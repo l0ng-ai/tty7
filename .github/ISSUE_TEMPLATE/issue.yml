@@ -1,0 +1,43 @@
+name: Issue
+description: Report a bug or suggest an improvement
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Type
+      options:
+        - Bug — something doesn't work as expected
+        - Idea — suggest an improvement or new capability
+    validations:
+      required: true
+  - type: textarea
+    id: detail
+    attributes:
+      label: What's going on?
+      description: >
+        For a bug: what you did, what you saw, and what you expected instead.
+        For an idea: the problem it solves and how it should behave.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: tty7 version (bugs)
+      placeholder: v0.2.0
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform (bugs)
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows
+        - Linux
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: >
+        Screenshots or recordings, the exact command / escape sequence that
+        triggers it, the shell you were using, or the TUI app (vim, htop, …)
+        and its version if one is involved.

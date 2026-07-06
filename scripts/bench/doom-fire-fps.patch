@@ -1,0 +1,24 @@
+diff --git a/src/main.zig b/src/main.zig
+index cceca94..342c9f2 100644
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -690,6 +690,19 @@ pub fn paintBuf() !void {
+ 
+     try emit(fg[0]);
+     try emitFmt("mem: {s:.2} min / {s:.2} avg / {s:.2} max [ {d:.2} fps ]", .{ std.fmt.fmtIntSizeBin(bs_sz_min), std.fmt.fmtIntSizeBin(bs_sz_avg), std.fmt.fmtIntSizeBin(bs_sz_max), fps });
++
++    // bench patch: periodically dump the cumulative fps to $DOOM_FPS_FILE so a
++    // harness can collect the average without recording the output stream.
++    if (bs_frame_tic % 30 == 0) {
++        if (std.posix.getenv("DOOM_FPS_FILE")) |fps_path| {
++            if (std.fs.createFileAbsolute(fps_path, .{ .truncate = true })) |f| {
++                defer f.close();
++                var fps_buf: [64]u8 = undefined;
++                const fps_str = std.fmt.bufPrint(&fps_buf, "{d:.2}\n", .{fps}) catch return;
++                f.writeAll(fps_str) catch {};
++            } else |_| {}
++        }
++    }
+ }
+ 
+ // initBuf(); defer freeBuf();

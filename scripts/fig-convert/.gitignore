@@ -1,0 +1,8 @@
+# Downloaded Fig spec corpus — fetched on demand via `npm pack`/`npm install`
+# (see README). The generated signatures land in ../../assets/completions/ and
+# ARE committed.
+package/
+*.tgz
+node_modules/
+package.json
+package-lock.json

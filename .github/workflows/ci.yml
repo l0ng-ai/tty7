@@ -1,0 +1,67 @@
+name: CI
+
+# Compile + test on every push/PR. The Windows and Linux jobs are the
+# compile-feedback loop for the platform-specific code a macOS dev machine
+# never builds (`cfg(windows)` transport / process detach / config dir,
+# the Linux `/proc` queries, the x11/wayland gpui backends). The macOS job
+# guards against regressing the original target.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  build:
+    name: build & test (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout tty7
+        uses: actions/checkout@v4
+
+      # gpui-component is a git dependency (see Cargo.toml), so no sibling
+      # checkout is needed. The Windows backend (gpui_windows + DirectWrite/D3D)
+      # ships with the windows-latest runner's SDK — no extra system deps.
+
+      # gpui's Linux backends need the x11/wayland/xkb/font dev packages at
+      # build time (build scripts resolve them via pkg-config). Same set the
+      # README documents for building from source on Linux.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config cmake clang libxkbcommon-dev \
+            libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev \
+            libwayland-dev libx11-dev libxcb1-dev libzstd-dev libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --target ${{ matrix.target }}
+
+      - name: Test
+        run: cargo test --target ${{ matrix.target }}

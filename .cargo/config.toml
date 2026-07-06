@@ -1,0 +1,5 @@
+# `cargo dev` — run the app against a throwaway config directory (`.tty7-dev/`)
+# instead of the real `~/.config/tty7/`, so debugging never clobbers your live
+# config/session/history. Extra args pass through, e.g. `cargo dev -- --foo`.
+[alias]
+dev = "run -- --config-dir .tty7-dev"

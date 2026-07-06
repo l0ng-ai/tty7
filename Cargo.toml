@@ -1,0 +1,145 @@
+[package]
+name = "tty7"
+version = "0.2.0"
+edition = "2024"
+description = "A terminal built on Zed's gpui that never loses your session — daemon-backed, shell-aware"
+repository = "https://github.com/l0ng-ai/tty7"
+license = "Apache-2.0"
+readme = "README.md"
+publish = false
+default-run = "tty7"
+
+[[bin]]
+name = "tty7"
+path = "src/main.rs"
+
+[dependencies]
+gpui = { workspace = true }
+gpui_platform = { workspace = true }
+gpui-component = { workspace = true }
+gpui-component-assets = { workspace = true }
+
+anyhow.workspace = true
+log.workspace = true
+smol.workspace = true
+smallvec.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+
+# Zed's fork of alacritty_terminal — same rev Zed pins. Used by the *client*
+# (`terminal::remote`) for the VT parser + grid (`Term`/`ansi::Processor`) that
+# renders the mirror. The daemon's PTY itself is driven by `portable-pty` below.
+alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "fcf32feacb367b75ec84dd40f041e4fd411d3cc1" }
+
+# Desktop notifications driven by OSC 9 / OSC 777 escape sequences. Cross-platform;
+# the macOS backend uses the deprecated NSUserNotification (weak — a completion
+# toast is fine, revisit mac-notification-sys if it proves unusable).
+notify-rust = "4"
+
+# Filesystem watcher for live config reload: watches `config.json` and reloads
+# `Config` + re-applies the theme without a restart.
+notify = "8"
+
+# Cross-platform PTY for the daemon: a Unix pty on Unix, ConPTY on Windows, behind
+# one blocking `Read`/`Write`/`resize` API. This is what lets `daemon::pane` share
+# a single code path across platforms instead of hand-rolling fd/ioctl/signal code.
+portable-pty = "0.8"
+
+# SIMD byte search for the OSC tokenizer's Ground/Ignore fast paths — the
+# sniffers sit on the full-throughput output stream (100+ MB/s at full drain),
+# where a per-byte state machine costs a measurable slice of the reader loop.
+# Already in the tree transitively (vte et al.), so this pins no new code.
+memchr = "2"
+
+# `setsid` (daemon detach) and the macOS foreground-process proc queries are the
+# only libc users left, both Unix-only — so the dep is Unix-only too.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Embeds `assets/favicon.ico` into the `.exe` so Windows shows the tty7 logo in
+# the taskbar / window / Explorer (macOS gets its icon from the `.app` bundle via
+# bundle.sh instead). Only needed at build time on Windows — see build.rs.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+# gpui only *reads* the macOS window appearance; it never sets it. We force the
+# app appearance to match the active theme (see `ui::theme::sync_native_appearance`)
+# so the native traffic-light buttons render in the right light/dark style.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSAppearance"] }
+
+# x11/wayland are the Linux windowing backends; only pull them on Linux. The
+# Windows backend (`gpui_windows`) and macOS backend are selected by gpui_platform
+# itself via `cfg`, so no feature is needed for them.
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui_platform = { workspace = true, features = ["x11", "wayland"] }
+
+# gpui's `test-support` unlocks `#[gpui::test]` + `TestAppContext`, the headless
+# App/Window harness the view/event tests run on. Dev-only: the feature merges
+# into test builds and never reaches a release binary.
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true
+
+# ---- Standalone workspace mirroring gpui-component's pins so the git/source
+# ---- caches are shared and versions stay aligned. ----
+[workspace]
+members = ["."]
+
+[workspace.package]
+edition = "2024"
+
+[workspace.dependencies]
+# Our fork's `tty7` branch carries the local customizations tty7 relies on:
+# `PopupMenu::with_size` plus the 1px hairline menu separator. The exact commit
+# is still pinned by Cargo.lock. For co-developing the UI crate, point these
+# back at a sibling checkout: `path = "../gpui-component/crates/{ui,assets}"`.
+gpui-component = { git = "https://github.com/l0ng-ai/gpui-component", branch = "tty7", version = "0.5.2" }
+gpui-component-assets = { git = "https://github.com/l0ng-ai/gpui-component", branch = "tty7", version = "0.5.1" }
+
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
+# Base features are cross-platform (`font-kit`, `runtime_shaders` only map to the
+# macOS backend; they're no-ops elsewhere). The Linux-only `x11`/`wayland`
+# backends are added by the `cfg(target_os = "linux")` dependency entry in the
+# package manifest, so they never reach the Windows/macOS builds.
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["font-kit", "runtime_shaders"] }
+
+anyhow = "1"
+log = "0.4"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1"
+smallvec = "1"
+smol = "2"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+type_complexity = "allow"
+
+[profile.dev]
+codegen-units = 16
+debug = "limited"
+split-debuginfo = "unpacked"
+
+[profile.dev.package]
+resvg = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
+smol = { opt-level = 3 }
+gpui = { opt-level = 3 }
+gpui_platform = { opt-level = 3 }
+gpui_macros = { opt-level = 3 }
+# The VT parser + grid run on every PTY byte; at opt-level 0 a `cat bigfile`
+# crawls under `cargo dev`.
+alacritty_terminal = { opt-level = 3 }
+
+# The render/parse hot path crosses the tty7 ↔ alacritty_terminal ↔ gpui crate
+# boundaries, so cross-crate inlining (thin LTO, like Zed ships) buys real
+# throughput there; single codegen unit for the same reason.
+[profile.release]
+lto = "thin"
+codegen-units = 1

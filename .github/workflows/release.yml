@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            os: macos
+            arch: arm64
+            target: aarch64-apple-darwin
+          # macos-13 was retired; macos-15-intel is the remaining hosted x86_64 image.
+          - runner: macos-15-intel
+            os: macos
+            arch: x86_64
+            target: x86_64-apple-darwin
+          - runner: windows-latest
+            os: windows
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+          - runner: ubuntu-latest
+            os: linux
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout tty7
+        uses: actions/checkout@v4
+        with:
+          path: tty7
+
+      # gpui-component is pulled as a git dependency (see Cargo.toml's patch
+      # section), so no sibling checkout is needed.
+
+      # gpui's Linux backends resolve the x11/wayland/xkb/font dev packages via
+      # pkg-config at build time — the same set the README documents for
+      # building from source on Linux.
+      - name: Install Linux system dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config cmake clang libxkbcommon-dev \
+            libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev \
+            libwayland-dev libx11-dev libxcb1-dev libzstd-dev libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tty7
+
+      - name: Build
+        working-directory: tty7
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # ---- Packaging: one step per OS ----------------------------------------
+      # macOS gets a signed + notarized drag-to-Applications DMG. Windows and
+      # Linux are unsigned archives of the self-contained binary
+      # (fonts are embedded via include_bytes!; the Windows icon is compiled in
+      # via build.rs).
+      - name: Bundle macOS DMG
+        if: matrix.os == 'macos'
+        working-directory: tty7
+        env:
+          # macOS code signing — the cert is imported into a throwaway keychain.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          # Notarization — required for Developer ID builds to pass Gatekeeper.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash .github/scripts/bundle-macos.sh "${{ matrix.target }}" "${{ matrix.arch }}"
+
+      - name: Package Linux tarball
+        if: matrix.os == 'linux'
+        working-directory: tty7
+        run: bash .github/scripts/bundle-linux.sh "${{ matrix.target }}" "${{ matrix.arch }}"
+
+      - name: Package Windows zip
+        if: matrix.os == 'windows'
+        working-directory: tty7
+        shell: pwsh
+        run: '& ./.github/scripts/bundle-windows.ps1 "${{ matrix.target }}" "${{ matrix.arch }}"'
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            tty7/dist/*.dmg
+            tty7/dist/*.tar.gz
+            tty7/dist/*.zip

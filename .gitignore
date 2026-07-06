@@ -1,0 +1,25 @@
+/target
+/dist
+.DS_Store
+
+# Local dev-tool state — kept out of the repo but retained on disk.
+/CLAUDE.md
+/AUDIT.md
+.brooks-lint-history.json
+openwiki/.last-update.json
+
+# dev-build throwaway config dir (cargo dev)
+.tty7-dev/
+
+# Claude Code agent worktrees (transient)
+.claude/worktrees/
+
+# local scratch notes (never committed)
+/todo.md
+
+# local freeze-forensics helper — kept on disk, not shipped
+/scripts/diagnose-freeze.sh
+
+# benchmark harness work dir + generated fixtures (scripts/bench/)
+.bench/
+/big.log
