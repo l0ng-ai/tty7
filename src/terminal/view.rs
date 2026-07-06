@@ -1619,17 +1619,23 @@ impl TerminalView {
 
     /// The shell cursor's current viewport cell `(row, col)`, accounting for
     /// scrollback offset — the same mapping `element::build_grid` uses to place
-    /// the block cursor. `None` when the cursor is hidden or scrolled off the top.
-    /// Used to anchor the inline line editor right where the shell prompt ends.
+    /// the block cursor. `None` only when the cursor is scrolled off the top of
+    /// the viewport. Used to anchor the inline line editor right where the shell
+    /// prompt ends.
+    ///
+    /// The cursor's `Hidden` *shape* is deliberately ignored. A full-screen TUI
+    /// (e.g. Claude Code) hides the cursor with DECTCEM (`\e[?25l`) and can hand
+    /// back to the shell prompt — or exit — before a matching `\e[?25h` reaches
+    /// our local grid, leaving the shape stale-`Hidden` while the shell is
+    /// already idle at its prompt. These callers only run while `input_active()`
+    /// (at the prompt, off the alt screen), where the cursor *position* is valid
+    /// even if the shape is momentarily hidden. Treating hidden as `None` here
+    /// made `render_input_bar` fall back to `(0, 0)` and paint the caret in the
+    /// top-left corner; `element::build_grid` already ignores the shape the same
+    /// way when anchoring the IME window.
     fn cursor_cell(&self) -> Option<(usize, usize)> {
         let term = self.terminal.term.lock();
         let content = term.renderable_content();
-        if matches!(
-            content.cursor.shape,
-            alacritty_terminal::vte::ansi::CursorShape::Hidden
-        ) {
-            return None;
-        }
         let row = content.cursor.point.line.0 + content.display_offset as i32;
         let col = content.cursor.point.column.0;
         (row >= 0).then_some((row as usize, col))
@@ -3884,5 +3890,74 @@ mod gpui_tests {
             .encode(&mut daemon)
             .unwrap();
         assert_eq!(wait_for(cx, "hello again"), "hello again");
+    }
+
+    /// Reproduces the "orange caret jumps to the top-left corner after Claude
+    /// Code exits" bug at the state level, driving the two conditions that must
+    /// co-occur to trigger it:
+    ///
+    ///   1. the shell is idle at its prompt (`DaemonMsg::Prompt` →
+    ///      `input_active()`), so the inline editor is live and draws its own
+    ///      caret via `render_input_bar`, which anchors at `cursor_cell()`; and
+    ///   2. the local grid's cursor *shape* is still `Hidden` — a full-screen
+    ///      TUI hid the cursor with DECTCEM (`\e[?25l`) and handed back to the
+    ///      prompt before a matching `\e[?25h` landed.
+    ///
+    /// The cursor's real *position* is a valid cell (the prompt end), but the
+    /// stale-hidden shape used to make `cursor_cell()` return `None`, so
+    /// `render_input_bar`'s `unwrap_or((0, 0))` painted the caret at cell
+    /// `(0, 0)`. The assertions pin all three facts: the editor is active, the
+    /// shape genuinely is `Hidden` (the precondition that tripped the old
+    /// early-return), and `cursor_cell()` nonetheless reports the real cell.
+    #[gpui::test]
+    fn hidden_cursor_at_prompt_anchors_the_editor_at_the_real_cell_not_top_left(
+        cx: &mut TestAppContext,
+    ) {
+        use alacritty_terminal::vte::ansi::CursorShape;
+
+        let (window, mut daemon) = harness(cx);
+
+        // Shell reports it is idle at its prompt: this is what flips
+        // `input_active()` true and puts the inline editor in charge.
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: Some(0),
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        // CUP to row 4 / col 11 (1-based), then hide the cursor as a TUI would
+        // on the way out — leaving the shape `Hidden` at a valid position.
+        DaemonMsg::Output(b"\x1b[4;11H\x1b[?25l".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+
+        // Poll until both the prompt report and the grid bytes have applied.
+        let mut state = (false, false, None);
+        for _ in 0..400 {
+            cx.run_until_parked();
+            state = window
+                .update(cx, |view, _, _| {
+                    let hidden = matches!(
+                        view.terminal.term.lock().renderable_content().cursor.shape,
+                        CursorShape::Hidden
+                    );
+                    (view.input_active(), hidden, view.cursor_cell())
+                })
+                .unwrap();
+            if state == (true, true, Some((3, 10))) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let (active, hidden, cell) = state;
+        assert!(active, "shell at its prompt must make the inline editor active");
+        assert!(hidden, "the TUI's `?25l` must leave the cursor shape Hidden");
+        assert_eq!(
+            cell,
+            Some((3, 10)),
+            "a Hidden shape must not collapse the editor anchor to the top-left corner"
+        );
     }
 }
