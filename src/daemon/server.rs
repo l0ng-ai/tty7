@@ -148,10 +148,18 @@ pub fn run() -> anyhow::Result<()> {
 /// Handle one connection start-to-finish. Reads the opening `ClientMsg` and
 /// dispatches; for the streaming variants it then runs [`stream_pane`].
 fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
+    let mut read_stream = stream;
+
+    // Authenticate before touching the protocol. On Windows the transport is
+    // loopback TCP, reachable by any local process; the client proves it read the
+    // user-private port file by presenting the daemon's token as a preamble. A
+    // failed check drops the connection here, before any `ClientMsg` is parsed or a
+    // pane is spawned. No-op on Unix (the socket's filesystem perms already gate it).
+    transport::authenticate(&mut read_stream)?;
+
     // Separate read/write halves so the writer thread and reader loop don't share a
     // `&mut` (the stream is just a socket; `try_clone` dups the handle — both
     // directions are independent).
-    let mut read_stream = stream;
     let write_stream = read_stream.try_clone()?;
 
     let first = ClientMsg::read(&mut read_stream)?;

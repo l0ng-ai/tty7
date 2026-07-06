@@ -16,8 +16,12 @@
 //!   daemon is unchanged. The chosen port is written to `<config>/daemon.port`
 //!   so the GUI can find a daemon it didn't spawn; that file is the Windows
 //!   analogue of the socket file (its presence is the "endpoint exists" marker).
-//!   Loopback is reachable only by processes on the same machine; a stricter
-//!   pipe/ACL story is a P1 hardening (see the Windows-adaptation notes).
+//!   Loopback is reachable by *any* local process, not just the same user — so,
+//!   unlike a Unix socket, the port alone isn't an access boundary. The daemon
+//!   closes that gap with a token: `bind` writes a random 256-bit token into the
+//!   (user-private) port file, `connect` presents it as a preamble, and
+//!   `authenticate` rejects any connection that doesn't match — so only a process
+//!   that could read the user-private file gets in. See [`imp_windows`].
 //!
 //! All endpoint state lives under the (config-dir-aware) config directory, so
 //! `--config-dir` / `cargo dev` isolation reaches the daemon on every platform.
@@ -121,6 +125,15 @@ mod imp_unix {
                 );
             }
         }
+    }
+
+    /// Daemon-side connection authentication — a no-op on Unix. The socket lives in
+    /// the user-private config dir (or `$XDG_RUNTIME_DIR`, 0700), so filesystem
+    /// permissions already restrict `connect` to the same user; there's nothing to
+    /// verify. Mirrors the Windows signature so `server` calls it unconditionally.
+    #[inline]
+    pub fn authenticate(_stream: &mut Stream) -> io::Result<()> {
+        Ok(())
     }
 
     /// Whether the endpoint marker exists on disk (a live *or* stale socket file).
@@ -256,44 +269,148 @@ mod tests {
 #[cfg(windows)]
 mod imp_windows {
     use super::*;
+    use std::io::{Read, Write};
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
     use std::path::PathBuf;
+    use std::sync::OnceLock;
 
     /// The connection stream both sides read/write framed messages over.
     pub type Stream = TcpStream;
     /// The daemon's accept side.
     pub type Listener = TcpListener;
 
-    /// Path of the port file recording the daemon's chosen loopback port. This is
-    /// the Windows analogue of the Unix socket file: its presence is the
-    /// "endpoint exists" marker.
+    /// Length of the per-daemon auth token, in bytes. 256 bits from the OS CSPRNG:
+    /// unguessable without reading the (user-private) port file, so possessing it
+    /// proves the connecting process runs as the same user.
+    const TOKEN_LEN: usize = 32;
+    type Token = [u8; TOKEN_LEN];
+
+    /// This daemon's auth token, minted once at [`bind`] and checked by
+    /// [`authenticate`] on every accepted connection. A process global because the
+    /// listener and the per-connection auth check live in the same daemon process
+    /// but don't share a handle; the client learns the token from the port file
+    /// instead. Set exactly once per daemon lifetime.
+    static DAEMON_TOKEN: OnceLock<Token> = OnceLock::new();
+
+    /// Mint a fresh 256-bit token from the OS CSPRNG. Panics only if the OS RNG is
+    /// unavailable, which on Windows means the system is too broken to run.
+    fn make_token() -> Token {
+        let mut token = [0u8; TOKEN_LEN];
+        getrandom::fill(&mut token).expect("OS RNG (BCryptGenRandom) unavailable");
+        token
+    }
+
+    /// Lowercase-hex encode a token for the (text) port file.
+    fn encode_token(token: &Token) -> String {
+        let mut s = String::with_capacity(TOKEN_LEN * 2);
+        for b in token {
+            s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
+            s.push(char::from_digit((b & 0x0f) as u32, 16).unwrap());
+        }
+        s
+    }
+
+    /// Decode a hex token; `None` unless it's exactly `TOKEN_LEN` bytes of valid hex.
+    fn decode_token(s: &str) -> Option<Token> {
+        let s = s.trim();
+        if s.len() != TOKEN_LEN * 2 {
+            return None;
+        }
+        let bytes = s.as_bytes();
+        let mut token = [0u8; TOKEN_LEN];
+        for (i, slot) in token.iter_mut().enumerate() {
+            let hi = (bytes[i * 2] as char).to_digit(16)?;
+            let lo = (bytes[i * 2 + 1] as char).to_digit(16)?;
+            *slot = ((hi << 4) | lo) as u8;
+        }
+        Some(token)
+    }
+
+    /// The port file records `<port>\n<token-hex>`: the loopback port the GUI
+    /// connects to, plus the token it must present. Parse both back; `None` if the
+    /// file is malformed (a truncated write, or an old single-line file).
+    fn parse_port_file(contents: &str) -> Option<(u16, Token)> {
+        let mut lines = contents.lines();
+        let port = lines.next()?.trim().parse::<u16>().ok()?;
+        let token = decode_token(lines.next()?)?;
+        Some((port, token))
+    }
+
+    /// Constant-time token comparison: fold every byte's difference into one
+    /// accumulator so the check can't leak how many leading bytes matched. A local
+    /// timing side-channel is far-fetched over loopback, but the guard is free.
+    fn tokens_match(a: &Token, b: &Token) -> bool {
+        let mut diff = 0u8;
+        for i in 0..TOKEN_LEN {
+            diff |= a[i] ^ b[i];
+        }
+        diff == 0
+    }
+
+    /// Path of the port file recording the daemon's chosen loopback port + token.
+    /// This is the Windows analogue of the Unix socket file: its presence is the
+    /// "endpoint exists" marker, and — being under the user-private config dir —
+    /// its contents (the token) are readable only by the same user.
     fn port_path() -> Option<PathBuf> {
         config::config_path("daemon.port")
     }
 
-    /// Read the recorded loopback port, if the port file exists and parses.
-    fn read_port() -> Option<u16> {
+    /// Read the recorded loopback port + token, if the port file exists and parses.
+    fn read_port_file() -> Option<(u16, Token)> {
         let path = port_path()?;
-        std::fs::read_to_string(path)
-            .ok()?
-            .trim()
-            .parse::<u16>()
-            .ok()
+        let contents = std::fs::read_to_string(path).ok()?;
+        parse_port_file(&contents)
     }
 
     fn loopback(port: u16) -> SocketAddr {
         SocketAddr::from((Ipv4Addr::LOCALHOST, port))
     }
 
-    /// Try to connect to the daemon. `Err` (including a missing/zero port) means
-    /// "nobody home" — the caller treats any error as "not running".
+    /// Try to connect to the daemon. `Err` (including a missing/zero port or a
+    /// malformed file) means "nobody home" — the caller treats any error as "not
+    /// running". On success we send the auth token as the connection preamble,
+    /// before any `ClientMsg`, so the daemon accepts us.
     pub fn connect() -> io::Result<Stream> {
-        let port = read_port()
-            .filter(|p| *p != 0)
+        let (port, token) = read_port_file()
+            .filter(|(p, _)| *p != 0)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no daemon port file"))?;
-        let stream = TcpStream::connect(loopback(port))?;
+        let mut stream = TcpStream::connect(loopback(port))?;
         tune(&stream);
+        // Present the token first thing; the daemon reads exactly these bytes in
+        // `authenticate` before it looks for a `ClientMsg`.
+        stream.write_all(&token)?;
         Ok(stream)
+    }
+
+    /// Daemon side: read and verify the connection preamble against this daemon's
+    /// token before any message is processed. Any process on the machine can open
+    /// a loopback TCP connection, but only one that read the user-private port file
+    /// knows the token — so this is what makes the loopback endpoint per-user
+    /// private, the property a Unix socket gets for free from filesystem perms.
+    ///
+    /// A short read (peer hung up), a mismatch, or an uninitialized token all fail
+    /// the connection; the caller drops it.
+    pub fn authenticate(stream: &mut Stream) -> io::Result<()> {
+        let expected = DAEMON_TOKEN
+            .get()
+            .ok_or_else(|| io::Error::other("daemon auth token not initialized"))?;
+        authenticate_with(stream, expected)
+    }
+
+    /// Pure core of [`authenticate`]: read a token off `reader` and compare it to
+    /// `expected`. Split out so the handshake is testable without a live daemon or
+    /// the process-global token.
+    fn authenticate_with(reader: &mut impl Read, expected: &Token) -> io::Result<()> {
+        let mut got = [0u8; TOKEN_LEN];
+        reader.read_exact(&mut got)?;
+        if tokens_match(&got, expected) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "daemon auth token mismatch",
+            ))
+        }
     }
 
     /// Loopback-TCP analogue of the Unix `tune`: disable Nagle so small framed
@@ -316,8 +433,9 @@ mod imp_windows {
         }
     }
 
-    /// Bind a loopback listener on an OS-assigned port and record that port in the
-    /// port file so the GUI can find it. Ensures the config dir exists first.
+    /// Bind a loopback listener on an OS-assigned port and record that port — plus
+    /// this daemon's freshly-minted auth token — in the port file so the GUI can
+    /// find *and* authenticate to it. Ensures the config dir exists first.
     pub fn bind() -> anyhow::Result<Listener> {
         let path = port_path()
             .ok_or_else(|| anyhow::anyhow!("could not resolve daemon port path (no config dir)"))?;
@@ -332,16 +450,161 @@ mod imp_windows {
             .local_addr()
             .map_err(|e| anyhow::anyhow!("could not read bound port: {e}"))?
             .port();
-        std::fs::write(&path, port.to_string())
+        // Mint the token once for this daemon's lifetime; `authenticate` checks
+        // against the same value. Written to the port file so a client that can
+        // read it (same user) can present it back.
+        let token = DAEMON_TOKEN.get_or_init(make_token);
+        let contents = format!("{port}\n{}", encode_token(token));
+        std::fs::write(&path, contents)
             .map_err(|e| anyhow::anyhow!("could not write port file {}: {e}", path.display()))?;
         Ok(listener)
     }
 
     /// A human-readable description of the endpoint, for log messages.
     pub fn endpoint_display() -> String {
-        match read_port() {
-            Some(port) => format!("127.0.0.1:{port}"),
+        match read_port_file() {
+            Some((port, _)) => format!("127.0.0.1:{port}"),
             None => "127.0.0.1:<unbound>".to_string(),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A token round-trips through hex encode → decode unchanged.
+        #[test]
+        fn token_hex_round_trips() {
+            let token = make_token();
+            assert_eq!(decode_token(&encode_token(&token)), Some(token));
+        }
+
+        /// `decode_token` rejects anything that isn't exactly 32 bytes of hex.
+        #[test]
+        fn decode_token_rejects_malformed() {
+            assert!(decode_token("").is_none());
+            assert!(decode_token("zz").is_none());
+            assert!(decode_token(&"a".repeat(63)).is_none()); // odd/short
+            assert!(decode_token(&"a".repeat(66)).is_none()); // too long
+            assert!(decode_token(&"g".repeat(64)).is_none()); // non-hex digit
+            assert!(decode_token(&"ab".repeat(32)).is_some()); // exactly right
+        }
+
+        /// The port file format is `<port>\n<token-hex>`, and parsing recovers both.
+        #[test]
+        fn parse_port_file_recovers_port_and_token() {
+            let token = make_token();
+            let contents = format!("54321\n{}", encode_token(&token));
+            assert_eq!(parse_port_file(&contents), Some((54321, token)));
+        }
+
+        /// A single-line (legacy / truncated) file has no token, so it must not
+        /// parse — a client can't authenticate without one.
+        #[test]
+        fn parse_port_file_rejects_missing_token() {
+            assert!(parse_port_file("54321").is_none());
+            assert!(parse_port_file("54321\n").is_none());
+            assert!(parse_port_file("").is_none());
+            assert!(parse_port_file("notaport\ndeadbeef").is_none());
+        }
+
+        /// `tokens_match` is true only for identical tokens.
+        #[test]
+        fn tokens_match_is_exact() {
+            let a = make_token();
+            let mut b = a;
+            assert!(tokens_match(&a, &b));
+            b[TOKEN_LEN - 1] ^= 1; // flip the last bit
+            assert!(!tokens_match(&a, &b));
+        }
+
+        /// The handshake core accepts the matching token and rejects a wrong one
+        /// (and a short read), driven over an in-memory reader — no live daemon.
+        #[test]
+        fn authenticate_with_accepts_only_the_matching_token() {
+            let token = make_token();
+
+            // Correct token → Ok.
+            let mut good = std::io::Cursor::new(token.to_vec());
+            assert!(authenticate_with(&mut good, &token).is_ok());
+
+            // Wrong token → PermissionDenied.
+            let mut wrong_bytes = token;
+            wrong_bytes[0] ^= 0xff;
+            let mut wrong = std::io::Cursor::new(wrong_bytes.to_vec());
+            let err = authenticate_with(&mut wrong, &token).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+
+            // Short preamble (peer hung up mid-token) → error, never a false accept.
+            let mut short = std::io::Cursor::new(vec![0u8; TOKEN_LEN - 1]);
+            assert!(authenticate_with(&mut short, &token).is_err());
+        }
+
+        /// End-to-end over a real loopback socket: a client that presents the
+        /// token authenticates; one that presents garbage is rejected. This is the
+        /// exact property the whole change exists to enforce.
+        #[test]
+        fn loopback_handshake_authenticates_real_connection() {
+            let token = make_token();
+            let listener = TcpListener::bind(loopback(0)).expect("bind loopback");
+            let port = listener.local_addr().unwrap().port();
+
+            // Good client: connect and present the correct token.
+            let good = std::thread::spawn(move || {
+                let mut s = TcpStream::connect(loopback(port)).unwrap();
+                s.write_all(&token).unwrap();
+                s
+            });
+            let (mut server_side, _) = listener.accept().unwrap();
+            assert!(authenticate_with(&mut server_side, &token).is_ok());
+            let _keep = good.join().unwrap();
+
+            // Bad client: connect and present a wrong token.
+            let mut bad_token = token;
+            bad_token[5] ^= 0xff;
+            let bad = std::thread::spawn(move || {
+                let mut s = TcpStream::connect(loopback(port)).unwrap();
+                let _ = s.write_all(&bad_token);
+            });
+            let (mut server_side2, _) = listener.accept().unwrap();
+            assert!(authenticate_with(&mut server_side2, &token).is_err());
+            bad.join().unwrap();
+        }
+
+        /// Full wiring over the real config-dir path: `bind` writes a parseable
+        /// `<port>\n<token>` file and seeds the process token, and the public
+        /// `authenticate` (which reads that process token) then accepts a client
+        /// that presents the file's token. Exercises the `bind`→`connect`→
+        /// `authenticate` seam the daemon actually runs, not just the pure core.
+        #[test]
+        fn bind_seeds_token_and_public_authenticate_accepts_a_file_token_client() {
+            // Pin the config dir under a temp dir so the port file never touches the
+            // real `%APPDATA%`. First-call-wins, matching the Unix IO tests.
+            let dir = std::env::temp_dir().join(format!("tty7-wintok-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).ok();
+            config::set_config_dir(dir);
+            remove_stale_endpoint();
+
+            let listener = bind().expect("bind under temp config dir");
+            let bound_port = listener.local_addr().unwrap().port();
+
+            // The port file parses and matches the bound port.
+            let contents = std::fs::read_to_string(port_path().unwrap()).unwrap();
+            let (port, token) = parse_port_file(&contents).expect("port file parses");
+            assert_eq!(port, bound_port, "file records the actually-bound port");
+
+            // A client that read the file (has the token) authenticates via the
+            // public path, which checks against the token `bind` seeded.
+            let good = std::thread::spawn(move || {
+                let mut s = TcpStream::connect(loopback(port)).unwrap();
+                s.write_all(&token).unwrap();
+                s
+            });
+            let (mut server_side, _) = listener.accept().unwrap();
+            assert!(authenticate(&mut server_side).is_ok());
+            let _keep = good.join().unwrap();
+
+            remove_stale_endpoint();
         }
     }
 }

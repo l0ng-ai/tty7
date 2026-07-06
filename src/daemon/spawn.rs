@@ -79,9 +79,11 @@ pub fn ensure_running() -> anyhow::Result<()> {
 /// daemon is listening.
 ///
 /// The GUI exposes this as "Restart Background Service": a long-lived daemon
-/// process can't see a macOS permission granted after it started (e.g. Full Disk
-/// Access) until it restarts, and quitting/reopening the GUI alone doesn't touch
-/// the detached daemon. Safe with no daemon running — it just spawns a fresh one.
+/// process keeps whatever environment it started with, so a change it can't pick
+/// up live only takes effect on restart — a macOS permission granted after launch
+/// (e.g. Full Disk Access), or an updated PATH / env on any platform — and
+/// quitting/reopening the GUI alone doesn't touch the detached daemon. Safe with
+/// no daemon running — it just spawns a fresh one.
 pub fn restart() -> anyhow::Result<()> {
     use crate::daemon::protocol::ClientMsg;
     use std::io::Write as _;

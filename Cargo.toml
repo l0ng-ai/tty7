@@ -56,6 +56,24 @@ memchr = "2"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The Windows GUI⇄daemon transport is loopback TCP, which (unlike a Unix socket)
+# any local process can connect to — so the daemon authenticates each connection
+# against a random token it writes into the user-private port file. `getrandom`
+# is the OS CSPRNG that mints that token; already in the tree transitively, so
+# this pins no new code. Windows-only, matching the transport it guards.
+[target.'cfg(windows)'.dependencies]
+getrandom = "0.3"
+
+# Toolhelp process enumeration + `TerminateProcess`, used by `daemon::winproc` to
+# title a pane by its foreground command and to tear down a shell's descendant
+# tree on hangup (ConPTY's `kill` only reaches the shell itself). Already in the
+# tree via gpui's Windows backend, so this pins no new code. Windows-only.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+] }
+
 # Embeds `assets/favicon.ico` into the `.exe` so Windows shows the tty7 logo in
 # the taskbar / window / Explorer (macOS gets its icon from the `.app` bundle via
 # bundle.sh instead). Only needed at build time on Windows — see build.rs.

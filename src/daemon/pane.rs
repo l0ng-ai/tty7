@@ -10,9 +10,11 @@
 //!
 //! The PTY is driven by [`portable-pty`](portable_pty): a Unix pty on Unix and a
 //! ConPTY on Windows, behind one blocking `Read`/`Write`/`resize` API. That keeps
-//! this module single-path across platforms — no fd/ioctl/signal code. The only
-//! platform-specific bit left is the macOS foreground-process query used for the
-//! pane title / a cwd fallback.
+//! this module single-path across platforms — no fd/ioctl/signal code. What stays
+//! platform-specific is the foreground-process query behind the pane title / cwd
+//! fallback (macOS/Linux proc APIs; a Windows process-table walk in
+//! [`winproc`](crate::daemon::winproc)) and the hangup that tears the child's
+//! whole process tree down.
 //!
 //! Shell integration (the hooks that make the shell emit OSC 7 / OSC 133) lives
 //! in the sibling [`shell_integration`](crate::daemon::shell_integration) module:
@@ -601,6 +603,13 @@ impl DaemonPane {
         // Graceful hangup of the whole group first (lets a shell run EXIT traps).
         #[cfg(unix)]
         self.signal_group(libc::SIGHUP);
+        // Windows has no process group to signal: `portable-pty`'s `kill` below
+        // terminates only the shell process, so capture and kill its descendant
+        // tree *first*, while their parent links still point at the (still-live)
+        // shell. Otherwise those children reparent and linger — some still attached
+        // to the ConPTY, which would keep the reader's blocking read from EOFing.
+        #[cfg(windows)]
+        self.kill_descendants();
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
         }
@@ -609,6 +618,20 @@ impl DaemonPane {
         // this they keep the slave PTY open and the reader thread never EOFs.
         #[cfg(unix)]
         self.signal_group(libc::SIGKILL);
+    }
+
+    /// Terminate every descendant of the shell (children, grandchildren, …). The
+    /// shell itself is left to `child.kill()`; this reaches the process tree the
+    /// ConPTY's own teardown doesn't. Best effort — a snapshot failure or an
+    /// already-exited process just means nothing to do.
+    #[cfg(windows)]
+    fn kill_descendants(&self) {
+        if let Some(pid) = self.shell_pid {
+            let procs = crate::daemon::winproc::snapshot();
+            for target in crate::daemon::winproc::descendants(&procs, pid) {
+                crate::daemon::winproc::terminate(target);
+            }
+        }
     }
 
     /// Post `sig` to the child's process group(s), not just the shell pid. The
@@ -708,6 +731,12 @@ impl DaemonPane {
     }
 
     /// Other platforms: no proc-query fallback (cwd only known via OSC 7).
+    /// No cwd fallback on Windows (or other non-mac/Linux targets): reading another
+    /// process's working directory needs PEB traversal via `ReadProcessMemory`,
+    /// which is undocumented and brittle across bitness/elevation. cwd there comes
+    /// from OSC 7 (the PowerShell shell integration emits it); `None` here just
+    /// means "no out-of-band fallback", so a shell without integration reports no
+    /// cwd rather than a wrong one.
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     fn foreground_cwd(&self) -> Option<PathBuf> {
         None
@@ -725,7 +754,21 @@ impl DaemonPane {
             .unwrap_or_default()
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    /// Windows has no pty foreground-process-group concept, so derive the title
+    /// from the process table instead: the deepest command running under the shell
+    /// (see [`winproc::foreground_name`](crate::daemon::winproc::foreground_name)).
+    /// Empty while the shell sits idle at its prompt, which leaves the pane's
+    /// existing title in place.
+    #[cfg(windows)]
+    fn foreground_title(&self) -> String {
+        let Some(pid) = self.shell_pid else {
+            return String::new();
+        };
+        let procs = crate::daemon::winproc::snapshot();
+        crate::daemon::winproc::foreground_name(&procs, pid).unwrap_or_default()
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     fn foreground_title(&self) -> String {
         String::new()
     }

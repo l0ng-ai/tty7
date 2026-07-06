@@ -446,15 +446,31 @@ if (-not $env:TTY7_SHELL_INTEGRATION) {
       Write-Host -NoNewline "$($global:__Tty7Esc)]133;D;$code$($global:__Tty7Bel)"
     }
 
-    # OSC 7 cwd, for real filesystem locations only. Escape a literal % as %25
-    # (the daemon percent-decodes the payload) and use forward slashes. Force one
-    # leading slash so a Windows drive path (`C:/…`) becomes `/C:/…` — the
-    # absolute-path shape the URI expects — while a POSIX path keeps its single
-    # slash instead of doubling it.
+    # cwd + title, for real filesystem locations only.
     if ($PWD.Provider.Name -eq 'FileSystem') {
-      $p = $PWD.ProviderPath.Replace('%', '%25').Replace('\', '/')
+      $fsPath = $PWD.ProviderPath
+
+      # OSC 7 cwd. Escape a literal % as %25 (the daemon percent-decodes the
+      # payload) and use forward slashes. Force one leading slash so a Windows
+      # drive path (`C:/…`) becomes `/C:/…` — the absolute-path shape the URI
+      # expects — while a POSIX path keeps its single slash instead of doubling it.
+      $p = $fsPath.Replace('%', '%25').Replace('\', '/')
       if (-not $p.StartsWith('/')) { $p = '/' + $p }
       Write-Host -NoNewline "$($global:__Tty7Esc)]7;file://$($env:COMPUTERNAME)$p$($global:__Tty7Bel)"
+
+      # OSC 0 window/tab title "user@host:dir". PowerShell profiles don't set a
+      # title the way macOS's default zsh does, so without this every tty7 tab on
+      # Windows stays generic. Forward slashes (so tty7's tab-label parser can take
+      # the last path segment) and home shown as `~`. Re-emitted each prompt so it
+      # tracks cwd; a full-screen app's own title still overrides it while it runs.
+      $titlePath = $fsPath.Replace('\', '/')
+      if ($env:USERPROFILE) {
+        $userHome = $env:USERPROFILE.Replace('\', '/')
+        if ($titlePath.StartsWith($userHome)) {
+          $titlePath = '~' + $titlePath.Substring($userHome.Length)
+        }
+      }
+      Write-Host -NoNewline "$($global:__Tty7Esc)]0;$($env:USERNAME)@$($env:COMPUTERNAME):$titlePath$($global:__Tty7Bel)"
     }
 
     # Restore the captured status so the user's own prompt sees the real result,
@@ -1103,6 +1119,20 @@ mod tests {
         assert!(s.contains("& $global:__Tty7OrigPrompt"));
         // The literal `%` in the cwd is escaped before the payload is built.
         assert!(s.contains(".Replace('%', '%25')"));
+    }
+
+    #[test]
+    fn powershell_integration_sets_an_osc_title() {
+        let s = POWERSHELL_INTEGRATION;
+        // Without an OSC 0/2 title every Windows tab stays generic (PowerShell
+        // profiles, unlike macOS's default zsh, set no title). The prompt hook
+        // must emit an OSC 0 "user@host:dir" title.
+        assert!(s.contains("]0;$($env:USERNAME)@$($env:COMPUTERNAME):"));
+        // Home is abbreviated to `~`, matching how the other shells' titles read.
+        assert!(s.contains("$titlePath = '~'"));
+        // The title path uses forward slashes so the tab-label parser (which splits
+        // on `/`) can take the last path segment on Windows too.
+        assert!(s.contains("$titlePath = $fsPath.Replace('\\', '/')"));
     }
 
     #[test]

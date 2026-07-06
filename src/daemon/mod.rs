@@ -28,3 +28,9 @@ pub mod transport;
 // `pub(crate)` rather than private so a future non-daemon spawn path could reuse
 // the exact same rc-file setup; today `pane` is the only caller.
 pub(crate) mod shell_integration;
+
+// Windows process-table helpers (foreground-command title + descendant teardown).
+// Windows-only: the Unix path gets the same information from the pty's foreground
+// process group and signals.
+#[cfg(windows)]
+pub(crate) mod winproc;

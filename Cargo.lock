@@ -7172,6 +7172,7 @@ version = "0.2.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "getrandom 0.3.4",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
@@ -7188,6 +7189,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "smol",
+ "windows-sys 0.59.0",
  "winresource",
 ]
 
