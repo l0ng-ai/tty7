@@ -5682,7 +5682,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7189,7 +7189,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "smol",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
  "winresource",
 ]
 
