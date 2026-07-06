@@ -16,7 +16,7 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -37,7 +37,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout tty7
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # gpui-component is a git dependency (see Cargo.toml), so no sibling
       # checkout is needed. The Windows backend (gpui_windows + DirectWrite/D3D)
