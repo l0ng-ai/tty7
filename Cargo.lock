@@ -7172,7 +7172,7 @@ version = "0.2.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
