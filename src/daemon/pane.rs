@@ -294,13 +294,70 @@ pub struct DaemonPane {
     reader: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// Fires a pane's "child gone" notification exactly once, whichever thread
+/// notices the death first. On Unix the reader thread sees it as a PTY `read()`
+/// EOF and reports here. On Windows the ConPTY output pipe does *not* EOF when
+/// the shell exits on its own — it only closes on `ClosePseudoConsole`, so a
+/// natural `exit` / Ctrl-D would leave the reader blocked forever and the pane
+/// wedged open (see [`DaemonPane::spawn_exit_monitor`]). There a separate thread
+/// waits on the child handle and reports here instead. The `reported` latch keeps
+/// whichever route fires second a no-op, so a subscriber never sees two `Exited`s
+/// and `on_dead` runs at most once.
+struct DeathReporter {
+    reported: AtomicBool,
+    /// The server's reclaim hook, consumed the first time the pane dies with
+    /// nobody attached. Behind a `Mutex<Option<…>>` because it's a `FnOnce`
+    /// shared between the reader and (on Windows) the monitor — whichever fires
+    /// first takes it.
+    on_dead: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl DeathReporter {
+    fn new(on_dead: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            reported: AtomicBool::new(false),
+            on_dead: Mutex::new(Some(Box::new(on_dead))),
+        }
+    }
+
+    /// Mark the pane not-alive and, unless the owner already began teardown
+    /// (`shutting_down` — the killer owns cleanup then), tell the attached
+    /// subscriber it exited; with nobody attached, hand the pane to `on_dead` so
+    /// the server drops it instead of leaking the zombie child + replay ring.
+    /// Idempotent: only the first call has any effect.
+    fn report(&self, state: &Mutex<PaneState>, shutting_down: &AtomicBool) {
+        if self.reported.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let mut st = state.lock().unwrap();
+        st.alive = false;
+        if shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+        let subscribed = st.subscriber.is_some();
+        if let Some(sub) = &st.subscriber {
+            let _ = sub.send(DaemonMsg::Exited { code: None });
+        }
+        drop(st);
+        // A subscriber's later detach reclaims the pane, so only an *unattached*
+        // death needs `on_dead` — and it fires at most once.
+        if subscribed {
+            return;
+        }
+        if let Some(on_dead) = self.on_dead.lock().unwrap().take() {
+            on_dead();
+        }
+    }
+}
+
 impl DaemonPane {
     /// Spawn the user's shell on a fresh PTY in `cwd`, sized to `size`, and start
     /// its reader thread. `id` is the registry id the server assigns. `shell` is
     /// an explicit per-spawn override (the new-tab dropdown) that outranks the
     /// configured default — see [`choose_shell`]. `on_dead` fires (from the
-    /// reader thread) when the child exits while *nobody is attached* — the case
-    /// where no connection's detach would ever reclaim the pane; the server uses
+    /// reader thread, or on Windows the child-exit monitor) when the child exits
+    /// while *nobody is attached* — the case where no connection's detach would
+    /// ever reclaim the pane; the server uses
     /// it to drop the dead pane from its registry instead of leaking the zombie
     /// child + replay ring for the daemon's lifetime.
     pub fn spawn(
@@ -423,6 +480,22 @@ impl DaemonPane {
             reader: Mutex::new(None),
         });
 
+        // Both the reader's EOF and (on Windows) the child-exit monitor report a
+        // death through this shared, run-once latch — see [`DeathReporter`].
+        let death = Arc::new(DeathReporter::new(on_dead));
+
+        // Windows: the ConPTY output pipe never EOFs on a *natural* child exit, so
+        // the reader alone would never notice `exit` / Ctrl-D and the pane would
+        // hang open. Watch the shell handle directly and report through the same
+        // latch. No-op on Unix, where the reader's `read()` EOF already covers it.
+        #[cfg(windows)]
+        Self::spawn_exit_monitor(
+            shell_pid,
+            state.clone(),
+            pane.shutting_down.clone(),
+            death.clone(),
+        );
+
         // The reader gates a foreground program's OSC 133 prompt marks (a remote
         // shell over ssh emitting its own) out of `at_prompt`, so tty7's local
         // line editor stays disengaged for whatever is really reading the
@@ -434,7 +507,7 @@ impl DaemonPane {
             gate,
             reader_handle,
             move || foreground_command_running(&fg_master, shell_pid),
-            on_dead,
+            death,
         );
         *pane.reader.lock().unwrap() = Some(reader);
 
@@ -444,9 +517,9 @@ impl DaemonPane {
     /// Reader thread: blocking-reads PTY bytes and, for each chunk, (a) appends to
     /// the ring (dropping the oldest bytes past `RING_CAP`), (b) forwards them to
     /// the subscriber as `Output`, (c) sniffs OSC 7 / OSC 133 and pushes `Cwd` /
-    /// `Prompt` on change. On EOF it marks the pane not-alive and sends `Exited`,
-    /// keeping the ring for a later attach — or, when nobody is attached to hear
-    /// the exit, hands the death to `on_dead` (see [`DaemonPane::spawn`]).
+    /// `Prompt` on change. On EOF it reports the death through `death` — marking
+    /// the pane not-alive and sending `Exited`, keeping the ring for a later
+    /// attach, or handing an unattached pane to `on_dead` (see [`DeathReporter`]).
     fn spawn_reader(
         state: Arc<Mutex<PaneState>>,
         shutting_down: Arc<AtomicBool>,
@@ -456,7 +529,7 @@ impl DaemonPane {
         // when a prompt mark arrives, to reject marks a foreground program emits —
         // see the call site and [`foreground_command_running`].
         foreground_running: impl Fn() -> bool + Send + 'static,
-        on_dead: impl FnOnce() + Send + 'static,
+        death: Arc<DeathReporter>,
     ) -> JoinHandle<()> {
         std::thread::Builder::new()
             .name("tty7-daemon-pane-reader".to_string())
@@ -555,25 +628,12 @@ impl DaemonPane {
                     }
                 }
 
-                // Child gone: mark not-alive and notify the subscriber, unless we
-                // initiated teardown (the connection is ending anyway; the killer
-                // also owns the registry cleanup). With a subscriber, the ring is
-                // left intact and that connection's later detach reclaims the
-                // pane. With *no* subscriber there is no such connection: fire
-                // `on_dead` so the owner can reclaim, or the dead pane (zombie
-                // child + ring + PTY fds) outlives everything in the registry.
-                let mut st = state.lock().unwrap();
-                st.alive = false;
-                if !shutting_down.load(Ordering::SeqCst) {
-                    let subscribed = st.subscriber.is_some();
-                    if let Some(sub) = &st.subscriber {
-                        let _ = sub.send(DaemonMsg::Exited { code: None });
-                    }
-                    drop(st);
-                    if !subscribed {
-                        on_dead();
-                    }
-                }
+                // Child gone (EOF): report the death — mark not-alive and notify
+                // the subscriber, or hand an unattached pane to `on_dead` — unless
+                // we initiated teardown. On Windows the monitor may have already
+                // reported this same death; the latch makes the second call a
+                // no-op. See [`DeathReporter::report`].
+                death.report(&state, &shutting_down);
             })
             .expect("spawn daemon pane reader thread")
     }
@@ -720,6 +780,61 @@ impl DaemonPane {
                 crate::daemon::winproc::terminate(target);
             }
         }
+    }
+
+    /// Windows-only: watch the shell for a *natural* exit (`exit`, Ctrl-D, a
+    /// crash) the ConPTY reader can't observe. The ConPTY output pipe reports EOF
+    /// only once the pseudoconsole is closed (`ClosePseudoConsole`), not when the
+    /// child dies — and the reader itself holds a `master` handle (the fg-gate
+    /// clone), so it can keep its own pipe open. Without this a shell that exits
+    /// on its own leaves the reader blocked and the pane wedged open forever.
+    ///
+    /// We open a wait-only handle to the shell *now*, while it's alive, so pid
+    /// reuse can't retarget the wait, then block a thread on it. When it signals,
+    /// the death flows through the shared latch — the same `Exited` / `on_dead`
+    /// the reader's EOF drives on Unix. The kill path is unaffected: it sets
+    /// `shutting_down`, under which `report` is a silent no-op.
+    #[cfg(windows)]
+    fn spawn_exit_monitor(
+        shell_pid: Option<u32>,
+        state: Arc<Mutex<PaneState>>,
+        shutting_down: Arc<AtomicBool>,
+        death: Arc<DeathReporter>,
+    ) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        };
+
+        let Some(pid) = shell_pid else { return };
+        // SAFETY: `OpenProcess` on a currently-live pid for wait-only access. A null
+        // return (already gone, or access denied) is handled below; on success the
+        // handle is closed by the monitor thread after its single wait.
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        if handle.is_null() {
+            // Couldn't watch it — report at once rather than risk wedging the pane
+            // open. Opening a just-spawned child essentially never fails.
+            death.report(&state, &shutting_down);
+            return;
+        }
+        // `HANDLE` is a raw pointer and thus `!Send`; move it across the thread
+        // boundary as an integer and rebuild it inside. It names a kernel object we
+        // own for the handle's lifetime, so this is just relocating ownership.
+        let handle = handle as isize;
+        std::thread::Builder::new()
+            .name("tty7-daemon-pane-exit-monitor".to_string())
+            .spawn(move || {
+                let handle = handle as windows_sys::Win32::Foundation::HANDLE;
+                // SAFETY: `handle` is our live process handle; waited once (any
+                // return — signaled or failed — means the child is effectively
+                // gone), then closed exactly once.
+                unsafe {
+                    WaitForSingleObject(handle, INFINITE);
+                    CloseHandle(handle);
+                }
+                death.report(&state, &shutting_down);
+            })
+            .expect("spawn daemon pane exit monitor thread");
     }
 
     /// Post `sig` to the child's process group(s), not just the shell pid. The
@@ -1847,7 +1962,9 @@ mod tests {
             Arc::new(OutputGate::new()),
             Box::new(std::io::Cursor::new(b"tail".to_vec())),
             || false, // no PTY here → treat the shell as foreground
-            move || dead_flag.store(true, Ordering::SeqCst),
+            Arc::new(DeathReporter::new(move || {
+                dead_flag.store(true, Ordering::SeqCst)
+            })),
         );
         handle.join().unwrap(); // the Cursor EOFs immediately after "tail"
 
@@ -1878,7 +1995,7 @@ mod tests {
             Arc::new(OutputGate::new()),
             Box::new(std::io::Cursor::new(Vec::new())),
             || false,
-            move || dead_tx.send(()).unwrap(),
+            Arc::new(DeathReporter::new(move || dead_tx.send(()).unwrap())),
         );
         handle.join().unwrap();
 
@@ -1900,12 +2017,56 @@ mod tests {
             Arc::new(OutputGate::new()),
             Box::new(std::io::Cursor::new(Vec::new())),
             || false,
-            move || dead_flag.store(true, Ordering::SeqCst),
+            Arc::new(DeathReporter::new(move || {
+                dead_flag.store(true, Ordering::SeqCst)
+            })),
         );
         handle.join().unwrap();
 
         assert!(!state.lock().unwrap().alive);
         assert!(!dead.load(Ordering::SeqCst));
+    }
+
+    /// The latch that lets the reader's EOF and (on Windows) the child-exit
+    /// monitor both report the same death without the subscriber seeing two
+    /// `Exited`s: the first `report` notifies, the second is a silent no-op.
+    #[test]
+    fn death_reporter_notifies_once_across_racing_callers() {
+        let state = Arc::new(Mutex::new(test_state(true)));
+        let (sub_tx, sub_rx) = mpsc::channel();
+        state.lock().unwrap().subscriber = Some(sub_tx);
+        let shutting_down = AtomicBool::new(false);
+        let calls = Arc::new(AtomicBool::new(false));
+        let calls_flag = calls.clone();
+        let death = DeathReporter::new(move || calls_flag.store(true, Ordering::SeqCst));
+
+        // Two reporters (stand-ins for the reader and the monitor) both fire.
+        death.report(&state, &shutting_down);
+        death.report(&state, &shutting_down);
+
+        assert!(!state.lock().unwrap().alive);
+        // Exactly one `Exited`, then nothing more.
+        assert!(matches!(
+            sub_rx.try_recv(),
+            Ok(DaemonMsg::Exited { code: None })
+        ));
+        assert!(sub_rx.try_recv().is_err(), "a second report must not re-notify");
+    }
+
+    /// With nobody attached, the *first* report hands the pane to `on_dead` and a
+    /// racing second report neither re-fires it nor panics on the taken `FnOnce`.
+    #[test]
+    fn death_reporter_fires_on_dead_at_most_once() {
+        let state = Arc::new(Mutex::new(test_state(true)));
+        let shutting_down = AtomicBool::new(false);
+        let (dead_tx, dead_rx) = mpsc::channel();
+        let death = DeathReporter::new(move || dead_tx.send(()).unwrap());
+
+        death.report(&state, &shutting_down);
+        death.report(&state, &shutting_down);
+
+        assert!(dead_rx.try_recv().is_ok(), "unattached death → on_dead");
+        assert!(dead_rx.try_recv().is_err(), "on_dead must fire only once");
     }
 
     /// `apply_signals` writes sniffed cwd/shell state into the pane state.
