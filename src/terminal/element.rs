@@ -595,6 +595,98 @@ fn char_string(c: char) -> SharedString {
     })
 }
 
+/// The Nerd Font powerline separators tty7 draws natively — as gpui paths
+/// sized to the exact cell — instead of rasterizing a font glyph.
+///
+/// These glyphs are pure geometry that only reads right when it fills the cell
+/// edge-to-edge: prompt themes (powerlevel10k, oh-my-posh, starship) butt them
+/// against colored segment backgrounds, so any gap or overshoot shows as a
+/// seam. Font rasterization can't guarantee that fit — the primary font rarely
+/// covers these codepoints, and a fallback face renders them at *its own*
+/// advance, narrower or wider than our cell (issue #17: separators at
+/// two-thirds width from a mismatched fallback). Building the shape from the
+/// cell rect makes it exact for every font/size combination — the approach
+/// Warp (bundled stretchable SVGs) and kitty (programmatic glyphs) settled on.
+/// The thin/outline variants (U+E0B1, U+E0B3, …) stay on the font path: they
+/// are hairline strokes, not fills, and the bundled Hack covers the common
+/// ones.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum PowerlineShape {
+    /// U+E0B0 — solid right-pointing triangle (the classic left separator).
+    TriangleRight,
+    /// U+E0B2 — solid left-pointing triangle (right-prompt separator).
+    TriangleLeft,
+    /// U+E0B4 — solid half-circle bulging right (rounded cap/separator).
+    HalfCircleRight,
+    /// U+E0B6 — solid half-circle bulging left.
+    HalfCircleLeft,
+    /// U+E0B8 — solid slant triangle filling the lower-left half.
+    SlantLowerLeft,
+    /// U+E0BA — solid slant triangle filling the lower-right half.
+    SlantLowerRight,
+    /// U+E0BC — solid slant triangle filling the upper-left half.
+    SlantUpperLeft,
+    /// U+E0BE — solid slant triangle filling the upper-right half.
+    SlantUpperRight,
+}
+
+impl PowerlineShape {
+    fn of(c: char) -> Option<Self> {
+        Some(match c {
+            '\u{e0b0}' => Self::TriangleRight,
+            '\u{e0b2}' => Self::TriangleLeft,
+            '\u{e0b4}' => Self::HalfCircleRight,
+            '\u{e0b6}' => Self::HalfCircleLeft,
+            '\u{e0b8}' => Self::SlantLowerLeft,
+            '\u{e0ba}' => Self::SlantLowerRight,
+            '\u{e0bc}' => Self::SlantUpperLeft,
+            '\u{e0be}' => Self::SlantUpperRight,
+            _ => return None,
+        })
+    }
+}
+
+/// Build the fill path for one powerline shape spanning exactly `bounds`
+/// (one cell). Pure geometry, split from the painting so tests can check it.
+///
+/// The half-circles approximate each quarter-ellipse with a single quadratic
+/// Bézier through the corner control point — within ~7% of a true ellipse,
+/// indistinguishable at cell sizes and the same trade kitty makes.
+fn powerline_path(bounds: Bounds<Pixels>, shape: PowerlineShape) -> gpui::Path<Pixels> {
+    let (x0, y0) = (bounds.origin.x, bounds.origin.y);
+    let (x1, y1) = (x0 + bounds.size.width, y0 + bounds.size.height);
+    let ymid = y0 + bounds.size.height / 2.;
+
+    let tri = |a: Point<Pixels>, b: Point<Pixels>, c: Point<Pixels>| {
+        let mut p = gpui::Path::new(a);
+        p.line_to(b);
+        p.line_to(c);
+        p
+    };
+    match shape {
+        PowerlineShape::TriangleRight => tri(point(x0, y0), point(x1, ymid), point(x0, y1)),
+        PowerlineShape::TriangleLeft => tri(point(x1, y0), point(x0, ymid), point(x1, y1)),
+        PowerlineShape::SlantLowerLeft => tri(point(x0, y0), point(x1, y1), point(x0, y1)),
+        PowerlineShape::SlantLowerRight => tri(point(x1, y0), point(x1, y1), point(x0, y1)),
+        PowerlineShape::SlantUpperLeft => tri(point(x0, y0), point(x1, y0), point(x0, y1)),
+        PowerlineShape::SlantUpperRight => tri(point(x0, y0), point(x1, y0), point(x1, y1)),
+        PowerlineShape::HalfCircleRight => {
+            // Flat edge on the left; the fan fill from the start point closes
+            // it implicitly (start → last point is that straight edge).
+            let mut p = gpui::Path::new(point(x0, y0));
+            p.curve_to(point(x1, ymid), point(x1, y0));
+            p.curve_to(point(x0, y1), point(x1, y1));
+            p
+        }
+        PowerlineShape::HalfCircleLeft => {
+            let mut p = gpui::Path::new(point(x1, y0));
+            p.curve_to(point(x0, ymid), point(x0, y0));
+            p.curve_to(point(x1, y1), point(x0, y1));
+            p
+        }
+    }
+}
+
 /// Paint glyphs as per-row batched runs where safe, single cells otherwise.
 ///
 /// Merging cells into multi-char `shape_line` runs causes drift whenever a
@@ -606,7 +698,8 @@ fn char_string(c: char) -> SharedString {
 /// Single-width glyphs that may come from a fallback face (box drawing, …)
 /// still paint cell-by-cell: their advances are unpredictable and mixing
 /// widths inside one batch would break `force_width`'s uniform-column
-/// assumption.
+/// assumption. Powerline separators skip fonts entirely — see
+/// [`PowerlineShape`].
 fn paint_glyphs(
     window: &mut Window,
     cx: &mut App,
@@ -660,7 +753,19 @@ fn paint_glyphs(
                 // Always exactly one column now — anything with a trailing
                 // spacer became a Wide run in `segment_row`. No `force_width`
                 // for a single glyph — it paints at the run origin regardless.
-                RowSeg::Solo { col } => (col, 1, char_string(buf[row_base + col].c), None),
+                RowSeg::Solo { col } => {
+                    let cell = &buf[row_base + col];
+                    if let Some(shape) = PowerlineShape::of(cell.c) {
+                        let cell_bounds = Bounds::new(
+                            point(geom.origin.x + geom.cell_width * (col as f32), y),
+                            size(geom.cell_width, geom.line_height),
+                        );
+                        let path = powerline_path(cell_bounds, shape);
+                        window.paint_path(path, GlyphStyle::of(cell).fg);
+                        continue;
+                    }
+                    (col, 1, char_string(cell.c), None)
+                }
             };
 
             let style = GlyphStyle::of(&buf[row_base + start]);
@@ -1679,6 +1784,88 @@ mod tests {
         assert_eq!(
             segment_row(&row),
             [run(0, 1, "a"), RowSeg::Solo { col: 1 }, run(2, 1, "b")]
+        );
+    }
+
+    #[test]
+    fn powerline_shape_maps_only_the_solid_separators() {
+        // The eight solid separators are drawn natively.
+        for (c, shape) in [
+            ('\u{e0b0}', PowerlineShape::TriangleRight),
+            ('\u{e0b2}', PowerlineShape::TriangleLeft),
+            ('\u{e0b4}', PowerlineShape::HalfCircleRight),
+            ('\u{e0b6}', PowerlineShape::HalfCircleLeft),
+            ('\u{e0b8}', PowerlineShape::SlantLowerLeft),
+            ('\u{e0ba}', PowerlineShape::SlantLowerRight),
+            ('\u{e0bc}', PowerlineShape::SlantUpperLeft),
+            ('\u{e0be}', PowerlineShape::SlantUpperRight),
+        ] {
+            assert_eq!(PowerlineShape::of(c), Some(shape), "U+{:04X}", c as u32);
+        }
+        // The thin/outline variants are hairline strokes — a filled gpui path
+        // can't draw those, so they stay on the font path — as do neighboring
+        // codepoints and ordinary prompt symbols.
+        for c in [
+            '\u{e0b1}', '\u{e0b3}', '\u{e0b5}', '\u{e0b7}', '\u{e0b9}', '\u{e0bb}', '\u{e0bd}',
+            '\u{e0bf}', '\u{e0a0}', '\u{e0c0}', '\u{2500}', '❯', '➜',
+        ] {
+            assert_eq!(PowerlineShape::of(c), None, "U+{:04X}", c as u32);
+        }
+    }
+
+    #[test]
+    fn powerline_path_fills_exactly_one_cell() {
+        // Native drawing exists to guarantee edge-to-edge fit: every vertex of
+        // every shape must stay inside the cell it was given (no overshoot into
+        // a neighbor), and the fill must actually reach both horizontal edges
+        // (no two-thirds-width separators — the issue #17 symptom).
+        let (x0, y0, w, h) = (px(10.), px(20.), px(9.), px(21.));
+        let bounds = Bounds::new(point(x0, y0), size(w, h));
+        for shape in [
+            PowerlineShape::TriangleRight,
+            PowerlineShape::TriangleLeft,
+            PowerlineShape::HalfCircleRight,
+            PowerlineShape::HalfCircleLeft,
+            PowerlineShape::SlantLowerLeft,
+            PowerlineShape::SlantLowerRight,
+            PowerlineShape::SlantUpperLeft,
+            PowerlineShape::SlantUpperRight,
+        ] {
+            let path = powerline_path(bounds, shape);
+            assert!(!path.vertices.is_empty(), "{shape:?} produced no geometry");
+            let (mut min_x, mut max_x) = (px(f32::MAX), px(f32::MIN));
+            for v in &path.vertices {
+                let p = v.xy_position;
+                assert!(
+                    p.x >= x0 && p.x <= x0 + w && p.y >= y0 && p.y <= y0 + h,
+                    "{shape:?} vertex at {p:?} escapes the cell"
+                );
+                min_x = min_x.min(p.x);
+                max_x = max_x.max(p.x);
+            }
+            assert_eq!(min_x, x0, "{shape:?} does not reach the left cell edge");
+            assert_eq!(
+                max_x,
+                x0 + w,
+                "{shape:?} does not reach the right cell edge"
+            );
+        }
+    }
+
+    #[test]
+    fn segment_row_keeps_powerline_separators_solo() {
+        // The native-draw intercept lives in the Solo arm of `paint_glyphs`;
+        // if separators ever started batching into Run/Wide segments they'd
+        // silently bypass it and fall back to font rasterization.
+        let row = vec![cell('a'), cell('\u{e0b0}'), cell('\u{e0b4}'), cell('b')];
+        assert_eq!(
+            segment_row(&row),
+            [
+                run(0, 1, "a"),
+                RowSeg::Solo { col: 1 },
+                RowSeg::Solo { col: 2 },
+                run(3, 1, "b")
+            ]
         );
     }
 

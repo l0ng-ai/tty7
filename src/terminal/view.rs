@@ -366,6 +366,22 @@ fn clipboard_paste_text(item: &ClipboardItem) -> Option<String> {
     item.text()
 }
 
+/// The font fallback chain: the user's configured list with the bundled "Hack"
+/// pinned to the end. Hack ships inside the binary (`register_bundled_fonts`)
+/// and covers the symbols prompt themes lean on — `❯`, `➜`, box drawing, the
+/// sharp powerline wedges — with ink that fits a monospace advance. Without
+/// this anchor, a custom `font_family` that lacks one of those codepoints
+/// falls through the whole configured list into the OS cascade, which happily
+/// serves a proportional glyph wider than the cell that `paint_glyphs`'
+/// per-cell clip then truncates (issue #17's severed `➜`).
+fn fallback_chain(family: &str, configured: &[String]) -> Vec<String> {
+    let mut chain = configured.to_vec();
+    if family != "Hack" && !chain.iter().any(|f| f == "Hack") {
+        chain.push("Hack".to_string());
+    }
+    chain
+}
+
 impl TerminalView {
     pub fn new(
         working_directory: Option<std::path::PathBuf>,
@@ -419,7 +435,7 @@ impl TerminalView {
         // Font Mono + Apple Color Emoji at 13px.
         let config = cx.global::<Config>();
         let font_family = config.font_family.clone();
-        let fallbacks = config.font_fallbacks.clone();
+        let fallbacks = fallback_chain(&font_family, &config.font_fallbacks);
         let font_size = px(config.font_size);
         let line_height_mul = config.line_height;
         let mut font = gpui::font(font_family);
@@ -3424,14 +3440,46 @@ fn smooth_scroll_step(offset: usize, frac: f32, delta: f32, max: usize) -> (i32,
 #[cfg(test)]
 mod tests {
     use super::{
-        WheelRoute, clipboard_paste_text, display_width, encode_mouse, fig_icon_emoji,
-        fig_icon_glyph, focus_report_bytes, menu_layout, paste_bytes, shell_escape_path,
-        smooth_scroll_step, trim_trailing_spaces, wheel_route, wrapped_click_index,
+        WheelRoute, clipboard_paste_text, display_width, encode_mouse, fallback_chain,
+        fig_icon_emoji, fig_icon_glyph, focus_report_bytes, menu_layout, paste_bytes,
+        shell_escape_path, smooth_scroll_step, trim_trailing_spaces, wheel_route,
+        wrapped_click_index,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
     use gpui_component::IconName;
     use std::path::PathBuf;
+
+    /// The bundled Hack always anchors the fallback chain so prompt symbols
+    /// (`➜`, `❯`, powerline wedges) never fall through to the OS cascade —
+    /// unless the user already covers it as primary or in their own list.
+    #[test]
+    fn fallback_chain_pins_bundled_hack_last() {
+        let configured = vec!["Menlo".to_string(), "Apple Color Emoji".to_string()];
+
+        // A custom primary that may lack the prompt symbols → Hack appended.
+        assert_eq!(
+            fallback_chain("JetBrains Mono", &configured),
+            ["Menlo", "Apple Color Emoji", "Hack"]
+        );
+
+        // Hack as the primary face already covers everything it could add.
+        assert_eq!(
+            fallback_chain("Hack", &configured),
+            ["Menlo", "Apple Color Emoji"]
+        );
+
+        // A user who lists Hack explicitly keeps their chosen position.
+        let with_hack = vec!["Hack".to_string(), "Menlo".to_string()];
+        assert_eq!(fallback_chain("SF Mono", &with_hack), ["Hack", "Menlo"]);
+
+        // "Hack Nerd Font" is a different family — the bundled face still lands.
+        assert_eq!(
+            fallback_chain("Hack Nerd Font", &[]),
+            ["Hack"],
+            "a Hack-prefixed family name must not suppress the bundled anchor"
+        );
+    }
 
     /// The wheel reaches the app only through the modes it negotiated: mouse
     /// reporting first, alternate scroll second, local scrollback otherwise.
