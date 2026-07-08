@@ -99,6 +99,25 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // sidebar below.
     t.tokens.popover = Hsla::from(rgb(m.popover)).into();
     t.tokens.popover_foreground = Hsla::from(rgb(m.foreground)).into();
+
+    // Context menus and dropdowns highlight the hovered/selected row from
+    // `tokens.accent` (fill) + `accent_foreground` (text) — see gpui-component's
+    // `MenuItemElement`. Left unset, that highlight falls back to the stock
+    // saturated accent, which snaps hard against this app's soft mix-based
+    // palette (the "生硬" hover). Point it at the same soft fill the command
+    // palette uses for its selected row (`list_active`, mix 0.17) so context
+    // menu, dropdown and palette share one hover language; keep the text at
+    // `foreground` so it stays legible on the low-contrast fill instead of the
+    // stock inverted accent text. The plain `accent`/`accent_foreground` fields
+    // feed the same highlight in the input completion / code-action popovers, so
+    // mirror both the fields and the tokens to keep every menu surface in step.
+    let accent_fill = rgb(m.list_active);
+    let accent_text = color_or(&c.foreground, m.foreground);
+    t.accent = accent_fill.into();
+    t.accent_foreground = accent_text;
+    t.tokens.accent = Hsla::from(accent_fill).into();
+    t.tokens.accent_foreground = accent_text.into();
+
     t.caret = color_or(&c.caret, m.caret);
     t.selection = color_or(&c.selection, m.selection); // text selection highlight
 

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Context menus and the "+" dropdown now highlight the hovered row with the
+  same soft fill the command palette uses for its selected row, instead of the
+  stock saturated accent that snapped hard against the rest of the UI. The
+  hover text stays at the normal foreground so it reads clearly on the quieter
+  fill.
+
 ## [0.6.0] - 2026-07-08
 
 ### Added
