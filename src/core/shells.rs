@@ -8,7 +8,10 @@
 //! - **Unix**: `/etc/shells` is the system's own inventory — parse it, keep the
 //!   entries that exist, dedupe by basename (the same shell often appears as
 //!   both `/bin/zsh` and `/usr/local/bin/zsh`). The login shell (`$SHELL`) is
-//!   seeded first so it wins its dedupe slot and leads the list.
+//!   seeded first so it wins its dedupe slot and leads the list. Package
+//!   managers don't register what they install there (Homebrew only *suggests*
+//!   adding fish to `/etc/shells`), so a curated set of well-known shells is
+//!   then probed on `PATH` as the catch-all.
 //! - **Windows**: there is no inventory file, so probe each shell's known
 //!   homes: PowerShell 7 across its six-ish install roots, Windows PowerShell
 //!   in System32, cmd via `%ComSpec%`, Git Bash under the Git install, and WSL
@@ -133,14 +136,47 @@ fn unix_shells_from(
     out
 }
 
+/// Shells package managers commonly install *without* registering them in
+/// `/etc/shells` — Homebrew and nix leave that edit to the user, and few make
+/// it, so `/etc/shells` misses e.g. a brew-installed fish entirely. Probed on
+/// `PATH` (the login-shell-enriched one — see `enrich_path_from_login_shell`
+/// in `main` — so Dock launches see Homebrew's prefix too).
+#[cfg_attr(windows, allow(dead_code))]
+const PATH_PROBED_SHELLS: [&str; 5] = ["fish", "nu", "pwsh", "elvish", "xonsh"];
+
+/// Expand [`PATH_PROBED_SHELLS`] into concrete candidate paths, one per
+/// `path_var` directory in `PATH` order. Fed through the same exists + dedupe
+/// pass as the `/etc/shells` entries, so the first directory that actually
+/// holds the shell wins — `which` semantics without spawning anything.
+/// Relative `PATH` entries are skipped: a `./fish` candidate would resolve
+/// somewhere else at every spawn. Pure — the caller supplies `path_var`.
+#[cfg_attr(windows, allow(dead_code))]
+fn path_shell_candidates(path_var: &str) -> Vec<String> {
+    let dirs: Vec<&str> = path_var.split(':').filter(|d| d.starts_with('/')).collect();
+    PATH_PROBED_SHELLS
+        .iter()
+        .flat_map(|name| {
+            dirs.iter()
+                .map(move |dir| format!("{}/{name}", dir.trim_end_matches('/')))
+        })
+        .collect()
+}
+
 #[cfg(unix)]
 fn detect_unix() -> Vec<DetectedShell> {
     // Seed the login shell first so it wins its basename's dedupe slot and
     // leads the list — it also covers shells installed outside /etc/shells
     // (nix/homebrew installs the user pointed $SHELL at without registering).
+    // The PATH probe comes last: registered shells keep their `/etc/shells`
+    // paths, and only the unregistered leftovers (brew fish, nushell, …) are
+    // picked up from `PATH`.
     let login = std::env::var("SHELL").ok().filter(|s| !s.is_empty());
     let etc = std::fs::read_to_string("/etc/shells").unwrap_or_default();
-    let candidates = login.into_iter().chain(parse_etc_shells(&etc));
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    let candidates = login
+        .into_iter()
+        .chain(parse_etc_shells(&etc))
+        .chain(path_shell_candidates(&path_var));
     unix_shells_from(candidates, |p| Path::new(p).is_file())
 }
 
@@ -351,6 +387,45 @@ mod tests {
             vec![
                 DetectedShell::bare("zsh", "/opt/homebrew/bin/zsh"),
                 DetectedShell::bare("bash", "/bin/bash"),
+            ]
+        );
+    }
+
+    #[test]
+    fn path_shell_candidates_expand_dirs_in_order_skipping_relative() {
+        let cands = path_shell_candidates("/opt/homebrew/bin:relative:.:/usr/bin/:");
+        // Per shell, one candidate per *absolute* PATH dir, in PATH order, with
+        // any trailing slash on the dir normalized away.
+        assert_eq!(cands[0], "/opt/homebrew/bin/fish");
+        assert_eq!(cands[1], "/usr/bin/fish");
+        assert!(cands.contains(&"/opt/homebrew/bin/nu".to_string()));
+        assert!(cands.iter().all(|c| c.starts_with('/')));
+        assert_eq!(cands.len(), PATH_PROBED_SHELLS.len() * 2);
+    }
+
+    #[test]
+    fn unregistered_path_shells_are_detected_after_etc_shells() {
+        // A brew-installed fish: absent from /etc/shells (and not the login
+        // shell), present on PATH — must still make the list, after the
+        // registered shells. zsh exists on PATH too but keeps its /etc/shells
+        // slot via the basename dedupe.
+        let etc = ["/bin/zsh".to_string(), "/bin/bash".to_string()];
+        let candidates = etc
+            .into_iter()
+            .chain(path_shell_candidates("/opt/homebrew/bin:/usr/bin"));
+        let exists = |p: &str| {
+            matches!(
+                p,
+                "/bin/zsh" | "/bin/bash" | "/opt/homebrew/bin/fish" | "/usr/bin/zsh"
+            )
+        };
+        let got = unix_shells_from(candidates, exists);
+        assert_eq!(
+            got,
+            vec![
+                DetectedShell::bare("zsh", "/bin/zsh"),
+                DetectedShell::bare("bash", "/bin/bash"),
+                DetectedShell::bare("fish", "/opt/homebrew/bin/fish"),
             ]
         );
     }

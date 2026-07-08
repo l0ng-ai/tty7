@@ -10,9 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - The "+" button now opens a shell picker: tty7 detects the shells installed
-  on this machine (the login shell plus `/etc/shells` on Unix; PowerShell 7,
-  Windows PowerShell, Command Prompt, Git Bash and WSL distributions on
-  Windows) and lists them in a dropdown, so opening a tab in a different shell
+  on this machine (on Unix the login shell, `/etc/shells`, plus well-known
+  shells found on `PATH` — fish, nushell, pwsh and friends installed by
+  Homebrew/nix are never registered in `/etc/shells`; on Windows PowerShell 7,
+  Windows PowerShell, Command Prompt, Git Bash and WSL distributions)
+  and lists them in a dropdown, so opening a tab in a different shell
   no longer requires editing `config.json`. The default entry leads the menu,
   ⌘T / Ctrl+T still opens a default tab in one keystroke, and splitting a pane
   inherits its shell — a fish tab splits into more fish, not back to the
