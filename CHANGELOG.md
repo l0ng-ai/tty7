@@ -15,6 +15,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hover text stays at the normal foreground so it reads clearly on the quieter
   fill.
 
+### Fixed
+
+- New tabs and splits no longer stall for seconds while a zsh plugin manager
+  reinstalls itself. tty7 launches zsh through a throwaway `ZDOTDIR` (so it can
+  layer its shell integration on top of your config), but it used to leave
+  `ZDOTDIR` pointing at that empty temp dir the whole time — so tools that find
+  their own state via `${ZDOTDIR:-$HOME}` (Zim, oh-my-zsh, `compinit`'s
+  `.zcompdump`) looked in the wrong place and rebuilt from scratch on every
+  pane, e.g. Zim reprinting `modules/…: Installed` and hanging for ~3s. Each
+  redirector now points `ZDOTDIR` back at your real config dir while your
+  startup files run, and restores it for the live session, so plugin managers
+  and completion caches resolve correctly and load instantly. As a bonus this
+  also fixes the classic relocated-config layout (a tiny `~/.zshenv` that sets
+  `ZDOTDIR=~/.config/zsh`), which previously loaded your config but silently
+  dropped tty7's integration. (#15)
+
+## [0.6.1] - 2026-07-08
+
+### Fixed
+
+- Tab completion (and other line editing) now stays out of the way over `ssh`.
+  A remote shell that emits its own prompt marks — fish 4.x on a Linux server,
+  most visibly, which ships OSC 133 on by default — used to engage tty7's
+  *local* line editor, so Tab ran completion against the local machine's
+  filesystem instead of reaching the remote shell. tty7 now only drives the
+  inline editor while the shell it launched is itself idle at its prompt;
+  whenever a foreground command (ssh, a TUI, a nested shell) owns the terminal,
+  keystrokes pass straight through to it. (#26, follow-up to #18)
+
 ## [0.6.0] - 2026-07-08
 
 ### Added
