@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Tab completion (and other line editing) now stays out of the way over `ssh`.
+  A remote shell that emits its own prompt marks — fish 4.x on a Linux server,
+  most visibly, which ships OSC 133 on by default — used to engage tty7's
+  *local* line editor, so Tab ran completion against the local machine's
+  filesystem instead of reaching the remote shell. tty7 now only drives the
+  inline editor while the shell it launched is itself idle at its prompt;
+  whenever a foreground command (ssh, a TUI, a nested shell) owns the terminal,
+  keystrokes pass straight through to it. (#26, follow-up to #18)
+
 ## [0.6.0] - 2026-07-08
 
 ### Added
