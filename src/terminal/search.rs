@@ -337,33 +337,9 @@ pub(super) fn url_span_at(text: &str, col: usize) -> Option<(usize, usize, Strin
         end += 1;
     }
     let mut token: String = chars[start..=end].iter().collect();
-    // Strip trailing punctuation like ).,;'": > (ASCII) plus the full-width / CJK
-    // brackets and stops that a URL gets glued to in prose, so the underline stops
+    // Strip trailing punctuation (see `trim_trailing_punct`) so the underline stops
     // where the link does. None of these characters occur inside real URLs.
-    while token.chars().next_back().is_some_and(|c| {
-        matches!(
-            c,
-            ')' | ']'
-                | '.'
-                | ','
-                | ';'
-                | ':'
-                | '\''
-                | '"'
-                | '>'
-                | '）'
-                | '］'
-                | '】'
-                | '》'
-                | '」'
-                | '。'
-                | '，'
-                | '；'
-                | '：'
-        )
-    }) {
-        token.pop();
-    }
+    trim_trailing_punct(&mut token);
 
     // A URL is frequently glued to preceding text with no ASCII whitespace: not
     // only wrappers like `(`/`[`, but CJK prose and full-width punctuation, e.g.
@@ -375,6 +351,16 @@ pub(super) fn url_span_at(text: &str, col: usize) -> Option<(usize, usize, Strin
     if let Some(off) = SCHEMES.iter().filter_map(|s| token.find(s)).min() {
         start += token[..off].chars().count();
         token.drain(..off);
+        // A URL can also be glued to *following* prose with no ASCII space, e.g.
+        // `…/pull/343（fix/… → dev）`, where the full-width `（` opens a parenthetical
+        // that the whitespace split can't separate. URL characters are all ASCII
+        // (RFC 3986), so truncate at the first char that can't appear in one — a CJK
+        // character, full-width bracket, arrow or emoji — which marks where it ends.
+        if let Some(bad) = token.find(|c| !is_url_char(c)) {
+            token.truncate(bad);
+        }
+        // Truncating there can re-expose trailing punctuation (`a.com,说明` → `a.com,`).
+        trim_trailing_punct(&mut token);
         let end = start + token.chars().count() - 1;
         // Only resolve when the cursor actually sits on the URL, not on the prefix
         // we dropped — for spaceless CJK that prefix can be a whole sentence.
@@ -401,6 +387,68 @@ pub(super) fn url_span_at(text: &str, col: usize) -> Option<(usize, usize, Strin
     } else {
         None
     }
+}
+
+/// Trim trailing punctuation a URL gets glued to in prose — `).,;:'"` and `>` plus
+/// their full-width / CJK counterparts — so the link stops where the address does.
+/// None of these characters occur at the end of a real URL.
+fn trim_trailing_punct(token: &mut String) {
+    while token.chars().next_back().is_some_and(|c| {
+        matches!(
+            c,
+            ')' | ']'
+                | '.'
+                | ','
+                | ';'
+                | ':'
+                | '\''
+                | '"'
+                | '>'
+                | '）'
+                | '］'
+                | '】'
+                | '》'
+                | '」'
+                | '。'
+                | '，'
+                | '；'
+                | '：'
+        )
+    }) {
+        token.pop();
+    }
+}
+
+/// Whether `c` may appear inside a URL per RFC 3986 (unreserved + reserved + `%`).
+/// Every such character is ASCII, so any CJK character, full-width bracket, arrow or
+/// emoji is rejected — which is what lets a URL be cut off from trailing CJK prose.
+fn is_url_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '-' | '.'
+                | '_'
+                | '~'
+                | ':'
+                | '/'
+                | '?'
+                | '#'
+                | '['
+                | ']'
+                | '@'
+                | '!'
+                | '$'
+                | '&'
+                | '\''
+                | '('
+                | ')'
+                | '*'
+                | '+'
+                | ','
+                | ';'
+                | '='
+                | '%'
+        )
 }
 
 #[cfg(test)]
@@ -555,6 +603,36 @@ mod tests {
             url_at("详见 https://a.com。", 5).as_deref(),
             Some("https://a.com")
         );
+    }
+
+    #[test]
+    fn url_at_stops_at_full_width_open_bracket_glued_after_url() {
+        // Regression: a URL immediately followed by a full-width `（parenthetical）`
+        // with no ASCII space — `…/pull/343（fix/… → dev）`. The `（` is not
+        // whitespace, so the token runs past the URL into the bracket; truncating at
+        // the first non-URL char keeps only the address.
+        let url = "https://github.com/acme/app/pull/343";
+        let line = format!("PR 已创建：{url}（fix/cache-write-tokens → dev）");
+        let h = line.chars().position(|c| c == 'h').expect("scheme start");
+        assert_eq!(url_at(&line, h).as_deref(), Some(url));
+        // Hovering deeper inside the URL resolves the same span, sans bracket.
+        let (start, end, got) = url_span_at(&line, h + 10).expect("URL before bracket");
+        assert_eq!(got, url);
+        assert_eq!(start, h);
+        assert_eq!(line.chars().nth(end + 1), Some('（'));
+        // Hovering on the parenthetical text after the URL is not a link.
+        let f = line.chars().position(|c| c == 'f').expect("`fix` start");
+        assert_eq!(url_at(&line, f), None);
+    }
+
+    #[test]
+    fn url_at_keeps_ascii_parens_inside_a_url() {
+        // ASCII `(`/`)` are valid URL characters (e.g. Wikipedia), so a pair in the
+        // middle of the path must survive — the non-URL-char truncation only fires on
+        // a full-width bracket, never an ASCII one. (A *trailing* `)` is still trimmed
+        // as a likely wrapper; balancing parens is out of scope.)
+        let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)/history";
+        assert_eq!(url_at(url, 40).as_deref(), Some(url));
     }
 
     #[test]
