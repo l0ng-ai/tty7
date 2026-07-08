@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- New tabs and splits no longer stall for seconds while a zsh plugin manager
+  reinstalls itself. tty7 launches zsh through a throwaway `ZDOTDIR` (so it can
+  layer its shell integration on top of your config), but it used to leave
+  `ZDOTDIR` pointing at that empty temp dir the whole time — so tools that find
+  their own state via `${ZDOTDIR:-$HOME}` (Zim, oh-my-zsh, `compinit`'s
+  `.zcompdump`) looked in the wrong place and rebuilt from scratch on every
+  pane, e.g. Zim reprinting `modules/…: Installed` and hanging for ~3s. Each
+  redirector now points `ZDOTDIR` back at your real config dir while your
+  startup files run, and restores it for the live session, so plugin managers
+  and completion caches resolve correctly and load instantly. As a bonus this
+  also fixes the classic relocated-config layout (a tiny `~/.zshenv` that sets
+  `ZDOTDIR=~/.config/zsh`), which previously loaded your config but silently
+  dropped tty7's integration. (#15)
+
 ## [0.6.1] - 2026-07-08
 
 ### Fixed

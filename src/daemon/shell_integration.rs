@@ -107,6 +107,19 @@ if [[ -o interactive ]] && [[ -z "$TTY7_SHELL_INTEGRATION" ]]; then
   # `precmd()` function still get ahead of us (zsh calls it before the array);
   # that's out of reach without wrapping their function.
   precmd_functions=(__tty7_precmd_d $precmd_functions)
+
+  # Startup kept ZDOTDIR aimed at our throwaway redirector dir so zsh read every
+  # one of our startup files. Now they've all run, point it back at the user's
+  # real config dir for the live session: tools that resolve state via
+  # ${ZDOTDIR:-$HOME} *at runtime* (compinit's .zcompdump, lazily-compiled plugin
+  # caches) — and a nested plain `zsh` — must land in the user's dir, not our
+  # empty temp one. One-shot: fires on the first precmd, then removes itself.
+  __tty7_restore_zdotdir() {
+    ZDOTDIR=${TTY7_USER_ZDOTDIR:-$HOME}
+    add-zsh-hook -d precmd __tty7_restore_zdotdir
+    unfunction __tty7_restore_zdotdir
+  }
+  add-zsh-hook precmd __tty7_restore_zdotdir
 fi
 # --- end tty7 shell integration ---
 "#;
@@ -504,28 +517,57 @@ if (-not $env:TTY7_SHELL_INTEGRATION) {
 # --- end tty7 shell integration ---
 "#;
 
-/// The redirector files written into our throwaway `ZDOTDIR`. Each sources the
-/// user's real counterpart (resolved from `TTY7_USER_ZDOTDIR`, defaulting to
-/// `$HOME`) so the user's environment loads unchanged; `.zshrc` additionally
-/// appends our integration body. We keep `ZDOTDIR` pointing at *our* dir across
-/// the whole startup sequence (rather than resetting it in `.zshenv`) so zsh
-/// keeps reading our redirectors for `.zprofile` / `.zshrc` / `.zlogin` too.
+/// The redirector files written into our throwaway `ZDOTDIR`. zsh reads its
+/// startup files from `$ZDOTDIR`, so for zsh to reach all four of ours we must
+/// keep `ZDOTDIR` pointing at *our* dir at every hand-off between files. But
+/// while each redirector actually *sources the user's real file* — and once the
+/// live session begins — `ZDOTDIR` has to point at the user's real config dir
+/// instead: a whole ecosystem of zsh tooling (Zim, oh-my-zsh, `compinit`'s
+/// `.zcompdump`) locates its own state via `${ZDOTDIR:-$HOME}`, and if that
+/// resolved to our *empty* throwaway dir it would reinstall / rebuild from
+/// scratch on every new pane — the 3-second stall and Zim "Installed" spam of
+/// issue #15. So each redirector swaps `ZDOTDIR` to the real dir around the
+/// `source`, then swaps our dir back so zsh still reaches the next redirector;
+/// the integration body ([`ZSH_INTEGRATION`]) restores the real dir for good
+/// once every startup file has run.
+///
+/// The source is done at top level (never wrapped in a function) so the user's
+/// config keeps its normal global scope.
 fn zsh_redirectors() -> [(&'static str, String); 4] {
-    // Source the user's file of the same name, if present. `${TTY7_USER_ZDOTDIR:-$HOME}`
-    // is the user's real config dir, captured into the env before launch.
-    let src = |name: &str| {
+    // Run the user's file of the same name with ZDOTDIR aimed at their *real*
+    // config dir, then restore ours so zsh reads the next redirector. The real
+    // dir is `TTY7_USER_ZDOTDIR`, captured into the env before launch; when it's
+    // absent we *unset* ZDOTDIR (not fall back to $HOME) so the file sees exactly
+    // what a real launch gives it — an unset ZDOTDIR — and the classic relocate
+    // idiom `: ${ZDOTDIR:=~/.config/zsh}` still fires. `tail` runs after the
+    // source but before the restore.
+    let redirect = |name: &str, tail: &str| {
         format!(
-            "[[ -f \"${{TTY7_USER_ZDOTDIR:-$HOME}}/{name}\" ]] && \
-             source \"${{TTY7_USER_ZDOTDIR:-$HOME}}/{name}\"\n"
+            "__tty7_ztmp=$ZDOTDIR\n\
+             if [[ -n \"$TTY7_USER_ZDOTDIR\" ]]; then ZDOTDIR=$TTY7_USER_ZDOTDIR; else unset ZDOTDIR; fi\n\
+             [[ -f \"${{ZDOTDIR:-$HOME}}/{name}\" ]] && source \"${{ZDOTDIR:-$HOME}}/{name}\"\n\
+             {tail}ZDOTDIR=$__tty7_ztmp\n\
+             unset __tty7_ztmp\n"
         )
     };
     [
-        (".zshenv", src(".zshenv")),
-        (".zprofile", src(".zprofile")),
-        // Our integration is appended *after* the user's .zshrc so it can extend
-        // (not be clobbered by) the user's PROMPT / hooks.
-        (".zshrc", format!("{}{ZSH_INTEGRATION}", src(".zshrc"))),
-        (".zlogin", src(".zlogin")),
+        // The user's own .zshenv may itself relocate ZDOTDIR — the classic tiny
+        // `~/.zshenv` that does `ZDOTDIR=~/.config/zsh`. Capture wherever it points
+        // *after* sourcing as the real dir for the later redirectors (and nested
+        // tty7); otherwise they'd look under $HOME and miss the user's real config.
+        (
+            ".zshenv",
+            redirect(".zshenv", "export TTY7_USER_ZDOTDIR=${ZDOTDIR:-$HOME}\n"),
+        ),
+        (".zprofile", redirect(".zprofile", "")),
+        // Our integration is appended *after* the user's .zshrc (and after ZDOTDIR
+        // is restored to ours) so it extends — not gets clobbered by — the user's
+        // PROMPT / hooks.
+        (
+            ".zshrc",
+            format!("{}{ZSH_INTEGRATION}", redirect(".zshrc", "")),
+        ),
+        (".zlogin", redirect(".zlogin", "")),
     ]
 }
 
@@ -872,9 +914,10 @@ mod tests {
         assert_eq!(names, [".zshenv", ".zprofile", ".zshrc", ".zlogin"]);
         for (name, body) in &files {
             // Every redirector sources the user's real file of the same name,
-            // resolved via the captured real ZDOTDIR (defaulting to $HOME).
+            // resolved via the captured real ZDOTDIR (`$TTY7_USER_ZDOTDIR`, or
+            // $HOME when the user never set one).
             assert!(
-                body.contains("${TTY7_USER_ZDOTDIR:-$HOME}"),
+                body.contains("$TTY7_USER_ZDOTDIR"),
                 "{name} should reference the user's real ZDOTDIR"
             );
             assert!(body.contains(name), "{name} should source its own name");
@@ -885,6 +928,76 @@ mod tests {
         assert!(zshrc.contains("__tty7_precmd"));
         assert!(zshrc.contains("133;A"));
         assert!(!files[0].1.contains("__tty7_precmd"));
+    }
+
+    #[test]
+    fn zsh_redirectors_point_zdotdir_at_the_real_dir_only_while_sourcing() {
+        // Issue #15: ZDOTDIR must resolve to the user's *real* config dir while
+        // their startup files run — Zim/oh-my-zsh/compinit key their install state
+        // off ${ZDOTDIR:-$HOME}, and our throwaway dir is empty, so leaving ZDOTDIR
+        // pointed there makes them reinstall on every pane. Each redirector must:
+        //   1. stash our dir, 2. aim ZDOTDIR at the real dir, 3. source, then
+        //   4. restore our dir so zsh still finds the *next* redirector.
+        for (name, body) in zsh_redirectors() {
+            let save = body.find("__tty7_ztmp=$ZDOTDIR").expect("stashes our dir");
+            let aim = body
+                .find("ZDOTDIR=$TTY7_USER_ZDOTDIR")
+                .expect("aims at the real dir");
+            let source = body
+                .find(&format!("source \"${{ZDOTDIR:-$HOME}}/{name}\""))
+                .expect("sources the user's file");
+            let restore = body
+                .rfind("ZDOTDIR=$__tty7_ztmp")
+                .expect("restores our dir");
+            let unset = body
+                .rfind("unset __tty7_ztmp")
+                .expect("cleans up its scratch var");
+            assert!(
+                save < aim && aim < source && source < restore && restore < unset,
+                "{name}: order must be stash → aim-at-real → source → restore-ours → unset"
+            );
+        }
+    }
+
+    #[test]
+    fn zshenv_recaptures_a_user_relocated_zdotdir() {
+        // The canonical layout is a tiny ~/.zshenv that does `ZDOTDIR=~/.config/zsh`,
+        // with the real config living there. After sourcing the user's .zshenv we
+        // must capture wherever ZDOTDIR now points so the .zprofile/.zshrc/.zlogin
+        // redirectors source from the *relocated* dir (and nested tty7 sees it too),
+        // rather than falling back to $HOME and dropping the user's config.
+        let files = zsh_redirectors();
+        let zshenv = &files[0].1;
+        let source = zshenv.find("source \"${ZDOTDIR:-$HOME}/.zshenv\"").unwrap();
+        let recapture = zshenv
+            .find("export TTY7_USER_ZDOTDIR=${ZDOTDIR:-$HOME}")
+            .unwrap();
+        let restore = zshenv.rfind("ZDOTDIR=$__tty7_ztmp").unwrap();
+        assert!(
+            source < recapture && recapture < restore,
+            "recapture must run after sourcing the user's .zshenv, before we restore our dir"
+        );
+        // Only .zshenv recaptures; the other three just source and restore.
+        for (name, body) in &files[1..] {
+            assert!(
+                !body.contains("export TTY7_USER_ZDOTDIR"),
+                "{name} must not re-export TTY7_USER_ZDOTDIR"
+            );
+        }
+    }
+
+    #[test]
+    fn zsh_integration_restores_real_zdotdir_after_startup() {
+        // With every startup file read, the integration body must hand ZDOTDIR back
+        // to the user's real dir for the live session (runtime ${ZDOTDIR:-$HOME}
+        // lookups, a nested plain `zsh`). It's a one-shot precmd hook that unhooks
+        // itself so it doesn't re-fire on every prompt.
+        assert!(ZSH_INTEGRATION.contains("__tty7_restore_zdotdir"));
+        assert!(ZSH_INTEGRATION.contains("ZDOTDIR=${TTY7_USER_ZDOTDIR:-$HOME}"));
+        assert!(
+            ZSH_INTEGRATION.contains("add-zsh-hook -d precmd __tty7_restore_zdotdir"),
+            "the restore hook must deregister itself so it runs exactly once"
+        );
     }
 
     #[test]
