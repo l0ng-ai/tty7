@@ -2050,7 +2050,10 @@ mod tests {
             sub_rx.try_recv(),
             Ok(DaemonMsg::Exited { code: None })
         ));
-        assert!(sub_rx.try_recv().is_err(), "a second report must not re-notify");
+        assert!(
+            sub_rx.try_recv().is_err(),
+            "a second report must not re-notify"
+        );
     }
 
     /// With nobody attached, the *first* report hands the pane to `on_dead` and a
