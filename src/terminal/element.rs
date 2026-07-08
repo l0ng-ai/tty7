@@ -687,6 +687,26 @@ fn powerline_path(bounds: Bounds<Pixels>, shape: PowerlineShape) -> gpui::Path<P
     }
 }
 
+/// How wide to clip a solo (single-column) glyph's paint.
+///
+/// A batched run clips to its exact column span, but a lone glyph can be a
+/// symbol whose face paints ink well past the single cell the grid reserved for
+/// it: a non-Mono Nerd Font sets a *one-cell advance* on its icons yet draws up
+/// to ~1.9 cells of ink (measured across Hasklug / Meslo / JetBrainsMono NF),
+/// and the OS cascade serves a proportional `➜`/`❯` the same way. Clipping that
+/// to one cell severs the glyph mid-ink — the incomplete icons and the cut-off
+/// arrow in issue #17.
+///
+/// Advance is no signal here (it reads one cell for those overflowing icons), so
+/// widen every solo glyph's clip to two cells. A glyph that already fits is
+/// untouched — it has no ink to spill — while a symbol that overflows renders
+/// whole, bleeding into a trailing blank the way iTerm2 and Terminal.app do with
+/// non-Mono faces. The two-cell bound keeps a pathological face from smearing a
+/// lone glyph across the row.
+fn solo_clip_width(cell_width: Pixels) -> Pixels {
+    cell_width * 2.
+}
+
 /// Paint glyphs as per-row batched runs where safe, single cells otherwise.
 ///
 /// Merging cells into multi-char `shape_line` runs causes drift whenever a
@@ -735,12 +755,13 @@ fn paint_glyphs(
         let y = geom.origin.y + geom.line_height * (row as f32);
 
         for seg in segment_row(&buf[row_base..row_base + geom.cols]) {
-            let (start, cells, text, force_width) = match seg {
+            let (start, cells, text, force_width, solo) = match seg {
                 RowSeg::Run { start, cells, text } => (
                     start,
                     cells,
                     SharedString::from(text),
                     Some(geom.cell_width),
+                    false,
                 ),
                 // Each wide glyph is pinned to its own two-column slot; the
                 // clip stops an oversized fallback glyph bleeding past the run.
@@ -749,6 +770,7 @@ fn paint_glyphs(
                     cells,
                     SharedString::from(text),
                     Some(geom.cell_width * 2.),
+                    false,
                 ),
                 // Always exactly one column now — anything with a trailing
                 // spacer became a Wide run in `segment_row`. No `force_width`
@@ -764,7 +786,7 @@ fn paint_glyphs(
                         window.paint_path(path, GlyphStyle::of(cell).fg);
                         continue;
                     }
-                    (col, 1, char_string(cell.c), None)
+                    (col, 1, char_string(cell.c), None, true)
                 }
             };
 
@@ -783,10 +805,15 @@ fn paint_glyphs(
                 .shape_line(text, font_size, run_buf, force_width);
 
             let x = geom.origin.x + geom.cell_width * (start as f32);
-            let clip = Bounds::new(
-                point(x, y),
-                size(geom.cell_width * (cells as f32), geom.line_height),
-            );
+            // Batched runs clip to their exact column span; a solo glyph gets a
+            // two-cell window so a symbol/icon face whose ink overflows its cell
+            // isn't severed (see `solo_clip_width` — issue #17).
+            let clip_width = if solo {
+                solo_clip_width(geom.cell_width)
+            } else {
+                geom.cell_width * (cells as f32)
+            };
+            let clip = Bounds::new(point(x, y), size(clip_width, geom.line_height));
             window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
                 _ = shaped.paint(
                     point(x, y),
@@ -1850,6 +1877,16 @@ mod tests {
                 "{shape:?} does not reach the right cell edge"
             );
         }
+    }
+
+    #[test]
+    fn solo_clip_width_gives_symbols_two_cells() {
+        // A lone symbol glyph paints into a two-cell window so a non-Mono Nerd
+        // Font icon (one-cell advance, ~1.9-cell ink) or a proportional arrow
+        // renders whole instead of severed at the cell edge (issue #17) — the
+        // bound keeps a pathological face from smearing across the row.
+        assert_eq!(solo_clip_width(px(10.)), px(20.));
+        assert_eq!(solo_clip_width(px(9.)), px(18.));
     }
 
     #[test]

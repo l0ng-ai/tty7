@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Nerd Font prompt icons no longer render sliced off on the right. A non-Mono
+  Nerd Font (and the proportional `➜`/`❯` the OS cascade hands back when nothing
+  in your font list covers them) gives an icon a single-cell *advance* but draws
+  ink up to ~1.9 cells wide, and tty7 clipped every lone glyph to exactly one
+  cell — severing the overflow into the half-icons and cut-off arrow from the
+  report. A single glyph now paints into a two-cell window, so it renders whole
+  (bleeding into the trailing blank the way iTerm2 and Terminal.app do), bounded
+  at two cells so a stray face can't smear across the row. Pairs with the native
+  powerline separators from #19; Mono Nerd Fonts are unchanged. (#17)
+
 - New tabs and splits no longer stall for seconds while a zsh plugin manager
   reinstalls itself. tty7 launches zsh through a throwaway `ZDOTDIR` (so it can
   layer its shell integration on top of your config), but it used to leave
