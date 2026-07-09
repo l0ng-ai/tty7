@@ -151,10 +151,13 @@ fn build_font(base: &Font, bold: bool, italic: bool) -> Font {
         FontStyle::Normal
     };
     // Batched runs shape several chars in one line, where a programming font's
-    // contextual ligatures (`calt`, e.g. Fira Code's "->") would fuse cells into
-    // one glyph and break `force_width`'s one-glyph-per-column snapping. A cell
-    // grid can't ligate — Zed's terminal disables the same feature.
-    f.features = gpui::FontFeatures::disable_ligatures();
+    // contextual ligatures (`calt`, e.g. Fira Code's "->") can fuse cells into
+    // one glyph and stress `force_width`'s one-glyph-per-column snapping. Keep
+    // the terminal-safe default unless the user explicitly configured OpenType
+    // features on the base font.
+    if f.features.tag_value_list().is_empty() {
+        f.features = gpui::FontFeatures::disable_ligatures();
+    }
     f
 }
 
@@ -1894,6 +1897,23 @@ mod tests {
         // whole instead of severed at the cell edge (issue #17) — the bound keeps
         // a pathological face from smearing across the row.
         assert_eq!(seg_clip_width(true, 1, cell), px(20.));
+    }
+
+    #[test]
+    fn build_font_disables_ligatures_unless_features_are_configured() {
+        let font = build_font(&gpui::font("Test"), false, false);
+        assert_eq!(font.features.is_calt_enabled(), Some(false));
+
+        let mut configured = gpui::font("Test");
+        configured.features = serde_json::from_str(r#"{"calt":true,"liga":1}"#).unwrap();
+        let font = build_font(&configured, false, false);
+        assert_eq!(font.features.is_calt_enabled(), Some(true));
+        assert!(
+            font.features
+                .tag_value_list()
+                .iter()
+                .any(|(tag, value)| tag == "liga" && *value == 1)
+        );
     }
 
     #[test]

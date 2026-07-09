@@ -445,9 +445,17 @@ impl Tty7App {
                 ),
                 None => return div().into_any_element(),
             };
-        let cursor_style = cx.global::<Config>().cursor_style;
-        let cursor_blink = cx.global::<Config>().cursor_blink;
-        let colors = cx.global::<Config>().colors.clone();
+        let cfg = cx.global::<Config>();
+        let cursor_style = cfg.cursor_style;
+        let cursor_blink = cfg.cursor_blink;
+        let font_ligatures = cfg.font_features.as_ref().is_some_and(|features| {
+            features.is_calt_enabled() == Some(true)
+                || features
+                    .tag_value_list()
+                    .iter()
+                    .any(|(tag, value)| tag == "liga" && *value != 0)
+        });
+        let colors = cfg.colors.clone();
 
         // Unified −/value/+ stepper plus a quiet Reset.
         let step = move |id: &'static str, glyph: &'static str, divider: bool| {
@@ -556,6 +564,10 @@ impl Tty7App {
         let font_family_control = font_dropdown(&font_select);
         let font_bold_control = font_dropdown(&font_bold_select);
         let font_italic_control = font_dropdown(&font_italic_select);
+        let ligature_switch = Switch::new("font-ligatures")
+            .checked(font_ligatures)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_font_ligatures(*on, cx)))
+            .into_any_element();
 
         let cursor_idx = match cursor_style {
             CursorStyle::Block => 0,
@@ -620,6 +632,12 @@ impl Tty7App {
                 "Italic Font",
                 "Face for italic text; Default synthesizes it from the primary.",
                 font_italic_control,
+                cx,
+            ))
+            .child(self.settings_row(
+                "Font ligatures",
+                "Enable common programming ligature features for terminal text.",
+                ligature_switch,
                 cx,
             ))
             .child(self.section_rule(cx))
