@@ -73,6 +73,9 @@ pub struct TerminalView {
     /// Optional distinct base face for italic cells (from `font_family_italic`).
     /// `None` → synthesize italic from `font`.
     pub font_italic: Option<Font>,
+    /// User-configured OpenType features for terminal fonts. `None` preserves
+    /// tty7's terminal-safe default (ligatures disabled); `Some` is opt-in.
+    font_features: Option<gpui::FontFeatures>,
     pub font_size: Pixels,
     /// Line height as a multiple of `font_size`; the element turns it into the
     /// concrete row height each frame. Sourced from `Config::line_height`.
@@ -438,14 +441,21 @@ impl TerminalView {
         let fallbacks = fallback_chain(&font_family, &config.font_fallbacks);
         let font_size = px(config.font_size);
         let line_height_mul = config.line_height;
+        let font_features = config.font_features.clone();
         let mut font = gpui::font(font_family);
         font.fallbacks = Some(gpui::FontFallbacks::from_fonts(fallbacks.clone()));
+        if let Some(features) = &font_features {
+            font.features = features.clone();
+        }
         // Optional distinct bold/italic faces, each carrying the same fallback
         // chain so glyph coverage matches the primary face.
         let alt_font = |family: &Option<String>| {
             family.as_ref().map(|f| {
                 let mut af = gpui::font(f.clone());
                 af.fallbacks = Some(gpui::FontFallbacks::from_fonts(fallbacks.clone()));
+                if let Some(features) = &font_features {
+                    af.features = features.clone();
+                }
                 af
             })
         };
@@ -591,6 +601,7 @@ impl TerminalView {
             font,
             font_bold,
             font_italic,
+            font_features,
             font_size,
             line_height_mul,
             cell_width: px(8.),
@@ -1647,6 +1658,9 @@ impl TerminalView {
         let fallbacks = self.font.fallbacks.clone();
         let mut font = gpui::font(family);
         font.fallbacks = fallbacks;
+        if let Some(features) = &self.font_features {
+            font.features = features.clone();
+        }
         self.font = font;
         cx.notify();
     }
@@ -1664,12 +1678,37 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Apply OpenType features to the live terminal fonts. `None` restores the
+    /// terminal-safe default path, where the renderer disables contextual
+    /// ligatures while building paint faces.
+    pub fn set_font_features(
+        &mut self,
+        features: Option<gpui::FontFeatures>,
+        cx: &mut Context<Self>,
+    ) {
+        self.font_features = features.clone();
+        let apply = |font: &mut Font| {
+            font.features = features.clone().unwrap_or_default();
+        };
+        apply(&mut self.font);
+        if let Some(font) = &mut self.font_bold {
+            apply(font);
+        }
+        if let Some(font) = &mut self.font_italic {
+            apply(font);
+        }
+        cx.notify();
+    }
+
     /// Build an alternate face from a family name, reusing the primary's
     /// fallbacks. `None` → `None` (fall back to synthesizing from `self.font`).
     fn alt_font(&self, family: Option<String>) -> Option<Font> {
         family.map(|f| {
             let mut af = gpui::font(f);
             af.fallbacks = self.font.fallbacks.clone();
+            if let Some(features) = &self.font_features {
+                af.features = features.clone();
+            }
             af
         })
     }

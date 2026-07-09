@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use gpui::{Global, Hsla, Rgba, rgb};
+use gpui::{FontFeatures, Global, Hsla, Rgba, rgb};
 use serde::{Deserialize, Serialize};
 
 /// Top-level configuration. Stored as a GPUI global so any view can read it.
@@ -26,6 +26,10 @@ pub struct Config {
     /// Optional distinct face for italic cells. `None` reuses `font_family` with a
     /// synthesized italic slant.
     pub font_family_italic: Option<String>,
+    /// Optional OpenType font features for terminal text. When absent, tty7 keeps
+    /// terminal-safe defaults and disables contextual ligatures; when present,
+    /// this map is passed through to gpui as-is (for example `{ "calt": true }`).
+    pub font_features: Option<FontFeatures>,
     /// Base font size in pixels.
     pub font_size: f32,
     /// Line height as a multiple of the font size (e.g. 1.35 → a 13px font gets
@@ -230,6 +234,7 @@ impl Default for Config {
             ],
             font_family_bold: None,
             font_family_italic: None,
+            font_features: None,
             font_size: 15.0,
             line_height: 1.4,
             theme: "light".to_string(),
@@ -690,6 +695,23 @@ mod tests {
         colors.set(0, None);
         assert!(colors.get(0).is_some_and(Option::is_none));
         assert!(colors.get(16).is_none());
+    }
+
+    #[test]
+    fn font_features_are_optional_and_parse_as_gpui_features() {
+        let cfg: Config =
+            serde_json::from_str(r#"{"font_features":{"calt":true,"liga":1}}"#).unwrap();
+        let features = cfg.font_features.expect("font features should parse");
+        assert_eq!(features.is_calt_enabled(), Some(true));
+        assert!(
+            features
+                .tag_value_list()
+                .iter()
+                .any(|(tag, value)| tag == "liga" && *value == 1)
+        );
+
+        let default_cfg = Config::default();
+        assert!(default_cfg.font_features.is_none());
     }
 
     #[test]

@@ -10,6 +10,7 @@ use gpui_component::input::{InputEvent, InputState};
 use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
 use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{ActiveTheme as _, IndexPath, TitleBar};
+use std::sync::Arc;
 
 use crate::core::actions::*;
 use crate::core::config::{Config, NewTabPosition, ShellConfig, color_or, hsla_to_hex6};
@@ -100,6 +101,9 @@ pub struct Tty7App {
     /// tracked so the hot-reload observer can diff them like `font_family`.
     pub(crate) font_family_bold: Option<String>,
     pub(crate) font_family_italic: Option<String>,
+    /// Currently-applied OpenType features for terminal fonts. `None` means the
+    /// terminal-safe default (ligatures disabled).
+    pub(crate) font_features: Option<gpui::FontFeatures>,
     /// Keeps the `observe_global::<Config>` subscription alive for the app's
     /// lifetime so external edits to `config.json` (swapped in by the watcher in
     /// `main.rs`) live-apply font size / line height / family. Never read.
@@ -150,6 +154,7 @@ impl Tty7App {
         let font_family = cx.global::<Config>().font_family.clone();
         let font_family_bold = cx.global::<Config>().font_family_bold.clone();
         let font_family_italic = cx.global::<Config>().font_family_italic.clone();
+        let font_features = cx.global::<Config>().font_features.clone();
         // Live-apply hot-reloaded config: the watcher in `main.rs` swaps the
         // `Config` global on every `config.json` change, which fires this. Theme
         // and colors are handled separately by `apply_theme`; here we cover the
@@ -189,6 +194,7 @@ impl Tty7App {
             font_family,
             font_family_bold,
             font_family_italic,
+            font_features,
             _config_watch: config_watch,
             _keystroke_watch: keystroke_watch,
             palette: None,
@@ -597,6 +603,29 @@ impl Tty7App {
         if let Some(state) = picker {
             state.update(cx, |s, cx| s.set_value(default, window, cx));
         }
+        cx.notify();
+    }
+
+    /// Toggle terminal font ligatures through the generic `font_features`
+    /// config. On enables the common programming-font features; off restores
+    /// tty7's terminal-safe default (contextual ligatures disabled).
+    pub(crate) fn set_font_ligatures(&mut self, on: bool, cx: &mut Context<Self>) {
+        let features = on.then(|| {
+            gpui::FontFeatures(Arc::new(vec![
+                ("calt".to_string(), 1),
+                ("liga".to_string(), 1),
+            ]))
+        });
+        self.font_features = features.clone();
+        for tab in &self.tabs {
+            for leaf in tab.pane.leaves() {
+                let features = features.clone();
+                leaf.update(cx, |v, cx| v.set_font_features(features, cx));
+            }
+        }
+        let cfg = cx.global_mut::<Config>();
+        cfg.font_features = features;
+        cfg.save();
         cx.notify();
     }
 
@@ -1580,9 +1609,14 @@ impl Tty7App {
     /// writes it), and — because we never write the global or `save()` from here
     /// — closes the save → watch → reload loop that would otherwise oscillate.
     fn reload_from_config(&mut self, cx: &mut Context<Self>) {
-        let (font_size, line_height, font_family) = {
+        let (font_size, line_height, font_family, font_features) = {
             let cfg = cx.global::<Config>();
-            (cfg.font_size, cfg.line_height, cfg.font_family.clone())
+            (
+                cfg.font_size,
+                cfg.line_height,
+                cfg.font_family.clone(),
+                cfg.font_features.clone(),
+            )
         };
         if font_size != self.font_size {
             self.font_size = font_size;
@@ -1613,6 +1647,15 @@ impl Tty7App {
                 for leaf in tab.pane.leaves() {
                     let family = font_family.clone();
                     leaf.update(cx, |v, cx| v.set_font_family(family, cx));
+                }
+            }
+        }
+        if font_features != self.font_features {
+            self.font_features = font_features.clone();
+            for tab in &self.tabs {
+                for leaf in tab.pane.leaves() {
+                    let features = font_features.clone();
+                    leaf.update(cx, |v, cx| v.set_font_features(features, cx));
                 }
             }
         }
