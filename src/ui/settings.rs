@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use gpui_component::color_picker::{ColorPicker, ColorPickerState};
 
-use crate::core::config::{Colors, Config, CursorStyle, NewTabPosition, NotifyMode};
+use crate::core::config::{AnsiColors, Colors, Config, CursorStyle, NewTabPosition, NotifyMode};
 use crate::ui::app::{FONT_SIZE_STEP, LINE_HEIGHT_STEP, Tty7App};
 use crate::ui::keymap::default_bindings;
 use crate::ui::presets;
@@ -56,6 +56,49 @@ pub(crate) enum ColorKey {
     Popover,
     Caret,
     Selection,
+}
+
+/// One terminal ANSI color slot (`ansi_colors.color0`…`color15`). These map to
+/// SGR colors that terminal programs request explicitly, separate from the
+/// default foreground/background.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AnsiColorKey(pub(crate) usize);
+
+impl AnsiColorKey {
+    pub(crate) const ALL: [AnsiColorKey; 16] = [
+        AnsiColorKey(0),
+        AnsiColorKey(1),
+        AnsiColorKey(2),
+        AnsiColorKey(3),
+        AnsiColorKey(4),
+        AnsiColorKey(5),
+        AnsiColorKey(6),
+        AnsiColorKey(7),
+        AnsiColorKey(8),
+        AnsiColorKey(9),
+        AnsiColorKey(10),
+        AnsiColorKey(11),
+        AnsiColorKey(12),
+        AnsiColorKey(13),
+        AnsiColorKey(14),
+        AnsiColorKey(15),
+    ];
+
+    fn label(self) -> String {
+        format!("Color {}", self.0)
+    }
+
+    fn id(self) -> String {
+        format!("ansi-color{}", self.0)
+    }
+
+    pub(crate) fn get(self, colors: &AnsiColors) -> &Option<String> {
+        colors.get(self.0).unwrap_or(&colors.color0)
+    }
+
+    pub(crate) fn set(self, colors: &mut AnsiColors, val: Option<String>) {
+        colors.set(self.0, val);
+    }
 }
 
 impl ColorKey {
@@ -169,10 +212,14 @@ pub(crate) struct SettingsState {
     /// order. Each is initialized to the effective color and emits a `Change` that
     /// writes the override + re-applies the theme.
     pub(crate) color_pickers: Vec<(ColorKey, Entity<ColorPickerState>)>,
+    /// One color picker per overridable terminal ANSI color (`ansi_colors.*`).
+    pub(crate) ansi_color_pickers: Vec<(AnsiColorKey, Entity<ColorPickerState>)>,
     /// Whether the Colors override group (Appearance) is expanded. Collapsed by
     /// default: its nine theme-internal slots are power-user surface, and open
     /// they would dwarf the theme/typography settings everyone else came for.
     pub(crate) colors_expanded: bool,
+    /// Whether the ANSI Colors override group (Appearance) is expanded.
+    pub(crate) ansi_colors_expanded: bool,
     /// Mouse-scroll multiplier slider (Terminal section).
     pub(crate) scroll_slider: Entity<SliderState>,
     pub(crate) _subs: Vec<Subscription>,
@@ -434,20 +481,31 @@ impl Tty7App {
         let hover_bg = theme.secondary.opacity(0.6);
         let stepper_bg = theme.secondary.opacity(0.35);
         let font_size = self.font_size;
-        let (font_select, font_bold_select, font_italic_select, color_pickers, colors_expanded) =
-            match self.active_settings() {
-                Some(s) => (
-                    s.font_select.clone(),
-                    s.font_bold_select.clone(),
-                    s.font_italic_select.clone(),
-                    s.color_pickers.clone(),
-                    s.colors_expanded,
-                ),
-                None => return div().into_any_element(),
-            };
-        let cursor_style = cx.global::<Config>().cursor_style;
-        let cursor_blink = cx.global::<Config>().cursor_blink;
-        let colors = cx.global::<Config>().colors.clone();
+        let (
+            font_select,
+            font_bold_select,
+            font_italic_select,
+            color_pickers,
+            colors_expanded,
+            ansi_color_pickers,
+            ansi_colors_expanded,
+        ) = match self.active_settings() {
+            Some(s) => (
+                s.font_select.clone(),
+                s.font_bold_select.clone(),
+                s.font_italic_select.clone(),
+                s.color_pickers.clone(),
+                s.colors_expanded,
+                s.ansi_color_pickers.clone(),
+                s.ansi_colors_expanded,
+            ),
+            None => return div().into_any_element(),
+        };
+        let cfg = cx.global::<Config>();
+        let cursor_style = cfg.cursor_style;
+        let cursor_blink = cfg.cursor_blink;
+        let colors = cfg.colors.clone();
+        let ansi_colors = cfg.ansi_colors.clone();
 
         // Unified −/value/+ stepper plus a quiet Reset.
         let step = move |id: &'static str, glyph: &'static str, divider: bool| {
@@ -638,6 +696,13 @@ impl Tty7App {
             ))
             .child(self.section_rule(cx))
             .child(self.render_colors_group(colors_expanded, color_pickers, &colors, cx))
+            .child(self.section_rule(cx))
+            .child(self.render_ansi_colors_group(
+                ansi_colors_expanded,
+                ansi_color_pickers,
+                &ansi_colors,
+                cx,
+            ))
             .into_any_element()
     }
 
@@ -710,6 +775,89 @@ impl Tty7App {
                     .disabled(!overridden)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.reset_color_override(key, window, cx);
+                    })),
+            )
+            .into_any_element();
+        self.settings_row(
+            key.label(),
+            if overridden {
+                "Custom"
+            } else {
+                "Theme default"
+            },
+            control,
+            cx,
+        )
+    }
+
+    /// Terminal ANSI color overrides (`color0`…`color15`), separate from the
+    /// theme's default foreground/background. These are the slots CLI programs
+    /// address explicitly with SGR colors.
+    fn render_ansi_colors_group(
+        &self,
+        expanded: bool,
+        color_pickers: Vec<(AnsiColorKey, Entity<ColorPickerState>)>,
+        colors: &AnsiColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted_fg = cx.theme().muted_foreground;
+        let chevron = if expanded {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        };
+        let header = v_flex()
+            .id("ansi-colors-toggle")
+            .gap_1()
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _w, cx| this.toggle_settings_ansi_colors(cx)))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child(self.header_text("ANSI Colors", cx))
+                    .child(Icon::new(chevron).small().text_color(muted_fg)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted_fg)
+                    .child("Advanced: override terminal color0-color15 slots used by CLI tools."),
+            );
+        Collapsible::new()
+            .open(expanded)
+            .child(header)
+            .content(
+                v_flex().mt_2().children(
+                    color_pickers
+                        .into_iter()
+                        .map(|(key, state)| self.render_ansi_color_row(key, state, colors, cx)),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_ansi_color_row(
+        &self,
+        key: AnsiColorKey,
+        state: Entity<ColorPickerState>,
+        colors: &AnsiColors,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let overridden = key.get(colors).is_some();
+        let control = h_flex()
+            .items_center()
+            .gap_3()
+            .w(px(240.))
+            .child(ColorPicker::new(&state).small())
+            .child(
+                Button::new(SharedString::from(format!("{}-reset", key.id())))
+                    .label("Reset")
+                    .ghost()
+                    .small()
+                    .disabled(!overridden)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.reset_ansi_color_override(key, window, cx);
                     })),
             )
             .into_any_element();

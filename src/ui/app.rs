@@ -19,7 +19,7 @@ use crate::daemon::protocol::ShellSpec;
 use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::palette::{Command, CommandKind, PaletteEvent, PaletteView};
 use crate::ui::pane::{CloseOutcome, Pane};
-use crate::ui::settings::{ColorKey, SettingsSection, SettingsState};
+use crate::ui::settings::{AnsiColorKey, ColorKey, SettingsSection, SettingsState};
 use crate::ui::theme::{apply_theme, set_menus};
 
 /// Global font-size bounds and step for the live zoom actions.
@@ -540,6 +540,61 @@ impl Tty7App {
         });
         if let Some(state) = picker {
             let default = color_or(&None, key.default_u32(&neutrals));
+            state.update(cx, |s, cx| s.set_value(default, window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Apply a picked ANSI color override and re-paint the terminal palette live.
+    /// `None` clears the slot back to the active preset's ANSI value.
+    pub(crate) fn set_ansi_color_override(
+        &mut self,
+        key: AnsiColorKey,
+        value: Option<gpui::Hsla>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let new = value.map(hsla_to_hex6);
+        let cfg = cx.global_mut::<Config>();
+        if key.get(&cfg.ansi_colors) == &new {
+            return;
+        }
+        key.set(&mut cfg.ansi_colors, new);
+        cfg.save();
+        apply_theme(Some(window), cx);
+        cx.notify();
+    }
+
+    /// Clear one ANSI override back to the active preset default and sync the
+    /// picker swatch to that effective color.
+    pub(crate) fn reset_ansi_color_override(
+        &mut self,
+        key: AnsiColorKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        {
+            let cfg = cx.global_mut::<Config>();
+            if key.get(&cfg.ansi_colors).is_none() {
+                return;
+            }
+            key.set(&mut cfg.ansi_colors, None);
+            cfg.save();
+        }
+        apply_theme(Some(window), cx);
+        let default: gpui::Hsla = {
+            let cfg = cx.global::<Config>();
+            let p = crate::ui::presets::by_id(&cfg.theme_preset);
+            let (r, g, b) = p.ansi16[key.0];
+            gpui::rgb((r as u32) << 16 | (g as u32) << 8 | b as u32).into()
+        };
+        let picker = self.active_settings().and_then(|s| {
+            s.ansi_color_pickers
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, state)| state.clone())
+        });
+        if let Some(state) = picker {
             state.update(cx, |s, cx| s.set_value(default, window, cx));
         }
         cx.notify();
@@ -1178,6 +1233,7 @@ impl Tty7App {
         let (shell_program_input, shell_args_input, wd_path_input) =
             self.build_shell_inputs(&mut subs, window, cx);
         let color_pickers = self.build_color_pickers(&mut subs, window, cx);
+        let ansi_color_pickers = self.build_ansi_color_pickers(&mut subs, window, cx);
         let scroll_slider = self.build_scroll_slider(&mut subs, window, cx);
 
         self.maximized = None;
@@ -1194,7 +1250,9 @@ impl Tty7App {
                 shell_args_input,
                 wd_path_input,
                 color_pickers,
+                ansi_color_pickers,
                 colors_expanded: false,
+                ansi_colors_expanded: false,
                 scroll_slider,
                 _subs: subs,
             }),
@@ -1388,6 +1446,38 @@ impl Tty7App {
                     move |this, _picker, ev: &ColorPickerEvent, window, cx| {
                         let ColorPickerEvent::Change(value) = ev;
                         this.set_color_override(key, *value, window, cx);
+                    },
+                ));
+                (key, state)
+            })
+            .collect()
+    }
+
+    /// One color picker per terminal ANSI color, seeded with the effective
+    /// current value (override if set, else active preset default).
+    fn build_ansi_color_pickers(
+        &mut self,
+        subs: &mut Vec<Subscription>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<(AnsiColorKey, Entity<ColorPickerState>)> {
+        let cfg = cx.global::<Config>();
+        let theme_preset = cfg.theme_preset.clone();
+        let ansi_colors = cfg.ansi_colors.clone();
+        let preset = crate::ui::presets::by_id(&theme_preset);
+        AnsiColorKey::ALL
+            .iter()
+            .map(|&key| {
+                let (r, g, b) = preset.ansi16[key.0];
+                let default = (r as u32) << 16 | (g as u32) << 8 | b as u32;
+                let effective = color_or(key.get(&ansi_colors), default);
+                let state = cx.new(|cx| ColorPickerState::new(window, cx).default_value(effective));
+                subs.push(cx.subscribe_in(
+                    &state,
+                    window,
+                    move |this, _picker, ev: &ColorPickerEvent, window, cx| {
+                        let ColorPickerEvent::Change(value) = ev;
+                        this.set_ansi_color_override(key, *value, window, cx);
                     },
                 ));
                 (key, state)
@@ -1656,6 +1746,19 @@ impl Tty7App {
             .and_then(|t| t.settings.as_mut())
         {
             s.colors_expanded = !s.colors_expanded;
+        }
+        cx.notify();
+    }
+
+    /// Expand/collapse the ANSI Colors override group in the settings tab's
+    /// Appearance section (no-op elsewhere).
+    pub(crate) fn toggle_settings_ansi_colors(&mut self, cx: &mut Context<Self>) {
+        if let Some(s) = self
+            .tabs
+            .get_mut(self.active)
+            .and_then(|t| t.settings.as_mut())
+        {
+            s.ansi_colors_expanded = !s.ansi_colors_expanded;
         }
         cx.notify();
     }

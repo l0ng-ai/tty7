@@ -39,6 +39,10 @@ pub struct Config {
     pub theme_preset: String,
     /// Optional per-color overrides layered on top of the active preset.
     pub colors: Colors,
+    /// Optional ANSI 0-15 overrides layered on top of the active preset's
+    /// terminal palette. Each field maps to the familiar terminal `colorN`
+    /// slot; `None` keeps the preset's value.
+    pub ansi_colors: AnsiColors,
     /// Optional keybinding overrides: action name (e.g. "NewTab") → keystroke
     /// (e.g. "secondary-t", which is ⌘ on macOS and Ctrl elsewhere). Unknown
     /// actions and unparseable keystrokes are ignored (with a warning) so a bad
@@ -233,6 +237,7 @@ impl Default for Config {
             // depend on ui). Unknown ids fall back to it anyway.
             theme_preset: "light".to_string(),
             colors: Colors::default(),
+            ansi_colors: AnsiColors::default(),
             keybindings: HashMap::new(),
             // `None` → the platform default shell (login shell on Unix,
             // PowerShell 7 / Windows PowerShell on Windows), chosen by the
@@ -282,6 +287,77 @@ pub struct Colors {
     pub popover: Option<String>,
     pub caret: Option<String>,
     pub selection: Option<String>,
+}
+
+/// Optional overrides for terminal ANSI colors 0-15. These correspond to the
+/// standard `color0`…`color15` slots that command-line tools address with SGR
+/// foreground/background colors; unlike [`Colors`], they do not affect UI chrome
+/// or the terminal's default foreground/background.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AnsiColors {
+    pub color0: Option<String>,
+    pub color1: Option<String>,
+    pub color2: Option<String>,
+    pub color3: Option<String>,
+    pub color4: Option<String>,
+    pub color5: Option<String>,
+    pub color6: Option<String>,
+    pub color7: Option<String>,
+    pub color8: Option<String>,
+    pub color9: Option<String>,
+    pub color10: Option<String>,
+    pub color11: Option<String>,
+    pub color12: Option<String>,
+    pub color13: Option<String>,
+    pub color14: Option<String>,
+    pub color15: Option<String>,
+}
+
+impl AnsiColors {
+    pub fn get(&self, index: usize) -> Option<&Option<String>> {
+        match index {
+            0 => Some(&self.color0),
+            1 => Some(&self.color1),
+            2 => Some(&self.color2),
+            3 => Some(&self.color3),
+            4 => Some(&self.color4),
+            5 => Some(&self.color5),
+            6 => Some(&self.color6),
+            7 => Some(&self.color7),
+            8 => Some(&self.color8),
+            9 => Some(&self.color9),
+            10 => Some(&self.color10),
+            11 => Some(&self.color11),
+            12 => Some(&self.color12),
+            13 => Some(&self.color13),
+            14 => Some(&self.color14),
+            15 => Some(&self.color15),
+            _ => None,
+        }
+    }
+
+    pub fn set(&mut self, index: usize, value: Option<String>) {
+        match index {
+            0 => self.color0 = value,
+            1 => self.color1 = value,
+            2 => self.color2 = value,
+            3 => self.color3 = value,
+            4 => self.color4 = value,
+            5 => self.color5 = value,
+            6 => self.color6 = value,
+            7 => self.color7 = value,
+            8 => self.color8 = value,
+            9 => self.color9 = value,
+            10 => self.color10 = value,
+            11 => self.color11 = value,
+            12 => self.color12 = value,
+            13 => self.color13 = value,
+            14 => self.color14 = value,
+            15 => self.color15 = value,
+            _ => {}
+        }
+    }
 }
 
 impl Global for Config {}
@@ -589,6 +665,31 @@ mod tests {
         // A valid override wins over the default.
         let white: Hsla = rgb(0xffffff).into();
         assert_eq!(color_or(&Some("#ffffff".to_string()), 0x000000), white);
+    }
+
+    #[test]
+    fn ansi_color_overrides_parse_and_default_independently() {
+        let cfg: Config =
+            serde_json::from_str(r##"{"ansi_colors":{"color0":"#575279","color15":"123456"}}"##)
+                .unwrap();
+        assert_eq!(
+            cfg.ansi_colors.get(0).and_then(|v| v.as_deref()),
+            Some("#575279")
+        );
+        assert_eq!(
+            cfg.ansi_colors.get(15).and_then(|v| v.as_deref()),
+            Some("123456")
+        );
+        assert!(cfg.ansi_colors.get(1).is_some_and(Option::is_none));
+
+        let mut colors = AnsiColors::default();
+        colors.set(0, Some("#111111".to_string()));
+        colors.set(15, Some("#eeeeee".to_string()));
+        assert_eq!(colors.get(0).and_then(|v| v.as_deref()), Some("#111111"));
+        assert_eq!(colors.get(15).and_then(|v| v.as_deref()), Some("#eeeeee"));
+        colors.set(0, None);
+        assert!(colors.get(0).is_some_and(Option::is_none));
+        assert!(colors.get(16).is_none());
     }
 
     #[test]

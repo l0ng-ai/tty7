@@ -7,7 +7,8 @@ use gpui::{App, Hsla, Menu, MenuItem, Pixels, Point, Window, point, px, rgb};
 use gpui_component::{Theme, ThemeMode};
 
 use crate::core::actions::*;
-use crate::core::config::{Config, color_or};
+use crate::core::config::{AnsiColors, Config, color_or, parse_hex_color};
+use crate::terminal::palette::ActivePalette;
 use crate::ui::presets;
 
 /// The traffic-light origin, nudged down from the macOS default so the buttons
@@ -78,7 +79,8 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // User `colors.*` overrides apply on top of the derived neutrals; a `None`
     // field falls through to the theme.
     let c = cfg.colors.clone();
-    let active = preset.active_palette();
+    let mut active = preset.active_palette();
+    apply_ansi_overrides(&mut active, &cfg.ansi_colors);
 
     Theme::change(mode, window.as_deref_mut(), cx);
     // Publish the terminal palette before borrowing the theme mutably.
@@ -167,6 +169,16 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     }
 }
 
+fn apply_ansi_overrides(active: &mut ActivePalette, overrides: &AnsiColors) {
+    for i in 0..16 {
+        if let Some(Some(hex)) = overrides.get(i) {
+            if let Some(rgb) = parse_hex_color(hex) {
+                active.ansi16[i] = crate::terminal::palette::hsla_to_rgb(rgb.into());
+            }
+        }
+    }
+}
+
 /// Apply `Config::mouse_hide_while_typing` to GPUI's cursor-hide policy: hide the
 /// pointer while typing when on, never when off. Called at startup and whenever
 /// the config changes (setter + hot-reload) so the switch takes effect live.
@@ -216,3 +228,41 @@ fn sync_native_appearance(dark: bool) {
 
 #[cfg(not(target_os = "macos"))]
 fn sync_native_appearance(_dark: bool) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ansi_overrides_replace_only_valid_slots() {
+        let mut active = presets::by_id("rose_pine_dawn").active_palette();
+        let original0 = active.ansi16[0];
+        let original1 = active.ansi16[1];
+        let original15 = active.ansi16[15];
+        let mut overrides = AnsiColors::default();
+        overrides.color0 = Some("#575279".to_string());
+        overrides.color1 = Some("not-a-color".to_string());
+        overrides.color15 = Some("123456".to_string());
+
+        apply_ansi_overrides(&mut active, &overrides);
+
+        assert_eq!(
+            (active.ansi16[0].r, active.ansi16[0].g, active.ansi16[0].b),
+            (0x57, 0x52, 0x79)
+        );
+        assert_eq!(
+            active.ansi16[1], original1,
+            "malformed overrides are ignored"
+        );
+        assert_eq!(
+            (
+                active.ansi16[15].r,
+                active.ansi16[15].g,
+                active.ansi16[15].b
+            ),
+            (0x12, 0x34, 0x56)
+        );
+        assert_ne!(active.ansi16[0], original0);
+        assert_ne!(active.ansi16[15], original15);
+    }
+}
