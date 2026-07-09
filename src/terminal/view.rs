@@ -1240,9 +1240,10 @@ impl TerminalView {
 
     /// Apply a readline-style Ctrl chord to the command editor: Ctrl-A/E/B/F
     /// motions (Ctrl-F also accepts the autosuggestion), Ctrl-W/U/K/H deletions
-    /// (each removing the selection first if there is one), Ctrl-R reverse search,
-    /// Ctrl-C interrupt, and Ctrl-D EOF/forward-delete. Unrecognized chords are
-    /// no-ops (the caller swallows every Ctrl combo at the prompt regardless).
+    /// (each removing the selection first if there is one), Ctrl-L clear-screen,
+    /// Ctrl-R reverse search, Ctrl-C interrupt, and Ctrl-D EOF/forward-delete.
+    /// Unrecognized chords are no-ops (the caller swallows every Ctrl combo at
+    /// the prompt regardless).
     fn apply_readline_ctrl(&mut self, key: &str) {
         match key {
             "r" => self.start_reverse_search(),
@@ -1284,6 +1285,11 @@ impl TerminalView {
                 }
             }
             "h" => self.cmd.backspace(),
+            "l" => {
+                // Clear screen belongs to the shell/readline layer: send the
+                // same form-feed byte the raw terminal path emits for Ctrl+L.
+                self.terminal.write(vec![0x0c]);
+            }
             "c" => {
                 // Interrupt: drop the edited line and let the shell draw a
                 // fresh prompt (send ^C, as a real terminal would). zle's own
@@ -4021,6 +4027,44 @@ mod gpui_tests {
                 _ => continue,
             }
         }
+    }
+
+    fn next_input_until_timeout(daemon: &mut UnixStream) -> Option<Vec<u8>> {
+        use std::io::ErrorKind;
+
+        daemon
+            .set_read_timeout(Some(std::time::Duration::from_millis(250)))
+            .unwrap();
+        loop {
+            match ClientMsg::read(daemon) {
+                Ok(ClientMsg::Input(bytes)) => return Some(bytes),
+                Ok(_) => continue,
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    return None;
+                }
+                Err(e) => panic!("client socket failed before Input: {e}"),
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn ctrl_l_at_prompt_reaches_the_shell(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                let ctrl_l = gpui::Keystroke {
+                    modifiers: gpui::Modifiers {
+                        control: true,
+                        ..Default::default()
+                    },
+                    key: "l".to_string(),
+                    key_char: None,
+                };
+                view.handle_editor_key(&ctrl_l, cx);
+            })
+            .unwrap();
+
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x0c]));
     }
 
     /// Readline's Meta word chords act on the local prompt editor: M-b / M-f
