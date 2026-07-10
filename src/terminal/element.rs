@@ -1246,6 +1246,11 @@ impl TerminalElement {
                 }
                 if button == MouseButton::Left {
                     v.on_select_update(col, row, left, cx);
+                    // Past the top/bottom edge, keep the selection growing by
+                    // auto-scrolling the scrollback (`pos_to_cell` clamps the
+                    // row, so the position alone stops at the edge).
+                    let overshoot = drag_overshoot(ev.position.y, bounds, geom.line_height);
+                    v.select_autoscroll(overshoot, col, left, cx);
                 }
             });
         });
@@ -1580,6 +1585,20 @@ impl CellGeom {
     }
 }
 
+/// Vertical overshoot of a selection drag past the pane bounds, in lines:
+/// positive above the top edge (auto-scroll up into history), negative below
+/// the bottom, zero while inside. Feeds `TerminalView::select_autoscroll`.
+fn drag_overshoot(y: Pixels, bounds: Bounds<Pixels>, line_height: Pixels) -> f32 {
+    let lh = line_height.as_f32().max(1.);
+    if y < bounds.top() {
+        (bounds.top() - y).as_f32() / lh
+    } else if y > bounds.bottom() {
+        -((y - bounds.bottom()).as_f32() / lh)
+    } else {
+        0.
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1705,6 +1724,21 @@ mod tests {
         // Far beyond the grid clamps to (cols-1, rows-1).
         let (c, r, _) = geom.pos_to_cell(point(px(9999.), px(9999.)));
         assert_eq!((c, r), (4, 2));
+    }
+
+    /// Drag auto-scroll only engages past the vertical edges, scaled to lines:
+    /// above the top is positive (into history), below the bottom negative.
+    #[test]
+    fn drag_overshoot_signed_by_edge_and_zero_inside() {
+        let bounds = Bounds::new(point(px(0.), px(100.)), size(px(200.), px(100.)));
+        // Anywhere inside (including the exact edges) → no auto-scroll.
+        assert_eq!(drag_overshoot(px(150.), bounds, px(10.)), 0.);
+        assert_eq!(drag_overshoot(px(100.), bounds, px(10.)), 0.);
+        assert_eq!(drag_overshoot(px(200.), bounds, px(10.)), 0.);
+        // 20px above the top at 10px lines → 2 lines up.
+        assert_eq!(drag_overshoot(px(80.), bounds, px(10.)), 2.);
+        // 30px below the bottom → 3 lines down.
+        assert_eq!(drag_overshoot(px(230.), bounds, px(10.)), -3.);
     }
 
     // ---- segment_row ----

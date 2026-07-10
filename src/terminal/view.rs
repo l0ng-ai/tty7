@@ -54,6 +54,18 @@ pub struct ChildExited;
 
 impl gpui::EventEmitter<ChildExited> for TerminalView {}
 
+/// See `TerminalView::drag_scroll`.
+#[derive(Clone, Copy)]
+struct DragScroll {
+    /// How far past the pane edge the pointer sits, in lines. Positive =
+    /// above the top edge (scroll up into history), negative = below.
+    overshoot: f32,
+    /// Column to keep extending the selection with at the edge row.
+    col: usize,
+    /// Cell half to anchor the selection end on.
+    side: Side,
+}
+
 pub struct TerminalView {
     pub terminal: RemoteTerminal,
     /// Daemon-assigned id of the pane this view mirrors. Persisted in the session
@@ -83,6 +95,18 @@ pub struct TerminalView {
     pub cell_width: Pixels,
     line_height: Pixels,
     selecting: bool,
+    /// Auto-scroll state for a selection drag that has crossed the pane's top
+    /// or bottom edge; `None` while the pointer is inside. A repeating task
+    /// (armed by `select_autoscroll`) keeps scrolling the scrollback and
+    /// re-extending the selection while this is `Some`, so the scroll goes on
+    /// even when the pointer holds still past the edge — mouse-move events
+    /// alone stop the moment the hand does.
+    drag_scroll: Option<DragScroll>,
+    /// Generation counter for the auto-scroll task. Bumped every time a new
+    /// task is armed so a stale task from a just-cancelled edge visit kills
+    /// itself instead of doubling the scroll speed when the pointer leaves,
+    /// re-enters, and leaves the pane again within one tick.
+    drag_scroll_epoch: u64,
     pub title: String,
     /// IME pre-edit (composing) text, e.g. the pinyin shown before a Chinese
     /// candidate is committed. Empty when not composing.
@@ -607,6 +631,8 @@ impl TerminalView {
             cell_width: px(8.),
             line_height: px(17.),
             selecting: false,
+            drag_scroll: None,
+            drag_scroll_epoch: 0,
             title: "tty7".to_string(),
             marked_text: String::new(),
             last_mouse_cell: None,
@@ -2417,9 +2443,100 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Drive selection auto-scroll from a drag's vertical overshoot past the
+    /// pane bounds, in lines (0 while the pointer is inside, positive above
+    /// the top edge). Called on every left-drag move: entering the edge zone
+    /// arms a repeating task that scrolls the scrollback and keeps extending
+    /// the selection at the edge row; later moves just retune its speed and
+    /// column, and moving back inside (or releasing) stops it.
+    pub fn select_autoscroll(
+        &mut self,
+        overshoot: f32,
+        col: usize,
+        left: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.selecting || overshoot == 0. {
+            self.drag_scroll = None;
+            return;
+        }
+        let side = if left { Side::Left } else { Side::Right };
+        let was_idle = self.drag_scroll.is_none();
+        self.drag_scroll = Some(DragScroll {
+            overshoot,
+            col,
+            side,
+        });
+        if !was_idle {
+            // The running task reads the fresh state on its next tick.
+            return;
+        }
+        // First step immediately so a quick flick past the edge still moves,
+        // then keep stepping on a timer. The task stops itself once the state
+        // clears (pointer back inside, drag ended), a newer task supersedes
+        // it (epoch mismatch), or the view is dropped.
+        self.drag_scroll_epoch += 1;
+        let epoch = self.drag_scroll_epoch;
+        self.drag_scroll_tick(epoch, cx);
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+                if !matches!(
+                    this.update(cx, |view, cx| view.drag_scroll_tick(epoch, cx)),
+                    Ok(true)
+                ) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// One auto-scroll step: scroll by an amount that grows with the
+    /// overshoot, then re-anchor the selection's moving end to the edge row
+    /// it is pushing past (top row when scrolling up, bottom when down).
+    /// Returns whether the task should keep ticking. Scrolling clamps at the
+    /// history limits, so pinning the pointer past the edge at the top of
+    /// scrollback just idles until it moves.
+    fn drag_scroll_tick(&mut self, epoch: u64, cx: &mut Context<Self>) -> bool {
+        if epoch != self.drag_scroll_epoch {
+            // Superseded by a newer task: the state now belongs to it, so just
+            // bow out without clearing anything.
+            return false;
+        }
+        if !self.selecting {
+            self.drag_scroll = None;
+        }
+        let Some(ds) = self.drag_scroll else {
+            return false;
+        };
+        let mut term = self.terminal.term.lock();
+        let before = term.grid().display_offset();
+        term.scroll_display(Scroll::Delta(drag_scroll_step(ds.overshoot)));
+        let offset = term.grid().display_offset();
+        let row = if ds.overshoot > 0. {
+            0
+        } else {
+            term.screen_lines().saturating_sub(1)
+        };
+        let point = Point::new(Line(row as i32 - offset as i32), Column(ds.col));
+        if let Some(sel) = term.selection.as_mut() {
+            sel.update(point, ds.side);
+        }
+        drop(term);
+        if offset != before {
+            self.scroll_frac = 0.;
+            cx.notify();
+        }
+        true
+    }
+
     pub fn on_select_end(&mut self, _cx: &mut Context<Self>) {
         self.selecting = false;
         self.editor_selecting = false;
+        self.drag_scroll = None;
     }
 
     fn on_scroll(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -3482,12 +3599,22 @@ fn smooth_scroll_step(offset: usize, frac: f32, delta: f32, max: usize) -> (i32,
     (new_offset as i32 - offset as i32, pos - new_offset)
 }
 
+/// Lines to scroll per auto-scroll tick for a selection drag sitting
+/// `overshoot` lines past the pane edge (sign = direction, positive = up into
+/// history). At least one line per tick so grazing the edge still crawls;
+/// farther out speeds up, capped so a wild fling stays controllable
+/// (8 lines/tick at a 50ms cadence ≈ 160 lines/s).
+fn drag_scroll_step(overshoot: f32) -> i32 {
+    let lines = overshoot.abs().ceil().clamp(1., 8.) as i32;
+    if overshoot < 0. { -lines } else { lines }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        WheelRoute, clipboard_paste_text, display_width, encode_mouse, fallback_chain,
-        fig_icon_emoji, fig_icon_glyph, focus_report_bytes, menu_layout, paste_bytes,
-        shell_escape_path, smooth_scroll_step, trim_trailing_spaces, wheel_route,
+        WheelRoute, clipboard_paste_text, display_width, drag_scroll_step, encode_mouse,
+        fallback_chain, fig_icon_emoji, fig_icon_glyph, focus_report_bytes, menu_layout,
+        paste_bytes, shell_escape_path, smooth_scroll_step, trim_trailing_spaces, wheel_route,
         wrapped_click_index,
     };
     use alacritty_terminal::term::TermMode;
@@ -3753,6 +3880,19 @@ mod tests {
         assert_eq!(smooth_scroll_step(98, 0.0, 7.3, 100), (2, 0.0));
         // No history at all (alt screen / fresh shell): position is pinned.
         assert_eq!(smooth_scroll_step(0, 0.0, 2.5, 0), (0, 0.0));
+    }
+
+    /// Selection auto-scroll: grazing the edge crawls one line per tick,
+    /// farther out speeds up with the overshoot, a fling caps at 8, and the
+    /// sign follows the direction (positive = up into history).
+    #[test]
+    fn drag_scroll_step_scales_with_overshoot_and_caps() {
+        assert_eq!(drag_scroll_step(0.2), 1);
+        assert_eq!(drag_scroll_step(-0.2), -1);
+        assert_eq!(drag_scroll_step(3.5), 4);
+        assert_eq!(drag_scroll_step(-3.5), -4);
+        assert_eq!(drag_scroll_step(50.0), 8);
+        assert_eq!(drag_scroll_step(-50.0), -8);
     }
 
     #[test]
