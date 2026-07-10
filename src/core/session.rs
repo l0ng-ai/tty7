@@ -117,19 +117,40 @@ impl Session {
     }
 }
 
+/// Helpers for every test that touches the on-disk `session.json`. The
+/// config-dir pin is process-wide (`set_config_dir` is first-call-wins), so
+/// the file is process-wide too — any test that reads or writes it must hold
+/// [`lock_session_file`] across the whole read/write sequence, or parallel
+/// tests clobber each other's session.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
+    use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard};
+
+    static SESSION_FILE: Mutex<()> = Mutex::new(());
+
+    /// Serialize access to the shared `session.json`.
+    pub(crate) fn lock_session_file() -> MutexGuard<'static, ()> {
+        // A poisoned lock just means another test failed mid-sequence; every
+        // holder rewrites the file from scratch, so the state is still sound.
+        SESSION_FILE.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// Pin the process config dir at a shared temp location so `save`/`load`
     /// (which resolve `session.json` under it) never touch the real `~/.config`.
-    /// `set_config_dir` is first-call-wins; every IO test computes the same path.
-    fn pin_config_dir() -> PathBuf {
+    /// `set_config_dir` is first-call-wins; every caller computes the same path.
+    pub(crate) fn pin_config_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("tty7-covtest-{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok();
         crate::core::config::set_config_dir(dir.clone());
         dir
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{lock_session_file, pin_config_dir};
+    use super::*;
 
     #[test]
     fn session_json_round_trips_nested_tree() {
@@ -198,6 +219,7 @@ mod tests {
 
     #[test]
     fn save_then_load_recovers_the_session() {
+        let _file = lock_session_file();
         pin_config_dir();
         let session = Session {
             active: 0,

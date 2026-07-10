@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The held-⌘ tab-number badges no longer stick on after the window loses key
+  status mid-hold (⌘-Tab, Spotlight, a click into another app). The ⌘ release
+  goes to whatever app is key by then, so the window never saw it; the badges
+  — and any pending reveal — are now dismissed on the activation flip itself.
+
 ## [0.7.0] - 2026-07-10
 
 ### Added

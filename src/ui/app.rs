@@ -114,6 +114,12 @@ pub struct Tty7App {
     /// pre-dispatch) rather than an observer because the terminal consumes
     /// most keys with `stop_propagation`, which suppresses observers. Never read.
     _keystroke_watch: Subscription,
+    /// Keeps the window-activation observer alive: any active-status flip also
+    /// cancels the badges. Deactivating mid-hold (⌘-Tab, Spotlight, a click
+    /// into another app) sends the modifier *release* to whatever app is key
+    /// by then — this window never gets that `ModifiersChanged`, so without
+    /// this the badges stuck on until some later keypress. Never read.
+    _activation_watch: Subscription,
     /// `Some` while the command palette overlay is open; `None` when closed.
     /// The view owns its search input, filtered list and keyboard handling and
     /// emits a `PaletteEvent`; we build the catalog and run the chosen command.
@@ -148,6 +154,20 @@ pub struct Tty7App {
 
 impl Tty7App {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // Restore the previous session (tab/split layout + each pane's cwd).
+        Self::with_session(Session::load(), window, cx)
+    }
+
+    /// The whole constructor behind `new`, with the saved session injected
+    /// instead of read from disk. The headless tests build the app through
+    /// this seam (a zero-tab session → the home page, no terminal spawned)
+    /// so every subscription and window hook runs exactly as in production
+    /// without touching `~/.config` or a daemon.
+    pub(crate) fn with_session(
+        session: Option<Session>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Font size from config (borrow ends before the mutable theme apply).
         let font_size = cx.global::<Config>().font_size;
         let line_height = cx.global::<Config>().line_height;
@@ -166,15 +186,23 @@ impl Tty7App {
         let keystroke_watch = cx.intercept_keystrokes(move |_ev, _window, cx| {
             let _ = this.update(cx, |this, cx| this.dismiss_mod_hint(cx));
         });
+        // Losing key status mid-hold (⌘-Tab, Spotlight, a click into another
+        // app) means the modifier release is delivered elsewhere and never
+        // reaches this window — the activation flip is the only signal left,
+        // so treat it like a release. Dismissing on *both* flips also keeps a
+        // reveal scheduled just before the switch from popping the badges up
+        // in a window the user already left.
+        let activation_watch = cx.observe_window_activation(window, |this, _window, cx| {
+            this.dismiss_mod_hint(cx);
+        });
         // Paint the configured color theme (defaults to a light one) and build
         // the menu bar.
         apply_theme(Some(window), cx);
         set_menus(cx);
-        // Try to restore the previous session (tab/split layout + each pane's
-        // cwd). A session with zero tabs is a real state — the user quit from
+        // A session with zero tabs is a real state — the user quit from
         // the home page — and restores back to it; only a *missing/unreadable*
         // session (first run) falls back to spawning a default terminal.
-        let (tabs, active) = match Session::load() {
+        let (tabs, active) = match session {
             // First run (no session file): the very first terminal has no
             // predecessor to inherit from, so start in the app's current
             // directory (None → default behavior).
@@ -197,6 +225,7 @@ impl Tty7App {
             font_features,
             _config_watch: config_watch,
             _keystroke_watch: keystroke_watch,
+            _activation_watch: activation_watch,
             palette: None,
             palette_sub: None,
             closed: Vec::new(),
