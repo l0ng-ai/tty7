@@ -83,8 +83,11 @@ fn lc(c: char) -> char {
 fn char_bonus(prev: Option<char>) -> i32 {
     match prev {
         None => BONUS_BOUNDARY,
-        Some(c) if c.is_whitespace() || matches!(c, '/' | '-' | '_' | '.' | ':' | '=' | ',' | '\\')
-        => BONUS_BOUNDARY,
+        Some(c)
+            if c.is_whitespace() || matches!(c, '/' | '-' | '_' | '.' | ':' | '=' | ',' | '\\') =>
+        {
+            BONUS_BOUNDARY
+        }
         _ => 0,
     }
 }
@@ -116,8 +119,16 @@ fn match_term(hay_lc: &[char], bonus: &[i32], term: &[char]) -> Option<(i32, Vec
         for j in 0..n {
             if j >= 2 {
                 let fresh = score[(i - 1) * n + (j - 2)];
-                let fresh = if fresh > NEG { fresh + PENALTY_GAP_START } else { NEG };
-                let extended = if gap_best > NEG { gap_best + PENALTY_GAP_EXTEND } else { NEG };
+                let fresh = if fresh > NEG {
+                    fresh + PENALTY_GAP_START
+                } else {
+                    NEG
+                };
+                let extended = if gap_best > NEG {
+                    gap_best + PENALTY_GAP_EXTEND
+                } else {
+                    NEG
+                };
                 if fresh >= extended {
                     gap_best = fresh;
                     gap_arg = j - 2;

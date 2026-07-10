@@ -656,12 +656,8 @@ impl TerminalView {
             &history.cwds,
             None,
         );
-        let history_frecency = super::history::frecency_scores(
-            &history.entries,
-            &history.counts,
-            &history.cwds,
-            None,
-        );
+        let history_frecency =
+            super::history::frecency_scores(&history.entries, &history.counts, &history.cwds, None);
 
         Self {
             terminal,

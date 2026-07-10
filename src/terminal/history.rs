@@ -506,20 +506,29 @@ mod tests {
         assert_eq!(r.exit, Some(0));
         // Exit unknown (pane died mid-command) and cwd unknown stay empty fields.
         let r = parse_own_line("1700000000\t\t\tmake");
-        assert_eq!((r.cmd.as_str(), r.cwd, r.ts, r.exit), ("make", None, Some(1_700_000_000), None));
+        assert_eq!(
+            (r.cmd.as_str(), r.cwd, r.ts, r.exit),
+            ("make", None, Some(1_700_000_000), None)
+        );
         // The command is the last field, so its own tabs survive.
         let r = parse_own_line("1700000000\t1\t/a\techo\tfoo");
         assert_eq!(r.cmd, "echo\tfoo");
         assert_eq!(r.exit, Some(1));
         // Previous generation: `<cwd>\t<command>`.
         let r = parse_own_line("/home/me\tgit status");
-        assert_eq!((r.cmd.as_str(), r.cwd.as_deref(), r.ts), ("git status", Some("/home/me"), None));
+        assert_eq!(
+            (r.cmd.as_str(), r.cwd.as_deref(), r.ts),
+            ("git status", Some("/home/me"), None)
+        );
         // Windows absolute cwd is recognized too (cross-platform, host-independent).
         let r = parse_own_line("C:\\Users\\me\tgit status");
         assert_eq!(r.cwd.as_deref(), Some("C:\\Users\\me"));
         // Legacy bare command — no tab, no metadata.
         let r = parse_own_line("ls -la");
-        assert_eq!((r.cmd.as_str(), r.cwd, r.ts, r.exit), ("ls -la", None, None, None));
+        assert_eq!(
+            (r.cmd.as_str(), r.cwd, r.ts, r.exit),
+            ("ls -la", None, None, None)
+        );
         // A tab whose pre-part isn't an absolute path is not treated as a cwd.
         assert_eq!(parse_own_line("echo\tfoo").cmd, "echo\tfoo");
     }
@@ -743,10 +752,7 @@ mod tests {
             })
         );
         assert!(
-            loaded
-                .cwds
-                .get(&unique)
-                .is_some_and(|d| d.contains("/tmp")),
+            loaded.cwds.get(&unique).is_some_and(|d| d.contains("/tmp")),
             "cwd association should round-trip"
         );
         assert!(
@@ -808,7 +814,12 @@ mod tests {
         crate::core::config::set_config_dir(dir);
 
         let unique = format!("tty7_nlcwd_marker_{}", std::process::id());
-        append(&unique, Some(Path::new("/tmp/evil\n/tmp/tail")), 1_700_000_000, None);
+        append(
+            &unique,
+            Some(Path::new("/tmp/evil\n/tmp/tail")),
+            1_700_000_000,
+            None,
+        );
         let loaded = load();
         // The command itself survives…
         assert!(loaded.entries.iter().any(|e| e == &unique));
