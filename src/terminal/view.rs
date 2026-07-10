@@ -213,6 +213,12 @@ pub struct TerminalView {
     /// True while a left-drag that began on the command-editor line is in progress,
     /// so mouse-move extends the editor selection rather than the terminal's.
     editor_selecting: bool,
+    /// True from a left press on the command-editor line until its release —
+    /// unlike [`Self::editor_selecting`] it also covers the double/triple-click
+    /// word/line selections, which don't arm drag-extend. Tells the mouse-up
+    /// that the ended gesture selected in the editor, so copy-on-select copies
+    /// the editor's selection rather than the terminal's.
+    editor_select_gesture: bool,
     /// The URL currently under the mouse (an OSC 8 hyperlink or a bare URL found
     /// in the row text), if any. Drives the hover underline and the pointing-hand
     /// cursor that mark a link as clickable. Stored in scroll-stable grid
@@ -659,6 +665,7 @@ impl TerminalView {
             completion: None,
             reverse_search: None,
             editor_selecting: false,
+            editor_select_gesture: false,
             hovered_link: None,
             _focus_subs: focus_subs,
         }
@@ -1869,6 +1876,7 @@ impl TerminalView {
             2 => self.cmd.select_word_at(idx),
             _ => self.cmd.select_all(),
         }
+        self.editor_select_gesture = true;
         self.completion = None;
         self.cursor_visible = true;
         cx.notify();
@@ -2533,10 +2541,30 @@ impl TerminalView {
         true
     }
 
-    pub fn on_select_end(&mut self, _cx: &mut Context<Self>) {
+    /// Mouse-up: the selection gesture (if any) is over. With copy-on-select
+    /// enabled, the selection the gesture drove goes straight to the clipboard
+    /// — [`select_end_copy`] picks the buffer, and empty selections (a plain
+    /// click repositioning the caret / collapsing the old selection) write
+    /// nothing because both copy paths drop empty text.
+    pub fn on_select_end(&mut self, cx: &mut Context<Self>) {
+        let copy = select_end_copy(
+            cx.global::<Config>().copy_on_select,
+            self.selecting,
+            self.editor_select_gesture,
+        );
         self.selecting = false;
         self.editor_selecting = false;
+        self.editor_select_gesture = false;
         self.drag_scroll = None;
+        match copy {
+            SelectEndCopy::None => {}
+            SelectEndCopy::Grid => self.copy_selection(cx),
+            SelectEndCopy::Editor => {
+                if let Some(text) = self.cmd.selected_text() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }
+        }
     }
 
     fn on_scroll(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -3330,6 +3358,30 @@ fn wheel_route(mode: TermMode, shift: bool, up: bool) -> WheelRoute {
     WheelRoute::Scrollback
 }
 
+/// What a finished mouse-selection gesture should auto-copy when
+/// copy-on-select is enabled (see `Config::copy_on_select`).
+#[derive(Debug, PartialEq)]
+enum SelectEndCopy {
+    /// Feature off, or the mouse-up ended no selection gesture (a plain
+    /// click, a right/middle release): leave the clipboard alone.
+    None,
+    /// The gesture drove the terminal grid selection (drag / double / triple
+    /// click over output): copy `term.selection`.
+    Grid,
+    /// The gesture landed on the command editor's line: copy the editor's
+    /// own selection.
+    Editor,
+}
+
+fn select_end_copy(enabled: bool, grid: bool, editor: bool) -> SelectEndCopy {
+    match (enabled, grid, editor) {
+        (false, ..) => SelectEndCopy::None,
+        (true, true, _) => SelectEndCopy::Grid,
+        (true, false, true) => SelectEndCopy::Editor,
+        (true, false, false) => SelectEndCopy::None,
+    }
+}
+
 /// One mouse report, encoded for the protocol the app negotiated. SGR (1006)
 /// prints decimal 1-based coordinates and keeps the button in the final
 /// letter (`M` press / `m` release); X10 packs everything into three bytes,
@@ -3612,10 +3664,10 @@ fn drag_scroll_step(overshoot: f32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        WheelRoute, clipboard_paste_text, display_width, drag_scroll_step, encode_mouse,
-        fallback_chain, fig_icon_emoji, fig_icon_glyph, focus_report_bytes, menu_layout,
-        paste_bytes, shell_escape_path, smooth_scroll_step, trim_trailing_spaces, wheel_route,
-        wrapped_click_index,
+        SelectEndCopy, WheelRoute, clipboard_paste_text, display_width, drag_scroll_step,
+        encode_mouse, fallback_chain, fig_icon_emoji, fig_icon_glyph, focus_report_bytes,
+        menu_layout, paste_bytes, select_end_copy, shell_escape_path, smooth_scroll_step,
+        trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
@@ -3722,6 +3774,29 @@ mod tests {
             | TermMode::APP_CURSOR;
         assert_eq!(wheel_route(everything, true, true), WheelRoute::Scrollback);
         assert_eq!(wheel_route(everything, true, false), WheelRoute::Scrollback);
+    }
+
+    /// Copy-on-select fires only when the released gesture actually drove a
+    /// selection, and copies the buffer that gesture touched — the terminal
+    /// grid or the command editor's line. Off, or a mouse-up that ended no
+    /// gesture (a plain click, a right-click), must leave the clipboard alone.
+    #[test]
+    fn copy_on_select_copies_the_buffer_the_gesture_touched() {
+        // Disabled: never copy, whatever kind of gesture just ended.
+        assert_eq!(select_end_copy(false, true, false), SelectEndCopy::None);
+        assert_eq!(select_end_copy(false, false, true), SelectEndCopy::None);
+
+        // A grid gesture (drag / double / triple click over output) copies
+        // the terminal selection; one on the editor line copies the editor's.
+        assert_eq!(select_end_copy(true, true, false), SelectEndCopy::Grid);
+        assert_eq!(select_end_copy(true, false, true), SelectEndCopy::Editor);
+
+        // No gesture ended → nothing to copy.
+        assert_eq!(select_end_copy(true, false, false), SelectEndCopy::None);
+
+        // The press routes to exactly one buffer, but if both flags ever
+        // read set, the grid selection (the visible one) wins.
+        assert_eq!(select_end_copy(true, true, true), SelectEndCopy::Grid);
     }
 
     /// SGR (1006) reports print 1-based decimal coordinates, stack the
@@ -4379,6 +4454,59 @@ mod gpui_tests {
             .encode(&mut daemon)
             .unwrap();
         assert_eq!(wait_for(cx, "hello again"), "hello again");
+    }
+
+    /// Copy-on-select, end to end: real output through the pump, the same
+    /// start/update/end calls the mouse handlers make, then the clipboard.
+    /// Off (the default) the release must leave the clipboard alone; on, the
+    /// selected text lands at mouse-up with no ⌘C.
+    #[gpui::test]
+    fn copy_on_select_writes_the_clipboard_at_mouse_up(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+
+        DaemonMsg::Output(b"hello world".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        // Bounded poll for the reader thread, as in the pump test above.
+        for _ in 0..400 {
+            cx.run_until_parked();
+            let row: String = window
+                .update(cx, |view, _, _| {
+                    let term = view.terminal.term.clone();
+                    let term = term.lock();
+                    (0..11)
+                        .map(|c| term.grid()[alacritty_terminal::index::Line(0)][Column(c)].c)
+                        .collect()
+                })
+                .unwrap();
+            if row == "hello world" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        // Drag across "hello" and release with the feature off: no copy.
+        let drag_hello = |cx: &mut TestAppContext| {
+            window
+                .update(cx, |view, _, cx| {
+                    view.on_select_start(0, 0, true, 1, cx);
+                    view.on_select_update(4, 0, false, cx);
+                    view.on_select_end(cx);
+                })
+                .unwrap();
+        };
+        drag_hello(cx);
+        assert_eq!(
+            cx.update(|cx| cx.read_from_clipboard()),
+            None,
+            "default-off must never write the clipboard"
+        );
+
+        // Same gesture with the feature on: "hello" is on the clipboard.
+        cx.update(|cx| cx.update_global::<Config, _>(|cfg, _| cfg.copy_on_select = true));
+        drag_hello(cx);
+        let text = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(text.as_deref(), Some("hello"));
     }
 
     /// Reproduces the "orange caret jumps to the top-left corner after Claude

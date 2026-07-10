@@ -106,6 +106,11 @@ pub struct Config {
     pub mouse_scroll_multiplier: f32,
     /// Drop trailing whitespace from each copied line. Off by default.
     pub clipboard_trim_trailing_spaces: bool,
+    /// Copy a mouse selection to the clipboard as soon as the gesture ends,
+    /// without ⌘C (à la Ghostty/iTerm2's copy-on-select). Off by default —
+    /// the clipboard is never overwritten by a stray selection unless opted
+    /// into.
+    pub copy_on_select: bool,
     /// Window state at launch: normal / maximized / fullscreen.
     #[serde(default, deserialize_with = "de_lenient")]
     pub startup_mode: StartupMode,
@@ -271,6 +276,7 @@ impl Default for Config {
             focus_follows_mouse: false,
             mouse_scroll_multiplier: 1.0,
             clipboard_trim_trailing_spaces: false,
+            copy_on_select: false,
             startup_mode: StartupMode::Normal,
             working_directory: WorkingDirectory::default(),
             env: HashMap::new(),

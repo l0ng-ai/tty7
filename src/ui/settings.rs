@@ -1014,6 +1014,7 @@ impl Tty7App {
         let option_as_alt = cfg.macos_option_as_alt;
         let scroll_mult = cfg.mouse_scroll_multiplier;
         let clip_trim = cfg.clipboard_trim_trailing_spaces;
+        let copy_on_select = cfg.copy_on_select;
         // Map the persisted scrollback depth onto its preset radio index (default
         // to 10k's slot for any off-preset value a hand-edit might leave).
         let scrollback_idx = match cfg.scrollback_limit {
@@ -1077,6 +1078,10 @@ impl Tty7App {
         let trim_switch = Switch::new("term-clip-trim")
             .checked(clip_trim)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_clipboard_trim(*on, cx)))
+            .into_any_element();
+        let copy_on_select_switch = Switch::new("term-copy-on-select")
+            .checked(copy_on_select)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_copy_on_select(*on, cx)))
             .into_any_element();
         // macOS only: the Option/special-character split this toggle resolves
         // doesn't exist on other platforms, where Alt always carries Meta.
@@ -1153,6 +1158,12 @@ impl Tty7App {
             ))
             .child(self.section_rule(cx))
             .child(self.section_header("Clipboard", cx))
+            .child(self.settings_row(
+                "Copy on select",
+                "Selecting text with the mouse copies it to the clipboard right away, no ⌘C needed.",
+                copy_on_select_switch,
+                cx,
+            ))
             .child(self.settings_row(
                 "Trim trailing spaces on copy",
                 "Strip trailing whitespace from each copied line.",

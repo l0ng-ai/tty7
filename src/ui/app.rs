@@ -766,6 +766,10 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.clipboard_trim_trailing_spaces = on);
     }
 
+    pub(crate) fn set_copy_on_select(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.copy_on_select = on);
+    }
+
     pub(crate) fn set_startup_mode(
         &mut self,
         mode: crate::core::config::StartupMode,

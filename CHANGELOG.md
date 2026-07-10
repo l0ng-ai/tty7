@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Copy on select: an opt-in Settings → Terminal → Clipboard toggle (config
+  key `copy_on_select`) that copies a mouse selection — drag, double-click
+  word, or triple-click line, over terminal output or the prompt's command
+  editor — to the clipboard the moment the gesture ends, no ⌘C needed. Off
+  by default so a stray selection never overwrites the clipboard. (#34)
+
 ### Fixed
 
 - The held-⌘ tab-number badges no longer stick on after the window loses key
