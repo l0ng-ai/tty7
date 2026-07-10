@@ -20,7 +20,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::core::config;
-use crate::daemon::transport;
+use crate::daemon::{pidfile, transport};
 
 /// How long to wait for a freshly spawned daemon to start listening before we
 /// give up. Generous enough to cover a cold process start, short enough that a
@@ -33,6 +33,13 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Generous on purpose: the daemon hangs up every pane's child (a ~200 ms SIGHUP
 /// grace each) before it exits, so a session with several panes needs a moment.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(6);
+/// How long a SIGTERMed daemon gets to finish its graceful teardown (same
+/// per-pane SIGHUP grace as above) before we escalate to SIGKILL.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const REAP_TERM_TIMEOUT: Duration = Duration::from_secs(6);
+/// How long a SIGKILLed daemon gets to disappear from the process table.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const REAP_KILL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Ensure a daemon is running for this process's config dir, spawning a detached
 /// one if needed. Returns `Ok(())` once the endpoint is connectable; `Err` if the
@@ -45,8 +52,14 @@ pub fn ensure_running() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Not running. If an endpoint marker is sitting there, it's a stale leftover
-    // from a crashed daemon (a *live* one would have answered the connect above),
+    // Nobody answers — but "unreachable" is not "gone". If the pidfile records
+    // a daemon that is still alive (wedged, or one whose endpoint was lost),
+    // its panes are already beyond reach; reap it before claiming the endpoint
+    // so it can't linger forever holding every pane's PTY and children.
+    reap_recorded_daemon();
+
+    // If an endpoint marker is sitting there, it's a stale leftover from a
+    // crashed daemon (a *live* one would have answered the connect above),
     // so clear it. The daemon's own `run()` clears stale endpoints too, but doing
     // it here means our post-spawn polling connects on the first try instead of
     // racing the daemon's cleanup.
@@ -103,6 +116,13 @@ pub fn restart() -> anyhow::Result<()> {
         }
     }
 
+    // If the old daemon is still alive here, `Shutdown` didn't stop it — a
+    // binary that predates the message, or a wedged teardown. Restarting
+    // *means* the old daemon must go: quietly claiming its endpoint while it
+    // lives is how sessions got stranded (unreachable daemon, panes and
+    // children still running — issue #42). Escalate by recorded pid.
+    reap_recorded_daemon();
+
     // The daemon removes its own endpoint marker on shutdown, but clear defensively
     // in case it was killed mid-teardown, then bring a fresh daemon up and wait for
     // it to listen. `ensure_running` re-probes and spawns only if nothing answers.
@@ -111,6 +131,124 @@ pub fn restart() -> anyhow::Result<()> {
     }
     ensure_running()
 }
+
+/// Reap the daemon recorded in the pidfile, if it is still alive: the caller
+/// has decided that daemon must go (it stopped answering, or a restart was
+/// ordered and `Shutdown` didn't stop it), and leaving it running while a new
+/// daemon claims the endpoint would strand it — alive, unreachable, and
+/// holding every pane's PTY and children.
+///
+/// Never trusts the pidfile blindly: the pid must still be alive *and* its
+/// executable basename must match our own (the daemon is this same binary),
+/// or the pid was recycled and the file is just stale — cleared, not killed.
+/// Always ends with the pidfile removed; the daemon we spawn next writes its
+/// own.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn reap_recorded_daemon() {
+    let Some(pid) = pidfile::read() else { return };
+    if pid <= 1 || pid == std::process::id() {
+        // A pidfile naming init or ourselves is corrupt, not a daemon.
+        pidfile::remove();
+        return;
+    }
+    if process_matches_own_exe(pid as libc::pid_t) {
+        log::warn!("reaping unreachable daemon (pid {pid}); its sessions will be hung up");
+        reap_process(pid as libc::pid_t);
+    }
+    pidfile::remove();
+}
+
+/// Whether `pid` is alive and runs an executable with the same basename as our
+/// own (GUI and daemon are the same `tty7` binary). This is the guard that
+/// keeps a stale pidfile — daemon crashed, pid recycled by some unrelated
+/// process — from getting an innocent process killed.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn process_matches_own_exe(pid: libc::pid_t) -> bool {
+    let ours = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_os_string()));
+    let theirs = process_path(pid).and_then(|p| p.file_name().map(|n| n.to_os_string()));
+    matches!((ours, theirs), (Some(a), Some(b)) if a == b)
+}
+
+/// Terminate `pid` with escalation: SIGTERM first — a current daemon tears
+/// down like `Shutdown`, giving every pane's child its SIGHUP grace (see
+/// `server::serve_sigterm`) — then SIGKILL if it outlives the grace window.
+/// Best effort: if it still won't die (unkillable, e.g. stuck in the kernel),
+/// log and move on; the new daemon binds a fresh endpoint regardless.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn reap_process(pid: libc::pid_t) {
+    if signal_and_await_exit(pid, libc::SIGTERM, REAP_TERM_TIMEOUT) {
+        return;
+    }
+    if !signal_and_await_exit(pid, libc::SIGKILL, REAP_KILL_TIMEOUT) {
+        log::error!("daemon pid {pid} survived SIGKILL; leaving it behind");
+    }
+}
+
+/// Send `sig` to `pid` and poll until it exits or `timeout` elapses. Returns
+/// whether the process is gone.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn signal_and_await_exit(pid: libc::pid_t, sig: libc::c_int, timeout: Duration) -> bool {
+    // SAFETY: plain kill(2); a dead/foreign pid just returns an error.
+    unsafe { libc::kill(pid, sig) };
+    let deadline = Instant::now() + timeout;
+    while process_alive(pid) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    true
+}
+
+/// Whether `pid` exists and is ours to signal (`kill(pid, 0)`). A pid held by
+/// another user's process reads as "not alive" (EPERM) — correct for the reap
+/// paths, which must then leave it alone.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn process_alive(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 probes deliverability without delivering anything.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Windows reap: same contract as the Unix version, built on the `winproc`
+/// process-table helpers the panes already use for hangup. There is no signal
+/// to ask for a graceful teardown, so this mirrors `DaemonPane`'s Windows
+/// hangup order instead: terminate the daemon's descendants deepest-first
+/// (while their parent links are still live), then the daemon itself.
+#[cfg(windows)]
+fn reap_recorded_daemon() {
+    use crate::daemon::winproc;
+
+    let Some(pid) = pidfile::read() else { return };
+    if pid <= 4 || pid == std::process::id() {
+        // System idle/System pids or ourselves: corrupt, not a daemon.
+        pidfile::remove();
+        return;
+    }
+    let procs = winproc::snapshot();
+    let ours = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+    let matches = procs
+        .iter()
+        .find(|p| p.pid == pid)
+        .zip(ours)
+        .is_some_and(|(entry, name)| entry.name.eq_ignore_ascii_case(&name));
+    if matches {
+        log::warn!("reaping unreachable daemon (pid {pid}); its sessions will be hung up");
+        for descendant in winproc::descendants(&procs, pid) {
+            winproc::terminate(descendant);
+        }
+        winproc::terminate(pid);
+    }
+    pidfile::remove();
+}
+
+/// No process-table access on other platforms: the reap is a best-effort
+/// rescue, so takeover there just keeps the pre-pidfile behavior.
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn reap_recorded_daemon() {}
 
 /// Re-exec our own binary as a detached `--daemon`, inheriting the resolved
 /// config dir. The child is fully severed from the GUI: its own session/process
@@ -155,7 +293,7 @@ fn spawn_detached() -> anyhow::Result<()> {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn detect_parent_shell() -> Option<PathBuf> {
-    parent_process_path(unsafe { libc::getppid() }).filter(|path| is_supported_shell(path))
+    process_path(unsafe { libc::getppid() }).filter(|path| is_supported_shell(path))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -173,8 +311,11 @@ fn is_supported_shell(path: &Path) -> bool {
     )
 }
 
+/// The executable path of an arbitrary live process, used both to recognize
+/// the shell that launched the GUI and to verify a pidfile's pid is still a
+/// tty7 daemon before reaping it.
 #[cfg(target_os = "macos")]
-fn parent_process_path(pid: libc::pid_t) -> Option<PathBuf> {
+fn process_path(pid: libc::pid_t) -> Option<PathBuf> {
     if pid <= 0 {
         return None;
     }
@@ -191,7 +332,7 @@ fn parent_process_path(pid: libc::pid_t) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn parent_process_path(pid: libc::pid_t) -> Option<PathBuf> {
+fn process_path(pid: libc::pid_t) -> Option<PathBuf> {
     if pid <= 0 {
         return None;
     }
@@ -256,6 +397,74 @@ mod tests {
             "/Applications/kitty.app/kitty"
         )));
         assert!(!is_supported_shell(Path::new("/usr/bin/omp")));
+    }
+
+    /// The reap guard: a live process whose executable is *not* ours must never
+    /// match — this is what keeps a stale pidfile with a recycled pid from
+    /// getting an innocent process killed. Driven with a real `sleep` child:
+    /// alive, path readable, basename `sleep` ≠ the test binary's.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn reap_guard_rejects_a_live_process_of_another_executable() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id() as libc::pid_t;
+
+        assert!(process_alive(pid), "the sleep child is alive and ours");
+        assert_eq!(
+            process_path(pid).and_then(|p| p.file_name().map(|n| n.to_os_string())),
+            Some("sleep".into()),
+            "process_path resolves an arbitrary pid, not just our parent"
+        );
+        assert!(
+            !process_matches_own_exe(pid),
+            "sleep must not match the test binary; matching here would mean the reap could kill it"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Escalation actually terminates a process that ignores the polite signal:
+    /// `sleep` dies to the SIGTERM leg already, and the poll must observe the
+    /// exit and report it. The child is reaped concurrently because a zombie
+    /// still answers `kill(pid, 0)` — in production the daemon is launchd's
+    /// child and vanishes on death, which is what the wait thread simulates.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn signal_and_await_exit_observes_the_death_it_caused() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id() as libc::pid_t;
+        let reaper = std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+
+        assert!(
+            signal_and_await_exit(pid, libc::SIGTERM, std::time::Duration::from_secs(5)),
+            "the child must be seen exiting within the grace window"
+        );
+        assert!(!process_alive(pid), "and be gone afterwards");
+        reaper.join().unwrap();
+    }
+
+    /// A dead pid reads as not-alive, so the reap paths treat its pidfile as
+    /// stale and clear it without signalling anything.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn process_alive_is_false_once_the_process_is_gone() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id() as libc::pid_t;
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!process_alive(pid));
     }
 
     /// A stale socket file (one nothing is listening on) must be treated as "not

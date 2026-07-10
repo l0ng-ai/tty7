@@ -10,6 +10,8 @@
 //! - `server` (daemon side) — the listener, pane registry, `--daemon`
 //!   entry point.
 //! - `spawn` — endpoint resolution + auto-launching the daemon from the GUI.
+//! - [`pidfile`] — the daemon's pid marker, letting takeover paths in `spawn`
+//!   reap a live-but-unreachable daemon instead of stranding it.
 //! - [`shell_integration`] — builds the throwaway `ZDOTDIR` (plus the bash/fish
 //!   equivalents) whose rc files emit OSC 7 / OSC 133. Lives here because the
 //!   PTY-owning `pane` is the sole injector; keeping it beside its only caller
@@ -20,6 +22,7 @@
 //! in-process `Terminal` so the view layer is largely unchanged.
 
 pub mod pane;
+pub mod pidfile;
 pub mod protocol;
 pub mod server;
 pub mod spawn;

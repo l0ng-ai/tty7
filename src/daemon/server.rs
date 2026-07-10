@@ -112,7 +112,20 @@ pub fn run() -> anyhow::Result<()> {
     let listener = transport::bind()?;
     log::info!("daemon listening on {}", transport::endpoint_display());
 
+    // Record who owns this endpoint. If this process later becomes unreachable
+    // (wedged, or a protocol the client no longer speaks), the client's takeover
+    // paths read this back and reap us instead of stranding our panes.
+    crate::daemon::pidfile::write_current();
+
     let registry = Arc::new(Registry::new());
+
+    // Reap-by-signal path: a client that can't reach us over the socket sends
+    // SIGTERM (see `spawn::reap_recorded_daemon`). Tear down exactly like the
+    // `Shutdown` message — every pane's child gets the SIGHUP-grace-SIGKILL
+    // treatment — rather than dying with the default action, which would only
+    // HUP each PTY's foreground group and leave background jobs behind.
+    #[cfg(unix)]
+    serve_sigterm(registry.clone());
 
     for stream in listener.incoming() {
         match stream {
@@ -143,6 +156,48 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Handle SIGTERM as a graceful daemon stop, mirroring `ClientMsg::Shutdown`.
+///
+/// SIGTERM is blocked on the calling thread *before* any connection thread
+/// spawns (new threads inherit the mask), then a dedicated thread `sigwait`s
+/// for it — the one way to run non-trivial teardown (locks, allocation) in
+/// response to a signal without breaking async-signal-safety. Must be called
+/// from the daemon's main thread ahead of the accept loop.
+///
+/// If the watcher can't be set up, SIGTERM keeps (or reverts to) its default
+/// terminate action; the takeover path's SIGKILL escalation still covers a
+/// daemon that ignores it either way.
+#[cfg(unix)]
+fn serve_sigterm(registry: Arc<Registry>) {
+    // SAFETY: building a local sigset and masking it on the current thread;
+    // nothing here aliases or races.
+    let set = unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        if libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) != 0 {
+            log::warn!("could not block SIGTERM; keeping default termination");
+            return;
+        }
+        set
+    };
+    std::thread::Builder::new()
+        .name("tty7-daemon-sigterm".to_string())
+        .spawn(move || {
+            let mut sig: libc::c_int = 0;
+            // SAFETY: `set` is the initialized sigset masked above; `sigwait`
+            // blocks until one of its signals is delivered to the process.
+            if unsafe { libc::sigwait(&set, &mut sig) } == 0 {
+                log::info!("daemon shutting down on SIGTERM");
+                registry.drain_and_kill();
+                transport::remove_stale_endpoint();
+                crate::daemon::pidfile::remove();
+                std::process::exit(0);
+            }
+        })
+        .ok();
 }
 
 /// Handle one connection start-to-finish. Reads the opening `ClientMsg` and
@@ -234,6 +289,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             log::info!("daemon shutting down on client request");
             registry.drain_and_kill();
             transport::remove_stale_endpoint();
+            crate::daemon::pidfile::remove();
             std::process::exit(0);
         }
 
