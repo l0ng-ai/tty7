@@ -186,12 +186,20 @@ pub struct TerminalView {
     /// current-directory half of the frecency ranking, so commands used *here*
     /// float up. Kept in step with `history` on submit.
     history_cwds: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    /// Last-run metadata (timestamp + exit code) per history line, feeding the
+    /// Ctrl+R menu's "ran 3h ago" and failure badges. Kept in step with
+    /// `history` on submit; the exit code lands when the shell reports back.
+    history_meta: std::collections::HashMap<String, super::history::EntryMeta>,
     /// `history` re-ordered by frecency (frequency × recency + a current-directory
     /// bonus), most relevant first. Drives the ghost-text autosuggestion — the
     /// sole whole-line recall surface besides Ctrl+R (the Tab menu stays
     /// history-free). Recomputed when a command is run or the working directory
     /// changes.
     history_ranked: Vec<String>,
+    /// The frecency score of each `history` entry, index-aligned with it — the
+    /// relevance half of the Ctrl+R search's fuzzy+frecency blend. Recomputed
+    /// alongside `history_ranked`.
+    history_frecency: Vec<f64>,
     /// The directory `history_ranked` was last computed for, so the polling loop
     /// only re-ranks when the working directory actually changes.
     ranked_cwd: Option<std::path::PathBuf>,
@@ -201,14 +209,20 @@ pub struct TerminalView {
     /// The in-progress line saved when history navigation starts, so pressing ↓
     /// past the newest entry restores what the user was typing.
     history_stash: String,
+    /// A submitted command whose history-file record is deferred until the
+    /// shell reports back at its prompt, so the record can carry the command's
+    /// exit code (see [`PendingHistory`]).
+    pending_history: Option<PendingHistory>,
     /// Open Tab-completion menu, if any — a picker over the candidates gathered
     /// when it opened. Typing/Backspace re-filter it in place; it closes on
     /// accept, on Escape, or once the edited word no longer matches anything.
     completion: Option<CompletionSession>,
-    /// Active Ctrl+R reverse-history search, if any. While set, the editor shows a
-    /// `(reverse-i-search)` prompt instead of the line: typing edits the query,
-    /// Ctrl+R steps to older matches, Enter accepts the match into the line, and
-    /// Escape/Ctrl+G cancels.
+    /// Active Ctrl+R history search, if any. While set, the editor shows a
+    /// `(reverse-i-search)` prompt instead of the line and a menu of the ranked
+    /// matches floats beside it: typing edits the query (fuzzy, blended with
+    /// frecency), Ctrl+R/↓ and Ctrl+S/↑ move the selection, Enter accepts the
+    /// selection into the line, Cmd+Enter runs it outright, and Escape/Ctrl+G
+    /// cancels.
     reverse_search: Option<ReverseSearch>,
     /// True while a left-drag that began on the command-editor line is in progress,
     /// so mouse-move extends the editor selection rather than the terminal's.
@@ -238,6 +252,26 @@ pub(super) struct HoveredLink {
     pub line: i32,
     pub start: usize,
     pub end: usize,
+}
+
+/// A submitted command whose history-file record is deferred so it can carry
+/// the command's exit code (like zsh's `INC_APPEND_HISTORY_TIME`). `seq` is
+/// [`RemoteTerminal::prompt_seq`] at submit time: a later report that puts the
+/// shell back at its prompt means the run completed and `last_exit_code()` is
+/// this command's. Flushed without an exit code if the view goes away first.
+struct PendingHistory {
+    line: String,
+    cwd: Option<std::path::PathBuf>,
+    ts: u64,
+    seq: u64,
+}
+
+/// Seconds since the unix epoch — the timestamp history records carry.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Outcome of a ⌘ shortcut at the terminal surface — the three control-flow
@@ -622,6 +656,12 @@ impl TerminalView {
             &history.cwds,
             None,
         );
+        let history_frecency = super::history::frecency_scores(
+            &history.entries,
+            &history.counts,
+            &history.cwds,
+            None,
+        );
 
         Self {
             terminal,
@@ -658,10 +698,13 @@ impl TerminalView {
             history: history.entries,
             history_counts: history.counts,
             history_cwds: history.cwds,
+            history_meta: history.meta,
             history_ranked,
+            history_frecency,
             ranked_cwd: None,
             history_nav: None,
             history_stash: String::new(),
+            pending_history: None,
             completion: None,
             reverse_search: None,
             editor_selecting: false,
@@ -1755,6 +1798,19 @@ impl TerminalView {
         }
         let at_prompt = self.terminal.at_prompt();
 
+        // A deferred history record is finalized once the shell has reported
+        // back at its prompt: the daemon's `last_exit` is now this command's.
+        // Sequence-based, so a fast command whose not-at-prompt window fell
+        // between polls still gets its exit code.
+        if self
+            .pending_history
+            .as_ref()
+            .is_some_and(|p| at_prompt && self.terminal.prompt_seq() > p.seq)
+        {
+            self.flush_pending_history();
+            cx.notify();
+        }
+
         // Re-rank history when the working directory changes (a `cd`), so ghost text
         // and completion start favouring commands run in the new directory. Only on
         // a real, known change — an unknown cwd keeps the previous ranking.
@@ -2038,10 +2094,14 @@ impl TerminalView {
         }
         let line = self.cmd.text();
         // Record in history (skip blanks and immediate duplicates for ↑/↓ recall),
-        // but always tally the run — count and the directory it ran in — for
-        // frecency, then refresh the ranked view for the current directory.
+        // but always tally the run — count, the directory it ran in, and when —
+        // for ranking and the Ctrl+R menu, then refresh the ranked view for the
+        // current directory. The file record is deferred until the shell reports
+        // back at its prompt, so it can carry this run's exit code; a previous
+        // record still deferred goes out first.
         if !line.trim().is_empty() {
             let cwd = self.cwd();
+            let now = unix_now();
             *self.history_counts.entry(line.clone()).or_insert(0) += 1;
             if let Some(dir) = cwd.as_ref().and_then(|p| p.to_str()) {
                 self.history_cwds
@@ -2049,10 +2109,23 @@ impl TerminalView {
                     .or_default()
                     .insert(dir.to_string());
             }
+            self.history_meta.insert(
+                line.clone(),
+                super::history::EntryMeta {
+                    ts: Some(now),
+                    exit: None,
+                },
+            );
             if self.history.last().map(String::as_str) != Some(line.as_str()) {
                 self.history.push(line.clone());
-                super::history::append(&line, cwd.as_deref());
             }
+            self.flush_pending_history();
+            self.pending_history = Some(PendingHistory {
+                line: line.clone(),
+                cwd: cwd.clone(),
+                ts: now,
+                seq: self.terminal.prompt_seq(),
+            });
             self.rerank_history(cwd.as_deref());
         }
         self.history_nav = None;
@@ -2118,13 +2191,40 @@ impl TerminalView {
     /// in that directory float to the top of ghost text and completion. Records the
     /// directory used, so `poll_foreground` can skip re-ranking until it changes.
     fn rerank_history(&mut self, cwd: Option<&std::path::Path>) {
+        let cwd_str = cwd.and_then(|p| p.to_str());
         self.history_ranked = super::history::rank_by_frecency(
             &self.history,
             &self.history_counts,
             &self.history_cwds,
-            cwd.and_then(|p| p.to_str()),
+            cwd_str,
+        );
+        self.history_frecency = super::history::frecency_scores(
+            &self.history,
+            &self.history_counts,
+            &self.history_cwds,
+            cwd_str,
         );
         self.ranked_cwd = cwd.map(std::path::Path::to_path_buf);
+    }
+
+    /// Write the deferred history record (see [`PendingHistory`]), if any. The
+    /// exit code is attached only when the shell has reported back *and* sits
+    /// at its prompt again — then `last_exit_code()` is this command's;
+    /// otherwise (pane going away mid-command, a new submit racing in) the
+    /// record goes out without one, like a plain shell history line.
+    fn flush_pending_history(&mut self) {
+        let Some(p) = self.pending_history.take() else {
+            return;
+        };
+        let exit = (self.terminal.prompt_seq() > p.seq && self.terminal.at_prompt())
+            .then(|| self.terminal.last_exit_code())
+            .flatten();
+        if exit.is_some()
+            && let Some(m) = self.history_meta.get_mut(&p.line)
+        {
+            m.exit = exit;
+        }
+        super::history::append(&p.line, p.cwd.as_deref(), p.ts, exit);
     }
 
     /// The autosuggestion (ghost text): the most *frecent* history entry that
@@ -2144,10 +2244,12 @@ impl TerminalView {
             .cloned()
     }
 
-    /// Begin a Ctrl+R reverse-history search (no-op if one is already active).
+    /// Begin a Ctrl+R history search (no-op if one is already active). Opens
+    /// with the empty query's frecency listing, so the menu is browsable
+    /// before a single key is typed.
     fn start_reverse_search(&mut self) {
         if self.reverse_search.is_none() {
-            self.reverse_search = Some(ReverseSearch::new());
+            self.reverse_search = Some(ReverseSearch::new(&self.history, &self.history_frecency));
         }
     }
 
@@ -2168,7 +2270,7 @@ impl TerminalView {
             if let Some(ch) = ks.key_char.as_deref() {
                 if !ch.is_empty() && ch.chars().all(|c| c >= '\u{20}' && c != '\u{7f}') {
                     if let Some(rs) = self.reverse_search.as_mut() {
-                        rs.push_query(ch, &self.history);
+                        rs.push_query(ch, &self.history, &self.history_frecency);
                     }
                     cx.notify();
                     return;
@@ -2178,7 +2280,7 @@ impl TerminalView {
         let Some(rs) = self.reverse_search.as_mut() else {
             return;
         };
-        match rs.handle_key(ks, &self.history) {
+        match rs.handle_key(ks, &self.history, &self.history_frecency) {
             reverse_search::Action::Redraw => {}
             reverse_search::Action::Cancel => self.reverse_search = None,
             reverse_search::Action::Accept(line) => {
@@ -2186,6 +2288,12 @@ impl TerminalView {
                 if let Some(line) = line {
                     self.cmd.set(&line);
                 }
+            }
+            reverse_search::Action::Run(line) => {
+                // Cmd+Enter: accept the selection and run it in one stroke.
+                self.reverse_search = None;
+                self.cmd.set(&line);
+                self.submit_command(cx);
             }
         }
         cx.notify();
@@ -2369,7 +2477,7 @@ impl TerminalView {
         }
         // While reverse-searching, typed text edits the query, not the line.
         if let Some(rs) = self.reverse_search.as_mut() {
-            rs.push_query(text, &self.history);
+            rs.push_query(text, &self.history, &self.history_frecency);
             self.cursor_visible = true;
             cx.notify();
             return;
@@ -2747,13 +2855,14 @@ impl TerminalView {
         let cy_top = px(8.) + self.line_height * (crow as f32);
 
         // Reverse-search mode replaces the line with a `(reverse-i-search)` prompt
-        // showing the query and the current match.
+        // showing the query and the selected match; the ranked candidates float
+        // in their own menu (`render_reverse_search_menu`).
         if let Some(rs) = &self.reverse_search {
             let label = format!("(reverse-i-search)`{}': ", rs.query());
             let matched = rs
-                .match_index()
-                .map(|i| self.history[i].clone())
-                .unwrap_or_default();
+                .selected_line(&self.history)
+                .unwrap_or_default()
+                .to_string();
             return div()
                 .absolute()
                 .left(cx_left)
@@ -3080,6 +3189,168 @@ impl TerminalView {
         )
     }
 
+    /// The floating Ctrl+R history menu: the ranked matches (best first) in a
+    /// completion-style popup anchored to the input row — matched characters
+    /// highlighted, the last-run time and a failure badge on the right. The
+    /// classic `(reverse-i-search)` prompt stays on the input row itself
+    /// (`render_input_bar`); this menu is the browsable view of the candidates,
+    /// windowed around the selection like the completion menu.
+    fn render_reverse_search_menu(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let rs = self.reverse_search.as_ref()?;
+        let matches = rs.matches();
+        if matches.is_empty() {
+            return None;
+        }
+        let (srow, _) = self.cursor_cell()?;
+
+        const MAX_ROWS: usize = 10;
+        let (total_rows, total_cols) = {
+            let term = self.terminal.term.lock();
+            (term.screen_lines(), term.columns())
+        };
+        let (place_above, visible, first) =
+            menu_layout(total_rows, srow, matches.len(), rs.selected(), MAX_ROWS);
+        let hidden_above = first;
+        let hidden_below = matches.len() - first - visible;
+
+        let theme = cx.theme();
+        let lh = self.line_height;
+        let now = unix_now();
+        let row = |i: usize| {
+            let m = &matches[i];
+            let line = self.history[m.index].as_str();
+            let selected = rs.selected() == i;
+            let base = if selected {
+                theme.foreground
+            } else {
+                theme.popover_foreground
+            };
+
+            // The command in runs of matched/unmatched characters, so the
+            // query's hits read highlighted inside the (possibly clipped) text.
+            let mut spans: Vec<gpui::AnyElement> = Vec::new();
+            let mut flush = |run: &mut String, hit: bool| {
+                if run.is_empty() {
+                    return;
+                }
+                spans.push(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .text_color(if hit { theme.blue } else { base })
+                        .child(std::mem::take(run))
+                        .into_any_element(),
+                );
+            };
+            let mut pos = m.positions.iter().copied().peekable();
+            let mut run = String::new();
+            let mut run_hit = false;
+            for (ci, ch) in line.chars().enumerate() {
+                let hit = pos.next_if_eq(&ci).is_some();
+                if hit != run_hit {
+                    flush(&mut run, run_hit);
+                    run_hit = hit;
+                }
+                run.push(ch);
+            }
+            flush(&mut run, run_hit);
+
+            // Right column: a failure badge when the last run exited non-zero,
+            // and how long ago that run was.
+            let meta = self.history_meta.get(line);
+            let failed = meta.and_then(|em| em.exit).filter(|&e| e != 0);
+            let ago = meta
+                .and_then(|em| em.ts)
+                .map(|ts| super::history::format_ago(now, ts));
+
+            div()
+                .h(lh)
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_2()
+                .whitespace_nowrap()
+                // Same selection fill as the completion menu (see the note
+                // there on `list_active` vs the stock `accent`).
+                .when(selected, |d| d.bg(theme.list_active))
+                .child(div().flex_1().flex().overflow_hidden().children(spans))
+                .when_some(failed, |d, code| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.red)
+                            .child(format!("✗ {code}")),
+                    )
+                })
+                .when_some(ago, |d, ago| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.muted_foreground)
+                            .child(ago),
+                    )
+                })
+                .into_any_element()
+        };
+        let rows: Vec<gpui::AnyElement> = (first..first + visible).map(row).collect();
+
+        // Menu height (for upward placement) = rows + any overflow footers.
+        let footer = |n: usize, label: String| {
+            (n > 0).then(|| {
+                div()
+                    .h(lh)
+                    .flex()
+                    .items_center()
+                    .px_2()
+                    .text_color(theme.muted_foreground)
+                    .child(label)
+                    .into_any_element()
+            })
+        };
+        let footer_lines = (hidden_above > 0) as usize + (hidden_below > 0) as usize;
+        let line_count = visible + footer_lines;
+        let menu_h = lh * (line_count as f32) + px(10.);
+
+        // Anchored at the line's left edge (unlike the completion menu, which
+        // anchors at the current word): history rows are whole commands, so
+        // the menu spans the input area at a fixed width — that keeps the
+        // right-hand metadata column vertically aligned across rows. A small
+        // gap keeps it clear of the input line and its caret.
+        let gap = px(6.);
+        let grid_w = self.cell_width * (total_cols as f32);
+        let menu_w = if grid_w < px(720.) { grid_w } else { px(720.) };
+        let y = if place_above {
+            px(8.) + lh * (srow as f32) - menu_h - gap
+        } else {
+            px(8.) + lh * ((srow + 1) as f32) + gap
+        };
+
+        Some(
+            div()
+                .absolute()
+                .left(px(16.))
+                .top(y)
+                .flex()
+                .flex_col()
+                .py_1()
+                .w(menu_w)
+                .overflow_hidden()
+                .bg(theme.popover)
+                .border_1()
+                .border_color(theme.border)
+                .rounded(px(6.))
+                .font_family(self.font.family.clone())
+                .text_size(self.font_size)
+                .text_color(theme.popover_foreground)
+                .children(footer(hidden_above, format!("↑ {hidden_above} more")))
+                .children(rows)
+                .children(footer(hidden_below, format!("↓ {hidden_below} more"))),
+        )
+    }
+
     /// Map a highlighter token kind to a theme color.
     fn kind_color(&self, kind: TokenKind, cx: &App) -> gpui::Hsla {
         let theme = cx.theme();
@@ -3098,6 +3369,15 @@ impl TerminalView {
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+impl Drop for TerminalView {
+    fn drop(&mut self) {
+        // A history record still deferred when the pane goes away (tab closed,
+        // window closed — possibly mid-command) is flushed rather than lost;
+        // it carries an exit code only if the shell had already reported back.
+        self.flush_pending_history();
     }
 }
 
@@ -3132,6 +3412,10 @@ impl Render for TerminalView {
         let completion_menu = self
             .input_active()
             .then(|| self.render_completion_menu(cx))
+            .flatten();
+        let reverse_search_menu = self
+            .input_active()
+            .then(|| self.render_reverse_search_menu(cx))
             .flatten();
 
         // Captured for the right-click menu: the focus handle routes dispatched
@@ -3213,6 +3497,7 @@ impl Render for TerminalView {
             .children(search_bar)
             .children(input_bar)
             .children(completion_menu)
+            .children(reverse_search_menu)
             // Right-click context menu (gpui-component PopupMenu).
             .context_menu(move |menu, _window, _cx| {
                 // Small size = tighter 20px rows; the default 26px felt too airy.
@@ -4319,6 +4604,238 @@ mod gpui_tests {
             .unwrap();
 
         assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x0c]));
+    }
+
+    fn key(spec: &str) -> gpui::Keystroke {
+        gpui::Keystroke::parse(spec).expect("valid keystroke spec")
+    }
+
+    /// The Ctrl+R flow end-to-end at the editor dispatcher: Ctrl+R opens the
+    /// search, typed text (the IME/commit path) edits the query with fuzzy
+    /// matching, Enter loads the selection into the editor without running it.
+    #[gpui::test]
+    fn ctrl_r_fuzzy_search_accepts_into_the_editor(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.history = ["git status", "cargo build", "git commit -m x"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
+                view.history_frecency = vec![0.0; view.history.len()];
+
+                view.handle_editor_key(&key("ctrl-r"), cx);
+                assert!(view.reverse_search.is_some(), "Ctrl+R opens the search");
+                // `gst` is a subsequence of `git status` — fuzzy, not substring.
+                view.commit_text("gst", cx);
+                assert_eq!(
+                    view.reverse_search
+                        .as_ref()
+                        .and_then(|rs| rs.selected_line(&view.history)),
+                    Some("git status")
+                );
+                view.handle_editor_key(&key("enter"), cx);
+                assert!(view.reverse_search.is_none(), "Enter closes the search");
+                assert_eq!(view.cmd.text(), "git status");
+            })
+            .unwrap();
+    }
+
+    /// Repeated Ctrl+R steps down the ranked matches, and Cmd+Enter runs the
+    /// selection outright: the line must come out of the client socket as
+    /// `Input` bytes ending in `\r`.
+    #[gpui::test]
+    fn ctrl_r_steps_matches_and_cmd_enter_runs(cx: &mut TestAppContext) {
+        // `submit_command` defers a history-file record; pin the config dir to
+        // the shared test scratch so nothing touches the real user history.
+        let dir = std::env::temp_dir().join(format!("tty7-covtest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        crate::core::config::set_config_dir(dir);
+
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.history = ["git status", "cargo build", "git commit -m x"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
+                view.history_frecency = vec![0.0; view.history.len()];
+
+                view.handle_editor_key(&key("ctrl-r"), cx);
+                view.commit_text("git", cx);
+                // Equal fuzzy scores: the newer entry ranks first; a second
+                // Ctrl+R steps to the older match.
+                assert_eq!(
+                    view.reverse_search
+                        .as_ref()
+                        .and_then(|rs| rs.selected_line(&view.history)),
+                    Some("git commit -m x")
+                );
+                view.handle_editor_key(&key("ctrl-r"), cx);
+                assert_eq!(
+                    view.reverse_search
+                        .as_ref()
+                        .and_then(|rs| rs.selected_line(&view.history)),
+                    Some("git status")
+                );
+                view.handle_editor_key(&key("cmd-enter"), cx);
+                assert!(view.reverse_search.is_none());
+                assert!(view.cmd.is_empty(), "submit clears the editor");
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"git status\r".to_vec()),
+            "Cmd+Enter ships the selected line to the PTY"
+        );
+    }
+
+    /// The Ctrl+R menu actually renders while the shell sits at its prompt:
+    /// with `input_active` true and a search open over entries carrying run
+    /// metadata, a real (headless) frame draws `render_reverse_search_menu` —
+    /// guarding the row/highlight/badge layout code against panics that unit
+    /// tests of the search logic can't reach.
+    #[gpui::test]
+    fn reverse_search_menu_survives_a_real_render_pass(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        // Put the shell at its prompt so `input_active()` is true and the
+        // menu branch of `render` runs.
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        for _ in 0..200 {
+            if window
+                .update(cx, |view, _, _| view.terminal.at_prompt())
+                .unwrap()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, _, cx| {
+                assert!(view.input_active(), "prompt report engages the editor");
+                view.history = ["git status", "cargo build --release", "echo hello"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
+                view.history_frecency = vec![0.0; view.history.len()];
+                // Metadata for the badge/ago column: one failed run, one aged.
+                view.history_meta.insert(
+                    "cargo build --release".into(),
+                    super::super::history::EntryMeta {
+                        ts: Some(unix_now().saturating_sub(7200)),
+                        exit: Some(1),
+                    },
+                );
+                view.handle_editor_key(&key("ctrl-r"), cx);
+                view.commit_text("c", cx);
+                assert!(
+                    view.reverse_search
+                        .as_ref()
+                        .is_some_and(|rs| !rs.matches().is_empty()),
+                    "the query has matches for the menu to draw"
+                );
+                cx.notify();
+            })
+            .unwrap();
+        // Let the notified frame actually draw — a panic in the menu layout
+        // or row rendering fails the test here.
+        cx.run_until_parked();
+        window
+            .update(cx, |view, _, _| {
+                assert!(view.reverse_search.is_some(), "search survives the frame");
+            })
+            .unwrap();
+    }
+
+    /// The deferred history record picks up the command's exit code once the
+    /// shell reports back at its prompt (OSC 133;D → daemon `Prompt` frame →
+    /// `prompt_seq`/`last_exit_code`), and the file line carries it.
+    #[gpui::test]
+    fn submitted_command_backfills_its_exit_code(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("tty7-covtest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        crate::core::config::set_config_dir(dir.clone());
+
+        let (window, mut daemon) = harness(cx);
+        let wait = |cx: &mut TestAppContext, pred: &dyn Fn(&TerminalView) -> bool, what: &str| {
+            for _ in 0..200 {
+                if window.update(cx, |view, _, _| pred(view)).unwrap() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            panic!("timed out waiting for {what}");
+        };
+
+        // The shell reaches its prompt (integration active).
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait(cx, &|v| v.terminal.at_prompt(), "the initial prompt report");
+
+        let marker = format!("tty7_gpui_exit_marker_{}", std::process::id());
+        window
+            .update(cx, |view, _, cx| {
+                view.cmd.set(&marker);
+                view.submit_command(cx);
+                assert!(view.pending_history.is_some(), "record defers for the exit");
+            })
+            .unwrap();
+
+        // The command runs (leaves the prompt) and finishes with exit 3.
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: false,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: Some(3),
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait(
+            cx,
+            &|v| v.terminal.at_prompt() && v.terminal.last_exit_code() == Some(3),
+            "the post-command prompt report",
+        );
+
+        window
+            .update(cx, |view, window, cx| {
+                view.poll_foreground(window, cx);
+                assert!(view.pending_history.is_none(), "poll flushed the record");
+                assert_eq!(
+                    view.history_meta.get(&marker).and_then(|m| m.exit),
+                    Some(3),
+                    "in-memory metadata learned the exit code"
+                );
+            })
+            .unwrap();
+
+        // The file record is the current format with the exit code attached.
+        let content = std::fs::read_to_string(dir.join("history")).expect("history file written");
+        let line = content
+            .lines()
+            .find(|l| l.contains(&marker))
+            .expect("the submitted command was recorded");
+        let mut fields = line.splitn(4, '\t');
+        let ts = fields.next().unwrap();
+        assert!(!ts.is_empty() && ts.bytes().all(|b| b.is_ascii_digit()));
+        assert_eq!(fields.next(), Some("3"), "exit code field");
     }
 
     /// Readline's Meta word chords act on the local prompt editor: M-b / M-f

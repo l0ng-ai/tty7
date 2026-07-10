@@ -19,6 +19,7 @@ mod cmd_editor;
 mod completion;
 pub mod element;
 pub mod fps;
+mod fuzzy;
 mod highlight;
 mod history;
 mod hold;

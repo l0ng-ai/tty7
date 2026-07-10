@@ -5,15 +5,20 @@
 //! ↑/↓ recall and Ctrl+R search without pulling in a database. Each terminal loads
 //! a snapshot on creation and appends as commands are submitted.
 //!
-//! Each new line is `<cwd>\t<command>` — the working directory the command ran in,
-//! a tab, then the command. That cwd feeds the frecency ranking: commands you've
-//! run *in this directory* float to the top of completion and ghost text. Legacy
-//! plain-command lines (no tab) still parse fine, just without a cwd association.
+//! Each new line is `<ts>\t<exit>\t<cwd>\t<command>` — when the command ran
+//! (unix seconds), the exit code of that run (empty while unknown: the record is
+//! written once the command finishes, but a pane can die before that), the
+//! working directory it ran in (empty when unusable), then the command itself
+//! (which may contain further tabs — it's the last field). The cwd feeds the
+//! frecency ranking; ts and exit feed the Ctrl+R menu's "ran 3h ago" / failure
+//! badges. Older `<cwd>\t<command>` lines and legacy bare commands still parse
+//! fine, just without the missing fields.
 //!
 //! On load we also seed from the user's real shell histories (`~/.zsh_history`,
 //! `~/.bash_history`, and `$HISTFILE`), so recall and completion work from the
 //! very first launch — before tty7 has accumulated a history of its own. Those
-//! files are read-only inputs; tty7 only ever writes its own file.
+//! files are read-only inputs; tty7 only ever writes its own file. zsh extended
+//! and bash `HISTTIMEFORMAT` timestamps are carried over when present.
 
 use crate::core::config::config_path;
 use std::collections::{HashMap, HashSet};
@@ -36,32 +41,61 @@ const FREQ_WEIGHT: f64 = 0.6;
 /// very frequent global one (`git status`, `ls`, …).
 const CWD_BONUS: f64 = 1.2;
 
+/// One history line as parsed from disk, before de-duplication: the command,
+/// plus whatever metadata its source format carried.
+struct Raw {
+    cmd: String,
+    cwd: Option<String>,
+    ts: Option<u64>,
+    exit: Option<i32>,
+}
+
+impl Raw {
+    fn bare(cmd: String) -> Self {
+        Self {
+            cmd,
+            cwd: None,
+            ts: None,
+            exit: None,
+        }
+    }
+}
+
+/// Last-known run metadata for one history line: when it last ran (unix
+/// seconds) and that run's exit code (`None` when the run never completed
+/// under tty7's watch — or predates exit tracking).
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct EntryMeta {
+    pub ts: Option<u64>,
+    pub exit: Option<i32>,
+}
+
 /// Loaded history: the unique command lines (oldest-first, the source for ↑/↓
-/// recall and Ctrl+R search), plus the two extra dimensions the frecency ranking
-/// needs — per-line run `counts` (frequency) and, for each line, the set of
-/// directories it was run in (`cwds`), so we can favour commands used *here*.
+/// recall and Ctrl+R search), plus the extra dimensions ranking and the Ctrl+R
+/// menu need — per-line run `counts` (frequency), the set of directories each
+/// line was run in (`cwds`, so we can favour commands used *here*), and the
+/// last-run `meta` (timestamp + exit code) per line.
 pub struct History {
     pub entries: Vec<String>,
     pub counts: HashMap<String, u32>,
     pub cwds: HashMap<String, HashSet<String>>,
+    pub meta: HashMap<String, EntryMeta>,
 }
 
 /// Load history (oldest first), seeding from the user's shell histories and then
 /// tty7's own file. Blanks are dropped and duplicates collapsed (keeping the most
-/// recent occurrence), while occurrence counts and per-directory associations are
-/// tallied for frecency ranking. Returns empty when nothing is readable.
+/// recent occurrence), while occurrence counts, per-directory associations and
+/// last-run metadata are tallied for ranking and the Ctrl+R menu. Returns empty
+/// when nothing is readable.
 pub fn load() -> History {
     // Shell history first (older, so it sits at a lower completion priority than
     // commands actually run in tty7), then tty7's own file last (most recent).
-    // Shell-history lines carry no cwd; tty7's own `<cwd>\t<cmd>` lines do.
-    let mut raw: Vec<(String, Option<String>)> = load_shell_history()
-        .into_iter()
-        .map(|cmd| (cmd, None))
-        .collect();
-    if let Some(path) = config_path("history") {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            raw.extend(content.lines().map(parse_own_line));
-        }
+    // Shell-history lines carry no cwd; tty7's own lines do.
+    let mut raw: Vec<Raw> = load_shell_history();
+    if let Some(path) = config_path("history")
+        && let Ok(content) = std::fs::read_to_string(&path)
+    {
+        raw.extend(content.lines().map(parse_own_line));
     }
     normalize(raw)
 }
@@ -81,32 +115,52 @@ fn looks_absolute(p: &str) -> bool {
     }
 }
 
-/// Parse one line of tty7's own history file into `(command, cwd)`. New lines are
-/// `<cwd>\t<command>` with an absolute cwd; legacy plain lines (and anything whose
-/// pre-tab part isn't an absolute path) carry just the command, no cwd.
-fn parse_own_line(line: &str) -> (String, Option<String>) {
+/// Parse one line of tty7's own history file. Current lines are
+/// `<ts>\t<exit>\t<cwd>\t<command>` (ts all-digits; exit an integer or empty;
+/// cwd absolute or empty; the command — the last field — may itself contain
+/// tabs). Older `<cwd>\t<command>` lines and legacy bare commands still parse,
+/// carrying only the fields they have.
+fn parse_own_line(line: &str) -> Raw {
+    let mut f = line.splitn(4, '\t');
+    if let (Some(ts), Some(exit), Some(cwd), Some(cmd)) = (f.next(), f.next(), f.next(), f.next())
+        && !ts.is_empty()
+        && ts.bytes().all(|b| b.is_ascii_digit())
+        && (exit.is_empty() || exit.parse::<i32>().is_ok())
+        && (cwd.is_empty() || looks_absolute(cwd))
+    {
+        return Raw {
+            cmd: cmd.to_string(),
+            cwd: (!cwd.is_empty()).then(|| cwd.to_string()),
+            ts: ts.parse().ok(),
+            exit: exit.parse().ok(),
+        };
+    }
     if let Some((cwd, cmd)) = line.split_once('\t')
         && looks_absolute(cwd)
     {
-        return (cmd.to_string(), Some(cwd.to_string()));
+        return Raw {
+            cmd: cmd.to_string(),
+            cwd: Some(cwd.to_string()),
+            ts: None,
+            exit: None,
+        };
     }
-    (line.to_string(), None)
+    Raw::bare(line.to_string())
 }
 
-/// Order unique history entries by *frecency* (frequency × recency, plus a
-/// current-directory bonus), most relevant first — the ranking that drives
-/// ghost-text autosuggestion and the completion menu's history recalls, so neither
-/// surfaces stale junk just because it was typed once, recently. `entries` is
-/// oldest-first as from [`load`]; `counts` and `cwds` are its companions; `cwd` is
-/// the directory to favour (none → no directory bonus).
-pub fn rank_by_frecency(
+/// The frecency score of every entry (frequency × recency, plus a
+/// current-directory bonus), index-aligned with `entries`. Shared by
+/// [`rank_by_frecency`] and the Ctrl+R search's relevance blend. `entries` is
+/// oldest-first as from [`load`]; `counts` and `cwds` are its companions; `cwd`
+/// is the directory to favour (none → no directory bonus).
+pub fn frecency_scores(
     entries: &[String],
     counts: &HashMap<String, u32>,
     cwds: &HashMap<String, HashSet<String>>,
     cwd: Option<&str>,
-) -> Vec<String> {
+) -> Vec<f64> {
     let n = entries.len();
-    let mut scored: Vec<(f64, usize)> = entries
+    entries
         .iter()
         .enumerate()
         .map(|(i, e)| {
@@ -125,25 +179,62 @@ pub fn rank_by_frecency(
             {
                 score += CWD_BONUS;
             }
-            (score, i)
+            score
         })
-        .collect();
-    // Higher score first; ties broken toward the more recent entry.
-    scored.sort_by(|a, b| {
-        b.0.partial_cmp(&a.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(b.1.cmp(&a.1))
-    });
-    scored
-        .into_iter()
-        .map(|(_, i)| entries[i].clone())
         .collect()
 }
 
-/// Append one command to the history file (best effort), tagged with the `cwd` it
-/// ran in when that's a usable absolute path. Commands containing a newline are
-/// skipped, since the format is one-per-line.
-pub fn append(cmd: &str, cwd: Option<&Path>) {
+/// Order unique history entries by *frecency*, most relevant first — the
+/// ranking that drives ghost-text autosuggestion and the completion menu's
+/// history recalls, so neither surfaces stale junk just because it was typed
+/// once, recently. See [`frecency_scores`] for the inputs.
+pub fn rank_by_frecency(
+    entries: &[String],
+    counts: &HashMap<String, u32>,
+    cwds: &HashMap<String, HashSet<String>>,
+    cwd: Option<&str>,
+) -> Vec<String> {
+    let scores = frecency_scores(entries, counts, cwds, cwd);
+    let mut idx: Vec<usize> = (0..entries.len()).collect();
+    // Higher score first; ties broken toward the more recent entry.
+    idx.sort_by(|&a, &b| {
+        scores[b]
+            .partial_cmp(&scores[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.cmp(&a))
+    });
+    idx.into_iter().map(|i| entries[i].clone()).collect()
+}
+
+/// Compact "how long ago" label for the Ctrl+R menu: `now` and `ts` are unix
+/// seconds. Coarse on purpose — the menu row has room for `3h`, not a date.
+pub fn format_ago(now: u64, ts: u64) -> String {
+    let s = now.saturating_sub(ts);
+    let (n, unit) = if s < 60 {
+        return "now".to_string();
+    } else if s < 3600 {
+        (s / 60, "m")
+    } else if s < 86_400 {
+        (s / 3600, "h")
+    } else if s < 7 * 86_400 {
+        (s / 86_400, "d")
+    } else if s < 30 * 86_400 {
+        (s / (7 * 86_400), "w")
+    } else if s < 365 * 86_400 {
+        (s / (30 * 86_400), "mo")
+    } else {
+        (s / (365 * 86_400), "y")
+    };
+    format!("{n}{unit}")
+}
+
+/// Append one command to the history file (best effort): `ts` is when it ran
+/// (unix seconds) and `exit` its exit code when the run completed under tty7's
+/// watch. The cwd is recorded when it's a usable absolute path — one that can't
+/// confuse the one-line format: no tab (the field separator) and no newline/CR
+/// (which would split the record across lines). Commands containing a newline
+/// are skipped, since the format is one-per-line.
+pub fn append(cmd: &str, cwd: Option<&Path>, ts: u64, exit: Option<i32>) {
     if cmd.contains('\n') {
         return;
     }
@@ -153,16 +244,12 @@ pub fn append(cmd: &str, cwd: Option<&Path>) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // `<cwd>\t<cmd>` when we have an absolute cwd — one that can't confuse the
-    // one-line format: no tab (the field separator) and no newline/CR (a cwd
-    // containing one would split the record across lines, and the stray tail
-    // would load back as a bogus command). Otherwise the legacy bare form.
-    let line = match cwd.and_then(Path::to_str) {
-        Some(c) if looks_absolute(c) && !c.contains(['\t', '\n', '\r']) => {
-            format!("{c}\t{cmd}")
-        }
-        _ => cmd.to_string(),
+    let cwd = match cwd.and_then(Path::to_str) {
+        Some(c) if looks_absolute(c) && !c.contains(['\t', '\n', '\r']) => c,
+        _ => "",
     };
+    let exit = exit.map(|e| e.to_string()).unwrap_or_default();
+    let line = format!("{ts}\t{exit}\t{cwd}\t{cmd}");
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -180,22 +267,34 @@ pub fn append(cmd: &str, cwd: Option<&Path>) {
 
 /// Drop blanks and de-duplicate (keeping the most recent occurrence, so recall
 /// and completion stay clean when shell history and tty7's own file overlap),
-/// tallying how many times each line appears and which directories it ran in, then
-/// cap to the most recent `MAX_ENTRIES`. Input is `(command, cwd)` pairs; output
-/// entries are oldest-first.
-fn normalize(raw: Vec<(String, Option<String>)>) -> History {
+/// tallying how many times each line appears, which directories it ran in, and
+/// its most recent run's metadata, then cap to the most recent `MAX_ENTRIES`.
+/// Output entries are oldest-first.
+fn normalize(raw: Vec<Raw>) -> History {
     let mut counts: HashMap<String, u32> = HashMap::new();
     let mut cwds: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut meta: HashMap<String, EntryMeta> = HashMap::new();
     let mut seen = HashSet::new();
     let mut out: Vec<String> = Vec::new();
-    for (line, cwd) in raw.into_iter().rev() {
-        let line = line.trim_end_matches('\r');
+    for r in raw.into_iter().rev() {
+        let line = r.cmd.trim_end_matches('\r');
         if line.is_empty() {
             continue;
         }
         *counts.entry(line.to_string()).or_insert(0) += 1;
-        if let Some(cwd) = cwd {
+        if let Some(cwd) = r.cwd {
             cwds.entry(line.to_string()).or_default().insert(cwd);
+        }
+        // Newest-first scan: the first occurrence carrying any run metadata is
+        // the last known run — its ts and exit stay a matched pair.
+        if (r.ts.is_some() || r.exit.is_some()) && !meta.contains_key(line) {
+            meta.insert(
+                line.to_string(),
+                EntryMeta {
+                    ts: r.ts,
+                    exit: r.exit,
+                },
+            );
         }
         if seen.insert(line.to_string()) {
             out.push(line.to_string());
@@ -208,12 +307,14 @@ fn normalize(raw: Vec<(String, Option<String>)>) -> History {
         for r in out.drain(0..cut) {
             counts.remove(&r);
             cwds.remove(&r);
+            meta.remove(&r);
         }
     }
     History {
         entries: out,
         counts,
         cwds,
+        meta,
     }
 }
 
@@ -222,7 +323,7 @@ fn normalize(raw: Vec<(String, Option<String>)>) -> History {
 /// `$HISTFILE` if set, and orders the files by modification time so the
 /// most-recently-used shell's entries end up with the highest completion
 /// priority.
-fn load_shell_history() -> Vec<String> {
+fn load_shell_history() -> Vec<Raw> {
     let mut files: Vec<PathBuf> = Vec::new();
     let mut seen = HashSet::new();
     let mut add = |p: PathBuf| {
@@ -256,9 +357,10 @@ fn load_shell_history() -> Vec<String> {
     out
 }
 
-/// Parse one shell-history file into command lines, appending to `out`. Strips
-/// zsh's extended-format prefix (`: <start>:<elapsed>;cmd`) and skips bash
-/// `HISTTIMEFORMAT` timestamp comments.
+/// Parse one shell-history file into command lines, appending to `out`,
+/// carrying over the timestamps the file records: zsh's extended-format prefix
+/// (`: <start>:<elapsed>;cmd`) and bash's `HISTTIMEFORMAT` comment (`#<ts>` on
+/// the line *before* the command).
 ///
 /// Each physical line becomes its own entry — we deliberately do *not* stitch
 /// backslash-continued multi-line commands back together. bash stores multi-line
@@ -266,45 +368,62 @@ fn load_shell_history() -> Vec<String> {
 /// that wreck the single-line completion menu's layout and (b) on bash, wrongly
 /// swallow the following command. A few stray fragments from a zsh here-doc are a
 /// fair price for robustness.
-fn parse_shell_history(content: &str, out: &mut Vec<String>) {
+fn parse_shell_history(content: &str, out: &mut Vec<Raw>) {
+    // A bash timestamp comment stamps the *next* command line.
+    let mut pending_ts: Option<u64> = None;
     for raw in content.split('\n') {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
-        if let Some(cmd) = start_of_command(line) {
+        if let Some(ts) = bash_timestamp(line) {
+            pending_ts = Some(ts);
+            continue;
+        }
+        if let Some((cmd, zsh_ts)) = start_of_command(line) {
             let cmd = cmd.trim();
             if !cmd.is_empty() {
-                out.push(cmd.to_string());
+                out.push(Raw {
+                    cmd: cmd.to_string(),
+                    cwd: None,
+                    ts: zsh_ts.or(pending_ts),
+                    exit: None,
+                });
             }
         }
+        pending_ts = None;
     }
 }
 
-/// The command text at the start of a history line, or `None` for lines that
-/// carry no command (blank lines, bash timestamp comments). Strips the zsh
-/// extended-history `": <start>:<elapsed>;"` prefix when present.
-fn start_of_command(line: &str) -> Option<&str> {
+/// The bash `HISTTIMEFORMAT` timestamp comment (`#1700000000`), if that's what
+/// this line is. It carries no command itself — it stamps the following line.
+fn bash_timestamp(line: &str) -> Option<u64> {
+    let rest = line.strip_prefix('#')?;
+    if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    rest.parse().ok()
+}
+
+/// The command text at the start of a history line plus the zsh
+/// extended-history timestamp when the line carries one, or `None` for blank
+/// lines. Strips the `": <start>:<elapsed>;"` prefix when present.
+fn start_of_command(line: &str) -> Option<(&str, Option<u64>)> {
     if line.is_empty() {
         return None;
     }
     // zsh extended history: ": 1700000000:0;the command". The timestamp field
     // must hold at least one digit — an empty/colon-only prefix would otherwise
     // match a *real* command like `: ;echo hi` and wrongly strip its head.
-    if let Some(rest) = line.strip_prefix(": ") {
-        if let Some(semi) = rest.find(';') {
-            let ts = &rest[..semi];
-            if ts.bytes().any(|b| b.is_ascii_digit())
-                && ts.bytes().all(|b| b.is_ascii_digit() || b == b':')
-            {
-                return Some(&rest[semi + 1..]);
-            }
+    if let Some(rest) = line.strip_prefix(": ")
+        && let Some(semi) = rest.find(';')
+    {
+        let ts = &rest[..semi];
+        if ts.bytes().any(|b| b.is_ascii_digit())
+            && ts.bytes().all(|b| b.is_ascii_digit() || b == b':')
+        {
+            let start = ts.split(':').next().and_then(|t| t.parse().ok());
+            return Some((&rest[semi + 1..], start));
         }
     }
-    // bash HISTTIMEFORMAT timestamp comment: "#1700000000".
-    if let Some(rest) = line.strip_prefix('#') {
-        if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-    }
-    Some(line)
+    Some((line, None))
 }
 
 #[cfg(test)]
@@ -314,7 +433,13 @@ mod tests {
     fn parse(content: &str) -> Vec<String> {
         let mut out = Vec::new();
         parse_shell_history(content, &mut out);
-        out
+        out.into_iter().map(|r| r.cmd).collect()
+    }
+
+    fn parse_ts(content: &str) -> Vec<(String, Option<u64>)> {
+        let mut out = Vec::new();
+        parse_shell_history(content, &mut out);
+        out.into_iter().map(|r| (r.cmd, r.ts)).collect()
     }
 
     #[test]
@@ -326,15 +451,29 @@ mod tests {
     }
 
     #[test]
-    fn zsh_extended_prefix_is_stripped() {
+    fn zsh_extended_prefix_is_stripped_and_timestamp_kept() {
         let content = ": 1700000000:0;git status\n: 1700000005:2;cargo build\n";
-        assert_eq!(parse(content), ["git status", "cargo build"]);
+        assert_eq!(
+            parse_ts(content),
+            [
+                ("git status".to_string(), Some(1_700_000_000)),
+                ("cargo build".to_string(), Some(1_700_000_005)),
+            ]
+        );
     }
 
     #[test]
-    fn bash_timestamp_comments_are_skipped() {
-        let content = "#1700000000\nls -la\n#1700000005\ncd ..\n";
-        assert_eq!(parse(content), ["ls -la", "cd .."]);
+    fn bash_timestamp_comments_stamp_the_next_command() {
+        let content = "#1700000000\nls -la\n#1700000005\ncd ..\nuntimed\n";
+        assert_eq!(
+            parse_ts(content),
+            [
+                ("ls -la".to_string(), Some(1_700_000_000)),
+                ("cd ..".to_string(), Some(1_700_000_005)),
+                // No comment directly above → no timestamp bleeds over.
+                ("untimed".to_string(), None),
+            ]
+        );
     }
 
     #[test]
@@ -348,26 +487,41 @@ mod tests {
         assert!(got.iter().all(|e| !e.contains('\n')));
     }
 
-    fn pair(cmd: &str, cwd: Option<&str>) -> (String, Option<String>) {
-        (cmd.to_string(), cwd.map(str::to_string))
+    fn pair(cmd: &str, cwd: Option<&str>) -> Raw {
+        Raw {
+            cmd: cmd.to_string(),
+            cwd: cwd.map(str::to_string),
+            ts: None,
+            exit: None,
+        }
     }
 
     #[test]
-    fn parse_own_line_reads_cwd_prefix_and_legacy_lines() {
-        assert_eq!(
-            parse_own_line("/home/me\tgit status"),
-            ("git status".to_string(), Some("/home/me".to_string()))
-        );
+    fn parse_own_line_reads_all_generations() {
+        // Current format: ts, exit, cwd, command.
+        let r = parse_own_line("1700000000\t0\t/home/me\tgit status");
+        assert_eq!(r.cmd, "git status");
+        assert_eq!(r.cwd.as_deref(), Some("/home/me"));
+        assert_eq!(r.ts, Some(1_700_000_000));
+        assert_eq!(r.exit, Some(0));
+        // Exit unknown (pane died mid-command) and cwd unknown stay empty fields.
+        let r = parse_own_line("1700000000\t\t\tmake");
+        assert_eq!((r.cmd.as_str(), r.cwd, r.ts, r.exit), ("make", None, Some(1_700_000_000), None));
+        // The command is the last field, so its own tabs survive.
+        let r = parse_own_line("1700000000\t1\t/a\techo\tfoo");
+        assert_eq!(r.cmd, "echo\tfoo");
+        assert_eq!(r.exit, Some(1));
+        // Previous generation: `<cwd>\t<command>`.
+        let r = parse_own_line("/home/me\tgit status");
+        assert_eq!((r.cmd.as_str(), r.cwd.as_deref(), r.ts), ("git status", Some("/home/me"), None));
         // Windows absolute cwd is recognized too (cross-platform, host-independent).
-        // `\\` are literal backslashes; `\t` is the real tab separator.
-        assert_eq!(
-            parse_own_line("C:\\Users\\me\tgit status"),
-            ("git status".to_string(), Some("C:\\Users\\me".to_string()))
-        );
-        // Legacy bare command — no tab, no cwd.
-        assert_eq!(parse_own_line("ls -la"), ("ls -la".to_string(), None));
+        let r = parse_own_line("C:\\Users\\me\tgit status");
+        assert_eq!(r.cwd.as_deref(), Some("C:\\Users\\me"));
+        // Legacy bare command — no tab, no metadata.
+        let r = parse_own_line("ls -la");
+        assert_eq!((r.cmd.as_str(), r.cwd, r.ts, r.exit), ("ls -la", None, None, None));
         // A tab whose pre-part isn't an absolute path is not treated as a cwd.
-        assert_eq!(parse_own_line("echo\tfoo"), ("echo\tfoo".to_string(), None));
+        assert_eq!(parse_own_line("echo\tfoo").cmd, "echo\tfoo");
     }
 
     #[test]
@@ -396,6 +550,34 @@ mod tests {
         let dirs = h.cwds.get("make").unwrap();
         assert!(dirs.contains("/a") && dirs.contains("/b"));
         assert_eq!(dirs.len(), 2);
+    }
+
+    #[test]
+    fn normalize_keeps_the_most_recent_runs_metadata() {
+        let with_meta = |cmd: &str, ts: u64, exit: Option<i32>| Raw {
+            cmd: cmd.to_string(),
+            cwd: None,
+            ts: Some(ts),
+            exit,
+        };
+        let raw = vec![
+            with_meta("make", 100, Some(2)),
+            pair("ls", None),
+            with_meta("make", 200, Some(0)),
+            // The newest occurrence has no metadata (a shell-history duplicate):
+            // the newest occurrence *with* metadata still wins.
+            pair("make", None),
+        ];
+        let h = normalize(raw);
+        assert_eq!(
+            h.meta.get("make"),
+            Some(&EntryMeta {
+                ts: Some(200),
+                exit: Some(0)
+            })
+        );
+        // No metadata anywhere → no entry.
+        assert_eq!(h.meta.get("ls"), None);
     }
 
     #[test]
@@ -438,6 +620,29 @@ mod tests {
     }
 
     #[test]
+    fn frecency_scores_align_with_the_ranking() {
+        let entries = vec!["a".to_string(), "b".to_string()];
+        let scores = frecency_scores(&entries, &HashMap::new(), &HashMap::new(), None);
+        assert_eq!(scores.len(), 2);
+        // Same count, so the newer entry scores strictly higher (recency).
+        assert!(scores[1] > scores[0]);
+    }
+
+    #[test]
+    fn format_ago_picks_readable_units() {
+        let now = 1_700_000_000;
+        assert_eq!(format_ago(now, now - 5), "now");
+        assert_eq!(format_ago(now, now - 300), "5m");
+        assert_eq!(format_ago(now, now - 2 * 3600), "2h");
+        assert_eq!(format_ago(now, now - 3 * 86_400), "3d");
+        assert_eq!(format_ago(now, now - 20 * 86_400), "2w");
+        assert_eq!(format_ago(now, now - 90 * 86_400), "3mo");
+        assert_eq!(format_ago(now, now - 800 * 86_400), "2y");
+        // A clock that went backwards degrades to "now", never underflows.
+        assert_eq!(format_ago(now, now + 100), "now");
+    }
+
+    #[test]
     fn looks_absolute_recognizes_unix_and_windows_roots() {
         assert!(looks_absolute("/home/me"));
         assert!(looks_absolute("\\\\server\\share")); // UNC
@@ -451,37 +656,45 @@ mod tests {
     }
 
     #[test]
-    fn start_of_command_strips_prefixes_and_skips_timestamps() {
-        // zsh extended-history prefix is stripped.
+    fn start_of_command_strips_prefixes_and_keeps_timestamps() {
+        // zsh extended-history prefix is stripped, its start timestamp kept.
         assert_eq!(
             start_of_command(": 1700000000:0;git status"),
-            Some("git status")
+            Some(("git status", Some(1_700_000_000)))
         );
         // A colon-prefixed line whose middle isn't numeric is taken verbatim.
-        assert_eq!(start_of_command(": not-a-ts;cmd"), Some(": not-a-ts;cmd"));
+        assert_eq!(
+            start_of_command(": not-a-ts;cmd"),
+            Some((": not-a-ts;cmd", None))
+        );
         // Regression: an empty or colon-only "timestamp" is not the zsh format —
         // the line is a real command (`: ;echo hi` runs the colon builtin, then
         // echo) and must NOT have its head stripped.
-        assert_eq!(start_of_command(": ;echo hi"), Some(": ;echo hi"));
-        assert_eq!(start_of_command(": :::;cmd"), Some(": :::;cmd"));
-        // A bash timestamp comment carries no command.
-        assert_eq!(start_of_command("#1700000000"), None);
-        // A real comment-looking line with non-digits is a command.
-        assert_eq!(start_of_command("#notdigits"), Some("#notdigits"));
+        assert_eq!(start_of_command(": ;echo hi"), Some((": ;echo hi", None)));
+        assert_eq!(start_of_command(": :::;cmd"), Some((": :::;cmd", None)));
         // Blank → None.
         assert_eq!(start_of_command(""), None);
         // Plain command passes through.
-        assert_eq!(start_of_command("ls -la"), Some("ls -la"));
+        assert_eq!(start_of_command("ls -la"), Some(("ls -la", None)));
+    }
+
+    #[test]
+    fn bash_timestamp_recognizes_only_all_digit_comments() {
+        assert_eq!(bash_timestamp("#1700000000"), Some(1_700_000_000));
+        // A real comment-looking line with non-digits is a command, not a stamp.
+        assert_eq!(bash_timestamp("#notdigits"), None);
+        assert_eq!(bash_timestamp("#"), None);
+        assert_eq!(bash_timestamp("ls"), None);
     }
 
     #[test]
     fn normalize_dedups_counts_and_caps_entries() {
         // Duplicates collapse to the most recent position, with a run count tallied.
         let raw = vec![
-            ("ls".to_string(), Some("/a".to_string())),
-            ("git".to_string(), None),
-            ("".to_string(), None), // blank dropped
-            ("ls".to_string(), Some("/b".to_string())),
+            pair("ls", Some("/a")),
+            pair("git", None),
+            pair("", None), // blank dropped
+            pair("ls", Some("/b")),
         ];
         let h = normalize(raw);
         // "ls" moved to the end (most recent) and "git" stayed; blank gone.
@@ -492,8 +705,8 @@ mod tests {
         assert!(dirs.contains("/a") && dirs.contains("/b"));
 
         // The cap keeps only the most recent MAX_ENTRIES unique lines.
-        let big: Vec<(String, Option<String>)> = (0..MAX_ENTRIES + 50)
-            .map(|i| (format!("cmd{i}"), None))
+        let big: Vec<Raw> = (0..MAX_ENTRIES + 50)
+            .map(|i| pair(&format!("cmd{i}"), None))
             .collect();
         let capped = normalize(big);
         assert_eq!(capped.entries.len(), MAX_ENTRIES);
@@ -505,22 +718,36 @@ mod tests {
     }
 
     #[test]
-    fn append_then_load_recovers_the_command() {
+    fn append_then_load_recovers_the_command_and_metadata() {
         // Pin the config dir so history writes to a temp file, not the real one.
         let dir = std::env::temp_dir().join(format!("tty7-covtest-{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok();
         crate::core::config::set_config_dir(dir);
 
         // A command with an embedded newline is rejected (one-per-line format).
-        append("bad\ncmd", None);
+        append("bad\ncmd", None, 1_700_000_000, None);
 
-        // A unique command tagged with an absolute cwd round-trips through load().
+        // A unique command tagged with cwd/ts/exit round-trips through load().
         let unique = format!("tty7_cov_marker_{}", std::process::id());
-        append(&unique, Some(Path::new("/tmp")));
+        append(&unique, Some(Path::new("/tmp")), 1_700_000_123, Some(1));
         let loaded = load();
         assert!(
             loaded.entries.iter().any(|e| e == &unique),
             "appended command should be recalled by load()"
+        );
+        assert_eq!(
+            loaded.meta.get(&unique),
+            Some(&EntryMeta {
+                ts: Some(1_700_000_123),
+                exit: Some(1)
+            })
+        );
+        assert!(
+            loaded
+                .cwds
+                .get(&unique)
+                .is_some_and(|d| d.contains("/tmp")),
+            "cwd association should round-trip"
         );
         assert!(
             !loaded.entries.iter().any(|e| e.contains('\n')),
@@ -544,7 +771,12 @@ mod tests {
                 let tag = tag.clone();
                 std::thread::spawn(move || {
                     for i in 0..25 {
-                        append(&format!("{tag}_{t}_{i}"), Some(Path::new("/tmp")));
+                        append(
+                            &format!("{tag}_{t}_{i}"),
+                            Some(Path::new("/tmp")),
+                            1_700_000_000,
+                            Some(0),
+                        );
                     }
                 })
             })
@@ -568,17 +800,17 @@ mod tests {
     #[test]
     fn append_rejects_a_cwd_that_would_break_the_line_format() {
         // Regression: a cwd containing a newline used to be written verbatim into
-        // the `<cwd>\t<cmd>` line, splitting the record — the pre-newline half
-        // loaded back as a bogus command and the real command gained a wrong cwd.
-        // Such a cwd is dropped (legacy bare form) so the record stays one line.
+        // the record, splitting it — the pre-newline half loaded back as a bogus
+        // command and the real command gained a wrong cwd. Such a cwd is dropped
+        // (empty field) so the record stays one line.
         let dir = std::env::temp_dir().join(format!("tty7-covtest-{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok();
         crate::core::config::set_config_dir(dir);
 
         let unique = format!("tty7_nlcwd_marker_{}", std::process::id());
-        append(&unique, Some(Path::new("/tmp/evil\n/tmp/tail")));
+        append(&unique, Some(Path::new("/tmp/evil\n/tmp/tail")), 1_700_000_000, None);
         let loaded = load();
-        // The command itself survives, as a bare entry…
+        // The command itself survives…
         assert!(loaded.entries.iter().any(|e| e == &unique));
         // …with no cwd association (the unusable path was dropped, not split)…
         assert!(loaded.cwds.get(&unique).is_none_or(|d| d.is_empty()));

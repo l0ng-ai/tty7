@@ -89,14 +89,25 @@ Files and sources:
 
 Format:
 
-- New tty7 entries are `<cwd>\t<command>` when cwd is an absolute path.
-- Legacy bare command lines are accepted.
+- New tty7 entries are `<ts>\t<exit>\t<cwd>\t<command>`: unix seconds when the
+  command ran, that run's exit code (empty when the run never completed under
+  tty7's watch), the absolute cwd (empty when unknown), then the command — the
+  last field, so its own tabs survive.
+- The record is written when the command *finishes*, not when it is submitted
+  (like zsh's `INC_APPEND_HISTORY_TIME`), so it can carry the exit code the
+  daemon sniffs from OSC 133;D. A pane that goes away mid-command flushes the
+  record without one.
+- Older `<cwd>\t<command>` lines and legacy bare command lines are accepted.
+- Timestamps from zsh extended history and bash `HISTTIMEFORMAT` comments are
+  carried over when seeding.
 
 Load behavior:
 
 - Blanks are dropped.
 - Duplicates are collapsed while preserving most recent occurrence semantics.
 - Counts and cwd sets are accumulated for ranking.
+- Last-run metadata (timestamp + exit code) is kept per command — the Ctrl+R
+  menu's "ran 3h ago" and failure badges.
 - Entry count is capped.
 
 Ranking:

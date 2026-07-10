@@ -84,6 +84,11 @@ struct ShellState {
     active: bool,
     at_prompt: bool,
     last_exit: Option<i32>,
+    /// Monotonic count of `Prompt` reports applied. Lets the view tell a
+    /// *fresh* prompt (the shell cycled through the submitted command and came
+    /// back) from the stale pre-submit state — even when 1 Hz polling misses
+    /// the intermediate not-at-prompt window of a fast command.
+    seq: u64,
 }
 
 /// The shared handles the reader thread writes into as daemon frames arrive;
@@ -513,6 +518,7 @@ impl RemoteTerminal {
                                         active,
                                         at_prompt,
                                         last_exit,
+                                        seq: guard.seq + 1,
                                     };
                                 }
                                 // The shell just reported a fresh prompt, so at
@@ -722,6 +728,19 @@ impl RemoteTerminal {
             .lock()
             .map(|s| s.active && s.at_prompt)
             .unwrap_or(false)
+    }
+
+    /// Monotonic count of `Prompt` reports applied so far — see
+    /// [`ShellState::seq`]. Comparing values from before and after a submit
+    /// tells whether the shell has reported back since.
+    pub fn prompt_seq(&self) -> u64 {
+        self.shell_state.lock().map(|s| s.seq).unwrap_or(0)
+    }
+
+    /// Exit code of the most recently completed foreground command, as sniffed
+    /// from OSC 133;D daemon-side. `None` before any command has finished.
+    pub fn last_exit_code(&self) -> Option<i32> {
+        self.shell_state.lock().ok().and_then(|s| s.last_exit)
     }
 
     /// Whether shell integration has engaged at all (the daemon has seen any

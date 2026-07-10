@@ -115,7 +115,7 @@ The essentials:
 | <kbd>⌘ K</kbd> | clear the screen and scrollback |
 | <kbd>⌘ P</kbd> | command palette |
 | <kbd>⌘ F</kbd> | search the scrollback |
-| <kbd>⌃ R</kbd> | reverse-search shell history |
+| <kbd>⌃ R</kbd> | fuzzy-search shell history |
 | <kbd>⌘ +</kbd> · <kbd>⌘ −</kbd> · <kbd>⌘ 0</kbd> | font size up · down · reset |
 
 The full list — and any overrides — lives in **Settings → Keybindings**.

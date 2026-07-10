@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Ctrl+R history search is now a browsable menu: matching is fuzzy
+  (subsequence with word-boundary/consecutive bonuses; space-separated terms
+  must all match) blended with frecency, and the ranked candidates float
+  beside the prompt — matched characters highlighted, selection moved by
+  Ctrl+R/↓ and Ctrl+S/↑, Enter to edit, Cmd+Enter to run outright. An empty
+  query lists the whole history by frecency, so bare Ctrl+R is a "recent &
+  relevant" browser. The classic `(reverse-i-search)` line stays. (#45)
+- History records now carry when the command ran and its exit code: new
+  entries are `<ts>\t<exit>\t<cwd>\t<command>`, written when the command
+  *finishes* (zsh `INC_APPEND_HISTORY_TIME`-style, exit code sniffed from
+  OSC 133;D daemon-side); older formats still load. The Ctrl+R menu shows
+  "ran 3h ago" and a `✗` badge on commands whose last run failed; timestamps
+  from zsh/bash history files are carried over when seeding. (#45)
+
 ## [0.8.0] - 2026-07-10
 
 ### Added

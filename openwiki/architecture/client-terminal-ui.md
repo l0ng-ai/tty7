@@ -134,11 +134,11 @@ Features include:
 
 History behavior:
 
-- tty7 writes `<cwd>\t<command>` lines when cwd is known.
-- Legacy bare lines parse without cwd association.
-- Load normalizes blanks/duplicates and caps entries.
+- tty7 writes `<ts>\t<exit>\t<cwd>\t<command>` lines, deferred until the command finishes so the record carries its exit code (see `data-and-config.md` for the format and flush rules).
+- Older `<cwd>\t<command>` and legacy bare lines parse without the missing fields.
+- Load normalizes blanks/duplicates, keeps per-command last-run metadata (timestamp + exit code), and caps entries.
 - Frecency ranking combines recency, frequency, and current-directory bonus.
-- Up/Down uses chronological history; ghost suggestion uses frecency-ranked history.
+- Up/Down uses chronological history; ghost suggestion uses frecency-ranked history; Ctrl+R blends fuzzy match scores with frecency.
 
 ### Completion
 
@@ -157,7 +157,7 @@ Completion is intentionally shallow: whitespace-delimited word detection, simple
 
 URL handling prefers OSC 8 hyperlinks and falls back to bare URL detection. Cmd/Ctrl-click opens links when `Config::link_url` is enabled.
 
-`src/terminal/reverse_search.rs` implements Ctrl+R history search with case-insensitive contains matching, repeated Ctrl+R to advance older, Enter to accept into editor, and Escape/Ctrl+G/Ctrl+C to cancel.
+`src/terminal/reverse_search.rs` implements Ctrl+R history search as a ranked match list: `src/terminal/fuzzy.rs` scores case-insensitive fuzzy subsequences (whitespace-separated query terms must all match), blended with each entry's frecency; an empty query lists the whole history by frecency. The view renders the candidates in a completion-style menu (`render_reverse_search_menu`) with matched characters highlighted and last-run time / failure badges from history metadata, plus the classic `(reverse-i-search)` prompt on the input row. Ctrl+R/↓ and Ctrl+S/↑ move the selection, Enter accepts into the editor, Cmd+Enter runs the selection outright, and Escape/Ctrl+G/Ctrl+C cancels.
 
 ## Settings, keymap, and theme
 
