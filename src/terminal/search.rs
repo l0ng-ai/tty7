@@ -359,6 +359,12 @@ pub(super) fn url_span_at(text: &str, col: usize) -> Option<(usize, usize, Strin
         if let Some(bad) = token.find(|c| !is_url_char(c)) {
             token.truncate(bad);
         }
+        // ASCII `(`/`)` pass the char test (Wikipedia URLs use them), but a closer
+        // with no matching opener *inside the URL* belongs to the prose around it:
+        // `(…/pull/43)(Fixes` must end at `43`, not swallow `)(Fixes`. Cut at the
+        // first unbalanced closer; what survives is balanced, so the trailing trim
+        // below knows any `)`/`]` still standing is part of the address.
+        truncate_at_unbalanced_close(&mut token);
         // Truncating there can re-expose trailing punctuation (`a.com,说明` → `a.com,`).
         trim_trailing_punct(&mut token);
         let end = start + token.chars().count() - 1;
@@ -379,6 +385,10 @@ pub(super) fn url_span_at(text: &str, col: usize) -> Option<(usize, usize, Strin
         token.remove(0);
         start += 1;
     }
+    // Removing the wrappers can orphan their closing halves (`(www.x)` kept its
+    // `)` through the first trim because the pair looked balanced): trim again
+    // now that the openers are gone.
+    trim_trailing_punct(&mut token);
     if token.starts_with("www.") && token.contains('.') {
         let end = start + token.chars().count() - 1;
         (start..=end)
@@ -389,33 +399,57 @@ pub(super) fn url_span_at(text: &str, col: usize) -> Option<(usize, usize, Strin
     }
 }
 
-/// Trim trailing punctuation a URL gets glued to in prose — `).,;:'"` and `>` plus
+/// Trim trailing punctuation a URL gets glued to in prose — `.,;:'"` and `>` plus
 /// their full-width / CJK counterparts — so the link stops where the address does.
-/// None of these characters occur at the end of a real URL.
+/// None of these characters occur at the end of a real URL. ASCII `)` and `]` *can*
+/// (`…/Rust_(programming_language)`), so those are stripped only while unmatched
+/// within the token — a closer with an opener earlier in the token is part of the
+/// address (or of a wrapper pair the leading-strip will remove), not glue.
 fn trim_trailing_punct(token: &mut String) {
-    while token.chars().next_back().is_some_and(|c| {
-        matches!(
-            c,
-            ')' | ']'
-                | '.'
-                | ','
-                | ';'
-                | ':'
-                | '\''
-                | '"'
-                | '>'
-                | '）'
-                | '］'
-                | '】'
-                | '》'
-                | '」'
-                | '。'
-                | '，'
-                | '；'
-                | '：'
-        )
-    }) {
+    loop {
+        let strip = match token.chars().next_back() {
+            Some(')') => count_char(token, ')') > count_char(token, '('),
+            Some(']') => count_char(token, ']') > count_char(token, '['),
+            Some(
+                '.' | ',' | ';' | ':' | '\'' | '"' | '>' | '）' | '］' | '】' | '》' | '」' | '。'
+                | '，' | '；' | '：',
+            ) => true,
+            _ => false,
+        };
+        if !strip {
+            return;
+        }
         token.pop();
+    }
+}
+
+fn count_char(s: &str, needle: char) -> usize {
+    s.chars().filter(|&c| c == needle).count()
+}
+
+/// Cut `token` at the first ASCII `)` or `]` that has no matching opener before it
+/// in the token. Balanced pairs — legal and common in URLs — survive; the first
+/// orphan closer marks where surrounding prose (`(url)(more…`, `[see url] next`)
+/// takes over. Parens and brackets balance independently, each as a plain counter.
+fn truncate_at_unbalanced_close(token: &mut String) {
+    let mut parens = 0usize;
+    let mut brackets = 0usize;
+    for (i, c) in token.char_indices() {
+        match c {
+            '(' => parens += 1,
+            '[' => brackets += 1,
+            ')' if parens == 0 => {
+                token.truncate(i);
+                return;
+            }
+            ']' if brackets == 0 => {
+                token.truncate(i);
+                return;
+            }
+            ')' => parens -= 1,
+            ']' => brackets -= 1,
+            _ => {}
+        }
     }
 }
 
@@ -629,10 +663,46 @@ mod tests {
     fn url_at_keeps_ascii_parens_inside_a_url() {
         // ASCII `(`/`)` are valid URL characters (e.g. Wikipedia), so a pair in the
         // middle of the path must survive — the non-URL-char truncation only fires on
-        // a full-width bracket, never an ASCII one. (A *trailing* `)` is still trimmed
-        // as a likely wrapper; balancing parens is out of scope.)
+        // a full-width bracket, never an ASCII one.
         let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)/history";
         assert_eq!(url_at(url, 40).as_deref(), Some(url));
+        // A *trailing* balanced pair survives too: the closer has its opener inside
+        // the URL, so it is part of the address, not prose glue.
+        let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        assert_eq!(url_at(url, 40).as_deref(), Some(url));
+        // Even when that URL is itself parenthesized: the wrapper pair is stripped,
+        // the URL's own pair is kept.
+        let line = format!("see ({url}) ok");
+        assert_eq!(url_at(&line, 8).as_deref(), Some(url));
+        // IPv6 literals keep their brackets the same way.
+        let url = "http://[::1]:8080/status";
+        let line = format!("probe [{url}] done");
+        assert_eq!(url_at(&line, 10).as_deref(), Some(url));
+    }
+
+    #[test]
+    fn url_at_stops_at_unbalanced_close_paren_glued_after_url() {
+        // Regression: `#43 (https://…/pull/43)(Fixes #42),分支 …` — the token runs
+        // `(url)(Fixes` with no space, every char is URL-legal, and the link used to
+        // swallow `)(Fixes`. The first `)` has no opener inside the URL (the `(`
+        // before the scheme was dropped with the prefix), so the link ends at `43`.
+        let url = "https://github.com/l0ng-ai/tty7/pull/43";
+        let line = format!("PR 已开:#43 ({url})(Fixes #42),分支 fix-x。");
+        let h = line.chars().position(|c| c == 'h').expect("scheme start");
+        assert_eq!(url_at(&line, h).as_deref(), Some(url));
+        // The span covers exactly the URL: the wrapping `(` sits before it, the
+        // `)(Fixes` glue after it, and hovering the glue is not a link.
+        let (start, end, got) = url_span_at(&line, h + 10).expect("URL inside parens");
+        assert_eq!(got, url);
+        assert_eq!(line.chars().nth(start - 1), Some('('));
+        assert_eq!(line.chars().nth(end + 1), Some(')'));
+        let f = line.chars().position(|c| c == 'F').expect("`Fixes` start");
+        assert_eq!(url_at(&line, f), None);
+        // Same for an orphan `]`: `[see https://a.com/x] next` glued without spaces.
+        assert_eq!(
+            url_at("read https://a.com/x]next now", 8).as_deref(),
+            Some("https://a.com/x")
+        );
     }
 
     #[test]
