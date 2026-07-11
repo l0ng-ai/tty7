@@ -96,8 +96,9 @@ impl Opt {
 
 /// A positional / value argument. `template` mirrors Fig's `"filepaths"` /
 /// `"folders"` (→ tty7's path completion); `suggestions` is a static candidate
-/// list; `generators` holds only the *static* `script`s (dynamic value
-/// completion — running them — is a later step, so they're unused for now).
+/// list; `generators` holds the *static* shell `script`s whose stdout becomes
+/// candidates — the completion engine collects them and the view runs them
+/// asynchronously (see [`super::generator`]).
 #[derive(Debug, Deserialize)]
 pub struct Arg {
     #[allow(dead_code)]
@@ -113,7 +114,6 @@ pub struct Arg {
     pub template: Vec<String>,
     #[serde(default)]
     pub suggestions: Vec<Suggestion>,
-    #[allow(dead_code)]
     #[serde(default)]
     pub generators: Vec<Generator>,
 }
@@ -140,11 +140,13 @@ pub struct Suggestion {
 }
 
 /// A dynamic-value generator, reduced to its static shell `script` (the JS
-/// `postProcess` is dropped at conversion time; tty7 would default to
-/// one-suggestion-per-line). Not executed yet — kept so the data is ready.
+/// `postProcess` is dropped at conversion time; tty7 defaults to
+/// one-suggestion-per-line, overridable per script — see [`super::generator`]).
+/// The tokens are joined with single spaces and re-parsed by `/bin/sh -c`, since
+/// the converter word-split original string scripts (so `bash -c "…"` entries
+/// only survive re-joining).
 #[derive(Debug, Deserialize)]
 pub struct Generator {
-    #[allow(dead_code)]
     #[serde(default)]
     pub script: Vec<String>,
 }

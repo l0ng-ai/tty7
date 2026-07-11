@@ -226,6 +226,12 @@ pub struct TerminalView {
     /// when it opened. Typing/Backspace re-filter it in place; it closes on
     /// accept, on Escape, or once the edited word no longer matches anything.
     completion: Option<CompletionSession>,
+    /// Monotonic tag bumped every time a completion session opens or closes.
+    /// Dynamic generators run on background threads and land their results here
+    /// via `cx.spawn`; each task captures the generation it was spawned under and
+    /// its result is dropped unless it still matches — so output from a session
+    /// the user has since closed (or replaced) can never leak into a later menu.
+    completion_generation: u64,
     /// Active Ctrl+R history search, if any. While set, the editor shows a
     /// `(reverse-i-search)` prompt instead of the line and a menu of the ranked
     /// matches floats beside it: typing edits the query (fuzzy, blended with
@@ -763,6 +769,7 @@ impl TerminalView {
             history_stash: String::new(),
             pending_history: None,
             completion: None,
+            completion_generation: 0,
             reverse_search: None,
             integration_notice: None,
             integration_notice_shown: false,
@@ -1096,7 +1103,7 @@ impl TerminalView {
                     if let Some(text) = self.cmd.selected_text() {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
                         self.cmd.delete_selection();
-                        self.completion = None;
+                        self.close_completion();
                         self.cursor_visible = true;
                         cx.notify();
                     }
@@ -1143,7 +1150,7 @@ impl TerminalView {
                     } else {
                         self.cmd.undo();
                     }
-                    self.completion = None;
+                    self.close_completion();
                     cx.notify();
                 }
                 CmdKey::Consumed
@@ -1167,7 +1174,7 @@ impl TerminalView {
                     if !self.cmd.delete_selection() {
                         self.cmd.delete_to_start();
                     }
-                    self.completion = None;
+                    self.close_completion();
                     self.cursor_visible = true;
                     cx.notify();
                 }
@@ -1218,7 +1225,7 @@ impl TerminalView {
                     {
                         self.completion_accept(cx);
                     } else {
-                        self.completion = None;
+                        self.close_completion();
                         self.submit_command(cx);
                     }
                     return;
@@ -1230,7 +1237,7 @@ impl TerminalView {
                     return;
                 }
                 (false, "escape") => {
-                    self.completion = None;
+                    self.close_completion();
                     cx.notify();
                     return;
                 }
@@ -1246,7 +1253,7 @@ impl TerminalView {
         }
 
         // Any other editing key closes an open completion menu.
-        self.completion = None;
+        self.close_completion();
 
         // Readline-style control combinations, delegated so this dispatcher stays
         // scannable. Every Ctrl chord is swallowed at the prompt (recognized or
@@ -1258,7 +1265,7 @@ impl TerminalView {
             // the readline `Ctrl+A` = move-to-line-start (its select-all is Cmd+A).
             if cfg!(not(target_os = "macos")) && key == "a" {
                 self.cmd.select_all();
-                self.completion = None;
+                self.close_completion();
                 self.cursor_visible = true;
                 cx.notify();
                 return;
@@ -1590,7 +1597,7 @@ impl TerminalView {
             let trimmed = text.strip_suffix('\n').unwrap_or(&text);
             self.cmd.insert_str(trimmed);
             self.history_nav = None;
-            self.completion = None;
+            self.close_completion();
             self.cursor_visible = true;
             cx.notify();
             return;
@@ -2018,7 +2025,7 @@ impl TerminalView {
             _ => self.cmd.select_all(),
         }
         self.editor_select_gesture = true;
-        self.completion = None;
+        self.close_completion();
         self.cursor_visible = true;
         cx.notify();
         true
@@ -2215,7 +2222,7 @@ impl TerminalView {
         }
         self.history_nav = None;
         self.history_stash.clear();
-        self.completion = None;
+        self.close_completion();
 
         // Any gap typeahead still waiting for its wipe (the ^U is deferred
         // until zle reads) would prefix the submitted line on zle's side —
@@ -2465,7 +2472,14 @@ impl TerminalView {
             return;
         };
 
-        if comp.candidates.len() == 1 {
+        // With generators inbound the candidate set is still growing, so the
+        // usual "unique sync match → accept" and "fill the common prefix"
+        // shortcuts are unsafe: a result landing a moment later could add or
+        // change the pick. Only the fully-static case (no pending) keeps the
+        // classic behavior byte-for-byte.
+        let has_pending = !comp.pending.is_empty();
+
+        if !has_pending && comp.candidates.len() == 1 {
             // Unique match: accept it outright.
             let c = comp.candidates[0].clone();
             self.completion_insert(&c, c.start);
@@ -2474,25 +2488,120 @@ impl TerminalView {
             return;
         }
 
-        // Multiple matches: fill the longest common prefix when it extends the
-        // typed word, then show the menu with the first row highlighted. All
-        // candidates share the prefix, so the fill never invalidates the set.
-        let word_start = comp.candidates[0].start;
-        let word_end = comp.candidates[0].end;
+        // The word range is carried by any candidate; with none (pure-generator
+        // slot) derive it from the caret so the session still knows what it
+        // replaces.
+        let (word_start, word_end) = match comp.candidates.first() {
+            Some(c) => (c.start, c.end),
+            None => (word_start_of(&line, cursor), cursor),
+        };
         let word: String = line
             .chars()
             .skip(word_start)
             .take(word_end - word_start)
             .collect();
         let s = CompletionSession::new(word_start, word.clone(), comp.candidates);
-        if let Some(lcp) = s.common_prefix()
+        if !has_pending
+            && let Some(lcp) = s.common_prefix()
             && lcp.chars().count() > word.chars().count()
         {
+            // Static-only: fill the longest common prefix when it extends the
+            // typed word. All candidates share it, so the fill never invalidates
+            // the set. With generators pending we skip this — the eventual set
+            // may share a shorter prefix, and mutating the line before results
+            // arrive would be jarring.
             self.apply_candidate(&line, word_start, word_end, &lcp);
         }
-        self.completion = Some(s);
+        let generation = self.open_completion(s);
         self.cursor_visible = true;
         cx.notify();
+
+        // Kick off each generator on the background executor and merge results
+        // back on the main thread, tagged with this session's generation.
+        for pending in comp.pending {
+            let script = pending.script;
+            let cwd = cwd.clone();
+            cx.spawn(async move |this, cx| {
+                let results = cx
+                    .background_executor()
+                    .spawn(async move { super::generator::run(&script, &cwd) })
+                    .await;
+                if results.is_empty() {
+                    return;
+                }
+                let _ = this.update(cx, |view, cx| {
+                    view.completion_merge(generation, results, cx);
+                });
+            })
+            .detach();
+        }
+    }
+
+    /// Open a completion menu and bump the generation tag, returning it so a
+    /// caller spawning generators can stamp their in-flight results. Every open
+    /// gets a fresh generation, so a slow generator from a prior session can't be
+    /// mistaken for one belonging to this menu.
+    fn open_completion(&mut self, session: CompletionSession) -> u64 {
+        self.completion = Some(session);
+        self.completion_generation = self.completion_generation.wrapping_add(1);
+        self.completion_generation
+    }
+
+    /// Close the menu, bumping the generation so any generator still running for
+    /// it is orphaned — its result will be dropped on arrival. No-op when nothing
+    /// is open.
+    fn close_completion(&mut self) {
+        let _ = self.take_completion();
+    }
+
+    /// Take the open session (for accept), bumping the generation like
+    /// [`Self::close_completion`].
+    fn take_completion(&mut self) -> Option<CompletionSession> {
+        let s = self.completion.take();
+        if s.is_some() {
+            self.completion_generation = self.completion_generation.wrapping_add(1);
+        }
+        s
+    }
+
+    /// Merge a finished generator's candidates into the open menu. Dropped unless
+    /// the session that spawned it is still the current one (`generation` match) —
+    /// the guard against a result outliving its menu. Rebuilds the candidate set
+    /// against the *live* word (the caret may have moved on while the generator
+    /// ran) and repaints.
+    fn completion_merge(
+        &mut self,
+        generation: u64,
+        results: Vec<super::generator::Parsed>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.completion_generation != generation || self.completion.is_none() {
+            return;
+        }
+        let word_start = self.completion.as_ref().map(|s| s.word_start).unwrap_or(0);
+        let chars: Vec<char> = self.cmd.text().chars().collect();
+        let cursor = self.cmd.cursor().min(chars.len());
+        let end = cursor.max(word_start);
+        let live_word: String = if cursor >= word_start {
+            chars[word_start..cursor].iter().collect()
+        } else {
+            String::new()
+        };
+        let new: Vec<completion::Candidate> = results
+            .into_iter()
+            .map(|p| completion::Candidate {
+                text: p.text,
+                kind: CandidateKind::Value,
+                start: word_start,
+                end,
+                description: p.description,
+                icon: None,
+            })
+            .collect();
+        if let Some(s) = self.completion.as_mut() {
+            s.merge(new, &live_word);
+            cx.notify();
+        }
     }
 
     /// Tab / Shift-Tab with the menu open: first try extending the line to the
@@ -2537,7 +2646,7 @@ impl TerminalView {
     /// menu. The command does not run — a second Enter (or Cmd+Enter in one
     /// stroke) submits.
     fn completion_accept(&mut self, cx: &mut Context<Self>) {
-        let Some(s) = self.completion.take() else {
+        let Some(s) = self.take_completion() else {
             return;
         };
         if let Some(c) = s.selected().cloned() {
@@ -2585,7 +2694,7 @@ impl TerminalView {
                 s.refilter(&word)
             };
         if !keep {
-            self.completion = None;
+            self.close_completion();
         }
     }
 
@@ -3788,6 +3897,18 @@ fn mac_only(_key: &'static str) -> Option<&'static str> {
 /// wide / fullwidth glyphs and most emoji, 1 otherwise. Mirrors how the grid
 /// (alacritty) lays out wide characters, so the editor's per-char cells and
 /// click hit-testing line up with the shell's own rendering.
+/// The char index where the whitespace-delimited word ending at `cursor` begins.
+/// Mirrors the word-splitting the completion engine does, used when a completion
+/// is all generators (no sync candidate to read the range off).
+fn word_start_of(line: &str, cursor: usize) -> usize {
+    let chars: Vec<char> = line.chars().collect();
+    let mut start = cursor.min(chars.len());
+    while start > 0 && !chars[start - 1].is_whitespace() {
+        start -= 1;
+    }
+    start
+}
+
 fn display_width(c: char) -> usize {
     let u = c as u32;
     let wide = matches!(u,
@@ -5525,6 +5646,99 @@ mod gpui_tests {
                 assert!(
                     view.input_active(),
                     "off the alt screen and at the prompt, the editor is live"
+                );
+            })
+            .unwrap();
+    }
+
+    /// A generator that finishes while its menu is still open merges its results
+    /// in: candidates land, the set filters to the word as it now stands, and the
+    /// highlight settles on the closest match — the async half of #51's fix.
+    #[gpui::test]
+    fn generator_results_merge_into_the_open_menu(cx: &mut TestAppContext) {
+        use crate::terminal::generator::Parsed;
+
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                // A pure-generator slot: the menu opened with no sync candidates
+                // (word_start at the caret, empty open word). The user has since
+                // typed "ma", so the live word narrows what the results show.
+                view.cmd.set_with_cursor("git checkout ma", 15);
+                let session = CompletionSession::new(13, String::new(), Vec::new());
+                let generation = view.open_completion(session);
+
+                let results = vec![
+                    Parsed {
+                        text: "main".into(),
+                        description: Some("branch".into()),
+                    },
+                    Parsed {
+                        text: "mainline".into(),
+                        description: Some("branch".into()),
+                    },
+                    Parsed {
+                        text: "feature".into(),
+                        description: None,
+                    },
+                ];
+                view.completion_merge(generation, results, cx);
+
+                let s = view.completion.as_ref().expect("menu still open");
+                let shown: Vec<&str> = s.filtered.iter().map(|&i| s.all[i].text.as_str()).collect();
+                // "feature" filtered out by the live "ma"; closeness orders the
+                // rest; the top row is preselected.
+                assert_eq!(shown, vec!["main", "mainline"]);
+                assert_eq!(s.selected().unwrap().text, "main");
+            })
+            .unwrap();
+    }
+
+    /// A generator that finishes *after* its menu closed must not resurrect it:
+    /// closing bumps the generation, so the stale result is dropped.
+    #[gpui::test]
+    fn generator_result_for_a_closed_menu_is_dropped(cx: &mut TestAppContext) {
+        use crate::terminal::generator::Parsed;
+
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.cmd.set_with_cursor("git checkout ", 13);
+                let session = CompletionSession::new(13, String::new(), Vec::new());
+                let stale = view.open_completion(session);
+                // The user dismisses the menu before the generator returns.
+                view.close_completion();
+
+                view.completion_merge(
+                    stale,
+                    vec![Parsed {
+                        text: "main".into(),
+                        description: None,
+                    }],
+                    cx,
+                );
+                assert!(
+                    view.completion.is_none(),
+                    "a result for a closed session never reopens the menu"
+                );
+
+                // And a result for an old generation can't bleed into a *new*
+                // session that has since opened.
+                let fresh =
+                    view.open_completion(CompletionSession::new(13, String::new(), Vec::new()));
+                assert_ne!(stale, fresh);
+                view.completion_merge(
+                    stale,
+                    vec![Parsed {
+                        text: "main".into(),
+                        description: None,
+                    }],
+                    cx,
+                );
+                let s = view.completion.as_ref().unwrap();
+                assert!(
+                    s.all.is_empty(),
+                    "the stale result stayed out of the new menu"
                 );
             })
             .unwrap();

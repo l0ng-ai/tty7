@@ -82,10 +82,28 @@ impl Candidate {
 }
 
 /// The result of completing at a cursor: the word candidates, each with its own
-/// replacement range.
+/// replacement range, plus any *dynamic* generators the position declares.
+///
+/// Generators can't be run here — this module is pure and synchronous, while a
+/// generator is a child process — so the sync candidates come back immediately
+/// and each pending script rides along for the view to execute on a background
+/// thread and [`CompletionSession::merge`] into the live menu. A position that
+/// declares generators is a completion even when `candidates` is empty (an SSH
+/// host list, a git branch list) — returning `Some` here is what stops the caller
+/// from falling back to filesystem paths, the bug behind `ssh <Tab>` listing the
+/// cwd (#51).
 #[derive(Debug)]
 pub struct Completion {
     pub candidates: Vec<Candidate>,
+    pub pending: Vec<PendingGenerator>,
+}
+
+/// A dynamic generator awaiting execution: the shell `script` (the spec's token
+/// list joined with single spaces, ready for `/bin/sh -c`). The view runs it off
+/// the main thread and merges its stdout-derived candidates into the open menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingGenerator {
+    pub script: String,
 }
 
 /// Common shell builtins / keywords, offered in command position. Not exhaustive,
@@ -115,14 +133,18 @@ pub fn complete(line: &str, cursor: usize, cwd: &Path) -> Option<Completion> {
     let word: String = chars[word_start..cursor].iter().collect();
 
     let is_command = chars[..word_start].iter().all(|c| c.is_whitespace());
-    let word_cands = if is_command && !word.contains('/') {
-        complete_command(&word)
+    let (word_cands, pending) = if is_command && !word.contains('/') {
+        (complete_command(&word), Vec::new())
     } else {
         // In argument position, prefer a per-command signature (flags,
         // subcommands, typed args) when the command has one; otherwise fall
-        // back to filesystem paths.
-        complete_signature(&chars, word_start, &word, cwd)
-            .unwrap_or_else(|| complete_path(&word, cwd))
+        // back to filesystem paths. A signature slot that declares suggestions
+        // or generators owns the position: it returns `Some` (possibly with no
+        // sync candidates but pending scripts) rather than ceding to paths.
+        match complete_signature(&chars, word_start, &word, cwd) {
+            Some(sig) => (sig.cands, sig.pending),
+            None => (complete_path(&word, cwd), Vec::new()),
+        }
     };
     let candidates: Vec<Candidate> = word_cands
         .into_iter()
@@ -136,10 +158,13 @@ pub fn complete(line: &str, cursor: usize, cwd: &Path) -> Option<Completion> {
             icon: wc.icon,
         })
         .collect();
-    if candidates.is_empty() {
+    if candidates.is_empty() && pending.is_empty() {
         None
     } else {
-        Some(Completion { candidates })
+        Some(Completion {
+            candidates,
+            pending,
+        })
     }
 }
 
@@ -191,6 +216,20 @@ fn sort_by_closeness(items: &mut [String]) {
     });
 }
 
+/// Order candidates in place by closeness — shorter completions first, ties
+/// alphabetical — the same ordering path and signature completion use, applied
+/// across the merged set so asynchronously-arriving generator results settle
+/// into the menu's existing sort rather than piling up at the end.
+fn sort_candidates_by_closeness(cands: &mut [Candidate]) {
+    cands.sort_by(|a, b| {
+        a.text
+            .chars()
+            .count()
+            .cmp(&b.text.chars().count())
+            .then_with(|| a.text.cmp(&b.text))
+    });
+}
+
 /// Filesystem path completion. Splits `word` into the directory part (kept
 /// verbatim in each candidate so the typed path prefix is preserved) and the
 /// final-segment prefix to match in that directory. Ordered by closeness.
@@ -239,19 +278,31 @@ fn complete_path(word: &str, cwd: &Path) -> Vec<WordCand> {
     out
 }
 
+/// The sync half of a signature-driven completion: candidates ready now, plus
+/// the dynamic generators whose output the view will merge in later. Returned as
+/// one unit so the caller can tell "this slot is a completion (don't fall back to
+/// paths)" from "no signature here" via the `Option` around it.
+struct SigResult {
+    cands: Vec<WordCand>,
+    pending: Vec<PendingGenerator>,
+}
+
 /// Signature-driven completion in argument position. Tokenizes the text before
 /// the word into an argv, and — if the current command has a signature — offers
-/// flags, subcommands, or typed-argument suggestions for the cursor's position.
+/// flags, subcommands, or typed-argument suggestions for the cursor's position,
+/// alongside any dynamic generators that position declares.
 ///
 /// Returns `None` (so the caller falls back to path completion) when the command
-/// has no signature, or when the position yields nothing useful and isn't a flag
-/// or value slot (so a bare argument still lists files).
+/// has no signature, or when the position yields nothing useful and isn't a flag,
+/// value, suggestion, or generator slot (so a bare argument still lists files).
+/// A slot with generators returns `Some` even with zero sync candidates — its
+/// results are still inbound, and falling back to paths there is exactly #51.
 fn complete_signature(
     chars: &[char],
     word_start: usize,
     word: &str,
     cwd: &Path,
-) -> Option<Vec<WordCand>> {
+) -> Option<SigResult> {
     // Only the current simple command matters: start after the last shell
     // separator so `foo | git <tab>` completes `git`, not `foo`.
     let prefix: String = chars[..word_start].iter().collect();
@@ -266,6 +317,7 @@ fn complete_signature(
     let (node, pending_value) = walk_signature(&sig, &tokens[1..]);
 
     // Flag position: options of the current node whose spelling extends `word`.
+    // Flags never carry generators.
     if word.starts_with('-') {
         let mut out = Vec::new();
         for opt in node.options() {
@@ -283,7 +335,10 @@ fn complete_signature(
                 }
             }
         }
-        return Some(finish(out));
+        return Some(SigResult {
+            cands: finish(out),
+            pending: Vec::new(),
+        });
     }
 
     // Value position: the previous token was an option taking an argument.
@@ -293,7 +348,17 @@ fn complete_signature(
         if arg.wants_paths() {
             out.extend(complete_path(word, cwd));
         }
-        return if out.is_empty() { None } else { Some(out) };
+        let pending = collect_generators(arg);
+        // A slot that declares suggestions or generators owns the position even
+        // when nothing matches yet; only a truly featureless value slot cedes to
+        // path completion.
+        if out.is_empty() && pending.is_empty() && arg.suggestions.is_empty() {
+            return None;
+        }
+        return Some(SigResult {
+            cands: out,
+            pending,
+        });
     }
 
     // Fresh token: subcommands of the current node plus its first positional arg.
@@ -313,17 +378,40 @@ fn complete_signature(
             }
         }
     }
+    let mut pending = Vec::new();
+    let mut claims_slot = false;
     if let Some(arg) = node.args().first() {
         push_arg_suggestions(&mut out, arg, word);
         if arg.wants_paths() {
             out.extend(complete_path(word, cwd));
         }
+        pending = collect_generators(arg);
+        // Suggestions/generators mean this positional owns the slot: don't cede
+        // to paths just because the sync list came back empty.
+        claims_slot = !arg.suggestions.is_empty() || !pending.is_empty();
     }
-    if out.is_empty() {
+    if out.is_empty() && !claims_slot {
         None
     } else {
-        Some(finish(out))
+        Some(SigResult {
+            cands: finish(out),
+            pending,
+        })
     }
+}
+
+/// Join each of an argument's dynamic generators into a runnable `/bin/sh -c`
+/// command string. The converter word-split original string scripts, so joining
+/// with single spaces and letting the shell re-parse restores pipes, quoting,
+/// and `bash -c "…"`-style entries.
+fn collect_generators(arg: &Arg) -> Vec<PendingGenerator> {
+    arg.generators
+        .iter()
+        .filter(|g| !g.script.is_empty())
+        .map(|g| PendingGenerator {
+            script: g.script.join(" "),
+        })
+        .collect()
 }
 
 /// Walk the argv after the command name, descending into matched subcommands and
@@ -523,6 +611,45 @@ impl CompletionSession {
         true
     }
 
+    /// Merge asynchronously-produced generator candidates into the open menu.
+    ///
+    /// Called on the main thread when a background generator finishes: dedupe the
+    /// new candidates by text against everything already gathered, append the
+    /// survivors, re-sort the whole set by closeness, then re-run the prefix
+    /// filter against `live_word` — the word as it stands *now*, which may have
+    /// grown while the generator ran. A highlighted candidate that survives the
+    /// re-filter keeps its highlight (matched by text, since the sort renumbers
+    /// `all`); otherwise the top row takes over.
+    ///
+    /// Unlike [`Self::refilter`] this never signals "close": a generator whose
+    /// results don't match the live word (or that returned nothing) just leaves
+    /// the menu as it was — the session lives or dies on the user's own edits.
+    pub(super) fn merge(&mut self, new: Vec<Candidate>, live_word: &str) {
+        let selected_text = self
+            .index
+            .and_then(|i| self.filtered.get(i))
+            .map(|&i| self.all[i].text.clone());
+
+        let mut seen: BTreeSet<String> = self.all.iter().map(|c| c.text.clone()).collect();
+        let fresh: Vec<Candidate> = new
+            .into_iter()
+            .filter(|c| seen.insert(c.text.clone()))
+            .collect();
+        self.all.extend(fresh);
+        sort_candidates_by_closeness(&mut self.all);
+
+        self.filtered = (0..self.all.len())
+            .filter(|&i| self.all[i].text.starts_with(live_word))
+            .collect();
+        self.index = if self.filtered.is_empty() {
+            None
+        } else {
+            let kept = selected_text
+                .and_then(|t| self.filtered.iter().position(|&i| self.all[i].text == t));
+            Some(kept.unwrap_or(0))
+        };
+    }
+
     /// Longest common prefix (in chars) of the filtered candidates — what Tab
     /// fills before it starts moving the highlight.
     pub(super) fn common_prefix(&self) -> Option<String> {
@@ -604,6 +731,94 @@ mod tests {
             t.iter().any(|s| s == "up"),
             "docker compose subcommands: {t:?}"
         );
+    }
+
+    #[test]
+    fn generator_arg_pends_scripts_and_suppresses_path_fallback() {
+        // `git checkout <arg>` declares branch/tag generators (dynamic) with no
+        // `filepaths` template. Pre-#51 the empty-static-match path fell through
+        // to filesystem completion and listed the cwd; now the slot owns the
+        // position — it returns the generator scripts and no path candidates.
+        let dir = temp_tree("gen-checkout", &[("sentinel.txt", false), ("subdir", true)]);
+        let line = "git checkout ";
+        let c = complete(line, line.chars().count(), &dir).expect("generator slot is a completion");
+        assert!(
+            !c.pending.is_empty(),
+            "the branch/tag generators ride along as pending scripts"
+        );
+        assert!(
+            c.pending
+                .iter()
+                .any(|p| p.script.contains("branch") && p.script.starts_with("git ")),
+            "one pending script is the joined git-branch listing: {:?}",
+            c.pending
+        );
+        // Crucially, no filesystem entry from the cwd leaked into the menu.
+        assert!(
+            c.candidates
+                .iter()
+                .all(|cand| cand.text != "sentinel.txt" && cand.text != "subdir"),
+            "no path fallback: {:?}",
+            c.candidates
+        );
+    }
+
+    #[test]
+    fn generator_script_tokens_join_with_single_spaces() {
+        // The converter word-split original string scripts; joining restores a
+        // single `/bin/sh -c` command.
+        let c = complete("git checkout ", 13, Path::new("/")).unwrap();
+        let branch = c
+            .pending
+            .iter()
+            .find(|p| p.script.contains("branch"))
+            .unwrap();
+        assert_eq!(
+            branch.script,
+            "git --no-optional-locks branch -a --no-color --sort=-committerdate"
+        );
+    }
+
+    #[test]
+    fn merge_dedupes_resorts_and_refilters_to_live_word() {
+        // Open on "f" with one static candidate, then a generator lands two
+        // branches; the merged set is deduped, closeness-sorted, and filtered to
+        // the live word.
+        let mut s = CompletionSession::new(
+            0,
+            "f".into(),
+            vec![cand("feature", CandidateKind::Value, 0, 1)],
+        );
+        let new = vec![
+            cand("feature", CandidateKind::Value, 0, 1), // dup by text — dropped
+            cand("fix", CandidateKind::Value, 0, 1),
+            cand("main", CandidateKind::Value, 0, 1), // filtered out by live word "f"
+        ];
+        s.merge(new, "f");
+        let texts: Vec<&str> = s.filtered.iter().map(|&i| s.all[i].text.as_str()).collect();
+        // "main" gone (doesn't start with "f"); "feature" not duplicated; closeness
+        // puts the shorter "fix" first.
+        assert_eq!(texts, vec!["fix", "feature"]);
+        // The default open-highlight was on "feature"; it survives the merge and
+        // follows the candidate to its new sorted slot rather than snapping to top.
+        assert_eq!(s.selected().unwrap().text, "feature");
+    }
+
+    #[test]
+    fn merge_preserves_a_surviving_highlight() {
+        let mut s = CompletionSession::new(
+            0,
+            "b".into(),
+            vec![
+                cand("branch-a", CandidateKind::Value, 0, 1),
+                cand("branch-b", CandidateKind::Value, 0, 1),
+            ],
+        );
+        s.select(true); // highlight "branch-b"
+        assert_eq!(s.selected().unwrap().text, "branch-b");
+        s.merge(vec![cand("bugfix", CandidateKind::Value, 0, 1)], "b");
+        // The highlighted candidate survives the merge/re-sort and keeps focus.
+        assert_eq!(s.selected().unwrap().text, "branch-b");
     }
 
     #[test]

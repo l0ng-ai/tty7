@@ -20,6 +20,7 @@ mod completion;
 pub mod element;
 pub mod fps;
 mod fuzzy;
+mod generator;
 mod highlight;
 mod history;
 mod hold;
