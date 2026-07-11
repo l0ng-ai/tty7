@@ -23,8 +23,10 @@
 
 use serde_json::Value;
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -32,11 +34,13 @@ use std::time::{Duration, Instant};
 /// Wall-clock ceiling on a generator: past this the child is killed and the
 /// position yields nothing. Generators are meant to be cheap local queries; a
 /// slow or hung one must never stall the menu.
+#[cfg(unix)]
 const TIMEOUT: Duration = Duration::from_millis(800);
 
 /// Ceiling on captured stdout. A runaway generator can't be allowed to buffer
 /// unbounded output into the UI; past this we keep draining the pipe (so the
 /// child doesn't block on a full buffer) but discard the overflow.
+#[cfg(unix)]
 const MAX_STDOUT: usize = 256 * 1024;
 
 /// How long a parsed result stays fresh in the cache. Reopening a menu (Tab,
@@ -72,20 +76,52 @@ pub fn run(script: &str, cwd: &Path) -> Vec<Parsed> {
 /// Kill-on-drop wrapper: whatever path leaves [`run_uncached`] — normal return,
 /// timeout, or an unwind — the child is signalled and reaped rather than leaked
 /// as a zombie holding the pipe open.
+///
+/// The kill targets the child's *process group*, not just the child: `sh -c`
+/// may fork the command rather than exec it (dash does), and killing only the
+/// shell would leave a grandchild holding the stdout pipe open — the reader
+/// thread would then block until the grandchild exits on its own, defeating
+/// the timeout. The child is spawned as its own group leader (see
+/// [`run_uncached`]), so `killpg(pid)` takes the whole tree down and the pipe
+/// closes immediately.
+#[cfg(unix)]
 struct Reaped(std::process::Child);
 
+#[cfg(unix)]
+impl Reaped {
+    fn kill_group(&mut self) {
+        // The child was made leader of a group whose pgid == its pid.
+        unsafe { libc::killpg(self.0.id() as libc::pid_t, libc::SIGKILL) };
+    }
+}
+
+#[cfg(unix)]
 impl Drop for Reaped {
     fn drop(&mut self) {
-        let _ = self.0.kill();
+        self.kill_group();
         let _ = self.0.wait();
     }
 }
 
+/// Generator scripts are POSIX `sh` + awk pipelines; there is nothing to run
+/// them with on Windows, so the whole execution path compiles away to "no
+/// dynamic suggestions" there. (Windows would need its own spec corpus with
+/// PowerShell scripts — a separate effort, not a porting gap here.)
+#[cfg(not(unix))]
+fn run_uncached(_script: &str, _cwd: &Path) -> Vec<Parsed> {
+    Vec::new()
+}
+
+#[cfg(unix)]
 fn run_uncached(script: &str, cwd: &Path) -> Vec<Parsed> {
+    use std::os::unix::process::CommandExt;
     let child = Command::new("/bin/sh")
         .arg("-c")
         .arg(script)
         .current_dir(cwd)
+        // Own process group (pgid == child pid), so the timeout can kill the
+        // shell *and* anything it forked in one killpg — see [`Reaped`].
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -130,7 +166,7 @@ fn run_uncached(script: &str, cwd: &Path) -> Vec<Parsed> {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if start.elapsed() >= TIMEOUT {
-                    let _ = child.0.kill();
+                    child.kill_group();
                     break None;
                 }
                 std::thread::sleep(Duration::from_millis(10));
@@ -964,6 +1000,10 @@ mod tests {
         );
     }
 
+    // The execution tests spawn real `/bin/sh` children, so they are Unix-only —
+    // matching `run_uncached`, which compiles to "no results" everywhere else.
+
+    #[cfg(unix)]
     #[test]
     fn run_captures_stdout_lines() {
         // A unique cwd so this never collides with a cached entry from a sibling
@@ -974,11 +1014,18 @@ mod tests {
         assert_eq!(texts, vec!["a", "b"]);
     }
 
+    /// `sh -c` may *fork* the command instead of exec'ing it (dash does), so this
+    /// also proves the group-kill takes the grandchild down: were only the shell
+    /// killed, the grandchild's open pipe would hold the reader (and us) for the
+    /// full five seconds.
+    #[cfg(unix)]
     #[test]
     fn run_times_out_and_kills_the_child() {
         let cwd = std::env::temp_dir();
         let start = Instant::now();
-        let out = run("sleep 5", &cwd);
+        // The trailing `true` stops the shell exec-optimizing the single command
+        // away, so `sleep` is always a *forked* grandchild.
+        let out = run("sleep 5; true", &cwd);
         // Timed out → no results, and we returned near the deadline rather than
         // waiting the full five seconds (the child was killed).
         assert!(out.is_empty());
@@ -989,6 +1036,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn nonzero_exit_yields_no_results() {
         let out = run("printf 'x\\n'; exit 1", &std::env::temp_dir());
