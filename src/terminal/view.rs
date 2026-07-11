@@ -421,8 +421,8 @@ fn trim_trailing_spaces(text: &str) -> String {
 
 /// Backslash-escape the shell-significant characters in a filesystem path so a
 /// pasted filename with spaces (or `$`, `'`, `(`, `&`…) reaches the shell as a
-/// single argument instead of splitting. Mirrors how macOS Terminal.app and
-/// Warp turn a dropped/pasted file into command-line text. An empty path
+/// single argument instead of splitting. Mirrors how macOS Terminal.app turns
+/// a dropped/pasted file into command-line text. An empty path
 /// becomes `''`.
 ///
 /// A newline/CR can't be backslash-escaped into a literal (`\<newline>` is a
@@ -476,8 +476,8 @@ fn shell_escape_path(path: &str) -> String {
 /// When the clipboard holds file references — a Finder "Copy" carries
 /// `ExternalPaths` and (usually) no string rep — we shell-escape each path and
 /// join them with a single space, so pasting a file drops a ready-to-use,
-/// space-safe path (multiple files → space-separated args), matching Warp and
-/// macOS Terminal.app. gpui's own `ClipboardItem::text()` would instead
+/// space-safe path (multiple files → space-separated args), matching macOS
+/// Terminal.app. gpui's own `ClipboardItem::text()` would instead
 /// concatenate the paths with *no* separator and never escape them.
 ///
 /// Otherwise (plain text, or an image with no text) we defer to `text()`.
@@ -1783,8 +1783,8 @@ impl TerminalView {
     /// Files dragged in from Finder (etc.) and dropped on the terminal:
     /// shell-escape each path, join with spaces, and insert them like a paste —
     /// with a trailing space so a dropped path is ready to be an argument and
-    /// back-to-back drops don't run together. Matches Warp and macOS
-    /// Terminal.app (which reuse their paste escaping for drops).
+    /// back-to-back drops don't run together. Matches macOS Terminal.app
+    /// (which reuses its paste escaping for drops).
     fn drop_files(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
         let text = paths
             .paths()

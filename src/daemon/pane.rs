@@ -42,8 +42,8 @@ use crate::daemon::shell_integration;
 /// `config.json`. On Windows `portable-pty`'s own default is `%COMSPEC%`
 /// (i.e. `cmd.exe`); we override it to PowerShell — PowerShell 7 (`pwsh`) when
 /// installed, probed once by `core::shells`, else the `powershell.exe` that
-/// ships with every supported Windows. Mirrors Warp / Windows Terminal's
-/// preference for the modern shell.
+/// ships with every supported Windows. Mirrors Windows Terminal's preference
+/// for the modern shell.
 #[cfg(windows)]
 fn default_prog() -> CommandBuilder {
     CommandBuilder::new(crate::core::shells::windows_default_shell())

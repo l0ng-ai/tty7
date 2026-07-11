@@ -60,9 +60,8 @@ the measurement includes the full input path the user experiences:
   `-o remember_window_size=no` matters: it defaults to yes even under
   `--config NONE`, and the restored size overrides `initial_window_*`.
 
-Warp is installed here but not benchmarked: closed source, no CLI to run a
-script as the shell, and config isn't file-isolatable. iTerm2/Terminal.app
-would need AppleScript driving and can't cleanly isolate config either.
+iTerm2/Terminal.app are not benchmarked: they would need AppleScript driving
+and can't cleanly isolate config.
 
 Grid fairness: tty7 has no size flag, so its default window is the reference —
 run tty7 first, and the driver reads the recorded `grid:` line to size the

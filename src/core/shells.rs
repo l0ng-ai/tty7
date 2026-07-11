@@ -1,9 +1,8 @@
 //! Shell discovery: enumerate the shells installed on this machine so the UI
 //! can offer them in the new-tab dropdown, and resolve the platform default.
 //!
-//! Mirrors Warp's approach (`app/src/util/windows.rs` there): rather than
-//! asking the user to type a program path into config, probe the well-known
-//! install locations up front and present what actually exists.
+//! Rather than asking the user to type a program path into config, probe the
+//! well-known install locations up front and present what actually exists.
 //!
 //! - **Unix**: `/etc/shells` is the system's own inventory — parse it, keep the
 //!   entries that exist, dedupe by basename (the same shell often appears as
@@ -198,7 +197,7 @@ pub fn windows_default_shell() -> &'static str {
     })
 }
 
-/// Locate PowerShell 7 the way Warp does: fixed install roots first (Program
+/// Locate PowerShell 7: fixed install roots first (Program
 /// Files x64/x86/ARM, dotnet tools, scoop, the Microsoft Store shim), then a
 /// `PATH` search as the catch-all.
 #[cfg(windows)]

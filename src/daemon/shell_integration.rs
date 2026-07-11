@@ -33,7 +33,7 @@
 //!   - **PowerShell** (the Windows default, and any `pwsh`) has no dotfile
 //!     redirect either, but `-EncodedCommand` runs a script *after* its own
 //!     profiles load — like fish's `-C`, no file on disk. It has no
-//!     precmd/preexec, so — following Warp and VS Code — the body wraps two
+//!     precmd/preexec, so — following VS Code — the body wraps two
 //!     host hooks: the `prompt` function (for the A/B/D marks + cwd) and
 //!     `PSConsoleHostReadLine`, PSReadLine's line reader (the closest thing to
 //!     a preexec, for the C mark). See [`setup_powershell`].
@@ -420,7 +420,7 @@ fi
 /// it layers hooks on top of the user's own prompt without a file on disk and
 /// without touching their config.
 ///
-/// PowerShell has no precmd/preexec, so — mirroring Warp and VS Code — we wrap
+/// PowerShell has no precmd/preexec, so — mirroring VS Code — we wrap
 /// two host hooks:
 ///   - **`prompt`** runs before each prompt is drawn. It emits `133;D` (the
 ///     last command's exit code) and the `OSC 7` cwd as side effects, then

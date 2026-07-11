@@ -609,7 +609,7 @@ fn char_string(c: char) -> SharedString {
 /// advance, narrower or wider than our cell (issue #17: separators at
 /// two-thirds width from a mismatched fallback). Building the shape from the
 /// cell rect makes it exact for every font/size combination — the approach
-/// Warp (bundled stretchable SVGs) and kitty (programmatic glyphs) settled on.
+/// kitty settled on with its programmatic glyphs.
 /// The thin/outline variants (U+E0B1, U+E0B3, …) stay on the font path: they
 /// are hairline strokes, not fills, and the bundled Hack covers the common
 /// ones.
