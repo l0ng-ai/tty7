@@ -15,7 +15,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-join%20chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/s3dethqz2V)
 
-[**Install**](#-install) · [**Benchmarks**](#-benchmarks) · [**Shortcuts**](#️-shortcuts) · [**Contributing**](#-contributing)
+[**Why tty7**](#why-tty7) · [**Install**](#install) · [**Features**](#features) · [**Benchmarks**](#benchmarks) · [**Keybindings**](#keybindings)
 
 <sub>English · [简体中文](README.zh-CN.md)</sub>
 
@@ -25,48 +25,50 @@
 
 </div>
 
-<br />
+## Why tty7
 
-tty7 is a GPU-rendered terminal. An 11 MB `cat` finishes in **95 ms** — about
-2× faster than Alacritty, Ghostty, or Kitty on the same hardware — and the
-built-in prompt gives you inline completion, syntax highlighting, and per-flag
-hints for common commands. Pure Rust, native on macOS, Windows, and Linux, no
-configuration needed.
+- **Fast** — about 2× the throughput of Alacritty, Ghostty, or Kitty on the
+  same hardware ([benchmarks](#benchmarks))
+- **A modern prompt** — completion, syntax highlighting, and history search
+  built in; no plugins to assemble
+- **Sessions that survive** — close the window or quit the app, your shells
+  keep running; no tmux
+- **Zero config** — zsh, bash, fish, and PowerShell work out of the box
 
-- ⚡ **Fast** — an 11 MB `cat` completes in **95 ms**, versus
-  179–239 ms for Alacritty/Ghostty/Kitty; DOOM-fire renders at **888 fps**
-  against their 485–617. Same machine, same grid; the harness is in the repo
-  ([benchmarks](#-benchmarks)).
-- ⌨️ **Prompt with completions** — inline completion, syntax highlighting,
-  history, and in-terminal search. Type
-  `git commit --`, `kubectl`, or `npm` and every flag and subcommand shows up
-  with its description — signatures for ~100 common commands, generated
-  from Fig's spec corpus.
-- 🧠 **Shell-aware, zero config** — new tabs and splits open in the current
-  working directory, and path completion always follows where you are. zsh,
-  bash, fish, and PowerShell are wired up automatically.
-- 🔌 **Sessions that survive** — shells run in a background daemon, so closing a
-  window, quitting the app, or swapping in a new build never takes a shell down.
-  Detach and reattach, no tmux.
+Native builds for macOS, Windows, and Linux ship with every release.
 
-Also included: tabs (drag to reorder, inline rename, number keys to switch) and
-resizable splits, a command palette, click-to-open links, desktop notifications,
-and focus-follows-mouse. Eight built-in themes from light to dark, with the
-native window chrome following the one you pick, plus CJK/IME input.
+## Install
 
-Native builds for macOS, Windows, and Linux — every release ships all three.
+Download the build for your platform from
+[**Releases**](https://github.com/l0ng-ai/tty7/releases):
 
-<br />
+- **macOS** — `tty7-<version>-macos-arm64.dmg` (Apple Silicon) or `…-x86_64.dmg`
+  (Intel); open it and drag `tty7.app` into Applications.
+- **Windows** — `…-windows-x86_64-setup.exe` (installer: Start Menu shortcut +
+  uninstall entry), or `…-windows-x86_64.zip` (portable: unzip and run
+  `tty7.exe`).
+- **Linux** — `…-linux-x86_64.tar.gz`; extract and run `./tty7` (needs the usual
+  x11/wayland runtime libraries).
 
-<div align="center">
+## Features
 
-**[Download the latest release&nbsp;&nbsp;▶](https://github.com/l0ng-ai/tty7/releases/latest)**
+### At the prompt
 
-</div>
+- **Ghost suggestions** — your history completes the whole line as you type; <kbd>→</kbd> to accept
+- **Tab completion that explains** — every flag and subcommand with its description, for ~100 common commands
+- **Syntax highlighting** — as you type, nothing to install
+- **Fuzzy history search** — <kbd>⌃ R</kbd> shows what you ran, where, and whether it failed
+- **History from day one** — your existing shell history just works, and carries across sessions
+- **Real line editing** — selection, word motion, undo
 
-<br />
+### In the window
 
-## 📊 Benchmarks
+- **Tabs & splits** — always open in the current directory
+- **Command palette** <kbd>⌘ P</kbd> · scrollback search <kbd>⌘ F</kbd>
+- **⌘-click links** · desktop notifications
+- **Eight themes** · CJK / IME input
+
+## Benchmarks
 
 All four terminals measured back-to-back on the same machine, same day, same
 155×40 grid — Apple M1 Pro, macOS 26.3.1, five-run averages (2026-07-04):
@@ -79,28 +81,17 @@ All four terminals measured back-to-back on the same machine, same day, same
 
 <sub>¹ GUI 105 MB + the persistent daemon 11 MB.</sub>
 
-tty7 reads the PTY at device speed and parses it in large batches off the render
-path, and the hot paths are lock-free — so a big `cat` never waits on drawing.
-(That's also what the background daemon buys you: it can run up to 16 MiB ahead
-of the window before backpressure applies.)
+Where the speed comes from:
+
+- The PTY is read at device speed and parsed in large batches, off the render path
+- Hot paths are lock-free — a big `cat` never waits on drawing
+- The daemon buffers up to 16 MiB ahead of the window before backpressure applies
 
 Methodology (how each terminal is driven, grid fairness, known pitfalls) and
 one-command reproduction live in [`scripts/bench/`](scripts/bench/README.md) —
 run it yourself.
 
-## 🚀 Install
-
-Download the build for your platform from [**Releases**](https://github.com/l0ng-ai/tty7/releases):
-
-- **macOS** — `tty7-<version>-macos-arm64.dmg` (Apple Silicon) or `…-x86_64.dmg`
-  (Intel); open it and drag `tty7.app` into Applications.
-- **Windows** — `…-windows-x86_64-setup.exe` (installer: Start Menu shortcut +
-  uninstall entry), or `…-windows-x86_64.zip` (portable: unzip and run
-  `tty7.exe`).
-- **Linux** — `…-linux-x86_64.tar.gz`; extract and run `./tty7` (needs the usual
-  x11/wayland runtime libraries).
-
-## ⌨️ Shortcuts
+## Keybindings
 
 Keys are shown in macOS notation — on Windows and Linux, read <kbd>⌘</kbd> as
 <kbd>Ctrl</kbd>. Open Settings with <kbd>⌘ ,</kbd> to browse or remap them all.
@@ -120,29 +111,12 @@ The essentials:
 
 The full list — and any overrides — lives in **Settings → Keybindings**.
 
-## 💭 Built with & inspired by
-
-- [gpui](https://github.com/zed-industries/zed) — Zed's GPU-accelerated UI framework
-- [`alacritty_terminal`](https://github.com/zed-industries/alacritty) (Zed's fork) — VT emulator, grid, and PTY
-- [gpui-component](https://github.com/longbridge/gpui-component) — UI widgets, via a [pinned fork](https://github.com/l0ng-ai/gpui-component/tree/tty7)
-- [tmux](https://github.com/tmux/tmux) — the inspiration for the persistent-daemon design
-
-## 🤝 Contributing
-
-Bug reports and PRs are welcome. For questions and ideas, join the
-[Discord](https://discord.gg/s3dethqz2V). Notable changes land in the
-[CHANGELOG](CHANGELOG.md).
-
-## 📝 License
-
-[Apache License 2.0](LICENSE) · © 2026 l0ng-ai
-
-<br />
+---
 
 <div align="center">
+<sub>
 
-<img src="assets/app-icon.svg" alt="" width="28" height="28" />
+Built on [gpui](https://github.com/zed-industries/zed) and [`alacritty_terminal`](https://github.com/zed-industries/alacritty) · [Apache-2.0](LICENSE) · [Discord](https://discord.gg/s3dethqz2V) · [Changelog](CHANGELOG.md)
 
-<sub><b>tty7</b> — a GPU-rendered terminal in pure Rust.</sub>
-
+</sub>
 </div>
