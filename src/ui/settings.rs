@@ -39,6 +39,21 @@ pub(crate) enum SettingsSection {
     About,
 }
 
+impl SettingsSection {
+    /// A `&'static` label for `TTY7_PROFILE` aggregation, so each section's build
+    /// cost and rebuild rate report under their own line.
+    fn profile_label(self) -> &'static str {
+        match self {
+            SettingsSection::Appearance => "settings:appearance",
+            SettingsSection::Terminal => "settings:terminal",
+            SettingsSection::Shell => "settings:shell",
+            SettingsSection::WindowTabs => "settings:window-tabs",
+            SettingsSection::Keybindings => "settings:keybindings",
+            SettingsSection::About => "settings:about",
+        }
+    }
+}
+
 /// The in-app color editor for the active *editable* theme: one color picker per
 /// seed color (background/foreground/accent/cursor/selection) and per ANSI slot,
 /// each wired to write its change straight back to the theme's YAML file. Rebuilt
@@ -109,6 +124,13 @@ impl Tty7App {
             Some(s) => (s.focus_handle.clone(), s.section),
             None => return div(), // not a settings tab; nothing to render
         };
+
+        // `TTY7_PROFILE`: time this section's whole element build and, via the
+        // aggregated call rate, expose whether the panel is rebuilding once (on a
+        // real change) or in a tight `notify` loop. Labelled per section so
+        // Appearance's cost stands apart from the lighter pages.
+        let prof = crate::ui::perf::enabled()
+            .then(|| (std::time::Instant::now(), section.profile_label()));
 
         // Sidebar nav item that activates a section on click.
         let nav_item = |label: &'static str, target: SettingsSection, icon: IconName| {
@@ -197,7 +219,7 @@ impl Tty7App {
                     .child(div().w_full().max_w(px(860.)).child(content)),
             );
 
-        div()
+        let root = div()
             .size_full()
             .flex()
             .flex_row()
@@ -212,7 +234,12 @@ impl Tty7App {
             // The Sidebar draws its own right border; no wrapper border here, or
             // the two stack into one thick rule.
             .child(sidebar)
-            .child(content_pane)
+            .child(content_pane);
+
+        if let Some((start, label)) = prof {
+            crate::ui::perf::record(label, start.elapsed());
+        }
+        root
     }
 
     /// Just the styled section title (no margin). Shared by `section_header` and
