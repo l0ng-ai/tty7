@@ -8,6 +8,6 @@
   <rect width="512" height="512" rx="114" fill="url(#bg)"/>
   <rect x="24" y="24" width="464" height="464" rx="94" fill="#20242D"/>
   <rect x="24" y="24" width="464" height="464" rx="94" fill="none" stroke="#454B57" stroke-width="4"/>
-  <path d="M84 86 L146 138 L84 190" fill="none" stroke="#F2EFE8" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="166" y="164" width="78" height="26" rx="13" fill="#FF6B35"/>
+  <path d="M120 120 L172 172 L120 224" fill="none" stroke="#F2EFE8" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="196" y="196" width="82" height="28" rx="14" fill="#FF6B35"/>
 </svg>
