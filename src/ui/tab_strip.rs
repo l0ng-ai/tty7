@@ -13,6 +13,7 @@ use gpui_component::input::Input;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
 
+use crate::core::actions::{OpenSettings, TogglePalette};
 use crate::core::config::Config;
 use crate::daemon::protocol::ShellSpec;
 use crate::ui::app::{Tab, Tty7App};
@@ -180,10 +181,11 @@ impl Tty7App {
         // strip's own left margin (8), and a small right buffer. Capped this way,
         // a crowded strip becomes a bounded flex container and the chips shrink.
         let avail = (window.viewport_size().width - px(100.)).max(px(120.));
-        // The "+" button (30px) plus a gap lives *outside* the clipped chip row,
-        // so it never gets scrolled off when the tabs fill the strip — reserve
-        // its footprint here and cap the chip row at the remainder.
-        let chips_avail = (avail - px(40.)).max(px(80.));
+        // The "+" and the right-edge overflow "⋯" (30px each, plus gaps) live
+        // *outside* the clipped chip row, so neither gets scrolled off when the
+        // tabs fill the strip — reserve both footprints here and cap the chip row
+        // at the remainder.
+        let chips_avail = (avail - px(80.)).max(px(80.));
         // Only the chip row clips; a crowded row shrinks its chips (down to their
         // `min_w`) and truncates their labels rather than pushing the "+" away.
         let mut chips = h_flex()
@@ -458,16 +460,67 @@ impl Tty7App {
                     }),
             );
 
-        // Outer strip: the clipping chip row plus the always-visible "+". Only
-        // `chips` is width-capped and `overflow_hidden`, so the "+" is never
+        // Right-edge overflow menu: the low-frequency *global* entries (command
+        // palette, settings) that until now had no on-screen affordance at all —
+        // only keyboard shortcuts. Same ghost 30px tile as the "+", but anchored
+        // to the title bar's otherwise-empty right edge and opening from its
+        // top-right corner so the popup never spills off-screen.
+        //
+        // `.menu(label, Action)` dispatches the real action, so a click and the
+        // shortcut travel one path and the row auto-renders the shortcut hint; it
+        // needs an `action_context` inside the app's element tree to land on the
+        // root `on_action` handlers, so we hand it the focused pane (falling back
+        // to the home page's handle when no tab is open).
+        //
+        // Hidden while the settings tab is active: both entries are redundant
+        // there (you're already in settings, and the palette's own value is
+        // reaching *other* views), so the chrome stays quiet.
+        let on_settings = self.tabs.get(active).is_some_and(Tab::is_settings);
+        let action_ctx = self
+            .tabs
+            .get(active)
+            .and_then(|t| t.pane.focused_or_first(window, cx))
+            .map(|leaf| leaf.read(cx).focus_handle.clone())
+            .unwrap_or_else(|| self.home_focus.clone());
+        let menu_button = div().occlude().flex_shrink_0().child(
+            Button::new("titlebar-menu")
+                .icon(Icon::new(IconName::Ellipsis).size(px(15.)))
+                .ghost()
+                .xsmall()
+                .w(px(30.))
+                .h(px(30.))
+                .rounded_lg()
+                .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _window, _cx| {
+                    menu.min_w(px(220.))
+                        .action_context(action_ctx.clone())
+                        .menu("Command Palette", Box::new(TogglePalette))
+                        .menu("Settings…", Box::new(OpenSettings))
+                }),
+        );
+
+        // Outer strip: the clipping chip row and the always-visible "+" anchored
+        // left, the overflow "⋯" pushed to the right edge by a flexible spacer.
+        // Only `chips` is width-capped and `overflow_hidden`, so neither button is
         // pushed off-screen no matter how many tabs are open.
         h_flex()
             .items_center()
             .gap_1p5()
-            .ml_2()
+            .w_full()
+            // Padding, not margin: the strip is `w_full` and taffy is border-box,
+            // so a horizontal *margin* would push it 16px past the title bar and
+            // clip the "⋯"; padding stays inside the 100% width.
+            .pl_2()
+            .pr_2()
+            // On Windows/Linux the window controls (─ ▢ ✕) sit on the right, right
+            // where the "⋯" lands; give it extra right breathing room there so it
+            // reads as a menu affordance, not a fourth window control. macOS keeps
+            // the tighter inset (its traffic lights are on the left).
+            .when(!cfg!(target_os = "macos"), |this| this.pr_3())
             .min_w_0()
             .child(chips)
             .child(add_button)
+            .child(div().flex_1())
+            .when(!on_settings, |this| this.child(menu_button))
     }
 }
 
