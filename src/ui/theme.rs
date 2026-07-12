@@ -3,12 +3,13 @@
 //! paints gpui-component's `Theme` from the active color theme (see
 //! `ui::presets`) and publishes the terminal-facing palette.
 
-use gpui::{App, Hsla, Menu, MenuItem, Pixels, Point, Window, point, px, rgb};
+use gpui::{
+    App, Hsla, Menu, MenuItem, Pixels, Point, WindowBackgroundAppearance, Window, point, px, rgb,
+};
 use gpui_component::{Theme, ThemeMode};
 
 use crate::core::actions::*;
-use crate::core::config::{AnsiColors, Config, color_or, parse_hex_color};
-use crate::terminal::palette::ActivePalette;
+use crate::core::config::Config;
 use crate::ui::presets;
 
 /// The traffic-light origin, nudged down from the macOS default so the buttons
@@ -59,41 +60,56 @@ pub(crate) fn set_menus(cx: &mut App) {
 }
 
 /// Paint gpui-component's `Theme` from the active color theme (selected by
-/// `Config::theme_preset`). The theme's own `dark` flag picks the component
-/// `ThemeMode`; every shell surface is then derived from the theme's
-/// background/foreground (see `Preset::neutrals`). User `colors.*` entries
-/// still override the derived neutrals. Also publishes the terminal-facing
-/// palette as the `ActivePalette` global so the renderer matches.
+/// `Config::theme_preset`). The theme's inferred `dark` brightness picks the
+/// component `ThemeMode`; every shell surface is then derived from the theme's
+/// background/foreground (see `Theme::neutrals`). Also publishes the
+/// terminal-facing palette as the `ActivePalette` global so the renderer matches,
+/// and applies the theme's window opacity/blur.
 pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
-    let cfg = cx.global::<Config>();
-    let preset = presets::by_id(&cfg.theme_preset);
-    let mode = if preset.dark {
+    let theme = presets::by_id(cx, &cx.global::<Config>().theme_preset.clone());
+    let mode = if theme.dark {
         ThemeMode::Dark
     } else {
         ThemeMode::Light
     };
-    // Keep the native macOS chrome (traffic lights, system menus, scrollbars) in
-    // the same light/dark mode as our theme, regardless of the OS setting.
-    sync_native_appearance(preset.dark);
-    let m = preset.neutrals();
-    // User `colors.*` overrides apply on top of the derived neutrals; a `None`
-    // field falls through to the theme.
-    let c = cfg.colors.clone();
-    let mut active = preset.active_palette();
-    apply_ansi_overrides(&mut active, &cfg.ansi_colors);
+    // Force the native macOS chrome (traffic lights, system menus, scrollbars)
+    // into the theme's own light/dark mode regardless of the OS setting.
+    sync_native_appearance(theme.dark);
+    let m = theme.neutrals();
+    let active = theme.active_palette();
+    let opacity = theme.opacity.filter(|o| *o < 1.0);
+
+    // Window opacity / blur: only a theme that opts in makes the window
+    // translucent; opaque themes leave the window fully opaque (the default).
+    if let Some(window) = window.as_deref_mut() {
+        let bg_appearance = if theme.blur {
+            WindowBackgroundAppearance::Blurred
+        } else if opacity.is_some() {
+            WindowBackgroundAppearance::Transparent
+        } else {
+            WindowBackgroundAppearance::Opaque
+        };
+        window.set_background_appearance(bg_appearance);
+    }
 
     Theme::change(mode, window.as_deref_mut(), cx);
     // Publish the terminal palette before borrowing the theme mutably.
     cx.set_global(active);
 
     let t = Theme::global_mut(cx);
-    t.background = color_or(&c.background, m.background); // terminal / window base
-    t.foreground = color_or(&c.foreground, m.foreground); // default text
-    t.border = color_or(&c.border, m.border);
-    t.secondary = color_or(&c.secondary, m.secondary); // hover chips (+ / tab)
-    t.muted = color_or(&c.muted, m.muted);
-    t.muted_foreground = color_or(&c.muted_foreground, m.muted_foreground); // inactive tab text
-    t.popover = color_or(&c.popover, m.popover); // elevated surfaces
+    // The window base carries the theme's opacity so a translucent/blurred theme
+    // actually shows through; opaque themes (opacity None) stay fully opaque.
+    let mut base: Hsla = rgb(m.background).into();
+    if let Some(o) = opacity {
+        base.a = o;
+    }
+    t.background = base; // terminal / window base
+    t.foreground = rgb(m.foreground).into(); // default text
+    t.border = rgb(m.border).into();
+    t.secondary = rgb(m.secondary).into(); // hover chips (+ / tab)
+    t.muted = rgb(m.muted).into();
+    t.muted_foreground = rgb(m.muted_foreground).into(); // inactive tab text
+    t.popover = rgb(m.popover).into(); // elevated surfaces
     // gpui-component paints popovers/menus (context menu, dropdowns) from
     // `tokens.popover` / `tokens.popover_foreground`, NOT the `popover*` fields —
     // so the menu background ignored our theme and fell back to the stock surface
@@ -114,14 +130,14 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // feed the same highlight in the input completion / code-action popovers, so
     // mirror both the fields and the tokens to keep every menu surface in step.
     let accent_fill = rgb(m.list_active);
-    let accent_text = color_or(&c.foreground, m.foreground);
+    let accent_text: Hsla = rgb(m.foreground).into();
     t.accent = accent_fill.into();
     t.accent_foreground = accent_text;
     t.tokens.accent = Hsla::from(accent_fill).into();
     t.tokens.accent_foreground = accent_text.into();
 
-    t.caret = color_or(&c.caret, m.caret);
-    t.selection = color_or(&c.selection, m.selection); // text selection highlight
+    t.caret = rgb(m.caret).into();
+    t.selection = rgb(m.selection).into(); // text selection highlight
 
     // Round every gpui-component widget (buttons, inputs, selects, switches,
     // segmented controls, menus) to match the shell's own hand-rolled chrome,
@@ -141,7 +157,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     let sidebar_sel = rgb(m.sidebar_sel);
     t.sidebar = sidebar_bg.into();
     t.tokens.sidebar = Hsla::from(sidebar_bg).into();
-    t.sidebar_border = color_or(&c.border, m.border);
+    t.sidebar_border = rgb(m.border).into();
     t.sidebar_foreground = rgb(m.sidebar_fg).into();
     t.sidebar_accent = sidebar_sel.into();
     t.tokens.sidebar_accent = Hsla::from(sidebar_sel).into();
@@ -166,16 +182,6 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     #[cfg(target_os = "macos")]
     if let Some(window) = window.as_deref_mut() {
         window.set_traffic_light_position(traffic_light_position());
-    }
-}
-
-fn apply_ansi_overrides(active: &mut ActivePalette, overrides: &AnsiColors) {
-    for i in 0..16 {
-        if let Some(Some(hex)) = overrides.get(i) {
-            if let Some(rgb) = parse_hex_color(hex) {
-                active.ansi16[i] = crate::terminal::palette::hsla_to_rgb(rgb.into());
-            }
-        }
     }
 }
 
@@ -228,41 +234,3 @@ fn sync_native_appearance(dark: bool) {
 
 #[cfg(not(target_os = "macos"))]
 fn sync_native_appearance(_dark: bool) {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ansi_overrides_replace_only_valid_slots() {
-        let mut active = presets::by_id("rose_pine_dawn").active_palette();
-        let original0 = active.ansi16[0];
-        let original1 = active.ansi16[1];
-        let original15 = active.ansi16[15];
-        let mut overrides = AnsiColors::default();
-        overrides.color0 = Some("#575279".to_string());
-        overrides.color1 = Some("not-a-color".to_string());
-        overrides.color15 = Some("123456".to_string());
-
-        apply_ansi_overrides(&mut active, &overrides);
-
-        assert_eq!(
-            (active.ansi16[0].r, active.ansi16[0].g, active.ansi16[0].b),
-            (0x57, 0x52, 0x79)
-        );
-        assert_eq!(
-            active.ansi16[1], original1,
-            "malformed overrides are ignored"
-        );
-        assert_eq!(
-            (
-                active.ansi16[15].r,
-                active.ansi16[15].g,
-                active.ansi16[15].b
-            ),
-            (0x12, 0x34, 0x56)
-        );
-        assert_ne!(active.ansi16[0], original0);
-        assert_ne!(active.ansi16[15], original15);
-    }
-}

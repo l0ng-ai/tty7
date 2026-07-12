@@ -13,15 +13,36 @@ use gpui_component::{ActiveTheme as _, IndexPath, TitleBar};
 use std::sync::Arc;
 
 use crate::core::actions::*;
-use crate::core::config::{Config, NewTabPosition, ShellConfig, color_or, hsla_to_hex6};
+use crate::core::config::{Config, NewTabPosition, ShellConfig};
 use crate::core::session::{Session, SessionAxis, SessionPane, SessionTab};
 use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
 use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::palette::{Command, CommandKind, PaletteEvent, PaletteView};
 use crate::ui::pane::{CloseOutcome, Pane};
-use crate::ui::settings::{AnsiColorKey, ColorKey, SettingsSection, SettingsState};
+use crate::ui::presets::Fill;
+use crate::ui::settings::{SettingsSection, SettingsState, ThemeEditor};
 use crate::ui::theme::{apply_theme, set_menus};
+
+/// One editable color of a user theme, targeted by the in-app color editor. Maps
+/// a picker to the seed field (or ANSI slot) it writes back to the theme's file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ThemeEdit {
+    Background,
+    Foreground,
+    Accent,
+    Cursor,
+    Selection,
+    Ansi(usize),
+}
+
+/// Convert a picked `Hsla` to a `0xRRGGBB` value (alpha dropped) for storage in a
+/// theme file.
+fn hsla_to_u32(color: gpui::Hsla) -> u32 {
+    let rgba: gpui::Rgba = color.into();
+    let to = |f: f32| (f.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (to(rgba.r) << 16) | (to(rgba.g) << 8) | to(rgba.b)
+}
 
 /// Global font-size bounds and step for the live zoom actions.
 const FONT_SIZE_MIN: f32 = 6.0;
@@ -524,65 +545,137 @@ impl Tty7App {
         apply_theme(Some(window), cx);
         set_menus(cx);
         cx.global::<Config>().save();
+        // The editor targets the active theme, so its pickers must track a switch.
+        self.rebuild_theme_editor(window, cx);
         cx.notify();
     }
 
-    /// Apply a picked color to one `colors.*` override and re-paint the theme
-    /// live. `None` clears the override, falling the slot back to the active
-    /// preset's default. Persisted so it survives a restart. `apply_theme` already
-    /// reads `cfg.colors.*`, so writing the field + re-applying is all it takes.
-    pub(crate) fn set_color_override(
-        &mut self,
-        key: ColorKey,
-        value: Option<gpui::Hsla>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let new = value.map(hsla_to_hex6);
-        let cfg = cx.global_mut::<Config>();
-        if key.get(&cfg.colors) == &new {
-            return; // no change — skip the theme re-apply + disk write
+    /// Open the user themes folder (`~/.config/tty7/themes`) in the system file
+    /// browser, creating it first so there's always somewhere to drop a theme.
+    pub(crate) fn open_themes_folder(&self, cx: &mut Context<Self>) {
+        if let Some(dir) = crate::ui::presets::themes_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            cx.open_with_system(&dir);
         }
-        key.set(&mut cfg.colors, new);
-        cfg.save();
-        apply_theme(Some(window), cx);
-        cx.notify();
     }
 
-    /// Clear one `colors.*` override back to the theme default, and sync the row's
-    /// picker swatch to the now-effective (preset) color.
-    pub(crate) fn reset_color_override(
-        &mut self,
-        key: ColorKey,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        {
-            let cfg = cx.global_mut::<Config>();
-            if key.get(&cfg.colors).is_none() {
-                return;
+    /// Duplicate the active theme into an editable YAML file, switch to the copy,
+    /// and open the color editor on it. This is the entry point for customizing a
+    /// read-only built-in (or an imported iTerm scheme).
+    pub(crate) fn fork_active_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = cx.global::<Config>().theme_preset.clone();
+        let theme = crate::ui::presets::by_id(cx, &id);
+        match crate::ui::presets::fork_to_file(&theme) {
+            Ok(new_id) => {
+                crate::ui::presets::load_registry(cx);
+                // Switches to the copy (applies + persists + rebuilds the editor).
+                self.set_preset(&new_id, window, cx);
             }
-            key.set(&mut cfg.colors, None);
-            cfg.save();
+            Err(e) => log::warn!("failed to duplicate theme: {e}"),
         }
+    }
+
+    /// Apply one color edit to the active (editable) theme: mutate the seed field,
+    /// write the theme's file, reload the registry, and repaint live.
+    pub(crate) fn edit_active_theme(
+        &mut self,
+        edit: ThemeEdit,
+        value: gpui::Hsla,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = cx.global::<Config>().theme_preset.clone();
+        let mut theme = crate::ui::presets::by_id(cx, &id);
+        if !theme.editable() {
+            return;
+        }
+        let c = hsla_to_u32(value);
+        match edit {
+            ThemeEdit::Background => theme.background = Fill::Solid(c),
+            ThemeEdit::Foreground => theme.foreground = c,
+            ThemeEdit::Accent => theme.accent = c,
+            ThemeEdit::Cursor => theme.caret = Some(c),
+            ThemeEdit::Selection => theme.selection = Some(c),
+            ThemeEdit::Ansi(i) => theme.ansi16[i] = ((c >> 16) as u8, (c >> 8) as u8, c as u8),
+        }
+        if let Err(e) = crate::ui::presets::write_theme_file(&theme) {
+            log::warn!("failed to write theme file: {e}");
+            return;
+        }
+        crate::ui::presets::load_registry(cx);
         apply_theme(Some(window), cx);
-        // Reflect the default in the picker swatch so it doesn't keep showing the
-        // cleared override color.
-        let neutrals = {
-            let cfg = cx.global::<Config>();
-            crate::ui::presets::by_id(&cfg.theme_preset).neutrals()
-        };
-        let picker = self.active_settings().and_then(|s| {
-            s.color_pickers
-                .iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, state)| state.clone())
-        });
-        if let Some(state) = picker {
-            let default = color_or(&None, key.default_u32(&neutrals));
-            state.update(cx, |s, cx| s.set_value(default, window, cx));
-        }
         cx.notify();
+    }
+
+    /// (Re)build the settings tab's color-editor pickers for the current active
+    /// theme. If no settings tab is open or the active theme isn't an editable
+    /// file, the editor is cleared. Called after every theme switch / duplicate
+    /// and when opening settings, so the pickers always reflect (and target) the
+    /// theme currently on screen.
+    pub(crate) fn rebuild_theme_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(idx) = self.settings_tab_index() else {
+            return;
+        };
+        let id = cx.global::<Config>().theme_preset.clone();
+        let theme = crate::ui::presets::by_id(cx, &id);
+        if !theme.editable() {
+            if let Some(s) = self.tabs.get_mut(idx).and_then(|t| t.settings.as_mut()) {
+                s.theme_editor = None;
+            }
+            return;
+        }
+
+        let neutrals = theme.neutrals();
+        // (edit target, row label, current 0xRRGGBB value) for each seed color.
+        let seed_specs: [(ThemeEdit, &str, u32); 5] = [
+            (ThemeEdit::Background, "Background", theme.background_color()),
+            (ThemeEdit::Foreground, "Foreground", theme.foreground),
+            (ThemeEdit::Accent, "Accent", theme.accent),
+            (ThemeEdit::Cursor, "Cursor", theme.caret.unwrap_or(theme.accent)),
+            (ThemeEdit::Selection, "Selection", neutrals.selection),
+        ];
+
+        let mut subs = Vec::new();
+        let mut make = |edit: ThemeEdit, value: u32, subs: &mut Vec<Subscription>, cx: &mut Context<Self>| {
+            let eff: gpui::Hsla = gpui::rgb(value).into();
+            let state = cx.new(|cx| ColorPickerState::new(window, cx).default_value(eff));
+            subs.push(cx.subscribe_in(
+                &state,
+                window,
+                move |this, _picker, ev: &ColorPickerEvent, window, cx| {
+                    let ColorPickerEvent::Change(value) = ev;
+                    if let Some(v) = value {
+                        this.edit_active_theme(edit, *v, window, cx);
+                    }
+                },
+            ));
+            state
+        };
+
+        let seed = seed_specs
+            .iter()
+            .map(|&(edit, label, value)| (edit, label.to_string(), make(edit, value, &mut subs, cx)))
+            .collect();
+        let ansi = (0..16)
+            .map(|i| {
+                let (r, g, b) = theme.ansi16[i];
+                let value = (r as u32) << 16 | (g as u32) << 8 | b as u32;
+                (
+                    ThemeEdit::Ansi(i),
+                    format!("Color {i}"),
+                    make(ThemeEdit::Ansi(i), value, &mut subs, cx),
+                )
+            })
+            .collect();
+
+        if let Some(s) = self.tabs.get_mut(idx).and_then(|t| t.settings.as_mut()) {
+            s.theme_editor = Some(ThemeEditor {
+                for_id: theme.id.clone(),
+                seed,
+                ansi,
+                _subs: subs,
+            });
+        }
     }
 
     /// Toggle terminal font ligatures through the generic `font_features`
@@ -605,61 +698,6 @@ impl Tty7App {
         let cfg = cx.global_mut::<Config>();
         cfg.font_features = features;
         cfg.save();
-        cx.notify();
-    }
-
-    /// Apply a picked ANSI color override and re-paint the terminal palette live.
-    /// `None` clears the slot back to the active preset's ANSI value.
-    pub(crate) fn set_ansi_color_override(
-        &mut self,
-        key: AnsiColorKey,
-        value: Option<gpui::Hsla>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let new = value.map(hsla_to_hex6);
-        let cfg = cx.global_mut::<Config>();
-        if key.get(&cfg.ansi_colors) == &new {
-            return;
-        }
-        key.set(&mut cfg.ansi_colors, new);
-        cfg.save();
-        apply_theme(Some(window), cx);
-        cx.notify();
-    }
-
-    /// Clear one ANSI override back to the active preset default and sync the
-    /// picker swatch to that effective color.
-    pub(crate) fn reset_ansi_color_override(
-        &mut self,
-        key: AnsiColorKey,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        {
-            let cfg = cx.global_mut::<Config>();
-            if key.get(&cfg.ansi_colors).is_none() {
-                return;
-            }
-            key.set(&mut cfg.ansi_colors, None);
-            cfg.save();
-        }
-        apply_theme(Some(window), cx);
-        let default: gpui::Hsla = {
-            let cfg = cx.global::<Config>();
-            let p = crate::ui::presets::by_id(&cfg.theme_preset);
-            let (r, g, b) = p.ansi16[key.0];
-            gpui::rgb((r as u32) << 16 | (g as u32) << 8 | b as u32).into()
-        };
-        let picker = self.active_settings().and_then(|s| {
-            s.ansi_color_pickers
-                .iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, state)| state.clone())
-        });
-        if let Some(state) = picker {
-            state.update(cx, |s, cx| s.set_value(default, window, cx));
-        }
         cx.notify();
     }
 
@@ -1266,8 +1304,8 @@ impl Tty7App {
             OpenSettings => self.toggle_settings(window, cx),
             RestartDaemon => self.restart_daemon(window, cx),
             SetTheme(i) => {
-                if let Some(preset) = crate::ui::presets::all().get(i) {
-                    self.set_preset(preset.id, window, cx);
+                if let Some(id) = crate::ui::presets::all(cx).get(i).map(|t| t.id.clone()) {
+                    self.set_preset(&id, window, cx);
                 }
             }
             // Handled inside `PaletteView` (opens the theme sub-list); it never
@@ -1299,8 +1337,6 @@ impl Tty7App {
             self.build_font_selects(&mut subs, window, cx);
         let (shell_program_input, shell_args_input, wd_path_input) =
             self.build_shell_inputs(&mut subs, window, cx);
-        let color_pickers = self.build_color_pickers(&mut subs, window, cx);
-        let ansi_color_pickers = self.build_ansi_color_pickers(&mut subs, window, cx);
         let scroll_slider = self.build_scroll_slider(&mut subs, window, cx);
 
         self.maximized = None;
@@ -1316,16 +1352,15 @@ impl Tty7App {
                 shell_program_input,
                 shell_args_input,
                 wd_path_input,
-                color_pickers,
-                ansi_color_pickers,
-                colors_expanded: false,
-                ansi_colors_expanded: false,
                 scroll_slider,
+                theme_editor: None,
                 _subs: subs,
             }),
         });
         self.active = self.tabs.len() - 1;
         window.focus(&focus_handle, cx);
+        // Build the color editor if we opened straight onto an editable theme.
+        self.rebuild_theme_editor(window, cx);
         self.save_session(cx);
         cx.notify();
     }
@@ -1484,72 +1519,6 @@ impl Tty7App {
             }),
         );
         (shell_program_input, shell_args_input, wd_path_input)
-    }
-
-    /// One color picker per overridable neutral, seeded with the effective
-    /// current color (override if set, else the active preset's default) so the
-    /// swatch shows what's actually on screen. Each `Change` writes the override
-    /// and re-applies the theme live.
-    fn build_color_pickers(
-        &mut self,
-        subs: &mut Vec<Subscription>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<(ColorKey, Entity<ColorPickerState>)> {
-        // Snapshot what the pickers need now and drop the `cfg` borrow, so the
-        // `cx.new` / `cx.subscribe_in` calls below can borrow `cx` mutably.
-        let cfg = cx.global::<Config>();
-        let theme_preset = cfg.theme_preset.clone();
-        let colors = cfg.colors.clone();
-        let neutrals = crate::ui::presets::by_id(&theme_preset).neutrals();
-        ColorKey::ALL
-            .iter()
-            .map(|&key| {
-                let effective = color_or(key.get(&colors), key.default_u32(&neutrals));
-                let state = cx.new(|cx| ColorPickerState::new(window, cx).default_value(effective));
-                subs.push(cx.subscribe_in(
-                    &state,
-                    window,
-                    move |this, _picker, ev: &ColorPickerEvent, window, cx| {
-                        let ColorPickerEvent::Change(value) = ev;
-                        this.set_color_override(key, *value, window, cx);
-                    },
-                ));
-                (key, state)
-            })
-            .collect()
-    }
-
-    /// One color picker per terminal ANSI color, seeded with the effective
-    /// current value (override if set, else active preset default).
-    fn build_ansi_color_pickers(
-        &mut self,
-        subs: &mut Vec<Subscription>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<(AnsiColorKey, Entity<ColorPickerState>)> {
-        let cfg = cx.global::<Config>();
-        let theme_preset = cfg.theme_preset.clone();
-        let ansi_colors = cfg.ansi_colors.clone();
-        let preset = crate::ui::presets::by_id(&theme_preset);
-        AnsiColorKey::ALL
-            .iter()
-            .map(|&key| {
-                let (r, g, b) = preset.ansi16[key.0];
-                let default = (r as u32) << 16 | (g as u32) << 8 | b as u32;
-                let effective = color_or(key.get(&ansi_colors), default);
-                let state = cx.new(|cx| ColorPickerState::new(window, cx).default_value(effective));
-                subs.push(cx.subscribe_in(
-                    &state,
-                    window,
-                    move |this, _picker, ev: &ColorPickerEvent, window, cx| {
-                        let ColorPickerEvent::Change(value) = ev;
-                        this.set_ansi_color_override(key, *value, window, cx);
-                    },
-                ));
-                (key, state)
-            })
-            .collect()
     }
 
     /// Mouse-scroll multiplier slider (0.5×–5×). Emits `Change` continuously as
@@ -1814,32 +1783,6 @@ impl Tty7App {
             .and_then(|t| t.settings.as_mut())
         {
             s.section = target;
-        }
-        cx.notify();
-    }
-
-    /// Expand/collapse the Colors override group in the settings tab's
-    /// Appearance section (no-op elsewhere).
-    pub(crate) fn toggle_settings_colors(&mut self, cx: &mut Context<Self>) {
-        if let Some(s) = self
-            .tabs
-            .get_mut(self.active)
-            .and_then(|t| t.settings.as_mut())
-        {
-            s.colors_expanded = !s.colors_expanded;
-        }
-        cx.notify();
-    }
-
-    /// Expand/collapse the ANSI Colors override group in the settings tab's
-    /// Appearance section (no-op elsewhere).
-    pub(crate) fn toggle_settings_ansi_colors(&mut self, cx: &mut Context<Self>) {
-        if let Some(s) = self
-            .tabs
-            .get_mut(self.active)
-            .and_then(|t| t.settings.as_mut())
-        {
-            s.ansi_colors_expanded = !s.ansi_colors_expanded;
         }
         cx.notify();
     }

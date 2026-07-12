@@ -126,6 +126,9 @@ fn spawn_config_watcher(cx: &mut App) {
                 // never crash the renderer — worst case we momentarily show
                 // defaults until the next (valid) save re-triggers this.
                 cx.set_global(Config::load());
+                // Reload the theme registry too, so edits to (or new) theme files
+                // in the themes folder take effect on the same hot-reload path.
+                crate::ui::presets::load_registry(cx);
                 crate::ui::theme::apply_cursor_hide_mode(cx);
                 // Re-paint theme + colors from the new config. We have no window
                 // handle in this global task, but `apply_theme` accepts `None`:
@@ -264,6 +267,9 @@ fn main() {
             cx.activate(true);
             // Load user config once and stash it as a global for views to read.
             cx.set_global(Config::load());
+            // Build the theme registry (built-ins + user theme files) before the
+            // first window paints its theme.
+            crate::ui::presets::load_registry(cx);
             // Honor `mouse_hide_while_typing` from the start.
             crate::ui::theme::apply_cursor_hide_mode(cx);
             // Start watching `config.json` so edits hot-reload theme/colors live.

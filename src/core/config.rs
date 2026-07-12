@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use gpui::{FontFeatures, Global, Hsla, Rgba, rgb};
+use gpui::{FontFeatures, Global};
 use serde::{Deserialize, Serialize};
 
 /// Top-level configuration. Stored as a GPUI global so any view can read it.
@@ -38,15 +38,10 @@ pub struct Config {
     pub line_height: f32,
     /// Startup theme mode: "dark" or "light".
     pub theme: String,
-    /// Active color scheme (preset) id: "warm", "tokyo", or "solarized".
-    /// Unknown ids fall back to the default preset.
+    /// Selected color theme id. Resolves against the theme registry (built-ins +
+    /// `~/.config/tty7/themes/*`); unknown ids fall back to the default theme. The
+    /// native chrome is forced to match the theme's light/dark brightness.
     pub theme_preset: String,
-    /// Optional per-color overrides layered on top of the active preset.
-    pub colors: Colors,
-    /// Optional ANSI 0-15 overrides layered on top of the active preset's
-    /// terminal palette. Each field maps to the familiar terminal `colorN`
-    /// slot; `None` keeps the preset's value.
-    pub ansi_colors: AnsiColors,
     /// Optional keybinding overrides: action name (e.g. "NewTab") → keystroke
     /// (e.g. "secondary-t", which is ⌘ on macOS and Ctrl elsewhere). Unknown
     /// actions and unparseable keystrokes are ignored (with a warning) so a bad
@@ -246,8 +241,6 @@ impl Default for Config {
             // The default theme id (mirrors `ui::presets::DEFAULT_ID`; core can't
             // depend on ui). Unknown ids fall back to it anyway.
             theme_preset: "light".to_string(),
-            colors: Colors::default(),
-            ansi_colors: AnsiColors::default(),
             keybindings: HashMap::new(),
             // `None` → the platform default shell (login shell on Unix,
             // PowerShell 7 / Windows PowerShell on Windows), chosen by the
@@ -280,93 +273,6 @@ impl Default for Config {
             startup_mode: StartupMode::Normal,
             working_directory: WorkingDirectory::default(),
             env: HashMap::new(),
-        }
-    }
-}
-
-/// Optional overrides for the dark-mode palette. Each `None` keeps the built-in
-/// "soft charcoal" default; a `Some("#rrggbb")` replaces it.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default)]
-pub struct Colors {
-    pub background: Option<String>,
-    pub foreground: Option<String>,
-    pub border: Option<String>,
-    pub secondary: Option<String>,
-    pub muted: Option<String>,
-    pub muted_foreground: Option<String>,
-    pub popover: Option<String>,
-    pub caret: Option<String>,
-    pub selection: Option<String>,
-}
-
-/// Optional overrides for terminal ANSI colors 0-15. These correspond to the
-/// standard `color0`…`color15` slots that command-line tools address with SGR
-/// foreground/background colors; unlike [`Colors`], they do not affect UI chrome
-/// or the terminal's default foreground/background.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default)]
-pub struct AnsiColors {
-    pub color0: Option<String>,
-    pub color1: Option<String>,
-    pub color2: Option<String>,
-    pub color3: Option<String>,
-    pub color4: Option<String>,
-    pub color5: Option<String>,
-    pub color6: Option<String>,
-    pub color7: Option<String>,
-    pub color8: Option<String>,
-    pub color9: Option<String>,
-    pub color10: Option<String>,
-    pub color11: Option<String>,
-    pub color12: Option<String>,
-    pub color13: Option<String>,
-    pub color14: Option<String>,
-    pub color15: Option<String>,
-}
-
-impl AnsiColors {
-    pub fn get(&self, index: usize) -> Option<&Option<String>> {
-        match index {
-            0 => Some(&self.color0),
-            1 => Some(&self.color1),
-            2 => Some(&self.color2),
-            3 => Some(&self.color3),
-            4 => Some(&self.color4),
-            5 => Some(&self.color5),
-            6 => Some(&self.color6),
-            7 => Some(&self.color7),
-            8 => Some(&self.color8),
-            9 => Some(&self.color9),
-            10 => Some(&self.color10),
-            11 => Some(&self.color11),
-            12 => Some(&self.color12),
-            13 => Some(&self.color13),
-            14 => Some(&self.color14),
-            15 => Some(&self.color15),
-            _ => None,
-        }
-    }
-
-    pub fn set(&mut self, index: usize, value: Option<String>) {
-        match index {
-            0 => self.color0 = value,
-            1 => self.color1 = value,
-            2 => self.color2 = value,
-            3 => self.color3 = value,
-            4 => self.color4 = value,
-            5 => self.color5 = value,
-            6 => self.color6 = value,
-            7 => self.color7 = value,
-            8 => self.color8 = value,
-            9 => self.color9 = value,
-            10 => self.color10 = value,
-            11 => self.color11 = value,
-            12 => self.color12 = value,
-            13 => self.color13 = value,
-            14 => self.color14 = value,
-            15 => self.color15 = value,
-            _ => {}
         }
     }
 }
@@ -601,82 +507,9 @@ where
     }))
 }
 
-/// Parse a `#rrggbb` string into a GPUI color. Returns `None` for anything that
-/// isn't six hex digits (with an optional leading `#`).
-pub fn parse_hex_color(s: &str) -> Option<Rgba> {
-    let hex = s.trim().trim_start_matches('#');
-    if hex.len() != 6 {
-        return None;
-    }
-    let n = u32::from_str_radix(hex, 16).ok()?;
-    Some(rgb(n))
-}
-
-/// Format a color as a `#rrggbb` string (alpha dropped), the shape
-/// [`parse_hex_color`] accepts and `colors.*` overrides are stored in. Used by
-/// the settings color pickers to write a picked `Hsla` back into config.
-pub fn hsla_to_hex6(color: Hsla) -> String {
-    let rgba: Rgba = color.into();
-    let to_u8 = |f: f32| (f.clamp(0.0, 1.0) * 255.0).round() as u8;
-    format!(
-        "#{:02x}{:02x}{:02x}",
-        to_u8(rgba.r),
-        to_u8(rgba.g),
-        to_u8(rgba.b)
-    )
-}
-
-/// Resolve a palette entry: use the override if it parses, else `default` (a
-/// `0xrrggbb` literal). Returns the theme's `Hsla` color type directly.
-pub fn color_or(override_: &Option<String>, default: u32) -> Hsla {
-    override_
-        .as_deref()
-        .and_then(parse_hex_color)
-        .map(Into::into)
-        .unwrap_or_else(|| rgb(default).into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_hex_color_accepts_six_hex_digits_with_optional_hash() {
-        let red = parse_hex_color("#ff0000").expect("#rrggbb should parse");
-        assert!((red.r - 1.0).abs() < 1e-6 && red.g == 0.0 && red.b == 0.0);
-        // The leading '#' is optional and surrounding whitespace is trimmed.
-        assert!(parse_hex_color("00ff00").is_some());
-        assert!(parse_hex_color("  #0000ff  ").is_some());
-    }
-
-    #[test]
-    fn parse_hex_color_rejects_malformed_input() {
-        assert!(parse_hex_color("#fff").is_none()); // too short
-        assert!(parse_hex_color("#1234567").is_none()); // too long
-        assert!(parse_hex_color("#gggggg").is_none()); // non-hex
-        assert!(parse_hex_color("").is_none());
-    }
-
-    #[test]
-    fn hsla_to_hex6_round_trips_through_parse_hex_color() {
-        // The settings pickers write colors with `hsla_to_hex6` and read them
-        // back with `parse_hex_color`; the pair must round-trip byte-exact.
-        for hex in ["#000000", "#ffffff", "#123456", "#a1b2c3"] {
-            let color: Hsla = parse_hex_color(hex).unwrap().into();
-            assert_eq!(hsla_to_hex6(color), hex);
-        }
-    }
-
-    #[test]
-    fn color_or_falls_back_to_default_on_missing_or_bad_override() {
-        let expected: Hsla = rgb(0x123456).into();
-        assert_eq!(color_or(&None, 0x123456), expected);
-        // A malformed override is ignored in favour of the default.
-        assert_eq!(color_or(&Some("nope".to_string()), 0x123456), expected);
-        // A valid override wins over the default.
-        let white: Hsla = rgb(0xffffff).into();
-        assert_eq!(color_or(&Some("#ffffff".to_string()), 0x000000), white);
-    }
 
     #[test]
     fn font_features_are_optional_and_parse_as_gpui_features() {
@@ -696,28 +529,14 @@ mod tests {
     }
 
     #[test]
-    fn ansi_color_overrides_parse_and_default_independently() {
-        let cfg: Config =
-            serde_json::from_str(r##"{"ansi_colors":{"color0":"#575279","color15":"123456"}}"##)
-                .unwrap();
-        assert_eq!(
-            cfg.ansi_colors.get(0).and_then(|v| v.as_deref()),
-            Some("#575279")
-        );
-        assert_eq!(
-            cfg.ansi_colors.get(15).and_then(|v| v.as_deref()),
-            Some("123456")
-        );
-        assert!(cfg.ansi_colors.get(1).is_some_and(Option::is_none));
-
-        let mut colors = AnsiColors::default();
-        colors.set(0, Some("#111111".to_string()));
-        colors.set(15, Some("#eeeeee".to_string()));
-        assert_eq!(colors.get(0).and_then(|v| v.as_deref()), Some("#111111"));
-        assert_eq!(colors.get(15).and_then(|v| v.as_deref()), Some("#eeeeee"));
-        colors.set(0, None);
-        assert!(colors.get(0).is_some_and(Option::is_none));
-        assert!(colors.get(16).is_none());
+    fn stale_override_keys_are_ignored() {
+        // Leftover keys from the retired override system are ignored, not fatal.
+        let cfg: Config = serde_json::from_str(
+            r##"{"font_size": 20.0, "colors": {"border": "#fff"}, "ansi_colors": {"color1": "#f00"}}"##,
+        )
+        .expect("stale override keys must be ignored");
+        assert_eq!(cfg.font_size, 20.0);
+        assert_eq!(cfg.theme_preset, "light");
     }
 
     #[test]

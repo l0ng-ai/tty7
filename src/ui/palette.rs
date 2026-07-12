@@ -125,15 +125,15 @@ impl Command {
     /// preset. The active theme is marked with a check so the list doubles as a
     /// "which theme am I on?" indicator.
     pub fn theme_commands(cx: &App) -> Vec<Command> {
-        let active = cx.global::<Config>().theme_preset.as_str();
-        crate::ui::presets::all()
-            .iter()
+        let active = cx.global::<Config>().theme_preset.clone();
+        crate::ui::presets::all(cx)
+            .into_iter()
             .enumerate()
             .map(|(i, p)| {
                 let title = if p.id == active {
                     format!("{}  ✓", p.name)
                 } else {
-                    p.name.to_string()
+                    p.name.clone()
                 };
                 Command::new(title, CommandKind::SetTheme(i))
             })

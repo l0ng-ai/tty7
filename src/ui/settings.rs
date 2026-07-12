@@ -10,23 +10,20 @@ use gpui::{
     Stateful, Subscription, Window, div, img, prelude::*, px, rgb,
 };
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _};
-use gpui_component::collapsible::Collapsible;
 use gpui_component::input::{Input, InputState};
 use gpui_component::select::{SearchableVec, Select, SelectState};
 use gpui_component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
 use gpui_component::slider::{Slider, SliderState};
 use gpui_component::switch::Switch;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
-use gpui_component::{Disableable as _, Selectable as _};
+use gpui_component::Selectable as _;
+use gpui_component::color_picker::{ColorPicker, ColorPickerState};
 use std::sync::Arc;
 
-use gpui_component::color_picker::{ColorPicker, ColorPickerState};
-
-use crate::core::config::{AnsiColors, Colors, Config, CursorStyle, NewTabPosition, NotifyMode};
-use crate::ui::app::{FONT_SIZE_STEP, LINE_HEIGHT_STEP, Tty7App};
+use crate::core::config::{Config, CursorStyle, NewTabPosition, NotifyMode};
+use crate::ui::app::{FONT_SIZE_STEP, LINE_HEIGHT_STEP, ThemeEdit, Tty7App};
 use crate::ui::keymap::default_bindings;
 use crate::ui::presets;
-use crate::ui::presets::Neutrals;
 
 /// Which section of the settings panel is currently selected in the sidebar.
 /// Sections are named for the *object* being configured (the appearance, the
@@ -42,153 +39,20 @@ pub(crate) enum SettingsSection {
     About,
 }
 
-/// One of the nine overridable neutral colors (`colors.*`). Maps a settings row
-/// to its `Colors` field getter/setter and the preset's default for that slot,
-/// so a single loop can build all nine color-picker rows.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ColorKey {
-    Background,
-    Foreground,
-    Border,
-    Secondary,
-    Muted,
-    MutedForeground,
-    Popover,
-    Caret,
-    Selection,
-}
-
-/// One terminal ANSI color slot (`ansi_colors.color0`…`color15`). These map to
-/// SGR colors that terminal programs request explicitly, separate from the
-/// default foreground/background.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AnsiColorKey(pub(crate) usize);
-
-impl AnsiColorKey {
-    pub(crate) const ALL: [AnsiColorKey; 16] = [
-        AnsiColorKey(0),
-        AnsiColorKey(1),
-        AnsiColorKey(2),
-        AnsiColorKey(3),
-        AnsiColorKey(4),
-        AnsiColorKey(5),
-        AnsiColorKey(6),
-        AnsiColorKey(7),
-        AnsiColorKey(8),
-        AnsiColorKey(9),
-        AnsiColorKey(10),
-        AnsiColorKey(11),
-        AnsiColorKey(12),
-        AnsiColorKey(13),
-        AnsiColorKey(14),
-        AnsiColorKey(15),
-    ];
-
-    fn label(self) -> String {
-        format!("Color {}", self.0)
-    }
-
-    fn id(self) -> String {
-        format!("ansi-color{}", self.0)
-    }
-
-    pub(crate) fn get(self, colors: &AnsiColors) -> &Option<String> {
-        colors.get(self.0).unwrap_or(&colors.color0)
-    }
-
-    pub(crate) fn set(self, colors: &mut AnsiColors, val: Option<String>) {
-        colors.set(self.0, val);
-    }
-}
-
-impl ColorKey {
-    /// The nine keys, in the order they appear in the panel.
-    pub(crate) const ALL: [ColorKey; 9] = [
-        ColorKey::Background,
-        ColorKey::Foreground,
-        ColorKey::Border,
-        ColorKey::Secondary,
-        ColorKey::Muted,
-        ColorKey::MutedForeground,
-        ColorKey::Popover,
-        ColorKey::Caret,
-        ColorKey::Selection,
-    ];
-
-    /// Human-readable row label.
-    fn label(self) -> &'static str {
-        match self {
-            ColorKey::Background => "Background",
-            ColorKey::Foreground => "Foreground",
-            ColorKey::Border => "Border",
-            ColorKey::Secondary => "Secondary",
-            ColorKey::Muted => "Muted",
-            ColorKey::MutedForeground => "Muted foreground",
-            ColorKey::Popover => "Popover",
-            ColorKey::Caret => "Caret",
-            ColorKey::Selection => "Selection",
-        }
-    }
-
-    /// A stable element id for the row's picker/reset controls.
-    fn id(self) -> &'static str {
-        match self {
-            ColorKey::Background => "background",
-            ColorKey::Foreground => "foreground",
-            ColorKey::Border => "border",
-            ColorKey::Secondary => "secondary",
-            ColorKey::Muted => "muted",
-            ColorKey::MutedForeground => "muted-foreground",
-            ColorKey::Popover => "popover",
-            ColorKey::Caret => "caret",
-            ColorKey::Selection => "selection",
-        }
-    }
-
-    /// The current override string for this key, if any.
-    pub(crate) fn get(self, colors: &Colors) -> &Option<String> {
-        match self {
-            ColorKey::Background => &colors.background,
-            ColorKey::Foreground => &colors.foreground,
-            ColorKey::Border => &colors.border,
-            ColorKey::Secondary => &colors.secondary,
-            ColorKey::Muted => &colors.muted,
-            ColorKey::MutedForeground => &colors.muted_foreground,
-            ColorKey::Popover => &colors.popover,
-            ColorKey::Caret => &colors.caret,
-            ColorKey::Selection => &colors.selection,
-        }
-    }
-
-    /// Replace this key's override (`None` clears it back to the theme default).
-    pub(crate) fn set(self, colors: &mut Colors, val: Option<String>) {
-        match self {
-            ColorKey::Background => colors.background = val,
-            ColorKey::Foreground => colors.foreground = val,
-            ColorKey::Border => colors.border = val,
-            ColorKey::Secondary => colors.secondary = val,
-            ColorKey::Muted => colors.muted = val,
-            ColorKey::MutedForeground => colors.muted_foreground = val,
-            ColorKey::Popover => colors.popover = val,
-            ColorKey::Caret => colors.caret = val,
-            ColorKey::Selection => colors.selection = val,
-        }
-    }
-
-    /// The preset's default (`0xrrggbb`) for this slot, shown when unoverridden.
-    pub(crate) fn default_u32(self, n: &Neutrals) -> u32 {
-        match self {
-            ColorKey::Background => n.background,
-            ColorKey::Foreground => n.foreground,
-            ColorKey::Border => n.border,
-            ColorKey::Secondary => n.secondary,
-            ColorKey::Muted => n.muted,
-            ColorKey::MutedForeground => n.muted_foreground,
-            ColorKey::Popover => n.popover,
-            ColorKey::Caret => n.caret,
-            ColorKey::Selection => n.selection,
-        }
-    }
+/// The in-app color editor for the active *editable* theme: one color picker per
+/// seed color (background/foreground/accent/cursor/selection) and per ANSI slot,
+/// each wired to write its change straight back to the theme's YAML file. Rebuilt
+/// by `Tty7App::rebuild_theme_editor` whenever the active theme changes, so it
+/// always targets (and reflects) the theme on screen.
+pub(crate) struct ThemeEditor {
+    /// The id the pickers were built for (which theme they edit).
+    #[allow(dead_code)]
+    pub(crate) for_id: String,
+    /// Seed-color pickers: `(edit target, row label, picker state)`.
+    pub(crate) seed: Vec<(ThemeEdit, String, Entity<ColorPickerState>)>,
+    /// One picker per ANSI slot 0–15.
+    pub(crate) ansi: Vec<(ThemeEdit, String, Entity<ColorPickerState>)>,
+    pub(crate) _subs: Vec<Subscription>,
 }
 
 /// Live state for the settings panel (Cmd+,). Holds the panel's focus owner
@@ -208,20 +72,11 @@ pub(crate) struct SettingsState {
     pub(crate) shell_args_input: Entity<InputState>,
     /// Custom working-directory path (used when the strategy is `Custom`).
     pub(crate) wd_path_input: Entity<InputState>,
-    /// One color picker per overridable neutral (`colors.*`), in `ColorKey::ALL`
-    /// order. Each is initialized to the effective color and emits a `Change` that
-    /// writes the override + re-applies the theme.
-    pub(crate) color_pickers: Vec<(ColorKey, Entity<ColorPickerState>)>,
-    /// One color picker per overridable terminal ANSI color (`ansi_colors.*`).
-    pub(crate) ansi_color_pickers: Vec<(AnsiColorKey, Entity<ColorPickerState>)>,
-    /// Whether the Colors override group (Appearance) is expanded. Collapsed by
-    /// default: its nine theme-internal slots are power-user surface, and open
-    /// they would dwarf the theme/typography settings everyone else came for.
-    pub(crate) colors_expanded: bool,
-    /// Whether the ANSI Colors override group (Appearance) is expanded.
-    pub(crate) ansi_colors_expanded: bool,
     /// Mouse-scroll multiplier slider (Terminal section).
     pub(crate) scroll_slider: Entity<SliderState>,
+    /// The color editor for the active editable theme, or `None` when the active
+    /// theme is read-only (a built-in / import) or the system is being followed.
+    pub(crate) theme_editor: Option<ThemeEditor>,
     pub(crate) _subs: Vec<Subscription>,
 }
 
@@ -481,23 +336,11 @@ impl Tty7App {
         let hover_bg = theme.secondary.opacity(0.6);
         let stepper_bg = theme.secondary.opacity(0.35);
         let font_size = self.font_size;
-        let (
-            font_select,
-            font_bold_select,
-            font_italic_select,
-            color_pickers,
-            colors_expanded,
-            ansi_color_pickers,
-            ansi_colors_expanded,
-        ) = match self.active_settings() {
+        let (font_select, font_bold_select, font_italic_select) = match self.active_settings() {
             Some(s) => (
                 s.font_select.clone(),
                 s.font_bold_select.clone(),
                 s.font_italic_select.clone(),
-                s.color_pickers.clone(),
-                s.colors_expanded,
-                s.ansi_color_pickers.clone(),
-                s.ansi_colors_expanded,
             ),
             None => return div().into_any_element(),
         };
@@ -511,8 +354,6 @@ impl Tty7App {
                     .iter()
                     .any(|(tag, value)| tag == "liga" && *value != 0)
         });
-        let colors = cfg.colors.clone();
-        let ansi_colors = cfg.ansi_colors.clone();
 
         // Unified −/value/+ stepper plus a quiet Reset.
         let step = move |id: &'static str, glyph: &'static str, divider: bool| {
@@ -712,182 +553,96 @@ impl Tty7App {
                 cx,
             ))
             .child(self.section_rule(cx))
-            .child(self.render_colors_group(colors_expanded, color_pickers, &colors, cx))
-            .child(self.section_rule(cx))
-            .child(self.render_ansi_colors_group(
-                ansi_colors_expanded,
-                ansi_color_pickers,
-                &ansi_colors,
+            .child(self.render_custom_themes(cx))
+            .into_any_element()
+    }
+
+    /// Custom themes section. On an editable theme, the color editor; on a
+    /// read-only built-in / import, a "Duplicate to edit" button that forks it
+    /// into an editable file. The folder button is always available.
+    fn render_custom_themes(&self, cx: &mut Context<Self>) -> AnyElement {
+        let editor = self
+            .active_settings()
+            .and_then(|s| s.theme_editor.as_ref());
+
+        let folder_button = Button::new("open-themes-folder")
+            .label("Open Themes Folder")
+            .small()
+            .on_click(cx.listener(|this, _, _w, cx| this.open_themes_folder(cx)));
+
+        if let Some(editor) = editor {
+            // Snapshot the picker handles so the render borrow of `self` ends.
+            let seed: Vec<_> = editor
+                .seed
+                .iter()
+                .map(|(_, label, state)| (label.clone(), state.clone()))
+                .collect();
+            let ansi: Vec<_> = editor
+                .ansi
+                .iter()
+                .map(|(_, label, state)| (label.clone(), state.clone()))
+                .collect();
+            return v_flex()
+                .child(self.section_intro(
+                    "Edit theme",
+                    "You're editing a copy. Changes save to its file in the themes \
+                     folder and apply live.",
+                    cx,
+                ))
+                .children(
+                    seed.into_iter()
+                        .map(|(label, state)| self.render_theme_color_row(label, state, cx)),
+                )
+                .child(self.section_header("ANSI colors", cx))
+                .children(
+                    ansi.into_iter()
+                        .map(|(label, state)| self.render_theme_color_row(label, state, cx)),
+                )
+                .child(h_flex().mt_4().child(folder_button))
+                .into_any_element();
+        }
+
+        // Read-only theme (built-in or import): offer to duplicate it into an
+        // editable copy, plus the folder affordance.
+        v_flex()
+            .child(self.section_intro(
+                "Custom themes",
+                "Duplicate a theme to edit its colors here, or drop your own in the \
+                 themes folder: a tty7 YAML theme or an iTerm2 .itermcolors scheme.",
                 cx,
             ))
-            .into_any_element()
-    }
-
-    /// The Colors override group, folded behind its header by default. The nine
-    /// slots are theme-internal knobs for power users; expanded they'd fill more
-    /// of the page than the theme + typography settings everyone came for. The
-    /// whole header is the toggle, with a chevron tracking the open state.
-    fn render_colors_group(
-        &self,
-        expanded: bool,
-        color_pickers: Vec<(ColorKey, Entity<ColorPickerState>)>,
-        colors: &Colors,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let muted_fg = cx.theme().muted_foreground;
-        let chevron = if expanded {
-            IconName::ChevronDown
-        } else {
-            IconName::ChevronRight
-        };
-        let header = v_flex()
-            .id("colors-toggle")
-            .gap_1()
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _w, cx| this.toggle_settings_colors(cx)))
             .child(
                 h_flex()
-                    .items_center()
-                    .gap_1p5()
-                    .child(self.header_text("Colors", cx))
-                    .child(Icon::new(chevron).small().text_color(muted_fg)),
-            )
-            .child(div().text_xs().text_color(muted_fg).child(
-                "Advanced: override individual theme colors. Reset returns a color to the theme default.",
-            ));
-        Collapsible::new()
-            .open(expanded)
-            .child(header)
-            .content(
-                v_flex().mt_2().children(
-                    color_pickers
-                        .into_iter()
-                        .map(|(key, state)| self.render_color_row(key, state, colors, cx)),
-                ),
+                    .gap_3()
+                    .child(
+                        Button::new("duplicate-theme")
+                            .label("Duplicate to Edit")
+                            .small()
+                            .primary()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.fork_active_theme(window, cx)
+                            })),
+                    )
+                    .child(folder_button),
             )
             .into_any_element()
     }
 
-    /// One color-override row: label + description, the picker swatch, and a
-    /// Reset that clears the override back to the theme default. Reset is disabled
-    /// (dimmed, no-op) when the slot isn't currently overridden.
-    fn render_color_row(
+    /// One color-editor row: a label paired with its picker. The picker's own
+    /// `Change` event (wired in `rebuild_theme_editor`) writes the edit to the
+    /// theme file, so the row itself is purely presentational.
+    fn render_theme_color_row(
         &self,
-        key: ColorKey,
+        label: String,
         state: Entity<ColorPickerState>,
-        colors: &Colors,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let overridden = key.get(colors).is_some();
         let control = h_flex()
             .items_center()
-            .gap_3()
             .w(px(240.))
             .child(ColorPicker::new(&state).small())
-            .child(
-                Button::new(SharedString::from(format!("color-reset-{}", key.id())))
-                    .label("Reset")
-                    .ghost()
-                    .small()
-                    .disabled(!overridden)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.reset_color_override(key, window, cx);
-                    })),
-            )
             .into_any_element();
-        self.settings_row(
-            key.label(),
-            if overridden {
-                "Custom"
-            } else {
-                "Theme default"
-            },
-            control,
-            cx,
-        )
-    }
-
-    /// Terminal ANSI color overrides (`color0`…`color15`), separate from the
-    /// theme's default foreground/background. These are the slots CLI programs
-    /// address explicitly with SGR colors.
-    fn render_ansi_colors_group(
-        &self,
-        expanded: bool,
-        color_pickers: Vec<(AnsiColorKey, Entity<ColorPickerState>)>,
-        colors: &AnsiColors,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let muted_fg = cx.theme().muted_foreground;
-        let chevron = if expanded {
-            IconName::ChevronDown
-        } else {
-            IconName::ChevronRight
-        };
-        let header = v_flex()
-            .id("ansi-colors-toggle")
-            .gap_1()
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _w, cx| this.toggle_settings_ansi_colors(cx)))
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_1p5()
-                    .child(self.header_text("ANSI Colors", cx))
-                    .child(Icon::new(chevron).small().text_color(muted_fg)),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(muted_fg)
-                    .child("Advanced: override terminal color0-color15 slots used by CLI tools."),
-            );
-        Collapsible::new()
-            .open(expanded)
-            .child(header)
-            .content(
-                v_flex().mt_2().children(
-                    color_pickers
-                        .into_iter()
-                        .map(|(key, state)| self.render_ansi_color_row(key, state, colors, cx)),
-                ),
-            )
-            .into_any_element()
-    }
-
-    fn render_ansi_color_row(
-        &self,
-        key: AnsiColorKey,
-        state: Entity<ColorPickerState>,
-        colors: &AnsiColors,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let overridden = key.get(colors).is_some();
-        let control = h_flex()
-            .items_center()
-            .gap_3()
-            .w(px(240.))
-            .child(ColorPicker::new(&state).small())
-            .child(
-                Button::new(SharedString::from(format!("{}-reset", key.id())))
-                    .label("Reset")
-                    .ghost()
-                    .small()
-                    .disabled(!overridden)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.reset_ansi_color_override(key, window, cx);
-                    })),
-            )
-            .into_any_element();
-        self.settings_row(
-            key.label(),
-            if overridden {
-                "Custom"
-            } else {
-                "Theme default"
-            },
-            control,
-            cx,
-        )
+        self.settings_row(label, "", control, cx)
     }
 
     /// Shell section: the program tty7 launches in each new terminal, plus its
@@ -1242,10 +997,10 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// Theme gallery: one clickable card per built-in theme, each a
-    /// mini-terminal preview painted in that theme's own colors (a prompt dot +
-    /// a few lines of "code" drawn from its ANSI set). The active card gets an
-    /// accent ring + a check; clicking switches the theme live via `set_preset`.
+    /// Theme gallery: one clickable card per theme (built-ins + user files), each
+    /// a mini-terminal preview painted in its own colors. The selected card gets a
+    /// soft ring + a check; clicking switches the active theme live via
+    /// `set_preset`.
     fn render_theme_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let border = theme.border;
@@ -1254,51 +1009,32 @@ impl Tty7App {
         let active_id = cx.global::<Config>().theme_preset.clone();
 
         // Selection chrome is monochrome — the ring and check track the theme's
-        // own `foreground`, exactly like the active tab in the title bar. It never
-        // introduces a hue that belongs to no theme (the old fixed orange did), and
-        // it adapts per theme: a soft dark ring on light grounds, a soft light one
-        // on dark. The preview's own `❯` still shows each theme's real accent —
-        // that's the swatch, not the selection chrome.
+        // own `foreground`, exactly like the active tab in the title bar.
         let sel_ring = foreground;
 
         let to_u32 = |(r, g, b): (u8, u8, u8)| (r as u32) << 16 | (g as u32) << 8 | b as u32;
 
-        // Cap the gallery at four cards wide (4×196 + 3×gap_5) but keep it
-        // flex-wrapping, so narrow panels fall back to three, two, or one per row.
-        // `mt_2` matches the header→control gap used by the row sections so the
-        // gallery sits on the same rhythm as everything else on the sheet.
+        // Cap the gallery at four cards wide but keep it flex-wrapping, so narrow
+        // panels fall back to three, two, or one per row.
         let mut gallery = h_flex().flex_wrap().gap_5().mt_2().mb_2().max_w(px(864.));
-        for p in presets::all() {
-            let id = p.id;
+        for p in presets::all(cx) {
+            let id = p.id.clone();
             let is_active = active_id == id;
-            // The theme's real accent — used only *inside* the preview (the `❯`
-            // chevron and one bar) so each card advertises its own look. The
-            // selection chrome around the card stays monochrome (see `sel_ring`).
             let accent = rgb(p.accent);
             let ansi = |i: usize| rgb(to_u32(p.ansi16[i]));
-            // The theme's real text color, used for the neutral "text" bars so the
-            // preview shows each theme's actual foreground contrast — otherwise a
-            // pale ANSI-white (e.g. Light's #e0e0e0) vanishes on a white card and
-            // two different light themes read as identical blank squares.
             let fg = rgb(p.foreground);
             // A "line of code": thin rounded bars, sized like words and tightly
             // spaced so the preview reads as real terminal text, not fat pills.
             let bar =
                 |w: f32, color: gpui::Rgba| div().h(px(4.)).w(px(w)).rounded(px(1.5)).bg(color);
 
-            // overflow_hidden masks children to a *rectangle*, not the card's
-            // rounded corners — so the preview bg must round its own corners
-            // (10px = the card's 12px radius − 2px border) or it pokes square
-            // corners past the rounded border.
             let preview = v_flex()
                 .h(px(120.))
-                .bg(rgb(p.background))
+                .bg(rgb(p.background_color()))
                 .rounded(px(10.))
                 .px_3()
                 .py_3()
                 .gap(px(10.))
-                // Prompt line: accent chevron + output bar — an unmistakable
-                // "this is a terminal" cue, in the theme's own accent.
                 .child(
                     h_flex()
                         .items_center()
@@ -1326,9 +1062,6 @@ impl Tty7App {
                         .child(bar(38., accent)),
                 );
 
-            // Name as a caption *below* the card — no grey footer bar. The card
-            // stays a clean swatch; the label lives on the page like a wallpaper
-            // picker, brightening to full foreground + a check when selected.
             let label = h_flex()
                 .items_center()
                 .gap_1p5()
@@ -1342,7 +1075,7 @@ impl Tty7App {
                             FontWeight::MEDIUM
                         })
                         .text_color(if is_active { foreground } else { muted_fg })
-                        .child(p.name),
+                        .child(p.name.clone()),
                 )
                 .when(is_active, |s| {
                     s.child(Icon::new(IconName::Check).small().text_color(foreground))
@@ -1352,16 +1085,11 @@ impl Tty7App {
                 .rounded_xl()
                 .overflow_hidden()
                 .border_1()
-                // A soft, thin orange ring — not a hard bright line. The
-                // selection reads as a faint tint, and the small solid check
-                // does the crisp "this one" pointing.
                 .border_color(if is_active {
                     sel_ring.opacity(0.35)
                 } else {
                     border
                 })
-                // A gentle lift off the sheet; the selected card lifts more, so
-                // depth reinforces selection alongside the ring.
                 .when(is_active, |s| s.shadow_md())
                 .when(!is_active, |s| {
                     s.shadow_sm()
@@ -1369,17 +1097,18 @@ impl Tty7App {
                 })
                 .child(preview);
 
+            let click_id = id.clone();
             gallery = gallery.child(
                 v_flex()
-                    .id(id)
+                    .id(SharedString::from(format!("theme-{id}")))
                     .w(px(196.))
                     .gap_2()
                     .cursor_pointer()
                     .child(card)
                     .child(label)
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.set_preset(id, window, cx)),
-                    ),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_preset(&click_id, window, cx)
+                    })),
             );
         }
 

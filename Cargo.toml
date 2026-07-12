@@ -26,6 +26,13 @@ smallvec.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 
+# Theme files. tty7 themes are authored as YAML (`~/.config/tty7/themes/*.yaml`,
+# our own schema); `plist` parses imported iTerm2 `.itermcolors` schemes (XML
+# plist) so the large iTerm color-scheme ecosystem drops straight in. serde_yaml
+# is already in the tree transitively, so it pins no new code; plist is pure Rust.
+serde_yaml = "0.9"
+plist = "1"
+
 # HTTP client for the startup update check (`core::update`): one GET to the
 # GitHub releases API to see if a newer version has shipped. `reqwest_client`
 # wraps Zed's `zed-reqwest` fork behind gpui's `http_client` trait (re-exported
