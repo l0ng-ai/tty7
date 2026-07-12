@@ -21,9 +21,11 @@
 //! `terminal::remote::RemoteTerminal`, exposing the same surface as the old
 //! in-process `Terminal` so the view layer is largely unchanged.
 
+pub(crate) mod forward;
 pub mod pane;
 pub mod pidfile;
 pub mod protocol;
+pub(crate) mod remote;
 pub mod server;
 pub mod spawn;
 pub mod transport;

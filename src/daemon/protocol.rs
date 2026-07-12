@@ -68,6 +68,51 @@ pub struct PaneInfo {
     pub alive: bool,
 }
 
+/// A foreground remote session the daemon can prove from the local process table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteContext {
+    pub kind: RemoteKind,
+    /// Original foreground argv. Kept so follow-up operations can preserve ssh
+    /// config flags such as `-F`, `-p`, and `-J` rather than guessing.
+    pub argv: Vec<String>,
+    /// The destination token (`host`, `user@host`, or ssh config alias).
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RemoteKind {
+    Ssh,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopbackForwardRequest {
+    pub pane_id: u64,
+    pub remote_host: String,
+    pub remote_port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopbackForward {
+    pub local_port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopbackForwardId {
+    pub pane_id: u64,
+    pub target: String,
+    pub remote_host: String,
+    pub remote_port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopbackForwardInfo {
+    pub id: LoopbackForwardId,
+    pub local_port: u16,
+    pub age_secs: u64,
+    pub idle_secs: u64,
+}
+
 /// Messages the GUI client sends to the daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientMsg {
@@ -99,6 +144,14 @@ pub enum ClientMsg {
     /// effect, which a long-lived daemon process can't otherwise see. Ends every
     /// running session, so the caller confirms with the user first.
     Shutdown,
+    /// Ensure a local SSH port-forward exists for a loopback URL printed by a
+    /// remote session in `pane_id`. Control-connection message; daemon replies
+    /// with `LoopbackForward` or `Error`.
+    EnsureLoopbackForward(LoopbackForwardRequest),
+    /// Ask for the daemon's active SSH loopback port-forwards.
+    ListLoopbackForwards,
+    /// Close one active SSH loopback port-forward.
+    CloseLoopbackForward(LoopbackForwardId),
 }
 
 /// Messages the daemon sends back to the GUI client.
@@ -128,6 +181,12 @@ pub enum DaemonMsg {
     Exited { code: Option<i32> },
     /// Reply to `List`.
     PaneList(Vec<PaneInfo>),
+    /// The foreground remote context, or `None` when the pane is local / unknown.
+    RemoteContext(Option<RemoteContext>),
+    /// Reply to `EnsureLoopbackForward`.
+    LoopbackForward(LoopbackForward),
+    /// Reply to `ListLoopbackForwards` and `CloseLoopbackForward`.
+    LoopbackForwardList(Vec<LoopbackForwardInfo>),
     /// A request failed (e.g. `Attach` to an unknown/dead pane id).
     Error(String),
 }
@@ -150,6 +209,9 @@ mod kind {
     /// an old daemon must keep serving new-GUI default spawns. Only picking a
     /// non-default shell sends this, and only a too-old daemon rejects it.
     pub const SPAWN_SHELL: u8 = 9;
+    pub const ENSURE_LOOPBACK_FORWARD: u8 = 10;
+    pub const LIST_LOOPBACK_FORWARDS: u8 = 11;
+    pub const CLOSE_LOOPBACK_FORWARD: u8 = 12;
 
     // Daemon -> client
     pub const SPAWNED: u8 = 1;
@@ -161,6 +223,9 @@ mod kind {
     pub const PANE_LIST: u8 = 7;
     pub const ERROR: u8 = 8;
     pub const SIZE: u8 = 9;
+    pub const REMOTE_CONTEXT: u8 = 10;
+    pub const LOOPBACK_FORWARD: u8 = 11;
+    pub const LOOPBACK_FORWARD_LIST: u8 = 12;
 }
 
 /// Write one framed message: `[u32 LE len][u8 kind][payload]`.
@@ -262,6 +327,13 @@ impl ClientMsg {
             ClientMsg::Kill { pane_id } => write_frame(w, kind::KILL, &to_json(pane_id)?),
             ClientMsg::List => write_frame(w, kind::LIST, &[]),
             ClientMsg::Shutdown => write_frame(w, kind::SHUTDOWN, &[]),
+            ClientMsg::EnsureLoopbackForward(req) => {
+                write_frame(w, kind::ENSURE_LOOPBACK_FORWARD, &to_json(req)?)
+            }
+            ClientMsg::ListLoopbackForwards => write_frame(w, kind::LIST_LOOPBACK_FORWARDS, &[]),
+            ClientMsg::CloseLoopbackForward(id) => {
+                write_frame(w, kind::CLOSE_LOOPBACK_FORWARD, &to_json(id)?)
+            }
         }
     }
 
@@ -292,6 +364,9 @@ impl ClientMsg {
             },
             kind::LIST => ClientMsg::List,
             kind::SHUTDOWN => ClientMsg::Shutdown,
+            kind::ENSURE_LOOPBACK_FORWARD => ClientMsg::EnsureLoopbackForward(from_json(&payload)?),
+            kind::LIST_LOOPBACK_FORWARDS => ClientMsg::ListLoopbackForwards,
+            kind::CLOSE_LOOPBACK_FORWARD => ClientMsg::CloseLoopbackForward(from_json(&payload)?),
             other => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -324,6 +399,15 @@ impl DaemonMsg {
             } => write_frame(w, kind::PROMPT, &to_json(&(active, at_prompt, last_exit))?),
             DaemonMsg::Exited { code } => write_frame(w, kind::EXITED, &to_json(code)?),
             DaemonMsg::PaneList(list) => write_frame(w, kind::PANE_LIST, &to_json(list)?),
+            DaemonMsg::RemoteContext(remote) => {
+                write_frame(w, kind::REMOTE_CONTEXT, &to_json(remote)?)
+            }
+            DaemonMsg::LoopbackForward(forward) => {
+                write_frame(w, kind::LOOPBACK_FORWARD, &to_json(forward)?)
+            }
+            DaemonMsg::LoopbackForwardList(forwards) => {
+                write_frame(w, kind::LOOPBACK_FORWARD_LIST, &to_json(forwards)?)
+            }
             DaemonMsg::Error(msg) => write_frame(w, kind::ERROR, &to_json(msg)?),
         }
     }
@@ -350,6 +434,9 @@ impl DaemonMsg {
                 code: from_json(&payload)?,
             },
             kind::PANE_LIST => DaemonMsg::PaneList(from_json(&payload)?),
+            kind::REMOTE_CONTEXT => DaemonMsg::RemoteContext(from_json(&payload)?),
+            kind::LOOPBACK_FORWARD => DaemonMsg::LoopbackForward(from_json(&payload)?),
+            kind::LOOPBACK_FORWARD_LIST => DaemonMsg::LoopbackForwardList(from_json(&payload)?),
             kind::ERROR => DaemonMsg::Error(from_json(&payload)?),
             other => {
                 return Err(io::Error::new(
@@ -483,6 +570,18 @@ mod tests {
             ClientMsg::Kill { pane_id: 7 },
             ClientMsg::List,
             ClientMsg::Shutdown,
+            ClientMsg::EnsureLoopbackForward(LoopbackForwardRequest {
+                pane_id: 7,
+                remote_host: "127.0.0.1".into(),
+                remote_port: 3000,
+            }),
+            ClientMsg::ListLoopbackForwards,
+            ClientMsg::CloseLoopbackForward(LoopbackForwardId {
+                pane_id: 7,
+                target: "dev".into(),
+                remote_host: "127.0.0.1".into(),
+                remote_port: 3000,
+            }),
         ];
         let mut buf = Vec::new();
         for m in &msgs {
@@ -515,6 +614,24 @@ mod tests {
                 cwd: Some(PathBuf::from("/x")),
                 title: "zsh".into(),
                 alive: true,
+            }]),
+            DaemonMsg::RemoteContext(Some(RemoteContext {
+                kind: RemoteKind::Ssh,
+                argv: vec!["ssh".into(), "-p".into(), "2222".into(), "dev".into()],
+                target: "dev".into(),
+            })),
+            DaemonMsg::RemoteContext(None),
+            DaemonMsg::LoopbackForward(LoopbackForward { local_port: 49152 }),
+            DaemonMsg::LoopbackForwardList(vec![LoopbackForwardInfo {
+                id: LoopbackForwardId {
+                    pane_id: 7,
+                    target: "dev".into(),
+                    remote_host: "127.0.0.1".into(),
+                    remote_port: 3000,
+                },
+                local_port: 49152,
+                age_secs: 12,
+                idle_secs: 3,
             }]),
             DaemonMsg::Error("nope".into()),
         ];

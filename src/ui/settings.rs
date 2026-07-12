@@ -21,6 +21,7 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_f
 use std::sync::Arc;
 
 use crate::core::config::{Config, CursorStyle, NewTabPosition, NotifyMode};
+use crate::daemon::protocol::LoopbackForwardInfo;
 use crate::ui::app::{FONT_SIZE_STEP, LINE_HEIGHT_STEP, ThemeEdit, Tty7App};
 use crate::ui::keymap::default_bindings;
 use crate::ui::presets;
@@ -97,6 +98,8 @@ pub(crate) struct SettingsState {
     pub(crate) theme_panel_open: bool,
     /// Live filter for the theme picker panel's list.
     pub(crate) theme_search: Entity<InputState>,
+    /// Last daemon-reported SSH loopback forwards shown in Terminal → Links.
+    pub(crate) loopback_forwards: Vec<LoopbackForwardInfo>,
     pub(crate) _subs: Vec<Subscription>,
 }
 
@@ -116,6 +119,16 @@ fn humanize_action(action: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+fn human_duration(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 60 * 60 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h", secs / 3600)
+    }
 }
 
 impl Tty7App {
@@ -329,6 +342,106 @@ impl Tty7App {
                     ),
             )
             .child(control)
+    }
+
+    fn render_loopback_forwards(
+        &self,
+        forwards: &[LoopbackForwardInfo],
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = cx.theme();
+        let refresh = Button::new("ssh-forward-refresh")
+            .label("Refresh")
+            .small()
+            .on_click(cx.listener(|this, _, _w, cx| this.refresh_loopback_forwards(cx)));
+
+        let header = h_flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child("Active SSH forwards"),
+            )
+            .child(refresh);
+
+        let body = if forwards.is_empty() {
+            v_flex().child(
+                div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("No active SSH loopback forwards."),
+            )
+        } else {
+            forwards.iter().fold(v_flex().gap_2(), |list, forward| {
+                list.child(self.render_loopback_forward_row(forward, cx))
+            })
+        };
+
+        v_flex().gap_2().py_2().child(header).child(body)
+    }
+
+    fn render_loopback_forward_row(
+        &self,
+        forward: &LoopbackForwardInfo,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = cx.theme();
+        let id = forward.id.clone();
+        let remote = format!(
+            "{}:{} on {}",
+            forward.id.remote_host, forward.id.remote_port, forward.id.target
+        );
+        let local = format!("127.0.0.1:{}", forward.local_port);
+        let details = format!(
+            "Pane {} · idle {} · age {}",
+            forward.id.pane_id,
+            human_duration(forward.idle_secs),
+            human_duration(forward.age_secs)
+        );
+        let close_id = SharedString::from(format!(
+            "ssh-forward-close-{}-{}-{}-{}",
+            forward.id.pane_id, forward.id.target, forward.id.remote_host, forward.id.remote_port
+        ));
+
+        h_flex()
+            .items_center()
+            .gap_4()
+            .px_3()
+            .py_2()
+            .border_1()
+            .border_color(theme.border)
+            .rounded_md()
+            .child(
+                v_flex()
+                    .gap_0p5()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(div().text_sm().text_color(theme.foreground).child(remote))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("->"),
+                            )
+                            .child(div().text_sm().text_color(theme.foreground).child(local)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(details),
+                    ),
+            )
+            .child(Button::new(close_id).label("Close").small().on_click(
+                cx.listener(move |this, _, _w, cx| this.close_loopback_forward(id.clone(), cx)),
+            ))
     }
 
     /// A segmented control (gpui-component's `ButtonGroup`, outline) for a small
@@ -803,6 +916,7 @@ impl Tty7App {
         let foreground = cx.theme().foreground;
         let cfg = cx.global::<Config>();
         let link_url = cfg.link_url;
+        let ssh_loopback_forward = cfg.ssh_loopback_forward;
         let mouse_hide = cfg.mouse_hide_while_typing;
         let focus_follows = cfg.focus_follows_mouse;
         let option_as_alt = cfg.macos_option_as_alt;
@@ -821,14 +935,18 @@ impl Tty7App {
             NotifyMode::Unfocused => 1,
             NotifyMode::Always => 2,
         };
-        let scroll_slider = match self.active_settings() {
-            Some(s) => s.scroll_slider.clone(),
+        let (scroll_slider, loopback_forwards) = match self.active_settings() {
+            Some(s) => (s.scroll_slider.clone(), s.loopback_forwards.clone()),
             None => return div().into_any_element(),
         };
 
         let link_switch = Switch::new("term-link-url")
             .checked(link_url)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_link_url(*on, cx)))
+            .into_any_element();
+        let ssh_loopback_switch = Switch::new("term-ssh-loopback-forward")
+            .checked(ssh_loopback_forward)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_ssh_loopback_forward(*on, cx)))
             .into_any_element();
         let scrollback_radio = self.segmented(
             "term-scrollback",
@@ -950,6 +1068,13 @@ impl Tty7App {
                 link_switch,
                 cx,
             ))
+            .child(self.settings_row(
+                "Forward SSH loopback links",
+                "When a pane is in SSH, open localhost links through a temporary port forward.",
+                ssh_loopback_switch,
+                cx,
+            ))
+            .child(self.render_loopback_forwards(&loopback_forwards, cx))
             .child(self.section_rule(cx))
             .child(self.section_header("Clipboard", cx))
             .child(self.settings_row(

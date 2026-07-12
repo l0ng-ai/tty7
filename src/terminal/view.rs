@@ -295,6 +295,12 @@ pub(super) struct HoveredLink {
     pub end: usize,
 }
 
+enum LoopbackOpen {
+    Forwarded(String),
+    ForwardFailed,
+    NotLoopback,
+}
+
 /// A submitted command whose history-file record is deferred so it can carry
 /// the command's exit code (like zsh's `INC_APPEND_HISTORY_TIME`). `seq` is
 /// [`RemoteTerminal::prompt_seq`] at submit time: a later report that puts the
@@ -3085,7 +3091,7 @@ impl TerminalView {
         if let Some(hl) = cell.hyperlink() {
             let uri = hl.uri().to_string();
             drop(term);
-            cx.open_url(&uri);
+            self.open_url(&uri, cx);
             return true;
         }
 
@@ -3098,13 +3104,50 @@ impl TerminalView {
         let cwd = self.cwd();
         if let Some(link) = super::search::link_at(&text, col, cwd.as_deref(), true) {
             match link.target {
-                LinkTarget::Url(url) => cx.open_url(&url),
+                LinkTarget::Url(url) => self.open_url(&url, cx),
                 LinkTarget::File { path, .. } => open_file_path(&path),
             }
+            true
+        } else if self.can_forward_loopback(cx)
+            && let Some((_, _, url)) = super::loopback::loopback_url_span_at(&text, col)
+        {
+            self.open_url(&url, cx);
             true
         } else {
             false
         }
+    }
+
+    fn open_url(&self, url: &str, cx: &mut Context<Self>) {
+        match self.forwarded_loopback_url(url, cx) {
+            LoopbackOpen::Forwarded(url) => cx.open_url(&url),
+            LoopbackOpen::NotLoopback => cx.open_url(url),
+            LoopbackOpen::ForwardFailed => {}
+        }
+    }
+
+    fn forwarded_loopback_url(&self, url: &str, cx: &mut Context<Self>) -> LoopbackOpen {
+        if !self.can_forward_loopback(cx) {
+            return LoopbackOpen::NotLoopback;
+        }
+        let Some(loopback) = super::loopback::parse_loopback_url(url) else {
+            return LoopbackOpen::NotLoopback;
+        };
+        match RemoteTerminal::ensure_loopback_forward(
+            self.pane_id,
+            loopback.forward_host(),
+            loopback.port,
+        ) {
+            Ok(forward) => LoopbackOpen::Forwarded(loopback.forwarded_url(forward.local_port)),
+            Err(e) => {
+                log::warn!("failed to forward loopback URL {url}: {e}");
+                LoopbackOpen::ForwardFailed
+            }
+        }
+    }
+
+    fn can_forward_loopback(&self, cx: &mut Context<Self>) -> bool {
+        cx.global::<Config>().ssh_loopback_forward && self.terminal.remote_context().is_some()
     }
 
     /// Update the remembered hovered link for the screen cell `(col, row)` and
@@ -3125,7 +3168,8 @@ impl TerminalView {
             self.clear_hovered_link(cx);
             return false;
         }
-        let next = self.link_span_at(col, row, include_files);
+        let include_loopback = self.can_forward_loopback(cx);
+        let next = self.link_span_at(col, row, include_files, include_loopback);
         if next != self.hovered_link {
             self.hovered_link = next;
             cx.notify();
@@ -3158,7 +3202,13 @@ impl TerminalView {
     /// contiguous run of cells sharing the same target), a bare URL token, or an
     /// existing file or directory path in the row text. Mirrors [`open_link_at`](Self::open_link_at)'s
     /// detection so the underline covers exactly what a Cmd+click would open.
-    fn link_span_at(&self, col: usize, row: usize, include_files: bool) -> Option<HoveredLink> {
+    fn link_span_at(
+        &self,
+        col: usize,
+        row: usize,
+        include_files: bool,
+        include_loopback: bool,
+    ) -> Option<HoveredLink> {
         let term = self.terminal.term.lock();
         let display_offset = term.grid().display_offset() as i32;
         let line = Line(row as i32 - display_offset);
@@ -3198,7 +3248,18 @@ impl TerminalView {
         }
         drop(term);
         let cwd = self.cwd();
-        let link = super::search::link_at(&text, col, cwd.as_deref(), include_files)?;
+        let link =
+            super::search::link_at(&text, col, cwd.as_deref(), include_files).or_else(|| {
+                include_loopback.then(|| {
+                    super::loopback::loopback_url_span_at(&text, col).map(|(start, end, url)| {
+                        super::search::LinkMatch {
+                            start,
+                            end,
+                            target: LinkTarget::Url(url),
+                        }
+                    })
+                })?
+            })?;
         Some(HoveredLink {
             line: line.0,
             start: link.start,

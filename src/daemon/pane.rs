@@ -35,7 +35,7 @@ use std::time::Duration;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::core::osc::OscTokenizer;
-use crate::daemon::protocol::{DaemonMsg, PaneInfo, ShellSpec, WinSize};
+use crate::daemon::protocol::{DaemonMsg, PaneInfo, RemoteContext, ShellSpec, WinSize};
 use crate::daemon::shell_integration;
 
 /// The platform default shell command, used when the user hasn't set `shell` in
@@ -135,6 +135,7 @@ fn apply_shell_integration(
 /// from some recent point onward, and a client's emulator tolerates a truncated
 /// prefix far better than a hole punched in the middle.
 const RING_CAP: usize = 8 * 1024 * 1024;
+const REMOTE_CONTEXT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Backpressure between a pane's PTY reader and its connection writer: counts
 /// the `Output` bytes sitting in the (unbounded) channel, and parks the reader
@@ -248,6 +249,8 @@ struct PaneState {
     cwd: Option<PathBuf>,
     /// Shell prompt/command state from OSC 133.
     shell: ShellState,
+    /// Trusted foreground remote context from the local process table.
+    remote: Option<RemoteContext>,
     /// Last geometry the PTY was sized to (spawn size, then each `resize`).
     /// Reported to a re-attaching client as `DaemonMsg::Size` so its replay of
     /// the ring runs at the geometry the ring was recorded under.
@@ -460,6 +463,7 @@ impl DaemonPane {
             subscriber_epoch: 0,
             cwd: initial_cwd,
             shell: ShellState::default(),
+            remote: None,
             size,
             alive: true,
         }));
@@ -502,12 +506,14 @@ impl DaemonPane {
         // line editor stays disengaged for whatever is really reading the
         // keyboard — see `foreground_command_running` / issue #26.
         let fg_master = master.clone();
+        let remote_master = master.clone();
         let reader = Self::spawn_reader(
             state,
             shutting_down,
             gate,
             reader_handle,
             move || foreground_command_running(&fg_master, shell_pid),
+            move || foreground_remote_context(&remote_master),
             death,
         );
         *pane.reader.lock().unwrap() = Some(reader);
@@ -530,6 +536,7 @@ impl DaemonPane {
         // when a prompt mark arrives, to reject marks a foreground program emits —
         // see the call site and [`foreground_command_running`].
         foreground_running: impl Fn() -> bool + Send + 'static,
+        foreground_remote: impl Fn() -> Option<RemoteContext> + Send + 'static,
         death: Arc<DeathReporter>,
     ) -> JoinHandle<()> {
         std::thread::Builder::new()
@@ -551,6 +558,7 @@ impl DaemonPane {
                 let mut tr_reads: u32 = 0;
                 let mut tr_read_t = std::time::Duration::ZERO;
                 let mut tr_disp_t = std::time::Duration::ZERO;
+                let mut next_remote_check = std::time::Instant::now();
 
                 loop {
                     if trace && tr_last.elapsed() >= std::time::Duration::from_secs(1) {
@@ -607,6 +615,19 @@ impl DaemonPane {
                                 }
                             }
 
+                            // SSH-context detection is a process-table query
+                            // (sysctl/procfs). Keep it out of the state lock and
+                            // off the per-chunk hot path; half-second freshness is
+                            // enough for link hover/click state while keeping PTY
+                            // drain latency predictable.
+                            let remote = if std::time::Instant::now() >= next_remote_check {
+                                next_remote_check =
+                                    std::time::Instant::now() + REMOTE_CONTEXT_POLL_INTERVAL;
+                                Some(foreground_remote())
+                            } else {
+                                None
+                            };
+
                             let tr1 = trace.then(std::time::Instant::now);
                             let mut st = state.lock().unwrap();
                             ring_append(&mut st.ring, bytes);
@@ -620,6 +641,9 @@ impl DaemonPane {
                                 }
                             }
                             apply_signals(&mut st, signals);
+                            if let Some(remote) = remote {
+                                apply_remote_context(&mut st, remote);
+                            }
                             if let Some(tr1) = tr1 {
                                 tr_disp_t += tr1.elapsed();
                             }
@@ -733,6 +757,11 @@ impl DaemonPane {
             title: self.foreground_title(),
             alive,
         }
+    }
+
+    pub(crate) fn remote_context(&self) -> Option<RemoteContext> {
+        let cached = self.state.lock().unwrap().remote.clone();
+        cached.or_else(|| self.foreground_remote_context())
     }
 
     /// Hang up the child now; the pane's `Drop` then reaps it. Used by the `Kill`
@@ -976,6 +1005,10 @@ impl DaemonPane {
     fn foreground_title(&self) -> String {
         String::new()
     }
+
+    fn foreground_remote_context(&self) -> Option<RemoteContext> {
+        foreground_remote_context(&self.master)
+    }
 }
 
 impl Drop for DaemonPane {
@@ -1094,6 +1127,9 @@ fn attach_subscriber(st: &mut PaneState, subscriber: Sender<DaemonMsg>) -> u64 {
             last_exit: st.shell.last_exit_code,
         });
     }
+    if st.remote.is_some() {
+        let _ = subscriber.send(DaemonMsg::RemoteContext(st.remote.clone()));
+    }
     // A dead pane's reader thread — the one that reports the child's exit — is
     // long gone, so replay its exit too: without this an attach racing the
     // child's death (it exited between the client's `List` and its `Attach`)
@@ -1127,6 +1163,16 @@ fn apply_signals(st: &mut PaneState, signals: SniffSignals) {
             });
         }
     }
+}
+
+fn apply_remote_context(st: &mut PaneState, remote: Option<RemoteContext>) {
+    if st.remote == remote {
+        return;
+    }
+    if let Some(sub) = &st.subscriber {
+        let _ = sub.send(DaemonMsg::RemoteContext(remote.clone()));
+    }
+    st.remote = remote;
 }
 
 /// Whether a foreground command — not the shell itself — currently owns the
@@ -1170,6 +1216,18 @@ fn is_foreground_command(fg_pgid: Option<i32>, shell_pid: Option<u32>) -> bool {
         (Some(pg), Some(shell)) if pg > 0 => pg as u32 != shell,
         _ => false,
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn foreground_remote_context(master: &Mutex<Box<dyn MasterPty + Send>>) -> Option<RemoteContext> {
+    let pid = master.lock().ok().and_then(|m| m.process_group_leader())?;
+    let argv = crate::daemon::remote::foreground_argv(pid)?;
+    crate::daemon::remote::parse_ssh_invocation(&argv).map(|inv| inv.context)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn foreground_remote_context(_master: &Mutex<Box<dyn MasterPty + Send>>) -> Option<RemoteContext> {
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1897,6 +1955,7 @@ mod tests {
             subscriber_epoch: 0,
             cwd: None,
             shell: ShellState::default(),
+            remote: None,
             size: WinSize {
                 cols: 80,
                 rows: 24,
@@ -1978,6 +2037,7 @@ mod tests {
             Arc::new(OutputGate::new()),
             Box::new(std::io::Cursor::new(b"tail".to_vec())),
             || false, // no PTY here → treat the shell as foreground
+            || None,
             Arc::new(DeathReporter::new(move || {
                 dead_flag.store(true, Ordering::SeqCst)
             })),
@@ -2011,6 +2071,7 @@ mod tests {
             Arc::new(OutputGate::new()),
             Box::new(std::io::Cursor::new(Vec::new())),
             || false,
+            || None,
             Arc::new(DeathReporter::new(move || dead_tx.send(()).unwrap())),
         );
         handle.join().unwrap();
@@ -2033,6 +2094,7 @@ mod tests {
             Arc::new(OutputGate::new()),
             Box::new(std::io::Cursor::new(Vec::new())),
             || false,
+            || None,
             Arc::new(DeathReporter::new(move || {
                 dead_flag.store(true, Ordering::SeqCst)
             })),

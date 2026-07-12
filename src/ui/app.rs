@@ -765,6 +765,38 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.link_url = on);
     }
 
+    pub(crate) fn set_ssh_loopback_forward(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.ssh_loopback_forward = on);
+    }
+
+    pub(crate) fn refresh_loopback_forwards(&mut self, cx: &mut Context<Self>) {
+        let forwards = crate::terminal::RemoteTerminal::list_loopback_forwards();
+        if let Some(settings) = self
+            .tabs
+            .get_mut(self.active)
+            .and_then(|tab| tab.settings.as_mut())
+        {
+            settings.loopback_forwards = forwards;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn close_loopback_forward(
+        &mut self,
+        id: crate::daemon::protocol::LoopbackForwardId,
+        cx: &mut Context<Self>,
+    ) {
+        let forwards = crate::terminal::RemoteTerminal::close_loopback_forward(id);
+        if let Some(settings) = self
+            .tabs
+            .get_mut(self.active)
+            .and_then(|tab| tab.settings.as_mut())
+        {
+            settings.loopback_forwards = forwards;
+        }
+        cx.notify();
+    }
+
     /// Toggle the startup update check (Settings → About). Takes effect on the
     /// next launch — this only persists the preference; it doesn't run or cancel
     /// an in-flight check.
@@ -1375,6 +1407,7 @@ impl Tty7App {
                 }
             }),
         );
+        let loopback_forwards = crate::terminal::RemoteTerminal::list_loopback_forwards();
 
         self.maximized = None;
         self.tabs.push(Tab {
@@ -1393,6 +1426,7 @@ impl Tty7App {
                 theme_editor: None,
                 theme_panel_open: false,
                 theme_search,
+                loopback_forwards,
                 _subs: subs,
             }),
         });

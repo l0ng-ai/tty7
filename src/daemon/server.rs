@@ -302,6 +302,44 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             Ok(())
         }
 
+        ClientMsg::EnsureLoopbackForward(req) => {
+            let mut w = write_stream;
+            let Some(pane) = registry.get(req.pane_id) else {
+                DaemonMsg::Error(format!("no such pane {}", req.pane_id)).encode(&mut w)?;
+                return Ok(());
+            };
+            let Some(remote) = pane.remote_context() else {
+                DaemonMsg::Error("pane has no detected ssh remote context".to_string())
+                    .encode(&mut w)?;
+                return Ok(());
+            };
+            match crate::daemon::forward::ForwardManager::global().ensure(
+                req.pane_id,
+                &remote,
+                &req.remote_host,
+                req.remote_port,
+            ) {
+                Ok(forward) => DaemonMsg::LoopbackForward(forward).encode(&mut w)?,
+                Err(e) => DaemonMsg::Error(format!("forward failed: {e}")).encode(&mut w)?,
+            }
+            Ok(())
+        }
+
+        ClientMsg::ListLoopbackForwards => {
+            let mut w = write_stream;
+            let list = crate::daemon::forward::ForwardManager::global().list();
+            DaemonMsg::LoopbackForwardList(list).encode(&mut w)?;
+            Ok(())
+        }
+
+        ClientMsg::CloseLoopbackForward(id) => {
+            let mut w = write_stream;
+            crate::daemon::forward::ForwardManager::global().close(&id);
+            let list = crate::daemon::forward::ForwardManager::global().list();
+            DaemonMsg::LoopbackForwardList(list).encode(&mut w)?;
+            Ok(())
+        }
+
         // `Input` / `Resize` / `Detach` as an opening message are meaningless (no
         // pane is bound yet); ignore and close.
         other => {

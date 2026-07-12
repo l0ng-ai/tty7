@@ -58,6 +58,10 @@ pub struct Config {
     /// Detect URLs (OSC 8 hyperlinks + bare URLs in the text), underline them on
     /// hover, and open them on ⌘/Ctrl-click. On by default.
     pub link_url: bool,
+    /// When a pane is in a detected SSH session, Command-clicking loopback URLs
+    /// opens them through a temporary local SSH port-forward. Off by default
+    /// because it starts background `ssh` processes.
+    pub ssh_loopback_forward: bool,
     /// Blink the block cursor while the terminal is focused. On by default; when
     /// off the cursor stays solid.
     pub cursor_blink: bool,
@@ -251,6 +255,7 @@ impl Default for Config {
             // out: URL detection on, cursor blinking, 10k scrollback, new tabs
             // after the active one, notify only while unfocused.
             link_url: true,
+            ssh_loopback_forward: false,
             cursor_blink: true,
             scrollback_limit: 10_000,
             new_tab_position: NewTabPosition::AfterCurrent,

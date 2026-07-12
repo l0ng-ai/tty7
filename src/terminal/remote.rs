@@ -34,7 +34,10 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi;
 
 use crate::core::osc::OscTokenizer;
-use crate::daemon::protocol::{ClientMsg, DaemonMsg, ShellSpec, WinSize};
+use crate::daemon::protocol::{
+    ClientMsg, DaemonMsg, LoopbackForward, LoopbackForwardId, LoopbackForwardInfo,
+    LoopbackForwardRequest, RemoteContext, ShellSpec, WinSize,
+};
 use crate::daemon::transport::{self, Stream};
 
 use super::size::TermSize;
@@ -97,6 +100,7 @@ struct ShellState {
 struct ReaderSignals {
     cwd: Arc<Mutex<Option<PathBuf>>>,
     shell: Arc<Mutex<ShellState>>,
+    remote: Arc<Mutex<Option<RemoteContext>>>,
     exited: Arc<AtomicBool>,
     child_exited: Arc<AtomicBool>,
     zle_reading: Arc<AtomicBool>,
@@ -130,6 +134,8 @@ pub struct RemoteTerminal {
     cwd: Arc<Mutex<Option<PathBuf>>>,
     /// Shell prompt/command state, last reported by the daemon via `Prompt`.
     shell_state: Arc<Mutex<ShellState>>,
+    /// Trusted foreground remote context, last reported by the daemon.
+    remote_context: Arc<Mutex<Option<RemoteContext>>>,
     /// Set true by the reader thread once the child exits or the daemon
     /// disconnects. `poll_exited()` copies this into the `exited` field.
     exited_flag: Arc<AtomicBool>,
@@ -264,6 +270,7 @@ impl RemoteTerminal {
 
         let cwd: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
         let shell_state: Arc<Mutex<ShellState>> = Arc::new(Mutex::new(ShellState::default()));
+        let remote_context: Arc<Mutex<Option<RemoteContext>>> = Arc::new(Mutex::new(None));
         let exited_flag = Arc::new(AtomicBool::new(false));
         let child_exited = Arc::new(AtomicBool::new(false));
         let zle_reading = Arc::new(AtomicBool::new(false));
@@ -275,6 +282,7 @@ impl RemoteTerminal {
             ReaderSignals {
                 cwd: cwd.clone(),
                 shell: shell_state.clone(),
+                remote: remote_context.clone(),
                 exited: exited_flag.clone(),
                 child_exited: child_exited.clone(),
                 zle_reading: zle_reading.clone(),
@@ -291,6 +299,7 @@ impl RemoteTerminal {
             writer: Mutex::new(write_half),
             cwd,
             shell_state,
+            remote_context,
             exited_flag,
             child_exited,
             zle_reading,
@@ -322,6 +331,7 @@ impl RemoteTerminal {
                 let ReaderSignals {
                     cwd,
                     shell,
+                    remote,
                     exited: exited_flag,
                     child_exited,
                     zle_reading,
@@ -549,6 +559,12 @@ impl RemoteTerminal {
                                     }
                                 }
                             }
+                            DaemonMsg::RemoteContext(ctx) => {
+                                flush_batch!();
+                                if let Ok(mut guard) = remote.lock() {
+                                    *guard = ctx;
+                                }
+                            }
                             DaemonMsg::Exited { .. } => {
                                 // Child gone: apply what it printed last, then
                                 // mark the emulator exited and flip the shared
@@ -719,6 +735,10 @@ impl RemoteTerminal {
         self.cwd.lock().ok().and_then(|g| g.clone())
     }
 
+    pub fn remote_context(&self) -> Option<RemoteContext> {
+        self.remote_context.lock().ok().and_then(|g| g.clone())
+    }
+
     /// Whether the shell sits idle at its prompt, from the daemon's last `Prompt`
     /// report. Only meaningful once `active` (the daemon has seen OSC 133);
     /// before that we conservatively answer `false`, matching `Terminal`'s
@@ -792,6 +812,55 @@ impl RemoteTerminal {
             // closes; a tiny blocking read of EOF is enough to order it.
             let _ = stream.shutdown(std::net::Shutdown::Write);
         }
+    }
+
+    pub fn ensure_loopback_forward(
+        pane_id: u64,
+        remote_host: &str,
+        remote_port: u16,
+    ) -> anyhow::Result<LoopbackForward> {
+        let mut stream = connect()?;
+        ClientMsg::EnsureLoopbackForward(LoopbackForwardRequest {
+            pane_id,
+            remote_host: remote_host.to_string(),
+            remote_port,
+        })
+        .encode(&mut stream)?;
+        match DaemonMsg::read(&mut stream)? {
+            DaemonMsg::LoopbackForward(forward) => Ok(forward),
+            DaemonMsg::Error(msg) => Err(anyhow::anyhow!(msg)),
+            other => Err(anyhow::anyhow!(
+                "unexpected reply to EnsureLoopbackForward: {other:?}"
+            )),
+        }
+    }
+
+    pub fn list_loopback_forwards() -> Vec<LoopbackForwardInfo> {
+        fn query() -> anyhow::Result<Vec<LoopbackForwardInfo>> {
+            let mut stream = connect()?;
+            ClientMsg::ListLoopbackForwards.encode(&mut stream)?;
+            match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::LoopbackForwardList(list) => Ok(list),
+                other => Err(anyhow::anyhow!(
+                    "unexpected reply to ListLoopbackForwards: {other:?}"
+                )),
+            }
+        }
+        query().unwrap_or_default()
+    }
+
+    pub fn close_loopback_forward(id: LoopbackForwardId) -> Vec<LoopbackForwardInfo> {
+        fn query(id: LoopbackForwardId) -> anyhow::Result<Vec<LoopbackForwardInfo>> {
+            let mut stream = connect()?;
+            ClientMsg::CloseLoopbackForward(id).encode(&mut stream)?;
+            match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::LoopbackForwardList(list) => Ok(list),
+                other => Err(anyhow::anyhow!(
+                    "unexpected reply to CloseLoopbackForward: {other:?}"
+                )),
+            }
+        }
+        query(id).unwrap_or_default()
     }
 }
 
