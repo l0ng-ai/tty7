@@ -116,7 +116,7 @@ impl Command {
             Command::new("Change Theme…", OpenThemePicker),
             Command::new("Open Settings", OpenSettings),
             Command::new("Reset Font Size", ResetFontSize),
-            Command::new("Restart Background Service…", RestartDaemon),
+            Command::new("Restart Daemon…", RestartDaemon),
         ]
     }
 

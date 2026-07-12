@@ -412,7 +412,7 @@ impl Tty7App {
     pub(crate) fn restart_daemon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let answer = window.prompt(
             PromptLevel::Warning,
-            "Restart Background Service?",
+            "Restart Daemon?",
             Some(
                 "This stops every running terminal session — anything still \
                  running in them will be terminated. Your tabs and layout are kept \

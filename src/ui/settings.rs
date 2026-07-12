@@ -1323,15 +1323,15 @@ impl Tty7App {
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(foreground)
-                            .child("Background service"),
+                            .child("Daemon"),
                     )
                     .child(div().text_sm().text_color(muted_fg).child(
-                        "Restart the background service to pick up a newly granted macOS permission, recover if it stops responding, or start from a clean slate. This ends all running sessions; your tabs and layout reopen with fresh shells.",
+                        "Restart the daemon to pick up a newly granted macOS permission, recover if it stops responding, or start from a clean slate. This ends all running sessions; your tabs and layout reopen with fresh shells.",
                     ))
                     .child(
                         h_flex().child(
                             Button::new("restart-daemon")
-                                .label("Restart Background Service…")
+                                .label("Restart Daemon…")
                                 .small()
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.restart_daemon(window, cx)

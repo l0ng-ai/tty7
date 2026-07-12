@@ -32,7 +32,7 @@ pub(crate) fn set_menus(cx: &mut App) {
             // Force a fresh background daemon (so a newly granted macOS permission
             // such as Full Disk Access takes effect). The trailing "…" signals the
             // confirmation prompt; it ends every running session.
-            MenuItem::action("Restart Background Service…", RestartDaemon),
+            MenuItem::action("Restart Daemon…", RestartDaemon),
             MenuItem::separator(),
             MenuItem::action("Quit tty7", Quit),
         ]),
