@@ -4,7 +4,7 @@
 //! `ui::presets`) and publishes the terminal-facing palette.
 
 use gpui::{
-    App, Hsla, Menu, MenuItem, Pixels, Point, WindowBackgroundAppearance, Window, point, px, rgb,
+    App, Hsla, Menu, MenuItem, Pixels, Point, Window, WindowBackgroundAppearance, point, px, rgb,
 };
 use gpui_component::{Theme, ThemeMode};
 

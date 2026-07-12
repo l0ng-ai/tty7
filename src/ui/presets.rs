@@ -307,12 +307,16 @@ pub fn to_yaml(t: &Theme) -> String {
     s.push_str(&format!("name: {:?}\n", t.name));
     match &t.background {
         Fill::Solid(c) => s.push_str(&format!("background: {}\n", hex(*c))),
-        Fill::Vertical { top, bottom } => {
-            s.push_str(&format!("background: {{ top: {}, bottom: {} }}\n", hex(*top), hex(*bottom)))
-        }
-        Fill::Horizontal { left, right } => {
-            s.push_str(&format!("background: {{ left: {}, right: {} }}\n", hex(*left), hex(*right)))
-        }
+        Fill::Vertical { top, bottom } => s.push_str(&format!(
+            "background: {{ top: {}, bottom: {} }}\n",
+            hex(*top),
+            hex(*bottom)
+        )),
+        Fill::Horizontal { left, right } => s.push_str(&format!(
+            "background: {{ left: {}, right: {} }}\n",
+            hex(*left),
+            hex(*right)
+        )),
     }
     s.push_str(&format!("foreground: {}\n", hex(t.foreground)));
     s.push_str(&format!("accent: {}\n", hex(t.accent)));
@@ -356,7 +360,10 @@ pub fn fork_to_file(t: &Theme) -> std::io::Result<String> {
     }
     let mut copy = t.clone();
     copy.name = format!("{} (custom)", t.name.trim_end_matches(" (custom)"));
-    crate::core::config::write_atomic(&dir.join(format!("{stem}.yaml")), to_yaml(&copy).as_bytes())?;
+    crate::core::config::write_atomic(
+        &dir.join(format!("{stem}.yaml")),
+        to_yaml(&copy).as_bytes(),
+    )?;
     Ok(stem)
 }
 
@@ -463,7 +470,14 @@ fn id_and_name(path: &std::path::Path) -> (String, String) {
         })
         .collect::<Vec<_>>()
         .join(" ");
-    (stem, if name.is_empty() { "Theme".into() } else { name })
+    (
+        stem,
+        if name.is_empty() {
+            "Theme".into()
+        } else {
+            name
+        },
+    )
 }
 
 // ── YAML theme files (tty7's own schema) ─────────────────────────────────────
@@ -577,9 +591,7 @@ fn expand_path(p: &str) -> PathBuf {
     if path.is_absolute() {
         return path;
     }
-    themes_dir()
-        .map(|d| d.join(&path))
-        .unwrap_or(path)
+    themes_dir().map(|d| d.join(&path)).unwrap_or(path)
 }
 
 // ── iTerm2 `.itermcolors` import ─────────────────────────────────────────────
@@ -601,7 +613,11 @@ fn load_iterm_theme(path: &std::path::Path) -> Result<Theme, String> {
             let f = c.get(k)?.as_real()?;
             Some((f.clamp(0.0, 1.0) * 255.0).round() as u32)
         };
-        Some((comp("Red Component")? << 16) | (comp("Green Component")? << 8) | comp("Blue Component")?)
+        Some(
+            (comp("Red Component")? << 16)
+                | (comp("Green Component")? << 8)
+                | comp("Blue Component")?,
+        )
     };
 
     let mut ansi16 = [(0u8, 0u8, 0u8); 16];
@@ -904,7 +920,11 @@ mod tests {
     fn foreground_is_legible_on_background() {
         for t in builtins() {
             let ratio = contrast(t.background_color(), t.foreground);
-            assert!(ratio >= 4.0, "{}: fg/bg contrast too low ({ratio:.2})", t.id);
+            assert!(
+                ratio >= 4.0,
+                "{}: fg/bg contrast too low ({ratio:.2})",
+                t.id
+            );
         }
     }
 
@@ -993,7 +1013,13 @@ ansi:
         )
         .unwrap();
         let fill = file.background.into_fill().unwrap();
-        assert_eq!(fill, Fill::Vertical { top: 0x001122, bottom: 0x334455 });
+        assert_eq!(
+            fill,
+            Fill::Vertical {
+                top: 0x001122,
+                bottom: 0x334455
+            }
+        );
         assert_eq!(fill.color(), 0x001122);
     }
 

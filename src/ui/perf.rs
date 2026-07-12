@@ -115,10 +115,17 @@ mod tests {
         let start = Instant::now();
         let mut m = Meter::new(start);
         assert_eq!(
-            m.record("x", start + Duration::from_millis(10), Duration::from_millis(2)),
+            m.record(
+                "x",
+                start + Duration::from_millis(10),
+                Duration::from_millis(2)
+            ),
             None
         );
-        assert_eq!(m.calls, 1, "the sub-window build folded into the open window");
+        assert_eq!(
+            m.calls, 1,
+            "the sub-window build folded into the open window"
+        );
     }
 
     #[test]
@@ -126,8 +133,12 @@ mod tests {
         let start = Instant::now();
         let mut m = Meter::new(start);
         assert!(
-            m.record("render", start + Duration::from_millis(500), Duration::from_millis(2))
-                .is_none()
+            m.record(
+                "render",
+                start + Duration::from_millis(500),
+                Duration::from_millis(2)
+            )
+            .is_none()
         );
         // Crossing the window boundary flushes the aggregate: 2 calls over 1.0s =
         // 2.0 calls/s, build avg (2+6)/2 = 4ms, max 6ms.

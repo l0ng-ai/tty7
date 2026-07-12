@@ -9,15 +9,15 @@ use gpui::{
     AnyElement, Context, Div, Entity, FontWeight, Image, ImageFormat, KeyDownEvent, SharedString,
     Stateful, Subscription, Window, div, img, prelude::*, px, rgb,
 };
+use gpui_component::Selectable as _;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _};
+use gpui_component::color_picker::{ColorPicker, ColorPickerState};
 use gpui_component::input::{Input, InputState};
 use gpui_component::select::{SearchableVec, Select, SelectState};
 use gpui_component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
 use gpui_component::slider::{Slider, SliderState};
 use gpui_component::switch::Switch;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
-use gpui_component::Selectable as _;
-use gpui_component::color_picker::{ColorPicker, ColorPickerState};
 use std::sync::Arc;
 
 use crate::core::config::{Config, CursorStyle, NewTabPosition, NotifyMode};
@@ -588,9 +588,7 @@ impl Tty7App {
     /// read-only built-in / import, a "Duplicate to edit" button that forks it
     /// into an editable file. The folder button is always available.
     fn render_custom_themes(&self, cx: &mut Context<Self>) -> AnyElement {
-        let editor = self
-            .active_settings()
-            .and_then(|s| s.theme_editor.as_ref());
+        let editor = self.active_settings().and_then(|s| s.theme_editor.as_ref());
 
         let folder_button = Button::new("open-themes-folder")
             .label("Open Themes Folder")

@@ -628,33 +628,44 @@ impl Tty7App {
         let neutrals = theme.neutrals();
         // (edit target, row label, current 0xRRGGBB value) for each seed color.
         let seed_specs: [(ThemeEdit, &str, u32); 5] = [
-            (ThemeEdit::Background, "Background", theme.background_color()),
+            (
+                ThemeEdit::Background,
+                "Background",
+                theme.background_color(),
+            ),
             (ThemeEdit::Foreground, "Foreground", theme.foreground),
             (ThemeEdit::Accent, "Accent", theme.accent),
-            (ThemeEdit::Cursor, "Cursor", theme.caret.unwrap_or(theme.accent)),
+            (
+                ThemeEdit::Cursor,
+                "Cursor",
+                theme.caret.unwrap_or(theme.accent),
+            ),
             (ThemeEdit::Selection, "Selection", neutrals.selection),
         ];
 
         let mut subs = Vec::new();
-        let mut make = |edit: ThemeEdit, value: u32, subs: &mut Vec<Subscription>, cx: &mut Context<Self>| {
-            let eff: gpui::Hsla = gpui::rgb(value).into();
-            let state = cx.new(|cx| ColorPickerState::new(window, cx).default_value(eff));
-            subs.push(cx.subscribe_in(
-                &state,
-                window,
-                move |this, _picker, ev: &ColorPickerEvent, window, cx| {
-                    let ColorPickerEvent::Change(value) = ev;
-                    if let Some(v) = value {
-                        this.edit_active_theme(edit, *v, window, cx);
-                    }
-                },
-            ));
-            state
-        };
+        let mut make =
+            |edit: ThemeEdit, value: u32, subs: &mut Vec<Subscription>, cx: &mut Context<Self>| {
+                let eff: gpui::Hsla = gpui::rgb(value).into();
+                let state = cx.new(|cx| ColorPickerState::new(window, cx).default_value(eff));
+                subs.push(cx.subscribe_in(
+                    &state,
+                    window,
+                    move |this, _picker, ev: &ColorPickerEvent, window, cx| {
+                        let ColorPickerEvent::Change(value) = ev;
+                        if let Some(v) = value {
+                            this.edit_active_theme(edit, *v, window, cx);
+                        }
+                    },
+                ));
+                state
+            };
 
         let seed = seed_specs
             .iter()
-            .map(|&(edit, label, value)| (edit, label.to_string(), make(edit, value, &mut subs, cx)))
+            .map(|&(edit, label, value)| {
+                (edit, label.to_string(), make(edit, value, &mut subs, cx))
+            })
             .collect();
         let ansi = (0..16)
             .map(|i| {

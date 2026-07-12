@@ -84,9 +84,10 @@ fn spawn_config_watcher(cx: &mut App) {
         // Everything else in the dir (`session.json`, `history`, the daemon
         // socket, and our own `.config.json.tmp.<pid>` / `*.yaml.tmp.<pid>` atomic
         // scratch files, whose extensions aren't theme extensions) is ignored.
-        let hit = event.paths.iter().any(|p| {
-            p.file_name() == watched_file.file_name() || is_theme_file(p)
-        });
+        let hit = event
+            .paths
+            .iter()
+            .any(|p| p.file_name() == watched_file.file_name() || is_theme_file(p));
         if hit {
             // try_send: a full channel just means a reload is already pending;
             // one ping is enough to trigger the (idempotent) reload.
@@ -162,13 +163,11 @@ fn spawn_config_watcher(cx: &mut App) {
 /// files atomic writes leave behind mid-save.
 fn is_theme_file(p: &std::path::Path) -> bool {
     p.parent().and_then(|d| d.file_name()) == Some(std::ffi::OsStr::new("themes"))
-        && p.extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| {
-                e.eq_ignore_ascii_case("yaml")
-                    || e.eq_ignore_ascii_case("yml")
-                    || e.eq_ignore_ascii_case("itermcolors")
-            })
+        && p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+            e.eq_ignore_ascii_case("yaml")
+                || e.eq_ignore_ascii_case("yml")
+                || e.eq_ignore_ascii_case("itermcolors")
+        })
 }
 
 /// Parse `--config-dir <path>` (or `--config-dir=<path>`) from the CLI and pin
