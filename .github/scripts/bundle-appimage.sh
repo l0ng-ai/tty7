@@ -61,7 +61,9 @@ Categories=System;TerminalEmulator;
 Terminal=false
 StartupWMClass=tty7
 DESKTOP
-cp assets/app-icon.png "$TOOLS/tty7.png"
+# linuxdeploy only accepts fixed icon resolutions (…256, 384, 512 — NOT the
+# source's 1024), so downscale to 256×256.
+convert assets/app-icon.png -resize 256x256 "$TOOLS/tty7.png"
 
 # Phase 1 — populate the AppDir: copy in dependent libs (ldd + patchelf) and
 # install the desktop/icon into their standard locations.
