@@ -39,8 +39,10 @@ macOS、Windows、Linux 三平台原生构建，每个 release 一起打出。
   （Intel）；打开后把 `tty7.app` 拖进「应用程序」即可。
 - **Windows** —— `…-windows-x86_64-setup.exe`（安装包：带开始菜单快捷方式和
   卸载入口），或 `…-windows-x86_64.zip`（便携版：解压后运行 `tty7.exe`）。
-- **Linux** —— `…-linux-x86_64.tar.gz`；解压后运行 `./tty7`（需要常见的
-  x11/wayland 运行时库）。
+- **Linux** —— `…-linux-x86_64.AppImage`(推荐:已打包 x11/wayland 依赖库,
+  Fedora / Arch 等发行版免装依赖,`chmod +x` 后直接运行),或
+  `…-linux-x86_64.tar.gz`(裸二进制,解压后运行 `./tty7`,需自行装齐常见的
+  x11/wayland 运行时库)。
 
 ## 功能
 

@@ -50,7 +50,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config cmake clang libxkbcommon-dev \
             libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev \
-            libwayland-dev libx11-dev libxcb1-dev libzstd-dev libssl-dev
+            libwayland-dev libx11-dev libxcb1-dev libzstd-dev libssl-dev \
+            libfuse2 file
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -89,6 +90,14 @@ jobs:
         working-directory: tty7
         run: bash .github/scripts/bundle-linux.sh "${{ matrix.target }}" "${{ matrix.arch }}"
 
+      # AppImage bundles the x11/wayland/xkb/font libs so it runs on Fedora/Arch/
+      # etc., not just Ubuntu. Kept separate from the tarball step so the tarball
+      # still ships even if AppImage tooling changes upstream.
+      - name: Package Linux AppImage
+        if: matrix.os == 'linux'
+        working-directory: tty7
+        run: bash .github/scripts/bundle-appimage.sh "${{ matrix.target }}" "${{ matrix.arch }}"
+
       - name: Package Windows installer + zip
         if: matrix.os == 'windows'
         working-directory: tty7
@@ -104,3 +113,4 @@ jobs:
             tty7/dist/*.tar.gz
             tty7/dist/*.zip
             tty7/dist/*-setup.exe
+            tty7/dist/*.AppImage

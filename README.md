@@ -43,8 +43,10 @@ Download the build for your platform from
 - **Windows** — `…-windows-x86_64-setup.exe` (installer: Start Menu shortcut +
   uninstall entry), or `…-windows-x86_64.zip` (portable: unzip and run
   `tty7.exe`).
-- **Linux** — `…-linux-x86_64.tar.gz`; extract and run `./tty7` (needs the usual
-  x11/wayland runtime libraries).
+- **Linux** — `…-linux-x86_64.AppImage` (recommended: bundles the x11/wayland
+  libraries, so it runs on Fedora / Arch / etc. with no extra packages —
+  `chmod +x` and run), or `…-linux-x86_64.tar.gz` (bare binary; extract and run
+  `./tty7`, needs the usual x11/wayland runtime libraries installed).
 
 ## Features
 
