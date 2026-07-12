@@ -79,13 +79,14 @@ fn spawn_config_watcher(cx: &mut App) {
     let watched_file = config_file.clone();
     let handler = move |res: notify::Result<notify::Event>| {
         let Ok(event) = res else { return };
-        // Only react to events that touch our `config.json` (the dir may also see
-        // `session.json`, `history`, and our own `.config.json.tmp.<pid>` scratch
-        // file from atomic writes — ignore those).
-        let hit = event
-            .paths
-            .iter()
-            .any(|p| p.file_name() == watched_file.file_name());
+        // React to events that touch our `config.json`, or a theme file dropped
+        // into the `themes/` subfolder — both feed the same registry reload below.
+        // Everything else in the dir (`session.json`, `history`, the daemon
+        // socket, and our own `.config.json.tmp.<pid>` / `*.yaml.tmp.<pid>` atomic
+        // scratch files, whose extensions aren't theme extensions) is ignored.
+        let hit = event.paths.iter().any(|p| {
+            p.file_name() == watched_file.file_name() || is_theme_file(p)
+        });
         if hit {
             // try_send: a full channel just means a reload is already pending;
             // one ping is enough to trigger the (idempotent) reload.
@@ -100,7 +101,9 @@ fn spawn_config_watcher(cx: &mut App) {
             return;
         }
     };
-    if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
+    // Recursive so the `themes/` subfolder is covered too (it may not exist yet;
+    // FSEvents picks up subdirs created later). The handler filters the noise.
+    if let Err(e) = watcher.watch(&dir, RecursiveMode::Recursive) {
         log::warn!(
             "config hot-reload disabled: failed to watch {}: {e}",
             dir.display()
@@ -150,6 +153,22 @@ fn spawn_config_watcher(cx: &mut App) {
     // rewrites `config.json` and will trip this watcher. That's benign — the
     // reload reads back the same content we just wrote and re-applies it
     // idempotently, so it can't oscillate; it's at worst one redundant repaint.
+}
+
+/// Whether `p` is a theme file living directly in the `themes/` subfolder — a
+/// `*.yaml` / `*.yml` / `*.itermcolors` whose parent directory is named `themes`.
+/// The parent check keeps a stray yaml elsewhere in the config dir from tripping
+/// a theme reload, and the extension check excludes the `*.tmp.<pid>` scratch
+/// files atomic writes leave behind mid-save.
+fn is_theme_file(p: &std::path::Path) -> bool {
+    p.parent().and_then(|d| d.file_name()) == Some(std::ffi::OsStr::new("themes"))
+        && p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| {
+                e.eq_ignore_ascii_case("yaml")
+                    || e.eq_ignore_ascii_case("yml")
+                    || e.eq_ignore_ascii_case("itermcolors")
+            })
 }
 
 /// Parse `--config-dir <path>` (or `--config-dir=<path>`) from the CLI and pin

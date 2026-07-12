@@ -376,7 +376,34 @@ pub fn write_theme_file(t: &Theme) -> std::io::Result<()> {
 fn load_all() -> Vec<Theme> {
     let mut themes = builtins();
     themes.extend(load_user_themes());
+    dedupe_ids(&mut themes);
     themes
+}
+
+/// Guarantee every theme carries a unique `id` so `by_id` (and thus selection)
+/// can address each one. Built-ins are added first and keep their canonical ids;
+/// a later theme — typically a user file whose stem matches a built-in, e.g.
+/// `dracula.itermcolors` vs the built-in `dracula` — gets the first free
+/// `<id>-2`, `-3`, … and its display name is suffixed to match, so the gallery
+/// doesn't show two identical labels and both entries stay selectable. Order is
+/// stable (user paths are pre-sorted), so a given file keeps its id across
+/// launches and a persisted `theme_preset` stays valid.
+fn dedupe_ids(themes: &mut [Theme]) {
+    let mut seen = std::collections::HashSet::new();
+    for t in themes.iter_mut() {
+        if seen.insert(t.id.clone()) {
+            continue;
+        }
+        let base = t.id.clone();
+        let mut n = 2;
+        let mut candidate = format!("{base}-{n}");
+        while !seen.insert(candidate.clone()) {
+            n += 1;
+            candidate = format!("{base}-{n}");
+        }
+        t.name = format!("{} ({n})", t.name);
+        t.id = candidate;
+    }
 }
 
 /// The themes directory, `~/.config/tty7/themes` (honoring `--config-dir`).
