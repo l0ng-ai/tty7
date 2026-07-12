@@ -18,12 +18,44 @@ use crate::daemon::protocol::ShellSpec;
 use crate::ui::app::{Tab, Tty7App};
 use crate::ui::hints::tab_badge_label;
 
+/// How many trailing path components a deep tab label keeps, mirroring
+/// ghostty's zsh integration title `%(4~|…/%3~|%~)`: a path deeper than this
+/// collapses to `…/` plus its last three components; a shallower one shows in
+/// full. The home directory abbreviates to `~`.
+const KEEP_SEGMENTS: usize = 3;
+
+/// Abbreviate a leading `$HOME` to `~` (an integrated shell usually already
+/// does this, but absolute paths from other shells won't be). Borrows when
+/// there's nothing to rewrite.
+fn abbreviate_home(path: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    if path.starts_with('~') {
+        return Cow::Borrowed(path);
+    }
+    let Some(home) = std::env::var_os("HOME") else {
+        return Cow::Borrowed(path);
+    };
+    let home = home.to_string_lossy();
+    let home = home.trim_end_matches('/');
+    if home.is_empty() {
+        return Cow::Borrowed(path);
+    }
+    if path == home {
+        return Cow::Owned("~".to_string());
+    }
+    match path.strip_prefix(home) {
+        Some(rest) if rest.starts_with('/') => Cow::Owned(format!("~{rest}")),
+        _ => Cow::Borrowed(path),
+    }
+}
+
 /// Derive a short tab label from a terminal's raw title.
 ///
-/// Shells emit OSC titles like `user@host:~/projects/app`; we show just the
-/// meaningful tail — the current directory's name (or the running command). We
-/// strip the `user@host:` prefix, then take the last path component, keeping
-/// `~` for the home directory.
+/// Shells emit OSC titles like `user@host:~/projects/app`; we show the tail the
+/// way ghostty does — the working directory abbreviated with `~`, trimmed to
+/// its last few components (`…/repo/025/tty7`) once it runs deep. We strip any
+/// `user@host:` prefix first; a non-path title (a running command) passes
+/// through unchanged.
 fn short_title(raw: &str) -> String {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -34,38 +66,58 @@ fn short_title(raw: &str) -> String {
         Some((head, tail)) if head.contains('@') => tail,
         _ => raw,
     };
-    let path = after_host.trim();
-    // Home directory shows as `~`; otherwise use the last path segment.
-    let name = if path == "~" {
-        "~"
-    } else {
-        path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path)
-    };
-    let mut name = name.to_string();
-    // Final safety clamp for unusually long names.
-    if name.chars().count() > 24 {
-        name = format!("{}…", name.chars().take(24).collect::<String>());
+    let after_host = after_host.trim();
+    if after_host.is_empty() {
+        return String::new();
     }
-    name
-}
+    let abbreviated = abbreviate_home(after_host);
+    let path: &str = abbreviated.as_ref();
 
-/// Pick a small monochrome line icon for a tab from its terminal title. A clean
-/// terminal glyph is the default; a few high-confidence contexts (remote shell,
-/// version control) get a dedicated icon. Kept deliberately minimal so the strip
-/// reads modern rather than busy.
-fn icon_for_title(raw: &str) -> IconName {
-    let label = short_title(raw);
-    // First whitespace token, lowercased — matches a bare command like `ssh host`.
-    let cmd = label
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    match cmd.as_str() {
-        "ssh" | "mosh" => IconName::Globe,
-        "git" | "lazygit" | "gitui" => IconName::Github,
-        _ => IconName::SquareTerminal,
+    // Classify the leading marker so it can be counted toward depth (like `~` in
+    // zsh's `%N~`) but dropped when the path is truncated.
+    enum Kind {
+        Home,
+        Absolute,
+        Relative,
     }
+    let (kind, body) = if let Some(rest) = path.strip_prefix("~/") {
+        (Kind::Home, rest)
+    } else if path == "~" {
+        return "~".to_string();
+    } else if let Some(rest) = path.strip_prefix('/') {
+        (Kind::Absolute, rest)
+    } else {
+        (Kind::Relative, path)
+    };
+
+    let segments: Vec<&str> = body.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.is_empty() {
+        return match kind {
+            Kind::Home => "~",
+            Kind::Absolute => "/",
+            Kind::Relative => "",
+        }
+        .to_string();
+    }
+
+    // `~` counts as one component in ghostty's depth test (`%(4~|…|…)`).
+    let depth = segments.len() + usize::from(matches!(kind, Kind::Home));
+    let mut label = if depth > KEEP_SEGMENTS {
+        // Deep path: ellipsis plus the trailing components, leading marker dropped.
+        let tail = &segments[segments.len() - KEEP_SEGMENTS..];
+        format!("…/{}", tail.join("/"))
+    } else {
+        match kind {
+            Kind::Home => format!("~/{}", segments.join("/")),
+            Kind::Absolute => format!("/{}", segments.join("/")),
+            Kind::Relative => segments.join("/"),
+        }
+    };
+    // Final safety clamp for an unusually long single component.
+    if label.chars().count() > 40 {
+        label = format!("{}…", label.chars().take(40).collect::<String>());
+    }
+    label
 }
 
 /// Drag payload for reordering tabs. Carries the source index and a label so the
@@ -111,15 +163,6 @@ impl Tty7App {
         }
     }
 
-    /// A small monochrome line icon for a tab: a gear for settings, otherwise
-    /// derived from the focused terminal's title (remote/VCS/default terminal).
-    fn tab_icon(&self, tab: &Tab, cx: &App) -> IconName {
-        if tab.is_settings() {
-            return IconName::Settings;
-        }
-        icon_for_title(&tab.leaf_title(cx))
-    }
-
     pub(crate) fn tab_strip(
         &self,
         window: &Window,
@@ -137,19 +180,22 @@ impl Tty7App {
         // strip's own left margin (8), and a small right buffer. Capped this way,
         // a crowded strip becomes a bounded flex container and the chips shrink.
         let avail = (window.viewport_size().width - px(100.)).max(px(120.));
-        let mut strip = h_flex()
+        // The "+" button (30px) plus a gap lives *outside* the clipped chip row,
+        // so it never gets scrolled off when the tabs fill the strip — reserve
+        // its footprint here and cap the chip row at the remainder.
+        let chips_avail = (avail - px(40.)).max(px(80.));
+        // Only the chip row clips; a crowded row shrinks its chips (down to their
+        // `min_w`) and truncates their labels rather than pushing the "+" away.
+        let mut chips = h_flex()
             .items_center()
             .gap_1p5()
-            .ml_2()
             .min_w_0()
-            .max_w(avail)
+            .max_w(chips_avail)
             .overflow_hidden();
 
         for (i, tab) in self.tabs.iter().enumerate() {
             let is_active = i == active;
             let label = self.tab_label(tab, i, cx);
-            // A small leading glyph hinting the tab's context (dir / tool / settings).
-            let icon = self.tab_icon(tab, cx);
 
             // Inline rename input for this tab, if it's the one being renamed.
             let rename_input = self
@@ -232,14 +278,18 @@ impl Tty7App {
                 .justify_between()
                 .gap_1p5()
                 .h(px(30.))
-                // Size to content instead of a fixed width so a short label
-                // ("~") doesn't claim as much room as a long one — but cap the
-                // width and keep a generous floor, and let it shrink when the
-                // strip gets crowded so chips stay inside the titlebar. The
-                // floor is deliberately roomy (Safari-ish) so a chip reads as a
-                // substantial tab rather than a cramped pill.
-                .min_w(px(150.))
-                .max_w(px(260.))
+                // Content-adaptive width with a readable floor. The three inputs
+                // that should decide a chip's width all flow through flexbox: its
+                // own label length (the flex basis is the content), the other
+                // tabs' lengths, and the window. A short label ("~") sits at the
+                // floor; a longer one grows to fit — with no pixel cap on top, so
+                // a wide window with few tabs shows labels in full (the only upper
+                // bound is `short_title`'s 40-char clamp). When the row overflows,
+                // `flex_shrink` trims every chip in proportion to its basis (the
+                // longest give up the most) down to `min_w`, which is the shrink
+                // floor too — kept modest so a crowded strip stays readable rather
+                // than collapsing to slivers, and so plenty of tabs fit first.
+                .min_w(px(100.))
                 .flex_shrink(1.)
                 .pl_3()
                 .pr_1p5()
@@ -270,16 +320,9 @@ impl Tty7App {
                         this.activate(i, window, cx);
                     }),
                 )
-                // Leading context glyph: brighter (foreground) on the active tab,
-                // muted on the others — hierarchy stays monochrome.
-                .child(div().flex_shrink_0().flex().child(
-                    Icon::new(icon).size(px(15.)).text_color(if is_active {
-                        cx.theme().foreground
-                    } else {
-                        cx.theme().muted_foreground
-                    }),
-                ))
-                // Clickable / editable label region.
+                // Clickable / editable label region. No leading context glyph —
+                // the label carries the whole chip, so a row of tabs reads as
+                // plain text rather than icon-per-chip busy.
                 .child(label_region)
                 // Trailing slot: normally the close affordance — always shown on
                 // the active tab; on the others it stays out of the way
@@ -329,7 +372,7 @@ impl Tty7App {
                         .into_any_element()
                 });
 
-            strip = strip.child(chip);
+            chips = chips.child(chip);
         }
 
         // "+" new-tab button — click opens the shell picker. The default shell
@@ -348,7 +391,7 @@ impl Tty7App {
                 .map(|s| s.program.as_str()),
         );
         let app = cx.entity().downgrade();
-        strip = strip.child(
+        let add_button =
             // Same Windows titlebar note as the chips above: `occlude()` gives
             // the trigger a BlockMouse hitbox so the TitleBar's HTCAPTION drag
             // area doesn't swallow the click.
@@ -395,10 +438,18 @@ impl Tty7App {
                         }
                         menu
                     }),
-            ),
-        );
+            );
 
-        strip
+        // Outer strip: the clipping chip row plus the always-visible "+". Only
+        // `chips` is width-capped and `overflow_hidden`, so the "+" is never
+        // pushed off-screen no matter how many tabs are open.
+        h_flex()
+            .items_center()
+            .gap_1p5()
+            .ml_2()
+            .min_w_0()
+            .child(chips)
+            .child(add_button)
     }
 }
 
@@ -407,36 +458,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn short_title_strips_user_host_and_keeps_last_segment() {
-        assert_eq!(short_title("user@host:~/projects/app"), "app");
-        assert_eq!(short_title("/usr/local/bin"), "bin");
+    fn short_title_strips_user_host_and_shows_shallow_path_in_full() {
+        // Up to KEEP_SEGMENTS deep (home `~` counts as one) shows in full.
+        assert_eq!(short_title("user@host:~/projects/app"), "~/projects/app");
+        assert_eq!(short_title("/usr/local/bin"), "/usr/local/bin");
         assert_eq!(short_title("plain"), "plain");
     }
 
     #[test]
-    fn short_title_keeps_home_tilde_and_handles_trailing_slash() {
+    fn short_title_truncates_deep_paths_to_trailing_segments() {
+        // Deeper than KEEP_SEGMENTS collapses to `…/` plus the last three.
+        assert_eq!(short_title("user@host:~/repo/025/tty7"), "…/repo/025/tty7");
+        assert_eq!(short_title("/usr/local/share/man"), "…/local/share/man");
+        assert_eq!(short_title("a/b/c/d"), "…/b/c/d");
+    }
+
+    #[test]
+    fn short_title_keeps_home_tilde_and_normalizes_trailing_slash() {
         assert_eq!(short_title("user@host:~"), "~");
         assert_eq!(short_title("~"), "~");
-        assert_eq!(short_title("a/b/c/"), "c");
+        // Trailing slash is dropped; the path is shown, not just its basename.
+        assert_eq!(short_title("a/b/c/"), "a/b/c");
     }
 
     #[test]
     fn short_title_blank_input_is_empty_and_long_names_are_clamped() {
         assert_eq!(short_title("   "), "");
-        let long = "a".repeat(40);
+        let long = "a".repeat(50);
         let out = short_title(&long);
-        // Clamp is 24 chars plus a single ellipsis.
-        assert_eq!(out.chars().count(), 25);
+        // Clamp is 40 chars plus a single ellipsis.
+        assert_eq!(out.chars().count(), 41);
         assert!(out.ends_with('…'));
-    }
-
-    #[test]
-    fn icon_for_title_maps_known_commands_else_terminal() {
-        assert!(matches!(icon_for_title("ssh box"), IconName::Globe));
-        assert!(matches!(icon_for_title("git status"), IconName::Github));
-        assert!(matches!(
-            icon_for_title("vim file"),
-            IconName::SquareTerminal
-        ));
     }
 }
