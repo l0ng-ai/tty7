@@ -550,6 +550,22 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Show/hide the theme picker panel beside the Appearance page.
+    pub(crate) fn toggle_theme_panel(&mut self, cx: &mut Context<Self>) {
+        if let Some(s) = self.active_settings_mut() {
+            s.theme_panel_open = !s.theme_panel_open;
+            cx.notify();
+        }
+    }
+
+    /// Close the theme picker panel (its `×`).
+    pub(crate) fn close_theme_panel(&mut self, cx: &mut Context<Self>) {
+        if let Some(s) = self.active_settings_mut() {
+            s.theme_panel_open = false;
+            cx.notify();
+        }
+    }
+
     /// Open the user themes folder (`~/.config/tty7/themes`) in the system file
     /// browser, creating it first so there's always somewhere to drop a theme.
     pub(crate) fn open_themes_folder(&self, cx: &mut Context<Self>) {
@@ -1349,6 +1365,16 @@ impl Tty7App {
         let (shell_program_input, shell_args_input, wd_path_input) =
             self.build_shell_inputs(&mut subs, window, cx);
         let scroll_slider = self.build_scroll_slider(&mut subs, window, cx);
+        // Live filter for the theme picker panel; each keystroke re-renders the
+        // (already-cheap) list so results narrow as you type.
+        let theme_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search themes…"));
+        subs.push(
+            cx.subscribe_in(&theme_search, window, |_this, _i, ev, _w, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
+        );
 
         self.maximized = None;
         self.tabs.push(Tab {
@@ -1365,6 +1391,8 @@ impl Tty7App {
                 wd_path_input,
                 scroll_slider,
                 theme_editor: None,
+                theme_panel_open: false,
+                theme_search,
                 _subs: subs,
             }),
         });
@@ -1780,6 +1808,12 @@ impl Tty7App {
     /// The active tab's settings state, if it is the settings tab.
     pub(crate) fn active_settings(&self) -> Option<&SettingsState> {
         self.tabs.get(self.active).and_then(|t| t.settings.as_ref())
+    }
+
+    pub(crate) fn active_settings_mut(&mut self) -> Option<&mut SettingsState> {
+        self.tabs
+            .get_mut(self.active)
+            .and_then(|t| t.settings.as_mut())
     }
 
     /// Select a sidebar section in the active settings tab (no-op elsewhere).

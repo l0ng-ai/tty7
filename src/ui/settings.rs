@@ -92,6 +92,11 @@ pub(crate) struct SettingsState {
     /// The color editor for the active editable theme, or `None` when the active
     /// theme is read-only (a built-in / import) or the system is being followed.
     pub(crate) theme_editor: Option<ThemeEditor>,
+    /// Whether the theme picker panel is open beside the content pane
+    /// (Appearance section only). Toggled from the "Current theme" card.
+    pub(crate) theme_panel_open: bool,
+    /// Live filter for the theme picker panel's list.
+    pub(crate) theme_search: Entity<InputState>,
     pub(crate) _subs: Vec<Subscription>,
 }
 
@@ -120,10 +125,12 @@ impl Tty7App {
         let theme = cx.theme();
         let (background, foreground) = (theme.background, theme.foreground);
 
-        let (focus_handle, section) = match self.active_settings() {
-            Some(s) => (s.focus_handle.clone(), s.section),
+        let (focus_handle, section, theme_panel_open) = match self.active_settings() {
+            Some(s) => (s.focus_handle.clone(), s.section, s.theme_panel_open),
             None => return div(), // not a settings tab; nothing to render
         };
+        // The theme picker panel only makes sense beside its own page.
+        let show_theme_panel = theme_panel_open && section == SettingsSection::Appearance;
 
         // `TTY7_PROFILE`: time this section's whole element build and, via the
         // aggregated call rate, expose whether the panel is rebuilding once (on a
@@ -234,7 +241,8 @@ impl Tty7App {
             // The Sidebar draws its own right border; no wrapper border here, or
             // the two stack into one thick rule.
             .child(sidebar)
-            .child(content_pane);
+            .child(content_pane)
+            .when(show_theme_panel, |r| r.child(self.render_theme_panel(cx)));
 
         if let Some((start, label)) = prof {
             crate::ui::perf::record(label, start.elapsed());
@@ -526,7 +534,11 @@ impl Tty7App {
                 "Pick a color theme. Each one sets its own light or dark look.",
                 cx,
             ))
-            .child(self.render_theme_picker(cx))
+            .child(self.render_current_theme(cx))
+            // Custom-theme management (duplicate / edit colors / open folder) is
+            // *about* themes, so it lives with the picker rather than stranded at
+            // the foot of the page after Cursor.
+            .child(self.render_custom_themes(cx))
             .child(self.section_rule(cx))
             .child(self.section_header("Typography", cx))
             .child(self.settings_row(
@@ -579,8 +591,6 @@ impl Tty7App {
                 blink_switch,
                 cx,
             ))
-            .child(self.section_rule(cx))
-            .child(self.render_custom_themes(cx))
             .into_any_element()
     }
 
@@ -608,6 +618,7 @@ impl Tty7App {
                 .map(|(_, label, state)| (label.clone(), state.clone()))
                 .collect();
             return v_flex()
+                .mt_5()
                 .child(self.section_intro(
                     "Edit theme",
                     "You're editing a copy. Changes save to its file in the themes \
@@ -630,6 +641,7 @@ impl Tty7App {
         // Read-only theme (built-in or import): offer to duplicate it into an
         // editable copy, plus the folder affordance.
         v_flex()
+            .mt_5()
             .child(self.section_intro(
                 "Custom themes",
                 "Duplicate a theme to edit its colors here, or drop your own in the \
@@ -640,10 +652,12 @@ impl Tty7App {
                 h_flex()
                     .gap_3()
                     .child(
+                        // Plain (not `.primary()`): a solid near-black fill reads
+                        // far too heavy against this soft, mostly-outline sheet —
+                        // it matches the "Open Themes Folder" button beside it.
                         Button::new("duplicate-theme")
                             .label("Duplicate to Edit")
                             .small()
-                            .primary()
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.fork_active_theme(window, cx)
                             })),
@@ -1026,118 +1040,251 @@ impl Tty7App {
     /// a mini-terminal preview painted in its own colors. The selected card gets a
     /// soft ring + a check; clicking switches the active theme live via
     /// `set_preset`.
-    fn render_theme_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The mini terminal preview for a theme: thin "lines of code" bars in the
+    /// theme's own colors over its background. Fills its container's width, so a
+    /// narrow "Current theme" card and the wider picker panel reuse one shape.
+    fn theme_preview(&self, p: &presets::Theme) -> Div {
+        let to_u32 = |(r, g, b): (u8, u8, u8)| (r as u32) << 16 | (g as u32) << 8 | b as u32;
+        let accent = rgb(p.accent);
+        let ansi = |i: usize| rgb(to_u32(p.ansi16[i]));
+        let fg = rgb(p.foreground);
+        // A "line of code": thin rounded bars, sized like words and tightly
+        // spaced so the preview reads as real terminal text, not fat pills.
+        let bar = |w: f32, color: gpui::Rgba| div().h(px(4.)).w(px(w)).rounded(px(1.5)).bg(color);
+
+        v_flex()
+            .w_full()
+            .bg(rgb(p.background_color()))
+            .rounded(px(8.))
+            .overflow_hidden()
+            .px_3()
+            .py_3()
+            .gap(px(10.))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_size(px(11.)).text_color(accent).child("❯"))
+                    .child(bar(60., fg)),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(bar(26., ansi(2)))
+                    .child(bar(46., ansi(4)))
+                    .child(bar(16., ansi(3))),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(bar(18., ansi(1)))
+                    .child(bar(52., fg)),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(bar(14., ansi(6)))
+                    .child(bar(38., accent)),
+            )
+    }
+
+    /// The compact "Current theme" card on the Appearance page: a preview of the
+    /// active theme beside its name and light/dark mode, the whole row a click
+    /// target that opens the picker panel on the right.
+    fn render_current_theme(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let border = theme.border;
         let foreground = theme.foreground;
         let muted_fg = theme.muted_foreground;
+        let hover_bg = theme.secondary.opacity(0.5);
+        let surface = theme.secondary.opacity(0.28);
+
         let active_id = cx.global::<Config>().theme_preset.clone();
+        let active = presets::by_id(cx, &active_id);
+        let name = active.name.clone();
+        let mode = if active.dark { "Dark" } else { "Light" };
+        let preview = self.theme_preview(&active);
+        let open = self.active_settings().is_some_and(|s| s.theme_panel_open);
 
-        // Selection chrome is monochrome — the ring and check track the theme's
-        // own `foreground`, exactly like the active tab in the title bar.
-        let sel_ring = foreground;
+        div()
+            .id("current-theme")
+            .mt_1()
+            .mb_2()
+            .max_w(px(520.))
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _w, cx| this.toggle_theme_panel(cx)))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_4()
+                    .p_3()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(if open { foreground.opacity(0.35) } else { border })
+                    .bg(surface)
+                    .hover(|h| h.bg(hover_bg))
+                    .child(div().w(px(150.)).flex_shrink_0().child(preview))
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(foreground)
+                                    .child(name),
+                            )
+                            .child(div().text_xs().text_color(muted_fg).child(mode)),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .text_sm()
+                            .text_color(muted_fg)
+                            .child("Change theme")
+                            .child(Icon::new(IconName::ChevronRight).small()),
+                    ),
+            )
+            .into_any_element()
+    }
 
-        let to_u32 = |(r, g, b): (u8, u8, u8)| (r as u32) << 16 | (g as u32) << 8 | b as u32;
+    /// The theme picker: a right-hand column of searchable preview
+    /// cards. Opened from the "Current theme" card; applying a theme keeps the
+    /// panel open (with its own `×`) so several looks can be tried in a row.
+    fn render_theme_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let border = theme.border;
+        let foreground = theme.foreground;
+        let muted_fg = theme.muted_foreground;
+        // A hair off the content pane (like the settings rail) so the panel reads
+        // as its own surface rather than an extension of the page.
+        let bg = theme.sidebar;
 
-        // Cap the gallery at four cards wide but keep it flex-wrapping, so narrow
-        // panels fall back to three, two, or one per row.
-        let mut gallery = h_flex().flex_wrap().gap_5().mt_2().mb_2().max_w(px(864.));
+        let active_id = cx.global::<Config>().theme_preset.clone();
+        let (search, query) = match self.active_settings() {
+            Some(s) => (
+                s.theme_search.clone(),
+                s.theme_search.read(cx).value().trim().to_lowercase(),
+            ),
+            None => return div().into_any_element(),
+        };
+
+        let header = h_flex()
+            .items_center()
+            .justify_between()
+            .px_4()
+            .pt_4()
+            .pb_1()
+            .child(
+                div()
+                    .text_base()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(foreground)
+                    .child("Themes"),
+            )
+            .child(
+                Button::new("theme-panel-close")
+                    .icon(IconName::Close)
+                    .ghost()
+                    .small()
+                    .on_click(cx.listener(|this, _, _w, cx| this.close_theme_panel(cx))),
+            );
+
+        let subtitle = div()
+            .px_4()
+            .pb_3()
+            .text_xs()
+            .text_color(muted_fg)
+            .child("Change your current theme.");
+
+        // Plain text input, the same shape the Shell section uses — our own
+        // field, not a bespoke pill. The Input fills its parent, but a percent
+        // width needs a *definite* one to resolve against, so the wrapper is sized
+        // explicitly (panel 300 − px_4 gutters). Placeholder labels it as search;
+        // a leading magnifier keeps that reading at a glance.
+        let search_box = div().px_4().pb_3().child(
+            div().w(px(268.)).child(
+                Input::new(&search)
+                    .small()
+                    .prefix(Icon::new(IconName::Search).small().text_color(muted_fg)),
+            ),
+        );
+
+        let mut list = v_flex().px_4().pb_4().gap_4();
         for p in presets::all(cx) {
+            if !query.is_empty() && !p.name.to_lowercase().contains(&query) {
+                continue;
+            }
             let id = p.id.clone();
             let is_active = active_id == id;
-            let accent = rgb(p.accent);
-            let ansi = |i: usize| rgb(to_u32(p.ansi16[i]));
-            let fg = rgb(p.foreground);
-            // A "line of code": thin rounded bars, sized like words and tightly
-            // spaced so the preview reads as real terminal text, not fat pills.
-            let bar =
-                |w: f32, color: gpui::Rgba| div().h(px(4.)).w(px(w)).rounded(px(1.5)).bg(color);
-
-            let preview = v_flex()
-                .h(px(120.))
-                .bg(rgb(p.background_color()))
-                .rounded(px(10.))
-                .px_3()
-                .py_3()
-                .gap(px(10.))
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(div().text_size(px(11.)).text_color(accent).child("❯"))
-                        .child(bar(60., fg)),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(bar(26., ansi(2)))
-                        .child(bar(46., ansi(4)))
-                        .child(bar(16., ansi(3))),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(bar(18., ansi(1)))
-                        .child(bar(52., fg)),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(bar(14., ansi(6)))
-                        .child(bar(38., accent)),
-                );
-
-            let label = h_flex()
-                .items_center()
-                .gap_1p5()
-                .px_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(if is_active {
-                            FontWeight::SEMIBOLD
-                        } else {
-                            FontWeight::MEDIUM
-                        })
-                        .text_color(if is_active { foreground } else { muted_fg })
-                        .child(p.name.clone()),
-                )
-                .when(is_active, |s| {
-                    s.child(Icon::new(IconName::Check).small().text_color(foreground))
-                });
-
-            let card = div()
-                .rounded_xl()
-                .overflow_hidden()
-                .border_1()
-                .border_color(if is_active {
-                    sel_ring.opacity(0.35)
-                } else {
-                    border
-                })
-                .when(is_active, |s| s.shadow_md())
-                .when(!is_active, |s| {
-                    s.shadow_sm()
-                        .hover(|h| h.border_color(sel_ring.opacity(0.18)))
-                })
-                .child(preview);
-
+            let preview = self.theme_preview(&p);
             let click_id = id.clone();
-            gallery = gallery.child(
+            list = list.child(
                 v_flex()
-                    .id(SharedString::from(format!("theme-{id}")))
-                    .w(px(196.))
-                    .gap_2()
+                    .id(SharedString::from(format!("panel-theme-{id}")))
+                    .gap_1p5()
                     .cursor_pointer()
-                    .child(card)
-                    .child(label)
+                    .child(
+                        div()
+                            .rounded_lg()
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(if is_active {
+                                foreground.opacity(0.5)
+                            } else {
+                                border
+                            })
+                            .when(is_active, |s| s.shadow_md())
+                            .when(!is_active, |s| {
+                                s.hover(|h| h.border_color(foreground.opacity(0.25)))
+                            })
+                            .child(preview),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1p5()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(if is_active {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::MEDIUM
+                                    })
+                                    .text_color(if is_active { foreground } else { muted_fg })
+                                    .child(p.name.clone()),
+                            )
+                            .when(is_active, |s| {
+                                s.child(Icon::new(IconName::Check).small().text_color(foreground))
+                            }),
+                    )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.set_preset(&click_id, window, cx)
                     })),
             );
         }
 
-        gallery.into_any_element()
+        v_flex()
+            .w(px(300.))
+            .h_full()
+            .flex_shrink_0()
+            .bg(bg)
+            .border_l_1()
+            .border_color(border)
+            .child(header)
+            .child(subtitle)
+            .child(search_box)
+            .child(
+                v_flex()
+                    .id("theme-panel-list")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .child(list),
+            )
+            .into_any_element()
     }
 
     /// Keybindings section: the effective shortcut list (defaults + overrides).
