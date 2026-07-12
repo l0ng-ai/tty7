@@ -222,8 +222,9 @@ impl CmdEditor {
         self.cursor = self.chars.len();
     }
 
-    /// Select the word (run of non-whitespace) containing char index `idx`.
-    pub fn select_word_at(&mut self, idx: usize) {
+    /// Bounds `(start, end)` of the word (run of non-whitespace) containing char
+    /// index `idx`. On whitespace this collapses to `(idx, idx)`.
+    pub fn word_bounds(&self, idx: usize) -> (usize, usize) {
         let idx = idx.min(self.chars.len());
         let mut s = idx;
         while s > 0 && !self.chars[s - 1].is_whitespace() {
@@ -233,8 +234,30 @@ impl CmdEditor {
         while e < self.chars.len() && !self.chars[e].is_whitespace() {
             e += 1;
         }
+        (s, e)
+    }
+
+    /// Select the word (run of non-whitespace) containing char index `idx`.
+    pub fn select_word_at(&mut self, idx: usize) {
+        let (s, e) = self.word_bounds(idx);
         self.anchor = Some(s);
         self.cursor = e;
+    }
+
+    /// Extend a word-granular drag (double-click then drag) to char index `idx`,
+    /// keeping the whole anchor word `anchor_start..anchor_end` selected. The
+    /// selection grows by whole words: dragging past the anchor word selects
+    /// forward to the far edge of the word under `idx`, dragging before it selects
+    /// backward to that word's near edge. The cursor sits at the moving edge.
+    pub fn extend_word_to(&mut self, anchor_start: usize, anchor_end: usize, idx: usize) {
+        let (ws, we) = self.word_bounds(idx.min(self.chars.len()));
+        if we >= anchor_end {
+            self.anchor = Some(anchor_start);
+            self.cursor = we;
+        } else {
+            self.anchor = Some(anchor_end);
+            self.cursor = ws;
+        }
     }
 
     /// Move the cursor to char index `idx` (clamped), extending the selection from
@@ -541,6 +564,27 @@ mod tests {
         assert_eq!(e.selection(), Some((2, 5)));
         e.extend_to(0); // drag back past the anchor
         assert_eq!(e.selection(), Some((0, 2)));
+    }
+
+    #[test]
+    fn extend_word_to_grows_by_whole_words_both_directions() {
+        // Double-click "push" (chars 4..8), then drag over later/earlier words.
+        let mut e = ed("git push origin main", 4);
+        e.select_word_at(6);
+        let (s, a) = e.selection().unwrap(); // (4, 8) == "push"
+        assert_eq!((s, a), (4, 8));
+
+        // Drag forward into "origin": selection reaches that word's far edge.
+        e.extend_word_to(s, a, 10);
+        assert_eq!(e.selected_text().as_deref(), Some("push origin"));
+        // Drag on into "main": grows to its end.
+        e.extend_word_to(s, a, 18);
+        assert_eq!(e.selected_text().as_deref(), Some("push origin main"));
+
+        // Drag backward before the anchor word into "git": anchor flips to the
+        // word's far edge, selection covers "git push".
+        e.extend_word_to(s, a, 1);
+        assert_eq!(e.selected_text().as_deref(), Some("git push"));
     }
 
     #[test]

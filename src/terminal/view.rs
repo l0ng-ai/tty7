@@ -270,6 +270,10 @@ pub struct TerminalView {
     /// that the ended gesture selected in the editor, so copy-on-select copies
     /// the editor's selection rather than the terminal's.
     editor_select_gesture: bool,
+    /// When a drag-extend is armed by a double-click, the word range the
+    /// double-click selected, so the drag can grow the selection by whole words
+    /// (keeping the anchor word intact). `None` for a plain char-granular drag.
+    editor_drag_word: Option<(usize, usize)>,
     /// The URL currently under the mouse (an OSC 8 hyperlink or a bare URL found
     /// in the row text), if any. Drives the hover underline and the pointing-hand
     /// cursor that mark a link as clickable. Stored in scroll-stable grid
@@ -785,6 +789,7 @@ impl TerminalView {
             created_at: std::time::Instant::now(),
             editor_selecting: false,
             editor_select_gesture: false,
+            editor_drag_word: None,
             hovered_link: None,
             _focus_subs: focus_subs,
         }
@@ -1189,6 +1194,18 @@ impl TerminalView {
                 }
                 CmdKey::Consumed
             }
+            "delete" => {
+                // ⌘⌫ deletes to line start; ⌘⌦ is its mirror — delete to line end.
+                if self.input_active() {
+                    if !self.cmd.delete_selection() {
+                        self.cmd.delete_to_end();
+                    }
+                    self.close_completion();
+                    self.cursor_visible = true;
+                    cx.notify();
+                }
+                CmdKey::Consumed
+            }
             _ => CmdKey::Bubble,
         }
     }
@@ -1268,6 +1285,41 @@ impl TerminalView {
         // scannable. Every Ctrl chord is swallowed at the prompt (recognized or
         // not), so this always notifies and returns.
         if m.control && !m.platform && !m.alt {
+            // Off macOS, word navigation and deletion live on Ctrl (the Windows /
+            // Linux convention): Ctrl+←/→ move by word (Shift extends the
+            // selection), Ctrl+⌫/⌦ delete a word. macOS keeps these on Alt (handled
+            // below) — its Ctrl+arrows are OS-level Space switches, and Ctrl+letters
+            // stay readline — so claim the arrow / delete keys only off macOS.
+            if cfg!(not(target_os = "macos")) {
+                match key {
+                    "left" => {
+                        self.editor_move_h(false, m.shift, true);
+                        cx.notify();
+                        return;
+                    }
+                    "right" => {
+                        self.editor_move_h(true, m.shift, true);
+                        cx.notify();
+                        return;
+                    }
+                    "backspace" => {
+                        if !self.cmd.delete_selection() {
+                            self.cmd.delete_word_left();
+                        }
+                        self.history_nav = None;
+                        cx.notify();
+                        return;
+                    }
+                    "delete" => {
+                        if !self.cmd.delete_selection() {
+                            self.cmd.delete_word_right();
+                        }
+                        cx.notify();
+                        return;
+                    }
+                    _ => {}
+                }
+            }
             // Off macOS, Ctrl is the primary modifier, so Ctrl+A is expected to
             // select the whole edited line (text-editor / Windows convention) —
             // there is no reachable Cmd key to carry the macOS `Cmd+A`. macOS keeps
@@ -2019,19 +2071,39 @@ impl TerminalView {
         col: usize,
         row: usize,
         clicks: usize,
+        shift: bool,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(idx) = self.editor_char_index(col, row, false) else {
             return false;
         };
         match clicks {
+            // Shift+click extends the selection from the current caret to the
+            // click (anchoring one at the old caret if none is active), matching
+            // shift-arrow selection; a plain click collapses to the caret.
+            1 if shift => {
+                self.cmd.extend_to(idx);
+                self.editor_selecting = true; // a drag from here keeps extending
+                self.editor_drag_word = None;
+            }
             1 => {
                 self.cmd.set_cursor(idx);
                 self.cmd.clear_selection();
                 self.editor_selecting = true; // a drag from here extends selection
+                self.editor_drag_word = None;
             }
-            2 => self.cmd.select_word_at(idx),
-            _ => self.cmd.select_all(),
+            2 => {
+                self.cmd.select_word_at(idx);
+                // Drag now grows the selection by whole words around this one.
+                self.editor_selecting = true;
+                self.editor_drag_word = self.cmd.selection();
+            }
+            _ => {
+                self.cmd.select_all();
+                // The whole line is selected; a drag has nothing left to extend.
+                self.editor_selecting = false;
+                self.editor_drag_word = None;
+            }
         }
         self.editor_select_gesture = true;
         self.close_completion();
@@ -2049,7 +2121,12 @@ impl TerminalView {
         let Some(idx) = self.editor_char_index(col, row, true) else {
             return false;
         };
-        self.cmd.extend_to(idx);
+        // A drag begun on a double-click extends by whole words; otherwise by char.
+        if let Some((s, e)) = self.editor_drag_word {
+            self.cmd.extend_word_to(s, e, idx);
+        } else {
+            self.cmd.extend_to(idx);
+        }
         self.cursor_visible = true;
         cx.notify();
         true
@@ -2923,6 +3000,7 @@ impl TerminalView {
         self.selecting = false;
         self.editor_selecting = false;
         self.editor_select_gesture = false;
+        self.editor_drag_word = None;
         self.drag_scroll = None;
         match copy {
             SelectEndCopy::None => {}
