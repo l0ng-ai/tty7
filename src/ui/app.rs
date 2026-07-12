@@ -2,8 +2,8 @@
 //! with the active terminal filling the rest. Owns all tabs (each its own PTY).
 
 use gpui::{
-    App, Axis, Context, Entity, KeyDownEvent, PromptLevel, Subscription, Window, div, prelude::*,
-    px,
+    App, Axis, ClipboardItem, Context, Entity, KeyDownEvent, PromptLevel, Subscription, Window,
+    div, prelude::*, px,
 };
 use gpui_component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{InputEvent, InputState};
@@ -797,6 +797,119 @@ impl Tty7App {
         cx.notify();
     }
 
+    pub(crate) fn copy_loopback_forward_address(
+        &mut self,
+        address: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.write_to_clipboard(ClipboardItem::new_string(address));
+    }
+
+    pub(crate) fn save_loopback_forward_form(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((pane_id, host, port, editing)) = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.settings.as_ref())
+            .and_then(|settings| {
+                let host = settings
+                    .loopback_host_input
+                    .read(cx)
+                    .value()
+                    .trim()
+                    .to_string();
+                let port = settings
+                    .loopback_port_input
+                    .read(cx)
+                    .value()
+                    .trim()
+                    .parse::<u16>()
+                    .ok()?;
+                let pane_id = settings
+                    .loopback_editing
+                    .as_ref()
+                    .map(|id| id.pane_id)
+                    .or(settings.loopback_default_pane_id)?;
+                Some((pane_id, host, port, settings.loopback_editing.clone()))
+            })
+        else {
+            return;
+        };
+        if host.is_empty() {
+            return;
+        }
+
+        if crate::terminal::RemoteTerminal::ensure_loopback_forward(pane_id, &host, port).is_ok() {
+            if let Some(old) = editing {
+                if old.remote_host != host || old.remote_port != port {
+                    let _ = crate::terminal::RemoteTerminal::close_loopback_forward(old);
+                }
+            }
+            let forwards = crate::terminal::RemoteTerminal::list_loopback_forwards();
+            if let Some(settings) = self
+                .tabs
+                .get_mut(self.active)
+                .and_then(|tab| tab.settings.as_mut())
+            {
+                settings.loopback_forwards = forwards;
+                settings.loopback_editing = None;
+                settings.loopback_host_input.update(cx, |input, cx| {
+                    input.set_value("localhost", window, cx);
+                });
+                settings.loopback_port_input.update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                });
+            }
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn edit_loopback_forward(
+        &mut self,
+        id: crate::daemon::protocol::LoopbackForwardId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(settings) = self
+            .tabs
+            .get_mut(self.active)
+            .and_then(|tab| tab.settings.as_mut())
+        {
+            settings.loopback_editing = Some(id.clone());
+            settings.loopback_host_input.update(cx, |input, cx| {
+                input.set_value(id.remote_host, window, cx);
+            });
+            settings.loopback_port_input.update(cx, |input, cx| {
+                input.set_value(id.remote_port.to_string(), window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_loopback_forward_edit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(settings) = self
+            .tabs
+            .get_mut(self.active)
+            .and_then(|tab| tab.settings.as_mut())
+        {
+            settings.loopback_editing = None;
+            settings.loopback_host_input.update(cx, |input, cx| {
+                input.set_value("localhost", window, cx);
+            });
+            settings.loopback_port_input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+        }
+        cx.notify();
+    }
+
     /// Toggle the startup update check (Settings → About). Takes effect on the
     /// next launch — this only persists the preference; it doesn't run or cancel
     /// an in-flight check.
@@ -1407,6 +1520,18 @@ impl Tty7App {
                 }
             }),
         );
+        let loopback_default_pane_id = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.pane.focused_or_first(window, cx))
+            .map(|pane| pane.read(cx).pane_id);
+        let loopback_host_input =
+            cx.new(|cx| InputState::new(window, cx).default_value("localhost"));
+        let loopback_port_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("3000")
+                .default_value("")
+        });
         let loopback_forwards = crate::terminal::RemoteTerminal::list_loopback_forwards();
 
         self.maximized = None;
@@ -1427,6 +1552,10 @@ impl Tty7App {
                 theme_panel_open: false,
                 theme_search,
                 loopback_forwards,
+                loopback_default_pane_id,
+                loopback_host_input,
+                loopback_port_input,
+                loopback_editing: None,
                 _subs: subs,
             }),
         });
