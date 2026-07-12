@@ -31,6 +31,15 @@ use crate::core::actions::{
 use crate::core::config::{Config, NotifyMode};
 use crate::daemon::protocol::ShellSpec;
 
+/// Inset (px) between the terminal-surface edge and the cell grid. The prompt
+/// editor and the floating completion / history menus are absolutely positioned
+/// over the grid, so they must offset their grid-aligned origin by the same
+/// amount the surface padding insets the grid. Keep these in sync with the
+/// `.px()/.py()` on the surface container in `TerminalView::render` — they are
+/// the single source of truth for that inset.
+const GRID_PAD_X: f32 = 8.;
+const GRID_PAD_Y: f32 = 4.;
+
 // Terminal-scoped actions dispatched by the right-click context menu. They route
 // to this view via `.on_action` handlers on the terminal surface; tab/split
 // actions in the same menu bubble up to `Tty7App` from the focused terminal.
@@ -3128,8 +3137,8 @@ impl TerminalView {
     /// as the single cursor.
     fn render_input_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (crow, ccol) = self.cursor_cell().unwrap_or((0, 0));
-        let cx_left = px(16.) + self.cell_width * (ccol as f32);
-        let cy_top = px(8.) + self.line_height * (crow as f32);
+        let cx_left = px(GRID_PAD_X) + self.cell_width * (ccol as f32);
+        let cy_top = px(GRID_PAD_Y) + self.line_height * (crow as f32);
 
         // Reverse-search mode replaces the line with a `(reverse-i-search)` prompt
         // showing the query and the selected match; the ranked candidates float
@@ -3315,7 +3324,7 @@ impl TerminalView {
 
         div()
             .absolute()
-            .left(px(16.))
+            .left(px(GRID_PAD_X))
             .top(cy_top)
             .right_4()
             .min_h(lh)
@@ -3435,11 +3444,11 @@ impl TerminalView {
         // particular, when flipped above it clears the caret instead of covering it.
         let gap = px(6.);
         // Anchor at the command start (the cursor cell), where the line begins.
-        let x = px(16.) + self.cell_width * (scol as f32);
+        let x = px(GRID_PAD_X) + self.cell_width * (scol as f32);
         let y = if place_above {
-            px(8.) + self.line_height * (srow as f32) - menu_h - gap
+            px(GRID_PAD_Y) + self.line_height * (srow as f32) - menu_h - gap
         } else {
-            px(8.) + self.line_height * ((srow + 1) as f32) + gap
+            px(GRID_PAD_Y) + self.line_height * ((srow + 1) as f32) + gap
         };
 
         Some(
@@ -3600,15 +3609,15 @@ impl TerminalView {
         let grid_w = self.cell_width * (total_cols as f32);
         let menu_w = if grid_w < px(720.) { grid_w } else { px(720.) };
         let y = if place_above {
-            px(8.) + lh * (srow as f32) - menu_h - gap
+            px(GRID_PAD_Y) + lh * (srow as f32) - menu_h - gap
         } else {
-            px(8.) + lh * ((srow + 1) as f32) + gap
+            px(GRID_PAD_Y) + lh * ((srow + 1) as f32) + gap
         };
 
         Some(
             div()
                 .absolute()
-                .left(px(16.))
+                .left(px(GRID_PAD_X))
                 .top(y)
                 .flex()
                 .flex_col()
@@ -3641,8 +3650,8 @@ impl TerminalView {
         Some(
             div()
                 .absolute()
-                .bottom(px(8.))
-                .right(px(16.))
+                .bottom(px(GRID_PAD_Y))
+                .right(px(GRID_PAD_X))
                 .max_w(px(560.))
                 .px_3()
                 .py_1()
@@ -3739,8 +3748,8 @@ impl Render for TerminalView {
             .size_full()
             .relative()
             .overflow_hidden()
-            .px_2()
-            .py_1()
+            .px(px(GRID_PAD_X))
+            .py(px(GRID_PAD_Y))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_key_down(cx.listener(Self::on_key_down))
