@@ -13,7 +13,7 @@ use gpui::{
 };
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::ContextMenuExt;
-use gpui_component::{ActiveTheme as _, Icon, IconName, Size, h_flex};
+use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex};
 
 use super::TermSize;
 use super::cmd_editor::CmdEditor;
@@ -3809,17 +3809,18 @@ impl Render for TerminalView {
             .children(integration_notice)
             // Right-click context menu (gpui-component PopupMenu).
             .context_menu(move |menu, _window, _cx| {
-                // Small size = tighter 20px rows; the default 26px felt too airy.
-                // A fixed min-width keeps the menu a consistent, intentional size
-                // instead of hugging the longest label (which reads ragged).
+                // Default (26px) rows: with the flat full-bleed highlight (no
+                // floating pill, no inter-row gap) they read dense, not airy, and
+                // match the command palette's row height. A fixed min-width keeps
+                // the menu a consistent, intentional size instead of hugging the
+                // longest label (which reads ragged).
                 // Copy/Paste/Select All/Find are dispatched inline (see
                 // `handle_cmd_shortcut`) with no registered `KeyBinding`, so the menu
                 // can't auto-derive their hints the way it does for the items below.
                 // We render the hint ourselves via `menu_row_with_hint` to keep the
                 // whole menu consistent, rather than register real bindings (which
                 // would risk the Ctrl+C SIGINT fall-through on Windows/Linux).
-                menu.with_size(Size::Small)
-                    .min_w(px(220.))
+                menu.min_w(px(220.))
                     .action_context(menu_focus.clone())
                     .menu_element_with_disabled(
                         Box::new(CopyText),

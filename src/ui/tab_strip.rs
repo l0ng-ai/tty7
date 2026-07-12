@@ -11,7 +11,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size, h_flex};
+use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
 
 use crate::core::config::Config;
 use crate::daemon::protocol::ShellSpec;
@@ -404,34 +404,52 @@ impl Tty7App {
                     .h(px(30.))
                     .rounded_lg()
                     .dropdown_menu(move |menu, _window, _cx| {
-                        let mut menu = menu.with_size(Size::Small).min_w(px(220.));
-                        // Default first — what a bare "new tab" means today,
-                        // named so the fallback is legible ("New Tab (zsh)").
-                        let open_default = app.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(format!("New Tab ({default_name})")).on_click(
-                                move |_, window, cx| {
-                                    if let Some(app) = open_default.upgrade() {
-                                        app.update(cx, |this, cx| this.new_tab(window, cx));
-                                    }
-                                },
-                            ),
-                        );
-                        if !shells.is_empty() {
-                            menu = menu.separator();
-                        }
+                        let mut menu = menu.min_w(px(220.));
+                        // One row per detected shell. There's no separate
+                        // "New Tab (…)" entry — it only duplicated the default
+                        // shell's row, and ⌘T already opens a default tab in one
+                        // press. The configured default is tagged instead so the
+                        // menu still says which shell a bare new tab would use.
                         for shell in &shells {
                             let spec = ShellSpec {
                                 program: shell.program.clone(),
                                 args: shell.args.clone(),
                             };
                             let open = app.clone();
-                            menu = menu.item(PopupMenuItem::new(shell.label.clone()).on_click(
+                            let item = if shell.label == default_name {
+                                let label: SharedString = shell.label.clone().into();
+                                PopupMenuItem::element(move |_window, cx| {
+                                    h_flex()
+                                        .w_full()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_3()
+                                        .child(label.clone())
+                                        .child(
+                                            div()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child("default"),
+                                        )
+                                })
+                            } else {
+                                PopupMenuItem::new(shell.label.clone())
+                            };
+                            menu = menu.item(item.on_click(move |_, window, cx| {
+                                if let Some(app) = open.upgrade() {
+                                    app.update(cx, |this, cx| {
+                                        this.new_tab_with_shell(Some(spec.clone()), window, cx);
+                                    });
+                                }
+                            }));
+                        }
+                        // Before shell detection lands (or if it finds nothing),
+                        // keep a single default entry so the menu is never empty.
+                        if shells.is_empty() {
+                            let open_default = app.clone();
+                            menu = menu.item(PopupMenuItem::new("New Tab").on_click(
                                 move |_, window, cx| {
-                                    if let Some(app) = open.upgrade() {
-                                        app.update(cx, |this, cx| {
-                                            this.new_tab_with_shell(Some(spec.clone()), window, cx);
-                                        });
+                                    if let Some(app) = open_default.upgrade() {
+                                        app.update(cx, |this, cx| this.new_tab(window, cx));
                                     }
                                 },
                             ));

@@ -404,7 +404,12 @@ impl Render for PaletteView {
             .rounded_lg()
             .shadow_lg()
             .overflow_hidden()
-            .child(List::new(&self.list).p_1().max_h(px(440.)));
+            // `py_1` (not `p_1`): the row padding is vertical only, so the
+            // selected row's fill runs edge to edge — the same flat, full-bleed
+            // highlight the context menu, new-tab dropdown and completion popup
+            // use. The 4px top/bottom inset keeps the first/last row clear of the
+            // card's rounded corners.
+            .child(List::new(&self.list).py_1().max_h(px(440.)));
 
         // Full-window scrim; clicking the empty area dismisses the palette (the
         // card itself is occluded so its clicks don't bubble here).
