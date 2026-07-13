@@ -54,6 +54,8 @@ pub enum CommandKind {
     ReopenClosedTab,
     OpenSettings,
     RestartDaemon,
+    /// Toggle the SFTP file panel for the focused native-SSH pane (WS5).
+    ToggleSftp,
     /// Opens the theme sub-list (a nested palette). Handled in `PaletteView`.
     OpenThemePicker,
     /// Opens a typed SSH connection sub-list. Handled in `PaletteView`.
@@ -104,6 +106,7 @@ impl CommandKind {
             ReopenClosedTab => "ReopenClosedTab",
             OpenSettings => "OpenSettings",
             RestartDaemon => "RestartDaemon",
+            ToggleSftp => "ToggleSftp",
             FindInTerminal
             | OpenThemePicker
             | OpenSshConnectInput
@@ -167,6 +170,7 @@ impl Command {
             Command::new("Find in Terminal…", FindInTerminal),
             Command::new("Reopen Closed Tab", ReopenClosedTab),
             Command::new("SSH: Add Connection…", OpenSshConnectInput),
+            Command::new("SFTP Panel", ToggleSftp),
             Command::new("Change Theme…", OpenThemePicker),
             Command::new("Open Settings", OpenSettings),
             Command::new("Reset Font Size", ResetFontSize),

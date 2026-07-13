@@ -388,6 +388,137 @@ pub struct SshForwardRule {
     pub description: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// SFTP (Workstream 5) — wire types.
+//
+// SFTP rides a native-SSH pane's already-authenticated russh connection: the
+// daemon opens an SFTP-subsystem channel on the pane's connection (reused across
+// panes sharing it) and answers directory listings / file operations / transfer
+// jobs. All requests carry the `pane_id`; the daemon resolves it to the pane's
+// `SshConnection` through the registry. Only native-SSH panes have one — a PTY
+// or compat-`ssh` pane replies with an `Error`.
+// ---------------------------------------------------------------------------
+
+/// The classification of one remote directory entry. Symlinks are reported as
+/// `Symlink`; the daemon additionally follow-stats the target so the GUI can tell
+/// a link-to-directory (navigable) from a link-to-file (downloadable) via
+/// [`SftpEntry::target_is_dir`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SftpEntryKind {
+    File,
+    Dir,
+    Symlink,
+}
+
+/// One entry in a remote directory listing (or a single `Stat` result).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SftpEntry {
+    pub name: String,
+    pub kind: SftpEntryKind,
+    #[serde(default)]
+    pub size: u64,
+    /// Modification time in whole seconds since the Unix epoch (0 if unknown).
+    #[serde(default)]
+    pub mtime: u64,
+    /// Unix mode bits (permissions + type), 0 if the server didn't report them.
+    #[serde(default)]
+    pub permissions: u32,
+    /// For a `Symlink`, whether the (followed) target is a directory — lets the
+    /// GUI decide navigate-vs-download without another round-trip. Always false
+    /// for non-symlinks.
+    #[serde(default)]
+    pub target_is_dir: bool,
+}
+
+/// A metadata / namespace operation on the remote filesystem. Recursive delete
+/// (`RemoveDir`) recurses daemon-side. `Stat`/`Readlink` return data in the
+/// [`SftpOpResult`]; the rest just succeed or fail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SftpOp {
+    /// Follow-symlink stat of a single path.
+    Stat { path: String },
+    Mkdir { path: String },
+    RemoveFile { path: String },
+    /// Recursive directory delete (daemon walks + removes children first).
+    RemoveDir { path: String },
+    Rename { from: String, to: String },
+    /// Set the permission (mode) bits of `path`.
+    Chmod { path: String, mode: u32 },
+    /// Read a symlink's target path (returned as [`SftpOpResult::Link`]).
+    Readlink { path: String },
+}
+
+/// The reply to a [`SftpOp`]. `Done` for side-effecting ops; `Stat`/`Link` carry
+/// the queried data; `Error` carries a human-readable failure reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SftpOpResult {
+    Done,
+    Stat(SftpEntry),
+    Link(String),
+    Error(String),
+}
+
+/// Transfer direction for a background SFTP job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SftpTransferKind {
+    /// local → remote.
+    Upload,
+    /// remote → local.
+    Download,
+}
+
+/// The recipe for a background transfer job. `local` is a path in the *daemon
+/// process's* filesystem (same user); `remote` is an absolute remote path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SftpTransferSpec {
+    pub pane_id: u64,
+    pub kind: SftpTransferKind,
+    pub local: PathBuf,
+    pub remote: String,
+    /// Recurse into directories (create dirs on the far side).
+    #[serde(default)]
+    pub recursive: bool,
+}
+
+/// Lifecycle state of a transfer job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SftpJobState {
+    Running,
+    Done,
+    Error,
+    Cancelled,
+}
+
+/// A snapshot of one transfer job's progress, returned by the poll-based
+/// `SftpTransferList` request while the tray is visible.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SftpJobProgress {
+    pub job_id: u64,
+    pub pane_id: u64,
+    pub kind: SftpTransferKind,
+    pub state: SftpJobState,
+    /// The path currently being transferred (a leaf within a recursive job).
+    #[serde(default)]
+    pub current: String,
+    #[serde(default)]
+    pub bytes_done: u64,
+    #[serde(default)]
+    pub bytes_total: u64,
+    /// Populated only when `state == Error`.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Display labels (the job's endpoints).
+    #[serde(default)]
+    pub local: String,
+    #[serde(default)]
+    pub remote: String,
+}
+
 fn default_term() -> String {
     "xterm-256color".to_string()
 }
@@ -688,6 +819,21 @@ pub enum ClientMsg {
     ListKnownHosts,
     /// Delete one `known_hosts` entry, then reply with the refreshed list.
     DeleteKnownHost(KnownHostId),
+    /// List a remote directory over the pane's SFTP session (control connection).
+    /// Daemon replies `SftpEntries` or `Error`.
+    SftpList { pane_id: u64, path: String },
+    /// A one-shot SFTP filesystem operation (mkdir/remove/rename/chmod/stat/…) on
+    /// the pane's SFTP session. Daemon replies `SftpOpResult`.
+    SftpOp { pane_id: u64, op: SftpOp },
+    /// Start a background upload/download job on the pane's SFTP session. Daemon
+    /// replies `SftpTransferStarted { job_id }` (or `Error`).
+    SftpTransferStart(SftpTransferSpec),
+    /// Cancel a running transfer job. Daemon replies with the current
+    /// `SftpTransferProgress` list.
+    SftpTransferCancel { job_id: u64 },
+    /// Poll the transfer jobs for a pane (the GUI polls while its tray is
+    /// visible). Daemon replies with a `SftpTransferProgress` list.
+    SftpTransferList { pane_id: u64 },
 }
 
 /// Messages the daemon sends back to the GUI client.
@@ -736,6 +882,14 @@ pub enum DaemonMsg {
     SshStatus { phase: SshPhase },
     /// Reply to `ListKnownHosts` and `DeleteKnownHost`.
     KnownHostsList(Vec<KnownHostEntry>),
+    /// Reply to `SftpList`: the directory's entries (unsorted; the GUI sorts).
+    SftpEntries(Vec<SftpEntry>),
+    /// Reply to `SftpOp`.
+    SftpOpResult(SftpOpResult),
+    /// Reply to `SftpTransferStart`: the id of the freshly created job.
+    SftpTransferStarted { job_id: u64 },
+    /// Reply to `SftpTransferList` / `SftpTransferCancel`: progress snapshots.
+    SftpTransferProgress(Vec<SftpJobProgress>),
     /// A request failed (e.g. `Attach` to an unknown/dead pane id).
     Error(String),
 }
@@ -776,6 +930,12 @@ mod kind {
     pub const LIST_KNOWN_HOSTS: u8 = 16;
     /// `DeleteKnownHost` — remove one known_hosts entry.
     pub const DELETE_KNOWN_HOST: u8 = 17;
+    // (WS3 reserves 15-17, WS4 reserves 20-24.) SFTP (WS5) owns 30-36.
+    pub const SFTP_LIST: u8 = 30;
+    pub const SFTP_OP: u8 = 31;
+    pub const SFTP_TRANSFER_START: u8 = 32;
+    pub const SFTP_TRANSFER_CANCEL: u8 = 33;
+    pub const SFTP_TRANSFER_LIST: u8 = 34;
 
     // Daemon -> client
     pub const SPAWNED: u8 = 1;
@@ -796,6 +956,11 @@ mod kind {
     pub const SSH_STATUS: u8 = 14;
     /// `KnownHostsList` — reply to `LIST_KNOWN_HOSTS` / `DELETE_KNOWN_HOST`.
     pub const KNOWN_HOSTS_LIST: u8 = 15;
+    // SFTP (WS5) replies own 30-36 in the daemon space too.
+    pub const SFTP_ENTRIES: u8 = 30;
+    pub const SFTP_OP_RESULT: u8 = 31;
+    pub const SFTP_TRANSFER_STARTED: u8 = 32;
+    pub const SFTP_TRANSFER_PROGRESS: u8 = 33;
 }
 
 /// Write one framed message: `[u32 LE len][u8 kind][payload]`.
@@ -922,6 +1087,21 @@ impl ClientMsg {
             ClientMsg::DeleteKnownHost(id) => {
                 write_frame(w, kind::DELETE_KNOWN_HOST, &to_json(id)?)
             }
+            ClientMsg::SftpList { pane_id, path } => {
+                write_frame(w, kind::SFTP_LIST, &to_json(&(pane_id, path))?)
+            }
+            ClientMsg::SftpOp { pane_id, op } => {
+                write_frame(w, kind::SFTP_OP, &to_json(&(pane_id, op))?)
+            }
+            ClientMsg::SftpTransferStart(spec) => {
+                write_frame(w, kind::SFTP_TRANSFER_START, &to_json(spec)?)
+            }
+            ClientMsg::SftpTransferCancel { job_id } => {
+                write_frame(w, kind::SFTP_TRANSFER_CANCEL, &to_json(job_id)?)
+            }
+            ClientMsg::SftpTransferList { pane_id } => {
+                write_frame(w, kind::SFTP_TRANSFER_LIST, &to_json(pane_id)?)
+            }
         }
     }
 
@@ -968,6 +1148,21 @@ impl ClientMsg {
             }
             kind::LIST_KNOWN_HOSTS => ClientMsg::ListKnownHosts,
             kind::DELETE_KNOWN_HOST => ClientMsg::DeleteKnownHost(from_json(&payload)?),
+            kind::SFTP_LIST => {
+                let (pane_id, path) = from_json(&payload)?;
+                ClientMsg::SftpList { pane_id, path }
+            }
+            kind::SFTP_OP => {
+                let (pane_id, op) = from_json(&payload)?;
+                ClientMsg::SftpOp { pane_id, op }
+            }
+            kind::SFTP_TRANSFER_START => ClientMsg::SftpTransferStart(from_json(&payload)?),
+            kind::SFTP_TRANSFER_CANCEL => ClientMsg::SftpTransferCancel {
+                job_id: from_json(&payload)?,
+            },
+            kind::SFTP_TRANSFER_LIST => ClientMsg::SftpTransferList {
+                pane_id: from_json(&payload)?,
+            },
             other => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -1016,6 +1211,18 @@ impl DaemonMsg {
             DaemonMsg::KnownHostsList(list) => {
                 write_frame(w, kind::KNOWN_HOSTS_LIST, &to_json(list)?)
             }
+            DaemonMsg::SftpEntries(entries) => {
+                write_frame(w, kind::SFTP_ENTRIES, &to_json(entries)?)
+            }
+            DaemonMsg::SftpOpResult(result) => {
+                write_frame(w, kind::SFTP_OP_RESULT, &to_json(result)?)
+            }
+            DaemonMsg::SftpTransferStarted { job_id } => {
+                write_frame(w, kind::SFTP_TRANSFER_STARTED, &to_json(job_id)?)
+            }
+            DaemonMsg::SftpTransferProgress(jobs) => {
+                write_frame(w, kind::SFTP_TRANSFER_PROGRESS, &to_json(jobs)?)
+            }
             DaemonMsg::Error(msg) => write_frame(w, kind::ERROR, &to_json(msg)?),
         }
     }
@@ -1053,6 +1260,12 @@ impl DaemonMsg {
                 phase: from_json(&payload)?,
             },
             kind::KNOWN_HOSTS_LIST => DaemonMsg::KnownHostsList(from_json(&payload)?),
+            kind::SFTP_ENTRIES => DaemonMsg::SftpEntries(from_json(&payload)?),
+            kind::SFTP_OP_RESULT => DaemonMsg::SftpOpResult(from_json(&payload)?),
+            kind::SFTP_TRANSFER_STARTED => DaemonMsg::SftpTransferStarted {
+                job_id: from_json(&payload)?,
+            },
+            kind::SFTP_TRANSFER_PROGRESS => DaemonMsg::SftpTransferProgress(from_json(&payload)?),
             kind::ERROR => DaemonMsg::Error(from_json(&payload)?),
             other => {
                 return Err(io::Error::new(
@@ -1217,6 +1430,45 @@ mod tests {
                 key_type: "ssh-ed25519".into(),
                 keyblob: "AAAAC3Nz".into(),
             }),
+            ClientMsg::SftpList {
+                pane_id: 4,
+                path: "/home/deploy/项目".into(),
+            },
+            ClientMsg::SftpOp {
+                pane_id: 4,
+                op: SftpOp::Mkdir {
+                    path: "/tmp/new dir".into(),
+                },
+            },
+            ClientMsg::SftpOp {
+                pane_id: 4,
+                op: SftpOp::Rename {
+                    from: "/a".into(),
+                    to: "/b".into(),
+                },
+            },
+            ClientMsg::SftpOp {
+                pane_id: 4,
+                op: SftpOp::Chmod {
+                    path: "/x".into(),
+                    mode: 0o755,
+                },
+            },
+            ClientMsg::SftpOp {
+                pane_id: 4,
+                op: SftpOp::Readlink {
+                    path: "/link".into(),
+                },
+            },
+            ClientMsg::SftpTransferStart(SftpTransferSpec {
+                pane_id: 4,
+                kind: SftpTransferKind::Upload,
+                local: PathBuf::from("/local/f"),
+                remote: "/remote/f".into(),
+                recursive: true,
+            }),
+            ClientMsg::SftpTransferCancel { job_id: 9 },
+            ClientMsg::SftpTransferList { pane_id: 4 },
         ];
         let mut buf = Vec::new();
         for m in &msgs {
@@ -1349,6 +1601,48 @@ mod tests {
                     key_type: "ssh-ed25519".into(),
                     keyblob: "AAAAC3Nz".into(),
                 },
+            }]),
+            DaemonMsg::SftpEntries(vec![
+                SftpEntry {
+                    name: "src".into(),
+                    kind: SftpEntryKind::Dir,
+                    size: 4096,
+                    mtime: 1_700_000_000,
+                    permissions: 0o40755,
+                    target_is_dir: false,
+                },
+                SftpEntry {
+                    name: "链接".into(),
+                    kind: SftpEntryKind::Symlink,
+                    size: 0,
+                    mtime: 0,
+                    permissions: 0o120777,
+                    target_is_dir: true,
+                },
+            ]),
+            DaemonMsg::SftpOpResult(SftpOpResult::Done),
+            DaemonMsg::SftpOpResult(SftpOpResult::Link("/target/path".into())),
+            DaemonMsg::SftpOpResult(SftpOpResult::Error("permission denied".into())),
+            DaemonMsg::SftpOpResult(SftpOpResult::Stat(SftpEntry {
+                name: "file".into(),
+                kind: SftpEntryKind::File,
+                size: 12,
+                mtime: 5,
+                permissions: 0o100644,
+                target_is_dir: false,
+            })),
+            DaemonMsg::SftpTransferStarted { job_id: 3 },
+            DaemonMsg::SftpTransferProgress(vec![SftpJobProgress {
+                job_id: 3,
+                pane_id: 4,
+                kind: SftpTransferKind::Download,
+                state: SftpJobState::Running,
+                current: "big.iso".into(),
+                bytes_done: 1024,
+                bytes_total: 4096,
+                error: None,
+                local: "/local".into(),
+                remote: "/remote".into(),
             }]),
             DaemonMsg::Error("nope".into()),
         ];

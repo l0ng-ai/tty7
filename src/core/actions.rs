@@ -57,6 +57,8 @@ actions!(
         ToggleTabSidebar,
         OpenSettings,
         RestartDaemon,
+        // Toggle the SFTP file panel for the focused native-SSH pane (WS5).
+        ToggleSftp,
         SendTab,
         SendBackTab,
         Quit

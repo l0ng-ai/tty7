@@ -198,6 +198,8 @@ pub struct Tty7App {
     /// over the active SSH pane, but the input/editing state is app-owned so it
     /// is not tied to the Settings tab.
     pub(crate) loopback_panel: LoopbackForwardPanelState,
+    /// Pane-contextual SFTP file panel (WS5), bound to a focused native-SSH pane.
+    pub(crate) sftp_panel: crate::ui::sftp::SftpPanelState,
     /// Vertical tab sidebar width (px), held in a shared `Cell` so the resize
     /// drag's window-level mouse listener can mutate it without the entity handle
     /// (mirrors the split divider's `ratio`). Seeded from `Config::sidebar_width`
@@ -263,6 +265,7 @@ impl Tty7App {
                 .placeholder("3000")
                 .default_value("")
         });
+        let sftp_panel = crate::ui::sftp::SftpPanelState::new(window, cx);
         let sidebar_width = cx.global::<Config>().sidebar_width;
         // Live-apply hot-reloaded config: the watcher in `main.rs` swaps the
         // `Config` global on every `config.json` change, which fires this. Theme
@@ -347,6 +350,7 @@ impl Tty7App {
                 port_input: loopback_port_input,
                 editing: None,
             },
+            sftp_panel,
             sidebar_width: Rc::new(Cell::new(sidebar_width)),
             sidebar_dragging: Rc::new(Cell::new(false)),
             sidebar_scroll: gpui::ScrollHandle::new(),
@@ -1697,6 +1701,7 @@ impl Tty7App {
             ReopenClosedTab => self.reopen_closed_tab(window, cx),
             OpenSettings => self.toggle_settings(window, cx),
             RestartDaemon => self.restart_daemon(window, cx),
+            ToggleSftp => self.toggle_sftp(window, cx),
             SetTheme(i) => {
                 if let Some(id) = crate::ui::presets::all(cx).get(i).map(|t| t.id.clone()) {
                     self.set_preset(&id, window, cx);
@@ -2226,7 +2231,11 @@ impl Tty7App {
         self.settings.as_mut()
     }
 
-    fn active_ssh_pane(&self, window: &Window, cx: &App) -> Option<(u64, RemoteContext)> {
+    pub(crate) fn active_ssh_pane(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> Option<(u64, RemoteContext)> {
         let pane = self
             .tabs
             .get(self.active)?
@@ -2584,6 +2593,12 @@ impl Render for Tty7App {
             // the terminal area when the active pane is an SSH session.
             .when_some(active_ssh_pane, |this, (pane_id, remote)| {
                 this.child(self.render_loopback_forward_overlay(pane_id, &remote, cx))
+                    // Pane-contextual SFTP panel (WS5), docked right when open for
+                    // this (native-SSH) pane.
+                    .when_some(
+                        self.render_sftp_overlay(pane_id, &remote, window, cx),
+                        |this, panel| this.child(panel),
+                    )
             })
             // In-pane native-SSH auth / host-key sheet (WS3), shown over the pane
             // that raised the prompt.
@@ -2762,6 +2777,7 @@ impl Render for Tty7App {
             .on_action(
                 cx.listener(|this, _: &RestartDaemon, window, cx| this.restart_daemon(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &ToggleSftp, window, cx| this.toggle_sftp(window, cx)))
             // Quit lives on the same element-tree action path as every other Cmd
             // shortcut above, so a focused terminal routes `cmd-q` here rather
             // than relying solely on the global handler (which the keystroke

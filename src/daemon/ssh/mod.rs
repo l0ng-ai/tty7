@@ -18,6 +18,7 @@
 pub mod broker;
 pub mod known_hosts;
 pub mod session;
+pub mod sftp;
 
 mod auth;
 mod connect;
@@ -92,6 +93,16 @@ impl SshManager {
                 conns: Mutex::new(HashMap::new()),
             }
         })
+    }
+
+    /// A handle to the engine's tokio runtime. The SFTP layer (`ssh::sftp`) uses
+    /// it to `block_on` one-shot operations and `spawn` background transfer jobs
+    /// from the daemon's std threads (the server connection threads) without owning
+    /// a second runtime. Safe to call from a non-async thread; `block_on` on the
+    /// returned handle drives the future on the caller and panics only if called
+    /// from *within* a runtime worker (the server threads never are).
+    pub fn handle(&self) -> tokio::runtime::Handle {
+        self.runtime.handle().clone()
     }
 
     /// Kick off a native-SSH shell for a pane. Returns immediately; the connect →
