@@ -527,7 +527,7 @@ impl Tty7App {
             // inside the width. `pr_2` (8px) sets the "⋯"'s gap from the right edge
             // — the original tight inset, which now holds steady on resize since
             // `strip_w` keeps the right edge tracking the window.
-            .pl_2()
+            .pl_0()
             .pr_2()
             // On Windows/Linux the window controls (─ ▢ ✕) sit on the right, right
             // where the "⋯" lands; give it extra right breathing room there so it
