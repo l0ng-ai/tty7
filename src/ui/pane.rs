@@ -229,7 +229,6 @@ impl Pane<Entity<TerminalView>> {
             Pane::Leaf(v) => {
                 let focused = show_focus && v.read(cx).focus_handle.contains_focused(window, cx);
                 // No full border (it reads as a hard rectangle).
-                // The active pane is marked by a small neutral dot in the corner.
                 div()
                     .size_full()
                     .relative()
@@ -243,17 +242,6 @@ impl Pane<Entity<TerminalView>> {
                     // the terminal and focuses it.
                     .when(show_focus && !focused, |d| d.opacity(0.55))
                     .child(v.clone())
-                    .when(focused, |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .top(px(5.))
-                                .left(px(5.))
-                                .size(px(7.))
-                                .rounded_full()
-                                .bg(cx.theme().blue),
-                        )
-                    })
                     .into_any_element()
             }
             Pane::Split {
