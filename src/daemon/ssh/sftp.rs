@@ -14,8 +14,10 @@
 //!   (`Arc::ptr_eq`). A reconnect (new connection, same key) transparently gets a
 //!   fresh SFTP session.
 //! - One-shot operations run through [`SftpManager::with_session`], which retries
-//!   once on failure with a freshly re-opened session — so a dead subsystem
-//!   channel (while the connection itself lives) is re-opened transparently.
+//!   once with a freshly re-opened session **only** on a transport/channel failure
+//!   — so a dead subsystem channel (while the connection itself lives) is re-opened
+//!   transparently, while a logical SFTP error (permission denied, no such file)
+//!   returns directly without a pointless retry.
 //!
 //! ## Threading
 //! The server's std connection threads call the **sync** methods here
@@ -34,7 +36,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -112,6 +114,49 @@ pub fn upload_temp_name(remote: &str) -> String {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
     format!("{remote}.tty7-upload-{:x}{:x}", nanos, n)
+}
+
+/// Whether a server-supplied directory-entry `name` is safe to use as a *single*
+/// local path component when building a download destination.
+///
+/// A recursive download turns remote entry names into local path components
+/// (`lpath.join(name)`). A malicious or compromised server can return names like
+/// `..`, `../../etc/foo`, or an absolute `/etc/foo`; `Path::join` with an absolute
+/// component discards the base, and `..` escapes upward — arbitrary local file
+/// write (CVE-2019-6111-class). Accept only a name that is exactly one *normal*
+/// path component: reject empty, `.`, `..`, anything containing a `/` or `\\`
+/// separator, and anything that doesn't resolve to a single `Component::Normal`.
+fn safe_local_name(name: &str) -> bool {
+    if name.is_empty() || name == "." || name == ".." {
+        return false;
+    }
+    // Reject either separator on every platform: a POSIX server name must never
+    // introduce a Windows path separator either.
+    if name.contains('/') || name.contains('\\') {
+        return false;
+    }
+    let mut comps = Path::new(name).components();
+    matches!(
+        (comps.next(), comps.next()),
+        (Some(Component::Normal(_)), None)
+    )
+}
+
+/// The temp path a download writes to before renaming over its target:
+/// `<local>.tty7-download-<rand>`, a sibling in the *same directory* so the
+/// finishing rename is same-filesystem (atomic). Mirrors [`upload_temp_name`].
+fn download_temp_path(lpath: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    // Append to the full path (a sibling with a suffix) so the temp stays in the
+    // destination directory regardless of the file name's own extension.
+    let mut os = lpath.as_os_str().to_os_string();
+    os.push(format!(".tty7-download-{:x}{:x}", nanos, n));
+    PathBuf::from(os)
 }
 
 // ---------------------------------------------------------------------------
@@ -409,8 +454,12 @@ impl SftpManager {
     // --- session cache -----------------------------------------------------
 
     /// Run `f` against the pane's cached SFTP session, retrying once with a
-    /// freshly re-opened session if the first attempt fails — so a dead subsystem
-    /// channel (while the connection lives) is transparently re-established.
+    /// freshly re-opened session **only** when the first attempt failed for a
+    /// transport/channel reason (the cached subsystem channel died while the
+    /// connection lives). A logical SFTP failure — a server status like permission
+    /// denied or no-such-file — returns directly, never re-opening the session (a
+    /// retry would just fail identically and waste a round-trip). See
+    /// [`is_transport_failure`].
     async fn with_session<T, F, Fut>(&self, conn: &Arc<SshConnection>, f: F) -> Result<T, String>
     where
         F: Fn(Arc<SftpSession>) -> Fut,
@@ -419,11 +468,12 @@ impl SftpManager {
         let sftp = self.session_for(conn).await?;
         match f(sftp).await {
             Ok(v) => Ok(v),
-            Err(_) => {
+            Err(e) if is_transport_failure(&e) => {
                 self.invalidate(conn.key());
                 let sftp = self.session_for(conn).await?;
                 f(sftp).await
             }
+            Err(e) => Err(e),
         }
     }
 
@@ -457,6 +507,26 @@ impl SftpManager {
     fn invalidate(&self, key: &ConnectionKey) {
         self.sessions.lock().unwrap().remove(key);
     }
+}
+
+/// Whether a stringified SFTP op error looks like a *transport/channel* failure
+/// (the subsystem channel died) rather than a logical server status (permission
+/// denied, no such file, …). Only the former is worth re-opening the session for.
+///
+/// `russh_sftp` renders channel/IO failures with these markers; a server status
+/// code renders as `<code>: <message>` and matches none of them — so an unmatched
+/// (logical) error is not retried. Conservative by design: an unrecognized error
+/// is treated as logical and returned directly.
+fn is_transport_failure(msg: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "I/O:",           // russh_sftp `Error::IO` — the channel stream failed
+        "Unexpected EOF", // the stream closed mid-message
+        "Timeout",        // no response — the subsystem/channel is wedged
+        "Unexpected packet",
+        "SendError", // the channel task's receiver is gone
+        "RecvError", // the channel task ended before replying
+    ];
+    MARKERS.iter().any(|m| msg.contains(m))
 }
 
 /// Open a fresh SFTP subsystem channel on `conn` and hand back a session.
@@ -657,6 +727,15 @@ async fn download(sftp: &SftpSession, spec: &SftpTransferSpec, job: &Job) -> Res
                 if name == "." || name == ".." {
                     continue;
                 }
+                // Guard against a hostile server returning a traversing name
+                // (`..`, `a/b`, `/abs`): it would become a local path component
+                // via `lpath.join`, escaping the destination. Skip unsafe names.
+                if !safe_local_name(&name) {
+                    log::warn!(
+                        "sftp download: skipping remote entry with unsafe name {name:?} under {rpath}"
+                    );
+                    continue;
+                }
                 stack.push((remote_join(&rpath, &name), lpath.join(&name)));
             }
         } else {
@@ -677,29 +756,48 @@ async fn download_file(
     if let Some(parent) = lpath.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
-    let mut remote = sftp
-        .open(rpath.to_string())
-        .await
-        .map_err(|e| format!("{e}"))?;
-    let mut local = tokio::fs::File::create(lpath)
-        .await
-        .map_err(|e| format!("create {}: {e}", lpath.display()))?;
-    let mut buf = vec![0u8; CHUNK];
-    loop {
-        if job.is_cancelled() {
-            return Err(cancelled());
-        }
-        let n = remote.read(&mut buf).await.map_err(|e| format!("{e}"))?;
-        if n == 0 {
-            break;
-        }
-        local
-            .write_all(&buf[..n])
+    // Download to a per-file temp in the destination dir, then rename over the
+    // target on success — mirroring the upload temp+rename discipline so a failed
+    // or cancelled download never truncates a pre-existing local file in place.
+    let temp = download_temp_path(lpath);
+    let result: Result<(), String> = async {
+        let mut remote = sftp
+            .open(rpath.to_string())
             .await
-            .map_err(|e| format!("write local: {e}"))?;
-        job.add_bytes(n as u64);
+            .map_err(|e| format!("{e}"))?;
+        let mut local = tokio::fs::File::create(&temp)
+            .await
+            .map_err(|e| format!("create {}: {e}", temp.display()))?;
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            if job.is_cancelled() {
+                return Err(cancelled());
+            }
+            let n = remote.read(&mut buf).await.map_err(|e| format!("{e}"))?;
+            if n == 0 {
+                break;
+            }
+            local
+                .write_all(&buf[..n])
+                .await
+                .map_err(|e| format!("write local: {e}"))?;
+            job.add_bytes(n as u64);
+        }
+        local.flush().await.ok();
+        Ok(())
     }
-    local.flush().await.ok();
+    .await;
+
+    if let Err(e) = result {
+        // Best effort: drop the partial temp, leaving any pre-existing target intact.
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(e);
+    }
+    // Swap the completed temp over the target.
+    if let Err(e) = tokio::fs::rename(&temp, lpath).await {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(format!("rename into {}: {e}", lpath.display()));
+    }
     // Preserve the executable/permission bits where sane (unix only, low 12 bits).
     preserve_mode(lpath, mode);
     Ok(())
@@ -819,6 +917,11 @@ async fn remote_size(
                     if name == "." || name == ".." {
                         continue;
                     }
+                    // Skip the same unsafe names the download walker skips so the
+                    // size denominator matches what is actually transferred.
+                    if !safe_local_name(&name) {
+                        continue;
+                    }
                     stack.push(remote_join(&path, &name));
                 }
             }
@@ -914,6 +1017,56 @@ mod tests {
         assert!(b.starts_with("/dir/file.txt.tty7-upload-"));
         // Two temp names for the same target must differ (counter component).
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn safe_local_name_rejects_traversal_and_accepts_plain_names() {
+        // Rejected: empty, dot, dotdot, embedded/leading separators, absolute.
+        assert!(!safe_local_name(""));
+        assert!(!safe_local_name("."));
+        assert!(!safe_local_name(".."));
+        assert!(!safe_local_name("a/b"));
+        assert!(!safe_local_name("/abs"));
+        assert!(!safe_local_name("../../.ssh/authorized_keys"));
+        assert!(!safe_local_name("a\\b"));
+        // Accepted: ordinary single components, including Unicode and dotted names.
+        assert!(safe_local_name("file.txt"));
+        assert!(safe_local_name("项目"));
+        assert!(safe_local_name("a.tar.gz"));
+        assert!(safe_local_name(".hidden"));
+    }
+
+    #[test]
+    fn download_temp_path_is_sibling_and_distinct() {
+        let target = Path::new("/dest/dir/file.bin");
+        let a = download_temp_path(target);
+        let b = download_temp_path(target);
+        // Same directory as the target (so the finishing rename is same-filesystem).
+        assert_eq!(a.parent(), target.parent());
+        assert!(
+            a.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("file.bin.tty7-download-")
+        );
+        // Two temps for the same target differ (counter component).
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn is_transport_failure_distinguishes_channel_from_logical_errors() {
+        // Transport/channel failures → retry.
+        assert!(is_transport_failure("I/O: broken pipe"));
+        assert!(is_transport_failure("rename failed: I/O: connection reset"));
+        assert!(is_transport_failure("Unexpected EOF on stream"));
+        assert!(is_transport_failure("Timeout"));
+        assert!(is_transport_failure("SendError: channel closed"));
+        // Logical server statuses → no retry.
+        assert!(!is_transport_failure("3: Permission denied"));
+        assert!(!is_transport_failure("2: No such file or directory"));
+        assert!(!is_transport_failure(
+            "remote path is a directory (enable recursive)"
+        ));
     }
 
     #[test]
