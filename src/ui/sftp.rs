@@ -213,7 +213,9 @@ impl Tty7App {
         self.sftp_panel.open_pane_id = Some(pane_id);
         self.sftp_panel.editing = None;
         // Start at the shell's OSC-7 cwd when known, else the filesystem root.
-        let start = self.pane_shell_cwd(pane_id, window, cx).unwrap_or_else(|| "/".to_string());
+        let start = self
+            .pane_shell_cwd(pane_id, window, cx)
+            .unwrap_or_else(|| "/".to_string());
         self.sftp_navigate(start, cx);
         self.sftp_poll_jobs(cx);
         self.sftp_start_polling(cx);
@@ -221,7 +223,11 @@ impl Tty7App {
 
     /// The focused pane's OSC-7 cwd as an absolute remote path, if tracked.
     fn pane_shell_cwd(&self, pane_id: u64, window: &Window, cx: &App) -> Option<String> {
-        let leaf = self.tabs.get(self.active)?.pane.focused_or_first(window, cx)?;
+        let leaf = self
+            .tabs
+            .get(self.active)?
+            .pane
+            .focused_or_first(window, cx)?;
         let leaf = leaf.read(cx);
         if leaf.pane_id != pane_id {
             return None;
@@ -597,10 +603,9 @@ impl Tty7App {
             .child(self.render_sftp_header(pane_id, shell_cwd.is_some(), cx))
             .child(self.render_sftp_breadcrumb(cx))
             .child(self.render_sftp_filter())
-            .when_some(
-                self.render_sftp_edit_form(cx),
-                |this, form| this.child(form),
-            )
+            .when_some(self.render_sftp_edit_form(cx), |this, form| {
+                this.child(form)
+            })
             .child(self.render_sftp_list(cx))
             .when_some(self.render_sftp_tray(cx), |this, tray| this.child(tray))
             // FR-T5: a Finder drop uploads onto the current directory.
@@ -611,12 +616,7 @@ impl Tty7App {
         Some(panel.into_any_element())
     }
 
-    fn render_sftp_header(
-        &self,
-        pane_id: u64,
-        has_shell_cwd: bool,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    fn render_sftp_header(&self, pane_id: u64, has_shell_cwd: bool, cx: &mut Context<Self>) -> Div {
         let border = cx.theme().border;
         let foreground = cx.theme().foreground;
         let toolbar = h_flex()
@@ -637,9 +637,9 @@ impl Tty7App {
                 Button::new("sftp-newfolder")
                     .label("New Folder")
                     .small()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.sftp_begin_new_folder(window, cx)
-                    })),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.sftp_begin_new_folder(window, cx)),
+                    ),
             )
             .child(
                 Button::new("sftp-upload")
@@ -652,9 +652,9 @@ impl Tty7App {
                     .label("Shell cwd")
                     .small()
                     .disabled(!has_shell_cwd)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.sftp_go_shell_cwd(window, cx)
-                    })),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.sftp_go_shell_cwd(window, cx)),
+                    ),
             );
 
         v_flex()
@@ -687,13 +687,11 @@ impl Tty7App {
     fn render_sftp_breadcrumb(&self, cx: &mut Context<Self>) -> Div {
         let muted = cx.theme().muted_foreground;
         let accent = cx.theme().accent;
-        let mut row = h_flex()
-            .flex_wrap()
-            .items_center()
-            .gap_0p5()
-            .px_2()
-            .py_1();
-        for (i, (label, path)) in breadcrumb_segments(&self.sftp_panel.cwd).into_iter().enumerate() {
+        let mut row = h_flex().flex_wrap().items_center().gap_0p5().px_2().py_1();
+        for (i, (label, path)) in breadcrumb_segments(&self.sftp_panel.cwd)
+            .into_iter()
+            .enumerate()
+        {
             if i > 0 {
                 row = row.child(div().text_xs().text_color(muted).child("›"));
             }
@@ -706,9 +704,9 @@ impl Tty7App {
                     .cursor_pointer()
                     .hover(|s| s.underline())
                     .child(label)
-                    .on_click(cx.listener(move |this, _, _w, cx| {
-                        this.sftp_navigate(path.clone(), cx)
-                    })),
+                    .on_click(
+                        cx.listener(move |this, _, _w, cx| this.sftp_navigate(path.clone(), cx)),
+                    ),
             );
         }
         row
@@ -780,13 +778,7 @@ impl Tty7App {
             .px_1();
 
         if let Some(err) = &self.sftp_panel.error {
-            return container.child(
-                div()
-                    .p_3()
-                    .text_xs()
-                    .text_color(danger)
-                    .child(err.clone()),
-            );
+            return container.child(div().p_3().text_xs().text_color(danger).child(err.clone()));
         }
 
         let filter = self.sftp_panel.filter_input.read(cx).value().to_string();
@@ -1042,12 +1034,7 @@ impl Tty7App {
                         .bg(bar_color),
                 ),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(status_color)
-                    .child(status),
-            )
+            .child(div().text_xs().text_color(status_color).child(status))
     }
 }
 

@@ -438,16 +438,32 @@ pub struct SftpEntry {
 #[serde(rename_all = "kebab-case")]
 pub enum SftpOp {
     /// Follow-symlink stat of a single path.
-    Stat { path: String },
-    Mkdir { path: String },
-    RemoveFile { path: String },
+    Stat {
+        path: String,
+    },
+    Mkdir {
+        path: String,
+    },
+    RemoveFile {
+        path: String,
+    },
     /// Recursive directory delete (daemon walks + removes children first).
-    RemoveDir { path: String },
-    Rename { from: String, to: String },
+    RemoveDir {
+        path: String,
+    },
+    Rename {
+        from: String,
+        to: String,
+    },
     /// Set the permission (mode) bits of `path`.
-    Chmod { path: String, mode: u32 },
+    Chmod {
+        path: String,
+        mode: u32,
+    },
     /// Read a symlink's target path (returned as [`SftpOpResult::Link`]).
-    Readlink { path: String },
+    Readlink {
+        path: String,
+    },
 }
 
 /// The reply to a [`SftpOp`]. `Done` for side-effecting ops; `Stat`/`Link` carry

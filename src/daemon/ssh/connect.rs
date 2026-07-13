@@ -126,7 +126,13 @@ pub async fn build_transport(
         let channel = jump
             .open_direct_tcpip(&spec.host, spec.port)
             .await
-            .map_err(|e| anyhow::anyhow!("jump host direct-tcpip to {}:{} failed: {e}", spec.host, spec.port))?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "jump host direct-tcpip to {}:{} failed: {e}",
+                    spec.host,
+                    spec.port
+                )
+            })?;
         return Ok(Transport::Channel(channel.into_stream()));
     }
     match &spec.proxy {
@@ -142,7 +148,9 @@ pub async fn build_transport(
         _ => {
             let stream = TcpStream::connect((spec.host.as_str(), spec.port))
                 .await
-                .map_err(|e| anyhow::anyhow!("connect to {}:{} failed: {e}", spec.host, spec.port))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("connect to {}:{} failed: {e}", spec.host, spec.port)
+                })?;
             Ok(Transport::Tcp(stream))
         }
     }
@@ -270,7 +278,9 @@ async fn socks5_connect(
 ) -> anyhow::Result<TcpStream> {
     let mut s = TcpStream::connect((proxy_host, proxy_port))
         .await
-        .map_err(|e| anyhow::anyhow!("connect to SOCKS proxy {proxy_host}:{proxy_port} failed: {e}"))?;
+        .map_err(|e| {
+            anyhow::anyhow!("connect to SOCKS proxy {proxy_host}:{proxy_port} failed: {e}")
+        })?;
     // Greeting: VER=5, one method, 0x00 = no auth.
     s.write_all(&[0x05, 0x01, 0x00]).await?;
     let mut reply = [0u8; 2];
@@ -317,7 +327,9 @@ async fn http_connect(
 ) -> anyhow::Result<TcpStream> {
     let mut s = TcpStream::connect((proxy_host, proxy_port))
         .await
-        .map_err(|e| anyhow::anyhow!("connect to HTTP proxy {proxy_host}:{proxy_port} failed: {e}"))?;
+        .map_err(|e| {
+            anyhow::anyhow!("connect to HTTP proxy {proxy_host}:{proxy_port} failed: {e}")
+        })?;
     let req = format!(
         "CONNECT {target}:{target_port} HTTP/1.1\r\nHost: {target}:{target_port}\r\nProxy-Connection: keep-alive\r\n\r\n"
     );
@@ -447,20 +459,13 @@ mod tests {
         );
         assert_eq!(
             argv,
-            vec![
-                "sh",
-                "-c",
-                "nc -X connect -x h.example:22 root@host 100%",
-            ]
+            vec!["sh", "-c", "nc -X connect -x h.example:22 root@host 100%",]
         );
     }
 
     #[test]
     fn shell_split_respects_double_quotes_and_escapes() {
-        assert_eq!(
-            shell_split(r#"a "b c" d\ e"#),
-            vec!["a", "b c", "d e"]
-        );
+        assert_eq!(shell_split(r#"a "b c" d\ e"#), vec!["a", "b c", "d e"]);
         assert_eq!(shell_split("   "), Vec::<String>::new());
     }
 

@@ -620,9 +620,10 @@ impl Tty7App {
                 (label, false)
             }
             PromptModel::HostKeyUnknown { host, .. } => (format!("Unknown host {host}"), false),
-            PromptModel::HostKeyChanged { .. } => {
-                ("Host key CHANGED — possible man-in-the-middle".to_string(), true)
-            }
+            PromptModel::HostKeyChanged { .. } => (
+                "Host key CHANGED — possible man-in-the-middle".to_string(),
+                true,
+            ),
         };
 
         let mut card = v_flex()
@@ -636,7 +637,11 @@ impl Tty7App {
             .border_1()
             .rounded_lg()
             .shadow_lg()
-            .border_color(if danger_sheet { danger } else { cx.theme().border })
+            .border_color(if danger_sheet {
+                danger
+            } else {
+                cx.theme().border
+            })
             // Esc cancels/aborts from anywhere in the sheet.
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" {
@@ -671,7 +676,12 @@ impl Tty7App {
             PromptModel::KeyPassphrase { comment, .. } => {
                 let mut c = card;
                 if !comment.is_empty() {
-                    c = c.child(div().text_xs().text_color(cx.theme().muted_foreground).child(comment.clone()));
+                    c = c.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(comment.clone()),
+                    );
                 }
                 c.child(self.render_ssh_input(0))
                     .child(self.render_ssh_remember(cx))
@@ -698,12 +708,13 @@ impl Tty7App {
                 port,
                 host,
             } => card
+                .child(div().text_xs().child(format!("{host}:{port}  {algorithm}")))
                 .child(
                     div()
                         .text_xs()
-                        .child(format!("{host}:{port}  {algorithm}")),
+                        .font_family("monospace")
+                        .child(fingerprint.clone()),
                 )
-                .child(div().text_xs().font_family("monospace").child(fingerprint.clone()))
                 .child(
                     h_flex()
                         .gap_2()
@@ -716,14 +727,9 @@ impl Tty7App {
                                     this.trust_ssh_host_key(window, cx)
                                 })),
                         )
-                        .child(
-                            Button::new("ssh-hk-abort")
-                                .label("Abort")
-                                .small()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.cancel_ssh_prompt(window, cx)
-                                })),
-                        ),
+                        .child(Button::new("ssh-hk-abort").label("Abort").small().on_click(
+                            cx.listener(|this, _, window, cx| this.cancel_ssh_prompt(window, cx)),
+                        )),
                 ),
             PromptModel::HostKeyChanged {
                 algorithm,
@@ -732,12 +738,9 @@ impl Tty7App {
                 port,
                 host,
             } => card
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(danger)
-                        .child("The host key differs from the one previously trusted. This may be an attack."),
-                )
+                .child(div().text_xs().text_color(danger).child(
+                    "The host key differs from the one previously trusted. This may be an attack.",
+                ))
                 .child(div().text_xs().child(format!("{host}:{port}  {algorithm}")))
                 .child(
                     div()
@@ -816,13 +819,14 @@ impl Tty7App {
                     .label(submit_label)
                     .small()
                     .primary()
-                    .on_click(cx.listener(|this, _, window, cx| this.submit_ssh_prompt(window, cx))),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.submit_ssh_prompt(window, cx)),
+                    ),
             )
             .child(
-                Button::new("ssh-cancel")
-                    .label("Cancel")
-                    .small()
-                    .on_click(cx.listener(|this, _, window, cx| this.cancel_ssh_prompt(window, cx))),
+                Button::new("ssh-cancel").label("Cancel").small().on_click(
+                    cx.listener(|this, _, window, cx| this.cancel_ssh_prompt(window, cx)),
+                ),
             )
             .into_any_element()
     }
@@ -880,19 +884,14 @@ mod tests {
     #[test]
     fn banner_is_not_a_blocking_model() {
         assert!(
-            PromptModel::from_prompt(
-                AuthPromptKind::Banner { text: "hi".into() },
-                None,
-                false
-            )
-            .is_none()
+            PromptModel::from_prompt(AuthPromptKind::Banner { text: "hi".into() }, None, false)
+                .is_none()
         );
     }
 
     #[test]
     fn fr_a6_remember_overwrites() {
-        let (resp, write) =
-            password_submit("u", "h", 22, "new".into(), true, true);
+        let (resp, write) = password_submit("u", "h", 22, "new".into(), true, true);
         assert!(matches!(resp, AuthResponse::Secret(_)));
         assert_eq!(
             write,

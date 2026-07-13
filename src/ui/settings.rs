@@ -1081,12 +1081,7 @@ impl Tty7App {
                                 .flex_1()
                                 .min_w_0()
                                 .child(div().text_sm().child(label))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(muted_fg)
-                                        .child(fp),
-                                ),
+                                .child(div().text_xs().text_color(muted_fg).child(fp)),
                         )
                         .child(
                             Button::new(("ssh-known-host-del", i))

@@ -426,10 +426,7 @@ fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
     let mut star: Option<usize> = None;
     let mut star_t = 0usize;
     while t < text.len() {
-        if p < pattern.len()
-            && (pattern[p] == b'?'
-                || pattern[p].eq_ignore_ascii_case(&text[t]))
-        {
+        if p < pattern.len() && (pattern[p] == b'?' || pattern[p].eq_ignore_ascii_case(&text[t])) {
             p += 1;
             t += 1;
         } else if p < pattern.len() && pattern[p] == b'*' {
@@ -585,10 +582,7 @@ mod tests {
             hex(&sha1(b"abc")),
             "a9993e364706816aba3e25717850c26c9cd0d89d"
         );
-        assert_eq!(
-            hex(&sha1(b"")),
-            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
-        );
+        assert_eq!(hex(&sha1(b"")), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
     }
 
     #[test]
@@ -698,14 +692,16 @@ mod tests {
         let token = "example.com";
         let salt = b"0123456789abcdef1234"; // 20 bytes
         let hash = hmac_sha1(salt, token.as_bytes());
-        let line = format!(
-            "|1|{}|{} {KEY_A}\n",
-            b64(salt),
-            b64(&hash),
-        );
+        let line = format!("|1|{}|{} {KEY_A}\n", b64(salt), b64(&hash),);
         let ka = key(KEY_A);
-        assert_eq!(check_in_str(&line, "example.com", 22, &ka), HostKeyStatus::Known);
-        assert_eq!(check_in_str(&line, "nope.com", 22, &ka), HostKeyStatus::Unknown);
+        assert_eq!(
+            check_in_str(&line, "example.com", 22, &ka),
+            HostKeyStatus::Known
+        );
+        assert_eq!(
+            check_in_str(&line, "nope.com", 22, &ka),
+            HostKeyStatus::Unknown
+        );
     }
 
     #[test]
@@ -756,7 +752,10 @@ mod tests {
         assert_eq!(check_in_str(&file, "host1", 22, &ka), HostKeyStatus::Known);
         // `?` is exactly one char — "host" (zero) and "host12" (two) don't match.
         assert_eq!(check_in_str(&file, "host", 22, &ka), HostKeyStatus::Unknown);
-        assert_eq!(check_in_str(&file, "host12", 22, &ka), HostKeyStatus::Unknown);
+        assert_eq!(
+            check_in_str(&file, "host12", 22, &ka),
+            HostKeyStatus::Unknown
+        );
     }
 
     #[test]
@@ -797,9 +796,7 @@ mod tests {
 
     #[test]
     fn list_reports_host_type_and_fingerprint() {
-        let file = format!(
-            "example.com {KEY_A}\n@revoked bad.example.com {KEY_B}\n# comment\n"
-        );
+        let file = format!("example.com {KEY_A}\n@revoked bad.example.com {KEY_B}\n# comment\n");
         let entries = list_in_str(&file);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].host, "example.com");
@@ -813,9 +810,8 @@ mod tests {
     fn delete_removes_only_the_matching_entry_byte_for_byte() {
         // A file with CRLF, a comment, a blank line, and no trailing newline on
         // the last entry — deletion must preserve every unrelated byte.
-        let contents = format!(
-            "# my hosts\r\nkeep.example.com {KEY_B}\n\ndrop.example.com {KEY_A}"
-        );
+        let contents =
+            format!("# my hosts\r\nkeep.example.com {KEY_B}\n\ndrop.example.com {KEY_A}");
         let entries = list_in_str(&contents);
         let target = entries
             .iter()

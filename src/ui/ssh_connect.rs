@@ -62,7 +62,13 @@ pub(crate) fn build_native_ssh_spec(
 ) -> NativeSshSpec {
     let mut visited = HashSet::new();
     visited.insert(profile.id);
-    build_spec_inner(profile, profiles, store, global_verify_host_keys, &mut visited)
+    build_spec_inner(
+        profile,
+        profiles,
+        store,
+        global_verify_host_keys,
+        &mut visited,
+    )
 }
 
 fn build_spec_inner(

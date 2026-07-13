@@ -54,9 +54,7 @@ pub async fn authenticate(
         }
         let outcome = match family {
             MethodKind::PublicKey => try_publickeys(handle, spec, broker).await,
-            MethodKind::KeyboardInteractive => {
-                try_keyboard_interactive(handle, spec, broker).await
-            }
+            MethodKind::KeyboardInteractive => try_keyboard_interactive(handle, spec, broker).await,
             MethodKind::Password => try_password(handle, spec, broker).await,
             // Agent is folded into the publickey pass below via a distinct marker;
             // handled in `method_order` expansion.
@@ -64,7 +62,10 @@ pub async fn authenticate(
         };
         match outcome {
             Outcome::Authenticated => return Ok(()),
-            Outcome::Failed { remaining_methods, reason } => {
+            Outcome::Failed {
+                remaining_methods,
+                reason,
+            } => {
                 if let Some(m) = remaining_methods
                     && !m.is_empty()
                 {
@@ -452,7 +453,10 @@ mod tests {
 
     #[test]
     fn method_order_restricts_by_mode() {
-        assert_eq!(method_order(SshAuthMode::Password), vec![MethodKind::Password]);
+        assert_eq!(
+            method_order(SshAuthMode::Password),
+            vec![MethodKind::Password]
+        );
         assert_eq!(
             method_order(SshAuthMode::KeyboardInteractive),
             vec![MethodKind::KeyboardInteractive]

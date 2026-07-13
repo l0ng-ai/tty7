@@ -538,10 +538,7 @@ mod tests {
             "100%-%d-h"
         );
         // Single left-to-right pass: %h expanding to text with %r is not re-expanded.
-        assert_eq!(
-            expand_identity_placeholders("%h", "%r", "u"),
-            "%r"
-        );
+        assert_eq!(expand_identity_placeholders("%h", "%r", "u"), "%r");
         // No placeholders → unchanged.
         assert_eq!(
             expand_identity_placeholders("~/.ssh/id_ed25519", "h", "u"),
@@ -554,10 +551,16 @@ mod tests {
         let mut p = SshProfile::new("x");
         p.host = "srv".to_string();
         p.user = "bob".to_string();
-        p.identity_files = vec!["~/.ssh/id_%r_%h".to_string(), "~/.ssh/id_ed25519".to_string()];
+        p.identity_files = vec![
+            "~/.ssh/id_%r_%h".to_string(),
+            "~/.ssh/id_ed25519".to_string(),
+        ];
         assert_eq!(
             p.expanded_identity_files(),
-            vec!["~/.ssh/id_bob_srv".to_string(), "~/.ssh/id_ed25519".to_string()]
+            vec![
+                "~/.ssh/id_bob_srv".to_string(),
+                "~/.ssh/id_ed25519".to_string()
+            ]
         );
     }
 

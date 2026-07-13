@@ -67,7 +67,11 @@ pub fn remote_join(dir: &str, name: &str) -> String {
     if dir.is_empty() || dir == "/" {
         format!("/{}", name.trim_start_matches('/'))
     } else {
-        format!("{}/{}", dir.trim_end_matches('/'), name.trim_start_matches('/'))
+        format!(
+            "{}/{}",
+            dir.trim_end_matches('/'),
+            name.trim_start_matches('/')
+        )
     }
 }
 
@@ -437,10 +441,7 @@ impl SftpManager {
         };
         let mut guard = slot.inner.lock().await;
         if let Some(cached) = guard.as_ref() {
-            let same = cached
-                .conn
-                .upgrade()
-                .is_some_and(|c| Arc::ptr_eq(&c, conn));
+            let same = cached.conn.upgrade().is_some_and(|c| Arc::ptr_eq(&c, conn));
             if same && conn.is_alive() {
                 return Ok(cached.sftp.clone());
             }
@@ -502,7 +503,10 @@ async fn list_dir(sftp: &SftpSession, path: &str) -> Result<Vec<SftpEntry>, Stri
 async fn run_op(sftp: &SftpSession, op: &SftpOp) -> Result<SftpOpResult, String> {
     Ok(match op {
         SftpOp::Stat { path } => {
-            let attrs = sftp.metadata(path.clone()).await.map_err(|e| format!("{e}"))?;
+            let attrs = sftp
+                .metadata(path.clone())
+                .await
+                .map_err(|e| format!("{e}"))?;
             SftpOpResult::Stat(entry_from_attrs(&remote_basename(path), &attrs))
         }
         SftpOp::Mkdir { path } => {
@@ -534,7 +538,10 @@ async fn run_op(sftp: &SftpSession, op: &SftpOp) -> Result<SftpOpResult, String>
             SftpOpResult::Done
         }
         SftpOp::Readlink { path } => {
-            let target = sftp.read_link(path.clone()).await.map_err(|e| format!("{e}"))?;
+            let target = sftp
+                .read_link(path.clone())
+                .await
+                .map_err(|e| format!("{e}"))?;
             SftpOpResult::Link(target)
         }
     })
@@ -570,7 +577,10 @@ async fn remove_dir_recursive(sftp: &SftpSession, path: &str) -> Result<(), Stri
         match step {
             Step::Enter(dir) => {
                 stack.push(Step::RemoveDir(dir.clone()));
-                let read_dir = sftp.read_dir(dir.clone()).await.map_err(|e| format!("{e}"))?;
+                let read_dir = sftp
+                    .read_dir(dir.clone())
+                    .await
+                    .map_err(|e| format!("{e}"))?;
                 for entry in read_dir {
                     let name = entry.file_name();
                     if name == "." || name == ".." {
@@ -627,7 +637,10 @@ async fn download(sftp: &SftpSession, spec: &SftpTransferSpec, job: &Job) -> Res
         if job.is_cancelled() {
             return Err(cancelled());
         }
-        let attrs = sftp.metadata(rpath.clone()).await.map_err(|e| format!("{e}"))?;
+        let attrs = sftp
+            .metadata(rpath.clone())
+            .await
+            .map_err(|e| format!("{e}"))?;
         if attrs.is_dir() {
             if !spec.recursive {
                 return Err("remote path is a directory (enable recursive)".to_string());
@@ -635,7 +648,10 @@ async fn download(sftp: &SftpSession, spec: &SftpTransferSpec, job: &Job) -> Res
             tokio::fs::create_dir_all(&lpath)
                 .await
                 .map_err(|e| format!("create local dir: {e}"))?;
-            let read_dir = sftp.read_dir(rpath.clone()).await.map_err(|e| format!("{e}"))?;
+            let read_dir = sftp
+                .read_dir(rpath.clone())
+                .await
+                .map_err(|e| format!("{e}"))?;
             for entry in read_dir {
                 let name = entry.file_name();
                 if name == "." || name == ".." {
@@ -661,7 +677,10 @@ async fn download_file(
     if let Some(parent) = lpath.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
-    let mut remote = sftp.open(rpath.to_string()).await.map_err(|e| format!("{e}"))?;
+    let mut remote = sftp
+        .open(rpath.to_string())
+        .await
+        .map_err(|e| format!("{e}"))?;
     let mut local = tokio::fs::File::create(lpath)
         .await
         .map_err(|e| format!("create {}: {e}", lpath.display()))?;

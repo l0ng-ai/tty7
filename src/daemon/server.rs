@@ -98,8 +98,9 @@ fn ssh_connection_for(
     let pane = registry
         .get(pane_id)
         .ok_or_else(|| format!("no such pane {pane_id}"))?;
-    pane.ssh_connection()
-        .ok_or_else(|| "pane has no native SSH connection (SFTP needs a native-SSH pane)".to_string())
+    pane.ssh_connection().ok_or_else(|| {
+        "pane has no native SSH connection (SFTP needs a native-SSH pane)".to_string()
+    })
 }
 
 /// Run the daemon: bind the socket and serve connections forever. Returns `Err`

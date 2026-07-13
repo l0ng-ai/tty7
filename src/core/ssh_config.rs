@@ -298,7 +298,10 @@ pub fn merge_imported(existing: &mut Vec<ManagedProfile>, imported: Vec<Imported
     let mut jump_targets: Vec<(String, String)> = Vec::new();
 
     for entry in imported {
-        let ImportedProfile { profile, proxy_jump } = entry;
+        let ImportedProfile {
+            profile,
+            proxy_jump,
+        } = entry;
         if let Some(raw) = proxy_jump {
             jump_targets.push((profile.name.clone(), raw));
         }
@@ -499,9 +502,8 @@ fn resolve_alias(alias: &str, blocks: &[HostBlock]) -> ResolvedHost {
                     }
                 }
                 "forwardagent" if r.forward_agent.is_none() => {
-                    r.forward_agent = first_word(val).map(|v| {
-                        matches!(v.to_ascii_lowercase().as_str(), "yes" | "true")
-                    });
+                    r.forward_agent = first_word(val)
+                        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "yes" | "true"));
                 }
                 _ => {}
             }
@@ -652,7 +654,10 @@ mod tests {
         // `secure` and `web` are concrete; `!web-staging` is a negation, not an alias.
         assert_eq!(names, vec!["secure", "web"]);
         // The Match block's User must not leak onto `secure`.
-        let secure = imported.iter().find(|i| i.profile.name == "secure").unwrap();
+        let secure = imported
+            .iter()
+            .find(|i| i.profile.name == "secure")
+            .unwrap();
         assert_eq!(secure.profile.user, "");
     }
 
@@ -717,7 +722,10 @@ mod tests {
         .unwrap();
 
         let mut existing = Vec::new();
-        merge_imported(&mut existing, import_profiles_from(ssh.join("config"), &root));
+        merge_imported(
+            &mut existing,
+            import_profiles_from(ssh.join("config"), &root),
+        );
 
         let bastion_id = existing.iter().find(|p| p.name == "bastion").unwrap().id;
         let prod = existing.iter().find(|p| p.name == "prod").unwrap();

@@ -39,8 +39,8 @@ use crate::core::osc::OscTokenizer;
 use crate::daemon::protocol::{
     AuthPromptKind, AuthResponse, ClientMsg, DaemonMsg, KnownHostEntry, KnownHostId,
     LoopbackForward, LoopbackForwardId, LoopbackForwardInfo, LoopbackForwardRequest,
-    ManagedForward, NativeSshSpec, RemoteContext, ShellSpec, SftpEntry, SftpJobProgress, SftpOp,
-    SftpOpResult, SftpTransferSpec, SshForwardRule, SshPhase, WinSize,
+    ManagedForward, NativeSshSpec, RemoteContext, SftpEntry, SftpJobProgress, SftpOp, SftpOpResult,
+    SftpTransferSpec, ShellSpec, SshForwardRule, SshPhase, WinSize,
 };
 use crate::daemon::transport::{self, Stream};
 
@@ -976,7 +976,10 @@ impl RemoteTerminal {
     /// FIFO order. `None` when the queue is empty. The view calls this while
     /// draining its event batch.
     pub fn take_auth_prompt(&self) -> Option<(u64, AuthPromptKind)> {
-        self.auth_prompts.lock().ok().and_then(|mut q| q.pop_front())
+        self.auth_prompts
+            .lock()
+            .ok()
+            .and_then(|mut q| q.pop_front())
     }
 
     /// Whether any native-SSH prompt is waiting (cheap check the view uses to
@@ -1028,7 +1031,9 @@ impl RemoteTerminal {
             ClientMsg::ListKnownHosts.encode(&mut stream)?;
             match DaemonMsg::read(&mut stream)? {
                 DaemonMsg::KnownHostsList(list) => Ok(list),
-                other => Err(anyhow::anyhow!("unexpected reply to ListKnownHosts: {other:?}")),
+                other => Err(anyhow::anyhow!(
+                    "unexpected reply to ListKnownHosts: {other:?}"
+                )),
             }
         }
         query().unwrap_or_default()

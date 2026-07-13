@@ -270,7 +270,10 @@ impl InMemoryCredentialStore {
 
     /// Number of stored entries (test introspection).
     pub fn len(&self) -> usize {
-        self.entries.lock().expect("credential store poisoned").len()
+        self.entries
+            .lock()
+            .expect("credential store poisoned")
+            .len()
     }
 
     /// Whether the store holds no entries.
@@ -282,12 +285,17 @@ impl InMemoryCredentialStore {
 impl CredentialStore for InMemoryCredentialStore {
     fn get(&self, service: &str, account: &str) -> CredentialResult<Option<String>> {
         let entries = self.entries.lock().expect("credential store poisoned");
-        Ok(entries.get(&(service.to_string(), account.to_string())).cloned())
+        Ok(entries
+            .get(&(service.to_string(), account.to_string()))
+            .cloned())
     }
 
     fn set(&self, service: &str, account: &str, secret: &str) -> CredentialResult<()> {
         let mut entries = self.entries.lock().expect("credential store poisoned");
-        entries.insert((service.to_string(), account.to_string()), secret.to_string());
+        entries.insert(
+            (service.to_string(), account.to_string()),
+            secret.to_string(),
+        );
         Ok(())
     }
 
@@ -304,15 +312,24 @@ mod tests {
 
     #[test]
     fn endpoint_and_key_accounts_are_stable() {
-        assert_eq!(endpoint_account("deploy", "10.0.0.5", 22), "deploy@10.0.0.5:22");
-        assert_eq!(endpoint_account("deploy", "10.0.0.5", 2222), "deploy@10.0.0.5:2222");
+        assert_eq!(
+            endpoint_account("deploy", "10.0.0.5", 22),
+            "deploy@10.0.0.5:22"
+        );
+        assert_eq!(
+            endpoint_account("deploy", "10.0.0.5", 2222),
+            "deploy@10.0.0.5:2222"
+        );
 
         // sha512 hex is 128 chars, lowercase, and deterministic.
         let a = key_account_from_contents(b"-----BEGIN OPENSSH PRIVATE KEY-----\n");
         let b = key_account_from_contents(b"-----BEGIN OPENSSH PRIVATE KEY-----\n");
         assert_eq!(a, b);
         assert_eq!(a.len(), 128);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
         assert_ne!(a, key_account_from_contents(b"different"));
     }
 
@@ -380,7 +397,10 @@ mod tests {
         let cref = store.set_key_passphrase(&key_id, "s3cret").unwrap();
         assert_eq!(cref.kind, CredentialKind::KeyPassphrase);
         assert_eq!(cref.service(), "tty7-ssh-key");
-        assert_eq!(store.passphrase_for_key(&key_id).unwrap().as_deref(), Some("s3cret"));
+        assert_eq!(
+            store.passphrase_for_key(&key_id).unwrap().as_deref(),
+            Some("s3cret")
+        );
 
         // A password with the same account string does NOT collide (different service).
         store.set_password("deploy", "host", 22, "pw").unwrap();

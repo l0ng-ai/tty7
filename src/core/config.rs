@@ -928,8 +928,9 @@ mod tests {
         profile.user = "deploy".to_string();
         profile.port = 2222;
         profile.auth = crate::core::ssh_profile::AuthMode::PublicKey;
-        profile.credential_ref =
-            Some(crate::core::keychain::CredentialRef::password("deploy", "10.0.0.5", 2222));
+        profile.credential_ref = Some(crate::core::keychain::CredentialRef::password(
+            "deploy", "10.0.0.5", 2222,
+        ));
         cfg.ssh_profiles = vec![profile.clone()];
         cfg.save();
 
