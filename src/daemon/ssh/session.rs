@@ -286,12 +286,30 @@ impl SshConnection {
         &self.key
     }
 
-    /// Whether this connection is still usable for reuse. Set false once a channel
-    /// driver observes the session drop.
+    /// Whether this connection is still usable for reuse.
+    ///
+    /// Two signals: the `alive` flag (cleared by [`mark_dead`](Self::mark_dead) on
+    /// teardown or when a reuse attempt finds the transport dead) **and** the russh
+    /// handle's own liveness — when russh's session task ends (transport dropped),
+    /// its command sender closes, so `handle.is_closed()` flips to true. The flag
+    /// alone is unreliable: `mark_dead` only runs from `Drop`, but a parked
+    /// forward/loopback accept loop holds an `Arc<SshConnection>`, so a dead
+    /// connection's `Drop` never runs and the flag stays true. Consulting
+    /// `is_closed()` (via a non-blocking `try_lock`; a contended lock means an open
+    /// is in flight, so assume alive) catches that case cheaply. The self-healing
+    /// reconnect in `SshManager::run_session` is the belt-and-suspenders backstop.
     pub fn is_alive(&self) -> bool {
-        self.alive.load(Ordering::SeqCst)
+        if !self.alive.load(Ordering::SeqCst) {
+            return false;
+        }
+        match self.handle.try_lock() {
+            Ok(handle) => !handle.is_closed(),
+            Err(_) => true,
+        }
     }
 
+    /// Mark this connection unusable for reuse (teardown, or a reuse attempt that
+    /// found the transport dead). Idempotent.
     pub(super) fn mark_dead(&self) {
         self.alive.store(false, Ordering::SeqCst);
     }

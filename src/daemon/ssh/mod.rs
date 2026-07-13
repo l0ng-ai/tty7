@@ -241,7 +241,7 @@ impl SshManager {
         // the transport + SSH handshake only — never around interactive auth,
         // which the user may reasonably take a while to complete (the broker
         // enforces its own per-prompt timeout).
-        let conn = self
+        let (mut conn, reused) = self
             .open_connection(spec, broker)
             .await
             .map_err(|e| format!("{e}"))?;
@@ -253,18 +253,42 @@ impl SshManager {
 
         broker.status(SshPhase::Connected);
 
+        // Open the shell channel on the (possibly shared) connection. This is also
+        // the first liveness probe of a *reused* connection: if its transport died
+        // silently — a parked forward/loopback accept loop holds an `Arc`, so the
+        // dead connection's `Drop` (and `mark_dead`) never ran — the first channel
+        // open errors. Self-heal: mark it dead, evict its registry slot, and
+        // reconnect fresh once. A fresh connection that fails here is a real error.
+        let channel = match conn.open_session_channel().await {
+            Ok(channel) => channel,
+            Err(e) if reused => {
+                log::info!(
+                    "reused ssh connection to {}:{} was dead ({e}); reconnecting",
+                    spec.host,
+                    spec.port
+                );
+                conn.mark_dead();
+                self.evict_connection(conn.key());
+                let (fresh, _) = self
+                    .open_connection(spec, broker)
+                    .await
+                    .map_err(|e| format!("{e}"))?;
+                conn = fresh;
+                *conn_slot.lock().unwrap() = Arc::downgrade(&conn);
+                conn.open_session_channel()
+                    .await
+                    .map_err(|e| format!("open shell channel failed: {e}"))?
+            }
+            Err(e) => return Err(format!("open shell channel failed: {e}")),
+        };
+
         // Establish the profile's preconfigured forwards (FR-F2) now that the
-        // connection is authenticated. Failures are non-fatal — each surfaces as a
-        // `ForwardStatus::Error` on the forward row, never a killed session.
+        // connection is authenticated *and* confirmed live. Failures are non-fatal —
+        // each surfaces as a `ForwardStatus::Error` on the forward row, never a
+        // killed session.
         for rule in &spec.forwards {
             self.forwards.establish(pane_id, conn.clone(), rule).await;
         }
-
-        // Open the shell channel on the (possibly shared) connection.
-        let channel = conn
-            .open_session_channel()
-            .await
-            .map_err(|e| format!("open shell channel failed: {e}"))?;
 
         let (pw, ph) = (
             u32::from(size.cols).saturating_mul(u32::from(size.cell_w)),
@@ -306,13 +330,24 @@ impl SshManager {
         Ok(())
     }
 
+    /// Drop a connection key's registry slot so the next `open_connection` for it
+    /// establishes a fresh connection instead of upgrading a stale `Weak`. Called
+    /// by the self-healing reuse path when a reused connection turns out dead.
+    fn evict_connection(&self, key: &ConnectionKey) {
+        self.conns.lock().unwrap().remove(key);
+    }
+
     /// Establish (or reuse) the connection for `spec`, recursing through the jump
-    /// chain. Boxed because it is `async`-recursive.
+    /// chain. Boxed because it is `async`-recursive. The returned `bool` is `true`
+    /// when an existing connection was reused (no fresh authentication) — the
+    /// caller uses it to self-heal: a reused connection whose transport silently
+    /// died errors on its first channel open, and only then is it worth evicting
+    /// and reconnecting.
     fn open_connection<'a>(
         &'a self,
         spec: &'a NativeSshSpec,
         broker: &'a Arc<PromptBroker>,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Arc<SshConnection>>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<(Arc<SshConnection>, bool)>> + Send + 'a>> {
         Box::pin(async move {
             let key = ConnectionKey::from_spec(spec);
             let slot: ConnSlot = {
@@ -325,14 +360,14 @@ impl SshManager {
             if let Some(conn) = guard.upgrade() {
                 if conn.is_alive() {
                     // Reuse: a new channel on the existing authenticated connection.
-                    return Ok(conn);
+                    return Ok((conn, true));
                 }
             }
 
             // Establish the jump connection first (recursively) so its
             // `direct-tcpip` channel can be this connection's transport.
             let jump = match &spec.jump {
-                Some(jump_spec) => Some(self.open_connection(jump_spec, broker).await?),
+                Some(jump_spec) => Some(self.open_connection(jump_spec, broker).await?.0),
                 None => None,
             };
 
@@ -374,7 +409,7 @@ impl SshManager {
 
             let conn = SshConnection::new(handle, key, remote_forwards);
             *guard = Arc::downgrade(&conn);
-            Ok(conn)
+            Ok((conn, false))
         })
     }
 }
@@ -445,6 +480,33 @@ mod tests {
 
         // Identical connection params → identical key (reuse).
         assert_eq!(a, ConnectionKey::from_spec(&base_spec()));
+    }
+
+    #[test]
+    fn evict_connection_clears_the_registry_slot() {
+        // The self-heal path evicts a dead connection's key so the next
+        // `open_connection` establishes fresh instead of upgrading a stale `Weak`.
+        // Exercise just the registry map — no live server needed.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build test runtime");
+        let mgr = SshManager {
+            runtime,
+            conns: Mutex::new(HashMap::new()),
+            forwards: SshForwardRegistry::default(),
+        };
+        let key = ConnectionKey::from_spec(&base_spec());
+        mgr.conns
+            .lock()
+            .unwrap()
+            .insert(key.clone(), Arc::new(tokio::sync::Mutex::new(Weak::new())));
+        assert!(mgr.conns.lock().unwrap().contains_key(&key));
+
+        mgr.evict_connection(&key);
+        assert!(
+            !mgr.conns.lock().unwrap().contains_key(&key),
+            "evicted key must be gone so the next open creates a new entry"
+        );
     }
 
     #[test]
