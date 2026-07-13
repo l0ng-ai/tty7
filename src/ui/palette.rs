@@ -464,6 +464,13 @@ impl PaletteView {
         cx.notify();
     }
 
+    fn search_placeholder(&self) -> &'static str {
+        match self.menu {
+            PaletteMenu::SshConnect => "user@host [-p 2222 -J jump]",
+            PaletteMenu::Root | PaletteMenu::Theme | PaletteMenu::SshProfiles => "Search…",
+        }
+    }
+
     /// Translate the current list's confirm/cancel into either a host-facing
     /// event or an in-place transition into/out of a sub-list.
     fn on_list_event(
@@ -538,7 +545,12 @@ impl Render for PaletteView {
             // highlight the context menu, new-tab dropdown and completion popup
             // use. The 4px top/bottom inset keeps the first/last row clear of the
             // card's rounded corners.
-            .child(List::new(&self.list).py_1().max_h(px(440.)));
+            .child(
+                List::new(&self.list)
+                    .search_placeholder(self.search_placeholder())
+                    .py_1()
+                    .max_h(px(440.)),
+            );
 
         // Full-window scrim; clicking the empty area dismisses the palette (the
         // card itself is occluded so its clicks don't bubble here).
