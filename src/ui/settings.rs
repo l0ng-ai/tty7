@@ -7,7 +7,7 @@
 
 use gpui::{
     AnyElement, Context, Div, Entity, FontWeight, Image, ImageFormat, KeyDownEvent, SharedString,
-    Stateful, Subscription, Window, div, img, prelude::*, px, rgb,
+    Stateful, Subscription, Window, div, img, prelude::*, px, relative, rgb,
 };
 use gpui_component::Selectable as _;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _};
@@ -1048,9 +1048,17 @@ impl Tty7App {
         let accent = rgb(p.accent);
         let ansi = |i: usize| rgb(to_u32(p.ansi16[i]));
         let fg = rgb(p.foreground);
-        // A "line of code": thin rounded bars, sized like words and tightly
-        // spaced so the preview reads as real terminal text, not fat pills.
-        let bar = |w: f32, color: gpui::Rgba| div().h(px(4.)).w(px(w)).rounded(px(1.5)).bg(color);
+        // A "line of code": thin rounded bars whose widths are *fractions* of the
+        // preview, so the same shape reads well in the narrow "Current theme" card
+        // and the wider picker instead of clustering at the left edge. Rows stay
+        // ragged-right like real terminal text.
+        let bar = |frac: f32, color: gpui::Rgba| {
+            div()
+                .h(px(4.))
+                .w(relative(frac))
+                .rounded(px(1.5))
+                .bg(color)
+        };
 
         v_flex()
             .w_full()
@@ -1065,26 +1073,26 @@ impl Tty7App {
                     .items_center()
                     .gap_2()
                     .child(div().text_size(px(11.)).text_color(accent).child("❯"))
-                    .child(bar(60., fg)),
+                    .child(bar(0.5, fg)),
             )
             .child(
                 h_flex()
                     .gap_2()
-                    .child(bar(26., ansi(2)))
-                    .child(bar(46., ansi(4)))
-                    .child(bar(16., ansi(3))),
+                    .child(bar(0.2, ansi(2)))
+                    .child(bar(0.36, ansi(4)))
+                    .child(bar(0.12, ansi(3))),
             )
             .child(
                 h_flex()
                     .gap_2()
-                    .child(bar(18., ansi(1)))
-                    .child(bar(52., fg)),
+                    .child(bar(0.14, ansi(1)))
+                    .child(bar(0.44, fg)),
             )
             .child(
                 h_flex()
                     .gap_2()
-                    .child(bar(14., ansi(6)))
-                    .child(bar(38., accent)),
+                    .child(bar(0.1, ansi(6)))
+                    .child(bar(0.32, accent)),
             )
     }
 
@@ -1231,7 +1239,12 @@ impl Tty7App {
                     .gap_1p5()
                     .cursor_pointer()
                     .child(
+                        // Percent width (`w_full` in the preview) only resolves
+                        // against a *definite* parent, so pin the card to the
+                        // panel's content width (300 − px_4 gutters) — same reason
+                        // the search box above is sized explicitly.
                         div()
+                            .w(px(268.))
                             .rounded_lg()
                             .overflow_hidden()
                             .border_1()
