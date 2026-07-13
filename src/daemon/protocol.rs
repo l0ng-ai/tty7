@@ -71,8 +71,17 @@ pub struct SshSpec {
 
 impl SshSpec {
     pub fn validate(&self) -> Result<(), String> {
-        if self.target.trim().is_empty() {
+        let target = self.target.trim();
+        if target.is_empty() {
             return Err("ssh target is empty".to_string());
+        }
+        // The target is appended as the trailing ssh argument without a `--`
+        // separator, so a value starting with `-` would be parsed as an option
+        // (e.g. `-oProxyCommand=…`, which ssh runs through a shell). ssh itself
+        // rejects such destinations; refuse them here too rather than hand ssh
+        // an option in destination position.
+        if target.starts_with('-') {
+            return Err("ssh target must not start with '-'".to_string());
         }
         validate_managed_ssh_args(&self.args)
     }
@@ -830,6 +839,32 @@ mod tests {
                 "must reject {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn ssh_spec_rejects_option_like_target() {
+        // A target starting with `-` is appended in destination position without
+        // a `--` guard, so ssh would parse it as an option (e.g. an injected
+        // `-oProxyCommand=…`). It must be refused regardless of surrounding
+        // whitespace.
+        for target in ["-oProxyCommand=touch /tmp/pwned", "-D8080", "  -N", "-"] {
+            assert!(
+                SshSpec {
+                    target: target.into(),
+                    args: vec![],
+                }
+                .validate()
+                .is_err(),
+                "must reject option-like target {target:?}"
+            );
+        }
+        // A host that merely contains a dash elsewhere is fine.
+        SshSpec {
+            target: "my-host".into(),
+            args: vec![],
+        }
+        .validate()
+        .unwrap();
     }
 
     /// Round-trip every `DaemonMsg` variant through encode → read.
