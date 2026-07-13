@@ -1120,7 +1120,11 @@ impl Tty7App {
                     .p_3()
                     .rounded_xl()
                     .border_1()
-                    .border_color(if open { foreground.opacity(0.35) } else { border })
+                    .border_color(if open {
+                        foreground.opacity(0.35)
+                    } else {
+                        border
+                    })
                     .bg(surface)
                     .hover(|h| h.bg(hover_bg))
                     .child(div().w(px(150.)).flex_shrink_0().child(preview))
