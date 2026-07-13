@@ -522,7 +522,19 @@ impl InputHandler for TerminalInputHandler {
         None
     }
 
-    fn prefers_ime_for_printable_keys(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
+    fn prefers_ime_for_printable_keys(&mut self, window: &mut Window, _cx: &mut App) -> bool {
+        // While a multi-key keybinding is mid-sequence — e.g. the tmux preset's
+        // `ctrl-b` prefix is held pending — the next key belongs to the keymap,
+        // not the IME. macOS otherwise diverts printable keys straight to the IME
+        // when a CJK input source is active (see `query_prefers_ime_for_printable_keys`
+        // in gpui's macOS backend), so `ctrl-b x` would type an `x` and let the
+        // prefix time out instead of completing the sequence. Declining IME here
+        // lets the keystroke reach `dispatch_key` and finish the chord; when no
+        // sequence is pending this is a no-op, so normal CJK composition is
+        // unaffected.
+        if window.has_pending_keystrokes() {
+            return false;
+        }
         // Route printable keys to the IME so CJK composes. Whether the committed
         // text lands in the terminal or the search query is decided by focus in
         // `input_text` — so opening the search bar no longer disables CJK input in
