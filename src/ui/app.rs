@@ -62,6 +62,12 @@ const MAX_CLOSED_TABS: usize = 20;
 /// the divider's clamp band granularity in `pane.rs`.
 const RESIZE_STEP: f32 = 0.05;
 
+/// Quiet window after the last captured chord before a recorded shortcut is
+/// committed (see `schedule_recording_commit`). Long enough to type a second
+/// chord of a sequence (`ctrl-b x`), short enough that a single chord commits
+/// promptly.
+const RECORD_COMMIT_DELAY_MS: u64 = 650;
+
 /// One tab: a split-pane tree plus an optional user-assigned name.
 pub struct Tab {
     /// The tab's split-pane tree (one or more terminals). For a settings tab
@@ -166,6 +172,10 @@ pub struct Tty7App {
     /// Generation counter for the delayed badge reveal: bumped on every
     /// modifier transition and keypress so a stale timer can't fire.
     pub(crate) mod_hint_gen: u64,
+    /// Generation counter for the keybinding-capture commit timer: bumped on
+    /// every captured chord, cancel, and start, so a stale pause-to-commit
+    /// timer can't fire after the sequence changed or capture ended.
+    record_gen: u64,
     /// Focus target for the home page (the zero-tab state; see `ui::home`).
     /// Keeping something focused keeps keystrokes flowing through the window's
     /// dispatch path, so ⌘T & friends still reach the root action handlers.
@@ -262,6 +272,7 @@ impl Tty7App {
             maximized: None,
             mod_hint_badges: false,
             mod_hint_gen: 0,
+            record_gen: 0,
             home_focus: cx.focus_handle(),
             detected_shells: Vec::new(),
         };
@@ -1922,24 +1933,28 @@ impl Tty7App {
             // Keep the key from also triggering an action / reaching a surface.
             cx.stop_propagation();
         });
+        self.record_gen = self.record_gen.wrapping_add(1);
         if let Some(s) = self.active_settings_mut() {
             s.rebinding_note = None;
             s.recording = Some(Recording {
                 action,
+                chords: Vec::new(),
                 _intercept: intercept,
             });
         }
         cx.notify();
     }
 
-    /// Handle a keystroke captured during recording: Esc cancels,
-    /// Backspace/Delete resets the action to its default, and anything else is
-    /// normalized to a config spec and stored as the action's override.
+    /// Handle a keystroke captured during recording. Esc cancels. Backspace
+    /// removes the last captured chord, or — with nothing captured yet — resets
+    /// the action to its default. Any other key appends a chord and (re)starts
+    /// the pause-to-commit timer, so single chords and sequences (e.g. the tmux
+    /// preset's `ctrl-b x`) are recorded the same way.
     fn on_record_key(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) {
-        let Some(action) = self
+        let Some((action, has_chords)) = self
             .active_settings()
             .and_then(|s| s.recording.as_ref())
-            .map(|r| r.action.clone())
+            .map(|r| (r.action.clone(), !r.chords.is_empty()))
         else {
             return;
         };
@@ -1949,8 +1964,26 @@ impl Tty7App {
                 return;
             }
             "backspace" | "delete" => {
-                self.stop_recording(cx);
-                self.reset_keybinding(action, cx);
+                if has_chords {
+                    // Edit the sequence: drop the last chord and keep capturing.
+                    if let Some(r) = self.active_settings_mut().and_then(|s| s.recording.as_mut()) {
+                        r.chords.pop();
+                    }
+                    let still_has = self
+                        .active_settings()
+                        .and_then(|s| s.recording.as_ref())
+                        .is_some_and(|r| !r.chords.is_empty());
+                    if still_has {
+                        self.schedule_recording_commit(cx);
+                    } else {
+                        // Nothing left to commit; wait for a fresh keypress.
+                        self.record_gen = self.record_gen.wrapping_add(1);
+                    }
+                    cx.notify();
+                } else {
+                    self.stop_recording(cx);
+                    self.reset_keybinding(action, cx);
+                }
                 return;
             }
             _ => {}
@@ -1960,12 +1993,49 @@ impl Tty7App {
         let Some(spec) = crate::ui::keymap::spec_from_keystroke(keystroke) else {
             return;
         };
-        self.stop_recording(cx);
-        self.assign_keybinding(action, spec, cx);
+        if let Some(r) = self.active_settings_mut().and_then(|s| s.recording.as_mut()) {
+            r.chords.push(spec);
+        }
+        self.schedule_recording_commit(cx);
+        cx.notify();
     }
 
-    /// Drop the active capture (interceptor released) without changing anything.
+    /// (Re)arm the pause-to-commit timer: after a short quiet window with no new
+    /// chord, the captured sequence is committed. Bumping `record_gen` first
+    /// invalidates any earlier timer, so only the latest keypress's timer fires.
+    fn schedule_recording_commit(&mut self, cx: &mut Context<Self>) {
+        self.record_gen = self.record_gen.wrapping_add(1);
+        let generation = self.record_gen;
+        cx.spawn(async move |this, cx| {
+            smol::Timer::after(std::time::Duration::from_millis(RECORD_COMMIT_DELAY_MS)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.record_gen == generation {
+                    this.commit_recording(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Commit the captured chords (joined into a sequence spec) as the action's
+    /// override. A no-op if capture ended or nothing was captured.
+    fn commit_recording(&mut self, cx: &mut Context<Self>) {
+        let Some((action, chords)) = self
+            .active_settings()
+            .and_then(|s| s.recording.as_ref())
+            .filter(|r| !r.chords.is_empty())
+            .map(|r| (r.action.clone(), r.chords.clone()))
+        else {
+            return;
+        };
+        self.stop_recording(cx);
+        self.assign_keybinding(action, chords.join(" "), cx);
+    }
+
+    /// Drop the active capture (interceptor released, any pending commit timer
+    /// invalidated) without changing anything.
     fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        self.record_gen = self.record_gen.wrapping_add(1);
         if let Some(s) = self.active_settings_mut() {
             s.recording = None;
         }
@@ -2391,6 +2461,9 @@ mod keybinding_gpui_tests {
     use gpui::{TestAppContext, VisualTestContext, WindowHandle};
 
     fn harness(cx: &mut TestAppContext) -> (WindowHandle<Tty7App>, VisualTestContext) {
+        // The pause-to-commit is a real `smol::Timer` (off the deterministic
+        // executor), so waiting on it parks the test thread.
+        cx.executor().allow_parking();
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(Config::default());
@@ -2406,6 +2479,40 @@ mod keybinding_gpui_tests {
         (window, vcx)
     }
 
+    /// Open Settings → Keybindings and begin capturing `action`.
+    fn begin_capture(
+        window: &WindowHandle<Tty7App>,
+        vcx: &mut VisualTestContext,
+        action: &str,
+    ) {
+        let action = action.to_string();
+        window
+            .update(vcx, |app, window, cx| {
+                app.toggle_settings(window, cx);
+                app.select_settings_section(SettingsSection::Keybindings, cx);
+                app.start_recording_key(action, window, cx);
+            })
+            .unwrap();
+    }
+
+    /// Poll (bounded) until `action` has the expected override in config — the
+    /// commit fires on a real ~650ms timer.
+    fn wait_for_binding(vcx: &mut VisualTestContext, action: &str, expected: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            vcx.background_executor.run_until_parked();
+            let got = vcx.update(|_, cx| cx.global::<Config>().keybindings.get(action).cloned());
+            if got.as_deref() == Some(expected) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "binding for {action} never became {expected:?} (last {got:?})"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     // End-to-end: open Settings → Keybindings, capture a shortcut for New Tab,
     // and confirm the recorded keystroke is normalized, persisted to config, and
     // the capture ends. This drives the real interceptor path installed by
@@ -2413,25 +2520,31 @@ mod keybinding_gpui_tests {
     #[gpui::test]
     fn recording_a_shortcut_writes_the_override_and_ends_capture(cx: &mut TestAppContext) {
         let (window, mut vcx) = harness(cx);
-        window
-            .update(&mut vcx, |app, window, cx| {
-                app.toggle_settings(window, cx);
-                app.select_settings_section(SettingsSection::Keybindings, cx);
-                app.start_recording_key("NewTab".to_string(), window, cx);
-            })
-            .unwrap();
+        begin_capture(&window, &mut vcx, "NewTab");
         // The platform-primary modifier normalizes to `secondary` on write.
         vcx.simulate_keystrokes("secondary-shift-n");
-        vcx.background_executor.run_until_parked();
+        wait_for_binding(&mut vcx, "NewTab", "secondary-shift-n");
 
-        let stored = vcx.update(|_, cx| cx.global::<Config>().keybindings.get("NewTab").cloned());
-        assert_eq!(stored.as_deref(), Some("secondary-shift-n"));
         let recording = window
             .update(&mut vcx, |app, _, _| {
                 app.active_settings().map(|s| s.recording.is_some())
             })
             .unwrap();
-        assert_eq!(recording, Some(false), "capture should end after a key");
+        assert_eq!(recording, Some(false), "capture should end after committing");
+    }
+
+    // A two-chord sequence (the tmux-style `ctrl-b x`) records as one binding.
+    #[gpui::test]
+    fn recording_a_two_chord_sequence_writes_the_full_spec(cx: &mut TestAppContext) {
+        let (window, mut vcx) = harness(cx);
+        begin_capture(&window, &mut vcx, "CloseActiveTab");
+        // Two chords in quick succession, then the pause commits the sequence.
+        // `secondary-b` is used (not a bare `ctrl-b`) so the recorded spec is
+        // identical on macOS and elsewhere — the primary modifier normalizes to
+        // `secondary` either way.
+        vcx.simulate_keystrokes("secondary-b");
+        vcx.simulate_keystrokes("x");
+        wait_for_binding(&mut vcx, "CloseActiveTab", "secondary-b x");
     }
 
     // Esc during capture cancels without touching config.

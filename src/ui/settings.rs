@@ -113,6 +113,11 @@ pub(crate) struct SettingsState {
 pub(crate) struct Recording {
     /// The action name whose shortcut is being captured.
     pub(crate) action: String,
+    /// The chords captured so far, each a config spec (e.g. `["ctrl-b", "x"]`).
+    /// A single chord is the common case; more than one records a sequence like
+    /// the tmux preset's `ctrl-b x`. Committed (joined by spaces) after a short
+    /// pause with no further keys.
+    pub(crate) chords: Vec<String>,
     /// Keeps the keystroke interceptor alive for the duration of the capture.
     pub(crate) _intercept: Subscription,
 }
@@ -1349,11 +1354,12 @@ impl Tty7App {
         let tmux = preset == "tmux";
         let effective = crate::ui::keymap::effective_bindings(cx);
 
-        // The row currently capturing a shortcut, and any pending takeover note.
+        // The row currently capturing a shortcut (action + chords so far), and
+        // any pending takeover note.
         let recording = self
             .active_settings()
             .and_then(|s| s.recording.as_ref())
-            .map(|r| r.action.clone());
+            .map(|r| (r.action.clone(), r.chords.clone()));
         let note = self
             .active_settings()
             .and_then(|s| s.rebinding_note.clone());
@@ -1453,16 +1459,46 @@ impl Tty7App {
         let count = effective.len();
         let mut list = v_flex().mt_2();
         for (i, (action, key)) in effective.into_iter().enumerate() {
-            let is_recording = recording.as_deref() == Some(action.as_str());
+            let is_recording = recording
+                .as_ref()
+                .is_some_and(|(a, _)| a == &action);
             let is_overridden = overridden.contains(&action);
 
-            // Right side: the recording prompt, the keycap sequence, or "—".
+            // Keycap clusters for a spec: one cluster per whitespace-separated
+            // chord (a sequence like `ctrl-b x` draws as two clusters), with a
+            // wider gap between clusters than within one.
+            let keycaps = |spec: &str| {
+                h_flex().gap_2().children(
+                    crate::ui::keymap::key_chords(spec)
+                        .into_iter()
+                        .map(|chord| h_flex().gap_1().children(chord.into_iter().map(&keycap))),
+                )
+            };
+
+            // Right side: the live capture (chords so far + hint), the keycap
+            // sequence, or "—".
             let captured: gpui::AnyElement = if is_recording {
-                div()
-                    .text_xs()
-                    .text_color(accent)
-                    .child("Press keys… Esc to cancel")
-                    .into_any_element()
+                let chords = recording
+                    .as_ref()
+                    .map(|(_, c)| c.clone())
+                    .unwrap_or_default();
+                let row = h_flex().gap_2().items_center();
+                let row = if chords.is_empty() {
+                    row.child(
+                        div()
+                            .text_xs()
+                            .text_color(accent)
+                            .child("Press keys…"),
+                    )
+                } else {
+                    row.child(keycaps(&chords.join(" "))).child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("pause to save · Esc"),
+                    )
+                };
+                row.into_any_element()
             } else if key.is_empty() {
                 div()
                     .text_sm()
@@ -1470,16 +1506,7 @@ impl Tty7App {
                     .child("—")
                     .into_any_element()
             } else {
-                // Each whitespace-separated chord becomes its own keycap cluster,
-                // with a wider gap between clusters than within one.
-                h_flex()
-                    .gap_2()
-                    .children(crate::ui::keymap::key_chords(&key).into_iter().map(|chord| {
-                        h_flex()
-                            .gap_1()
-                            .children(chord.into_iter().map(&keycap))
-                    }))
-                    .into_any_element()
+                keycaps(&key).into_any_element()
             };
 
             // The whole right cell is clickable to start capturing this row.
@@ -1536,7 +1563,7 @@ impl Tty7App {
         v_flex()
             .child(self.section_intro(
                 "Keyboard Shortcuts",
-                "Click a shortcut to change it, then press the new keys (Esc cancels, Backspace resets to default). Changes apply immediately.",
+                "Click a shortcut, then press the new keys — it saves after a brief pause. Chain keys for a sequence like Ctrl-B then X. Esc cancels; Backspace removes the last key, or resets to default. Changes apply immediately.",
                 cx,
             ))
             .child(preset_row)
