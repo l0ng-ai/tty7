@@ -26,6 +26,18 @@ smallvec.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 
+# SSH connection-manager data layer (`core::ssh_profile` / `core::keychain`).
+# `uuid` mints stable profile ids (v4) and serde-serializes them as strings;
+# `sha2` hashes private-key file contents to the sha512-hex account key that
+# passphrases are stored under in the OS keychain (per PRD §7.2). Both are already
+# in the tree transitively, so pinning them here adds no new native code. `keyring`
+# 4.x is the OS credential-vault backend: its default `v1` feature auto-selects the
+# platform store (macOS Keychain / Windows Credential Manager / Linux Secret
+# Service), so no per-platform feature guards are needed.
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10"
+keyring = "4"
+
 # Theme files. tty7 themes are authored as YAML (`~/.config/tty7/themes/*.yaml`,
 # our own schema); `plist` parses imported iTerm2 `.itermcolors` schemes (XML
 # plist) so the large iTerm color-scheme ecosystem drops straight in. serde_yaml

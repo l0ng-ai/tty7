@@ -9,9 +9,16 @@
 
 pub mod actions;
 pub mod config;
+// SSH connection-manager data layer (WS1). Its public API is consumed by the
+// daemon-session, auth, forwarding, and UI workstreams, which land separately —
+// so parts of it read as dead code until those merge.
+#[allow(dead_code)]
+pub mod keychain;
 pub mod osc;
 pub mod session;
 pub mod shells;
 pub mod ssh_config;
+#[allow(dead_code)]
+pub mod ssh_profile;
 pub mod threads;
 pub mod update;
