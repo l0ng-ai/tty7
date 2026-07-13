@@ -162,6 +162,26 @@ impl<L: Clone> Pane<L> {
         }
     }
 
+    /// Replace the first leaf matching `is_target` with `new`, keeping the tree
+    /// shape (used for in-place SSH reconnect: the dead pane's slot gets a fresh
+    /// connection). Returns whether a match was found.
+    fn replace_leaf_where(&mut self, is_target: &impl Fn(&L) -> bool, new: L) -> bool {
+        match self {
+            Pane::Leaf(v) => {
+                if is_target(v) {
+                    *v = new;
+                    true
+                } else {
+                    false
+                }
+            }
+            Pane::Split { a, b, .. } => {
+                a.replace_leaf_where(is_target, new.clone()) || b.replace_leaf_where(is_target, new)
+            }
+            Pane::Empty => false,
+        }
+    }
+
     /// Remove the first leaf matching `is_target` (depth-first, `a` before
     /// `b`), collapsing its parent split into the sibling.
     fn close_leaf_where(&mut self, is_target: &impl Fn(&L) -> bool) -> CloseOutcome {
@@ -468,6 +488,16 @@ impl Pane<Entity<TerminalView>> {
         new: Entity<TerminalView>,
     ) -> bool {
         self.split_leaf_where(&|v| v.entity_id() == target.entity_id(), axis, new)
+    }
+
+    /// Replace `target` (matched by entity identity) with `new`, preserving the
+    /// tree shape. Used by the in-place SSH reconnect (PRD FR-E4).
+    pub fn replace_leaf(
+        &mut self,
+        target: &Entity<TerminalView>,
+        new: Entity<TerminalView>,
+    ) -> bool {
+        self.replace_leaf_where(&|v| v.entity_id() == target.entity_id(), new)
     }
 
     /// Remove the focused leaf, collapsing its parent split into the sibling.

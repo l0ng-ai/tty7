@@ -185,6 +185,53 @@ pub struct Config {
     /// deliberate, documented escape hatch (PRD FR-S4).
     #[serde(default = "default_true")]
     pub verify_host_keys: bool,
+    /// Global default for the "confirm before closing a live SSH session"
+    /// prompt (PRD FR-E3). Off by default (closing is unsurprising for most
+    /// panes). A per-profile `warn_on_close: Some(true/false)` override wins over
+    /// this when set; this is the fallback for profiles that leave it unset and
+    /// for QuickConnect panes.
+    #[serde(default)]
+    pub ssh_warn_on_close: bool,
+    /// Per-profile usage stats driving the palette's frecency ordering (PRD
+    /// FR-P3): a saved profile's id → how many times it was connected and when it
+    /// was last used. Bumped on every connect; read to rank the palette's profile
+    /// rows. Entries for deleted profiles are harmless (never surfaced).
+    #[serde(default)]
+    pub ssh_profile_frecency: HashMap<uuid::Uuid, ProfileUsage>,
+}
+
+/// One saved profile's usage record for palette frecency (see
+/// [`Config::ssh_profile_frecency`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ProfileUsage {
+    /// Times this profile has been connected.
+    pub count: u32,
+    /// Unix timestamp (seconds) of the most recent connect.
+    pub last_used: u64,
+}
+
+impl ProfileUsage {
+    /// A frecency score combining frequency (how often) with recency (how
+    /// recently), so the palette floats both heavily-used and just-used profiles
+    /// to the top. Recency decays smoothly over days; `now` is unix seconds.
+    pub fn score(&self, now: u64) -> f64 {
+        if self.count == 0 {
+            return 0.0;
+        }
+        let age_days = now.saturating_sub(self.last_used) as f64 / 86_400.0;
+        // Frequency, discounted by how stale the last use is (halves ~weekly).
+        self.count as f64 / (1.0 + age_days / 7.0)
+    }
+}
+
+/// The current unix time in whole seconds (0 before the epoch, which never
+/// happens). Used to stamp [`ProfileUsage::last_used`].
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Policy for a shell's starting directory (see [`Config::working_directory`]).
@@ -377,6 +424,8 @@ impl Default for Config {
             env: HashMap::new(),
             ssh_profiles: Vec::new(),
             verify_host_keys: true,
+            ssh_warn_on_close: false,
+            ssh_profile_frecency: HashMap::new(),
         }
     }
 }
@@ -653,6 +702,53 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_usage_score_ranks_frequency_and_recency() {
+        let now = 100_000_000u64;
+        let day = 86_400u64;
+        // Never-used scores zero.
+        assert_eq!(ProfileUsage::default().score(now), 0.0);
+        // Same recency, more uses ⇒ higher score.
+        let a = ProfileUsage {
+            count: 10,
+            last_used: now,
+        };
+        let b = ProfileUsage {
+            count: 2,
+            last_used: now,
+        };
+        assert!(a.score(now) > b.score(now));
+        // Same count, more recent ⇒ higher score (recency decays with age).
+        let recent = ProfileUsage {
+            count: 3,
+            last_used: now,
+        };
+        let stale = ProfileUsage {
+            count: 3,
+            last_used: now - 30 * day,
+        };
+        assert!(recent.score(now) > stale.score(now));
+    }
+
+    #[test]
+    fn ssh_warn_on_close_and_frecency_round_trip() {
+        let mut cfg = Config::default();
+        assert!(!cfg.ssh_warn_on_close);
+        cfg.ssh_warn_on_close = true;
+        let id = uuid::Uuid::new_v4();
+        cfg.ssh_profile_frecency.insert(
+            id,
+            ProfileUsage {
+                count: 4,
+                last_used: 42,
+            },
+        );
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert!(back.ssh_warn_on_close);
+        assert_eq!(back.ssh_profile_frecency.get(&id).unwrap().count, 4);
+    }
 
     #[test]
     fn font_features_are_optional_and_parse_as_gpui_features() {

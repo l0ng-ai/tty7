@@ -235,6 +235,21 @@ pub struct Tty7App {
     /// Cached `known_hosts` entries for the "SSH → Known hosts" settings section,
     /// refreshed from the daemon when that section is opened / after a delete.
     pub(crate) known_hosts: Vec<crate::daemon::protocol::KnownHostEntry>,
+    /// `Some` while the SSH profile editor page is open (a full-window overlay
+    /// like Settings; see `ui::profile_editor`).
+    pub(crate) profiles_editor: Option<crate::ui::profile_editor::ProfileEditorState>,
+    /// In-pane "confirm close of a live SSH session" state (PRD FR-E3): the close
+    /// action awaiting confirmation, or `None` when no prompt is up.
+    pub(crate) ssh_close_confirm: Option<SshCloseKind>,
+}
+
+/// Which close action a live-SSH close-confirmation is gating (PRD FR-E3).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SshCloseKind {
+    /// Close the whole tab at this index.
+    Tab(usize),
+    /// Close the focused pane.
+    Pane,
 }
 
 impl Tty7App {
@@ -381,6 +396,8 @@ impl Tty7App {
             settings: None,
             ssh_prompt: crate::ui::ssh_prompt::SshPromptState::new(cx),
             known_hosts: Vec::new(),
+            profiles_editor: None,
+            ssh_close_confirm: None,
         };
         // Discover this machine's shells for the "+" dropdown off the UI thread
         // (the WSL probe on Windows spawns a process, and /etc/shells hits the
@@ -862,7 +879,11 @@ impl Tty7App {
     /// it, and repaint so the control reflects the new value. Keeping the
     /// persist/notify contract here means a future change (e.g. debounced
     /// saves) lands in one place.
-    fn update_config(&mut self, cx: &mut Context<Self>, mutate: impl FnOnce(&mut Config)) {
+    pub(crate) fn update_config(
+        &mut self,
+        cx: &mut Context<Self>,
+        mutate: impl FnOnce(&mut Config),
+    ) {
         let cfg = cx.global_mut::<Config>();
         mutate(cfg);
         cfg.save();
@@ -881,6 +902,12 @@ impl Tty7App {
     /// per-profile override still wins where set.
     pub(crate) fn set_verify_host_keys(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.verify_host_keys = on);
+    }
+
+    /// Global default for confirming before closing a live SSH session (FR-E3).
+    /// A per-profile `warn_on_close` override still wins where set.
+    pub(crate) fn set_ssh_warn_on_close(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.ssh_warn_on_close = on);
     }
 
     /// Re-fetch the daemon's `known_hosts` entries for the settings section.
@@ -1125,7 +1152,12 @@ impl Tty7App {
         cx.notify();
     }
 
-    fn open_managed_ssh_spec(&mut self, ssh: SshSpec, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_managed_ssh_spec(
+        &mut self,
+        ssh: SshSpec,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if ssh.validate().is_err() {
             return;
         }
@@ -1279,7 +1311,7 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.startup_mode = mode);
     }
 
-    fn focus_active(&self, window: &mut Window, cx: &mut App) {
+    pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut App) {
         // While the settings overlay is open it owns focus (so Esc-to-close and
         // keybinding capture keep working); tab operations behind it don't steal
         // it. `close_settings` refocuses the active terminal on the way out.
@@ -1344,6 +1376,55 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Open a new tab running a native (russh) SSH session for the resolved
+    /// `spec` (PRD FR-C1). The caller (`ui::ssh_connect`) has already pulled any
+    /// keychain secrets into `spec`. Mirrors `new_tab_with_shell` but for the
+    /// native backend.
+    pub(crate) fn open_native_ssh_tab(
+        &mut self,
+        spec: Box<crate::daemon::protocol::NativeSshSpec>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cwd = self.tabs.get(self.active).and_then(|t| {
+            t.pane
+                .focused_or_first(window, cx)
+                .and_then(|leaf| leaf.read(cx).cwd())
+        });
+        let view = new_terminal_native(self.font_size, cwd, spec, window, cx);
+        self.maximized = None;
+        let insert_at = self.new_tab_insert_at(cx);
+        self.tabs.insert(insert_at, Tab::new(Pane::leaf(view)));
+        self.active = insert_at;
+        self.focus_active(window, cx);
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Respawn a native SSH pane **in place** (same tab / split slot), replacing a
+    /// dead pane's view with a fresh native connection for `spec` (PRD FR-E4). The
+    /// daemon re-establishes the profile's preconfigured forwards on connect.
+    pub(crate) fn respawn_native_ssh_in_place(
+        &mut self,
+        dead: &Entity<TerminalView>,
+        spec: Box<crate::daemon::protocol::NativeSshSpec>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cwd = dead.read(cx).cwd();
+        let fresh = new_terminal_native(self.font_size, cwd, spec, window, cx);
+        // Swap the fresh leaf into the dead one's position across every tab.
+        for tab in &mut self.tabs {
+            if tab.pane.replace_leaf(dead, fresh.clone()) {
+                break;
+            }
+        }
+        self.maximized = None;
+        self.focus_leaf(&fresh, window, cx);
+        self.save_session(cx);
+        cx.notify();
+    }
+
     /// Split the focused pane in the active tab, focusing the new terminal.
     pub(crate) fn split(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
         // Capture the target leaf BEFORE creating the new terminal: constructing
@@ -1374,6 +1455,14 @@ impl Tty7App {
 
     /// Close the focused pane. If it was the tab's only pane, close the tab.
     fn close_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // FR-E3: if the focused pane is a live SSH session flagged warn-on-close,
+        // raise the in-pane confirm sheet instead of closing outright.
+        if self.ssh_close_confirm.is_none() && self.focused_pane_is_warn_ssh(window, cx) {
+            self.ssh_close_confirm = Some(SshCloseKind::Pane);
+            cx.notify();
+            return;
+        }
+        self.ssh_close_confirm = None;
         self.maximized = None;
         // Capture the focused leaf before closing: if a split collapses, that
         // leaf is destroyed with no reopen path, so we kill its daemon pane. Owned
@@ -1599,6 +1688,15 @@ impl Tty7App {
         if index >= self.tabs.len() {
             return;
         }
+        // FR-E3: confirm before closing a tab that holds a live warn-on-close SSH
+        // session (unless this call is the confirmation itself).
+        let already_confirming = self.ssh_close_confirm == Some(SshCloseKind::Tab(index));
+        if !already_confirming && self.tab_has_warn_ssh(index, cx) {
+            self.ssh_close_confirm = Some(SshCloseKind::Tab(index));
+            cx.notify();
+            return;
+        }
+        self.ssh_close_confirm = None;
         self.maximized = None;
         // A rename in progress stores a fixed tab index; removing a tab shifts
         // indices and would let the pending edit commit onto the wrong tab. Drop it.
@@ -1717,13 +1815,53 @@ impl Tty7App {
     /// "Switch to Tab: …" entry per open tab (label matches the tab strip).
     fn palette_commands(&self, cx: &App) -> Vec<Command> {
         let mut commands = Command::base_commands();
-        let profiles = ssh_config::discover_profiles();
-        if !profiles.is_empty() {
-            commands.push(Command {
-                title: "SSH Profiles…".to_string(),
-                kind: CommandKind::OpenSshProfilePicker(profiles),
-            });
+
+        // Saved SSH profiles, ordered by frecency then name (PRD FR-P3). Each row
+        // connects on Enter (native or compat per its flag) and edits on ⌘⏎ / →.
+        let cfg = cx.global::<Config>();
+        let now = crate::core::config::unix_now();
+        let mut profiles: Vec<&crate::core::ssh_profile::SshProfile> =
+            cfg.ssh_profiles.iter().collect();
+        profiles.sort_by(|a, b| {
+            let score = |p: &crate::core::ssh_profile::SshProfile| {
+                cfg.ssh_profile_frecency
+                    .get(&p.id)
+                    .map(|u| u.score(now))
+                    .unwrap_or(0.0)
+            };
+            score(b)
+                .partial_cmp(&score(a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        for p in profiles {
+            let subtitle = crate::core::ssh_profile::to_connect_string(p);
+            let title = if p.name.is_empty() {
+                subtitle.clone()
+            } else {
+                p.name.clone()
+            };
+            commands.push(
+                Command::new(
+                    format!("SSH: {title}"),
+                    CommandKind::ConnectSavedProfile(p.id),
+                )
+                .with_subtitle(subtitle),
+            );
         }
+
+        // Live `~/.ssh/config` aliases, marked and connected via the (frozen)
+        // shell-out alias path — OpenSSH stays their source of truth (PRD §3.3).
+        for alias in ssh_config::discover_profiles() {
+            commands.push(
+                Command::new(
+                    format!("SSH: {}", alias.alias),
+                    CommandKind::OpenSshProfile(alias),
+                )
+                .with_subtitle("~/.ssh/config"),
+            );
+        }
+
         for (i, tab) in self.tabs.iter().enumerate() {
             // Skip the active tab — "switch to the tab you're already on" is a
             // no-op that only pads the list.
@@ -1731,10 +1869,10 @@ impl Tty7App {
                 continue;
             }
             let label = self.tab_label(tab, i, cx);
-            commands.push(Command {
-                title: format!("Switch to Tab: {label}"),
-                kind: CommandKind::ActivateTab(i),
-            });
+            commands.push(Command::new(
+                format!("Switch to Tab: {label}"),
+                CommandKind::ActivateTab(i),
+            ));
         }
         commands
     }
@@ -1774,7 +1912,7 @@ impl Tty7App {
     }
 
     /// Close the palette and hand focus back to the active terminal.
-    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = None;
         self.palette_sub = None;
         self.focus_active(window, cx);
@@ -1833,6 +1971,7 @@ impl Tty7App {
             OpenSettings => self.toggle_settings(window, cx),
             RestartDaemon => self.restart_daemon(window, cx),
             ToggleSftp => self.toggle_sftp(window, cx),
+            RestartSshSession => self.restart_ssh_session(window, cx),
             SetTheme(i) => {
                 if let Some(id) = crate::ui::presets::all(cx).get(i).map(|t| t.id.clone()) {
                     self.set_preset(&id, window, cx);
@@ -1853,9 +1992,18 @@ impl Tty7App {
                     self.open_managed_ssh_spec(ssh, window, cx);
                 }
             }
+            ConnectSavedProfile(id) => self.connect_ssh_profile(id, window, cx),
+            EditSavedProfile(id) => self.open_ssh_profiles_for(Some(id), None, window, cx),
+            QuickConnect(target) => {
+                if let Some(qc) = crate::core::ssh_profile::parse_quick_connect(&target) {
+                    self.quick_connect(qc, window, cx);
+                }
+            }
+            SaveQuickConnect(target) => self.open_ssh_profiles_for(None, Some(target), window, cx),
+            OpenSshProfiles => self.open_ssh_profiles_for(None, None, window, cx),
             // Handled inside `PaletteView` (opens a sub-list); these never emit a
             // `Confirm` for this variant, so they never reach here.
-            OpenThemePicker | OpenSshConnectInput | OpenSshProfilePicker(_) => {}
+            OpenThemePicker | OpenSshConnectInput => {}
             ActivateTab(i) => self.activate(i, window, cx),
         }
     }
@@ -2362,6 +2510,86 @@ impl Tty7App {
         self.settings.as_mut()
     }
 
+    /// The status-dot colour for a tab whose representative pane is an SSH
+    /// session (PRD FR-E2): native panes are phase-coloured (connecting = warning,
+    /// connected = accent, failed/disconnected = red); shell-out (compat) SSH
+    /// panes get a plain neutral dot. `None` for non-SSH tabs (no dot).
+    pub(crate) fn tab_ssh_dot(&self, tab: &Tab, cx: &App) -> Option<gpui::Hsla> {
+        use crate::daemon::protocol::SshPhase;
+        let leaf = tab.pane.first_leaf()?;
+        let v = leaf.read(cx);
+        let theme = cx.theme();
+        if let Some(phase) = v.ssh_phase() {
+            // Native pane.
+            let color = if v.ssh_disconnected() {
+                theme.danger
+            } else {
+                match phase {
+                    SshPhase::Connecting | SshPhase::Authenticating => theme.warning,
+                    SshPhase::Connected => theme.accent,
+                    SshPhase::Failed { .. } => theme.danger,
+                }
+            };
+            Some(color)
+        } else if v.remote_context().is_some() {
+            // Compat-mode / detected shell-out ssh: a plain neutral dot.
+            Some(theme.muted_foreground)
+        } else {
+            None
+        }
+    }
+
+    /// Whether `leaf` is a live, connected native-SSH pane whose effective
+    /// warn-on-close is on (per-profile override, else the global toggle).
+    fn leaf_is_warn_ssh(&self, leaf: &Entity<TerminalView>, cx: &App) -> bool {
+        use crate::daemon::protocol::SshPhase;
+        let v = leaf.read(cx);
+        let connected = matches!(v.ssh_phase(), Some(SshPhase::Connected)) && !v.terminal.exited;
+        if !connected {
+            return false;
+        }
+        let cfg = cx.global::<Config>();
+        let per_profile = v
+            .ssh_spec()
+            .and_then(|s| s.profile_id.clone())
+            .and_then(|id| uuid::Uuid::parse_str(&id).ok())
+            .and_then(|id| cfg.ssh_profiles.iter().find(|p| p.id == id))
+            .and_then(|p| p.warn_on_close);
+        per_profile.unwrap_or(cfg.ssh_warn_on_close)
+    }
+
+    /// Whether the tab at `index` holds any live warn-on-close SSH pane (FR-E3).
+    pub(crate) fn tab_has_warn_ssh(&self, index: usize, cx: &App) -> bool {
+        self.tabs
+            .get(index)
+            .map(|t| t.pane.leaves().iter().any(|l| self.leaf_is_warn_ssh(l, cx)))
+            .unwrap_or(false)
+    }
+
+    /// Whether the focused pane is a live warn-on-close SSH pane (FR-E3).
+    pub(crate) fn focused_pane_is_warn_ssh(&self, window: &Window, cx: &App) -> bool {
+        self.tabs
+            .get(self.active)
+            .and_then(|t| t.pane.focused_or_first(window, cx))
+            .map(|l| self.leaf_is_warn_ssh(&l, cx))
+            .unwrap_or(false)
+    }
+
+    /// Proceed with a pending SSH-close after confirmation (FR-E3).
+    pub(crate) fn confirm_ssh_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.ssh_close_confirm {
+            Some(SshCloseKind::Tab(i)) => self.close_tab(i, window, cx),
+            Some(SshCloseKind::Pane) => self.close_pane(window, cx),
+            None => {}
+        }
+    }
+
+    /// Dismiss the SSH-close confirmation, leaving the session open (FR-E3).
+    pub(crate) fn cancel_ssh_close(&mut self, cx: &mut Context<Self>) {
+        self.ssh_close_confirm = None;
+        cx.notify();
+    }
+
     pub(crate) fn active_ssh_pane(
         &self,
         window: &Window,
@@ -2676,6 +2904,12 @@ impl Render for Tty7App {
         let strip = self.tab_strip(!vertical, window, cx);
         let sidebar = vertical.then(|| self.tab_sidebar(window, cx));
         let active_ssh_pane = self.active_ssh_pane(window, cx);
+        // Native-SSH status strip / reconnect notice for the focused pane (E1/E4).
+        let ssh_status = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.pane.focused_or_first(window, cx))
+            .and_then(|leaf| self.render_ssh_status_strip(&leaf, cx));
         // Render the active tab's pane tree; show focus rings only when split.
         let body = match self.tabs.get(self.active) {
             // Zero tabs: the window's own face — the home page (see `ui::home`).
@@ -2735,6 +2969,12 @@ impl Render for Tty7App {
             // that raised the prompt.
             .when_some(self.render_ssh_prompt_overlay(window, cx), |this, el| {
                 this.child(el)
+            })
+            // Native-SSH status strip / reconnect notice (E1/E4).
+            .when_some(ssh_status, |this, el| this.child(el))
+            // Live-SSH close-confirmation sheet (E3).
+            .when_some(self.render_ssh_close_confirm_overlay(cx), |this, el| {
+                this.child(el)
             });
 
         // The two layouts. Horizontal (default): a column of [title bar / body].
@@ -2785,6 +3025,17 @@ impl Render for Tty7App {
                 .occlude()
                 .bg(cx.theme().background)
                 .child(self.render_settings(cx))
+        });
+
+        // SSH profile editor — a second full-window overlay (PRD §6.2 ②),
+        // mounted the same way as Settings.
+        let profiles_overlay = self.profiles_editor.is_some().then(|| {
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(cx.theme().background)
+                .child(self.render_profile_editor(cx))
         });
 
         div()
@@ -2914,9 +3165,17 @@ impl Render for Tty7App {
             // than relying solely on the global handler (which the keystroke
             // doesn't reach while focus is deep in the terminal view).
             .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
+            .on_action(cx.listener(|this, _: &OpenSshProfiles, window, cx| {
+                this.open_ssh_profiles_for(None, None, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &RestartSshSession, window, cx| {
+                this.restart_ssh_session(window, cx)
+            }))
             .child(main_layout)
             // Settings overlay, above the tabs/terminal when open.
             .when_some(settings_overlay, |this, overlay| this.child(overlay))
+            // SSH profile editor overlay.
+            .when_some(profiles_overlay, |this, overlay| this.child(overlay))
             // Command palette overlay, layered above everything when open.
             .when_some(self.palette.clone(), |this, palette| this.child(palette))
     }
@@ -2939,9 +3198,10 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
             SessionPane::Leaf {
                 cwd: view.cwd(),
                 pane_id: Some(view.pane_id),
-                // WS2 seam: WS6 populates this (via `NativeSshSpec::without_secrets`)
-                // so a dead native-SSH pane can be respawned on restore.
-                ssh_spec: None,
+                // Persist the secret-free native-SSH spec so a *dead* pane can be
+                // reconnected on restore (FR-E4/C2); `None` for local panes. A
+                // live pane reattaches by `pane_id` and never needs this.
+                ssh_spec: view.ssh_spec(),
             }
         }
         Pane::Split {
@@ -3021,11 +3281,22 @@ fn session_to_pane(
         SessionPane::Leaf {
             cwd,
             pane_id,
-            ssh_spec: _,
+            ssh_spec,
         } => {
             // Only restore the pane id when the daemon confirms it's still live;
             // a stale id (daemon restarted, pane killed) falls back to a spawn.
             let restore = (*pane_id).filter(|id| alive.contains(id));
+            // A *dead* native-SSH leaf (spec persisted, pane no longer alive)
+            // reconnects rather than dropping back to a local shell (FR-C2/E4):
+            // re-resolve secrets from the profile when it names one, else reuse
+            // the secret-free spec and let the auth sheets prompt.
+            if restore.is_none() {
+                if let Some(spec) = ssh_spec.clone() {
+                    let resolved = crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
+                    let view = new_terminal_native(font_size, cwd.clone(), resolved, window, cx);
+                    return Pane::leaf(view);
+                }
+            }
             // A shell pick isn't persisted in the session, so a stale pane that
             // must respawn comes back on the default shell.
             let view = new_terminal(font_size, cwd.clone(), restore, None, window, cx);
@@ -3070,6 +3341,38 @@ fn new_terminal(
     // Native-SSH auth/host-key prompts raised by this pane → in-pane sheet. Same
     // single build site as ChildExited, so every pane (new tab, split, restore)
     // is covered.
+    cx.subscribe_in(
+        &view,
+        window,
+        |app, view, _: &crate::terminal::view::AuthPromptReady, window, cx| {
+            app.on_auth_prompt_ready(view.clone(), window, cx);
+        },
+    )
+    .detach();
+    view
+}
+
+/// Build a native (russh) SSH terminal view for `spec`, wiring the same
+/// per-pane subscriptions (`ChildExited`, `AuthPromptReady`) as [`new_terminal`]
+/// so it participates in auto-close and the in-pane auth sheets. Mirrors
+/// `new_terminal` but takes the resolved connect spec instead of a shell.
+pub(crate) fn new_terminal_native(
+    font_size: f32,
+    working_directory: Option<std::path::PathBuf>,
+    spec: Box<crate::daemon::protocol::NativeSshSpec>,
+    window: &mut Window,
+    cx: &mut Context<Tty7App>,
+) -> Entity<TerminalView> {
+    let view = cx.new(|cx| {
+        let mut view = TerminalView::new_native_ssh(spec, working_directory, window, cx)
+            .expect("failed to start native SSH session");
+        view.font_size = px(font_size);
+        view
+    });
+    cx.subscribe_in(&view, window, |app, view, _: &ChildExited, window, cx| {
+        app.on_child_exited(view.clone(), window, cx);
+    })
+    .detach();
     cx.subscribe_in(
         &view,
         window,

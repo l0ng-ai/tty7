@@ -95,6 +95,12 @@ pub struct TerminalView {
     /// panes. In-memory only (not persisted) — held so splits of this pane
     /// inherit the same shell.
     shell_spec: Option<ShellSpec>,
+    /// The native-SSH spec this pane was spawned with, **secrets stripped**
+    /// ([`NativeSshSpec::without_secrets`]). `None` for local shells and
+    /// compat-mode (shell-out) SSH panes. Persisted into the session so a *dead*
+    /// native-SSH pane can be respawned/reconnected on restore (PRD FR-E4 / C2),
+    /// and read live to drive the in-pane reconnect (`RestartSshSession`).
+    ssh_spec: Option<Box<crate::daemon::protocol::NativeSshSpec>>,
     pub focus_handle: FocusHandle,
     pub font: Font,
     /// Optional distinct base face for bold cells (from `font_family_bold`), with
@@ -605,6 +611,32 @@ impl TerminalView {
         Ok(view)
     }
 
+    /// Spawn a native (russh) SSH pane for `spec` and build the view around it
+    /// (PRD FR-C1/E-series). The caller (`ui::ssh_connect`) has already resolved
+    /// keychain secrets into `spec`; this view retains only the **secret-free**
+    /// copy ([`NativeSshSpec::without_secrets`]) for session-restore respawn and
+    /// the in-pane reconnect. Auth/host-key prompts and the connection phase ride
+    /// this pane's own stream and surface through the usual `AuthPromptReady`
+    /// path.
+    pub fn new_native_ssh(
+        spec: Box<crate::daemon::protocol::NativeSshSpec>,
+        working_directory: Option<std::path::PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<Self> {
+        let persist = Box::new(spec.without_secrets());
+        let (terminal, pane_id) = RemoteTerminal::spawn_native_ssh(
+            TermSize::new(80, 24),
+            8,
+            17,
+            working_directory,
+            spec,
+        )?;
+        let mut view = Self::with_terminal(terminal, pane_id, window, cx);
+        view.ssh_spec = Some(persist);
+        Ok(view)
+    }
+
     /// Build the view around an already-connected terminal. Split from [`new`]
     /// so tests can hand in a `RemoteTerminal` backed by a plain socketpair
     /// and exercise the event plumbing without a live daemon.
@@ -782,6 +814,7 @@ impl TerminalView {
             terminal,
             pane_id,
             shell_spec: None,
+            ssh_spec: None,
             focus_handle,
             font,
             font_bold,
@@ -868,6 +901,26 @@ impl TerminalView {
     /// so splits can inherit it. `None` → the default shell.
     pub fn shell_spec(&self) -> Option<ShellSpec> {
         self.shell_spec.clone()
+    }
+
+    /// The secret-free native-SSH spec this pane ran, if it is a native-SSH pane.
+    /// Persisted for session restore and re-used by the in-pane reconnect
+    /// (`RestartSshSession`).
+    pub fn ssh_spec(&self) -> Option<Box<crate::daemon::protocol::NativeSshSpec>> {
+        self.ssh_spec.clone()
+    }
+
+    /// The native-SSH connection phase for the status strip (PRD FR-E1); `None`
+    /// for a non-native pane.
+    pub fn ssh_phase(&self) -> Option<crate::daemon::protocol::SshPhase> {
+        self.terminal.ssh_phase()
+    }
+
+    /// Whether this native-SSH pane's connection is dead (shell exited or the
+    /// connect failed) and so eligible for an in-pane reconnect. False for live
+    /// panes and non-native panes.
+    pub fn ssh_disconnected(&self) -> bool {
+        self.ssh_spec.is_some() && self.terminal.exited
     }
 
     fn handle_event(&mut self, ev: AlacEvent, cx: &mut Context<Self>) {

@@ -76,6 +76,8 @@ impl Tty7App {
         for (i, tab) in self.tabs.iter().enumerate() {
             let is_active = i == active;
             let label = self.tab_label(tab, i, cx);
+            // SSH status dot (PRD FR-E2).
+            let ssh_dot = self.tab_ssh_dot(tab, cx);
             // Filter by the search box; matching is on the visible label. The row
             // keeps its real index `i`, so activate/close/move still hit the right
             // tab even when the list is narrowed.
@@ -180,6 +182,10 @@ impl Tty7App {
                         this.activate(i, window, cx);
                     }),
                 )
+                // Leading SSH status dot when this tab hosts an SSH session.
+                .when_some(ssh_dot, |c, color| {
+                    c.child(div().flex_shrink_0().size(px(6.)).rounded_full().bg(color))
+                })
                 .child(label_region)
                 // Trailing slot: while the shortcut hints are armed it shows the
                 // row's ⌘N switch digit; otherwise the close affordance — always

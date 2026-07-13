@@ -165,6 +165,12 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         // No default chord — reachable from the command palette ("SFTP Panel") and
         // bindable in Settings like any other action.
         ("ToggleSftp", ""),
+        // No default chord — reachable from the command palette ("SSH: Manage
+        // Profiles…") and bindable in Settings.
+        ("OpenSshProfiles", ""),
+        // Reconnect a dropped native-SSH pane (PRD FR-E4). ⌘⇧R is free (no
+        // existing binding uses it).
+        ("RestartSshSession", "secondary-shift-r"),
         ("Quit", "secondary-q"),
     ]
 }
@@ -443,6 +449,8 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ClearScrollback" => KeyBinding::new(keystroke, ClearScrollback, Some("Terminal")),
         "OpenSettings" => KeyBinding::new(keystroke, OpenSettings, None),
         "ToggleSftp" => KeyBinding::new(keystroke, ToggleSftp, None),
+        "OpenSshProfiles" => KeyBinding::new(keystroke, OpenSshProfiles, None),
+        "RestartSshSession" => KeyBinding::new(keystroke, RestartSshSession, None),
         "Quit" => KeyBinding::new(keystroke, Quit, None),
         _ => return None,
     })

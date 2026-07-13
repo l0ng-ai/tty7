@@ -10,10 +10,10 @@
 //! profile store — everything it needs rides this spec once, over the local socket
 //! (secrets redacted in `Debug`; see `NativeSshSpec`).
 //!
-//! WS6 wires the UI entry points (palette connect, profile editor) that call
-//! [`Tty7App::native_ssh_spec_for_profile`]; until then this is exercised by the
-//! unit tests and reachable internally.
-#![allow(dead_code)] // the spec-builder is consumed by WS6's connect UI; tests cover it now
+//! WS6 wires the UI entry points to this module: the palette connect flow, the
+//! profile editor, QuickConnect, and the reconnect/restore paths all resolve
+//! their specs through here (see [`Tty7App::connect_ssh_profile`],
+//! [`Tty7App::quick_connect`], and [`resolve_persisted_ssh_spec`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -48,6 +48,184 @@ impl Tty7App {
             cfg.verify_host_keys,
         )
     }
+
+    /// Connect a saved profile (PRD FR-P3). Honors the per-profile
+    /// `use_system_ssh` compat-mode flag (FR-C5): flagged profiles go through the
+    /// frozen shell-out path (no SFTP / GUI auth / vault); everything else takes
+    /// the native russh path. Bumps the profile's frecency either way.
+    pub(crate) fn connect_ssh_profile(
+        &mut self,
+        profile_id: uuid::Uuid,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(profile) = cx
+            .global::<Config>()
+            .ssh_profiles
+            .iter()
+            .find(|p| p.id == profile_id)
+            .cloned()
+        else {
+            return;
+        };
+        self.bump_ssh_frecency(profile_id, cx);
+        if profile.use_system_ssh {
+            let spec = compat_ssh_spec(&profile, &cx.global::<Config>().ssh_profiles);
+            self.open_managed_ssh_spec(spec, window, cx);
+        } else {
+            let spec = Box::new(self.native_ssh_spec_for_profile(&profile, cx));
+            self.open_native_ssh_tab(spec, window, cx);
+        }
+    }
+
+    /// QuickConnect to a typed `user@host[:port]` target (PRD FR-P4), always via
+    /// the native path. Builds a transient profile so keychain lookup by endpoint
+    /// still applies (a QuickConnect can reuse a remembered password).
+    pub(crate) fn quick_connect(
+        &mut self,
+        qc: crate::core::ssh_profile::QuickConnect,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let port = qc.port_or_default();
+        let mut profile = SshProfile::new(qc.host.clone());
+        profile.host = qc.host;
+        profile.port = port;
+        if let Some(user) = qc.user {
+            profile.user = user;
+        }
+        let spec = Box::new(self.native_ssh_spec_for_profile(&profile, cx));
+        self.open_native_ssh_tab(spec, window, cx);
+    }
+
+    /// Reconnect the focused native-SSH pane after it dropped (PRD FR-E4). A
+    /// no-op unless the focused pane is a *dead* native-SSH pane. Re-resolves
+    /// credentials from the saved profile when the pane's persisted spec names one
+    /// (`profile_id`), otherwise reuses the secret-free spec and lets the auth
+    /// sheets fill in. Respawns in the same tab/split slot; the daemon rebuilds
+    /// the profile's preconfigured forwards on connect.
+    pub(crate) fn restart_ssh_session(
+        &mut self,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(view) = self.focused_pane_view(window, cx) else {
+            return;
+        };
+        let dead_spec = {
+            let v = view.read(cx);
+            if !v.ssh_disconnected() {
+                return;
+            }
+            v.ssh_spec()
+        };
+        let Some(spec) = dead_spec else {
+            return;
+        };
+        let resolved = self.resolve_restart_spec(spec, cx);
+        self.respawn_native_ssh_in_place(&view, resolved, window, cx);
+    }
+
+    /// If the persisted (secret-free) spec names a saved profile that still
+    /// exists, rebuild it from the profile so keychain secrets are re-applied;
+    /// otherwise return the spec unchanged (the auth sheets will prompt).
+    fn resolve_restart_spec(
+        &self,
+        spec: Box<crate::daemon::protocol::NativeSshSpec>,
+        cx: &gpui::App,
+    ) -> Box<crate::daemon::protocol::NativeSshSpec> {
+        resolve_persisted_ssh_spec(spec, cx)
+    }
+
+    /// The focused pane's terminal view, if any.
+    fn focused_pane_view(
+        &self,
+        window: &gpui::Window,
+        cx: &gpui::App,
+    ) -> Option<gpui::Entity<crate::terminal::view::TerminalView>> {
+        self.tabs
+            .get(self.active)?
+            .pane
+            .focused_or_first(window, cx)
+    }
+
+    /// Record a connect against a profile's frecency stats (FR-P3).
+    fn bump_ssh_frecency(&mut self, profile_id: uuid::Uuid, cx: &mut gpui::Context<Self>) {
+        self.update_config(cx, |cfg| {
+            let entry = cfg.ssh_profile_frecency.entry(profile_id).or_default();
+            entry.count = entry.count.saturating_add(1);
+            entry.last_used = crate::core::config::unix_now();
+        });
+    }
+}
+
+/// Re-resolve a persisted (secret-free) [`NativeSshSpec`] for reconnection
+/// (FR-E4/C2). When the spec names a saved profile that still exists, rebuild it
+/// from that profile so keychain secrets are re-applied; otherwise return the
+/// spec unchanged and let the in-pane auth sheets prompt. A free function so both
+/// the in-place reconnect and session-restore (which has no `Tty7App` yet) share
+/// it.
+pub(crate) fn resolve_persisted_ssh_spec(
+    spec: Box<crate::daemon::protocol::NativeSshSpec>,
+    cx: &gpui::App,
+) -> Box<crate::daemon::protocol::NativeSshSpec> {
+    let cfg = cx.global::<Config>();
+    let profile = spec
+        .profile_id
+        .as_deref()
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .and_then(|id| cfg.ssh_profiles.iter().find(|p| p.id == id).cloned());
+    match profile {
+        Some(p) => Box::new(build_native_ssh_spec(
+            &p,
+            &cfg.ssh_profiles,
+            &OsCredentialStore,
+            cfg.verify_host_keys,
+        )),
+        None => spec,
+    }
+}
+
+/// Build a compat-mode [`SshSpec`] (system `ssh` shell-out) from a profile
+/// (PRD FR-C5). A best-effort mapping of the common fields — the compat path is
+/// frozen (PRD §3.1), so exotic options aren't threaded through here; users who
+/// need them keep them in `~/.ssh/config`.
+fn compat_ssh_spec(
+    profile: &SshProfile,
+    profiles: &[SshProfile],
+) -> crate::daemon::protocol::SshSpec {
+    let target = if profile.user.is_empty() {
+        profile.host.clone()
+    } else {
+        format!("{}@{}", profile.user, profile.host)
+    };
+    let mut args: Vec<String> = Vec::new();
+    if profile.port != 22 {
+        args.push("-p".to_string());
+        args.push(profile.port.to_string());
+    }
+    for id in profile.expanded_identity_files() {
+        args.push("-i".to_string());
+        args.push(id);
+    }
+    // A jump host resolves to a `-J user@host` hop (single level; deeper chains
+    // are rare in compat mode and left to ssh_config).
+    if let Some(jump) = profile
+        .jump_host
+        .and_then(|id| profiles.iter().find(|p| p.id == id))
+    {
+        let hop = if jump.user.is_empty() {
+            jump.host.clone()
+        } else {
+            format!("{}@{}", jump.user, jump.host)
+        };
+        args.push("-J".to_string());
+        args.push(hop);
+    }
+    if profile.agent_forward {
+        args.push("-A".to_string());
+    }
+    crate::daemon::protocol::SshSpec { target, args }
 }
 
 /// Build a [`NativeSshSpec`] from `profile`, resolving keychain secrets via
@@ -294,6 +472,34 @@ mod tests {
         // A profile override wins over the global.
         p.verify_host_keys = Some(false);
         assert!(!build_native_ssh_spec(&p, &[], &store, true).verify_host_keys);
+    }
+
+    #[test]
+    fn compat_ssh_spec_maps_common_fields() {
+        let bastion = profile("bastion", "bastion.example.com", "jump");
+        let mut p = profile("web", "10.0.0.5", "deploy");
+        p.port = 2222;
+        p.identity_files = vec!["~/.ssh/id_ed25519".to_string()];
+        p.agent_forward = true;
+        p.jump_host = Some(bastion.id);
+        let profiles = vec![bastion.clone(), p.clone()];
+
+        let spec = compat_ssh_spec(&p, &profiles);
+        assert_eq!(spec.target, "deploy@10.0.0.5");
+        assert!(spec.args.windows(2).any(|w| w == ["-p", "2222"]));
+        assert!(spec.args.iter().any(|a| a == "-i"));
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|w| w == ["-J", "jump@bastion.example.com"])
+        );
+        assert!(spec.args.iter().any(|a| a == "-A"));
+        // A default-port, user-less profile omits `-p` and `user@`.
+        let mut bare = profile("bare", "host", "");
+        bare.port = 22;
+        let spec = compat_ssh_spec(&bare, &[]);
+        assert_eq!(spec.target, "host");
+        assert!(!spec.args.iter().any(|a| a == "-p"));
     }
 
     #[test]

@@ -19,8 +19,11 @@ use gpui_component::{
     v_flex,
 };
 
+use uuid::Uuid;
+
 use crate::core::config::Config;
 use crate::core::ssh_config::SshProfile;
+use crate::core::ssh_profile::parse_quick_connect;
 
 /// What a command actually does. Most variants map to an existing `Tty7App`
 /// operation dispatched in `app.rs` (so it can touch tabs/panes); submenu
@@ -56,12 +59,12 @@ pub enum CommandKind {
     RestartDaemon,
     /// Toggle the SFTP file panel for the focused native-SSH pane (WS5).
     ToggleSftp,
+    /// Reconnect a dead native-SSH pane in place (WS6, FR-E4).
+    RestartSshSession,
     /// Opens the theme sub-list (a nested palette). Handled in `PaletteView`.
     OpenThemePicker,
     /// Opens a typed SSH connection sub-list. Handled in `PaletteView`.
     OpenSshConnectInput,
-    /// Opens the SSH profile sub-list. Handled in `PaletteView`.
-    OpenSshProfilePicker(Vec<SshProfile>),
     /// Open a tty7-managed SSH tab from a typed target/options line.
     OpenSshConnect(String),
     /// Apply the preset at this index in `presets::all()`. Emitted from the
@@ -71,6 +74,29 @@ pub enum CommandKind {
     OpenSshProfile(SshProfile),
     /// Switch to the tab at this index in `Tty7App::tabs`.
     ActivateTab(usize),
+    /// Connect a saved SSH profile by id (native or compat, per its flag).
+    ConnectSavedProfile(Uuid),
+    /// Open the profile editor focused on this saved profile (⌘⏎ / → on a row).
+    EditSavedProfile(Uuid),
+    /// QuickConnect to a typed `user@host[:port]` target via the native path.
+    QuickConnect(String),
+    /// Open the profile editor pre-filled from a typed QuickConnect target
+    /// ("save as profile" from a quick connect).
+    SaveQuickConnect(String),
+    /// Open the full-window SSH profile manager/editor page.
+    OpenSshProfiles,
+}
+
+impl CommandKind {
+    /// The "edit" counterpart of a connect-style command, for the ⌘⏎ / → gesture
+    /// (PRD §6.2 ①). `None` for commands that have no editor.
+    pub fn edit_variant(&self) -> Option<CommandKind> {
+        match self {
+            CommandKind::ConnectSavedProfile(id) => Some(CommandKind::EditSavedProfile(*id)),
+            CommandKind::QuickConnect(s) => Some(CommandKind::SaveQuickConnect(s.clone())),
+            _ => None,
+        }
+    }
 }
 
 impl CommandKind {
@@ -107,14 +133,19 @@ impl CommandKind {
             OpenSettings => "OpenSettings",
             RestartDaemon => "RestartDaemon",
             ToggleSftp => "ToggleSftp",
+            RestartSshSession => "RestartSshSession",
             FindInTerminal
             | OpenThemePicker
             | OpenSshConnectInput
-            | OpenSshProfilePicker(_)
             | OpenSshConnect(_)
             | SetTheme(_)
             | OpenSshProfile(_)
-            | ActivateTab(_) => return None,
+            | ActivateTab(_)
+            | ConnectSavedProfile(_)
+            | EditSavedProfile(_)
+            | QuickConnect(_)
+            | SaveQuickConnect(_)
+            | OpenSshProfiles => return None,
         })
     }
 }
@@ -123,15 +154,25 @@ impl CommandKind {
 #[derive(Clone)]
 pub struct Command {
     pub title: String,
+    /// Optional dimmed secondary text on the right of the title (e.g. a saved
+    /// profile's `user@host`, or `(~/.ssh/config)` for an alias).
+    pub subtitle: Option<String>,
     pub kind: CommandKind,
 }
 
 impl Command {
-    fn new(title: impl Into<String>, kind: CommandKind) -> Self {
+    pub fn new(title: impl Into<String>, kind: CommandKind) -> Self {
         Self {
             title: title.into(),
+            subtitle: None,
             kind,
         }
+    }
+
+    /// Attach a dimmed subtitle rendered to the right of the title.
+    pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> Self {
+        self.subtitle = Some(subtitle.into());
+        self
     }
 
     /// The static commands available regardless of how many tabs exist. The
@@ -170,6 +211,8 @@ impl Command {
             Command::new("Find in Terminal…", FindInTerminal),
             Command::new("Reopen Closed Tab", ReopenClosedTab),
             Command::new("SSH: Add Connection…", OpenSshConnectInput),
+            Command::new("SSH: Manage Profiles…", OpenSshProfiles),
+            Command::new("Reconnect SSH Session", RestartSshSession),
             Command::new("SFTP Panel", ToggleSftp),
             Command::new("Change Theme…", OpenThemePicker),
             Command::new("Open Settings", OpenSettings),
@@ -198,18 +241,6 @@ impl Command {
             .collect()
     }
 
-    pub fn ssh_profile_commands(profiles: Vec<SshProfile>) -> Vec<Command> {
-        profiles
-            .into_iter()
-            .map(|profile| {
-                Command::new(
-                    format!("SSH: {}", profile.alias),
-                    CommandKind::OpenSshProfile(profile),
-                )
-            })
-            .collect()
-    }
-
     fn ssh_connect_command(input: &str) -> Command {
         let title = if input.trim().is_empty() {
             "SSH: Add Connection…".to_string()
@@ -234,6 +265,15 @@ pub fn fuzzy_match(query: &str, title: &str) -> bool {
     needle.peek().is_none()
 }
 
+/// True when `query` fuzzy-matches a command's subtitle (e.g. typing a hostname
+/// matches a profile row whose subtitle is `user@host`). A command with no
+/// subtitle never matches this way.
+fn fuzzy_match_subtitle(query: &str, cmd: &Command) -> bool {
+    cmd.subtitle
+        .as_deref()
+        .is_some_and(|s| fuzzy_match(query, s))
+}
+
 /// Feeds the command catalog to gpui-component's `ListState`. It keeps the full
 /// catalog plus the subset matching the current query (`matched`), re-filtering
 /// in `perform_search` whenever the search input changes.
@@ -244,6 +284,10 @@ pub struct PaletteDelegate {
     matched: Vec<Command>,
     input: Option<PaletteInput>,
     query: String,
+    /// Whether this is the root catalog, where a query that parses as
+    /// `user@host[:port]` injects live "Connect to …" / "Save … as profile"
+    /// rows so QuickConnect shares the one entry box (PRD §6.2 ①).
+    quick_connect_root: bool,
     /// Index of the highlighted row, mirrored from the list's own selection so
     /// `render_item` can mark it. `None` when nothing matches.
     selected: Option<IndexPath>,
@@ -261,7 +305,37 @@ impl PaletteDelegate {
             commands,
             input: None,
             query: String::new(),
+            quick_connect_root: false,
             selected: Some(IndexPath::default()),
+        }
+    }
+
+    /// The root delegate: like [`new`], but a query that parses as a QuickConnect
+    /// target injects live connect/save rows.
+    pub fn root(commands: Vec<Command>) -> Self {
+        Self {
+            quick_connect_root: true,
+            ..Self::new(commands)
+        }
+    }
+
+    /// The QuickConnect rows for a query at the root, if it parses as a target.
+    fn quick_connect_commands(query: &str) -> Vec<Command> {
+        match parse_quick_connect(query) {
+            Some(_) => {
+                let target = query.trim().to_string();
+                vec![
+                    Command::new(
+                        format!("Connect to \"{target}\""),
+                        CommandKind::QuickConnect(target.clone()),
+                    ),
+                    Command::new(
+                        format!("Save \"{target}\" as profile…"),
+                        CommandKind::SaveQuickConnect(target),
+                    ),
+                ]
+            }
+            None => Vec::new(),
         }
     }
 
@@ -272,6 +346,7 @@ impl PaletteDelegate {
             matched,
             input: Some(PaletteInput::SshConnect),
             query: String::new(),
+            quick_connect_root: false,
             selected: Some(IndexPath::default()),
         }
     }
@@ -280,6 +355,11 @@ impl PaletteDelegate {
     /// `app.rs` when the list confirms a selection.
     pub fn command_at(&self, ix: IndexPath) -> Option<CommandKind> {
         self.matched.get(ix.row).map(|c| c.kind.clone())
+    }
+
+    /// The currently highlighted command, if any (for the ⌘⏎ / → edit gesture).
+    pub fn selected_command(&self) -> Option<CommandKind> {
+        self.selected.and_then(|ix| self.command_at(ix))
     }
 }
 
@@ -302,12 +382,19 @@ impl ListDelegate for PaletteDelegate {
             self.query = query.to_string();
             self.matched = vec![Command::ssh_connect_command(query)];
         } else {
-            self.matched = self
-                .commands
-                .iter()
-                .filter(|c| fuzzy_match(query, &c.title))
-                .cloned()
-                .collect();
+            let mut matched: Vec<Command> = Vec::new();
+            // At the root, a query that parses as a connect target leads with
+            // QuickConnect rows (PRD §6.2 ①), above the fuzzy-matched catalog.
+            if self.quick_connect_root {
+                matched.extend(Self::quick_connect_commands(query));
+            }
+            matched.extend(
+                self.commands
+                    .iter()
+                    .filter(|c| fuzzy_match(query, &c.title) || fuzzy_match_subtitle(query, c))
+                    .cloned(),
+            );
+            self.matched = matched;
         }
         self.selected = (!self.matched.is_empty()).then(IndexPath::default);
         Task::ready(())
@@ -337,11 +424,23 @@ impl ListDelegate for PaletteDelegate {
             .and_then(|action| crate::ui::keymap::effective_key(action, cx))
             .map(|spec| crate::ui::keymap::key_tokens(&spec));
 
+        // Title, with an optional dimmed subtitle to its right (a profile's
+        // `user@host`, or `(~/.ssh/config)` for an alias).
+        let mut left = h_flex().items_center().gap_2().child(cmd.title.clone());
+        if let Some(subtitle) = cmd.subtitle.clone() {
+            left = left.child(div().text_xs().text_color(muted).child(subtitle));
+        }
+
         let mut row = h_flex()
             .w_full()
             .items_center()
             .justify_between()
-            .child(cmd.title.clone());
+            .child(left);
+        // Editable rows (saved profiles, quick-connect) advertise the ⌘⏎ / →
+        // edit gesture with a subtle trailing hint (PRD §6.2 ①).
+        if cmd.kind.edit_variant().is_some() {
+            row = row.child(div().text_xs().text_color(muted).child("→ edit"));
+        }
         if let Some(tokens) = keys {
             row = row.child(h_flex().gap_1().children(tokens.into_iter().map(move |t| {
                 div()
@@ -396,7 +495,6 @@ enum PaletteMenu {
     Root,
     Theme,
     SshConnect,
-    SshProfiles,
 }
 
 /// The command palette as a self-contained view. It owns the `ListState`
@@ -421,7 +519,7 @@ pub struct PaletteView {
 
 impl PaletteView {
     pub fn new(commands: Vec<Command>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let list = Self::build_list(commands.clone(), window, cx);
+        let list = Self::build_root_list(commands.clone(), window, cx);
         let _sub = cx.subscribe_in(&list, window, Self::on_list_event);
         Self {
             list,
@@ -441,6 +539,15 @@ impl PaletteView {
         cx: &mut Context<Self>,
     ) -> Entity<ListState<PaletteDelegate>> {
         Self::build_list_with_delegate(PaletteDelegate::new(commands), window, cx)
+    }
+
+    /// The root list, whose delegate injects live QuickConnect rows.
+    fn build_root_list(
+        commands: Vec<Command>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ListState<PaletteDelegate>> {
+        Self::build_list_with_delegate(PaletteDelegate::root(commands), window, cx)
     }
 
     fn build_list_with_delegate(
@@ -474,8 +581,19 @@ impl PaletteView {
     fn search_placeholder(&self) -> &'static str {
         match self.menu {
             PaletteMenu::SshConnect => "user@host [-p 2222 -J jump]",
-            PaletteMenu::Root | PaletteMenu::Theme | PaletteMenu::SshProfiles => "Search…",
+            PaletteMenu::Root => "Search or type user@host to connect…",
+            PaletteMenu::Theme => "Search…",
         }
+    }
+
+    /// Read the currently highlighted command's "edit" variant, if any — the
+    /// target of the ⌘⏎ / → gesture on a profile / quick-connect row.
+    fn selected_edit_command(&self, cx: &App) -> Option<CommandKind> {
+        self.list
+            .read(cx)
+            .delegate()
+            .selected_command()
+            .and_then(|k| k.edit_variant())
     }
 
     /// Translate the current list's confirm/cancel into either a host-facing
@@ -502,11 +620,6 @@ impl PaletteView {
                         self.menu = PaletteMenu::SshConnect;
                         self.show_ssh_connect(window, cx);
                     }
-                    Some(CommandKind::OpenSshProfilePicker(profiles)) => {
-                        self.menu = PaletteMenu::SshProfiles;
-                        let profiles = Command::ssh_profile_commands(profiles);
-                        self.show(profiles, window, cx);
-                    }
                     Some(CommandKind::OpenSshConnect(input)) if input.trim().is_empty() => {}
                     Some(kind) => cx.emit(PaletteEvent::Confirm(kind)),
                     None => cx.emit(PaletteEvent::Dismiss),
@@ -518,7 +631,10 @@ impl PaletteView {
                 if self.menu != PaletteMenu::Root {
                     self.menu = PaletteMenu::Root;
                     let root = self.root.clone();
-                    self.show(root, window, cx);
+                    let list = Self::build_root_list(root, window, cx);
+                    self._sub = cx.subscribe_in(&list, window, Self::on_list_event);
+                    self.list = list;
+                    cx.notify();
                 } else {
                     cx.emit(PaletteEvent::Dismiss);
                 }
@@ -569,6 +685,21 @@ impl Render for PaletteView {
             .justify_center()
             .pt(px(120.))
             .bg(background.opacity(0.45))
+            // ⌘⏎ or → on a highlighted profile / quick-connect row opens its
+            // editor instead of connecting (PRD §6.2 ①). Captured on the scrim
+            // (an ancestor of the focused search box) so it fires before the list
+            // acts on a bare Enter. Plain Enter / navigation keys fall through.
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
+                let ks = &ev.keystroke;
+                let is_edit_gesture = (ks.key == "enter" && ks.modifiers.platform)
+                    || (ks.key == "right" && !ks.modifiers.platform);
+                if is_edit_gesture {
+                    if let Some(edit) = this.selected_edit_command(cx) {
+                        cx.stop_propagation();
+                        cx.emit(PaletteEvent::Confirm(edit));
+                    }
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_this, _: &MouseDownEvent, _window, cx| {

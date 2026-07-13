@@ -618,7 +618,7 @@ impl Tty7App {
     /// A bold section header that introduces a group of settings.
     /// With no cards, the header *is* the unit of grouping — it tells the eye
     /// where one set of related controls begins.
-    fn section_header(&self, title: &str, cx: &Context<Self>) -> Div {
+    pub(crate) fn section_header(&self, title: &str, cx: &Context<Self>) -> Div {
         self.header_text(title, cx).mb_4()
     }
 
@@ -643,7 +643,7 @@ impl Tty7App {
 
     /// A full-width hairline between sections, so the page reads as one
     /// continuous sheet rather than stacked boxes.
-    fn section_rule(&self, cx: &Context<Self>) -> Div {
+    pub(crate) fn section_rule(&self, cx: &Context<Self>) -> Div {
         div().h(px(1.)).my_7().bg(cx.theme().border)
     }
 
@@ -652,7 +652,7 @@ impl Tty7App {
     /// column (not space-between) keeps label and control visually paired
     /// regardless of window width — space-between on a wide pane stretched the
     /// two apart into a dead gap.
-    fn settings_row(
+    pub(crate) fn settings_row(
         &self,
         label: impl Into<String>,
         desc: impl Into<String>,
@@ -1051,6 +1051,12 @@ impl Tty7App {
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_verify_host_keys(*on, cx)))
             .into_any_element();
 
+        let warn_on_close = cx.global::<Config>().ssh_warn_on_close;
+        let warn_switch = Switch::new("ssh-warn-on-close")
+            .checked(warn_on_close)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_ssh_warn_on_close(*on, cx)))
+            .into_any_element();
+
         let mut list = v_flex().gap_1().w_full();
         if self.known_hosts.is_empty() {
             list = list.child(
@@ -1103,6 +1109,13 @@ impl Tty7App {
                  changed keys. A profile can override this. Turning it off disables \
                  host-key checking for the native SSH path.",
                 verify_switch,
+                cx,
+            ))
+            .child(self.settings_row(
+                "Warn before closing",
+                "Ask for confirmation before closing a tab or pane with a live SSH \
+                 session. A profile can override this.",
+                warn_switch,
                 cx,
             ))
             .child(self.section_rule(cx))

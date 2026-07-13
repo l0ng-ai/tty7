@@ -299,6 +299,8 @@ impl Tty7App {
             }
             let is_active = i == active;
             let label = self.tab_label(tab, i, cx);
+            // SSH status dot (PRD FR-E2): coloured by the pane's connection phase.
+            let ssh_dot = self.tab_ssh_dot(tab, cx);
 
             // Inline rename input for this tab, if it's the one being renamed.
             let rename_input = self
@@ -423,6 +425,10 @@ impl Tty7App {
                         this.activate(i, window, cx);
                     }),
                 )
+                // Leading SSH status dot when this tab hosts an SSH session.
+                .when_some(ssh_dot, |c, color| {
+                    c.child(div().flex_shrink_0().size(px(6.)).rounded_full().bg(color))
+                })
                 // Clickable / editable label region. No leading context glyph —
                 // the label carries the whole chip, so a row of tabs reads as
                 // plain text rather than icon-per-chip busy.

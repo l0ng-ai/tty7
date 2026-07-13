@@ -3,7 +3,7 @@
 //! Settings owns persistent preferences; this module owns the live forwarding
 //! dashboard that only makes sense beside a concrete SSH pane.
 
-use gpui::{AnyElement, Context, Div, FontWeight, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, Context, Div, Entity, FontWeight, SharedString, div, prelude::*, px};
 use gpui_component::Selectable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
@@ -11,10 +11,163 @@ use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use crate::daemon::protocol::{
     ForwardStatus, LoopbackForwardInfo, ManagedForward, RemoteContext, RemoteKind, SshForwardKind,
+    SshPhase,
 };
+use crate::terminal::view::TerminalView;
 use crate::ui::app::Tty7App;
 
 impl Tty7App {
+    /// The in-pane native-SSH status strip (PRD FR-E1): a subtle ` SSH ` chip
+    /// coloured by the connection phase, with the hostname, pinned top-left of the
+    /// terminal body. A dead pane also shows the "connection lost — ⌘⇧R to
+    /// reconnect" notice (FR-E4). Returns `None` for a non-native pane.
+    pub(crate) fn render_ssh_status_strip(
+        &self,
+        leaf: &Entity<TerminalView>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let view = leaf.read(cx);
+        let phase = view.ssh_phase()?;
+        let disconnected = view.ssh_disconnected();
+        let host = view
+            .terminal
+            .ssh_endpoint()
+            .map(|(h, _)| h)
+            .or_else(|| view.remote_context().map(|c| c.target))
+            .unwrap_or_default();
+
+        let theme = cx.theme();
+        // Phase → accent. Connecting/authenticating are cautionary (yellow),
+        // connected reads calm (accent), failed/disconnected are red.
+        let (color, label) = if disconnected {
+            (theme.danger, "SSH ✕")
+        } else {
+            match &phase {
+                SshPhase::Connecting => (theme.warning, "SSH …"),
+                SshPhase::Authenticating => (theme.warning, "SSH ⚿"),
+                SshPhase::Connected => (theme.accent, "SSH"),
+                SshPhase::Failed { .. } => (theme.danger, "SSH ✕"),
+            }
+        };
+
+        let chip = h_flex()
+            .items_center()
+            .gap_1p5()
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .bg(color.opacity(0.15))
+            .border_1()
+            .border_color(color.opacity(0.5))
+            .text_xs()
+            .text_color(color)
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(label))
+            .when(!host.is_empty(), |d| {
+                d.child(div().text_color(theme.muted_foreground).child(host))
+            });
+
+        let mut col = div().flex().flex_col().items_start().gap_1().child(chip);
+
+        if disconnected {
+            col = col.child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme.danger.opacity(0.12))
+                    .border_1()
+                    .border_color(theme.danger.opacity(0.4))
+                    .text_xs()
+                    .text_color(theme.foreground)
+                    .child("Connection lost — press ⌘⇧R to reconnect")
+                    .child(
+                        Button::new("ssh-reconnect")
+                            .label("Reconnect")
+                            .primary()
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.restart_ssh_session(window, cx)
+                            })),
+                    ),
+            );
+        }
+
+        Some(
+            div()
+                .absolute()
+                .top_2()
+                .left_4()
+                .child(col)
+                .into_any_element(),
+        )
+    }
+
+    /// The in-pane "confirm close of a live SSH session" sheet (PRD FR-E3),
+    /// centered over the terminal. Enter/Close closes; Esc/Keep cancels. Returns
+    /// `None` when no confirmation is pending.
+    pub(crate) fn render_ssh_close_confirm_overlay(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        self.ssh_close_confirm?;
+        let theme = cx.theme();
+        let card = v_flex()
+            .w(px(360.))
+            .gap_3()
+            .p_4()
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_lg()
+            .shadow_lg()
+            .occlude()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Close this SSH session?"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("The connection is live. Closing will end it."),
+            )
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("ssh-close-cancel")
+                            .label("Keep")
+                            .small()
+                            .on_click(
+                                cx.listener(|this, _, _window, cx| this.cancel_ssh_close(cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("ssh-close-confirm")
+                            .label("Close")
+                            .primary()
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.confirm_ssh_close(window, cx)
+                            })),
+                    ),
+            );
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
     pub(crate) fn render_loopback_forward_overlay(
         &self,
         pane_id: u64,
