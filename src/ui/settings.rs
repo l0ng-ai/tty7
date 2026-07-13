@@ -20,7 +20,7 @@ use gpui_component::switch::Switch;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use std::sync::Arc;
 
-use crate::core::config::{Config, CursorStyle, NewTabPosition, NotifyMode};
+use crate::core::config::{BellMode, Config, CursorStyle, NewTabPosition, NotifyMode};
 use crate::ui::app::{FONT_SIZE_STEP, LINE_HEIGHT_STEP, ThemeEdit, Tty7App};
 use crate::ui::presets;
 
@@ -832,6 +832,16 @@ impl Tty7App {
         let scroll_mult = cfg.mouse_scroll_multiplier;
         let clip_trim = cfg.clipboard_trim_trailing_spaces;
         let copy_on_select = cfg.copy_on_select;
+        let mouse_reporting = cfg.mouse_reporting;
+        let bell = cfg.bell;
+        // Map the persisted threshold onto its preset radio index (nearest slot
+        // for any off-preset value a hand-edit might leave).
+        let threshold_idx = match cfg.notify_threshold_secs {
+            n if n <= 5 => 0,
+            n if n <= 10 => 1,
+            n if n <= 30 => 2,
+            _ => 3,
+        };
         // Map the persisted scrollback depth onto its preset radio index (default
         // to 10k's slot for any off-preset value a hand-edit might leave).
         let scrollback_idx = match cfg.scrollback_limit {
@@ -904,6 +914,44 @@ impl Tty7App {
             .checked(copy_on_select)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_copy_on_select(*on, cx)))
             .into_any_element();
+        let mouse_report_switch = Switch::new("term-mouse-report")
+            .checked(mouse_reporting)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_mouse_reporting(*on, cx)))
+            .into_any_element();
+        let bell_idx = match bell {
+            BellMode::None => 0,
+            BellMode::Visual => 1,
+            BellMode::Audible => 2,
+        };
+        let bell_control = self.segmented(
+            "term-bell",
+            &["Off", "Visual", "Audible"],
+            bell_idx,
+            cx,
+            |this, ix, _w, cx| {
+                let mode = match ix {
+                    0 => BellMode::None,
+                    1 => BellMode::Visual,
+                    _ => BellMode::Audible,
+                };
+                this.set_bell_mode(mode, cx);
+            },
+        );
+        let threshold_radio = self.segmented(
+            "term-notify-threshold",
+            &["5s", "10s", "30s", "1m"],
+            threshold_idx,
+            cx,
+            |this, ix, _w, cx| {
+                let secs = match ix {
+                    0 => 5,
+                    1 => 10,
+                    2 => 30,
+                    _ => 60,
+                };
+                this.set_notify_threshold(secs, cx);
+            },
+        );
         // macOS only: the Option/special-character split this toggle resolves
         // doesn't exist on other platforms, where Alt always carries Meta.
         let option_alt_row = cfg!(target_os = "macos").then(|| {
@@ -964,6 +1012,12 @@ impl Tty7App {
                 mouse_hide_switch,
                 cx,
             ))
+            .child(self.settings_row(
+                "Report mouse to apps",
+                "Let full-screen apps (vim, tmux) handle clicks and scrolling. Off keeps the mouse local; Shift always does for one gesture.",
+                mouse_report_switch,
+                cx,
+            ))
             .when_some(option_alt_row, |v, row| {
                 v.child(self.section_rule(cx))
                     .child(self.section_header("Keyboard", cx))
@@ -998,11 +1052,25 @@ impl Tty7App {
                 cx,
             ))
             .child(self.section_rule(cx))
+            .child(self.section_header("Bell", cx))
+            .child(self.settings_row(
+                "Terminal bell",
+                "How a bell (^G) is signalled: silenced, a brief flash, or the system sound.",
+                bell_control,
+                cx,
+            ))
+            .child(self.section_rule(cx))
             .child(self.section_header("Notifications", cx))
             .child(self.settings_row(
                 "Notify on command finish",
-                "Desktop alert after a long (≥10s) command completes.",
+                "Desktop alert after a long foreground command completes.",
                 notify_radio,
+                cx,
+            ))
+            .child(self.settings_row(
+                "Notify threshold",
+                "How long a command must run to qualify as \"long\".",
+                threshold_radio,
                 cx,
             ))
             .into_any_element()
@@ -1020,7 +1088,12 @@ impl Tty7App {
             NewTabPosition::AfterCurrent => 0,
             NewTabPosition::End => 1,
         };
+        let restore_session = cfg.restore_session;
 
+        let restore_switch = Switch::new("wt-restore-session")
+            .checked(restore_session)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_restore_session(*on, cx)))
+            .into_any_element();
         let startup_radio = self.segmented(
             "wt-startup",
             &["Normal", "Maximized", "Fullscreen"],
@@ -1056,6 +1129,12 @@ impl Tty7App {
                 "Startup window",
                 "Window state when tty7 launches.",
                 startup_radio,
+                cx,
+            ))
+            .child(self.settings_row(
+                "Restore previous session",
+                "Reopen the last window's tabs, splits, and directories on launch. Off starts with a single fresh terminal.",
+                restore_switch,
                 cx,
             ))
             .child(self.section_rule(cx))

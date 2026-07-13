@@ -28,7 +28,7 @@ use super::typeahead::{RawInput, Typeahead};
 use crate::core::actions::{
     CloseActiveTab, NewTab, SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
 };
-use crate::core::config::{Config, NotifyMode};
+use crate::core::config::{BellMode, Config, NotifyMode};
 use crate::daemon::protocol::{RemoteContext, ShellSpec};
 
 /// Inset (px) between the terminal-surface edge and the cell grid. The prompt
@@ -165,6 +165,13 @@ pub struct TerminalView {
     /// True for a brief window after a bell event; drives a momentary visual
     /// flash painted in place of an audible beep.
     pub bell_flash: bool,
+    /// Whether mouse events are reported to full-screen apps that request it
+    /// (`Config::mouse_reporting`). Cached from the global at construction and
+    /// refreshed on config hot-reload (`Tty7App::reload_from_config`) so the
+    /// mouse-report gates — which run in `&self`/`&mut self` methods without a
+    /// `cx` — can consult it. When `false`, every mouse-tracking mode reads as
+    /// clear, keeping the mouse local (selection + scrollback).
+    pub report_mouse: bool,
     /// Last observed "shell is idle at its prompt" state, tracked so a change can
     /// trigger a redraw (showing/hiding the line editor) even when the shell
     /// produced no output to repaint on its own.
@@ -336,9 +343,9 @@ enum CmdKey {
     FallThrough,
 }
 
-/// A foreground command must run at least this long for its completion to be
-/// worth a background notification.
-const LONG_COMMAND: std::time::Duration = std::time::Duration::from_secs(10);
+// The minimum foreground-command duration worth a "finished" notification is
+// configurable (`Config::notify_threshold_secs`, default 10s); read live where
+// the notification is posted rather than pinned to a const here.
 
 /// How long gap input may be held client-side before it must be released to
 /// the PTY (see the `hold` module). Long enough for a fast command's full
@@ -397,6 +404,24 @@ fn notify_command_finished(label: &str, elapsed: std::time::Duration) {
         format!("{label} — finished after {secs}s")
     };
     super::remote::notify_desktop(Some("tty7"), &body);
+}
+
+/// Ring the OS system bell for the `Audible` bell mode. Returns `true` if a
+/// sound was actually requested, `false` on platforms without a portable beep
+/// (the caller then falls back to the visual flash so the bell is never silent).
+fn ring_system_bell() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // A parameter-less AppKit call that just asks the system to play the
+        // user's alert sound; invoked on the main (gpui app) thread, where every
+        // `AlacEvent` is handled.
+        objc2_app_kit::NSBeep();
+        true
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
 }
 
 /// Build the byte sequence written to the PTY for a paste. Under bracketed paste
@@ -590,6 +615,7 @@ impl TerminalView {
         let font_size = px(config.font_size);
         let line_height_mul = config.line_height;
         let font_features = config.font_features.clone();
+        let report_mouse = config.mouse_reporting;
         let mut font = gpui::font(font_family);
         font.fallbacks = Some(gpui::FontFallbacks::from_fonts(fallbacks.clone()));
         if let Some(features) = &font_features {
@@ -762,6 +788,7 @@ impl TerminalView {
             title: "tty7".to_string(),
             marked_text: String::new(),
             last_mouse_cell: None,
+            report_mouse,
             last_hover_cell: None,
             link_modifier_down: false,
             scroll_debt: 0.,
@@ -887,22 +914,20 @@ impl TerminalView {
                 };
                 self.terminal.write(fmt(rgb).into_bytes());
             }
-            AlacEvent::Bell => {
-                // Visual bell: a brief flash instead of an audible beep. Turn it
-                // on now, then schedule a one-shot task to clear it ~150ms later.
-                self.bell_flash = true;
-                cx.notify();
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(150))
-                        .await;
-                    let _ = this.update(cx, |view, cx| {
-                        view.bell_flash = false;
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
+            AlacEvent::Bell => match cx.global::<Config>().bell {
+                // Silenced: neither flash nor sound.
+                BellMode::None => {}
+                // Visual bell: a brief flash instead of an audible beep.
+                BellMode::Visual => self.flash_bell(cx),
+                // Audible bell: ring the system bell. Where none exists (non-mac
+                // today), fall back to the flash so an opted-in bell is never
+                // silent.
+                BellMode::Audible => {
+                    if !ring_system_bell() {
+                        self.flash_bell(cx);
+                    }
+                }
+            },
             AlacEvent::TextAreaSizeRequest(fmt) => {
                 // CSI 14 t: the text area size in pixels. Image-preview TUIs
                 // (yazi, ranger's chafa/sixel backends) size their graphics
@@ -1693,12 +1718,32 @@ impl TerminalView {
     // ---- Mouse tracking (so vim / tmux / zellij get clicks & drags) ----
 
     /// True when the application has enabled any mouse-reporting mode.
+    /// Drive the momentary visual bell flash: turn it on now, then schedule a
+    /// one-shot task to clear it ~150ms later. Shared by the `Visual` bell mode
+    /// and the `Audible` fallback on platforms without a system bell.
+    fn flash_bell(&mut self, cx: &mut Context<Self>) {
+        self.bell_flash = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(150))
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.bell_flash = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub fn mouse_mode(&self) -> bool {
-        self.terminal
-            .term
-            .lock()
-            .mode()
-            .intersects(TermMode::MOUSE_MODE)
+        self.report_mouse
+            && self
+                .terminal
+                .term
+                .lock()
+                .mode()
+                .intersects(TermMode::MOUSE_MODE)
     }
 
     /// Encode and send a single mouse event to the PTY. `base` is the raw button
@@ -1743,12 +1788,13 @@ impl TerminalView {
         if self.last_mouse_cell == Some((col, row)) {
             return;
         }
-        let wants = self
-            .terminal
-            .term
-            .lock()
-            .mode()
-            .intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION);
+        let wants = self.report_mouse
+            && self
+                .terminal
+                .term
+                .lock()
+                .mode()
+                .intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION);
         if !wants {
             return;
         }
@@ -1771,12 +1817,13 @@ impl TerminalView {
         if self.last_mouse_cell == Some((col, row)) {
             return;
         }
-        if !self
-            .terminal
-            .term
-            .lock()
-            .mode()
-            .contains(TermMode::MOUSE_MOTION)
+        if !self.report_mouse
+            || !self
+                .terminal
+                .term
+                .lock()
+                .mode()
+                .contains(TermMode::MOUSE_MOTION)
         {
             return;
         }
@@ -1790,7 +1837,13 @@ impl TerminalView {
         if lines == 0 {
             return;
         }
-        let mode = *self.terminal.term.lock().mode();
+        let mut mode = *self.terminal.term.lock().mode();
+        // "Mouse reporting off" also silences the wheel: drop the report mode so
+        // the tick falls through to alternate-scroll / local scrollback, exactly
+        // as if the app had never asked for wheel reporting.
+        if !self.report_mouse {
+            mode.remove(TermMode::MOUSE_MODE);
+        }
         match wheel_route(mode, mods.shift, lines > 0) {
             // Mouse-wheel reporting: one report per line, at the last mouse cell.
             WheelRoute::Report { base } => {
@@ -2005,13 +2058,16 @@ impl TerminalView {
                 let title = std::mem::take(&mut self.running_title);
                 self.running_since = None;
                 // Gate on the configured policy: never / only-when-unfocused /
-                // always. The long-command floor still applies regardless.
-                let notify = match cx.global::<Config>().notify_on_command_finish {
+                // always. The configured long-command floor still applies
+                // regardless.
+                let cfg = cx.global::<Config>();
+                let notify = match cfg.notify_on_command_finish {
                     NotifyMode::Never => false,
                     NotifyMode::Unfocused => !window.is_window_active(),
                     NotifyMode::Always => true,
                 };
-                if elapsed >= LONG_COMMAND && notify {
+                let threshold = std::time::Duration::from_secs(cfg.notify_threshold_secs);
+                if elapsed >= threshold && notify {
                     notify_command_finished(&title, elapsed);
                 }
             }

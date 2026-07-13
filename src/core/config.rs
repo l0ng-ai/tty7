@@ -91,6 +91,22 @@ pub struct Config {
     /// self-updates — it only links to the Releases page. On by default; set to
     /// `false` to skip the network call entirely (offline / privacy).
     pub check_for_updates: bool,
+    /// Seconds a foreground command must run before it's eligible for a
+    /// "command finished" notification (further gated by
+    /// `notify_on_command_finish`). Defaults to 10; clamped in `sanitize` so a
+    /// hand-edit can't set a degenerate value.
+    #[serde(default = "default_notify_threshold_secs")]
+    pub notify_threshold_secs: u64,
+    /// Restore the previous session (tab/split layout + each pane's cwd) on
+    /// launch. On by default; when off, every launch starts with a single fresh
+    /// terminal instead of the last window's layout. The session is still saved
+    /// on quit — it's just ignored at startup.
+    #[serde(default = "default_true")]
+    pub restore_session: bool,
+    /// How the terminal bell (BEL / `^G`) is signalled. Defaults to a brief
+    /// visual flash (the current behavior).
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub bell: BellMode,
 
     // ── Appearance ──────────────────────────────────────────────────────────
     /// The shape drawn for the terminal cursor.
@@ -114,6 +130,13 @@ pub struct Config {
     /// Multiplier applied to mouse-wheel scroll distance. 1.0 = one row per wheel
     /// line (the raw amount). Clamped to a sane band in `sanitize`.
     pub mouse_scroll_multiplier: f32,
+    /// Report mouse events (click / drag / wheel) to full-screen apps that ask
+    /// for them (vim, tmux, htop). On by default. When off, the mouse always
+    /// stays local — native selection and scrollback — regardless of what the
+    /// app requested. Holding Shift already forces local behavior for a single
+    /// gesture even while this is on.
+    #[serde(default = "default_true")]
+    pub mouse_reporting: bool,
     /// Drop trailing whitespace from each copied line. Off by default.
     pub clipboard_trim_trailing_spaces: bool,
     /// Copy a mouse selection to the clipboard as soon as the gesture ends,
@@ -215,6 +238,20 @@ pub enum NotifyMode {
     Always,
 }
 
+/// How the terminal bell (BEL / `^G`) is signalled (see [`Config::bell`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BellMode {
+    /// Ignore the bell entirely — no flash, no sound.
+    None,
+    /// A brief visual flash of the terminal (the current behavior).
+    #[default]
+    Visual,
+    /// Ring the system bell. On platforms without one, falls back to a flash so
+    /// an opted-in bell is never silent.
+    Audible,
+}
+
 /// A shell program plus its launch arguments. Mirrors `alacritty_terminal`'s
 /// `tty::Shell`, but lives here so config has no dependency on the PTY crate and
 /// the daemon can read it straight from `config.json`.
@@ -276,6 +313,11 @@ impl Default for Config {
             // Opt-out, not opt-in: a stale terminal that never tells you it's
             // outdated is the status quo we're fixing. One cheap GET at startup.
             check_for_updates: true,
+            notify_threshold_secs: default_notify_threshold_secs(),
+            restore_session: true,
+            // Visual flash preserves the pre-config behavior (the bell always
+            // flashed); opting into None/Audible is a deliberate change.
+            bell: BellMode::Visual,
             cursor_style: CursorStyle::Block,
             // Input/mouse defaults preserve today's behavior: Option composes
             // characters as macOS ships it (opt into Option-as-Meta); GPUI
@@ -286,6 +328,7 @@ impl Default for Config {
             mouse_hide_while_typing: true,
             focus_follows_mouse: false,
             mouse_scroll_multiplier: 1.0,
+            mouse_reporting: true,
             clipboard_trim_trailing_spaces: false,
             copy_on_select: false,
             startup_mode: StartupMode::Normal,
@@ -344,6 +387,10 @@ impl Config {
             self.mouse_scroll_multiplier = Config::default().mouse_scroll_multiplier;
         }
         self.mouse_scroll_multiplier = self.mouse_scroll_multiplier.clamp(0.1, 10.0);
+        // Keep the notify threshold in a usable band: a 1s floor so it can't fire
+        // on every trivial command, and a 1-hour ceiling above which "long
+        // command" stops meaning anything.
+        self.notify_threshold_secs = self.notify_threshold_secs.clamp(1, 3600);
     }
 
     /// Write the current config back to disk, creating the parent directory if
@@ -507,6 +554,19 @@ pub fn extra_env() -> HashMap<String, String> {
 /// Serde default for [`Config::keybinding_preset`]: the no-op `"default"` preset.
 fn default_preset() -> String {
     "default".to_string()
+}
+
+/// Serde default for the several `bool` fields that default to `true` (so a
+/// config predating them, or one omitting them, keeps the on-by-default
+/// behavior instead of deserializing to `false`).
+fn default_true() -> bool {
+    true
+}
+
+/// Serde default for [`Config::notify_threshold_secs`]: the 10-second floor a
+/// command had to cross before this was configurable.
+fn default_notify_threshold_secs() -> u64 {
+    10
 }
 
 /// Serde default for [`Config::prefix`]: tmux's classic `C-b`.
@@ -707,6 +767,53 @@ mod tests {
         assert_eq!(clamp(0), 100); // floor
         assert_eq!(clamp(10_000), 10_000); // untouched in-band
         assert_eq!(clamp(usize::MAX), MAX_SCROLLBACK); // ceiling
+    }
+
+    #[test]
+    fn new_terminal_prefs_default_and_parse_leniently() {
+        // Defaults preserve the pre-config behavior: restore on, mouse reporting
+        // on, a 10s notify floor, and a visual bell.
+        let cfg = Config::default();
+        assert!(cfg.restore_session);
+        assert!(cfg.mouse_reporting);
+        assert_eq!(cfg.notify_threshold_secs, 10);
+        assert_eq!(cfg.bell, BellMode::Visual);
+
+        // A config predating these fields keeps the on-by-default booleans (not
+        // `false`) and the 10s floor.
+        let cfg: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert!(cfg.restore_session);
+        assert!(cfg.mouse_reporting);
+        assert_eq!(cfg.notify_threshold_secs, 10);
+        assert_eq!(cfg.bell, BellMode::Visual);
+
+        // Valid values round-trip; a bad bell string falls back without failing
+        // the whole parse.
+        let cfg: Config = serde_json::from_str(
+            r#"{"restore_session": false, "mouse_reporting": false, "bell": "audible"}"#,
+        )
+        .unwrap();
+        assert!(!cfg.restore_session);
+        assert!(!cfg.mouse_reporting);
+        assert_eq!(cfg.bell, BellMode::Audible);
+
+        let cfg: Config = serde_json::from_str(r#"{"bell": "loud"}"#).unwrap();
+        assert_eq!(cfg.bell, BellMode::Visual);
+    }
+
+    #[test]
+    fn sanitize_clamps_notify_threshold_into_band() {
+        let clamp = |n: u64| {
+            let mut cfg = Config {
+                notify_threshold_secs: n,
+                ..Config::default()
+            };
+            cfg.sanitize();
+            cfg.notify_threshold_secs
+        };
+        assert_eq!(clamp(0), 1); // floor
+        assert_eq!(clamp(10), 10); // untouched in-band
+        assert_eq!(clamp(100_000), 3600); // ceiling
     }
 
     #[test]

@@ -271,7 +271,20 @@ fn main() {
     // daemon if none is running (sharing our config dir). Failure is non-fatal —
     // we log and continue; a still-absent daemon will surface later when a
     // RemoteTerminal fails to connect, rather than blocking startup here.
-    if let Err(e) = crate::daemon::spawn::ensure_running() {
+    //
+    // When session restore is off, start the daemon *fresh* instead of reusing a
+    // live one: this launch won't re-attach to the previous session's panes, so
+    // reusing the daemon would leave those shells running orphaned (unreachable,
+    // never hung up). `restart()` hangs up every old shell then spawns a clean
+    // daemon — and is safe (equivalent to a plain spawn) when none is running.
+    // Read straight off disk; the `Config` global isn't set until inside `run`.
+    let restore_session = crate::core::config::Config::load().restore_session;
+    let daemon_result = if restore_session {
+        crate::daemon::spawn::ensure_running()
+    } else {
+        crate::daemon::spawn::restart()
+    };
+    if let Err(e) = daemon_result {
         log::error!("failed to ensure daemon is running: {e}");
     }
 

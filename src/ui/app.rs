@@ -204,8 +204,15 @@ pub struct Tty7App {
 
 impl Tty7App {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // Restore the previous session (tab/split layout + each pane's cwd).
-        Self::with_session(Session::load(), window, cx)
+        // Restore the previous session (tab/split layout + each pane's cwd),
+        // unless the user turned restore off — then start fresh. `None` takes the
+        // first-run path in `with_session`, spawning a single default terminal.
+        let session = if cx.global::<Config>().restore_session {
+            Session::load()
+        } else {
+            None
+        };
+        Self::with_session(session, window, cx)
     }
 
     /// The whole constructor behind `new`, with the saved session injected
@@ -990,6 +997,29 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.notify_on_command_finish = mode);
     }
 
+    /// Set the "long command" floor (seconds) a foreground command must exceed
+    /// to be eligible for a completion notification. Read live where the alert
+    /// is posted, so nothing needs pushing to open panes.
+    pub(crate) fn set_notify_threshold(&mut self, secs: u64, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.notify_threshold_secs = secs.clamp(1, 3600));
+    }
+
+    /// Switch how the terminal bell is signalled. Read live in each pane's bell
+    /// handler, so there's nothing to push.
+    pub(crate) fn set_bell_mode(
+        &mut self,
+        mode: crate::core::config::BellMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_config(cx, |cfg| cfg.bell = mode);
+    }
+
+    /// Toggle session restore. Takes effect on the next launch (this only
+    /// persists the preference); the current window is untouched.
+    pub(crate) fn set_restore_session(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.restore_session = on);
+    }
+
     // ── Input / Mouse setters ───────────────────────────────────────────────
 
     /// Takes effect on the next keystroke — the terminal reads the flag per
@@ -1006,6 +1036,21 @@ impl Tty7App {
 
     pub(crate) fn set_focus_follows_mouse(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.focus_follows_mouse = on);
+    }
+
+    /// Toggle whether mouse events reach full-screen apps. The gates are cached
+    /// per view, so this pushes the new value into every open pane (like the
+    /// font setters) in addition to persisting it.
+    pub(crate) fn set_mouse_reporting(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.mouse_reporting = on);
+        for tab in &self.tabs {
+            for leaf in tab.pane.leaves() {
+                leaf.update(cx, |v, cx| {
+                    v.report_mouse = on;
+                    cx.notify();
+                });
+            }
+        }
     }
 
     pub(crate) fn set_mouse_scroll_multiplier(&mut self, mult: f32, cx: &mut Context<Self>) {
@@ -1990,6 +2035,20 @@ impl Tty7App {
                     let italic = italic.clone();
                     leaf.update(cx, |v, cx| v.set_font_family_italic(italic, cx));
                 }
+            }
+        }
+        // Mouse-reporting is cached per view (the gates run without a `cx`), so a
+        // hot-reload must push it into every open pane. Diffed per leaf so an
+        // unrelated config edit doesn't churn panes that already agree.
+        let report_mouse = cx.global::<Config>().mouse_reporting;
+        for tab in &self.tabs {
+            for leaf in tab.pane.leaves() {
+                leaf.update(cx, |v, cx| {
+                    if v.report_mouse != report_mouse {
+                        v.report_mouse = report_mouse;
+                        cx.notify();
+                    }
+                });
             }
         }
         cx.notify();
