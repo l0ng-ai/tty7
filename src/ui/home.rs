@@ -184,6 +184,7 @@ mod tests {
         SessionPane::Leaf {
             cwd: cwd.map(PathBuf::from),
             pane_id: None,
+            ssh_spec: None,
         }
     }
 

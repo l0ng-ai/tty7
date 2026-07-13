@@ -14,6 +14,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::daemon::protocol::NativeSshSpec;
+
 /// Split orientation, mirroring `gpui::Axis` (which isn't `Serialize`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum SessionAxis {
@@ -34,6 +36,14 @@ pub enum SessionPane {
         /// written by an older build (they just spawn fresh).
         #[serde(default)]
         pane_id: Option<u64>,
+        /// The native-SSH spec this leaf ran, **with secrets stripped**
+        /// ([`NativeSshSpec::without_secrets`]). Persisted so a *dead* native-SSH
+        /// pane can be respawned (reconnected) on restore rather than falling back
+        /// to a local shell — the reconnection UX itself is WS6's. A live pane
+        /// reattaches for free and needs none of this. `None` for local panes and
+        /// for sessions written before this field existed.
+        #[serde(default)]
+        ssh_spec: Option<Box<NativeSshSpec>>,
     },
     /// A split of two subtrees along `axis`, with `a` taking `ratio` of space.
     Split {
@@ -162,6 +172,7 @@ mod tests {
                     pane: SessionPane::Leaf {
                         cwd: Some(PathBuf::from("/work")),
                         pane_id: Some(7),
+                        ssh_spec: None,
                     },
                 },
                 SessionTab {
@@ -172,10 +183,12 @@ mod tests {
                         a: Box::new(SessionPane::Leaf {
                             cwd: None,
                             pane_id: None,
+                            ssh_spec: None,
                         }),
                         b: Box::new(SessionPane::Leaf {
                             cwd: Some(PathBuf::from("/tmp")),
                             pane_id: Some(9),
+                            ssh_spec: None,
                         }),
                     },
                 },
@@ -228,6 +241,7 @@ mod tests {
                 pane: SessionPane::Leaf {
                     cwd: Some(PathBuf::from("/home/u")),
                     pane_id: Some(1),
+                    ssh_spec: None,
                 },
             }],
         };

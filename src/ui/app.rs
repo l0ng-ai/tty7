@@ -2752,6 +2752,9 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
             SessionPane::Leaf {
                 cwd: view.cwd(),
                 pane_id: Some(view.pane_id),
+                // WS2 seam: WS6 populates this (via `NativeSshSpec::without_secrets`)
+                // so a dead native-SSH pane can be respawned on restore.
+                ssh_spec: None,
             }
         }
         Pane::Split {
@@ -2770,6 +2773,7 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
         Pane::Empty => SessionPane::Leaf {
             cwd: None,
             pane_id: None,
+            ssh_spec: None,
         },
     }
 }
@@ -2827,7 +2831,11 @@ fn session_to_pane(
     cx: &mut Context<Tty7App>,
 ) -> Pane {
     match sp {
-        SessionPane::Leaf { cwd, pane_id } => {
+        SessionPane::Leaf {
+            cwd,
+            pane_id,
+            ssh_spec: _,
+        } => {
             // Only restore the pane id when the daemon confirms it's still live;
             // a stale id (daemon restarted, pane killed) falls back to a spawn.
             let restore = (*pane_id).filter(|id| alive.contains(id));

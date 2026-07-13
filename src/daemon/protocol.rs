@@ -261,7 +261,14 @@ pub struct RemoteContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RemoteKind {
+    /// A tty7-managed SSH pane backed by the *system* `ssh` binary (compat mode)
+    /// or a foreground `ssh` typed in a shell. Carries a ControlMaster socket
+    /// when tty7-managed (`RemoteContext.control_path`).
     Ssh,
+    /// A pane backed by the daemon's native russh session engine
+    /// (`daemon::ssh`). `control_path` is always `None`; forwarding / SFTP reach
+    /// the connection through the in-memory registry, not a control socket.
+    NativeSsh,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,6 +297,304 @@ pub struct LoopbackForwardInfo {
     pub local_port: u16,
     pub age_secs: u64,
     pub idle_secs: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Native SSH (russh) session engine — wire types (Workstream 2).
+//
+// A `NativeSshSpec` is everything the daemon needs to establish one russh
+// connection and open a shell channel on it. The GUI (WS1/WS6) resolves a
+// stored profile — including any OS-keychain secrets and any jump-host profile
+// references — into this fully self-contained spec before sending it; the daemon
+// never reads the keychain or the profile store. Secrets (`password`,
+// `key_passphrases`) ride the *local* daemon socket exactly once and are held
+// only in memory. `NativeSshSpec` has a hand-written `Debug` that redacts them,
+// so it is safe to log a spec for diagnostics.
+// ---------------------------------------------------------------------------
+
+/// Which authentication methods the daemon may attempt. `Auto` tries all in the
+/// Tabby-derived order (none → publickey → agent → password → keyboard-interactive);
+/// the others restrict attempts to that single family (plus the mandatory leading
+/// `none` probe, which only learns the server's advertised methods).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SshAuthMode {
+    #[default]
+    Auto,
+    Password,
+    PublicKey,
+    Agent,
+    KeyboardInteractive,
+}
+
+/// The transport under the SSH connection. Exactly one is used; `Command` and the
+/// proxies are mutually exclusive with each other and with a jump host (which is
+/// carried separately on `NativeSshSpec::jump`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SshProxy {
+    #[default]
+    None,
+    /// A `ProxyCommand`-style program whose stdio is the transport. The daemon
+    /// substitutes `%h`/`%p` (and `%r`) tokens itself before spawning — the gap
+    /// Tabby left open (#11058).
+    Command(String),
+    Socks {
+        host: String,
+        port: u16,
+    },
+    Http {
+        host: String,
+        port: u16,
+    },
+}
+
+/// Per-connection algorithm preference lists. Empty list = russh defaults (with
+/// tty7's Tabby-derived preference applied where russh supports the entry).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SshAlgorithms {
+    #[serde(default)]
+    pub kex: Vec<String>,
+    #[serde(default)]
+    pub cipher: Vec<String>,
+    #[serde(default)]
+    pub mac: Vec<String>,
+    #[serde(default)]
+    pub host_key: Vec<String>,
+    #[serde(default)]
+    pub compression: Vec<String>,
+}
+
+/// A preconfigured port-forward carried on the spec. WS2 only carries the data;
+/// establishing forwards is WS4's job (see the seam in `daemon::ssh`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SshForwardKind {
+    Local,
+    Remote,
+    Dynamic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshForwardRule {
+    pub kind: SshForwardKind,
+    pub bind_host: String,
+    pub bind_port: u16,
+    #[serde(default)]
+    pub target_host: String,
+    #[serde(default)]
+    pub target_port: u16,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+fn default_term() -> String {
+    "xterm-256color".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// The fully-resolved recipe for one native SSH connection + shell. See the
+/// module-level comment above for the trust/secret model.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeSshSpec {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+
+    pub auth_mode: SshAuthMode,
+    /// Private-key paths to try, in order. `%h`/`%r` expand to host/user.
+    #[serde(default)]
+    pub identity_files: Vec<String>,
+    #[serde(default)]
+    pub agent_forward: bool,
+
+    /// Cleartext password, pre-resolved by the GUI from the keychain. SECRET.
+    #[serde(default)]
+    pub password: Option<String>,
+    /// Passphrases for encrypted identity files, keyed by identity-file path (as
+    /// listed in `identity_files`). Pre-resolved by the GUI. SECRET.
+    #[serde(default)]
+    pub key_passphrases: Option<std::collections::HashMap<String, String>>,
+
+    #[serde(default)]
+    pub proxy: SshProxy,
+    /// Jump host: the GUI resolves a profile reference into a nested spec, so a
+    /// multi-level chain is a chain of `jump` boxes. The daemon opens a
+    /// `direct-tcpip` channel on the (recursively established) jump connection and
+    /// uses it as this connection's transport.
+    #[serde(default)]
+    pub jump: Option<Box<NativeSshSpec>>,
+
+    /// Preconfigured forwards — carried only (WS4 establishes them).
+    #[serde(default)]
+    pub forwards: Vec<SshForwardRule>,
+
+    #[serde(default)]
+    pub keepalive_interval_s: Option<u32>,
+    #[serde(default)]
+    pub keepalive_count_max: Option<u32>,
+    #[serde(default)]
+    pub connect_timeout_s: Option<u32>,
+
+    #[serde(default)]
+    pub algorithms: SshAlgorithms,
+    /// X11 forwarding — carried only (implementing X11 channels is deferred).
+    #[serde(default)]
+    pub x11: bool,
+
+    #[serde(default = "default_term")]
+    pub term: String,
+    #[serde(default = "default_true")]
+    pub verify_host_keys: bool,
+    #[serde(default)]
+    pub skip_banner: bool,
+    /// Lines sent verbatim (each + `\n`) to the shell channel after it starts,
+    /// sequentially, with no expect-logic.
+    #[serde(default)]
+    pub login_script: Vec<String>,
+
+    /// UI labeling only — never affects connection behavior.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+}
+
+impl NativeSshSpec {
+    /// A clone with all secrets stripped (`password`, `key_passphrases`), and the
+    /// jump chain stripped recursively. This is the form that is safe to persist
+    /// (e.g. in `core::session` for native-SSH pane respawn) — the daemon
+    /// re-resolves secrets from the GUI/keychain on the next connect.
+    #[allow(dead_code)] // consumed by WS6 when persisting native-SSH panes
+    pub fn without_secrets(&self) -> NativeSshSpec {
+        NativeSshSpec {
+            password: None,
+            key_passphrases: None,
+            jump: self.jump.as_ref().map(|j| Box::new(j.without_secrets())),
+            ..self.clone()
+        }
+    }
+}
+
+impl std::fmt::Debug for NativeSshSpec {
+    /// Redacts secrets so a spec can be logged. `password` / `key_passphrases`
+    /// collapse to a presence marker; the nested `jump` spec redacts recursively
+    /// through this same impl.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeSshSpec")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("auth_mode", &self.auth_mode)
+            .field("identity_files", &self.identity_files)
+            .field("agent_forward", &self.agent_forward)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field(
+                "key_passphrases",
+                &self.key_passphrases.as_ref().map(|m| m.len()),
+            )
+            .field("proxy", &self.proxy)
+            .field("jump", &self.jump)
+            .field("forwards", &self.forwards)
+            .field("keepalive_interval_s", &self.keepalive_interval_s)
+            .field("keepalive_count_max", &self.keepalive_count_max)
+            .field("connect_timeout_s", &self.connect_timeout_s)
+            .field("algorithms", &self.algorithms)
+            .field("x11", &self.x11)
+            .field("term", &self.term)
+            .field("verify_host_keys", &self.verify_host_keys)
+            .field("skip_banner", &self.skip_banner)
+            .field("login_script", &self.login_script)
+            .field("display_name", &self.display_name)
+            .field("profile_id", &self.profile_id)
+            .finish()
+    }
+}
+
+/// One prompt in a keyboard-interactive challenge (RFC 4256).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KiPrompt {
+    pub text: String,
+    /// Whether the user's keystrokes should be echoed (false for passwords).
+    pub echo: bool,
+}
+
+/// An interactive decision the daemon needs from the GUI during a native-SSH
+/// spawn. Sent as `DaemonMsg::AuthPrompt` over the pane's own connection, before
+/// any `Output`; the daemon blocks that auth/host-key step until the matching
+/// `ClientMsg::AuthResponse` arrives (or a timeout fails it cleanly).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuthPromptKind {
+    Password {
+        user: String,
+        host: String,
+    },
+    KeyPassphrase {
+        key_path: String,
+        comment: String,
+    },
+    KeyboardInteractive {
+        name: String,
+        instructions: String,
+        prompts: Vec<KiPrompt>,
+    },
+    HostKeyUnknown {
+        host: String,
+        port: u16,
+        algorithm: String,
+        fingerprint_sha256: String,
+    },
+    HostKeyChanged {
+        host: String,
+        port: u16,
+        algorithm: String,
+        fingerprint_sha256: String,
+        old_fingerprint_sha256: String,
+    },
+    /// A server auth banner. Fire-and-forget: no response is expected or awaited.
+    Banner {
+        text: String,
+    },
+}
+
+/// The GUI's reply to an [`AuthPromptKind`]. `Secret`/`Secrets` carry cleartext
+/// (a password, a passphrase, or keyboard-interactive answers); the hand-written
+/// `Debug` redacts them.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuthResponse {
+    Secret(String),
+    Secrets(Vec<String>),
+    HostKeyDecision { accept: bool, remember: bool },
+    /// The user dismissed the prompt; the daemon fails the auth step cleanly.
+    Cancelled,
+}
+
+impl std::fmt::Debug for AuthResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthResponse::Secret(_) => f.write_str("Secret(<redacted>)"),
+            AuthResponse::Secrets(v) => write!(f, "Secrets(<{} redacted>)", v.len()),
+            AuthResponse::HostKeyDecision { accept, remember } => f
+                .debug_struct("HostKeyDecision")
+                .field("accept", accept)
+                .field("remember", remember)
+                .finish(),
+            AuthResponse::Cancelled => f.write_str("Cancelled"),
+        }
+    }
+}
+
+/// Progress of a native-SSH spawn, sent as `DaemonMsg::SshStatus` so the GUI can
+/// show a status line while the connection comes up (or explain a failure).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SshPhase {
+    Connecting,
+    Authenticating,
+    Connected,
+    Failed { reason: String },
 }
 
 /// Messages the GUI client sends to the daemon.
@@ -331,6 +636,23 @@ pub enum ClientMsg {
     ListLoopbackForwards,
     /// Close one active SSH loopback port-forward.
     CloseLoopbackForward(LoopbackForwardId),
+    /// Create a new pane backed by the daemon's native russh session engine.
+    /// Like `Spawn`, but the pane's byte source is an SSH shell channel rather
+    /// than a local PTY. `spec` is fully self-contained (see [`NativeSshSpec`]).
+    /// This connection then becomes that pane's stream, and also carries the
+    /// interactive auth/host-key exchange (`AuthPrompt`/`AuthResponse`).
+    SpawnNativeSsh {
+        cwd: Option<PathBuf>,
+        size: WinSize,
+        spec: Box<NativeSshSpec>,
+    },
+    /// The GUI's reply to a `DaemonMsg::AuthPrompt` with a matching `request_id`.
+    /// Delivered on the pane's own connection while its native-SSH spawn is still
+    /// authenticating.
+    AuthResponse {
+        request_id: u64,
+        response: AuthResponse,
+    },
 }
 
 /// Messages the daemon sends back to the GUI client.
@@ -366,6 +688,17 @@ pub enum DaemonMsg {
     LoopbackForward(LoopbackForward),
     /// Reply to `ListLoopbackForwards` and `CloseLoopbackForward`.
     LoopbackForwardList(Vec<LoopbackForwardInfo>),
+    /// A native-SSH spawn needs an interactive decision from the GUI (password,
+    /// passphrase, keyboard-interactive answers, or a host-key confirmation).
+    /// Sent before `Output` starts flowing; the daemon blocks the auth step until
+    /// a `ClientMsg::AuthResponse` with the same `request_id` arrives. A `Banner`
+    /// prompt is fire-and-forget (no response awaited).
+    AuthPrompt {
+        request_id: u64,
+        prompt: AuthPromptKind,
+    },
+    /// Progress of a native-SSH spawn (connect/auth/connected/failed).
+    SshStatus { phase: SshPhase },
     /// A request failed (e.g. `Attach` to an unknown/dead pane id).
     Error(String),
 }
@@ -396,6 +729,12 @@ mod kind {
     /// `ShellSpec`, ignore the unknown managed-SSH field, and silently launch a
     /// plain `ssh` tab with no ControlMaster/RemoteContext.
     pub const SPAWN_MANAGED_SSH: u8 = 13;
+    /// `SpawnNativeSsh` — the native russh session engine. A brand-new kind, so a
+    /// daemon that predates WS2 rejects it (unknown kind → error) rather than
+    /// mis-spawning; a native-SSH pane must never silently fall back to anything.
+    pub const SPAWN_NATIVE_SSH: u8 = 14;
+    /// `AuthResponse` — the GUI's reply to an `AUTH_PROMPT`.
+    pub const AUTH_RESPONSE: u8 = 15;
 
     // Daemon -> client
     pub const SPAWNED: u8 = 1;
@@ -410,6 +749,10 @@ mod kind {
     pub const REMOTE_CONTEXT: u8 = 10;
     pub const LOOPBACK_FORWARD: u8 = 11;
     pub const LOOPBACK_FORWARD_LIST: u8 = 12;
+    /// `AuthPrompt` — an interactive auth/host-key request during a native-SSH spawn.
+    pub const AUTH_PROMPT: u8 = 13;
+    /// `SshStatus` — native-SSH spawn progress.
+    pub const SSH_STATUS: u8 = 14;
 }
 
 /// Write one framed message: `[u32 LE len][u8 kind][payload]`.
@@ -525,6 +868,13 @@ impl ClientMsg {
             ClientMsg::CloseLoopbackForward(id) => {
                 write_frame(w, kind::CLOSE_LOOPBACK_FORWARD, &to_json(id)?)
             }
+            ClientMsg::SpawnNativeSsh { cwd, size, spec } => {
+                write_frame(w, kind::SPAWN_NATIVE_SSH, &to_json(&(cwd, size, spec))?)
+            }
+            ClientMsg::AuthResponse {
+                request_id,
+                response,
+            } => write_frame(w, kind::AUTH_RESPONSE, &to_json(&(request_id, response))?),
         }
     }
 
@@ -558,6 +908,17 @@ impl ClientMsg {
             kind::ENSURE_LOOPBACK_FORWARD => ClientMsg::EnsureLoopbackForward(from_json(&payload)?),
             kind::LIST_LOOPBACK_FORWARDS => ClientMsg::ListLoopbackForwards,
             kind::CLOSE_LOOPBACK_FORWARD => ClientMsg::CloseLoopbackForward(from_json(&payload)?),
+            kind::SPAWN_NATIVE_SSH => {
+                let (cwd, size, spec) = from_json(&payload)?;
+                ClientMsg::SpawnNativeSsh { cwd, size, spec }
+            }
+            kind::AUTH_RESPONSE => {
+                let (request_id, response) = from_json(&payload)?;
+                ClientMsg::AuthResponse {
+                    request_id,
+                    response,
+                }
+            }
             other => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -599,6 +960,10 @@ impl DaemonMsg {
             DaemonMsg::LoopbackForwardList(forwards) => {
                 write_frame(w, kind::LOOPBACK_FORWARD_LIST, &to_json(forwards)?)
             }
+            DaemonMsg::AuthPrompt { request_id, prompt } => {
+                write_frame(w, kind::AUTH_PROMPT, &to_json(&(request_id, prompt))?)
+            }
+            DaemonMsg::SshStatus { phase } => write_frame(w, kind::SSH_STATUS, &to_json(phase)?),
             DaemonMsg::Error(msg) => write_frame(w, kind::ERROR, &to_json(msg)?),
         }
     }
@@ -628,6 +993,13 @@ impl DaemonMsg {
             kind::REMOTE_CONTEXT => DaemonMsg::RemoteContext(from_json(&payload)?),
             kind::LOOPBACK_FORWARD => DaemonMsg::LoopbackForward(from_json(&payload)?),
             kind::LOOPBACK_FORWARD_LIST => DaemonMsg::LoopbackForwardList(from_json(&payload)?),
+            kind::AUTH_PROMPT => {
+                let (request_id, prompt) = from_json(&payload)?;
+                DaemonMsg::AuthPrompt { request_id, prompt }
+            }
+            kind::SSH_STATUS => DaemonMsg::SshStatus {
+                phase: from_json(&payload)?,
+            },
             kind::ERROR => DaemonMsg::Error(from_json(&payload)?),
             other => {
                 return Err(io::Error::new(
@@ -1116,5 +1488,210 @@ mod tests {
         assert!(info.alive);
         assert_eq!(info.cwd, None);
         assert_eq!(info.title, "");
+    }
+
+    fn sample_native_spec() -> NativeSshSpec {
+        let mut passphrases = std::collections::HashMap::new();
+        passphrases.insert("~/.ssh/id_ed25519".to_string(), "topsecret".to_string());
+        NativeSshSpec {
+            host: "example.com".into(),
+            port: 2222,
+            user: "deploy".into(),
+            auth_mode: SshAuthMode::Auto,
+            identity_files: vec!["~/.ssh/id_ed25519".into()],
+            agent_forward: true,
+            password: Some("hunter2".into()),
+            key_passphrases: Some(passphrases),
+            proxy: SshProxy::Socks {
+                host: "127.0.0.1".into(),
+                port: 1080,
+            },
+            jump: Some(Box::new(NativeSshSpec {
+                host: "bastion".into(),
+                port: 22,
+                user: "jump".into(),
+                auth_mode: SshAuthMode::Agent,
+                identity_files: vec![],
+                agent_forward: false,
+                password: Some("jumppass".into()),
+                key_passphrases: None,
+                proxy: SshProxy::None,
+                jump: None,
+                forwards: vec![],
+                keepalive_interval_s: None,
+                keepalive_count_max: None,
+                connect_timeout_s: None,
+                algorithms: SshAlgorithms::default(),
+                x11: false,
+                term: "xterm-256color".into(),
+                verify_host_keys: true,
+                skip_banner: false,
+                login_script: vec![],
+                display_name: None,
+                profile_id: None,
+            })),
+            forwards: vec![SshForwardRule {
+                kind: SshForwardKind::Local,
+                bind_host: "127.0.0.1".into(),
+                bind_port: 8000,
+                target_host: "127.0.0.1".into(),
+                target_port: 80,
+                description: Some("web".into()),
+            }],
+            keepalive_interval_s: Some(30),
+            keepalive_count_max: Some(3),
+            connect_timeout_s: Some(20),
+            algorithms: SshAlgorithms {
+                cipher: vec!["aes256-ctr".into()],
+                ..Default::default()
+            },
+            x11: true,
+            term: "xterm-256color".into(),
+            verify_host_keys: true,
+            skip_banner: false,
+            login_script: vec!["tmux attach".into()],
+            display_name: Some("prod-web".into()),
+            profile_id: Some("uuid-1".into()),
+        }
+    }
+
+    /// The wire spec round-trips through serde, secrets and jump chain included.
+    #[test]
+    fn native_ssh_spec_serde_round_trips() {
+        let spec = sample_native_spec();
+        let json = serde_json::to_string(&spec).unwrap();
+        let back: NativeSshSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(spec, back);
+    }
+
+    /// Missing optional fields decode via `#[serde(default)]` (forward compat).
+    #[test]
+    fn native_ssh_spec_tolerates_minimal_json() {
+        let spec: NativeSshSpec = serde_json::from_str(
+            r#"{"host":"h","port":22,"user":"u","auth_mode":"auto"}"#,
+        )
+        .unwrap();
+        assert_eq!(spec.term, "xterm-256color"); // defaulted
+        assert!(spec.verify_host_keys); // defaulted true
+        assert_eq!(spec.password, None);
+        assert!(spec.jump.is_none());
+    }
+
+    /// The hand-written `Debug` must never leak secrets — for the spec *or* its
+    /// nested jump spec — and `AuthResponse::Secret(s)` redact too.
+    #[test]
+    fn secrets_are_redacted_in_debug_output() {
+        let spec = sample_native_spec();
+        let dbg = format!("{spec:?}");
+        assert!(!dbg.contains("hunter2"), "password leaked: {dbg}");
+        assert!(!dbg.contains("topsecret"), "passphrase leaked: {dbg}");
+        assert!(!dbg.contains("jumppass"), "jump password leaked: {dbg}");
+        assert!(dbg.contains("<redacted>"));
+
+        assert_eq!(
+            format!("{:?}", AuthResponse::Secret("pw".into())),
+            "Secret(<redacted>)"
+        );
+        assert_eq!(
+            format!("{:?}", AuthResponse::Secrets(vec!["a".into(), "b".into()])),
+            "Secrets(<2 redacted>)"
+        );
+    }
+
+    /// `without_secrets` clears passwords/passphrases recursively but keeps
+    /// everything else, so the sanitized spec is safe to persist.
+    #[test]
+    fn without_secrets_strips_password_and_passphrases_recursively() {
+        let clean = sample_native_spec().without_secrets();
+        assert_eq!(clean.password, None);
+        assert!(clean.key_passphrases.is_none());
+        assert_eq!(clean.jump.as_ref().unwrap().password, None);
+        // Non-secret fields survive.
+        assert_eq!(clean.host, "example.com");
+        assert_eq!(clean.login_script, vec!["tmux attach".to_string()]);
+    }
+
+    /// The new native-SSH client/daemon message variants round-trip through the
+    /// frame codec (new kind bytes included).
+    #[test]
+    fn native_ssh_messages_round_trip() {
+        let client_msgs = vec![
+            ClientMsg::SpawnNativeSsh {
+                cwd: Some(PathBuf::from("/work")),
+                size: SIZE,
+                spec: Box::new(sample_native_spec()),
+            },
+            ClientMsg::AuthResponse {
+                request_id: 7,
+                response: AuthResponse::Secret("pw".into()),
+            },
+            ClientMsg::AuthResponse {
+                request_id: 8,
+                response: AuthResponse::HostKeyDecision {
+                    accept: true,
+                    remember: true,
+                },
+            },
+        ];
+        let mut buf = Vec::new();
+        for m in &client_msgs {
+            m.encode(&mut buf).unwrap();
+        }
+        let mut cur = std::io::Cursor::new(buf);
+        for m in &client_msgs {
+            assert_eq!(*m, ClientMsg::read(&mut cur).unwrap());
+        }
+
+        let daemon_msgs = vec![
+            DaemonMsg::AuthPrompt {
+                request_id: 1,
+                prompt: AuthPromptKind::HostKeyChanged {
+                    host: "h".into(),
+                    port: 22,
+                    algorithm: "ssh-ed25519".into(),
+                    fingerprint_sha256: "SHA256:new".into(),
+                    old_fingerprint_sha256: "SHA256:old".into(),
+                },
+            },
+            DaemonMsg::AuthPrompt {
+                request_id: 2,
+                prompt: AuthPromptKind::KeyboardInteractive {
+                    name: "2FA".into(),
+                    instructions: "enter code".into(),
+                    prompts: vec![KiPrompt {
+                        text: "Code:".into(),
+                        echo: true,
+                    }],
+                },
+            },
+            DaemonMsg::SshStatus {
+                phase: SshPhase::Failed {
+                    reason: "nope".into(),
+                },
+            },
+        ];
+        let mut buf = Vec::new();
+        for m in &daemon_msgs {
+            m.encode(&mut buf).unwrap();
+        }
+        let mut cur = std::io::Cursor::new(buf);
+        for m in &daemon_msgs {
+            assert_eq!(*m, DaemonMsg::read(&mut cur).unwrap());
+        }
+    }
+
+    /// The native-SSH spawn uses a brand-new kind byte, so a pre-WS2 daemon
+    /// rejects it (unknown kind) rather than mis-spawning.
+    #[test]
+    fn native_ssh_spawn_uses_new_kind_byte() {
+        let msg = ClientMsg::SpawnNativeSsh {
+            cwd: None,
+            size: SIZE,
+            spec: Box::new(sample_native_spec()),
+        };
+        let mut buf = Vec::new();
+        msg.encode(&mut buf).unwrap();
+        let (k, _) = read_frame(&mut std::io::Cursor::new(&buf)).unwrap();
+        assert_eq!(k, kind::SPAWN_NATIVE_SSH);
     }
 }

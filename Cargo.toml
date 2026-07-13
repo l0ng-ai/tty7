@@ -61,6 +61,30 @@ notify = "8"
 # a single code path across platforms instead of hand-rolling fd/ioctl/signal code.
 portable-pty = "0.8"
 
+# Native (pure-Rust) SSH client for the daemon's russh session engine
+# (`daemon::ssh`). Replaces shelling out to the system `ssh` binary for managed
+# connections: it gives us the protocol stack that GUI-hosted auth, host-key
+# prompts, in-memory connection reuse, and (later) SFTP / native port-forwarding
+# all need. 0.62 folded the old `russh-keys` crate in as `russh::keys` (key
+# parsing + ssh-agent client). The async russh session lives on a small tokio
+# runtime owned by `daemon::ssh`; the rest of the daemon stays std-threads and
+# bridges to it through blocking `Read`/`Write` adapters.
+russh = "0.62"
+
+# tokio powers only the russh session engine — a single runtime `daemon::ssh`
+# owns. The daemon's PTY/reader/writer threads remain std threads and never touch
+# it; they cross into async through bounded/unbounded channels (the blocking
+# `Read`/`Write` adapters in `daemon::ssh::session`).
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+    "macros",
+    "process",
+] }
+
 # SIMD byte search for the OSC tokenizer's Ground/Ignore fast paths — the
 # sniffers sit on the full-throughput output stream (100+ MB/s at full drain),
 # where a per-byte state machine costs a measurable slice of the reader loop.
@@ -114,6 +138,9 @@ gpui_platform = { workspace = true, features = ["x11", "wayland"] }
 # into test builds and never reaches a release binary.
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+# `test-util` unlocks tokio's paused clock (`start_paused`) so the ssh prompt
+# broker's timeout/retry tests run instantly instead of in real time. Dev-only.
+tokio = { version = "1", features = ["test-util", "macros", "rt"] }
 
 [lints]
 workspace = true

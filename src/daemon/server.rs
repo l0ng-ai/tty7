@@ -258,6 +258,39 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             stream_pane(pane, id, read_stream, write_stream, registry)
         }
 
+        ClientMsg::SpawnNativeSsh { cwd: _, size, spec } => {
+            // A native russh-backed pane. Same lifecycle as `Spawn` (allocate,
+            // reclaim-on-detached-death, reply `Spawned`, attach, stream); the pane
+            // spawns fast and the connect/auth runs asynchronously, sending
+            // `AuthPrompt`/`SshStatus` over this same connection.
+            let id = registry.alloc_id();
+            let on_dead = {
+                let registry = registry.clone();
+                move || {
+                    std::thread::Builder::new()
+                        .name("tty7-daemon-pane-reap".to_string())
+                        .spawn(move || {
+                            registry.remove(id);
+                        })
+                        .ok();
+                }
+            };
+            let pane = match DaemonPane::spawn_native_ssh(id, size, spec, on_dead) {
+                Ok(p) => p,
+                Err(e) => {
+                    let mut w = write_stream;
+                    let _ = DaemonMsg::Error(format!("native ssh spawn failed: {e}")).encode(&mut w);
+                    return Err(e);
+                }
+            };
+            registry.insert(pane.clone());
+            {
+                let mut w = &write_stream;
+                DaemonMsg::Spawned { pane_id: id }.encode(&mut w)?;
+            }
+            stream_pane(pane, id, read_stream, write_stream, registry)
+        }
+
         // The attach `size` is the client's pre-layout placeholder and is
         // deliberately ignored: the daemon reports the recorded geometry via
         // `DaemonMsg::Size` for the replay, and the client sends a real
@@ -407,6 +440,12 @@ fn run_stream(
         match ClientMsg::read(&mut read_stream) {
             Ok(ClientMsg::Input(bytes)) => pane.write_input(&bytes),
             Ok(ClientMsg::Resize(size)) => pane.resize(size),
+            // The GUI's reply to a native-SSH auth/host-key prompt; route it to the
+            // pane's prompt broker (a no-op for non-native panes).
+            Ok(ClientMsg::AuthResponse {
+                request_id,
+                response,
+            }) => pane.deliver_auth_response(request_id, response),
             Ok(ClientMsg::Detach) => break,
             Ok(ClientMsg::Kill { pane_id }) => {
                 // Honor a kill for *this* pane; for another id, just remove+kill it

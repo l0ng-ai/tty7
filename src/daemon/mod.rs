@@ -28,6 +28,9 @@ pub mod protocol;
 pub(crate) mod remote;
 pub mod server;
 pub mod spawn;
+/// Native (russh) SSH session engine — see the module docs and
+/// `docs/ssh-native-architecture.md`.
+pub mod ssh;
 pub mod transport;
 
 pub(crate) const DETECTED_SHELL_ENV: &str = "TTY7_DETECTED_SHELL";
