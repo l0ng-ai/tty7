@@ -50,6 +50,8 @@ actions!(
         PasteText,
         SelectAll,
         FindInTerminal,
+        FindNext,
+        FindPrevious,
         ClearScrollback
     ]
 );
@@ -1140,7 +1142,7 @@ impl TerminalView {
     fn handle_cmd_shortcut(
         &mut self,
         ks: &gpui::Keystroke,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> CmdKey {
         let m = &ks.modifiers;
@@ -1200,21 +1202,11 @@ impl TerminalView {
                 }
                 CmdKey::Consumed
             }
-            "f" => {
-                self.open_search(window, cx);
-                CmdKey::Consumed
-            }
-            // ⌘G / ⌘⇧G step to the next / previous match while the bar is open
-            // (macOS's standard "find again" keys), mirroring Enter / ⇧Enter.
-            "g" if self.search.is_some() => {
-                let dir = if m.shift {
-                    Direction::Left
-                } else {
-                    Direction::Right
-                };
-                self.step_match(dir, cx);
-                CmdKey::Consumed
-            }
+            // Find (open bar) and ⌘G / ⌘⇧G (next / previous match) are registered
+            // keybindings — `FindInTerminal` / `FindNext` / `FindPrevious` — so they
+            // are visible and rebindable in Settings and get a working default on
+            // every platform (⌘F on macOS, Ctrl+Shift+F elsewhere). They dispatch
+            // through `on_action`, not this inline path.
             "a" => {
                 // At the prompt, ⌘A selects the whole edited line; otherwise it
                 // selects the whole terminal buffer (scrollback included).
@@ -4019,6 +4011,14 @@ impl Render for TerminalView {
             .on_action(
                 cx.listener(|this, _: &FindInTerminal, window, cx| this.open_search(window, cx)),
             )
+            // Find-again: step to the next / previous match. No-op when the bar is
+            // closed (nothing to step through).
+            .on_action(cx.listener(|this, _: &FindNext, _w, cx| {
+                this.step_match(Direction::Right, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FindPrevious, _w, cx| {
+                this.step_match(Direction::Left, cx);
+            }))
             .on_action(cx.listener(|this, _: &ClearScrollback, _w, cx| this.clear_scrollback(cx)))
             // Tab / Shift-Tab are claimed here (in the "Terminal" key context) so
             // they reach the shell instead of triggering Root's focus navigation.
@@ -4079,10 +4079,10 @@ impl Render for TerminalView {
                         menu_row_with_hint("Select All", mac_only("secondary-a")),
                     )
                     .separator()
-                    .menu_element(
-                        Box::new(FindInTerminal),
-                        menu_row_with_hint("Find…", mac_only("secondary-f")),
-                    )
+                    // Find now has a real registered binding, so let the menu
+                    // auto-render its shortcut hint (correct per platform) like the
+                    // items below, instead of a hand-rolled mac-only one.
+                    .menu("Find…", Box::new(FindInTerminal))
                     .menu("Clear", Box::new(ClearScrollback))
                     .separator()
                     .menu("Split Right", Box::new(SplitRight))

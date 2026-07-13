@@ -7,7 +7,7 @@ use gpui::{App, Global, KeyBinding, Keystroke, NoAction};
 
 use crate::core::actions::*;
 use crate::core::config::Config;
-use crate::terminal::view::ClearScrollback;
+use crate::terminal::view::{ClearScrollback, FindInTerminal, FindNext, FindPrevious};
 use crate::ui::theme::set_menus;
 
 /// The set of keystrokes currently installed for app actions, remembered so a
@@ -159,6 +159,34 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         // this steers clear of collisions) — reachable from the command palette
         // and Settings → Window & Tabs, and bindable there like any other action.
         ("ToggleTabSidebar", ""),
+        // Buffer search. ⌘F on macOS; elsewhere `secondary-f` (Ctrl+F) is
+        // readline's forward-char, so follow the GUI-terminal convention and open
+        // find on Ctrl+Shift+F, leaving Ctrl+F to the shell. Find-again is ⌘G/⌘⇧G
+        // on macOS and F3/Shift+F3 elsewhere (the Windows/Linux norm).
+        (
+            "FindInTerminal",
+            if cfg!(target_os = "macos") {
+                "secondary-f"
+            } else {
+                "ctrl-shift-f"
+            },
+        ),
+        (
+            "FindNext",
+            if cfg!(target_os = "macos") {
+                "secondary-g"
+            } else {
+                "f3"
+            },
+        ),
+        (
+            "FindPrevious",
+            if cfg!(target_os = "macos") {
+                "secondary-shift-g"
+            } else {
+                "shift-f3"
+            },
+        ),
         // Like Terminal.app / iTerm2 / Ghostty ⌘K: wipe the screen + scrollback.
         ("ClearScrollback", "secondary-k"),
         ("OpenSettings", "secondary-,"),
@@ -437,6 +465,12 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         // Terminal-scoped (the handler lives on the terminal surface): the "Terminal"
         // context keeps ⌘K inert in the settings tab / home page instead of binding a
         // dead global chord there.
+        // Terminal-scoped like ClearScrollback: the handlers live on the terminal
+        // surface, so the "Terminal" context keeps these inert on the settings /
+        // home pages instead of binding a dead global chord there.
+        "FindInTerminal" => KeyBinding::new(keystroke, FindInTerminal, Some("Terminal")),
+        "FindNext" => KeyBinding::new(keystroke, FindNext, Some("Terminal")),
+        "FindPrevious" => KeyBinding::new(keystroke, FindPrevious, Some("Terminal")),
         "ClearScrollback" => KeyBinding::new(keystroke, ClearScrollback, Some("Terminal")),
         "OpenSettings" => KeyBinding::new(keystroke, OpenSettings, None),
         "Quit" => KeyBinding::new(keystroke, Quit, None),
