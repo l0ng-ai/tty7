@@ -12,5 +12,6 @@ pub mod config;
 pub mod osc;
 pub mod session;
 pub mod shells;
+pub mod ssh_config;
 pub mod threads;
 pub mod update;

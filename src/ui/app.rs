@@ -16,6 +16,7 @@ use crate::core::actions::*;
 use crate::core::config::{Config, NewTabPosition, ShellConfig};
 use crate::core::session::{Session, SessionAxis, SessionPane, SessionTab};
 use crate::core::shells::DetectedShell;
+use crate::core::ssh_config;
 use crate::daemon::protocol::{ShellSpec, SshSpec};
 use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::palette::{Command, CommandKind, PaletteEvent, PaletteView};
@@ -936,6 +937,10 @@ impl Tty7App {
             return;
         };
         let ssh = SshSpec { target, args };
+        self.open_managed_ssh_spec(ssh, window, cx);
+    }
+
+    fn open_managed_ssh_spec(&mut self, ssh: SshSpec, window: &mut Window, cx: &mut Context<Self>) {
         if ssh.validate().is_err() {
             return;
         }
@@ -1422,6 +1427,13 @@ impl Tty7App {
     /// "Switch to Tab: …" entry per open tab (label matches the tab strip).
     fn palette_commands(&self, cx: &App) -> Vec<Command> {
         let mut commands = Command::base_commands();
+        let profiles = ssh_config::discover_profiles();
+        if !profiles.is_empty() {
+            commands.push(Command {
+                title: "SSH Profiles…".to_string(),
+                kind: CommandKind::OpenSshProfilePicker(profiles),
+            });
+        }
         for (i, tab) in self.tabs.iter().enumerate() {
             // Skip the active tab — "switch to the tab you're already on" is a
             // no-op that only pads the list.
@@ -1463,7 +1475,7 @@ impl Tty7App {
     ) {
         match ev {
             PaletteEvent::Confirm(kind) => {
-                let kind = *kind;
+                let kind = kind.clone();
                 self.close_palette(window, cx);
                 self.run_command(kind, window, cx);
             }
@@ -1522,9 +1534,19 @@ impl Tty7App {
                     self.set_preset(&id, window, cx);
                 }
             }
-            // Handled inside `PaletteView` (opens the theme sub-list); it never
-            // emits a `Confirm` for this variant, so it never reaches here.
-            OpenThemePicker => {}
+            OpenSshProfile(profile) => {
+                self.open_managed_ssh_spec(
+                    SshSpec {
+                        target: profile.alias,
+                        args: Vec::new(),
+                    },
+                    window,
+                    cx,
+                );
+            }
+            // Handled inside `PaletteView` (opens a sub-list); these never emit a
+            // `Confirm` for this variant, so they never reach here.
+            OpenThemePicker | OpenSshProfilePicker(_) => {}
             ActivateTab(i) => self.activate(i, window, cx),
         }
     }

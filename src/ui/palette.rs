@@ -20,13 +20,12 @@ use gpui_component::{
 };
 
 use crate::core::config::Config;
+use crate::core::ssh_config::SshProfile;
 
 /// What a command actually does. Most variants map to an existing `Tty7App`
-/// operation dispatched in `app.rs` (so it can touch tabs/panes); the two
-/// exceptions are handled entirely inside [`PaletteView`]: `OpenThemePicker`
-/// swaps the palette to the theme sub-list and never reaches the host, and
-/// `SetTheme` is emitted from that sub-list.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// operation dispatched in `app.rs` (so it can touch tabs/panes); submenu
+/// openers are handled inside [`PaletteView`] and never reach the host.
+#[derive(Clone, PartialEq, Eq)]
 pub enum CommandKind {
     NewTab,
     SplitRight,
@@ -44,9 +43,13 @@ pub enum CommandKind {
     RestartDaemon,
     /// Opens the theme sub-list (a nested palette). Handled in `PaletteView`.
     OpenThemePicker,
+    /// Opens the SSH profile sub-list. Handled in `PaletteView`.
+    OpenSshProfilePicker(Vec<SshProfile>),
     /// Apply the preset at this index in `presets::all()`. Emitted from the
     /// theme sub-list.
     SetTheme(usize),
+    /// Open a tty7-managed SSH tab for this discovered OpenSSH host alias.
+    OpenSshProfile(SshProfile),
     /// Switch to the tab at this index in `Tty7App::tabs`.
     ActivateTab(usize),
 }
@@ -55,7 +58,7 @@ impl CommandKind {
     /// The action whose keystroke should be shown beside this command in the
     /// palette, if any. Commands with no global binding (Change Theme and its
     /// sub-entries, Find, tab switching) return `None` and render without a hint.
-    fn binding_action(self) -> Option<&'static str> {
+    fn binding_action(&self) -> Option<&'static str> {
         use CommandKind::*;
         Some(match self {
             NewTab => "NewTab",
@@ -71,7 +74,12 @@ impl CommandKind {
             ReopenClosedTab => "ReopenClosedTab",
             OpenSettings => "OpenSettings",
             RestartDaemon => "RestartDaemon",
-            FindInTerminal | OpenThemePicker | SetTheme(_) | ActivateTab(_) => return None,
+            FindInTerminal
+            | OpenThemePicker
+            | OpenSshProfilePicker(_)
+            | SetTheme(_)
+            | OpenSshProfile(_)
+            | ActivateTab(_) => return None,
         })
     }
 }
@@ -139,6 +147,18 @@ impl Command {
             })
             .collect()
     }
+
+    pub fn ssh_profile_commands(profiles: Vec<SshProfile>) -> Vec<Command> {
+        profiles
+            .into_iter()
+            .map(|profile| {
+                Command::new(
+                    format!("SSH: {}", profile.alias),
+                    CommandKind::OpenSshProfile(profile),
+                )
+            })
+            .collect()
+    }
 }
 
 /// Case-insensitive subsequence match: every character of `query` must appear
@@ -180,7 +200,7 @@ impl PaletteDelegate {
     /// The command kind at the given (filtered) index path, if any. Called by
     /// `app.rs` when the list confirms a selection.
     pub fn command_at(&self, ix: IndexPath) -> Option<CommandKind> {
-        self.matched.get(ix.row).map(|c| c.kind)
+        self.matched.get(ix.row).map(|c| c.kind.clone())
     }
 }
 
@@ -287,21 +307,28 @@ pub enum PaletteEvent {
     Dismiss,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PaletteMenu {
+    Root,
+    Theme,
+    SshProfiles,
+}
+
 /// The command palette as a self-contained view. It owns the `ListState`
 /// (search input, fuzzy filter, keyboard nav) and the scrim/card overlay
 /// chrome, and emits a [`PaletteEvent`] when the user confirms or dismisses.
 /// The host builds the root catalog and executes the chosen command, so this
-/// view stays ignorant of what most commands do — the one exception is the
-/// theme sub-list, a two-level flow the palette drives internally: picking
-/// "Change Theme…" swaps the list to the presets (Esc steps back to the root),
-/// and only the final `SetTheme` reaches the host.
+/// view stays ignorant of what most commands do. Submenus are two-level flows
+/// the palette drives internally: picking an opener swaps the list to that
+/// catalog, Esc steps back to the root, and only the final command reaches the
+/// host.
 pub struct PaletteView {
     list: Entity<ListState<PaletteDelegate>>,
-    /// The root catalog, kept so Esc inside the theme sub-list can restore it
-    /// instead of dismissing the whole palette.
+    /// The root catalog, kept so Esc inside a sub-list can restore it instead
+    /// of dismissing the whole palette.
     root: Vec<Command>,
-    /// True while the theme sub-list is showing.
-    in_submenu: bool,
+    /// Which catalog the palette is currently showing.
+    menu: PaletteMenu,
     /// Keeps the *current* list's event subscription alive. Replaced on every
     /// [`show`](Self::show) (root ⇄ sub-list) so it always targets the live list.
     _sub: Subscription,
@@ -314,7 +341,7 @@ impl PaletteView {
         Self {
             list,
             root: commands,
-            in_submenu: false,
+            menu: PaletteMenu::Root,
             _sub,
         }
     }
@@ -334,7 +361,7 @@ impl PaletteView {
         list
     }
 
-    /// Swap the visible list to `commands` (root ⇄ theme sub-list). Recreating
+    /// Swap the visible list to `commands` (root ⇄ sub-list). Recreating
     /// the `ListState` from scratch — rather than mutating the delegate in
     /// place — hands us a cleared search box, reset selection and fresh row
     /// cache for free, sidestepping the list's internal query/selection caching.
@@ -346,7 +373,7 @@ impl PaletteView {
     }
 
     /// Translate the current list's confirm/cancel into either a host-facing
-    /// event or an in-place transition into/out of the theme sub-list.
+    /// event or an in-place transition into/out of a sub-list.
     fn on_list_event(
         &mut self,
         list: &Entity<ListState<PaletteDelegate>>,
@@ -359,11 +386,16 @@ impl PaletteView {
                 let kind = list.read(cx).delegate().command_at(*ix);
                 match kind {
                     // A submenu opener never reaches the host: it swaps this
-                    // palette to the theme sub-list and stays open.
+                    // palette to another command catalog and stays open.
                     Some(CommandKind::OpenThemePicker) => {
-                        self.in_submenu = true;
+                        self.menu = PaletteMenu::Theme;
                         let themes = Command::theme_commands(cx);
                         self.show(themes, window, cx);
+                    }
+                    Some(CommandKind::OpenSshProfilePicker(profiles)) => {
+                        self.menu = PaletteMenu::SshProfiles;
+                        let profiles = Command::ssh_profile_commands(profiles);
+                        self.show(profiles, window, cx);
                     }
                     Some(kind) => cx.emit(PaletteEvent::Confirm(kind)),
                     None => cx.emit(PaletteEvent::Dismiss),
@@ -372,8 +404,8 @@ impl PaletteView {
             // Esc: from the sub-list, step back to the root catalog; from the
             // root, dismiss the palette.
             ListEvent::Cancel => {
-                if self.in_submenu {
-                    self.in_submenu = false;
+                if self.menu != PaletteMenu::Root {
+                    self.menu = PaletteMenu::Root;
                     let root = self.root.clone();
                     self.show(root, window, cx);
                 } else {
