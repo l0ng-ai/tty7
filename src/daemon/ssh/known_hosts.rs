@@ -88,8 +88,26 @@ pub fn check_in_file(path: &Path, host: &str, port: u16, key: &PublicKey) -> Hos
 pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> HostKeyStatus {
     let token = host_token(host, port);
     let our_alg = key.algorithm();
-    let mut changed: Option<String> = None;
 
+    // First pass — revocation wins outright. A `@revoked` line matching this exact
+    // key anywhere in the file rejects it, even if a trusted line for the same
+    // host+key appears earlier: a revoked key must never read as trusted.
+    for line in contents.lines() {
+        let Some(entry) = KnownHostsLine::parse(line) else {
+            continue;
+        };
+        if entry.marker != Some(Marker::Revoked) || !entry.matches_host(&token) {
+            continue;
+        }
+        if let Some(stored) = entry.key() {
+            if &stored == key {
+                return HostKeyStatus::Revoked;
+            }
+        }
+    }
+
+    // Second pass — normal known/changed resolution (revocation already handled).
+    let mut changed: Option<String> = None;
     for line in contents.lines() {
         let Some(entry) = KnownHostsLine::parse(line) else {
             continue;
@@ -102,14 +120,8 @@ pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> H
             // host-cert verification here, so skip rather than mis-flag it as a
             // changed key (PRD §3.4). Falls through to Unknown → confirm.
             Some(Marker::CertAuthority) => continue,
-            Some(Marker::Revoked) => {
-                if let Some(stored) = entry.key() {
-                    if &stored == key {
-                        return HostKeyStatus::Revoked;
-                    }
-                }
-                continue;
-            }
+            // Revocation was resolved in the first pass; ignore here.
+            Some(Marker::Revoked) => continue,
             None => {
                 let Some(stored) = entry.key() else { continue };
                 if stored.algorithm() != our_alg {
@@ -657,6 +669,18 @@ mod tests {
     fn revoked_line_hard_rejects_the_matching_key() {
         let ka = key(KEY_A);
         let file = format!("@revoked example.com {KEY_A}\n");
+        assert_eq!(
+            check_in_str(&file, "example.com", 22, &ka),
+            HostKeyStatus::Revoked
+        );
+    }
+
+    #[test]
+    fn revoked_takes_precedence_over_an_earlier_trusted_line() {
+        // A trusted line for the exact key appears FIRST, then a `@revoked` line
+        // for the same host+key. Revocation must win — the key is never trusted.
+        let ka = key(KEY_A);
+        let file = format!("example.com {KEY_A}\n@revoked example.com {KEY_A}\n");
         assert_eq!(
             check_in_str(&file, "example.com", 22, &ka),
             HostKeyStatus::Revoked
