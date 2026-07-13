@@ -1,3 +1,13 @@
+//! Loopback port forwarding for **compat-mode** (shell-out `ssh`) panes only.
+//!
+//! FROZEN (PRD §3.1). This drives OpenSSH's ControlMaster socket via
+//! `ssh -O forward`/`cancel`, so it is reachable exclusively from panes spawned
+//! through the system-ssh compat funnel (`RemoteKind::Ssh` with a
+//! `RemoteContext.control_path`). Native russh panes take the WS4 equivalent
+//! (`daemon::ssh::forward` + `SshManager::ensure_loopback_forward`); the server's
+//! `EnsureLoopbackForward` handler branches on `RemoteKind` so this module never
+//! sees a native pane. No new features may depend on it.
+
 use std::collections::HashMap;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;

@@ -7,6 +7,10 @@ API WS4/WS5 build on, and the seams intentionally left open.
 Code lives under `src/daemon/ssh/` plus a backend seam in `src/daemon/pane.rs`
 and wire types in `src/daemon/protocol.rs`.
 
+> **Status:** WS1–WS7 merged. The native russh engine is the default path; the
+> seams in §5 below are resolved (see the per-row notes). WS7 froze the shell-out
+> path as the system-ssh compat escape hatch — see [§6 Path policy](#6-path-policy-ws7).
+
 ---
 
 ## 1. Where the bytes flow
@@ -174,12 +178,46 @@ brief §5); SFTP opens a session channel and drives the subsystem.
 | X11 forwarding | `NativeSshSpec.x11` carried only; **seam documented** in `daemon::ssh::handler` (P1, deferred — needs `request_x11` + `server_channel_open_x11` + `$DISPLAY` bridge) | WS4/WS5 |
 | SFTP | none; `open_session_channel` provided for the subsystem | WS5 |
 | Agent forwarding channels | `agent_forward` requests `auth-agent-req` on the shell channel; incoming agent-channel bridging to `SSH_AUTH_SOCK` not wired | WS4/WS5 |
-| Session restore respawn | `SessionPane::Leaf.ssh_spec` (secret-free) persisted; reconnection UX not built | WS6 |
-| GUI auth/host-key sheets | protocol + broker ready; sheets not built | WS3 |
-| known_hosts hardening | plaintext / hashed / `@revoked` / `@cert-authority`-skip + safe append implemented; wildcard/negation matching and a management UI pending | WS3 |
+| Session restore respawn | **DONE (WS6)** — `SessionPane::Leaf.ssh_spec` (secret-free) persisted; `restart_ssh_session` / `resolve_persisted_ssh_spec` re-resolve keychain secrets from the named profile and respawn in place (FR-E4) | WS6 |
+| GUI auth/host-key sheets | **DONE (WS3)** — password / passphrase / keyboard-interactive / host-key sheets render in-pane over the prompting pane | WS3 |
+| known_hosts hardening | plaintext / hashed / `@revoked` / `@cert-authority`-skip + safe append implemented; management UI shipped in Settings → SSH (WS3) | WS3 |
 
 **Session restore note:** a *live* native-SSH pane reattaches for free (the
 daemon + russh connection stay up across GUI restarts). Only a *dead* pane needs
 respawn, for which WS6 persists `Leaf.ssh_spec` via `without_secrets()`. (Kept a
 leaf field per the WS2 brief; the four `SessionPane::Leaf` literals in `ui/` got
 a mechanical `ssh_spec: None`, no UI behavior changed.)
+
+---
+
+## 6. Path policy (WS7)
+
+Native russh is the default and only path with the full manager feature set;
+the shell-out `ssh` path is a **frozen** compat escape hatch (PRD §3.1). Every
+SSH entry point resolves to exactly one of the two backends:
+
+| Entry point | Routes to | Backend |
+|---|---|---|
+| Saved profile, `use_system_ssh` **off** (`connect_ssh_profile`) | `open_native_ssh_tab` | native russh |
+| Typed `user@host[:port]` (`OpenSshConnect` bare target) / palette QuickConnect row | `quick_connect` → `open_native_ssh_tab` | native russh |
+| Saved profile, `use_system_ssh` **on** | `compat_ssh_spec` → `open_managed_ssh_spec` | compat shell-out |
+| `~/.ssh/config` alias row (`OpenSshProfile`) | `open_compat_alias` → `open_managed_ssh_spec` | compat shell-out |
+| Typed line carrying ssh flags/args (`ssh … -p … -J …`) | `parse_ssh_connect_input` → `open_managed_ssh_spec` | compat shell-out |
+
+**Compat funnel.** `Tty7App::open_managed_ssh_spec` is the single funnel onto
+`SPAWN_MANAGED_SSH`; its only callers are the three escape hatches above. No
+default path reaches it.
+
+**Frozen surface** (kept working, never extended — module-level notes cite this
+policy): `daemon::protocol::SshSpec`, `daemon::pane::build_managed_ssh_command`
+(`SPAWN_MANAGED_SSH`), and `daemon::forward` (ControlMaster `ssh -O forward`
+loopback). The `EnsureLoopbackForward` server handler branches on `RemoteKind`
+so `daemon::forward` only ever sees compat panes; native panes take
+`daemon::ssh::forward` + `SshManager::ensure_loopback_forward` (direct-tcpip).
+
+**Compat feature gating (FR-C5).** A compat pane has no russh connection, so
+SFTP, the managed L/R/D forward add-form, and GUI auth/host-key sheets are
+unavailable — each surfaces a visible reason (SFTP panel notice, a muted line in
+the Ports panel, and the profile editor's compat-mode switch note), never a
+silent miss. Loopback one-click forwards (FR-F4) and `~/.ssh/config` forwards
+still work on compat panes via ControlMaster.

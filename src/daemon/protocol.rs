@@ -60,6 +60,11 @@ pub struct ShellSpec {
     pub ssh: Option<SshSpec>,
 }
 
+/// The connect recipe for a **compat-mode** (shell-out `ssh`) pane.
+///
+/// FROZEN (PRD §3.1): the system-ssh escape hatch, carried by `SPAWN_MANAGED_SSH`.
+/// The native russh path uses [`NativeSshSpec`] instead. Kept functional but not
+/// extended — new SSH features land on the native spec, never here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshSpec {
     /// The destination token (`host`, `user@host`, or ssh config alias).

@@ -66,6 +66,23 @@ Download the build for your platform from
 - **⌘-click links** · desktop notifications
 - **Eight themes** · CJK / IME input
 
+### SSH connection manager
+
+A native Rust SSH stack (russh) is the default path — profiles, credentials, and
+SFTP without shelling out to `ssh`.
+
+- **QuickConnect** — type `user@host[:port]` in the palette and connect; IPv6 `[::1]:port` supported
+- **Saved profiles** — full connection config with passwords / passphrases in the OS keychain, never on disk
+- **GUI auth** — in-pane sheets for password, key passphrase, 2FA, and host-key confirmation (new vs. changed)
+- **Built-in SFTP** — a slide-in file panel: browse, upload / download, rename / delete / chmod, drag to Finder
+- **Port forwarding** — Local / Remote / Dynamic, preconfigured or added live, plus ⌘-click `localhost:PORT` to auto-forward
+- **Jump hosts & proxies** — multi-hop via profile references, ProxyCommand, SOCKS5 / HTTP
+
+| Path | When | Features |
+|---|---|---|
+| **Native (russh)** | Profiles + QuickConnect — the default | SFTP · keychain · GUI auth · L/R/D forwards |
+| **System ssh (compat)** | `use_system_ssh` profiles · `~/.ssh/config` aliases · typed `ssh …` with flags | Frozen escape hatch — OpenSSH is the source of truth; SFTP / GUI auth / managed forwards off |
+
 ## Benchmarks
 
 All four terminals measured back-to-back on the same machine, same day, same

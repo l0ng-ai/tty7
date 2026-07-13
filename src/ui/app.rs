@@ -1152,6 +1152,13 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// The frozen **system-ssh compat funnel** (PRD §3.1): spawn a tty7-managed
+    /// shell-out `ssh` tab (ControlMaster loopback forwarding, no native engine /
+    /// SFTP / GUI auth / vault). The only paths that reach it are the deliberate
+    /// escape hatches — `use_system_ssh` profiles (`connect_ssh_profile`),
+    /// `~/.ssh/config` aliases (`open_compat_alias`), and arg-bearing typed
+    /// connects (`open_typed_ssh_connect`). It is not on the default path and must
+    /// not gain new callers; the default is native russh (`open_native_ssh_tab`).
     pub(crate) fn open_managed_ssh_spec(
         &mut self,
         ssh: SshSpec,
@@ -1172,6 +1179,48 @@ impl Tty7App {
             window,
             cx,
         );
+    }
+
+    /// Open a `~/.ssh/config` host alias through the frozen system-ssh compat
+    /// funnel (PRD §3.3). OpenSSH stays the source of truth for the alias, so it
+    /// runs as shell-out `ssh <alias>` — russh can't fully resolve ssh_config
+    /// (`Match`/canonicalize/deep `ProxyJump`), so aliases intentionally stay on
+    /// the compat path. Routed via [`Self::open_managed_ssh_spec`], the same
+    /// funnel `use_system_ssh` profiles use, rather than a bespoke spawn.
+    pub(crate) fn open_compat_alias(
+        &mut self,
+        alias: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_managed_ssh_spec(
+            SshSpec {
+                target: alias,
+                args: Vec::new(),
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Route a typed "SSH: Add Connection…" line to the right path (PRD §3.1/§3.3
+    /// path policy). A bare `user@host[:port]` target takes the **default** native
+    /// russh path ([`Self::quick_connect`]); anything else — a bare token that
+    /// only names a `~/.ssh/config` alias, or a line carrying extra ssh flags/args
+    /// (a system-ssh scenario) — falls to the frozen shell-out compat funnel. The
+    /// compat funnel is the labeled exception here, never the default.
+    fn open_typed_ssh_connect(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(target) = bare_ssh_target(input)
+            && let Some(qc) = crate::core::ssh_profile::parse_quick_connect(&target)
+        {
+            self.quick_connect(qc, window, cx);
+            return;
+        }
+        // A bare config alias (unparseable as a target) or an arg-bearing `ssh …`
+        // line: the frozen system-ssh compat path.
+        if let Ok(ssh) = parse_ssh_connect_input(input) {
+            self.open_managed_ssh_spec(ssh, window, cx);
+        }
     }
 
     /// Toggle the startup update check (Settings → About). Takes effect on the
@@ -1852,13 +1901,15 @@ impl Tty7App {
 
         // Live `~/.ssh/config` aliases, marked and connected via the (frozen)
         // shell-out alias path — OpenSSH stays their source of truth (PRD §3.3).
+        // The subtitle flags that these run on the system `ssh` compat path (no
+        // native engine / SFTP / GUI auth), unlike the saved profiles above.
         for alias in ssh_config::discover_profiles() {
             commands.push(
                 Command::new(
                     format!("SSH: {}", alias.alias),
                     CommandKind::OpenSshProfile(alias),
                 )
-                .with_subtitle("~/.ssh/config"),
+                .with_subtitle("~/.ssh/config · system ssh"),
             );
         }
 
@@ -1977,21 +2028,8 @@ impl Tty7App {
                     self.set_preset(&id, window, cx);
                 }
             }
-            OpenSshProfile(profile) => {
-                self.open_managed_ssh_spec(
-                    SshSpec {
-                        target: profile.alias,
-                        args: Vec::new(),
-                    },
-                    window,
-                    cx,
-                );
-            }
-            OpenSshConnect(input) => {
-                if let Ok(ssh) = parse_ssh_connect_input(&input) {
-                    self.open_managed_ssh_spec(ssh, window, cx);
-                }
-            }
+            OpenSshProfile(profile) => self.open_compat_alias(profile.alias, window, cx),
+            OpenSshConnect(input) => self.open_typed_ssh_connect(&input, window, cx),
             ConnectSavedProfile(id) => self.connect_ssh_profile(id, window, cx),
             EditSavedProfile(id) => self.open_ssh_profiles_for(Some(id), None, window, cx),
             QuickConnect(target) => {
@@ -3416,6 +3454,21 @@ pub(crate) fn parse_ssh_option_words(input: &str) -> Result<Vec<String>, ()> {
     Ok(words)
 }
 
+/// If `input` is a single bare destination token (optionally prefixed with the
+/// literal `ssh`) carrying no options, return it — the candidate for the native
+/// QuickConnect path. Any leading `-flag`, extra words, or an unclosed quote
+/// yields `None`, marking the line as arg-bearing (a system-ssh compat input).
+fn bare_ssh_target(input: &str) -> Option<String> {
+    let mut words = parse_ssh_option_words(input).ok()?;
+    if words.first().is_some_and(|w| w == "ssh") {
+        words.remove(0);
+    }
+    match words.as_slice() {
+        [only] if !only.starts_with('-') => Some(only.clone()),
+        _ => None,
+    }
+}
+
 pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<SshSpec, ()> {
     let mut words = parse_ssh_option_words(input)?;
     if words.first().is_some_and(|word| word == "ssh") {
@@ -3473,7 +3526,28 @@ fn ssh_short_option_value_flag(word: &str) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_ssh_connect_input, parse_ssh_option_words};
+    use super::{bare_ssh_target, parse_ssh_connect_input, parse_ssh_option_words};
+
+    #[test]
+    fn bare_ssh_target_recognizes_single_tokens_only() {
+        // Bare targets (→ native QuickConnect), optional `ssh` prefix stripped.
+        assert_eq!(
+            bare_ssh_target("deploy@10.0.0.5").as_deref(),
+            Some("deploy@10.0.0.5")
+        );
+        assert_eq!(
+            bare_ssh_target("ssh host:2222").as_deref(),
+            Some("host:2222")
+        );
+        assert_eq!(bare_ssh_target("  myalias  ").as_deref(), Some("myalias"));
+        // Arg-bearing or flag-led lines are NOT bare (→ compat shell-out).
+        assert_eq!(bare_ssh_target("dev -p 2222"), None);
+        assert_eq!(bare_ssh_target("-J jump host"), None);
+        assert_eq!(bare_ssh_target("ssh -p 2222 dev"), None);
+        assert_eq!(bare_ssh_target(""), None);
+        // An unclosed quote is a parse error, not a bare target.
+        assert_eq!(bare_ssh_target("'unterminated"), None);
+    }
 
     #[test]
     fn parses_ssh_option_words_with_quotes() {

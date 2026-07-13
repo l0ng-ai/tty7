@@ -1,8 +1,9 @@
 //! Pane-contextual SFTP file panel (Workstream 5).
 //!
 //! Renders as a right-docked, slide-in panel over the terminal body area for the
-//! focused **native-SSH** pane (a compat-`ssh` or PTY pane has no russh connection
-//! and never shows it). Mirrors the `ui::forwards` pattern: a set of
+//! focused **native-SSH** pane (a PTY pane has no remote to browse; a compat-`ssh`
+//! pane has no russh connection, so it shows a short "unavailable" notice instead
+//! — FR-C5). Mirrors the `ui::forwards` pattern: a set of
 //! `impl Tty7App` render helpers plus a [`SftpPanelState`] held on `Tty7App`, and
 //! synchronous one-shot [`RemoteTerminal`] control calls to the daemon
 //! (`sftp_list` / `sftp_op` / `sftp_transfer_*`).
@@ -185,19 +186,28 @@ fn local_download_dir() -> PathBuf {
 // ---------------------------------------------------------------------------
 
 impl Tty7App {
-    /// Toggle the SFTP panel for the focused native-SSH pane. A no-op (with a
-    /// gentle close) when the focused pane isn't native-SSH.
+    /// Toggle the SFTP panel for the focused SSH pane. Native panes get the file
+    /// browser; a compat (`use_system_ssh` / alias) pane has no russh connection,
+    /// so it opens the panel on a compat notice (FR-C5) — a visible reason rather
+    /// than a silent no-op. A non-SSH focused pane closes any open panel.
     pub(crate) fn toggle_sftp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let native = self
-            .active_ssh_pane(window, cx)
-            .filter(|(_, remote)| remote.kind == RemoteKind::NativeSsh);
-        match native {
-            Some((pane_id, _)) if self.sftp_panel.open_pane_id == Some(pane_id) => {
-                self.close_sftp_panel(cx);
-            }
-            Some((pane_id, _)) => self.sftp_open_at(pane_id, window, cx),
-            // Focused pane can't do SFTP: close any panel that was open.
-            None => self.close_sftp_panel(cx),
+        let Some((pane_id, remote)) = self.active_ssh_pane(window, cx) else {
+            self.close_sftp_panel(cx);
+            return;
+        };
+        if self.sftp_panel.open_pane_id == Some(pane_id) {
+            self.close_sftp_panel(cx);
+            return;
+        }
+        if remote.kind == RemoteKind::NativeSsh {
+            self.sftp_open_at(pane_id, window, cx);
+        } else {
+            // Compat pane: open the panel to show the "unavailable" notice; do not
+            // navigate or start the poll loop (there is nothing to list).
+            self.sftp_panel.open_pane_id = Some(pane_id);
+            self.sftp_panel.editing = None;
+            self.sftp_panel.poll_gen = self.sftp_panel.poll_gen.wrapping_add(1);
+            cx.notify();
         }
     }
 
@@ -578,12 +588,17 @@ impl Tty7App {
     pub(crate) fn render_sftp_overlay(
         &self,
         pane_id: u64,
-        _remote: &RemoteContext,
+        remote: &RemoteContext,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if self.sftp_panel.open_pane_id != Some(pane_id) {
             return None;
+        }
+        // Compat (shell-out) pane: no russh connection, so show why SFTP is off
+        // (FR-C5) instead of the file browser.
+        if remote.kind != RemoteKind::NativeSsh {
+            return Some(self.render_sftp_compat_notice(cx));
         }
         let popover = cx.theme().popover;
         let border = cx.theme().border;
@@ -614,6 +629,50 @@ impl Tty7App {
             }));
 
         Some(panel.into_any_element())
+    }
+
+    /// The right-docked notice shown when SFTP is toggled on a compat-mode SSH
+    /// pane (FR-C5): a plain, muted explanation and a Close button — the panel
+    /// chrome without the browser.
+    fn render_sftp_compat_notice(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        v_flex()
+            .id("sftp-compat-notice")
+            .absolute()
+            .top_0()
+            .right_0()
+            .bottom_0()
+            .w(px(self.sftp_panel.width))
+            .gap_3()
+            .p_4()
+            .bg(theme.popover)
+            .border_l_1()
+            .border_color(theme.border)
+            .shadow_lg()
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child("SFTP unavailable"),
+                    )
+                    .child(
+                        Button::new("sftp-compat-close")
+                            .label("Close")
+                            .small()
+                            .on_click(cx.listener(|this, _, _w, cx| this.close_sftp_panel(cx))),
+                    ),
+            )
+            .child(div().text_sm().text_color(theme.muted_foreground).child(
+                "System ssh compat mode — SFTP, GUI auth, and the managed forward \
+                         manager are unavailable for this connection. Uncheck \u{201c}System ssh \
+                         compat mode\u{201d} on the profile (or use QuickConnect) to connect over \
+                         the native engine and get these features.",
+            ))
+            .into_any_element()
     }
 
     fn render_sftp_header(&self, pane_id: u64, has_shell_cwd: bool, cx: &mut Context<Self>) -> Div {

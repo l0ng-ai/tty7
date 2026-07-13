@@ -62,6 +62,22 @@ macOS、Windows、Linux 三平台原生构建，每个 release 一起打出。
 - **⌘ 点击打开链接** · 桌面通知
 - **8 套主题** · CJK / 输入法输入
 
+### SSH 连接管理器
+
+默认走原生 Rust SSH 栈（russh）—— profile、凭据、SFTP 全部内置，无需 shell 出 `ssh`。
+
+- **QuickConnect** —— 面板里打 `user@host[:port]` 回车即连；支持 IPv6 `[::1]:port`
+- **保存 profile** —— 完整连接配置，密码 / passphrase 进 OS keychain，绝不落盘
+- **GUI 认证** —— pane 内 sheet 输入密码、私钥 passphrase、2FA，并确认主机密钥（新主机 vs 已变更）
+- **内置 SFTP** —— 滑入式文件面板：浏览、上传 / 下载、重命名 / 删除 / chmod，可拖进 Finder
+- **端口转发** —— Local / Remote / Dynamic，预配置或运行时增删，外加 ⌘ 点击 `localhost:PORT` 一键转发
+- **跳板与代理** —— 经 profile 引用多跳、ProxyCommand、SOCKS5 / HTTP
+
+| 路径 | 何时 | 功能 |
+|---|---|---|
+| **原生（russh）** | profile + QuickConnect —— 默认 | SFTP · keychain · GUI 认证 · L/R/D 转发 |
+| **系统 ssh（兼容模式）** | `use_system_ssh` profile · `~/.ssh/config` alias · 带 flag 的 `ssh …` 输入 | 冻结逃生门 —— 以 OpenSSH 为准；SFTP / GUI 认证 / 托管转发关闭 |
+
 ## 基准测试
 
 四款终端在同一台机器上依次测完，网格统一为 155×40 —— Apple M1 Pro，

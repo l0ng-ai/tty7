@@ -226,6 +226,12 @@ fn build_shell_command(
     Ok((cmd, integration_dir))
 }
 
+/// Build the shell-out `ssh` command for a compat-mode pane.
+///
+/// FROZEN (PRD §3.1): the system-ssh escape hatch. It sets up the ControlMaster
+/// socket that `daemon::forward` later drives for loopback forwarding. Only
+/// reached via `SPAWN_MANAGED_SSH` (the compat funnel); native panes never come
+/// through here. Kept working but not extended.
 fn build_managed_ssh_command(
     program: &str,
     ssh: &SshSpec,
