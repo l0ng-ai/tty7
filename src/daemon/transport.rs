@@ -152,14 +152,38 @@ mod imp_unix {
     /// Bind the listener (daemon side). Ensures the config dir exists first; the
     /// caller is responsible for having cleared any stale endpoint.
     pub fn bind() -> anyhow::Result<Listener> {
+        use std::os::unix::fs::PermissionsExt as _;
         let path = socket_path().ok_or_else(|| {
             anyhow::anyhow!("could not resolve daemon socket path (no config dir)")
         })?;
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
+            // The socket now carries `NativeSshSpec` secrets, so it must be reachable
+            // only by this user. Tighten the config dir to 0700 — but only when the
+            // socket lives *in* the config dir (tty7 owns it). The overlong-path
+            // fallback puts the socket directly under a shared base ($XDG_RUNTIME_DIR
+            // or the OS temp dir), which we must never chmod; the 0600 socket file
+            // below is the boundary there. Best effort: log and continue on failure.
+            let owns_parent = config::config_dir_path().is_some_and(|c| c.as_path() == parent);
+            if owns_parent {
+                if let Err(e) =
+                    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                {
+                    log::warn!(
+                        "could not chmod 0700 daemon socket dir {}: {e}",
+                        parent.display()
+                    );
+                }
+            }
         }
         let listener = UnixListener::bind(&path)
             .map_err(|e| anyhow::anyhow!("bind {} failed: {}", path.display(), e))?;
+        // Restrict the socket file to the owner: on Unix, connecting requires write
+        // permission on the socket node, so 0600 keeps a co-local user out — the
+        // access boundary now that the socket conveys cleartext SSH secrets.
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+            log::warn!("could not chmod 0600 daemon socket {}: {e}", path.display());
+        }
         Ok(listener)
     }
 
