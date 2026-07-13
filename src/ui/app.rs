@@ -17,7 +17,7 @@ use crate::core::config::{Config, NewTabPosition, ShellConfig};
 use crate::core::session::{Session, SessionAxis, SessionPane, SessionTab};
 use crate::core::shells::DetectedShell;
 use crate::core::ssh_config;
-use crate::daemon::protocol::{ShellSpec, SshSpec};
+use crate::daemon::protocol::{ShellSpec, SshSpec, ssh_option_takes_value};
 use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::palette::{Command, CommandKind, PaletteEvent, PaletteView};
 use crate::ui::pane::{CloseOutcome, Dir, Pane};
@@ -928,35 +928,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    pub(crate) fn open_managed_ssh_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((target, options)) = self
-            .tabs
-            .get(self.active)
-            .and_then(|tab| tab.settings.as_ref())
-            .map(|settings| {
-                (
-                    settings
-                        .ssh_target_input
-                        .read(cx)
-                        .value()
-                        .trim()
-                        .to_string(),
-                    settings.ssh_options_input.read(cx).value().to_string(),
-                )
-            })
-        else {
-            return;
-        };
-        if target.is_empty() {
-            return;
-        }
-        let Ok(args) = parse_ssh_option_words(&options) else {
-            return;
-        };
-        let ssh = SshSpec { target, args };
-        self.open_managed_ssh_spec(ssh, window, cx);
-    }
-
     fn open_managed_ssh_spec(&mut self, ssh: SshSpec, window: &mut Window, cx: &mut Context<Self>) {
         if ssh.validate().is_err() {
             return;
@@ -1621,9 +1592,14 @@ impl Tty7App {
                     cx,
                 );
             }
+            OpenSshConnect(input) => {
+                if let Ok(ssh) = parse_ssh_connect_input(&input) {
+                    self.open_managed_ssh_spec(ssh, window, cx);
+                }
+            }
             // Handled inside `PaletteView` (opens a sub-list); these never emit a
             // `Confirm` for this variant, so they never reach here.
-            OpenThemePicker | OpenSshProfilePicker(_) => {}
+            OpenThemePicker | OpenSshConnectInput | OpenSshProfilePicker(_) => {}
             ActivateTab(i) => self.activate(i, window, cx),
         }
     }
@@ -1681,19 +1657,6 @@ impl Tty7App {
                 .placeholder("3000")
                 .default_value("")
         });
-        let ssh_target_input = cx.new(|cx| InputState::new(window, cx).placeholder("user@host"));
-        let ssh_options_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("-p 2222 -J jump")
-                .default_value("")
-        });
-        for input in [&ssh_target_input, &ssh_options_input] {
-            subs.push(cx.subscribe_in(input, window, |_this, _i, ev, _w, cx| {
-                if matches!(ev, InputEvent::Change) {
-                    cx.notify();
-                }
-            }));
-        }
         let loopback_forwards = crate::terminal::RemoteTerminal::list_loopback_forwards();
 
         self.maximized = None;
@@ -1714,8 +1677,6 @@ impl Tty7App {
                 theme_panel_open: false,
                 theme_search,
                 loopback_forwards,
-                ssh_target_input,
-                ssh_options_input,
                 loopback_default_pane_id,
                 loopback_host_input,
                 loopback_port_input,
@@ -2761,9 +2722,64 @@ pub(crate) fn parse_ssh_option_words(input: &str) -> Result<Vec<String>, ()> {
     Ok(words)
 }
 
+pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<SshSpec, ()> {
+    let mut words = parse_ssh_option_words(input)?;
+    if words.first().is_some_and(|word| word == "ssh") {
+        words.remove(0);
+    }
+    let Some(target_ix) = ssh_connect_target_ix(&words) else {
+        return Err(());
+    };
+    let target = words.remove(target_ix);
+    if target.trim().is_empty() {
+        return Err(());
+    }
+    let ssh = SshSpec {
+        target,
+        args: words,
+    };
+    ssh.validate().map_err(|_| ())?;
+    Ok(ssh)
+}
+
+fn ssh_connect_target_ix(words: &[String]) -> Option<usize> {
+    let mut i = 0;
+    while i < words.len() {
+        let word = &words[i];
+        if word == "--" {
+            return None;
+        }
+        if !word.starts_with('-') {
+            return Some(i);
+        }
+        if ssh_short_option_value_flag(word).is_some() {
+            i += 1;
+            if i >= words.len() {
+                return None;
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn ssh_short_option_value_flag(word: &str) -> Option<char> {
+    let short = word.strip_prefix('-')?;
+    if short.is_empty() || short.starts_with('-') {
+        return None;
+    }
+    let mut chars = short.chars();
+    let flag = chars.next()?;
+    if ssh_option_takes_value(flag) && chars.as_str().is_empty() {
+        Some(flag)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_ssh_option_words;
+    use super::{parse_ssh_connect_input, parse_ssh_option_words};
 
     #[test]
     fn parses_ssh_option_words_with_quotes() {
@@ -2776,6 +2792,44 @@ mod tests {
     #[test]
     fn rejects_unclosed_ssh_option_quote() {
         assert!(parse_ssh_option_words("-J 'jump").is_err());
+    }
+
+    #[test]
+    fn parses_ssh_connect_input_with_optional_ssh_prefix() {
+        assert_eq!(
+            parse_ssh_connect_input("ssh dev -p 2222 -J 'jump host'")
+                .unwrap()
+                .target,
+            "dev"
+        );
+        let parsed = parse_ssh_connect_input("dev -p 2222").unwrap();
+        assert_eq!(parsed.target, "dev");
+        assert_eq!(parsed.args, vec!["-p", "2222"]);
+    }
+
+    #[test]
+    fn parses_ssh_connect_input_with_options_before_target() {
+        let parsed = parse_ssh_connect_input("ssh -p 2222 -J 'jump host' dev").unwrap();
+        assert_eq!(parsed.target, "dev");
+        assert_eq!(parsed.args, vec!["-p", "2222", "-J", "jump host"]);
+    }
+
+    #[test]
+    fn parses_ssh_connect_input_with_quoted_target() {
+        let parsed = parse_ssh_connect_input("ssh -l dev 'host name'").unwrap();
+        assert_eq!(parsed.target, "host name");
+        assert_eq!(parsed.args, vec!["-l", "dev"]);
+    }
+
+    #[test]
+    fn rejects_ssh_connect_input_without_target() {
+        assert!(parse_ssh_connect_input("ssh -p 2222").is_err());
+    }
+
+    #[test]
+    fn rejects_ssh_connect_input_with_remote_command() {
+        assert!(parse_ssh_connect_input("ssh dev uptime").is_err());
+        assert!(parse_ssh_connect_input("ssh -- dev").is_err());
     }
 }
 

@@ -17,13 +17,11 @@ use gpui_component::select::{SearchableVec, Select, SelectState};
 use gpui_component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
 use gpui_component::slider::{Slider, SliderState};
 use gpui_component::switch::Switch;
-use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
-};
+use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use std::sync::Arc;
 
 use crate::core::config::{Config, CursorStyle, NewTabPosition, NotifyMode};
-use crate::daemon::protocol::{LoopbackForwardId, LoopbackForwardInfo, SshSpec};
+use crate::daemon::protocol::{LoopbackForwardId, LoopbackForwardInfo};
 use crate::ui::app::{FONT_SIZE_STEP, LINE_HEIGHT_STEP, ThemeEdit, Tty7App};
 use crate::ui::presets;
 
@@ -101,8 +99,6 @@ pub(crate) struct SettingsState {
     pub(crate) theme_search: Entity<InputState>,
     /// Last daemon-reported SSH loopback forwards shown in Terminal → Links.
     pub(crate) loopback_forwards: Vec<LoopbackForwardInfo>,
-    pub(crate) ssh_target_input: Entity<InputState>,
-    pub(crate) ssh_options_input: Entity<InputState>,
     /// Pane selected when Settings opened; manual forwards use this pane's
     /// proven SSH context.
     pub(crate) loopback_default_pane_id: Option<u64>,
@@ -1249,7 +1245,6 @@ impl Tty7App {
                 ssh_loopback_switch,
                 cx,
             ))
-            .child(self.render_managed_ssh_tab_form(cx))
             .child(self.render_loopback_forward_form(cx))
             .child(self.render_loopback_forwards(&loopback_forwards, cx))
             .child(self.section_rule(cx))
@@ -1275,79 +1270,6 @@ impl Tty7App {
                 cx,
             ))
             .into_any_element()
-    }
-
-    fn render_managed_ssh_tab_form(&self, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme();
-        let Some(settings) = self.active_settings() else {
-            return div();
-        };
-        let target_input = settings.ssh_target_input.clone();
-        let options_input = settings.ssh_options_input.clone();
-        let target = target_input.read(cx).value().trim().to_string();
-        let options = options_input.read(cx).value().to_string();
-        let options_words = crate::ui::app::parse_ssh_option_words(&options);
-        let validation = options_words
-            .as_ref()
-            .map_err(|_| "Unclosed quote in SSH options.".to_string())
-            .and_then(|args| {
-                SshSpec {
-                    target: target.clone(),
-                    args: args.clone(),
-                }
-                .validate()
-            });
-        let can_open = validation.is_ok();
-        let options_label = validation
-            .as_ref()
-            .map(|_| "Connection options only; put the host in Target.".to_string())
-            .unwrap_or_else(|err| err.clone());
-
-        let target = div()
-            .w(px(180.))
-            .child(Input::new(&target_input).small())
-            .into_any_element();
-        let options = div()
-            .w(px(220.))
-            .child(Input::new(&options_input).small())
-            .into_any_element();
-
-        v_flex()
-            .gap_2()
-            .py_2()
-            .child(
-                h_flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        v_flex()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.foreground)
-                                    .child("Open managed SSH tab"),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(options_label),
-                            ),
-                    )
-                    .child(
-                        Button::new("managed-ssh-open")
-                            .label("Open")
-                            .small()
-                            .primary()
-                            .disabled(!can_open)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_managed_ssh_tab(window, cx)
-                            })),
-                    ),
-            )
-            .child(h_flex().items_center().gap_2().child(target).child(options))
     }
 
     /// Window & Tabs section: the app window's lifecycle and tab placement.

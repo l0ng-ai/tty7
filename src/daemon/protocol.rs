@@ -203,7 +203,7 @@ fn managed_ssh_option_is_blocked(name: &str) -> bool {
     )
 }
 
-fn ssh_option_takes_value(flag: char) -> bool {
+pub(crate) fn ssh_option_takes_value(flag: char) -> bool {
     matches!(
         flag,
         'B' | 'b'

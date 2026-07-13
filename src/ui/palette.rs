@@ -55,8 +55,12 @@ pub enum CommandKind {
     RestartDaemon,
     /// Opens the theme sub-list (a nested palette). Handled in `PaletteView`.
     OpenThemePicker,
+    /// Opens a typed SSH connection sub-list. Handled in `PaletteView`.
+    OpenSshConnectInput,
     /// Opens the SSH profile sub-list. Handled in `PaletteView`.
     OpenSshProfilePicker(Vec<SshProfile>),
+    /// Open a tty7-managed SSH tab from a typed target/options line.
+    OpenSshConnect(String),
     /// Apply the preset at this index in `presets::all()`. Emitted from the
     /// theme sub-list.
     SetTheme(usize),
@@ -100,7 +104,9 @@ impl CommandKind {
             RestartDaemon => "RestartDaemon",
             FindInTerminal
             | OpenThemePicker
+            | OpenSshConnectInput
             | OpenSshProfilePicker(_)
+            | OpenSshConnect(_)
             | SetTheme(_)
             | OpenSshProfile(_)
             | ActivateTab(_) => return None,
@@ -157,6 +163,7 @@ impl Command {
             Command::new("Clear", ClearTerminal),
             Command::new("Find in Terminal…", FindInTerminal),
             Command::new("Reopen Closed Tab", ReopenClosedTab),
+            Command::new("SSH: Add Connection…", OpenSshConnectInput),
             Command::new("Change Theme…", OpenThemePicker),
             Command::new("Open Settings", OpenSettings),
             Command::new("Reset Font Size", ResetFontSize),
@@ -195,6 +202,15 @@ impl Command {
             })
             .collect()
     }
+
+    fn ssh_connect_command(input: &str) -> Command {
+        let title = if input.trim().is_empty() {
+            "SSH: Add Connection…".to_string()
+        } else {
+            format!("SSH: Connect {}", input.trim())
+        };
+        Command::new(title, CommandKind::OpenSshConnect(input.to_string()))
+    }
 }
 
 /// Case-insensitive subsequence match: every character of `query` must appear
@@ -219,9 +235,16 @@ pub struct PaletteDelegate {
     commands: Vec<Command>,
     /// The subset matching the current query — exactly what the list renders.
     matched: Vec<Command>,
+    input: Option<PaletteInput>,
+    query: String,
     /// Index of the highlighted row, mirrored from the list's own selection so
     /// `render_item` can mark it. `None` when nothing matches.
     selected: Option<IndexPath>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PaletteInput {
+    SshConnect,
 }
 
 impl PaletteDelegate {
@@ -229,6 +252,19 @@ impl PaletteDelegate {
         Self {
             matched: commands.clone(),
             commands,
+            input: None,
+            query: String::new(),
+            selected: Some(IndexPath::default()),
+        }
+    }
+
+    fn ssh_connect() -> Self {
+        let matched = vec![Command::ssh_connect_command("")];
+        Self {
+            commands: Vec::new(),
+            matched,
+            input: Some(PaletteInput::SshConnect),
+            query: String::new(),
             selected: Some(IndexPath::default()),
         }
     }
@@ -255,12 +291,17 @@ impl ListDelegate for PaletteDelegate {
         _window: &mut Window,
         _cx: &mut Context<ListState<Self>>,
     ) -> Task<()> {
-        self.matched = self
-            .commands
-            .iter()
-            .filter(|c| fuzzy_match(query, &c.title))
-            .cloned()
-            .collect();
+        if let Some(PaletteInput::SshConnect) = self.input {
+            self.query = query.to_string();
+            self.matched = vec![Command::ssh_connect_command(query)];
+        } else {
+            self.matched = self
+                .commands
+                .iter()
+                .filter(|c| fuzzy_match(query, &c.title))
+                .cloned()
+                .collect();
+        }
         self.selected = (!self.matched.is_empty()).then(IndexPath::default);
         Task::ready(())
     }
@@ -347,6 +388,7 @@ pub enum PaletteEvent {
 enum PaletteMenu {
     Root,
     Theme,
+    SshConnect,
     SshProfiles,
 }
 
@@ -391,7 +433,14 @@ impl PaletteView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<ListState<PaletteDelegate>> {
-        let delegate = PaletteDelegate::new(commands);
+        Self::build_list_with_delegate(PaletteDelegate::new(commands), window, cx)
+    }
+
+    fn build_list_with_delegate(
+        delegate: PaletteDelegate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ListState<PaletteDelegate>> {
         let list = cx.new(|cx| ListState::new(delegate, window, cx).searchable(true));
         list.update(cx, |state, cx| state.focus(window, cx));
         list
@@ -403,6 +452,13 @@ impl PaletteView {
     /// cache for free, sidestepping the list's internal query/selection caching.
     fn show(&mut self, commands: Vec<Command>, window: &mut Window, cx: &mut Context<Self>) {
         let list = Self::build_list(commands, window, cx);
+        self._sub = cx.subscribe_in(&list, window, Self::on_list_event);
+        self.list = list;
+        cx.notify();
+    }
+
+    fn show_ssh_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let list = Self::build_list_with_delegate(PaletteDelegate::ssh_connect(), window, cx);
         self._sub = cx.subscribe_in(&list, window, Self::on_list_event);
         self.list = list;
         cx.notify();
@@ -428,11 +484,16 @@ impl PaletteView {
                         let themes = Command::theme_commands(cx);
                         self.show(themes, window, cx);
                     }
+                    Some(CommandKind::OpenSshConnectInput) => {
+                        self.menu = PaletteMenu::SshConnect;
+                        self.show_ssh_connect(window, cx);
+                    }
                     Some(CommandKind::OpenSshProfilePicker(profiles)) => {
                         self.menu = PaletteMenu::SshProfiles;
                         let profiles = Command::ssh_profile_commands(profiles);
                         self.show(profiles, window, cx);
                     }
+                    Some(CommandKind::OpenSshConnect(input)) if input.trim().is_empty() => {}
                     Some(kind) => cx.emit(PaletteEvent::Confirm(kind)),
                     None => cx.emit(PaletteEvent::Dismiss),
                 }
