@@ -9,7 +9,9 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
-use crate::daemon::protocol::{LoopbackForwardInfo, RemoteContext};
+use crate::daemon::protocol::{
+    ForwardStatus, LoopbackForwardInfo, ManagedForward, RemoteContext, RemoteKind, SshForwardKind,
+};
 use crate::ui::app::Tty7App;
 
 impl Tty7App {
@@ -21,7 +23,13 @@ impl Tty7App {
     ) -> AnyElement {
         let foreground = cx.theme().foreground;
         let pane_forwards = self.loopback_forwards_for_pane(pane_id);
-        let active_count = pane_forwards.len();
+        let is_native = remote.kind == RemoteKind::NativeSsh;
+        let managed_count = if is_native {
+            self.loopback_panel.managed.len()
+        } else {
+            0
+        };
+        let active_count = pane_forwards.len() + managed_count;
         let panel_open = self.loopback_panel.open_pane_id == Some(pane_id);
         let label = if active_count == 0 {
             "Ports".to_string()
@@ -82,12 +90,14 @@ impl Tty7App {
             .small()
             .on_click(cx.listener(|this, _, _w, cx| this.close_loopback_forward_panel(cx)));
 
-        let body = if forwards.is_empty() {
+        let is_native = remote.kind == RemoteKind::NativeSsh;
+
+        let loopback_body = if forwards.is_empty() {
             v_flex().child(
                 div()
                     .text_sm()
                     .text_color(muted_foreground)
-                    .child("No active forwards for this host."),
+                    .child("No loopback forwards for this host."),
             )
         } else {
             let mut list = v_flex().gap_2();
@@ -99,7 +109,7 @@ impl Tty7App {
 
         v_flex()
             .w(px(460.))
-            .max_h(px(420.))
+            .max_h(px(560.))
             .gap_3()
             .p_3()
             .overflow_hidden()
@@ -132,8 +142,217 @@ impl Tty7App {
                     )
                     .child(h_flex().gap_2().child(refresh).child(close)),
             )
-            .child(self.render_loopback_forward_form(pane_id, cx))
+            // Managed L/R/D forwards come first for native panes; the loopback
+            // one-click list stays below and is shown for both pane kinds.
+            .when(is_native, |this| {
+                this.child(self.render_managed_forwards_section(pane_id, cx))
+            })
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(foreground)
+                            .child("Loopback (localhost links)"),
+                    )
+                    .child(self.render_loopback_forward_form(pane_id, cx))
+                    .child(loopback_body),
+            )
+    }
+
+    /// The managed-forward (Local/Remote/Dynamic) section shown for native-SSH
+    /// panes: an add form with a kind selector and the live forward rows (WS4).
+    fn render_managed_forwards_section(&self, pane_id: u64, cx: &mut Context<Self>) -> Div {
+        let foreground = cx.theme().foreground;
+        let muted_foreground = cx.theme().muted_foreground;
+        let managed: Vec<ManagedForward> = self
+            .loopback_panel
+            .managed
+            .iter()
+            .filter(|m| m.pane_id == pane_id)
+            .cloned()
+            .collect();
+
+        let body = if managed.is_empty() {
+            v_flex().child(
+                div()
+                    .text_sm()
+                    .text_color(muted_foreground)
+                    .child("No managed forwards."),
+            )
+        } else {
+            let mut list = v_flex().gap_2();
+            for forward in &managed {
+                list = list.child(self.render_managed_forward_row(forward, cx));
+            }
+            list
+        };
+
+        v_flex()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(foreground)
+                    .child("Managed forwards"),
+            )
+            .child(self.render_managed_forward_form(pane_id, cx))
             .child(body)
+    }
+
+    fn render_managed_forward_form(&self, pane_id: u64, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let kind = self.loopback_panel.mf_kind;
+        let selected = match kind {
+            SshForwardKind::Local => 0,
+            SshForwardKind::Remote => 1,
+            SshForwardKind::Dynamic => 2,
+        };
+        // Dynamic (SOCKS) forwards have no fixed target — grey the target inputs.
+        let needs_target = kind != SshForwardKind::Dynamic;
+
+        let bind_host = div()
+            .w(px(150.))
+            .child(Input::new(&self.loopback_panel.mf_bind_host).small());
+        let bind_port = div()
+            .w(px(80.))
+            .child(Input::new(&self.loopback_panel.mf_bind_port).small());
+        let target_host = div()
+            .w(px(150.))
+            .child(Input::new(&self.loopback_panel.mf_target_host).small());
+        let target_port = div()
+            .w(px(80.))
+            .child(Input::new(&self.loopback_panel.mf_target_port).small());
+        let description = div()
+            .w_full()
+            .child(Input::new(&self.loopback_panel.mf_description).small());
+
+        v_flex()
+            .gap_2()
+            .py_1()
+            .child(self.segmented(
+                "ssh-managed-forward-kind",
+                &["Local", "Remote", "Dynamic"],
+                selected,
+                cx,
+                move |this, ix, _window, cx| {
+                    let kind = match ix {
+                        1 => SshForwardKind::Remote,
+                        2 => SshForwardKind::Dynamic,
+                        _ => SshForwardKind::Local,
+                    };
+                    this.set_managed_forward_kind(kind, cx);
+                },
+            ))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(div().w(px(48.)).text_xs().text_color(muted).child("bind"))
+                    .child(bind_host)
+                    .child(div().text_sm().text_color(muted).child(":"))
+                    .child(bind_port),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_1()
+                    .opacity(if needs_target { 1.0 } else { 0.4 })
+                    .child(
+                        div()
+                            .w(px(48.))
+                            .text_xs()
+                            .text_color(muted)
+                            .child(if needs_target { "target" } else { "SOCKS" }),
+                    )
+                    .child(target_host)
+                    .child(div().text_sm().text_color(muted).child(":"))
+                    .child(target_port),
+            )
+            .child(
+                h_flex().items_center().gap_2().child(description).child(
+                    Button::new(("ssh-managed-forward-add", pane_id))
+                        .label("Add")
+                        .small()
+                        .primary()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.add_managed_forward(pane_id, window, cx)
+                        })),
+                ),
+            )
+    }
+
+    fn render_managed_forward_row(&self, forward: &ManagedForward, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme();
+        let (badge, badge_color) = match forward.kind {
+            SshForwardKind::Local => ("L", theme.info),
+            SshForwardKind::Remote => ("R", theme.warning),
+            SshForwardKind::Dynamic => ("D", theme.success),
+        };
+        let bind = format!("{}:{}", forward.bind_host, forward.bind_port);
+        let flow = if forward.kind == SshForwardKind::Dynamic {
+            format!("{bind}  (SOCKS)")
+        } else {
+            format!("{bind} -> {}:{}", forward.target_host, forward.target_port)
+        };
+        let (status_text, status_color) = match &forward.status {
+            ForwardStatus::Listening => ("listening".to_string(), theme.success),
+            ForwardStatus::Error(msg) => (format!("error: {msg}"), theme.danger),
+        };
+        let pane_id = forward.pane_id;
+        let forward_id = forward.id;
+
+        h_flex()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .border_1()
+            .border_color(theme.border)
+            .rounded_md()
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(20.))
+                    .h(px(20.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .bg(badge_color.opacity(0.15))
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(badge_color)
+                    .child(badge),
+            )
+            .child(
+                v_flex()
+                    .gap_0p5()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().text_sm().text_color(theme.foreground).child(flow))
+                    .when_some(forward.description.clone(), |el, desc| {
+                        el.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(desc),
+                        )
+                    })
+                    .child(div().text_xs().text_color(status_color).child(status_text)),
+            )
+            .child(
+                Button::new(("ssh-managed-forward-del", forward_id as usize))
+                    .label("Delete")
+                    .small()
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.remove_managed_forward(pane_id, forward_id, cx)
+                    })),
+            )
     }
 
     fn render_loopback_forward_form(&self, pane_id: u64, cx: &mut Context<Self>) -> Div {

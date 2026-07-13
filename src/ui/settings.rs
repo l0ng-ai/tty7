@@ -678,7 +678,7 @@ impl Tty7App {
     /// speak the same segmented language as the −│value│+ stepper; `small` pins
     /// every option control to the same 24px height as the selects beside them.
     /// `selected` is the active index; `on_pick` fires with the newly chosen one.
-    fn segmented(
+    pub(crate) fn segmented(
         &self,
         id: &'static str,
         options: &'static [&'static str],

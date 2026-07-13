@@ -169,9 +169,9 @@ brief §5); SFTP opens a session channel and drives the subsystem.
 
 | Seam | State in WS2 | Owner |
 |---|---|---|
-| Port forwards (L/R/D) | `NativeSshSpec.forwards` carried only; `open_direct_tcpip` provided | WS4 |
-| `RemoteContext.control_path` | always `None` for native — `forward.rs` (ssh `-O`) correctly rejects native panes | WS4 |
-| X11 forwarding | `NativeSshSpec.x11` carried only; no X11 channels | WS4/WS5 |
+| Port forwards (L/R/D) | **DONE (WS4)** — `daemon::ssh::forward` (`SshForwardRegistry`): Local/Dynamic TCP listeners + `open_direct_tcpip`, Remote via `tcpip_forward` + `RemoteForwardTable` in the handler; preconfigured forwards established post-auth in `run_session`; protocol `AddForward`/`RemoveForward`/`ListForwards` (client kinds 20–22) → `ForwardList` (daemon kind 20) | WS4 |
+| `RemoteContext.control_path` | always `None` for native; native loopback (FR-F4) now goes through `SshManager::ensure_loopback_forward` (a Local `direct-tcpip`), server-side branch on `RemoteKind::NativeSsh` | WS4 |
+| X11 forwarding | `NativeSshSpec.x11` carried only; **seam documented** in `daemon::ssh::handler` (P1, deferred — needs `request_x11` + `server_channel_open_x11` + `$DISPLAY` bridge) | WS4/WS5 |
 | SFTP | none; `open_session_channel` provided for the subsystem | WS5 |
 | Agent forwarding channels | `agent_forward` requests `auth-agent-req` on the shell channel; incoming agent-channel bridging to `SSH_AUTH_SOCK` not wired | WS4/WS5 |
 | Session restore respawn | `SessionPane::Leaf.ssh_spec` (secret-free) persisted; reconnection UX not built | WS6 |

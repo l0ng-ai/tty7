@@ -283,7 +283,7 @@ pub struct LoopbackForward {
     pub local_port: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LoopbackForwardId {
     pub pane_id: u64,
     pub target: String,
@@ -386,6 +386,38 @@ pub struct SshForwardRule {
     pub target_port: u16,
     #[serde(default)]
     pub description: Option<String>,
+}
+
+/// Runtime status of a live managed forward, surfaced to the GUI per row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ForwardStatus {
+    /// The forward's listener (Local/Dynamic) or remote binding (Remote) is up.
+    Listening,
+    /// The forward failed to come up (bind conflict, remote request denied, …).
+    /// The string is a human-readable reason with no secrets.
+    Error(String),
+}
+
+/// One established managed forward on a native-SSH pane's connection (WS4). This
+/// is the runtime counterpart of a [`SshForwardRule`]: it carries a daemon-issued
+/// `id` (used to remove it), the pane it is attributed to (for per-pane listing),
+/// the *resolved* bind port (a `bind_port` of 0 resolves to the OS-assigned port),
+/// and a live `status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedForward {
+    pub id: u64,
+    pub pane_id: u64,
+    pub kind: SshForwardKind,
+    pub bind_host: String,
+    pub bind_port: u16,
+    #[serde(default)]
+    pub target_host: String,
+    #[serde(default)]
+    pub target_port: u16,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub status: ForwardStatus,
 }
 
 fn default_term() -> String {
@@ -567,7 +599,10 @@ pub enum AuthPromptKind {
 pub enum AuthResponse {
     Secret(String),
     Secrets(Vec<String>),
-    HostKeyDecision { accept: bool, remember: bool },
+    HostKeyDecision {
+        accept: bool,
+        remember: bool,
+    },
     /// The user dismissed the prompt; the daemon fails the auth step cleanly.
     Cancelled,
 }
@@ -653,6 +688,16 @@ pub enum ClientMsg {
         request_id: u64,
         response: AuthResponse,
     },
+    /// Establish a new managed port-forward (Local/Remote/Dynamic) on the native-SSH
+    /// pane `pane_id`'s connection (WS4). Control-connection message; the daemon
+    /// replies with a `ForwardList` reflecting the pane's forwards after the add.
+    AddForward { pane_id: u64, rule: SshForwardRule },
+    /// Tear down one managed forward by its daemon-issued id. Control-connection
+    /// message; the daemon replies with the pane's remaining `ForwardList`.
+    RemoveForward { pane_id: u64, forward_id: u64 },
+    /// Ask for the managed forwards attributed to `pane_id`. Control-connection
+    /// message; the daemon replies with a `ForwardList`.
+    ListForwards { pane_id: u64 },
 }
 
 /// Messages the daemon sends back to the GUI client.
@@ -699,6 +744,9 @@ pub enum DaemonMsg {
     },
     /// Progress of a native-SSH spawn (connect/auth/connected/failed).
     SshStatus { phase: SshPhase },
+    /// Reply to `AddForward` / `RemoveForward` / `ListForwards`: the managed
+    /// forwards currently attributed to the requested pane (WS4).
+    ForwardList(Vec<ManagedForward>),
     /// A request failed (e.g. `Attach` to an unknown/dead pane id).
     Error(String),
 }
@@ -735,6 +783,13 @@ mod kind {
     pub const SPAWN_NATIVE_SSH: u8 = 14;
     /// `AuthResponse` — the GUI's reply to an `AUTH_PROMPT`.
     pub const AUTH_RESPONSE: u8 = 15;
+    // (16–19 reserved: WS3 auth extensions.)
+    /// `AddForward` — establish a managed port-forward (WS4).
+    pub const ADD_FORWARD: u8 = 20;
+    /// `RemoveForward` — tear down one managed forward by id (WS4).
+    pub const REMOVE_FORWARD: u8 = 21;
+    /// `ListForwards` — list a pane's managed forwards (WS4).
+    pub const LIST_FORWARDS: u8 = 22;
 
     // Daemon -> client
     pub const SPAWNED: u8 = 1;
@@ -753,6 +808,9 @@ mod kind {
     pub const AUTH_PROMPT: u8 = 13;
     /// `SshStatus` — native-SSH spawn progress.
     pub const SSH_STATUS: u8 = 14;
+    // (15–19 reserved: WS3 auth extensions.)
+    /// `ForwardList` — reply to the WS4 managed-forward messages.
+    pub const FORWARD_LIST: u8 = 20;
 }
 
 /// Write one framed message: `[u32 LE len][u8 kind][payload]`.
@@ -875,6 +933,16 @@ impl ClientMsg {
                 request_id,
                 response,
             } => write_frame(w, kind::AUTH_RESPONSE, &to_json(&(request_id, response))?),
+            ClientMsg::AddForward { pane_id, rule } => {
+                write_frame(w, kind::ADD_FORWARD, &to_json(&(pane_id, rule))?)
+            }
+            ClientMsg::RemoveForward {
+                pane_id,
+                forward_id,
+            } => write_frame(w, kind::REMOVE_FORWARD, &to_json(&(pane_id, forward_id))?),
+            ClientMsg::ListForwards { pane_id } => {
+                write_frame(w, kind::LIST_FORWARDS, &to_json(pane_id)?)
+            }
         }
     }
 
@@ -919,6 +987,20 @@ impl ClientMsg {
                     response,
                 }
             }
+            kind::ADD_FORWARD => {
+                let (pane_id, rule) = from_json(&payload)?;
+                ClientMsg::AddForward { pane_id, rule }
+            }
+            kind::REMOVE_FORWARD => {
+                let (pane_id, forward_id) = from_json(&payload)?;
+                ClientMsg::RemoveForward {
+                    pane_id,
+                    forward_id,
+                }
+            }
+            kind::LIST_FORWARDS => ClientMsg::ListForwards {
+                pane_id: from_json(&payload)?,
+            },
             other => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -964,6 +1046,7 @@ impl DaemonMsg {
                 write_frame(w, kind::AUTH_PROMPT, &to_json(&(request_id, prompt))?)
             }
             DaemonMsg::SshStatus { phase } => write_frame(w, kind::SSH_STATUS, &to_json(phase)?),
+            DaemonMsg::ForwardList(list) => write_frame(w, kind::FORWARD_LIST, &to_json(list)?),
             DaemonMsg::Error(msg) => write_frame(w, kind::ERROR, &to_json(msg)?),
         }
     }
@@ -1000,6 +1083,7 @@ impl DaemonMsg {
             kind::SSH_STATUS => DaemonMsg::SshStatus {
                 phase: from_json(&payload)?,
             },
+            kind::FORWARD_LIST => DaemonMsg::ForwardList(from_json(&payload)?),
             kind::ERROR => DaemonMsg::Error(from_json(&payload)?),
             other => {
                 return Err(io::Error::new(
@@ -1158,6 +1242,33 @@ mod tests {
                 remote_host: "127.0.0.1".into(),
                 remote_port: 3000,
             }),
+            ClientMsg::AddForward {
+                pane_id: 7,
+                rule: SshForwardRule {
+                    kind: SshForwardKind::Local,
+                    bind_host: "127.0.0.1".into(),
+                    bind_port: 8080,
+                    target_host: "10.0.0.5".into(),
+                    target_port: 80,
+                    description: Some("web".into()),
+                },
+            },
+            ClientMsg::AddForward {
+                pane_id: 7,
+                rule: SshForwardRule {
+                    kind: SshForwardKind::Dynamic,
+                    bind_host: "127.0.0.1".into(),
+                    bind_port: 1080,
+                    target_host: String::new(),
+                    target_port: 0,
+                    description: None,
+                },
+            },
+            ClientMsg::RemoveForward {
+                pane_id: 7,
+                forward_id: 3,
+            },
+            ClientMsg::ListForwards { pane_id: 7 },
         ];
         let mut buf = Vec::new();
         for m in &msgs {
@@ -1280,6 +1391,30 @@ mod tests {
                 age_secs: 12,
                 idle_secs: 3,
             }]),
+            DaemonMsg::ForwardList(vec![
+                ManagedForward {
+                    id: 1,
+                    pane_id: 7,
+                    kind: SshForwardKind::Local,
+                    bind_host: "127.0.0.1".into(),
+                    bind_port: 8080,
+                    target_host: "10.0.0.5".into(),
+                    target_port: 80,
+                    description: Some("web".into()),
+                    status: ForwardStatus::Listening,
+                },
+                ManagedForward {
+                    id: 2,
+                    pane_id: 7,
+                    kind: SshForwardKind::Remote,
+                    bind_host: "0.0.0.0".into(),
+                    bind_port: 9000,
+                    target_host: "127.0.0.1".into(),
+                    target_port: 3000,
+                    description: None,
+                    status: ForwardStatus::Error("bind refused".into()),
+                },
+            ]),
             DaemonMsg::Error("nope".into()),
         ];
         let mut buf = Vec::new();
@@ -1567,10 +1702,9 @@ mod tests {
     /// Missing optional fields decode via `#[serde(default)]` (forward compat).
     #[test]
     fn native_ssh_spec_tolerates_minimal_json() {
-        let spec: NativeSshSpec = serde_json::from_str(
-            r#"{"host":"h","port":22,"user":"u","auth_mode":"auto"}"#,
-        )
-        .unwrap();
+        let spec: NativeSshSpec =
+            serde_json::from_str(r#"{"host":"h","port":22,"user":"u","auth_mode":"auto"}"#)
+                .unwrap();
         assert_eq!(spec.term, "xterm-256color"); // defaulted
         assert!(spec.verify_host_keys); // defaulted true
         assert_eq!(spec.password, None);
