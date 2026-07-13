@@ -132,24 +132,15 @@ impl Tty7App {
                     )
                     .child(h_flex().gap_2().child(refresh).child(close)),
             )
-            .child(self.render_loopback_forward_form(pane_id, &remote.target, cx))
+            .child(self.render_loopback_forward_form(pane_id, cx))
             .child(body)
     }
 
-    fn render_loopback_forward_form(
-        &self,
-        pane_id: u64,
-        remote_target: &str,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    fn render_loopback_forward_form(&self, pane_id: u64, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme();
         let host_input = self.loopback_panel.host_input.clone();
         let port_input = self.loopback_panel.port_input.clone();
         let editing = self.loopback_panel.editing.clone();
-        let pane_label = editing
-            .as_ref()
-            .map(|id| id.target.clone())
-            .unwrap_or_else(|| remote_target.to_string());
         let title = if editing.is_some() {
             "Edit forward"
         } else {
@@ -184,21 +175,13 @@ impl Tty7App {
                     .justify_between()
                     .gap_3()
                     .child(
-                        v_flex()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.foreground)
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(pane_label),
-                            ),
+                        v_flex().gap_0p5().child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.foreground)
+                                .child(title),
+                        ),
                     )
                     .child(
                         h_flex()
