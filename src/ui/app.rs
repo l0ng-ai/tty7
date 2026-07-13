@@ -123,6 +123,15 @@ pub(crate) struct LoopbackForwardPanelState {
     pub(crate) host_input: Entity<InputState>,
     pub(crate) port_input: Entity<InputState>,
     pub(crate) editing: Option<LoopbackForwardId>,
+    /// Managed forwards (Local/Remote/Dynamic) for the open native-SSH pane (WS4).
+    pub(crate) managed: Vec<crate::daemon::protocol::ManagedForward>,
+    /// Add-forward form state (native-SSH panes only).
+    pub(crate) mf_kind: crate::daemon::protocol::SshForwardKind,
+    pub(crate) mf_bind_host: Entity<InputState>,
+    pub(crate) mf_bind_port: Entity<InputState>,
+    pub(crate) mf_target_host: Entity<InputState>,
+    pub(crate) mf_target_port: Entity<InputState>,
+    pub(crate) mf_description: Entity<InputState>,
 }
 
 pub struct Tty7App {
@@ -266,6 +275,12 @@ impl Tty7App {
                 .default_value("")
         });
         let sftp_panel = crate::ui::sftp::SftpPanelState::new(window, cx);
+        // Managed-forward add-form inputs (native-SSH panes).
+        let mf_bind_host = cx.new(|cx| InputState::new(window, cx).default_value("127.0.0.1"));
+        let mf_bind_port = cx.new(|cx| InputState::new(window, cx).placeholder("8080"));
+        let mf_target_host = cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1"));
+        let mf_target_port = cx.new(|cx| InputState::new(window, cx).placeholder("80"));
+        let mf_description = cx.new(|cx| InputState::new(window, cx).placeholder("description"));
         let sidebar_width = cx.global::<Config>().sidebar_width;
         // Live-apply hot-reloaded config: the watcher in `main.rs` swaps the
         // `Config` global on every `config.json` change, which fires this. Theme
@@ -349,6 +364,13 @@ impl Tty7App {
                 host_input: loopback_host_input,
                 port_input: loopback_port_input,
                 editing: None,
+                managed: Vec::new(),
+                mf_kind: crate::daemon::protocol::SshForwardKind::Local,
+                mf_bind_host,
+                mf_bind_port,
+                mf_target_host,
+                mf_target_port,
+                mf_description,
             },
             sftp_panel,
             sidebar_width: Rc::new(Cell::new(sidebar_width)),
@@ -887,6 +909,114 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Refresh the managed (Local/Remote/Dynamic) forwards for `pane_id` (WS4).
+    pub(crate) fn refresh_managed_forwards(&mut self, pane_id: u64, cx: &mut Context<Self>) {
+        self.loopback_panel.managed = crate::terminal::RemoteTerminal::list_forwards(pane_id);
+        cx.notify();
+    }
+
+    /// Pick the kind for the add-forward form (native-SSH panes).
+    pub(crate) fn set_managed_forward_kind(
+        &mut self,
+        kind: crate::daemon::protocol::SshForwardKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.loopback_panel.mf_kind = kind;
+        cx.notify();
+    }
+
+    /// Establish the add-form's managed forward on `pane_id`'s connection, then
+    /// clear the form. A blank/invalid bind port is ignored; Dynamic forwards need
+    /// no target.
+    pub(crate) fn add_managed_forward(
+        &mut self,
+        pane_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::daemon::protocol::{SshForwardKind, SshForwardRule};
+        let kind = self.loopback_panel.mf_kind;
+        let bind_host = self
+            .loopback_panel
+            .mf_bind_host
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let bind_host = if bind_host.is_empty() {
+            "127.0.0.1".to_string()
+        } else {
+            bind_host
+        };
+        let Ok(bind_port) = self
+            .loopback_panel
+            .mf_bind_port
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<u16>()
+        else {
+            return;
+        };
+        let target_host = self
+            .loopback_panel
+            .mf_target_host
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let target_port = self
+            .loopback_panel
+            .mf_target_port
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<u16>()
+            .unwrap_or(0);
+        // Local/Remote require a target; Dynamic (SOCKS) does not.
+        if kind != SshForwardKind::Dynamic && (target_host.is_empty() || target_port == 0) {
+            return;
+        }
+        let description = self
+            .loopback_panel
+            .mf_description
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let rule = SshForwardRule {
+            kind,
+            bind_host,
+            bind_port,
+            target_host,
+            target_port,
+            description: (!description.is_empty()).then_some(description),
+        };
+        self.loopback_panel.managed = crate::terminal::RemoteTerminal::add_forward(pane_id, rule);
+        // Reset the value-carrying fields; keep bind host default.
+        for input in [
+            &self.loopback_panel.mf_bind_port,
+            &self.loopback_panel.mf_target_host,
+            &self.loopback_panel.mf_target_port,
+            &self.loopback_panel.mf_description,
+        ] {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Tear down one managed forward by id (native-SSH panes).
+    pub(crate) fn remove_managed_forward(
+        &mut self,
+        pane_id: u64,
+        forward_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.loopback_panel.managed =
+            crate::terminal::RemoteTerminal::remove_forward(pane_id, forward_id);
+        cx.notify();
+    }
+
     pub(crate) fn toggle_loopback_forward_panel(&mut self, pane_id: u64, cx: &mut Context<Self>) {
         let should_open = self.loopback_panel.open_pane_id != Some(pane_id);
         if should_open {
@@ -900,6 +1030,7 @@ impl Tty7App {
                 self.loopback_panel.editing = None;
             }
             self.refresh_loopback_forwards(cx);
+            self.refresh_managed_forwards(pane_id, cx);
         } else {
             self.loopback_panel.open_pane_id = None;
             self.loopback_panel.editing = None;

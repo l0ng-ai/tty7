@@ -38,9 +38,9 @@ use std::collections::VecDeque;
 use crate::core::osc::OscTokenizer;
 use crate::daemon::protocol::{
     AuthPromptKind, AuthResponse, ClientMsg, DaemonMsg, KnownHostEntry, KnownHostId,
-    LoopbackForward, LoopbackForwardId, LoopbackForwardInfo, LoopbackForwardRequest, NativeSshSpec,
-    RemoteContext, ShellSpec, SftpEntry, SftpJobProgress, SftpOp, SftpOpResult, SftpTransferSpec,
-    SshPhase, WinSize,
+    LoopbackForward, LoopbackForwardId, LoopbackForwardInfo, LoopbackForwardRequest,
+    ManagedForward, NativeSshSpec, RemoteContext, ShellSpec, SftpEntry, SftpJobProgress, SftpOp,
+    SftpOpResult, SftpTransferSpec, SshForwardRule, SshPhase, WinSize,
 };
 use crate::daemon::transport::{self, Stream};
 
@@ -1121,6 +1121,56 @@ impl RemoteTerminal {
                 DaemonMsg::SftpTransferProgress(jobs) => Ok(jobs),
                 other => Err(anyhow::anyhow!(
                     "unexpected reply to SftpTransferList: {other:?}"
+                )),
+            }
+        }
+        query(pane_id).unwrap_or_default()
+    }
+
+    /// Establish a managed forward (Local/Remote/Dynamic) on a native-SSH pane over
+    /// a short-lived control connection; returns the pane's forwards after the add.
+    /// One-shot, modeled on `list_loopback_forwards`.
+    pub fn add_forward(pane_id: u64, rule: SshForwardRule) -> Vec<ManagedForward> {
+        fn query(pane_id: u64, rule: SshForwardRule) -> anyhow::Result<Vec<ManagedForward>> {
+            let mut stream = connect()?;
+            ClientMsg::AddForward { pane_id, rule }.encode(&mut stream)?;
+            match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::ForwardList(list) => Ok(list),
+                DaemonMsg::Error(msg) => Err(anyhow::anyhow!(msg)),
+                other => Err(anyhow::anyhow!("unexpected reply to AddForward: {other:?}")),
+            }
+        }
+        query(pane_id, rule).unwrap_or_default()
+    }
+
+    /// Tear down one managed forward by id; returns the pane's remaining forwards.
+    pub fn remove_forward(pane_id: u64, forward_id: u64) -> Vec<ManagedForward> {
+        fn query(pane_id: u64, forward_id: u64) -> anyhow::Result<Vec<ManagedForward>> {
+            let mut stream = connect()?;
+            ClientMsg::RemoveForward {
+                pane_id,
+                forward_id,
+            }
+            .encode(&mut stream)?;
+            match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::ForwardList(list) => Ok(list),
+                other => Err(anyhow::anyhow!(
+                    "unexpected reply to RemoveForward: {other:?}"
+                )),
+            }
+        }
+        query(pane_id, forward_id).unwrap_or_default()
+    }
+
+    /// List a native-SSH pane's managed forwards.
+    pub fn list_forwards(pane_id: u64) -> Vec<ManagedForward> {
+        fn query(pane_id: u64) -> anyhow::Result<Vec<ManagedForward>> {
+            let mut stream = connect()?;
+            ClientMsg::ListForwards { pane_id }.encode(&mut stream)?;
+            match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::ForwardList(list) => Ok(list),
+                other => Err(anyhow::anyhow!(
+                    "unexpected reply to ListForwards: {other:?}"
                 )),
             }
         }

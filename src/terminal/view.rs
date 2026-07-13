@@ -3223,10 +3223,13 @@ impl TerminalView {
 
     fn can_forward_loopback(&self, cx: &mut Context<Self>) -> bool {
         cx.global::<Config>().ssh_loopback_forward
-            && self
-                .terminal
-                .remote_context()
-                .is_some_and(|remote| remote.control_path.is_some())
+            && self.terminal.remote_context().is_some_and(|remote| {
+                // A compat-mode ssh pane forwards through its ControlMaster socket; a
+                // native russh pane (WS4, FR-F4) forwards through its in-memory
+                // connection — neither of which the other has, so accept either.
+                remote.control_path.is_some()
+                    || remote.kind == crate::daemon::protocol::RemoteKind::NativeSsh
+            })
     }
 
     /// Update the remembered hovered link for the screen cell `(col, row)` and

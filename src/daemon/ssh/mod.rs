@@ -16,6 +16,7 @@
 //! `DaemonPane::ssh_connection` (in `daemon::pane`) exposes a pane's connection.
 
 pub mod broker;
+pub mod forward;
 pub mod known_hosts;
 pub mod session;
 pub mod sftp;
@@ -25,6 +26,7 @@ mod connect;
 mod handler;
 
 pub use broker::PromptBroker;
+pub use forward::SshForwardRegistry;
 pub use session::{ChannelCmd, SharedConnection, SshConnection, SshSessionHandle};
 
 use std::collections::HashMap;
@@ -35,8 +37,12 @@ use std::time::Duration;
 
 use russh::Pty;
 
-use crate::daemon::protocol::{NativeSshSpec, SshPhase, WinSize};
+use crate::daemon::protocol::{
+    LoopbackForward, LoopbackForwardId, LoopbackForwardInfo, ManagedForward, NativeSshSpec,
+    SshForwardRule, SshPhase, WinSize,
+};
 
+use forward::RemoteForwardTable;
 use handler::ClientHandler;
 use session::drive_channel;
 
@@ -75,6 +81,9 @@ type ConnSlot = Arc<tokio::sync::Mutex<Weak<SshConnection>>>;
 pub struct SshManager {
     runtime: tokio::runtime::Runtime,
     conns: Mutex<HashMap<ConnectionKey, ConnSlot>>,
+    /// The WS4 managed-forward registry (Local/Remote/Dynamic + native loopback),
+    /// driven on this manager's runtime.
+    forwards: SshForwardRegistry,
 }
 
 impl SshManager {
@@ -91,6 +100,7 @@ impl SshManager {
             SshManager {
                 runtime,
                 conns: Mutex::new(HashMap::new()),
+                forwards: SshForwardRegistry::default(),
             }
         })
     }
@@ -105,6 +115,73 @@ impl SshManager {
         self.runtime.handle().clone()
     }
 
+    // ---- Synchronous forward API for the (std-thread) daemon server ----------
+    //
+    // The server dispatch runs on plain std threads; these block on the runtime
+    // for the async establishment/teardown while returning results synchronously.
+
+    /// Establish a managed forward on `conn` for `pane_id`; returns the pane's
+    /// forwards after the add.
+    pub fn add_forward(
+        &self,
+        pane_id: u64,
+        conn: Arc<SshConnection>,
+        rule: &SshForwardRule,
+    ) -> Vec<ManagedForward> {
+        self.runtime.block_on(async {
+            self.forwards.establish(pane_id, conn, rule).await;
+            self.forwards.list(pane_id)
+        })
+    }
+
+    /// Remove a managed forward by id; returns the pane's remaining forwards.
+    pub fn remove_forward(&self, pane_id: u64, forward_id: u64) -> Vec<ManagedForward> {
+        self.runtime
+            .block_on(self.forwards.remove(pane_id, forward_id))
+    }
+
+    /// List a pane's managed forwards.
+    pub fn list_forwards(&self, pane_id: u64) -> Vec<ManagedForward> {
+        self.forwards.list(pane_id)
+    }
+
+    /// Tear down every forward attributed to `pane_id` (pane death / blast radius).
+    /// Detached on the runtime so a pane's `Drop` (which runs on a connection
+    /// thread) never blocks on a remote `cancel_tcpip_forward` round-trip.
+    pub fn teardown_pane_forwards(&'static self, pane_id: u64) {
+        self.runtime.spawn(async move {
+            self.forwards.teardown_pane(pane_id).await;
+        });
+    }
+
+    /// Ensure a native-SSH loopback forward for a Cmd-clicked `localhost` URL (FR-F4).
+    pub fn ensure_loopback_forward(
+        &self,
+        pane_id: u64,
+        conn: Arc<SshConnection>,
+        target: &str,
+        remote_host: &str,
+        remote_port: u16,
+    ) -> std::io::Result<LoopbackForward> {
+        self.runtime.block_on(self.forwards.ensure_loopback(
+            pane_id,
+            conn,
+            target,
+            remote_host,
+            remote_port,
+        ))
+    }
+
+    /// The active native-SSH loopback forwards, in the GUI's loopback list shape.
+    pub fn list_loopback_forwards(&self) -> Vec<LoopbackForwardInfo> {
+        self.forwards.list_loopback()
+    }
+
+    /// Close one native-SSH loopback forward.
+    pub fn close_loopback_forward(&self, id: &LoopbackForwardId) -> bool {
+        self.forwards.close_loopback(id)
+    }
+
     /// Kick off a native-SSH shell for a pane. Returns immediately; the connect →
     /// auth → shell sequence runs on the runtime and drives the pane through the
     /// provided bridge ends. All progress/prompt frames go via `broker`.
@@ -115,6 +192,7 @@ impl SshManager {
     /// to the rest of the daemon exactly like a shell that exited.
     pub fn spawn_native_session(
         &'static self,
+        pane_id: u64,
         spec: Box<NativeSshSpec>,
         size: WinSize,
         broker: Arc<PromptBroker>,
@@ -124,7 +202,15 @@ impl SshManager {
     ) {
         self.runtime.spawn(async move {
             if let Err(reason) = self
-                .run_session(&spec, size, &broker, data_tx.clone(), cmd_rx, &conn_slot)
+                .run_session(
+                    pane_id,
+                    &spec,
+                    size,
+                    &broker,
+                    data_tx.clone(),
+                    cmd_rx,
+                    &conn_slot,
+                )
                 .await
             {
                 broker.status(SshPhase::Failed {
@@ -141,6 +227,7 @@ impl SshManager {
 
     async fn run_session(
         &'static self,
+        pane_id: u64,
         spec: &NativeSshSpec,
         size: WinSize,
         broker: &Arc<PromptBroker>,
@@ -165,6 +252,13 @@ impl SshManager {
         *conn_slot.lock().unwrap() = Arc::downgrade(&conn);
 
         broker.status(SshPhase::Connected);
+
+        // Establish the profile's preconfigured forwards (FR-F2) now that the
+        // connection is authenticated. Failures are non-fatal — each surfaces as a
+        // `ForwardStatus::Error` on the forward row, never a killed session.
+        for rule in &spec.forwards {
+            self.forwards.establish(pane_id, conn.clone(), rule).await;
+        }
 
         // Open the shell channel on the (possibly shared) connection.
         let channel = conn
@@ -249,12 +343,16 @@ impl SshManager {
                 .filter(|v| *v > 0)
                 .map(|v| Duration::from_secs(u64::from(v)))
                 .unwrap_or(DEFAULT_CONNECT_TIMEOUT);
+            // The connection's Remote-forward table, shared with its handler so
+            // incoming `forwarded-tcpip` channels resolve to a local target (WS4).
+            let remote_forwards = RemoteForwardTable::default();
             let handler = ClientHandler {
                 host: spec.host.clone(),
                 port: spec.port,
                 verify_host_keys: spec.verify_host_keys,
                 skip_banner: spec.skip_banner,
                 broker: broker.clone(),
+                remote_forwards: remote_forwards.clone(),
             };
             let handshake = async {
                 let transport = connect::build_transport(spec, jump).await?;
@@ -274,7 +372,7 @@ impl SshManager {
                 .await
                 .map_err(anyhow::Error::msg)?;
 
-            let conn = SshConnection::new(handle, key);
+            let conn = SshConnection::new(handle, key, remote_forwards);
             *guard = Arc::downgrade(&conn);
             Ok(conn)
         })

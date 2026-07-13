@@ -32,6 +32,7 @@ use russh::{Channel, ChannelMsg};
 use crate::daemon::protocol::WinSize;
 
 use super::ConnectionKey;
+use super::forward::RemoteForwardTable;
 
 /// Bounded depth (in messages) of the driver→reader data channel. Each message is
 /// one russh data chunk (≤ the channel's max packet size, ~32 KiB), so this caps
@@ -258,6 +259,11 @@ pub struct SshConnection {
     /// as the stable identity WS4/WS5 will match against.
     #[allow(dead_code)]
     key: ConnectionKey,
+    /// The connection's active `tcpip-forward` bindings (WS4 Remote forwards).
+    /// Shared with this connection's [`super::handler::ClientHandler`] so incoming
+    /// `forwarded-tcpip` channels resolve to a local target. Empty for a connection
+    /// with no remote forwards.
+    remote_forwards: RemoteForwardTable,
     alive: AtomicBool,
 }
 
@@ -265,10 +271,12 @@ impl SshConnection {
     pub(super) fn new(
         handle: russh::client::Handle<super::handler::ClientHandler>,
         key: ConnectionKey,
+        remote_forwards: RemoteForwardTable,
     ) -> Arc<Self> {
         Arc::new(Self {
             handle: tokio::sync::Mutex::new(handle),
             key,
+            remote_forwards,
             alive: AtomicBool::new(true),
         })
     }
@@ -307,8 +315,64 @@ impl SshConnection {
         self.handle
             .lock()
             .await
-            .channel_open_direct_tcpip(host.to_string(), u32::from(port), "127.0.0.1".to_string(), 0)
+            .channel_open_direct_tcpip(
+                host.to_string(),
+                u32::from(port),
+                "127.0.0.1".to_string(),
+                0,
+            )
             .await
+    }
+
+    /// Request a `tcpip-forward` binding on `bind_host:bind_port`, routing incoming
+    /// `forwarded-tcpip` channels to `target_host:target_port` (WS4 Remote forward).
+    /// Registers the target *before* the request so an eager server channel finds
+    /// it. Returns the resolved bind port (the server assigns one when `bind_port`
+    /// is 0). On failure the registration is rolled back.
+    pub async fn add_remote_forward(
+        &self,
+        bind_host: &str,
+        bind_port: u16,
+        target_host: &str,
+        target_port: u16,
+    ) -> Result<u16, String> {
+        self.remote_forwards
+            .register(bind_host, bind_port, target_host, target_port);
+        let requested = self
+            .handle
+            .lock()
+            .await
+            .tcpip_forward(bind_host.to_string(), u32::from(bind_port))
+            .await;
+        match requested {
+            Ok(assigned) => {
+                let real = if bind_port == 0 {
+                    assigned as u16
+                } else {
+                    bind_port
+                };
+                if real != bind_port {
+                    self.remote_forwards.rekey(bind_host, bind_port, real);
+                }
+                Ok(real)
+            }
+            Err(e) => {
+                self.remote_forwards.unregister(bind_host, bind_port);
+                Err(format!("{e}"))
+            }
+        }
+    }
+
+    /// Cancel a previously requested `tcpip-forward` binding (best effort) and drop
+    /// its target registration.
+    pub async fn cancel_remote_forward(&self, bind_host: &str, bind_port: u16) {
+        self.remote_forwards.unregister(bind_host, bind_port);
+        let _ = self
+            .handle
+            .lock()
+            .await
+            .cancel_tcpip_forward(bind_host.to_string(), u32::from(bind_port))
+            .await;
     }
 }
 

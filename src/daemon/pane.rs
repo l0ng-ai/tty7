@@ -36,8 +36,8 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use crate::core::osc::OscTokenizer;
 use crate::daemon::protocol::{
-    AuthResponse, DaemonMsg, NativeSshSpec, PaneInfo, RemoteContext, RemoteKind, ShellSpec, SshSpec,
-    WinSize,
+    AuthResponse, DaemonMsg, NativeSshSpec, PaneInfo, RemoteContext, RemoteKind, ShellSpec,
+    SshSpec, WinSize,
 };
 use crate::daemon::shell_integration;
 
@@ -786,6 +786,7 @@ impl DaemonPane {
 
         // Kick off the connection on the SSH engine's runtime.
         crate::daemon::ssh::SshManager::global().spawn_native_session(
+            id,
             spec,
             size,
             broker,
@@ -1360,6 +1361,14 @@ impl DaemonPane {
 
 impl Drop for DaemonPane {
     fn drop(&mut self) {
+        // A native-SSH pane's managed forwards (WS4) are attributed to this pane;
+        // tear them down as the pane dies so listeners close and remote bindings are
+        // cancelled — the FR-C2 blast radius when a shared connection drops takes
+        // every pane through here. Detached, so it never blocks this connection
+        // thread.
+        if matches!(self.backend, PaneBackend::NativeSsh(_)) {
+            crate::daemon::ssh::SshManager::global().teardown_pane_forwards(self.id);
+        }
         // Hang up the byte source: SIGHUP → SIGKILL for a PTY child + its group, or
         // channel close for a native-SSH session — so the reader's `read()` can EOF.
         self.hangup();
