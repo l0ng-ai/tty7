@@ -122,11 +122,13 @@ fn short_title(raw: &str) -> String {
 }
 
 /// Drag payload for reordering tabs. Carries the source index and a label so the
-/// drag preview can show the tab being moved.
+/// drag preview can show the tab being moved. `pub(crate)` so the vertical
+/// [`tab_sidebar`](crate::ui::tab_sidebar) reuses the same payload (and could one
+/// day support strip ↔ sidebar cross-drops via the shared `move_tab`).
 #[derive(Clone)]
-struct DragTab {
-    index: usize,
-    label: SharedString,
+pub(crate) struct DragTab {
+    pub(crate) index: usize,
+    pub(crate) label: SharedString,
 }
 
 impl Render for DragTab {
@@ -164,8 +166,88 @@ impl Tty7App {
         }
     }
 
+    /// Attach the "new tab" shell picker to a button: the configured default
+    /// shell leads the menu (tagged `default`), followed by every shell detected
+    /// on this machine; clicking one opens a tab on that shell. Extracted so the
+    /// title-bar strip's "+" and the vertical [`tab_sidebar`] share one menu
+    /// definition rather than duplicating the shell iteration.
+    ///
+    /// [`tab_sidebar`]: crate::ui::tab_sidebar
+    pub(crate) fn attach_new_tab_menu(
+        &self,
+        button: Button,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let shells = self.detected_shells.clone();
+        let default_name = crate::core::shells::default_shell_name(
+            cx.global::<Config>()
+                .shell
+                .as_ref()
+                .map(|s| s.program.as_str()),
+        );
+        let app = cx.entity().downgrade();
+        button.dropdown_menu(move |menu, _window, _cx| {
+            let mut menu = menu.min_w(px(220.));
+            // One row per detected shell. There's no separate "New Tab (…)"
+            // entry — it only duplicated the default shell's row, and ⌘T already
+            // opens a default tab in one press. The configured default is tagged
+            // instead so the menu still says which shell a bare new tab would use.
+            for shell in &shells {
+                let spec = ShellSpec {
+                    program: shell.program.clone(),
+                    args: shell.args.clone(),
+                    ssh: None,
+                };
+                let open = app.clone();
+                let item = if shell.label == default_name {
+                    let label: SharedString = shell.label.clone().into();
+                    PopupMenuItem::element(move |_window, cx| {
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(label.clone())
+                            .child(
+                                div()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("default"),
+                            )
+                    })
+                } else {
+                    PopupMenuItem::new(shell.label.clone())
+                };
+                menu = menu.item(item.on_click(move |_, window, cx| {
+                    if let Some(app) = open.upgrade() {
+                        app.update(cx, |this, cx| {
+                            this.new_tab_with_shell(Some(spec.clone()), window, cx);
+                        });
+                    }
+                }));
+            }
+            // Before shell detection lands (or if it finds nothing), keep a
+            // single default entry so the menu is never empty.
+            if shells.is_empty() {
+                let open_default = app.clone();
+                menu = menu.item(
+                    PopupMenuItem::new("New Tab").on_click(move |_, window, cx| {
+                        if let Some(app) = open_default.upgrade() {
+                            app.update(cx, |this, cx| this.new_tab(window, cx));
+                        }
+                    }),
+                );
+            }
+            menu
+        })
+    }
+
+    /// The horizontal tab strip rendered into the title bar. `show_chips` draws
+    /// the per-tab chip row; passing `false` (the vertical-sidebar mode, where
+    /// the sidebar owns the tab list) keeps only the "+" and "⋯" chrome so the
+    /// title bar isn't left empty.
     pub(crate) fn tab_strip(
         &self,
+        show_chips: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -210,6 +292,11 @@ impl Tty7App {
             .overflow_hidden();
 
         for (i, tab) in self.tabs.iter().enumerate() {
+            // In sidebar mode the vertical rail carries the tab list; the strip
+            // keeps only its "+"/"⋯" chrome, so skip the chip row entirely.
+            if !show_chips {
+                break;
+            }
             let is_active = i == active;
             let label = self.tab_label(tab, i, cx);
 
@@ -399,80 +486,21 @@ impl Tty7App {
         // for `Button` — hence a ghost Button restyled to the title bar's 30px
         // tile rhythm (30px box, 15px glyph, soft corners) rather than the
         // hand-rolled tile the "+" used to be.
-        let shells = self.detected_shells.clone();
-        let default_name = crate::core::shells::default_shell_name(
-            cx.global::<Config>()
-                .shell
-                .as_ref()
-                .map(|s| s.program.as_str()),
-        );
-        let app = cx.entity().downgrade();
         let add_button =
             // Same Windows titlebar note as the chips above: `occlude()` gives
             // the trigger a BlockMouse hitbox so the TitleBar's HTCAPTION drag
             // area doesn't swallow the click.
             div().occlude().flex_shrink_0().child(
-                Button::new("tab-add")
-                    .icon(Icon::new(IconName::Plus).size(px(15.)))
-                    .ghost()
-                    .xsmall()
-                    .w(px(30.))
-                    .h(px(30.))
-                    .rounded_lg()
-                    .dropdown_menu(move |menu, _window, _cx| {
-                        let mut menu = menu.min_w(px(220.));
-                        // One row per detected shell. There's no separate
-                        // "New Tab (…)" entry — it only duplicated the default
-                        // shell's row, and ⌘T already opens a default tab in one
-                        // press. The configured default is tagged instead so the
-                        // menu still says which shell a bare new tab would use.
-                        for shell in &shells {
-                            let spec = ShellSpec {
-                                program: shell.program.clone(),
-                                args: shell.args.clone(),
-                                ssh: None,
-                            };
-                            let open = app.clone();
-                            let item = if shell.label == default_name {
-                                let label: SharedString = shell.label.clone().into();
-                                PopupMenuItem::element(move |_window, cx| {
-                                    h_flex()
-                                        .w_full()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap_3()
-                                        .child(label.clone())
-                                        .child(
-                                            div()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child("default"),
-                                        )
-                                })
-                            } else {
-                                PopupMenuItem::new(shell.label.clone())
-                            };
-                            menu = menu.item(item.on_click(move |_, window, cx| {
-                                if let Some(app) = open.upgrade() {
-                                    app.update(cx, |this, cx| {
-                                        this.new_tab_with_shell(Some(spec.clone()), window, cx);
-                                    });
-                                }
-                            }));
-                        }
-                        // Before shell detection lands (or if it finds nothing),
-                        // keep a single default entry so the menu is never empty.
-                        if shells.is_empty() {
-                            let open_default = app.clone();
-                            menu = menu.item(PopupMenuItem::new("New Tab").on_click(
-                                move |_, window, cx| {
-                                    if let Some(app) = open_default.upgrade() {
-                                        app.update(cx, |this, cx| this.new_tab(window, cx));
-                                    }
-                                },
-                            ));
-                        }
-                        menu
-                    }),
+                self.attach_new_tab_menu(
+                    Button::new("tab-add")
+                        .icon(Icon::new(IconName::Plus).size(px(15.)))
+                        .ghost()
+                        .xsmall()
+                        .w(px(30.))
+                        .h(px(30.))
+                        .rounded_lg(),
+                    cx,
+                ),
             );
 
         // Right-edge overflow menu: the low-frequency *global* entries (command
@@ -486,11 +514,8 @@ impl Tty7App {
         // needs an `action_context` inside the app's element tree to land on the
         // root `on_action` handlers, so we hand it the focused pane (falling back
         // to the home page's handle when no tab is open).
-        //
-        // Hidden while the settings tab is active: both entries are redundant
-        // there (you're already in settings, and the palette's own value is
-        // reaching *other* views), so the chrome stays quiet.
-        let on_settings = self.tabs.get(active).is_some_and(Tab::is_settings);
+        // (Settings is a full-window overlay now, so it simply covers this menu
+        // while open — no need to conditionally hide it.)
         let action_ctx = self
             .tabs
             .get(active)
@@ -520,9 +545,13 @@ impl Tty7App {
         h_flex()
             .items_center()
             .gap_1p5()
-            // Viewport-derived width (see `strip_w`) so the right edge — and the
-            // "⋯" pinned to it — tracks the window instead of drifting.
-            .w(strip_w)
+            // Chip mode: viewport-derived width (see `strip_w`) so the right edge —
+            // and the "⋯" pinned to it — tracks the window instead of drifting.
+            // Sidebar mode: the strip lives in the narrower right column beside the
+            // rail, so it just fills that column (`w_full`) and the "⋯" pins to its
+            // right; the viewport width would overrun the column and push it off.
+            .when(show_chips, |this| this.w(strip_w))
+            .when(!show_chips, |this| this.w_full())
             // Padding, not margin: taffy is border-box, so a horizontal *margin*
             // would push the strip past its box and clip the "⋯"; padding stays
             // inside the width. `pr_2` (8px) sets the "⋯"'s gap from the right edge
@@ -536,9 +565,12 @@ impl Tty7App {
             .when(!cfg!(target_os = "macos"), |this| this.pr_3())
             .min_w_0()
             .child(chips)
-            .child(add_button)
+            // In sidebar mode the rail owns "New Tab" (a "+" in its own top bar),
+            // so the title bar drops its "+" to avoid a redundant second one —
+            // leaving just the "⋯" overflow menu on a thin strip.
+            .when(show_chips, move |this| this.child(add_button))
             .child(div().flex_1())
-            .when(!on_settings, |this| this.child(menu_button))
+            .child(menu_button)
     }
 }
 

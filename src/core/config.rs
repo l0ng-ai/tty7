@@ -82,6 +82,15 @@ pub struct Config {
     /// Where a newly opened tab lands relative to the active one.
     #[serde(default, deserialize_with = "de_lenient")]
     pub new_tab_position: NewTabPosition,
+    /// Where the tab bar is rendered: a horizontal strip in the title bar
+    /// (`top`, the default) or a vertical list down the left side (`left`).
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub tab_bar_position: TabBarPosition,
+    /// Width (px) of the vertical tab sidebar (only meaningful when
+    /// `tab_bar_position` is `left`). Set by dragging the sidebar's right edge;
+    /// the live layout re-clamps it to `[180, window_width/2]`.
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
     /// When to post a desktop notification after a long foreground command
     /// finishes.
     #[serde(default, deserialize_with = "de_lenient")]
@@ -224,6 +233,17 @@ pub enum NewTabPosition {
     End,
 }
 
+/// Where the tab bar is rendered (see [`Config::tab_bar_position`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TabBarPosition {
+    /// A horizontal strip of chips in the title bar (the current behavior).
+    #[default]
+    Top,
+    /// A vertical list down the left side of the window (a tab sidebar).
+    Left,
+}
+
 /// When tty7 posts a "command finished" desktop notification (see
 /// [`Config::notify_on_command_finish`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -309,6 +329,10 @@ impl Default for Config {
             cursor_blink: true,
             scrollback_limit: 10_000,
             new_tab_position: NewTabPosition::AfterCurrent,
+            // Horizontal title-bar strip, matching the long-standing layout;
+            // `left` opts into the vertical sidebar.
+            tab_bar_position: TabBarPosition::Top,
+            sidebar_width: default_sidebar_width(),
             notify_on_command_finish: NotifyMode::Unfocused,
             // Opt-out, not opt-in: a stale terminal that never tells you it's
             // outdated is the status quo we're fixing. One cheap GET at startup.
@@ -391,6 +415,12 @@ impl Config {
         // on every trivial command, and a 1-hour ceiling above which "long
         // command" stops meaning anything.
         self.notify_threshold_secs = self.notify_threshold_secs.clamp(1, 3600);
+        // A corrupt/NaN width would poison `w(px(..))`; keep it in a broad safe
+        // band (the live layout enforces the real `[180, window/2]` bounds).
+        if !self.sidebar_width.is_finite() || self.sidebar_width <= 0.0 {
+            self.sidebar_width = default_sidebar_width();
+        }
+        self.sidebar_width = self.sidebar_width.clamp(100.0, 2000.0);
     }
 
     /// Write the current config back to disk, creating the parent directory if
@@ -574,6 +604,12 @@ fn default_prefix() -> String {
     "ctrl-b".to_string()
 }
 
+/// Serde default for [`Config::sidebar_width`]: a comfortable rail width that
+/// clears the tab labels without eating too much of the terminal.
+fn default_sidebar_width() -> f32 {
+    220.0
+}
+
 /// Upper bound on `scrollback_limit`. Matches alacritty_terminal's own history
 /// ceiling — asking for more just wastes memory since the emulator caps there.
 pub const MAX_SCROLLBACK: usize = 100_000;
@@ -702,20 +738,22 @@ mod tests {
         // A typo'd enum string must NOT reset the whole config: font_size is kept,
         // and only the bad field falls back to its default.
         let cfg: Config = serde_json::from_str(
-            r#"{"font_size": 20.0, "new_tab_position": "middle", "notify_on_command_finish": "sometimes"}"#,
+            r#"{"font_size": 20.0, "new_tab_position": "middle", "notify_on_command_finish": "sometimes", "tab_bar_position": "diagonal"}"#,
         )
         .expect("a bad enum value must not fail the whole parse");
         assert_eq!(cfg.font_size, 20.0);
         assert_eq!(cfg.new_tab_position, NewTabPosition::AfterCurrent);
         assert_eq!(cfg.notify_on_command_finish, NotifyMode::Unfocused);
+        assert_eq!(cfg.tab_bar_position, TabBarPosition::Top);
 
         // Valid kebab-case values round-trip.
         let cfg: Config = serde_json::from_str(
-            r#"{"new_tab_position": "end", "notify_on_command_finish": "always"}"#,
+            r#"{"new_tab_position": "end", "notify_on_command_finish": "always", "tab_bar_position": "left"}"#,
         )
         .unwrap();
         assert_eq!(cfg.new_tab_position, NewTabPosition::End);
         assert_eq!(cfg.notify_on_command_finish, NotifyMode::Always);
+        assert_eq!(cfg.tab_bar_position, TabBarPosition::Left);
     }
 
     #[test]

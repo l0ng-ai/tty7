@@ -1,16 +1,20 @@
 //! The window shell: a transparent unified title bar carrying the tab strip,
 //! with the active terminal filling the rest. Owns all tabs (each its own PTY).
 
-use gpui::{App, Axis, Context, Entity, PromptLevel, Subscription, Window, div, prelude::*, px};
+use gpui::{
+    App, Axis, Context, Entity, Focusable, PromptLevel, Subscription, Window, div, prelude::*, px,
+};
 use gpui_component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
 use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{ActiveTheme as _, IndexPath, TitleBar};
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::core::actions::*;
-use crate::core::config::{Config, NewTabPosition, ShellConfig};
+use crate::core::config::{Config, NewTabPosition, ShellConfig, TabBarPosition};
 use crate::core::session::{Session, SessionAxis, SessionPane, SessionTab};
 use crate::core::shells::DetectedShell;
 use crate::core::ssh_config;
@@ -72,31 +76,25 @@ const RESIZE_STEP: f32 = 0.05;
 /// promptly.
 const RECORD_COMMIT_DELAY_MS: u64 = 650;
 
-/// One tab: a split-pane tree plus an optional user-assigned name.
+/// Height (px) of the unified title bar. Shared by `render` (the strip's height),
+/// the settings overlay's nav-sidebar top zone, and the tab rail's top zone so
+/// they all line up (and reach the very top of the window).
+pub(crate) const TITLE_BAR_HEIGHT: f32 = 40.;
+
+/// One tab: a split-pane tree plus an optional user-assigned name. Settings is
+/// no longer a tab — it's a full-window overlay (`Tty7App::settings`), so every
+/// tab is a real terminal tab.
 pub struct Tab {
-    /// The tab's split-pane tree (one or more terminals). For a settings tab
-    /// this is `Pane::Empty` — the body renders the settings panel instead.
+    /// The tab's split-pane tree (one or more terminals).
     pub pane: Pane,
     /// User-set custom name (via "Rename Tab"). `None` → derive the label from
     /// the focused terminal's title at render time.
     pub name: Option<String>,
-    /// `Some` for the dedicated settings tab; `None` for a normal terminal tab.
-    /// A settings tab carries its own panel state and is never persisted.
-    settings: Option<SettingsState>,
 }
 
 impl Tab {
     fn new(pane: Pane) -> Self {
-        Self {
-            pane,
-            name: None,
-            settings: None,
-        }
-    }
-
-    /// True for the dedicated settings tab.
-    pub(crate) fn is_settings(&self) -> bool {
-        self.settings.is_some()
+        Self { pane, name: None }
     }
 
     /// The title of the tab's representative terminal (its first leaf), used to
@@ -200,6 +198,25 @@ pub struct Tty7App {
     /// over the active SSH pane, but the input/editing state is app-owned so it
     /// is not tied to the Settings tab.
     pub(crate) loopback_panel: LoopbackForwardPanelState,
+    /// Vertical tab sidebar width (px), held in a shared `Cell` so the resize
+    /// drag's window-level mouse listener can mutate it without the entity handle
+    /// (mirrors the split divider's `ratio`). Seeded from `Config::sidebar_width`
+    /// and persisted back when a drag ends.
+    pub(crate) sidebar_width: Rc<Cell<f32>>,
+    /// Whether the sidebar's resize handle is currently held.
+    pub(crate) sidebar_dragging: Rc<Cell<bool>>,
+    /// Scroll handle for the sidebar's row list, so activating a tab scrolls its
+    /// row into view.
+    pub(crate) sidebar_scroll: gpui::ScrollHandle,
+    /// Filter box in the sidebar's top control bar ("Search tabs…"); its text
+    /// narrows the visible rows by fuzzy-ish substring match on the tab label.
+    pub(crate) sidebar_search: Entity<InputState>,
+    /// Re-renders the sidebar on each search keystroke so results narrow live.
+    _sidebar_search_sub: Subscription,
+    /// `Some` while the settings page is open. Settings is a full-window overlay
+    /// (not a tab), so it covers the tab rail / title bar and never clutters the
+    /// tab list. Holds all the settings widget state + its subscriptions.
+    settings: Option<SettingsState>,
 }
 
 impl Tty7App {
@@ -239,6 +256,7 @@ impl Tty7App {
                 .placeholder("3000")
                 .default_value("")
         });
+        let sidebar_width = cx.global::<Config>().sidebar_width;
         // Live-apply hot-reloaded config: the watcher in `main.rs` swaps the
         // `Config` global on every `config.json` change, which fires this. Theme
         // and colors are handled separately by `apply_theme`; here we cover the
@@ -283,6 +301,16 @@ impl Tty7App {
             // the same way a daemon restart does.
             some => tabs_from_session(some, font_size, window, cx),
         };
+        // Sidebar tab filter. Each keystroke re-renders the (cheap) row list so
+        // results narrow as you type — the same live-filter wiring the theme
+        // picker uses.
+        let sidebar_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search tabs…"));
+        let sidebar_search_sub =
+            cx.subscribe_in(&sidebar_search, window, |_this, _i, ev, _w, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    cx.notify();
+                }
+            });
         let app = Self {
             tabs,
             active,
@@ -312,6 +340,12 @@ impl Tty7App {
                 port_input: loopback_port_input,
                 editing: None,
             },
+            sidebar_width: Rc::new(Cell::new(sidebar_width)),
+            sidebar_dragging: Rc::new(Cell::new(false)),
+            sidebar_scroll: gpui::ScrollHandle::new(),
+            sidebar_search,
+            _sidebar_search_sub: sidebar_search_sub,
+            settings: None,
         };
         // Discover this machine's shells for the "+" dropdown off the UI thread
         // (the WSL probe on Windows spawns a process, and /etc/shells hits the
@@ -395,29 +429,18 @@ impl Tty7App {
     /// Called after every structural change; the write is a small synchronous
     /// JSON dump and any error is swallowed inside `Session::save`.
     fn save_session(&self, cx: &App) {
-        // The settings tab is ephemeral — exclude it, and clamp `active` into the
-        // remaining terminal tabs so the next launch restores a real tab.
         let tabs: Vec<SessionTab> = self
             .tabs
             .iter()
-            .filter(|tab| !tab.is_settings())
             .map(|tab| tab_to_session(tab, cx))
             .collect();
-        // Zero terminal tabs is a real state (the home page) and is persisted as
-        // such, so the next launch comes back to it instead of a fresh shell.
+        // Zero tabs is a real state (the home page) and is persisted as such, so
+        // the next launch comes back to it instead of a fresh shell.
         if tabs.is_empty() {
             Session::default().save();
             return;
         }
-        // Remap `self.active` (an index into the *unfiltered* tabs) into the
-        // filtered list: it's the number of non-settings tabs before it. A plain
-        // `min` clamp is wrong when the settings tab sits *before* the active one
-        // — it would shift the restored selection onto the wrong tab.
-        let active = self.tabs[..self.active.min(self.tabs.len())]
-            .iter()
-            .filter(|tab| !tab.is_settings())
-            .count()
-            .min(tabs.len() - 1);
+        let active = self.active.min(tabs.len() - 1);
         let session = Session { active, tabs };
         session.save();
     }
@@ -438,7 +461,6 @@ impl Tty7App {
             Tab {
                 pane,
                 name: st.name,
-                settings: None,
             },
         );
         self.active = insert_at;
@@ -680,13 +702,13 @@ impl Tty7App {
     /// and when opening settings, so the pickers always reflect (and target) the
     /// theme currently on screen.
     pub(crate) fn rebuild_theme_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(idx) = self.settings_tab_index() else {
+        if self.settings.is_none() {
             return;
-        };
+        }
         let id = cx.global::<Config>().theme_preset.clone();
         let theme = crate::ui::presets::by_id(cx, &id);
         if !theme.editable() {
-            if let Some(s) = self.tabs.get_mut(idx).and_then(|t| t.settings.as_mut()) {
+            if let Some(s) = self.settings.as_mut() {
                 s.theme_editor = None;
             }
             return;
@@ -746,7 +768,7 @@ impl Tty7App {
             })
             .collect();
 
-        if let Some(s) = self.tabs.get_mut(idx).and_then(|t| t.settings.as_mut()) {
+        if let Some(s) = self.settings.as_mut() {
             s.theme_editor = Some(ThemeEditor {
                 for_id: theme.id.clone(),
                 seed,
@@ -989,6 +1011,22 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.new_tab_position = pos);
     }
 
+    /// Set where the tab bar is rendered (Settings → Window & Tabs). Persists the
+    /// choice; the layout re-derives from the `Config` global on the next render.
+    pub(crate) fn set_tab_bar_position(&mut self, pos: TabBarPosition, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.tab_bar_position = pos);
+    }
+
+    /// `ToggleTabSidebar`: flip the tab bar between the horizontal title-bar strip
+    /// (`Top`) and the vertical left sidebar (`Left`), persisting the choice.
+    pub(crate) fn toggle_tab_sidebar(&mut self, cx: &mut Context<Self>) {
+        let next = match cx.global::<Config>().tab_bar_position {
+            TabBarPosition::Top => TabBarPosition::Left,
+            TabBarPosition::Left => TabBarPosition::Top,
+        };
+        self.set_tab_bar_position(next, cx);
+    }
+
     pub(crate) fn set_notify_mode(
         &mut self,
         mode: crate::core::config::NotifyMode,
@@ -1076,6 +1114,13 @@ impl Tty7App {
     }
 
     fn focus_active(&self, window: &mut Window, cx: &mut App) {
+        // While the settings overlay is open it owns focus (so Esc-to-close and
+        // keybinding capture keep working); tab operations behind it don't steal
+        // it. `close_settings` refocuses the active terminal on the way out.
+        if let Some(settings) = self.settings.as_ref() {
+            window.focus(&settings.focus_handle, cx);
+            return;
+        }
         let Some(tab) = self.tabs.get(self.active) else {
             // No tabs → the home page is showing; keep something focused so
             // keystrokes stay on the window's dispatch path (⌘T etc. must still
@@ -1083,10 +1128,7 @@ impl Tty7App {
             window.focus(&self.home_focus, cx);
             return;
         };
-        // Settings tab: route focus to its panel so Esc-to-close works.
-        if let Some(settings) = tab.settings.as_ref() {
-            window.focus(&settings.focus_handle, cx);
-        } else if let Some(leaf) = tab.pane.first_leaf() {
+        if let Some(leaf) = tab.pane.first_leaf() {
             let handle = leaf.read(cx).focus_handle.clone();
             window.focus(&handle, cx);
         }
@@ -1350,6 +1392,9 @@ impl Tty7App {
         if index < self.tabs.len() && index != self.active {
             self.maximized = None;
             self.active = index;
+            // In sidebar mode, pull the newly active row into view (a no-op when
+            // the strip is horizontal — the handle tracks no painted list then).
+            self.sidebar_scroll.scroll_to_item(index);
             self.focus_active(window, cx);
             self.save_session(cx);
             cx.notify();
@@ -1393,22 +1438,19 @@ impl Tty7App {
         // indices and would let the pending edit commit onto the wrong tab. Drop it.
         self.renaming = None;
         // Snapshot the tab (layout + each pane's current cwd + name) onto the
-        // recently-closed stack so Cmd+Shift+T can bring it back. The settings
-        // tab is ephemeral, so it is never snapshotted or reopened this way.
-        if !self.tabs[index].is_settings() {
-            let snapshot = tab_to_session(&self.tabs[index], cx);
-            self.closed.push(snapshot);
-            if self.closed.len() > MAX_CLOSED_TABS {
-                self.closed.remove(0);
-            }
-            // Explicitly closing a tab kills its daemon panes (matching the old
-            // in-process behavior: closing ends the shells). This is distinct from
-            // *quitting* the app, where panes are detached and kept alive so the
-            // next launch can re-attach. Reopen-closed-tab then spawns fresh in the
-            // saved cwd, just like before the daemon split.
-            for leaf in self.tabs[index].pane.leaves() {
-                crate::terminal::RemoteTerminal::kill_pane(leaf.read(cx).pane_id);
-            }
+        // recently-closed stack so Cmd+Shift+T can bring it back.
+        let snapshot = tab_to_session(&self.tabs[index], cx);
+        self.closed.push(snapshot);
+        if self.closed.len() > MAX_CLOSED_TABS {
+            self.closed.remove(0);
+        }
+        // Explicitly closing a tab kills its daemon panes (matching the old
+        // in-process behavior: closing ends the shells). This is distinct from
+        // *quitting* the app, where panes are detached and kept alive so the
+        // next launch can re-attach. Reopen-closed-tab then spawns fresh in the
+        // saved cwd, just like before the daemon split.
+        for leaf in self.tabs[index].pane.leaves() {
+            crate::terminal::RemoteTerminal::kill_pane(leaf.read(cx).pane_id);
         }
         self.tabs.remove(index);
         if self.tabs.is_empty() {
@@ -1464,8 +1506,7 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The settings tab has a fixed label and isn't user-renamable.
-        if self.tabs.get(index).is_none_or(Tab::is_settings) {
+        if self.tabs.get(index).is_none() {
             return;
         }
         let current = self.tab_label(&self.tabs[index], index, cx);
@@ -1598,6 +1639,7 @@ impl Tty7App {
             PrevTab => self.cycle_tab(false, window, cx),
             ToggleMaximizePane => self.toggle_maximize(window, cx),
             ToggleFullscreen => window.toggle_fullscreen(),
+            ToggleTabSidebar => self.toggle_tab_sidebar(cx),
             ResetFontSize => self.reset_font_size(cx),
             FindInTerminal => {
                 // Open the search bar on the pane focus just returned to (the
@@ -1653,18 +1695,12 @@ impl Tty7App {
 
     // ----- Settings tab (Cmd+,) -------------------------------------------
 
-    /// Index of the dedicated settings tab, if one is open.
-    fn settings_tab_index(&self) -> Option<usize> {
-        self.tabs.iter().position(Tab::is_settings)
-    }
-
-    /// Open the settings tab (Cmd+,). If one already exists, just activate it;
-    /// otherwise assemble a new tab from the per-widget builders below (each
-    /// pre-filled from config, with its subscriptions pushed onto `subs`) and
-    /// focus it.
+    /// Toggle the settings overlay (Cmd+,). If it's already open, close it;
+    /// otherwise assemble its widget state (each control pre-filled from config,
+    /// with its subscriptions pushed onto `subs`) and focus the page.
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(index) = self.settings_tab_index() {
-            self.activate(index, window, cx);
+        if self.settings.is_some() {
+            self.close_settings(window, cx);
             return;
         }
         let focus_handle = cx.focus_handle();
@@ -1684,33 +1720,50 @@ impl Tty7App {
                 }
             }),
         );
-        self.maximized = None;
-        self.tabs.push(Tab {
-            pane: Pane::Empty,
-            name: Some("Settings".to_string()),
-            settings: Some(SettingsState {
-                focus_handle: focus_handle.clone(),
-                section: SettingsSection::Appearance,
-                font_select,
-                font_bold_select,
-                font_italic_select,
-                shell_program_input,
-                shell_args_input,
-                wd_path_input,
-                scroll_slider,
-                theme_editor: None,
-                theme_panel_open: false,
-                theme_search,
-                recording: None,
-                rebinding_note: None,
-                _subs: subs,
+        // Live filter for the nav-header settings search; each keystroke re-renders
+        // the (cheap) nav rail so the result list narrows as you type.
+        let settings_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search settings…"));
+        subs.push(
+            cx.subscribe_in(&settings_search, window, |this, _i, ev, _w, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    this.autoselect_settings_search(cx);
+                    cx.notify();
+                }
             }),
+        );
+
+        self.settings = Some(SettingsState {
+            focus_handle: focus_handle.clone(),
+            section: SettingsSection::Appearance,
+            search: settings_search,
+            font_select,
+            font_bold_select,
+            font_italic_select,
+            shell_program_input,
+            shell_args_input,
+            wd_path_input,
+            scroll_slider,
+            theme_editor: None,
+            theme_panel_open: false,
+            theme_search,
+            recording: None,
+            rebinding_note: None,
+            _subs: subs,
         });
-        self.active = self.tabs.len() - 1;
-        window.focus(&focus_handle, cx);
+        // Land the caret in the search box so Settings opens ready to type/filter
+        // (a blinking cursor), rather than on the inert page root. Escape still
+        // closes — the root's key handler is an ancestor of the focused input.
+        let search_focus = self
+            .settings
+            .as_ref()
+            .map(|s| s.search.read(cx).focus_handle(cx));
+        match search_focus {
+            Some(handle) => window.focus(&handle, cx),
+            None => window.focus(&focus_handle, cx),
+        }
         // Build the color editor if we opened straight onto an editable theme.
         self.rebuild_theme_editor(window, cx);
-        self.save_session(cx);
         cx.notify();
     }
 
@@ -1898,10 +1951,12 @@ impl Tty7App {
         scroll_slider
     }
 
-    /// Close the settings tab (Esc inside the panel).
+    /// Close the settings overlay (Esc inside the panel, or Cmd+, again),
+    /// dropping its widget state and returning focus to the active terminal.
     pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(index) = self.settings_tab_index() {
-            self.close_tab(index, window, cx);
+        if self.settings.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
         }
     }
 
@@ -1974,6 +2029,9 @@ impl Tty7App {
                 cfg.font_features.clone(),
             )
         };
+        // Keep the runtime sidebar width in step with the config (an external
+        // edit to `config.json`, or our own drag-end persist which re-fires this).
+        self.sidebar_width.set(cx.global::<Config>().sidebar_width);
         if font_size != self.font_size {
             self.font_size = font_size;
             let px_size = px(font_size);
@@ -2060,10 +2118,7 @@ impl Tty7App {
     /// reads `config.json` fresh on each PTY spawn — so running shells are
     /// untouched. There's nothing to apply live here; we just save.
     fn commit_shell(&mut self, cx: &mut Context<Self>) {
-        let Some(settings) = self
-            .settings_tab_index()
-            .and_then(|i| self.tabs[i].settings.as_ref())
-        else {
+        let Some(settings) = self.active_settings() else {
             return;
         };
         let program = settings
@@ -2114,8 +2169,7 @@ impl Tty7App {
     /// restores it.
     fn commit_working_directory_path(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self
-            .settings_tab_index()
-            .and_then(|i| self.tabs[i].settings.as_ref())
+            .active_settings()
             .map(|s| s.wd_path_input.read(cx).value().trim().to_string())
         else {
             return;
@@ -2130,14 +2184,15 @@ impl Tty7App {
     }
 
     /// The active tab's settings state, if it is the settings tab.
+    /// The open settings page's state, if the overlay is showing. The single
+    /// accessor every settings widget/handler reads, so the rest of the settings
+    /// code is agnostic to where the state lives.
     pub(crate) fn active_settings(&self) -> Option<&SettingsState> {
-        self.tabs.get(self.active).and_then(|t| t.settings.as_ref())
+        self.settings.as_ref()
     }
 
     pub(crate) fn active_settings_mut(&mut self) -> Option<&mut SettingsState> {
-        self.tabs
-            .get_mut(self.active)
-            .and_then(|t| t.settings.as_mut())
+        self.settings.as_mut()
     }
 
     fn active_ssh_pane(&self, window: &Window, cx: &App) -> Option<(u64, RemoteContext)> {
@@ -2150,23 +2205,40 @@ impl Tty7App {
         Some((pane.pane_id, pane.remote_context()?))
     }
 
-    /// Select a sidebar section in the active settings tab (no-op elsewhere).
+    /// Select a sidebar section in the settings page (no-op when it's closed).
     pub(crate) fn select_settings_section(
         &mut self,
         target: SettingsSection,
         cx: &mut Context<Self>,
     ) {
-        if let Some(s) = self
-            .tabs
-            .get_mut(self.active)
-            .and_then(|t| t.settings.as_mut())
-        {
+        if let Some(s) = self.settings.as_mut() {
             s.section = target;
             // Leaving the Keybindings page abandons any in-progress capture, so
             // the interceptor doesn't keep swallowing keys off-screen.
             s.recording = None;
         }
         cx.notify();
+    }
+
+    /// Keep the settings selection on a section that has search hits: if the
+    /// query changed and the current section no longer matches, jump to the
+    /// best-matching one so the shown page always reflects the search. A section
+    /// that still has matches is left alone, so the user's own click isn't yanked
+    /// away as they keep typing.
+    pub(crate) fn autoselect_settings_search(&mut self, cx: &mut Context<Self>) {
+        let Some(settings) = self.settings.as_ref() else {
+            return;
+        };
+        let query = settings.search.read(cx).value().trim().to_lowercase();
+        if query.is_empty() {
+            return;
+        }
+        if crate::ui::settings::section_match_count(settings.section, &query) > 0 {
+            return;
+        }
+        if let Some(best) = crate::ui::settings::best_matching_section(&query) {
+            self.select_settings_section(best, cx);
+        }
     }
 
     // ----- Keybindings editing (Settings → Keybindings) --------------------
@@ -2420,14 +2492,19 @@ impl Tty7App {
 
 impl Render for Tty7App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let strip = self.tab_strip(window, cx);
+        // Vertical-tab mode: the sidebar owns the tab list, so the title-bar strip
+        // drops its chips (keeping only "+"/"⋯"). Gated on having tabs — the
+        // zero-tab home page keeps the full-width horizontal layout, so an empty
+        // rail never appears.
+        let vertical = matches!(cx.global::<Config>().tab_bar_position, TabBarPosition::Left)
+            && !self.tabs.is_empty();
+        let strip = self.tab_strip(!vertical, window, cx);
+        let sidebar = vertical.then(|| self.tab_sidebar(window, cx));
         let active_ssh_pane = self.active_ssh_pane(window, cx);
         // Render the active tab's pane tree; show focus rings only when split.
         let body = match self.tabs.get(self.active) {
             // Zero tabs: the window's own face — the home page (see `ui::home`).
             None => self.render_home(cx).into_any_element(),
-            // The settings tab renders its panel instead of a terminal pane.
-            Some(tab) if tab.is_settings() => self.render_settings(cx).into_any_element(),
             Some(active_tab) => {
                 // If a pane is maximized and it belongs to the active tab, render
                 // just that leaf full-window; otherwise the normal split layout.
@@ -2451,6 +2528,78 @@ impl Render for Tty7App {
                 }
             }
         };
+
+        // The title strip (a transparent unified title bar carrying `strip`) and
+        // the terminal body area — shared by both layouts.
+        let title_bar = TitleBar::new()
+            // Taller than the stock 34px bar so the tabs read substantial and
+            // roomy instead of cramped. `.h(..)` lands in the component's
+            // `refine_style`, applied after its own `.h(TITLE_BAR_HEIGHT)`, so
+            // this override wins.
+            .h(px(TITLE_BAR_HEIGHT))
+            .bg(cx.theme().transparent)
+            .border_color(cx.theme().transparent)
+            .child(strip);
+        let body_area = div()
+            .flex_1()
+            .relative()
+            .overflow_hidden()
+            .child(body)
+            // Pane-contextual SSH loopback ("Ports") overlay, pinned top-right of
+            // the terminal area when the active pane is an SSH session.
+            .when_some(active_ssh_pane, |this, (pane_id, remote)| {
+                this.child(self.render_loopback_forward_overlay(pane_id, &remote, cx))
+            });
+
+        // The two layouts. Horizontal (default): a column of [title bar / body].
+        // Vertical: the rail is a full-height *left column* that reaches the very
+        // top of the window — the traffic lights sit on its surface — with the
+        // title strip and terminal stacked in the right column. That way the rail
+        // surface has no seam with the title bar and reads as one continuous
+        // panel.
+        let main_layout = match sidebar {
+            Some(sidebar) => div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .flex()
+                .flex_row()
+                .child(sidebar)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(title_bar)
+                        .child(body_area),
+                )
+                .into_any_element(),
+            None => div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(title_bar)
+                .child(body_area)
+                .into_any_element(),
+        };
+
+        // Settings is a full-window overlay (not a tab): it covers the tab rail,
+        // title strip, and terminal so it never crowds the tab list. `occlude`
+        // blocks input to the elements behind it. It fills the window edge to
+        // edge — its own nav sidebar reserves the title-bar zone internally (so
+        // that rail reaches the top like the tab rail), rather than insetting the
+        // whole page here.
+        let settings_overlay = self.settings.is_some().then(|| {
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(cx.theme().background)
+                .child(self.render_settings(cx))
+        });
 
         div()
             .id("tty7-root")
@@ -2565,6 +2714,9 @@ impl Render for Tty7App {
                 cx.listener(|_, _: &ToggleFullscreen, window, _cx| window.toggle_fullscreen()),
             )
             .on_action(
+                cx.listener(|this, _: &ToggleTabSidebar, _window, cx| this.toggle_tab_sidebar(cx)),
+            )
+            .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.toggle_settings(window, cx)),
             )
             .on_action(
@@ -2575,29 +2727,9 @@ impl Render for Tty7App {
             // than relying solely on the global handler (which the keystroke
             // doesn't reach while focus is deep in the terminal view).
             .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
-            .child(
-                TitleBar::new()
-                    // Taller than the stock 34px bar so the tabs read substantial
-                    // and roomy instead of cramped. `.h(..)` lands
-                    // in the component's `refine_style`, which is applied after its
-                    // own `.h(TITLE_BAR_HEIGHT)`, so this override wins.
-                    .h(px(40.))
-                    .bg(cx.theme().transparent)
-                    .border_color(cx.theme().transparent)
-                    // The tab strip anchors left; the title bar keeps its right
-                    // edge clear (before the traffic lights' mirror gap on macOS).
-                    .child(strip),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .relative()
-                    .overflow_hidden()
-                    .child(body)
-                    .when_some(active_ssh_pane, |this, (pane_id, remote)| {
-                        this.child(self.render_loopback_forward_overlay(pane_id, &remote, cx))
-                    }),
-            )
+            .child(main_layout)
+            // Settings overlay, above the tabs/terminal when open.
+            .when_some(settings_overlay, |this, overlay| this.child(overlay))
             // Command palette overlay, layered above everything when open.
             .when_some(self.palette.clone(), |this, palette| this.child(palette))
     }
@@ -2676,7 +2808,6 @@ fn tabs_from_session(
         tabs.push(Tab {
             pane,
             name: st.name.clone(),
-            settings: None,
         });
     }
     // Clamp the saved active index into the rebuilt range.

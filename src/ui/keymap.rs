@@ -155,6 +155,10 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         // the bare ⌘⏎, which users expect to affect the whole window.
         ("ToggleMaximizePane", "secondary-shift-enter"),
         ("ToggleFullscreen", "secondary-enter"),
+        // No default chord (a layout toggle rarely wants a reflexive shortcut, and
+        // this steers clear of collisions) — reachable from the command palette
+        // and Settings → Window & Tabs, and bindable there like any other action.
+        ("ToggleTabSidebar", ""),
         // Like Terminal.app / iTerm2 / Ghostty ⌘K: wipe the screen + scrollback.
         ("ClearScrollback", "secondary-k"),
         ("OpenSettings", "secondary-,"),
@@ -429,6 +433,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ReopenClosedTab" => KeyBinding::new(keystroke, ReopenClosedTab, None),
         "ToggleMaximizePane" => KeyBinding::new(keystroke, ToggleMaximizePane, None),
         "ToggleFullscreen" => KeyBinding::new(keystroke, ToggleFullscreen, None),
+        "ToggleTabSidebar" => KeyBinding::new(keystroke, ToggleTabSidebar, None),
         // Terminal-scoped (the handler lives on the terminal surface): the "Terminal"
         // context keeps ⌘K inert in the settings tab / home page instead of binding a
         // dead global chord there.

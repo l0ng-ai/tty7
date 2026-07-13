@@ -6,9 +6,11 @@
 //! window shell stays focused on tab/pane orchestration.
 
 use gpui::{
-    AnyElement, Context, Div, Entity, FontWeight, Image, ImageFormat, KeyDownEvent, SharedString,
-    Stateful, Subscription, Window, div, img, prelude::*, px, relative, rgb,
+    AnyElement, Context, Div, Entity, FontWeight, Image, ImageFormat, KeyDownEvent, MouseButton,
+    SharedString, Stateful, Subscription, Window, WindowControlArea, div, img, prelude::*, px,
+    relative, rgb,
 };
+use gpui_component::InteractiveElementExt as _;
 use gpui_component::Selectable as _;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_component::color_picker::{ColorPicker, ColorPickerState};
@@ -18,9 +20,13 @@ use gpui_component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarM
 use gpui_component::slider::{Slider, SliderState};
 use gpui_component::switch::Switch;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::core::config::{BellMode, Config, CursorStyle, NewTabPosition, NotifyMode};
+use crate::core::config::{
+    BellMode, Config, CursorStyle, NewTabPosition, NotifyMode, TabBarPosition,
+};
 use crate::ui::app::{FONT_SIZE_STEP, LINE_HEIGHT_STEP, ThemeEdit, Tty7App};
 use crate::ui::presets;
 
@@ -53,6 +59,201 @@ impl SettingsSection {
     }
 }
 
+/// One searchable setting for the settings-search box: the row's display title,
+/// the section it lives in, and a bag of extra keywords/synonyms so a search
+/// lands even when the user's word isn't in the visible label. Matching is
+/// case-insensitive substring over `title` + `keywords`.
+struct SearchEntry {
+    section: SettingsSection,
+    title: &'static str,
+    keywords: &'static str,
+}
+
+/// The static index the settings search matches against — one entry per notable
+/// setting, mirroring the rows each `render_settings_*` builds. Keywords carry
+/// synonyms the visible label omits (e.g. "meta" → the Option/Alt row, "color"
+/// → the theme) so intent-based searches still resolve to the right section.
+fn settings_search_entries() -> &'static [SearchEntry] {
+    use SettingsSection::*;
+    &[
+        // Appearance
+        SearchEntry {
+            section: Appearance,
+            title: "Theme",
+            keywords: "appearance color colours scheme dark light palette background foreground accent",
+        },
+        SearchEntry {
+            section: Appearance,
+            title: "Font Family",
+            keywords: "typeface monospace typography",
+        },
+        SearchEntry {
+            section: Appearance,
+            title: "Font Size",
+            keywords: "typography text bigger smaller zoom",
+        },
+        SearchEntry {
+            section: Appearance,
+            title: "Line Height",
+            keywords: "typography leading spacing",
+        },
+        SearchEntry {
+            section: Appearance,
+            title: "Bold Font",
+            keywords: "typeface weight",
+        },
+        SearchEntry {
+            section: Appearance,
+            title: "Italic Font",
+            keywords: "typeface oblique",
+        },
+        SearchEntry {
+            section: Appearance,
+            title: "Font ligatures",
+            keywords: "typography glyph fira",
+        },
+        SearchEntry {
+            section: Appearance,
+            title: "Cursor shape",
+            keywords: "caret block bar underline beam",
+        },
+        SearchEntry {
+            section: Appearance,
+            title: "Blink cursor",
+            keywords: "caret blinking flash",
+        },
+        SearchEntry {
+            section: Appearance,
+            title: "ANSI colors",
+            keywords: "palette 16 terminal colours theme",
+        },
+        // Terminal
+        SearchEntry {
+            section: Terminal,
+            title: "Option acts as Meta",
+            keywords: "alt keyboard modifier escape macos",
+        },
+        SearchEntry {
+            section: Terminal,
+            title: "Scrollback",
+            keywords: "history buffer lines scroll",
+        },
+        SearchEntry {
+            section: Terminal,
+            title: "Scroll speed",
+            keywords: "mouse wheel multiplier scrolling",
+        },
+        SearchEntry {
+            section: Terminal,
+            title: "Focus follows mouse",
+            keywords: "pane hover activate",
+        },
+        SearchEntry {
+            section: Terminal,
+            title: "Hide mouse while typing",
+            keywords: "cursor pointer autohide",
+        },
+        SearchEntry {
+            section: Terminal,
+            title: "Detect URLs",
+            keywords: "links hyperlink clickable open",
+        },
+        SearchEntry {
+            section: Terminal,
+            title: "Forward SSH loopback links",
+            keywords: "ssh remote port tunnel localhost forward",
+        },
+        SearchEntry {
+            section: Terminal,
+            title: "Copy on select",
+            keywords: "clipboard selection yank",
+        },
+        SearchEntry {
+            section: Terminal,
+            title: "Trim trailing spaces on copy",
+            keywords: "clipboard whitespace",
+        },
+        SearchEntry {
+            section: Terminal,
+            title: "Notify on command finish",
+            keywords: "notification alert bell done osc",
+        },
+        // Shell
+        SearchEntry {
+            section: Shell,
+            title: "Program",
+            keywords: "shell binary zsh bash fish executable",
+        },
+        SearchEntry {
+            section: Shell,
+            title: "Arguments",
+            keywords: "shell flags login args",
+        },
+        SearchEntry {
+            section: Shell,
+            title: "Working directory",
+            keywords: "cwd start folder path directory",
+        },
+        // Window & Tabs
+        SearchEntry {
+            section: WindowTabs,
+            title: "Startup window",
+            keywords: "restore session launch open",
+        },
+        SearchEntry {
+            section: WindowTabs,
+            title: "New tab position",
+            keywords: "tabs order end after",
+        },
+        SearchEntry {
+            section: WindowTabs,
+            title: "Tab bar position",
+            keywords: "tabs vertical sidebar left top layout",
+        },
+        // Keybindings
+        SearchEntry {
+            section: Keybindings,
+            title: "Keybindings",
+            keywords: "shortcut hotkey keyboard binding chord tmux preset rebind",
+        },
+        // About
+        SearchEntry {
+            section: About,
+            title: "About",
+            keywords: "version license credits build",
+        },
+    ]
+}
+
+/// Does this entry match the (already lowered, trimmed) query? Matches on the
+/// visible title or any of its synonym keywords, so intent-based searches land.
+fn entry_matches(entry: &SearchEntry, query: &str) -> bool {
+    entry.title.to_lowercase().contains(query) || entry.keywords.contains(query)
+}
+
+/// How many of `section`'s settings match `query` — the `(N)` shown beside each
+/// section link while a search is active. `query` must already be lowered/trimmed.
+pub(crate) fn section_match_count(section: SettingsSection, query: &str) -> usize {
+    settings_search_entries()
+        .iter()
+        .filter(|e| e.section == section && entry_matches(e, query))
+        .count()
+}
+
+/// The section a search should jump to: the one with the most matches, ties
+/// broken by nav order (the first section wins). `None` when nothing matches, so
+/// the caller leaves the current selection alone.
+pub(crate) fn best_matching_section(query: &str) -> Option<SettingsSection> {
+    use SettingsSection::*;
+    [Appearance, Terminal, Shell, WindowTabs, Keybindings, About]
+        .into_iter()
+        .map(|s| (s, section_match_count(s, query)))
+        .filter(|(_, n)| *n > 0)
+        // `>` (not `>=`) so an equal later section never displaces the earlier one.
+        .reduce(|best, cur| if cur.1 > best.1 { cur } else { best })
+        .map(|(s, _)| s)
+}
+
 /// The in-app color editor for the active *editable* theme: one color picker per
 /// seed color (background/foreground/accent/cursor/selection) and per ANSI slot,
 /// each wired to write its change straight back to the theme's YAML file. Rebuilt
@@ -75,6 +276,10 @@ pub(crate) struct ThemeEditor {
 pub(crate) struct SettingsState {
     pub(crate) focus_handle: gpui::FocusHandle,
     pub(crate) section: SettingsSection,
+    /// Live query for the settings search box in the nav header. While non-empty
+    /// the nav rail lists matching settings (across every section) instead of the
+    /// six section links; picking one jumps to its section.
+    pub(crate) search: Entity<InputState>,
     pub(crate) font_select: Entity<SelectState<SearchableVec<String>>>,
     /// Bold / italic face pickers. Their first row is the `FONT_DEFAULT_LABEL`
     /// sentinel, meaning "reuse the primary face with synthesized emphasis".
@@ -144,13 +349,24 @@ impl Tty7App {
     /// Build the settings tab body: a fixed left sidebar (section nav) beside a
     /// scrollable content area for the selected section. Esc closes the tab.
     pub(crate) fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        // Copy the palette out (Hsla is Copy) so this borrow doesn't outlive into
+        // `render_settings_search_results` below, which needs `cx` mutably.
         let theme = cx.theme();
-        let (background, foreground) = (theme.background, theme.foreground);
+        let (background, foreground, header_muted) =
+            (theme.background, theme.foreground, theme.muted_foreground);
 
-        let (focus_handle, section, theme_panel_open) = match self.active_settings() {
-            Some(s) => (s.focus_handle.clone(), s.section, s.theme_panel_open),
+        let (focus_handle, section, theme_panel_open, search) = match self.active_settings() {
+            Some(s) => (
+                s.focus_handle.clone(),
+                s.section,
+                s.theme_panel_open,
+                s.search.clone(),
+            ),
             None => return div(), // not a settings tab; nothing to render
         };
+        // Live settings-search query (trimmed, lowered). Non-empty swaps the six
+        // section links for a cross-section list of matching settings.
+        let query = search.read(cx).value().trim().to_lowercase();
         // The theme picker panel only makes sense beside its own page.
         let show_theme_panel = theme_panel_open && section == SettingsSection::Appearance;
 
@@ -161,65 +377,115 @@ impl Tty7App {
         let prof = crate::ui::perf::enabled()
             .then(|| (std::time::Instant::now(), section.profile_label()));
 
-        // Sidebar nav item that activates a section on click.
+        // Sidebar nav item that activates a section on click. While a search is
+        // active it also carries a trailing `(N)` count of that section's matching
+        // settings — the full section nav stays put and is annotated with
+        // per-section hit counts, rather than collapsing into a flat result list.
         let nav_item = |label: &'static str, target: SettingsSection, icon: IconName| {
             let view = cx.entity();
-            SidebarMenuItem::new(label)
+            let count = if query.is_empty() {
+                0
+            } else {
+                section_match_count(target, &query)
+            };
+            let item = SidebarMenuItem::new(label)
                 .icon(Icon::new(icon))
                 .active(section == target)
                 .on_click(move |_, _window, cx| {
                     view.update(cx, |this, cx| this.select_settings_section(target, cx));
+                });
+            if count > 0 {
+                item.suffix(move |_w, _cx| {
+                    div()
+                        .text_xs()
+                        .text_color(header_muted)
+                        .child(format!("({count})"))
                 })
+            } else {
+                item
+            }
         };
+
+        // The six section links stay put during search — only their `(N)` suffixes
+        // change — so the nav never collapses out from under the user.
+        let nav_body = SidebarMenu::new()
+            .child(nav_item(
+                "Appearance",
+                SettingsSection::Appearance,
+                IconName::Palette,
+            ))
+            // Sliders for Terminal (it's the tuning page), the `>_`
+            // prompt glyph for Shell (it configures the prompt's
+            // program) — the two would otherwise both claim `>_`.
+            .child(nav_item(
+                "Terminal",
+                SettingsSection::Terminal,
+                IconName::Settings2,
+            ))
+            .child(nav_item(
+                "Shell",
+                SettingsSection::Shell,
+                IconName::SquareTerminal,
+            ))
+            .child(nav_item(
+                "Window & Tabs",
+                SettingsSection::WindowTabs,
+                IconName::WindowRestore,
+            ))
+            // The icon set ships no keyboard glyph; CaseSensitive ("Aa")
+            // is the closest key-ish cue available.
+            .child(nav_item(
+                "Keybindings",
+                SettingsSection::Keybindings,
+                IconName::CaseSensitive,
+            ))
+            .child(nav_item("About", SettingsSection::About, IconName::Info));
 
         let sidebar = Sidebar::new("settings-sidebar")
             .collapsible(SidebarCollapsible::None)
-            // Narrower than the stock 255px — three short items don't need that
-            // much column, and a tighter rail reads more native/less hollow.
-            .w(px(212.))
+            // Match the tab sidebar's default width (`default_sidebar_width`, 220px)
+            // so toggling the settings overlay over the vertical rail doesn't shift
+            // the left column — narrower than the stock 255px too, which three short
+            // items don't need and which reads more native/less hollow.
+            .w(px(220.))
             .header(
-                div()
+                v_flex()
+                    .w_full()
                     .px_2()
-                    .py_1()
-                    .text_xs()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.muted_foreground)
-                    .child("SETTINGS"),
+                    .gap_2()
+                    // Reserve the title-bar height at the top so the nav rail
+                    // reaches the very top of the window (the macOS traffic lights
+                    // rest on its surface) with the header clearing them — matching
+                    // the tab rail's top zone.
+                    .pt(px(crate::ui::app::TITLE_BAR_HEIGHT))
+                    .pb_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(header_muted)
+                            .child("SETTINGS"),
+                    )
+                    // Settings search: type a setting or a synonym and each section
+                    // below shows how many of its settings match, with the
+                    // best-matching section auto-selected (see the search input's
+                    // change subscription in `app.rs`). Styled like the tab sidebar's
+                    // search — a leading magnifier + a borderless input sitting flush
+                    // on the rail surface, no box, so the header reads clean.
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(Icon::new(IconName::Search).small().text_color(header_muted))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Input::new(&search).appearance(false)),
+                            ),
+                    ),
             )
-            .child(
-                SidebarMenu::new()
-                    .child(nav_item(
-                        "Appearance",
-                        SettingsSection::Appearance,
-                        IconName::Palette,
-                    ))
-                    // Sliders for Terminal (it's the tuning page), the `>_`
-                    // prompt glyph for Shell (it configures the prompt's
-                    // program) — the two would otherwise both claim `>_`.
-                    .child(nav_item(
-                        "Terminal",
-                        SettingsSection::Terminal,
-                        IconName::Settings2,
-                    ))
-                    .child(nav_item(
-                        "Shell",
-                        SettingsSection::Shell,
-                        IconName::SquareTerminal,
-                    ))
-                    .child(nav_item(
-                        "Window & Tabs",
-                        SettingsSection::WindowTabs,
-                        IconName::WindowRestore,
-                    ))
-                    // The icon set ships no keyboard glyph; CaseSensitive ("Aa")
-                    // is the closest key-ish cue available.
-                    .child(nav_item(
-                        "Keybindings",
-                        SettingsSection::Keybindings,
-                        IconName::CaseSensitive,
-                    ))
-                    .child(nav_item("About", SettingsSection::About, IconName::Info)),
-            );
+            .child(nav_body);
 
         let content = match section {
             SettingsSection::Appearance => self.render_settings_appearance(cx),
@@ -250,6 +516,7 @@ impl Tty7App {
 
         let root = div()
             .size_full()
+            .relative()
             .flex()
             .flex_row()
             .bg(background)
@@ -264,7 +531,58 @@ impl Tty7App {
             // the two stack into one thick rule.
             .child(sidebar)
             .child(content_pane)
-            .when(show_theme_panel, |r| r.child(self.render_theme_panel(cx)));
+            // The overlay covers the real title bar, so the window's own drag
+            // region is buried. Restore it: a transparent strip across the top
+            // band (the height the title bar reserved) that moves the window on
+            // drag and zooms it on double-click, exactly like the title bar it
+            // stands in for. Driven the same way `TitleBar` does — a press arms a
+            // `should_move` flag and the first move calls `start_window_move`
+            // (deferring to an actual move keeps a plain click, and double-click,
+            // intact); the `WindowControlArea::Drag` tag covers the Windows path.
+            .child({
+                let should_move = Rc::new(Cell::new(false));
+                div()
+                    .id("settings-titlebar-drag")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
+                    .window_control_area(WindowControlArea::Drag)
+                    .on_mouse_down(MouseButton::Left, {
+                        let should_move = should_move.clone();
+                        move |_, _, _| should_move.set(true)
+                    })
+                    .on_mouse_up(MouseButton::Left, {
+                        let should_move = should_move.clone();
+                        move |_, _, _| should_move.set(false)
+                    })
+                    .on_mouse_move(move |_, window, _| {
+                        if should_move.replace(false) {
+                            window.start_window_move();
+                        }
+                    })
+                    .on_double_click(|_, window, _| window.titlebar_double_click())
+            })
+            .when(show_theme_panel, |r| r.child(self.render_theme_panel(cx)))
+            // Close affordance at the page's top-right corner (Esc and Cmd+, also
+            // close) — the intuitive "close this page" spot, and clear of the
+            // macOS traffic lights (top-left) and the window controls' zone.
+            // Hidden while the theme panel is open: it docks at the same right edge
+            // and carries its own ✕, so keeping this one would stack two ✕ there.
+            .when(!show_theme_panel, |r| {
+                r.child(
+                    div().absolute().top(px(6.)).right(px(10.)).occlude().child(
+                        Button::new("settings-close")
+                            .icon(IconName::Close)
+                            .ghost()
+                            .small()
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.close_settings(window, cx)),
+                            ),
+                    ),
+                )
+            });
 
         if let Some((start, label)) = prof {
             crate::ui::perf::record(label, start.elapsed());
@@ -1089,6 +1407,10 @@ impl Tty7App {
             NewTabPosition::End => 1,
         };
         let restore_session = cfg.restore_session;
+        let tab_bar_idx = match cfg.tab_bar_position {
+            TabBarPosition::Top => 0,
+            TabBarPosition::Left => 1,
+        };
 
         let restore_switch = Switch::new("wt-restore-session")
             .checked(restore_session)
@@ -1122,6 +1444,20 @@ impl Tty7App {
                 this.set_new_tab_position(pos, cx);
             },
         );
+        let tab_bar_radio = self.segmented(
+            "wt-tab-bar-pos",
+            &["Top", "Left"],
+            tab_bar_idx,
+            cx,
+            |this, ix, _w, cx| {
+                let pos = if ix == 0 {
+                    TabBarPosition::Top
+                } else {
+                    TabBarPosition::Left
+                };
+                this.set_tab_bar_position(pos, cx);
+            },
+        );
 
         v_flex()
             .child(self.section_header("Window", cx))
@@ -1143,6 +1479,12 @@ impl Tty7App {
                 "New tab position",
                 "Where a freshly opened tab is inserted.",
                 new_tab_radio,
+                cx,
+            ))
+            .child(self.settings_row(
+                "Tab bar position",
+                "Show tabs as a horizontal strip on top or a vertical sidebar on the left.",
+                tab_bar_radio,
                 cx,
             ))
             .into_any_element()

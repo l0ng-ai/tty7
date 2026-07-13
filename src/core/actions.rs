@@ -52,6 +52,9 @@ actions!(
         ReopenClosedTab,
         ToggleMaximizePane,
         ToggleFullscreen,
+        // Switch the tab bar between the horizontal title-bar strip and the
+        // vertical left-side sidebar (persists `tab_bar_position`).
+        ToggleTabSidebar,
         OpenSettings,
         RestartDaemon,
         SendTab,
