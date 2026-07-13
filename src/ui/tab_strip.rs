@@ -183,10 +183,16 @@ impl Tty7App {
         // `viewport - 80` reaches the true right edge and the strip's own `pr`
         // sets the "⋯" inset; other platforms put the window controls on the
         // *right*, so keep the strip narrower to clear them.
+        //
+        // The non-macOS reserve must cover everything the TitleBar lays out
+        // *beside* the strip, or the strip overruns the bar and shoves the native
+        // close button off the corner: 12px of `TitleBar` left padding + the three
+        // 34px window-control tiles (─ ▢ ✕ = 102px) = 114px. Undershooting it (the
+        // old 100px) left the strip ~14px too wide, clipping the "✕".
         let strip_w = if cfg!(target_os = "macos") {
             (window.viewport_size().width - px(80.)).max(px(160.))
         } else {
-            (window.viewport_size().width - px(100.)).max(px(140.))
+            (window.viewport_size().width - px(114.)).max(px(140.))
         };
         // The "+" and the right-edge overflow "⋯" (30px each), their surrounding
         // gaps, and the strip's own left/right padding all live *outside* the
