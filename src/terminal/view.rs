@@ -3,7 +3,7 @@
 
 use alacritty_terminal::event::Event as AlacEvent;
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::TermMode;
 use gpui::{
@@ -162,6 +162,22 @@ pub struct TerminalView {
     /// keeps Escape feeding the PTY when the terminal is focused.
     /// `pub(super)` so the search code in `terminal::search` can mirror focus.
     pub(super) search_focused: bool,
+    /// Force case-sensitive matching (the "Aa" toggle). When `false` the query
+    /// keeps alacritty's smart-case default (insensitive unless it contains an
+    /// uppercase char); when `true` a `(?-i)` prefix forces sensitivity. Persists
+    /// across close/reopen of the bar.
+    pub(super) search_case_sensitive: bool,
+    /// Treat the query as a regex (the ".*" toggle). When `false` (default) the
+    /// query is matched literally (metacharacters escaped); when `true` it is a
+    /// regex pattern. Persists across close/reopen.
+    pub(super) search_regex: bool,
+    /// Set when the current query is regex mode and fails to compile — drives the
+    /// error styling on the search field so an invalid pattern isn't a silent
+    /// zero-match. Only ever true while `search_regex` is on.
+    pub(super) search_regex_error: bool,
+    /// The last query text, remembered when the bar closes so reopening restores
+    /// it (unless a selection prefills instead).
+    pub(super) search_last_query: String,
     /// True for a brief window after a bell event; drives a momentary visual
     /// flash painted in place of an audible beep.
     pub bell_flash: bool,
@@ -797,6 +813,10 @@ impl TerminalView {
             cursor_visible: true,
             focused: true,
             search_focused: false,
+            search_case_sensitive: false,
+            search_regex: false,
+            search_regex_error: false,
+            search_last_query: String::new(),
             bell_flash: false,
             last_at_prompt: false,
             running_since: None,
@@ -1182,6 +1202,17 @@ impl TerminalView {
             }
             "f" => {
                 self.open_search(window, cx);
+                CmdKey::Consumed
+            }
+            // ⌘G / ⌘⇧G step to the next / previous match while the bar is open
+            // (macOS's standard "find again" keys), mirroring Enter / ⇧Enter.
+            "g" if self.search.is_some() => {
+                let dir = if m.shift {
+                    Direction::Left
+                } else {
+                    Direction::Right
+                };
+                self.step_match(dir, cx);
                 CmdKey::Consumed
             }
             "a" => {
@@ -5521,6 +5552,89 @@ mod gpui_tests {
             })
             .unwrap();
         assert_eq!(next_input(&mut daemon), b"ping".to_vec());
+    }
+
+    /// Buffer search (Cmd+F) end-to-end: the case ("Aa") and regex (".*")
+    /// toggles change the match set, a broken regex flags an error instead of a
+    /// silent zero-match, and closing persists the query. Drives the real
+    /// `open_search` / `recompute_matches` / `close_search` path against a grid
+    /// seeded through the reader thread.
+    #[gpui::test]
+    fn buffer_search_honors_case_and_regex_toggles(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+
+        // Three lines differing only by case, so the case toggle is observable.
+        DaemonMsg::Output(b"Hello World\r\nhello world\r\nWORLD wide\r\n".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+
+        // Wait for the reader thread to parse the output into the grid.
+        for _ in 0..200 {
+            let ready = window
+                .update(cx, |v, _, _| {
+                    let term = v.terminal.term.lock();
+                    let grid = term.grid();
+                    (0..grid.screen_lines() as i32)
+                        .any(|l| (0..grid.columns()).any(|c| grid[Line(l)][Column(c)].c == 'W'))
+                })
+                .unwrap();
+            if ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, window, cx| {
+                fn set_query(
+                    view: &mut TerminalView,
+                    q: &str,
+                    window: &mut Window,
+                    cx: &mut Context<TerminalView>,
+                ) {
+                    let input = view.search.as_ref().unwrap().input.clone();
+                    input.update(cx, |s, cx| s.set_value(q, window, cx));
+                    view.recompute_matches(cx);
+                }
+
+                view.open_search(window, cx);
+                assert!(view.search.is_some(), "Cmd+F opens the bar");
+
+                // Smart-case default: a lowercase query matches all three casings.
+                set_query(view, "world", window, cx);
+                assert_eq!(view.search.as_ref().unwrap().matches.len(), 3);
+                assert!(!view.search_regex_error);
+
+                // Force case-sensitive: only the exact-lowercase line matches.
+                view.search_case_sensitive = true;
+                view.recompute_matches(cx);
+                assert_eq!(view.search.as_ref().unwrap().matches.len(), 1);
+                view.search_case_sensitive = false;
+
+                // Literal mode: "wor.d" (a literal dot) matches nothing; regex
+                // mode turns "." into a wildcard so all three lines match.
+                set_query(view, "wor.d", window, cx);
+                assert_eq!(view.search.as_ref().unwrap().matches.len(), 0);
+                view.search_regex = true;
+                view.recompute_matches(cx);
+                assert_eq!(view.search.as_ref().unwrap().matches.len(), 3);
+
+                // A broken regex flags an error rather than a silent zero-match.
+                view.search_regex = true;
+                set_query(view, "(", window, cx);
+                assert!(view.search_regex_error);
+                assert_eq!(view.search.as_ref().unwrap().matches.len(), 0);
+                // The same query is a valid literal once regex mode is off.
+                view.search_regex = false;
+                view.recompute_matches(cx);
+                assert!(!view.search_regex_error);
+
+                // Closing remembers the query for the next open.
+                view.close_search(window, cx);
+                assert_eq!(view.search_last_query, "(");
+                assert!(view.search.is_none());
+            })
+            .unwrap();
     }
 
     #[gpui::test]

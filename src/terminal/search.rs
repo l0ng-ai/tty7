@@ -5,13 +5,17 @@
 
 use std::path::{Path, PathBuf};
 
+use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
+use alacritty_terminal::term::Term;
 use alacritty_terminal::term::search::{Match, RegexSearch};
 use gpui::{Context, Entity, Subscription, Window, div, prelude::*, px};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _, Size};
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _, Size,
+};
 
 use super::view::TerminalView;
 
@@ -67,8 +71,16 @@ impl TerminalView {
     pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Build the field on first open (Cmd+F again just refocuses it). The
         // InputState owns the query text, caret, selection, Cmd+A and IME.
-        if self.search.is_none() {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
+        let fresh = self.search.is_none();
+        if fresh {
+            // Seed the query: a single-line terminal selection is the strongest
+            // signal of intent (select-then-⌘F), otherwise fall back to the last
+            // query so reopening resumes where the user left off.
+            let seed = self
+                .selected_search_seed()
+                .unwrap_or_else(|| self.search_last_query.clone());
+            let input =
+                cx.new(|cx| InputState::new(window, cx).placeholder("Find").default_value(seed));
             let subs = vec![cx.subscribe_in(&input, window, Self::on_search_event)];
             self.search = Some(SearchState {
                 input,
@@ -80,12 +92,35 @@ impl TerminalView {
         if let Some(input) = self.search.as_ref().map(|s| s.input.clone()) {
             input.update(cx, |state, cx| state.focus(window, cx));
         }
+        // A freshly seeded (or restored) query has matches to compute right away;
+        // Cmd+F on an already-open bar just refocuses and keeps the current list.
+        if fresh {
+            self.recompute_matches(cx);
+        }
         cx.notify();
     }
 
+    /// The current terminal selection as a search seed: a non-empty, single-line
+    /// selection with no newline. Multi-line selections aren't useful as a query.
+    fn selected_search_seed(&self) -> Option<String> {
+        let text = self.terminal.term.lock().selection_to_string()?;
+        let trimmed = text.trim_matches(['\n', '\r']);
+        if trimmed.is_empty() || trimmed.contains('\n') {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
     pub fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Remember the query so the next open resumes it (toggles persist on the
+        // view already). Then tear down the field and any error state.
+        if let Some(s) = self.search.as_ref() {
+            self.search_last_query = s.input.read(cx).value().to_string();
+        }
         self.search = None;
         self.search_focused = false;
+        self.search_regex_error = false;
         self.terminal.term.lock().selection = None;
         // Return focus to the terminal so typing resumes feeding the PTY.
         window.focus(&self.focus_handle, cx);
@@ -131,7 +166,7 @@ impl TerminalView {
     /// nearest the bottom of the viewport (mirroring the old "search up from the
     /// newest content" behavior), falling back to the first match, or `None`
     /// when there are no matches / the query is empty.
-    fn recompute_matches(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn recompute_matches(&mut self, cx: &mut Context<Self>) {
         let Some(query) = self
             .search
             .as_ref()
@@ -142,9 +177,17 @@ impl TerminalView {
 
         let mut matches: Vec<Match> = Vec::new();
         let mut current_index: Option<usize> = None;
+        let mut regex_error = false;
 
         if !query.is_empty() {
-            if let Ok(mut regex) = RegexSearch::new(&query) {
+            let pattern = self.effective_search_pattern(&query);
+            let compiled = RegexSearch::new(&pattern);
+            // A pattern only fails to compile in regex mode (a literal query is
+            // escaped, and the `(?-i)` case prefix is always valid), so a failure
+            // means the user typed a broken regex — flag it instead of silently
+            // showing zero matches.
+            regex_error = compiled.is_err();
+            if let Ok(mut regex) = compiled {
                 let term = self.terminal.term.lock();
                 let grid = term.grid();
                 let mut origin = Point::new(grid.topmost_line(), Column(0));
@@ -194,13 +237,16 @@ impl TerminalView {
             s.matches = matches;
             s.current_index = current_index;
         }
+        self.search_regex_error = regex_error;
 
-        // Clear any stray selection and bring the focused match into view.
+        // Clear any stray selection and bring the focused match into view, but
+        // only when it's off-screen so an in-viewport match doesn't jerk the
+        // scroll position around as the user refines the query.
         let current = self.search.as_ref().and_then(|s| s.current().cloned());
         let mut term = self.terminal.term.lock();
         term.selection = None;
         if let Some(m) = current {
-            term.scroll_to_point(*m.start());
+            scroll_match_into_view(&mut term, &m);
         }
         drop(term);
         cx.notify();
@@ -209,7 +255,7 @@ impl TerminalView {
     /// Move to the next (`Direction::Right`, toward the bottom) or previous
     /// (`Direction::Left`, toward the top) match, wrapping around, and scroll the
     /// new current match into view. Never recomputes the match list.
-    fn step_match(&mut self, direction: Direction, cx: &mut Context<Self>) {
+    pub(super) fn step_match(&mut self, direction: Direction, cx: &mut Context<Self>) {
         let current = {
             let Some(s) = self.search.as_mut() else {
                 return;
@@ -226,8 +272,48 @@ impl TerminalView {
             s.current_index = Some(next);
             s.matches[next].clone()
         };
-        self.terminal.term.lock().scroll_to_point(*current.start());
+        // Explicit navigation always reveals the target: unlike a live query
+        // change, stepping past a match already on screen should still recenter
+        // it if it sits off-screen, but leave the viewport alone when it's visible.
+        scroll_match_into_view(&mut self.terminal.term.lock(), &current);
         cx.notify();
+    }
+
+    /// Toggle the "Aa" (force case-sensitive) option and re-search. Does nothing
+    /// when the bar is closed.
+    fn toggle_search_case(&mut self, cx: &mut Context<Self>) {
+        if self.search.is_none() {
+            return;
+        }
+        self.search_case_sensitive = !self.search_case_sensitive;
+        self.recompute_matches(cx);
+    }
+
+    /// Toggle the ".*" (regex vs literal) option and re-search.
+    fn toggle_search_regex(&mut self, cx: &mut Context<Self>) {
+        if self.search.is_none() {
+            return;
+        }
+        self.search_regex = !self.search_regex;
+        self.recompute_matches(cx);
+    }
+
+    /// Turn the user's query into the pattern fed to alacritty's `RegexSearch`,
+    /// applying the two toggles. In literal mode the query is regex-escaped so
+    /// metacharacters (`.`, `*`, `(`, …) match themselves. A `(?-i)` prefix forces
+    /// case sensitivity when "Aa" is on; when off, alacritty's smart-case default
+    /// applies (insensitive unless the query already contains an uppercase char).
+    fn effective_search_pattern(&self, query: &str) -> String {
+        let base = if self.search_regex {
+            query.to_string()
+        } else {
+            regex_escape(query)
+        };
+        if self.search_case_sensitive {
+            format!("(?-i){base}")
+        } else {
+            base
+        }
     }
 
     pub(super) fn render_search_bar(
@@ -243,14 +329,19 @@ impl TerminalView {
         let border = theme.border;
         let popover = theme.popover;
         let accent = theme.accent;
+        let danger = theme.red;
         // (The `theme` borrow of `cx` ends here, before the `cx.listener` calls below.)
 
         let total = state.matches.len();
         let has_query = !state.input.read(cx).value().is_empty();
         let has_matches = !state.matches.is_empty();
         // Highlight the border while the field is focused so the bar reads as the
-        // active input. Caret/selection/IME all live inside the field itself.
+        // active input. Caret/selection/IME all live inside the field itself. A
+        // broken regex (only possible in regex mode) turns the border red instead.
         let focused = self.search_focused;
+        let regex_error = self.search_regex_error;
+        let case_on = self.search_case_sensitive;
+        let regex_on = self.search_regex;
 
         // The query field — a gpui-component InputState. It owns focus, the
         // blinking caret, text selection, Cmd+A, arrow keys and IME composition.
@@ -273,6 +364,28 @@ impl TerminalView {
                 .text_color(muted)
                 .child(format!("{current}/{total}"))
         });
+
+        // Option toggles: "Aa" forces case-sensitive matching, ".*" switches the
+        // query between literal and regex. Both read as pressed (accent fill) when
+        // active and re-search on click.
+        let case_toggle = Button::new("search-case")
+            .label("Aa")
+            .ghost()
+            .small()
+            .selected(case_on)
+            .tooltip("Match case")
+            .on_click(cx.listener(|this, _, _window, cx| {
+                this.toggle_search_case(cx);
+            }));
+        let regex_toggle = Button::new("search-regex")
+            .label(".*")
+            .ghost()
+            .small()
+            .selected(regex_on)
+            .tooltip("Use regular expression")
+            .on_click(cx.listener(|this, _, _window, cx| {
+                this.toggle_search_regex(cx);
+            }));
 
         // Thin rule separating the query zone from the action buttons.
         let divider = div().flex_none().w(px(1.)).h(px(16.)).bg(border);
@@ -308,26 +421,89 @@ impl TerminalView {
             .absolute()
             .top_2()
             .right_4()
+            // Block mouse events over the bar so a click (or drag) on it doesn't
+            // fall through to the terminal surface and start a selection — the
+            // terminal's mouse handlers gate on `Hitbox::is_hovered`, which this
+            // occluding hitbox turns off for the cells beneath the bar.
+            .occlude()
             .flex()
             .items_center()
             .gap_1p5()
-            .w(px(340.))
+            .w(px(400.))
             .h(px(34.))
             .pl_3()
             .pr_1()
             .rounded_lg()
             .border_1()
-            .border_color(if focused { accent } else { border })
+            .border_color(if regex_error {
+                danger
+            } else if focused {
+                accent
+            } else {
+                border
+            })
             .bg(popover)
             .shadow_md()
-            // The field fills the remaining width; count + buttons keep fixed size.
+            // The field fills the remaining width; count + toggles + buttons keep
+            // fixed size.
             .child(div().flex_1().min_w_0().child(field))
             .children(count)
+            .child(case_toggle)
+            .child(regex_toggle)
             .child(divider)
             .child(prev)
             .child(next)
             .child(close)
     }
+}
+
+/// Scroll `term` so `m`'s start is on screen, but only when it isn't already —
+/// an in-viewport match keeps the current scroll position so refining the query
+/// or stepping between nearby matches doesn't jerk the view around. The visible
+/// line range for the current `display_offset` is `[-offset, screen_lines-1-offset]`
+/// (the same arithmetic `recompute_matches` uses to pick the initial match).
+fn scroll_match_into_view<T: EventListener>(term: &mut Term<T>, m: &Match) {
+    let grid = term.grid();
+    let display_offset = grid.display_offset() as i32;
+    let top = -display_offset;
+    let bottom = grid.screen_lines() as i32 - 1 - display_offset;
+    let line = m.start().line.0;
+    if line < top || line > bottom {
+        term.scroll_to_point(*m.start());
+    }
+}
+
+/// Escape regex metacharacters so a literal-mode query matches itself. Mirrors
+/// `regex::escape` (which isn't a direct dependency): backslash-prefix every
+/// character the regex parser treats as special.
+fn regex_escape(query: &str) -> String {
+    let mut out = String::with_capacity(query.len());
+    for c in query.chars() {
+        if matches!(
+            c,
+            '\\' | '.'
+                | '+'
+                | '*'
+                | '?'
+                | '('
+                | ')'
+                | '|'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '^'
+                | '$'
+                | '#'
+                | '&'
+                | '-'
+                | '~'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Test-only convenience over [`url_span_at`]: just the resolved address.
@@ -714,6 +890,16 @@ fn is_url_char(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regex_escape_neutralizes_metacharacters() {
+        // A literal query for regex metacharacters must match them verbatim.
+        assert_eq!(regex_escape("a.b*c"), r"a\.b\*c");
+        assert_eq!(regex_escape("foo(bar)"), r"foo\(bar\)");
+        assert_eq!(regex_escape("1+1=2"), r"1\+1=2");
+        // Plain alphanumerics are left untouched.
+        assert_eq!(regex_escape("hello"), "hello");
+    }
 
     #[test]
     fn url_at_detects_http_and_strips_trailing_punct() {

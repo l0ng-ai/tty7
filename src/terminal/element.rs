@@ -11,7 +11,8 @@ use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Rgb};
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, CursorStyle, Element, ElementId, Font, FontStyle,
-    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, MouseButton,
+    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, Hsla, IntoElement, LayoutId,
+    MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, SharedString, Style,
     TextAlign, TextRun, Window, fill, outline, point, px, relative, size,
 };
@@ -1165,10 +1166,19 @@ impl TerminalElement {
     /// Register the per-frame mouse listeners (press / drag / release) over our
     /// bounds, translating pixel positions to grid cells and routing to the view
     /// (selection, link opening, or mouse-tracking reports).
-    fn register_mouse_handlers(&self, geom: CellGeom, bounds: Bounds<Pixels>, window: &mut Window) {
+    fn register_mouse_handlers(
+        &self,
+        geom: CellGeom,
+        bounds: Bounds<Pixels>,
+        hitbox: HitboxId,
+        window: &mut Window,
+    ) {
         let view = self.view.clone();
-        window.on_mouse_event(move |ev: &MouseDownEvent, phase, _window, cx| {
-            if !phase.bubble() || !bounds.contains(&ev.position) {
+        window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
+            // `is_hovered` (not `bounds.contains`) so a click on an overlay that
+            // sits above the terminal — the Cmd+F search bar, which `.occlude()`s
+            // its area — doesn't fall through and start a terminal selection.
+            if !phase.bubble() || !hitbox.is_hovered(window) {
                 return;
             }
             let (col, row, left) = geom.pos_to_cell(ev.position);
@@ -1209,8 +1219,8 @@ impl TerminalElement {
                 // local (button-less motion is never forwarded to the app), and
                 // ⌘-click opens links inside mouse-mode TUIs as well, so the
                 // underline affordance must match. Skipped only when the pointer
-                // is outside our bounds.
-                let inside = bounds.contains(&ev.position);
+                // is outside our bounds (or under the search-bar overlay).
+                let inside = hitbox.is_hovered(window);
                 // Focus-follows-mouse: hovering an unfocused pane focuses it, no
                 // click needed. Guarded on `inside` and the config flag.
                 if inside && cx.global::<Config>().focus_follows_mouse {
@@ -1539,7 +1549,7 @@ impl Element for TerminalElement {
         // Hand the snapshot buffer back for the next paint (any pane).
         GRID_BUF.with(|b| *b.borrow_mut() = buf);
 
-        self.register_mouse_handlers(geom, bounds, window);
+        self.register_mouse_handlers(geom, bounds, prepaint.hitbox.id, window);
 
         // A pointing-hand cursor over a hovered link reinforces that it's
         // clickable (Cmd+click opens it).
