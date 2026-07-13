@@ -174,18 +174,26 @@ impl Tty7App {
         // first nine chips swaps its close affordance for a ⌘N badge — same
         // slot, so nothing shifts when the hints appear.
         let show_badges = self.mod_hint_badges;
-        // The titlebar lays out on its main axis by content width, so the strip
-        // never inherits a window-bounded width to shrink within — `flex_shrink`
-        // on the chips would never fire. Derive an explicit cap from the live
-        // viewport instead: total width minus the traffic-light pad (80), the
-        // strip's own left margin (8), and a small right buffer. Capped this way,
-        // a crowded strip becomes a bounded flex container and the chips shrink.
-        let avail = (window.viewport_size().width - px(100.)).max(px(120.));
-        // The "+" and the right-edge overflow "⋯" (30px each, plus gaps) live
-        // *outside* the clipped chip row, so neither gets scrolled off when the
-        // tabs fill the strip — reserve both footprints here and cap the chip row
-        // at the remainder.
-        let chips_avail = (avail - px(80.)).max(px(80.));
+        // Explicit viewport-derived strip width, NOT `w_full`: the title bar sizes
+        // its content by intrinsic width, so `w_full` doesn't track the window and
+        // the strip's right edge (where the "⋯" is pinned) lags behind the
+        // shrinking window — the button drifts right into the corner. Deriving the
+        // width from the live viewport makes the right edge track the window at
+        // every size. macOS reserves 80px on the *left* for the traffic lights, so
+        // `viewport - 80` reaches the true right edge and the strip's own `pr`
+        // sets the "⋯" inset; other platforms put the window controls on the
+        // *right*, so keep the strip narrower to clear them.
+        let strip_w = if cfg!(target_os = "macos") {
+            (window.viewport_size().width - px(80.)).max(px(160.))
+        } else {
+            (window.viewport_size().width - px(100.)).max(px(140.))
+        };
+        // The "+" and the right-edge overflow "⋯" (30px each), their surrounding
+        // gaps, and the strip's own left/right padding all live *outside* the
+        // clipped chip row — reserve that whole footprint here so the fixed chrome
+        // never overflows the strip box (which would eat the "⋯"'s right inset and
+        // shove it into the window corner) and cap the chip row at the remainder.
+        let chips_avail = (strip_w - px(100.)).max(px(80.));
         // Only the chip row clips; a crowded row shrinks its chips (down to their
         // `min_w`) and truncates their labels rather than pushing the "+" away.
         let mut chips = h_flex()
@@ -505,16 +513,19 @@ impl Tty7App {
         h_flex()
             .items_center()
             .gap_1p5()
-            .w_full()
-            // Padding, not margin: the strip is `w_full` and taffy is border-box,
-            // so a horizontal *margin* would push it 16px past the title bar and
-            // clip the "⋯"; padding stays inside the 100% width.
+            // Viewport-derived width (see `strip_w`) so the right edge — and the
+            // "⋯" pinned to it — tracks the window instead of drifting.
+            .w(strip_w)
+            // Padding, not margin: taffy is border-box, so a horizontal *margin*
+            // would push the strip past its box and clip the "⋯"; padding stays
+            // inside the width. `pr_2` (8px) sets the "⋯"'s gap from the right edge
+            // — the original tight inset, which now holds steady on resize since
+            // `strip_w` keeps the right edge tracking the window.
             .pl_2()
             .pr_2()
             // On Windows/Linux the window controls (─ ▢ ✕) sit on the right, right
             // where the "⋯" lands; give it extra right breathing room there so it
-            // reads as a menu affordance, not a fourth window control. macOS keeps
-            // the tighter inset (its traffic lights are on the left).
+            // reads as a menu affordance, not a fourth window control.
             .when(!cfg!(target_os = "macos"), |this| this.pr_3())
             .min_w_0()
             .child(chips)
