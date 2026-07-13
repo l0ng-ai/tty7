@@ -63,6 +63,15 @@ pub fn rebind(cx: &mut App) {
     bindings.extend(action_bindings(&effective));
     cx.bind_keys(bindings);
     cx.set_global(BoundKeystrokes(bound_keystrokes(&effective)));
+
+    // Rebuild the menu bar so its macOS key equivalents track the new keymap.
+    // AppKit dispatches a menu shortcut (e.g. ⌘W → Close) *before* GPUI's keymap,
+    // so a stale equivalent would fire the old action even though we suppressed
+    // its keybinding with `NoAction`. `set_menus` re-resolves each item's
+    // equivalent from the current keymap (via `bindings_for_action`, which skips
+    // the suppressed bindings), so a rebound action loses its old ⌘-shortcut and
+    // gains the new one.
+    set_menus(cx);
 }
 
 /// Build the `KeyBinding`s for an effective table, skipping unbound rows (empty
