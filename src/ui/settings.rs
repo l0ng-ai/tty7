@@ -1428,11 +1428,7 @@ impl Tty7App {
         // and the wider picker instead of clustering at the left edge. Rows stay
         // ragged-right like real terminal text.
         let bar = |frac: f32, color: gpui::Rgba| {
-            div()
-                .h(px(4.))
-                .w(relative(frac))
-                .rounded(px(1.5))
-                .bg(color)
+            div().h(px(4.)).w(relative(frac)).rounded(px(1.5)).bg(color)
         };
 
         v_flex()
@@ -1736,25 +1732,19 @@ impl Tty7App {
         };
 
         // A preset toggle button, highlighted when active.
-        let preset_button = |id: &'static str, label: &'static str, value: &'static str, on: bool| {
-            Button::new(id)
-                .label(label)
-                .small()
-                .selected(on)
-                .on_click(cx.listener(move |this, _, _w, cx| {
-                    this.set_keybinding_preset(value, cx)
-                }))
-        };
+        let preset_button =
+            |id: &'static str, label: &'static str, value: &'static str, on: bool| {
+                Button::new(id).label(label).small().selected(on).on_click(
+                    cx.listener(move |this, _, _w, cx| this.set_keybinding_preset(value, cx)),
+                )
+            };
         // A prefix choice button (tmux preset only).
-        let prefix_button = |id: &'static str, label: &'static str, value: &'static str, on: bool| {
-            Button::new(id)
-                .label(label)
-                .small()
-                .selected(on)
-                .on_click(cx.listener(move |this, _, _w, cx| {
-                    this.set_keybinding_prefix(value, cx)
-                }))
-        };
+        let prefix_button =
+            |id: &'static str, label: &'static str, value: &'static str, on: bool| {
+                Button::new(id).label(label).small().selected(on).on_click(
+                    cx.listener(move |this, _, _w, cx| this.set_keybinding_prefix(value, cx)),
+                )
+            };
 
         let preset_row = h_flex()
             .items_center()
@@ -1812,9 +1802,7 @@ impl Tty7App {
         let count = effective.len();
         let mut list = v_flex().mt_2();
         for (i, (action, key)) in effective.into_iter().enumerate() {
-            let is_recording = recording
-                .as_ref()
-                .is_some_and(|(a, _)| a == &action);
+            let is_recording = recording.as_ref().is_some_and(|(a, _)| a == &action);
             let is_overridden = overridden.contains(&action);
 
             // Keycap clusters for a spec: one cluster per whitespace-separated
@@ -1837,12 +1825,7 @@ impl Tty7App {
                     .unwrap_or_default();
                 let row = h_flex().gap_2().items_center();
                 let row = if chords.is_empty() {
-                    row.child(
-                        div()
-                            .text_xs()
-                            .text_color(accent)
-                            .child("Press keys…"),
-                    )
+                    row.child(div().text_xs().text_color(accent).child("Press keys…"))
                 } else {
                     row.child(keycaps(&chords.join(" "))).child(
                         div()
@@ -1873,9 +1856,7 @@ impl Tty7App {
                 .py_1()
                 .rounded_md()
                 .cursor_pointer()
-                .when(is_recording, |d| {
-                    d.border_1().border_color(accent)
-                })
+                .when(is_recording, |d| d.border_1().border_color(accent))
                 .hover(|d| d.bg(kbd_bg))
                 .child(captured)
                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -1883,9 +1864,11 @@ impl Tty7App {
                 }));
 
             let action_for_reset = action.clone();
-            let right = h_flex().items_center().gap_1().child(capture).when(
-                is_overridden,
-                |r| {
+            let right = h_flex()
+                .items_center()
+                .gap_1()
+                .child(capture)
+                .when(is_overridden, |r| {
                     r.child(
                         Button::new(SharedString::from(format!("reset-{action}")))
                             .label("Reset")
@@ -1894,8 +1877,7 @@ impl Tty7App {
                                 this.reset_keybinding(action_for_reset.clone(), cx)
                             })),
                     )
-                },
-            );
+                });
 
             list = list.child(
                 h_flex()

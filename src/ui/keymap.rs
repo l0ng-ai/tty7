@@ -453,6 +453,11 @@ mod tests {
     const SHIFT: &str = "⇧";
     #[cfg(not(target_os = "macos"))]
     const SHIFT: &str = "Shift";
+    // Literal `ctrl` renders as ⌃ on macOS, "Ctrl" elsewhere.
+    #[cfg(target_os = "macos")]
+    const CTRL: &str = "⌃";
+    #[cfg(not(target_os = "macos"))]
+    const CTRL: &str = "Ctrl";
 
     #[test]
     fn key_tokens_maps_modifiers_to_glyphs() {
@@ -475,7 +480,10 @@ mod tests {
         // A tmux-style sequence renders as two distinct clusters.
         assert_eq!(
             key_chords("ctrl-b n"),
-            vec![vec!["⌃".to_string(), "B".to_string()], vec!["N".to_string()]]
+            vec![
+                vec![CTRL.to_string(), "B".to_string()],
+                vec!["N".to_string()]
+            ]
         );
         // A single chord is one group.
         assert_eq!(key_chords("secondary-t"), vec![vec![SECONDARY, "T"]]);
@@ -594,7 +602,9 @@ mod gpui_tests {
             rebind(cx);
             let eff = effective_bindings(cx);
             assert_eq!(
-                eff.iter().find(|(a, _)| a == "SplitRight").map(|(_, k)| k.as_str()),
+                eff.iter()
+                    .find(|(a, _)| a == "SplitRight")
+                    .map(|(_, k)| k.as_str()),
                 Some("secondary-d")
             );
         });

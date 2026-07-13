@@ -266,7 +266,9 @@ impl<L: Clone> Pane<L> {
     fn collect_rects(&self, area: Rect, out: &mut Vec<(L, Rect)>) {
         match self {
             Pane::Leaf(v) => out.push((v.clone(), area)),
-            Pane::Split { axis, a, b, ratio, .. } => {
+            Pane::Split {
+                axis, a, b, ratio, ..
+            } => {
                 let r = ratio.get().clamp(MIN_RATIO, MAX_RATIO);
                 match axis {
                     Axis::Horizontal => {
@@ -1021,7 +1023,10 @@ mod tests {
     fn assert_rect(got: Rect, want: Rect) {
         let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
         assert!(
-            close(got.x, want.x) && close(got.y, want.y) && close(got.w, want.w) && close(got.h, want.h),
+            close(got.x, want.x)
+                && close(got.y, want.y)
+                && close(got.w, want.w)
+                && close(got.h, want.h),
             "rect {got:?} != {want:?}"
         );
     }
@@ -1038,12 +1043,39 @@ mod tests {
             Pane::Leaf(0),
             TestPane::split_node(Axis::Vertical, 0.6, Pane::Leaf(1), Pane::Leaf(2)),
         );
-        assert_rect(rect_of(&pane, 0), Rect { x: 0.0, y: 0.0, w: 0.25, h: 1.0 });
-        assert_rect(rect_of(&pane, 1), Rect { x: 0.25, y: 0.0, w: 0.75, h: 0.6 });
-        assert_rect(rect_of(&pane, 2), Rect { x: 0.25, y: 0.6, w: 0.75, h: 0.4 });
+        assert_rect(
+            rect_of(&pane, 0),
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.25,
+                h: 1.0,
+            },
+        );
+        assert_rect(
+            rect_of(&pane, 1),
+            Rect {
+                x: 0.25,
+                y: 0.0,
+                w: 0.75,
+                h: 0.6,
+            },
+        );
+        assert_rect(
+            rect_of(&pane, 2),
+            Rect {
+                x: 0.25,
+                y: 0.6,
+                w: 0.75,
+                h: 0.4,
+            },
+        );
         // Rects come back in leaves() order.
         assert_eq!(
-            pane.leaf_rects().iter().map(|(v, _)| *v).collect::<Vec<_>>(),
+            pane.leaf_rects()
+                .iter()
+                .map(|(v, _)| *v)
+                .collect::<Vec<_>>(),
             pane.leaves()
         );
     }
@@ -1129,10 +1161,16 @@ mod tests {
         // Inner split moved; outer untouched.
         match &pane {
             Pane::Split { ratio, b, .. } => {
-                assert!((ratio.get() - 0.5).abs() < 1e-6, "outer split must not move");
+                assert!(
+                    (ratio.get() - 0.5).abs() < 1e-6,
+                    "outer split must not move"
+                );
                 match &**b {
                     Pane::Split { ratio, .. } => {
-                        assert!((ratio.get() - 0.55).abs() < 1e-6, "inner split should grow 1");
+                        assert!(
+                            (ratio.get() - 0.55).abs() < 1e-6,
+                            "inner split should grow 1"
+                        );
                     }
                     _ => unreachable!(),
                 }

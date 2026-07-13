@@ -22,7 +22,9 @@ use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::palette::{Command, CommandKind, PaletteEvent, PaletteView};
 use crate::ui::pane::{CloseOutcome, Dir, Pane};
 use crate::ui::presets::Fill;
-use crate::ui::settings::{Recording, SettingsSection, SettingsState, ThemeEditor, humanize_action};
+use crate::ui::settings::{
+    Recording, SettingsSection, SettingsState, ThemeEditor, humanize_action,
+};
 use crate::ui::theme::{apply_theme, set_menus};
 
 /// One editable color of a user theme, targeted by the in-app color editor. Maps
@@ -2217,7 +2219,10 @@ impl Tty7App {
             "backspace" | "delete" => {
                 if has_chords {
                     // Edit the sequence: drop the last chord and keep capturing.
-                    if let Some(r) = self.active_settings_mut().and_then(|s| s.recording.as_mut()) {
+                    if let Some(r) = self
+                        .active_settings_mut()
+                        .and_then(|s| s.recording.as_mut())
+                    {
                         r.chords.pop();
                     }
                     let still_has = self
@@ -2244,7 +2249,10 @@ impl Tty7App {
         let Some(spec) = crate::ui::keymap::spec_from_keystroke(keystroke) else {
             return;
         };
-        if let Some(r) = self.active_settings_mut().and_then(|s| s.recording.as_mut()) {
+        if let Some(r) = self
+            .active_settings_mut()
+            .and_then(|s| s.recording.as_mut())
+        {
             r.chords.push(spec);
         }
         self.schedule_recording_commit(cx);
@@ -2492,27 +2500,45 @@ impl Render for Tty7App {
             .on_action(cx.listener(|this, _: &ResizePaneDown, window, cx| {
                 this.resize_pane(Dir::Down, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &SwapPaneNext, window, cx| {
-                this.swap_pane(true, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SwapPanePrev, window, cx| {
-                this.swap_pane(false, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &NextTab, window, cx| {
-                this.cycle_tab(true, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
-                this.cycle_tab(false, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ActivateTab1, window, cx| this.activate(0, window, cx)))
-            .on_action(cx.listener(|this, _: &ActivateTab2, window, cx| this.activate(1, window, cx)))
-            .on_action(cx.listener(|this, _: &ActivateTab3, window, cx| this.activate(2, window, cx)))
-            .on_action(cx.listener(|this, _: &ActivateTab4, window, cx| this.activate(3, window, cx)))
-            .on_action(cx.listener(|this, _: &ActivateTab5, window, cx| this.activate(4, window, cx)))
-            .on_action(cx.listener(|this, _: &ActivateTab6, window, cx| this.activate(5, window, cx)))
-            .on_action(cx.listener(|this, _: &ActivateTab7, window, cx| this.activate(6, window, cx)))
-            .on_action(cx.listener(|this, _: &ActivateTab8, window, cx| this.activate(7, window, cx)))
-            .on_action(cx.listener(|this, _: &ActivateTab9, window, cx| this.activate(8, window, cx)))
+            .on_action(
+                cx.listener(|this, _: &SwapPaneNext, window, cx| this.swap_pane(true, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SwapPanePrev, window, cx| this.swap_pane(false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(true, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &PrevTab, window, cx| this.cycle_tab(false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ActivateTab1, window, cx| this.activate(0, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ActivateTab2, window, cx| this.activate(1, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ActivateTab3, window, cx| this.activate(2, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ActivateTab4, window, cx| this.activate(3, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ActivateTab5, window, cx| this.activate(4, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ActivateTab6, window, cx| this.activate(5, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ActivateTab7, window, cx| this.activate(6, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ActivateTab8, window, cx| this.activate(7, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ActivateTab9, window, cx| this.activate(8, window, cx)),
+            )
             .on_action(cx.listener(|this, _: &IncreaseFontSize, _window, cx| {
                 this.change_font_size(FONT_SIZE_STEP, cx)
             }))
@@ -2781,11 +2807,7 @@ mod keybinding_gpui_tests {
     }
 
     /// Open Settings → Keybindings and begin capturing `action`.
-    fn begin_capture(
-        window: &WindowHandle<Tty7App>,
-        vcx: &mut VisualTestContext,
-        action: &str,
-    ) {
+    fn begin_capture(window: &WindowHandle<Tty7App>, vcx: &mut VisualTestContext, action: &str) {
         let action = action.to_string();
         window
             .update(vcx, |app, window, cx| {
@@ -2831,7 +2853,11 @@ mod keybinding_gpui_tests {
                 app.active_settings().map(|s| s.recording.is_some())
             })
             .unwrap();
-        assert_eq!(recording, Some(false), "capture should end after committing");
+        assert_eq!(
+            recording,
+            Some(false),
+            "capture should end after committing"
+        );
     }
 
     // A two-chord sequence (the tmux-style `ctrl-b x`) records as one binding.
