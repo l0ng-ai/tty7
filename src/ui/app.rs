@@ -16,7 +16,7 @@ use crate::core::actions::*;
 use crate::core::config::{Config, NewTabPosition, ShellConfig};
 use crate::core::session::{Session, SessionAxis, SessionPane, SessionTab};
 use crate::core::shells::DetectedShell;
-use crate::daemon::protocol::ShellSpec;
+use crate::daemon::protocol::{ShellSpec, SshSpec};
 use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::palette::{Command, CommandKind, PaletteEvent, PaletteView};
 use crate::ui::pane::{CloseOutcome, Pane};
@@ -910,6 +910,48 @@ impl Tty7App {
         cx.notify();
     }
 
+    pub(crate) fn open_managed_ssh_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((target, options)) = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.settings.as_ref())
+            .map(|settings| {
+                (
+                    settings
+                        .ssh_target_input
+                        .read(cx)
+                        .value()
+                        .trim()
+                        .to_string(),
+                    settings.ssh_options_input.read(cx).value().to_string(),
+                )
+            })
+        else {
+            return;
+        };
+        if target.is_empty() {
+            return;
+        }
+        let Ok(args) = parse_ssh_option_words(&options) else {
+            return;
+        };
+        let ssh = SshSpec { target, args };
+        if ssh.validate().is_err() {
+            return;
+        }
+        let mut shell_args = ssh.args.clone();
+        shell_args.push(ssh.target.clone());
+        self.new_tab_with_shell(
+            Some(ShellSpec {
+                program: "ssh".to_string(),
+                args: shell_args,
+                ssh: Some(ssh),
+            }),
+            window,
+            cx,
+        );
+    }
+
     /// Toggle the startup update check (Settings → About). Takes effect on the
     /// next launch — this only persists the preference; it doesn't run or cancel
     /// an in-flight check.
@@ -1500,6 +1542,14 @@ impl Tty7App {
     /// focus it.
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self.settings_tab_index() {
+            let loopback_default_pane_id = self
+                .tabs
+                .get(self.active)
+                .and_then(|tab| tab.pane.focused_or_first(window, cx))
+                .map(|pane| pane.read(cx).pane_id);
+            if let Some(settings) = self.tabs[index].settings.as_mut() {
+                settings.loopback_default_pane_id = loopback_default_pane_id;
+            }
             self.activate(index, window, cx);
             return;
         }
@@ -1532,6 +1582,19 @@ impl Tty7App {
                 .placeholder("3000")
                 .default_value("")
         });
+        let ssh_target_input = cx.new(|cx| InputState::new(window, cx).placeholder("user@host"));
+        let ssh_options_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("-p 2222 -J jump")
+                .default_value("")
+        });
+        for input in [&ssh_target_input, &ssh_options_input] {
+            subs.push(cx.subscribe_in(input, window, |_this, _i, ev, _w, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    cx.notify();
+                }
+            }));
+        }
         let loopback_forwards = crate::terminal::RemoteTerminal::list_loopback_forwards();
 
         self.maximized = None;
@@ -1552,6 +1615,8 @@ impl Tty7App {
                 theme_panel_open: false,
                 theme_search,
                 loopback_forwards,
+                ssh_target_input,
+                ssh_options_input,
                 loopback_default_pane_id,
                 loopback_host_input,
                 loopback_port_input,
@@ -2281,4 +2346,54 @@ fn new_terminal(
     })
     .detach();
     view
+}
+
+pub(crate) fn parse_ssh_option_words(input: &str) -> Result<Vec<String>, ()> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), '\\') => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            (Some(_), c) => current.push(c),
+            (None, '\'' | '"') => quote = Some(ch),
+            (None, c) if c.is_whitespace() => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            (None, c) => current.push(c),
+        }
+    }
+    if quote.is_some() {
+        return Err(());
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    Ok(words)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_ssh_option_words;
+
+    #[test]
+    fn parses_ssh_option_words_with_quotes() {
+        assert_eq!(
+            parse_ssh_option_words("-p 2222 -J 'jump host' -o \"User=dev\"").unwrap(),
+            vec!["-p", "2222", "-J", "jump host", "-o", "User=dev"]
+        );
+    }
+
+    #[test]
+    fn rejects_unclosed_ssh_option_quote() {
+        assert!(parse_ssh_option_words("-J 'jump").is_err());
+    }
 }

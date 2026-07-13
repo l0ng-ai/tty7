@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::{TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -22,7 +23,7 @@ struct ForwardKey {
 
 struct ForwardEntry {
     local_port: u16,
-    child: Child,
+    control_path: PathBuf,
     created_at: Instant,
     last_used: Instant,
 }
@@ -51,11 +52,10 @@ impl ForwardManager {
         if !is_loopback_forward_host(remote_host) {
             anyhow::bail!("only loopback hosts can be forwarded");
         }
-        let invocation = crate::daemon::remote::parse_ssh_invocation(&remote.argv)
-            .ok_or_else(|| anyhow::anyhow!("foreground ssh invocation is not forwardable"))?;
-        if invocation.context.target != remote.target {
-            anyhow::bail!("foreground ssh target changed");
-        }
+        let control_path = remote
+            .control_path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("pane is not a tty7-managed ssh session"))?;
 
         let key = ForwardKey {
             pane_id,
@@ -74,21 +74,37 @@ impl ForwardManager {
         }
 
         let local_port = reserve_local_port()?;
-        let mut cmd = build_ssh_forward_command(
-            &invocation.forward_args,
-            &invocation.context.target,
+        let mut cmd = build_ssh_control_command(
+            control_path,
+            "forward",
+            &remote.target,
             "127.0.0.1",
             local_port,
             remote_host,
             remote_port,
         );
-        let mut child = cmd.spawn()?;
-        wait_for_forward_listener(&mut child, local_port)?;
+        let status = cmd.status()?;
+        if !status.success() {
+            anyhow::bail!("ssh master failed to open local port {local_port}: {status}");
+        }
+        if let Err(err) = wait_for_forward_listener(local_port) {
+            cancel_forward(
+                &LoopbackForwardId {
+                    pane_id,
+                    target: remote.target.clone(),
+                    remote_host: remote_host.to_string(),
+                    remote_port,
+                },
+                local_port,
+                control_path,
+            );
+            return Err(err);
+        }
         entries.insert(
             key,
             ForwardEntry {
                 local_port,
-                child,
+                control_path: control_path.clone(),
                 created_at: Instant::now(),
                 last_used: Instant::now(),
             },
@@ -124,7 +140,7 @@ impl ForwardManager {
         let Some((_, entry)) = entries.remove_entry(&ForwardKey::from_id(id)) else {
             return false;
         };
-        stop_child(entry.child);
+        cancel_forward(id, entry.local_port, &entry.control_path);
         true
     }
 }
@@ -154,22 +170,15 @@ fn prune_dead_or_idle(entries: &mut HashMap<ForwardKey, ForwardEntry>) {
         .iter_mut()
         .filter_map(|(key, entry)| {
             let idle = entry.last_used.elapsed() > FORWARD_IDLE_TTL;
-            let exited = entry.child.try_wait().ok().flatten().is_some();
-            (idle || exited).then(|| key.clone())
+            let master_alive = control_master_alive(&entry.control_path, &key.target);
+            (idle || !master_alive).then(|| key.clone())
         })
         .collect();
     for key in dead_or_idle {
         if let Some(entry) = entries.remove(&key) {
-            stop_child(entry.child);
+            cancel_forward(&key.to_id(), entry.local_port, &entry.control_path);
         }
     }
-}
-
-fn stop_child(mut child: Child) {
-    if matches!(child.try_wait(), Ok(None)) {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
 }
 
 fn reserve_local_port() -> anyhow::Result<u16> {
@@ -177,20 +186,15 @@ fn reserve_local_port() -> anyhow::Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
-fn wait_for_forward_listener(child: &mut Child, local_port: u16) -> anyhow::Result<()> {
+fn wait_for_forward_listener(local_port: u16) -> anyhow::Result<()> {
     let deadline = Instant::now() + FORWARD_STARTUP_TIMEOUT;
     loop {
         if TcpStream::connect(("127.0.0.1", local_port)).is_ok() {
             return Ok(());
         }
-        if let Some(status) = child.try_wait()? {
-            anyhow::bail!("ssh exited before opening local port {local_port}: {status}");
-        }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
             anyhow::bail!(
-                "ssh did not open local port {local_port} within {:?}",
+                "ssh master did not open local port {local_port} within {:?}",
                 FORWARD_STARTUP_TIMEOUT
             );
         }
@@ -198,8 +202,9 @@ fn wait_for_forward_listener(child: &mut Child, local_port: u16) -> anyhow::Resu
     }
 }
 
-fn build_ssh_forward_command(
-    ssh_args: &[String],
+fn build_ssh_control_command(
+    control_path: &PathBuf,
+    operation: &str,
     target: &str,
     local_host: &str,
     local_port: u16,
@@ -207,21 +212,46 @@ fn build_ssh_forward_command(
     remote_port: u16,
 ) -> Command {
     let mut cmd = Command::new("ssh");
-    cmd.arg("-N")
-        .arg("-o")
-        .arg("ExitOnForwardFailure=yes")
-        .arg("-o")
-        .arg("BatchMode=yes")
+    cmd.arg("-S")
+        .arg(control_path)
+        .arg("-O")
+        .arg(operation)
         .arg("-L")
         .arg(format!(
             "{local_host}:{local_port}:{remote_host}:{remote_port}"
         ));
-    cmd.args(ssh_args);
     cmd.arg(target);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     cmd
+}
+
+fn control_master_alive(control_path: &PathBuf, target: &str) -> bool {
+    Command::new("ssh")
+        .arg("-S")
+        .arg(control_path)
+        .arg("-O")
+        .arg("check")
+        .arg(target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn cancel_forward(id: &LoopbackForwardId, local_port: u16, control_path: &PathBuf) {
+    let _ = build_ssh_control_command(
+        control_path,
+        "cancel",
+        &id.target,
+        "127.0.0.1",
+        local_port,
+        &id.remote_host,
+        id.remote_port,
+    )
+    .status();
 }
 
 fn is_loopback_forward_host(host: &str) -> bool {
@@ -233,9 +263,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builds_forward_command_preserving_ssh_options() {
-        let args = vec!["-p".to_string(), "2222".to_string(), "-Jjump".to_string()];
-        let cmd = build_ssh_forward_command(&args, "dev", "127.0.0.1", 49152, "127.0.0.1", 3000);
+    fn builds_forward_command_against_control_master() {
+        let control_path = PathBuf::from("/tmp/tty7-ssh.sock");
+        let cmd = build_ssh_control_command(
+            &control_path,
+            "forward",
+            "dev",
+            "127.0.0.1",
+            49152,
+            "127.0.0.1",
+            3000,
+        );
         let argv: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -243,16 +281,12 @@ mod tests {
         assert_eq!(
             argv,
             vec![
-                "-N",
-                "-o",
-                "ExitOnForwardFailure=yes",
-                "-o",
-                "BatchMode=yes",
+                "-S",
+                "/tmp/tty7-ssh.sock",
+                "-O",
+                "forward",
                 "-L",
                 "127.0.0.1:49152:127.0.0.1:3000",
-                "-p",
-                "2222",
-                "-Jjump",
                 "dev",
             ]
         );

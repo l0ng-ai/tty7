@@ -309,7 +309,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                 return Ok(());
             };
             let Some(remote) = pane.remote_context() else {
-                DaemonMsg::Error("pane has no detected ssh remote context".to_string())
+                DaemonMsg::Error("pane has no managed ssh remote context".to_string())
                     .encode(&mut w)?;
                 return Ok(());
             };

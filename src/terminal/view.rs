@@ -3147,7 +3147,11 @@ impl TerminalView {
     }
 
     fn can_forward_loopback(&self, cx: &mut Context<Self>) -> bool {
-        cx.global::<Config>().ssh_loopback_forward && self.terminal.remote_context().is_some()
+        cx.global::<Config>().ssh_loopback_forward
+            && self
+                .terminal
+                .remote_context()
+                .is_some_and(|remote| remote.control_path.is_some())
     }
 
     /// Update the remembered hovered link for the screen cell `(col, row)` and

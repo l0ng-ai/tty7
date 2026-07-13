@@ -53,6 +53,171 @@ pub struct ShellSpec {
     pub program: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// When present, this pane is a tty7-owned SSH session. The daemon injects
+    /// a ControlMaster/ControlPath at spawn time and later reuses that master for
+    /// loopback forwards; ordinary shell picks leave this empty.
+    #[serde(default)]
+    pub ssh: Option<SshSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshSpec {
+    /// The destination token (`host`, `user@host`, or ssh config alias).
+    pub target: String,
+    /// SSH client options that are safe to reuse for the master connection.
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl SshSpec {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.target.trim().is_empty() {
+            return Err("ssh target is empty".to_string());
+        }
+        validate_managed_ssh_args(&self.args)
+    }
+}
+
+fn validate_managed_ssh_args(args: &[String]) -> Result<(), String> {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            return Err("ssh options must not include a remote command".to_string());
+        }
+        if arg == "-N" || arg == "-f" || arg == "-T" {
+            return Err(format!(
+                "ssh option {arg} is not supported for managed SSH tabs"
+            ));
+        }
+        if matches!(arg.as_str(), "-W" | "-w" | "-L" | "-R" | "-D" | "-S" | "-O") {
+            return Err(format!(
+                "ssh option {arg} conflicts with tty7-managed forwarding"
+            ));
+        }
+        if arg == "-o" {
+            i += 1;
+            let Some(value) = args.get(i) else {
+                return Err("ssh -o requires an option value".to_string());
+            };
+            let (name, _) = split_ssh_option(value);
+            if managed_ssh_option_is_blocked(name) {
+                return Err(format!(
+                    "ssh option {name} conflicts with tty7-managed forwarding"
+                ));
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("-o")
+            && !value.is_empty()
+        {
+            let value = value.strip_prefix('=').unwrap_or(value);
+            let (name, _) = split_ssh_option(value);
+            if managed_ssh_option_is_blocked(name) {
+                return Err(format!(
+                    "ssh option {name} conflicts with tty7-managed forwarding"
+                ));
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(short) = arg.strip_prefix('-')
+            && !short.starts_with('-')
+            && short.len() > 1
+        {
+            let mut chars = short.chars();
+            let Some(flag) = chars.next() else {
+                return Err("empty ssh option".to_string());
+            };
+            if matches!(
+                flag,
+                'W' | 'w' | 'L' | 'R' | 'D' | 'S' | 'O' | 'N' | 'f' | 'T'
+            ) {
+                return Err(format!(
+                    "ssh option -{flag} conflicts with tty7-managed forwarding"
+                ));
+            }
+            if ssh_option_takes_value(flag) && chars.as_str().is_empty() {
+                i += 1;
+                if i >= args.len() {
+                    return Err(format!("ssh option -{flag} requires a value"));
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if arg.starts_with("--") {
+            return Err(format!(
+                "long ssh option {arg} is not supported for managed SSH tabs"
+            ));
+        }
+        if !arg.starts_with('-') {
+            return Err("ssh target must be entered separately from ssh options".to_string());
+        }
+        if arg.len() == 2 {
+            let flag = arg.as_bytes()[1] as char;
+            if ssh_option_takes_value(flag) {
+                i += 1;
+                if i >= args.len() {
+                    return Err(format!("ssh option {arg} requires a value"));
+                }
+            }
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+fn split_ssh_option(value: &str) -> (&str, &str) {
+    value
+        .split_once('=')
+        .map(|(name, value)| (name, value))
+        .unwrap_or((value, ""))
+}
+
+fn managed_ssh_option_is_blocked(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "controlmaster"
+            | "controlpath"
+            | "controlpersist"
+            | "exitonforwardfailure"
+            | "forkafterauthentication"
+            | "localforward"
+            | "remoteforward"
+            | "dynamicforward"
+            | "permitlocalcommand"
+            | "proxycommand"
+            | "sessiontype"
+            | "requesttty"
+    )
+}
+
+fn ssh_option_takes_value(flag: char) -> bool {
+    matches!(
+        flag,
+        'B' | 'b'
+            | 'c'
+            | 'D'
+            | 'E'
+            | 'e'
+            | 'F'
+            | 'I'
+            | 'i'
+            | 'J'
+            | 'L'
+            | 'l'
+            | 'm'
+            | 'O'
+            | 'o'
+            | 'p'
+            | 'Q'
+            | 'R'
+            | 'S'
+            | 'W'
+            | 'w'
+    )
 }
 
 /// Metadata for one live pane, returned by `List` for session restore / pickers.
@@ -77,6 +242,11 @@ pub struct RemoteContext {
     pub argv: Vec<String>,
     /// The destination token (`host`, `user@host`, or ssh config alias).
     pub target: String,
+    /// tty7-owned SSH master socket for this pane. Present only for managed SSH
+    /// panes created through tty7; absent for process-table-detected foreground
+    /// ssh commands typed inside a normal shell.
+    #[serde(default)]
+    pub control_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -558,6 +728,19 @@ mod tests {
                 shell: Some(ShellSpec {
                     program: "wsl.exe".into(),
                     args: vec!["--distribution".into(), "Ubuntu".into()],
+                    ssh: None,
+                }),
+            },
+            ClientMsg::Spawn {
+                cwd: Some(PathBuf::from("/tmp/x")),
+                size: SIZE,
+                shell: Some(ShellSpec {
+                    program: "ssh".into(),
+                    args: vec!["-p".into(), "2222".into(), "dev".into()],
+                    ssh: Some(SshSpec {
+                        target: "dev".into(),
+                        args: vec!["-p".into(), "2222".into()],
+                    }),
                 }),
             },
             ClientMsg::Attach {
@@ -593,6 +776,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ssh_spec_allows_connection_options() {
+        SshSpec {
+            target: "dev".into(),
+            args: vec![
+                "-p".into(),
+                "2222".into(),
+                "-Jjump".into(),
+                "-i".into(),
+                "~/.ssh/id_ed25519".into(),
+                "-o".into(),
+                "UserKnownHostsFile=/tmp/known_hosts".into(),
+            ],
+        }
+        .validate()
+        .unwrap();
+    }
+
+    #[test]
+    fn ssh_spec_rejects_forward_and_control_options() {
+        for args in [
+            vec!["-L".to_string(), "127.0.0.1:1:127.0.0.1:1".to_string()],
+            vec!["-S".to_string(), "/tmp/other.sock".to_string()],
+            vec!["-O".to_string(), "forward".to_string()],
+            vec!["-o".to_string(), "ControlPath=/tmp/other.sock".to_string()],
+            vec!["-oControlPath=/tmp/other.sock".to_string()],
+            vec![
+                "-o".to_string(),
+                "LocalForward=127.0.0.1:1 127.0.0.1:1".to_string(),
+            ],
+            vec!["dev".to_string()],
+        ] {
+            assert!(
+                SshSpec {
+                    target: "dev".into(),
+                    args: args.clone(),
+                }
+                .validate()
+                .is_err(),
+                "must reject {args:?}"
+            );
+        }
+    }
+
     /// Round-trip every `DaemonMsg` variant through encode → read.
     #[test]
     fn daemon_roundtrip() {
@@ -619,6 +846,7 @@ mod tests {
                 kind: RemoteKind::Ssh,
                 argv: vec!["ssh".into(), "-p".into(), "2222".into(), "dev".into()],
                 target: "dev".into(),
+                control_path: Some(PathBuf::from("/tmp/tty7-ssh-1.sock")),
             })),
             DaemonMsg::RemoteContext(None),
             DaemonMsg::LoopbackForward(LoopbackForward { local_port: 49152 }),

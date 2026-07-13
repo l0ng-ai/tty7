@@ -430,6 +430,7 @@ impl Tty7App {
                             let spec = ShellSpec {
                                 program: shell.program.clone(),
                                 args: shell.args.clone(),
+                                ssh: None,
                             };
                             let open = app.clone();
                             let item = if shell.label == default_name {
