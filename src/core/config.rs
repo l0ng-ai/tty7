@@ -168,6 +168,15 @@ pub struct Config {
     /// key/value editor is a future addition.
     #[serde(default)]
     pub env: HashMap<String, String>,
+
+    // ── SSH connection manager ───────────────────────────────────────────────
+    /// Saved SSH connection profiles (the connection-manager data layer). Secrets
+    /// never live here — a profile only carries a `credential_ref` naming its OS
+    /// keychain entry (see [`crate::core::keychain`]). This is distinct from the
+    /// live `ssh_config` alias *discovery* in [`crate::core::ssh_config`]: these
+    /// are user-owned, editable profiles that can be imported from `~/.ssh/config`.
+    #[serde(default)]
+    pub ssh_profiles: Vec<crate::core::ssh_profile::SshProfile>,
 }
 
 /// Policy for a shell's starting directory (see [`Config::working_directory`]).
@@ -358,6 +367,7 @@ impl Default for Config {
             startup_mode: StartupMode::Normal,
             working_directory: WorkingDirectory::default(),
             env: HashMap::new(),
+            ssh_profiles: Vec::new(),
         }
     }
 }
@@ -619,7 +629,7 @@ pub const MAX_SCROLLBACK: usize = 100_000;
 /// whole `config.json` parse — one bad entry must never reset every other
 /// setting to its default. Missing fields are still handled by the container's
 /// `#[serde(default)]`, which never calls this.
-fn de_lenient<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+pub(crate) fn de_lenient<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: serde::de::DeserializeOwned + Default,
@@ -894,7 +904,8 @@ mod tests {
     #[test]
     fn save_load_and_shell_command_round_trip_through_disk() {
         pin_config_dir();
-        // Persist a config with a non-default shell + font, then read it back.
+        // Persist a config with a non-default shell + font + an SSH profile, then
+        // read it back.
         let mut cfg = Config {
             font_size: 18.0,
             ..Config::default()
@@ -903,6 +914,14 @@ mod tests {
             program: "fish".to_string(),
             args: vec!["-l".to_string()],
         });
+        let mut profile = crate::core::ssh_profile::SshProfile::new("prod-web");
+        profile.host = "10.0.0.5".to_string();
+        profile.user = "deploy".to_string();
+        profile.port = 2222;
+        profile.auth = crate::core::ssh_profile::AuthMode::PublicKey;
+        profile.credential_ref =
+            Some(crate::core::keychain::CredentialRef::password("deploy", "10.0.0.5", 2222));
+        cfg.ssh_profiles = vec![profile.clone()];
         cfg.save();
 
         let loaded = Config::load();
@@ -911,11 +930,37 @@ mod tests {
             loaded.shell.as_ref().map(|s| s.program.as_str()),
             Some("fish")
         );
+        // The SSH profile round-trips byte-for-byte, id included, with no plaintext
+        // secret anywhere (only the credential *ref*).
+        assert_eq!(loaded.ssh_profiles, vec![profile]);
 
         // `shell_command` reads the same on-disk config for the daemon side.
         let (program, args) = shell_command().expect("shell override present");
         assert_eq!(program, "fish");
         assert_eq!(args, vec!["-l".to_string()]);
+    }
+
+    #[test]
+    fn ssh_profiles_default_empty_and_parse_from_json() {
+        // Absent key → empty (a config predating profiles still loads).
+        let cfg = Config::default();
+        assert!(cfg.ssh_profiles.is_empty());
+        let cfg: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert!(cfg.ssh_profiles.is_empty());
+
+        // A present profile array parses; a bad enum value inside one profile falls
+        // back leniently instead of failing the whole config parse.
+        let cfg: Config = serde_json::from_str(
+            r#"{"ssh_profiles":[{"name":"a","host":"h","auth":"bogus","port":2200}]}"#,
+        )
+        .expect("a bad per-profile enum must not fail the whole config parse");
+        assert_eq!(cfg.ssh_profiles.len(), 1);
+        assert_eq!(cfg.ssh_profiles[0].name, "a");
+        assert_eq!(cfg.ssh_profiles[0].port, 2200);
+        assert_eq!(
+            cfg.ssh_profiles[0].auth,
+            crate::core::ssh_profile::AuthMode::Auto
+        );
     }
 
     #[test]
