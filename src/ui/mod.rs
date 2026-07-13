@@ -15,6 +15,8 @@ pub mod pane;
 pub mod perf;
 pub mod presets;
 pub mod settings;
+pub mod ssh_connect;
+pub mod ssh_prompt;
 pub mod tab_sidebar;
 pub mod tab_strip;
 pub mod theme;

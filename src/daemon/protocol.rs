@@ -514,6 +514,36 @@ impl std::fmt::Debug for NativeSshSpec {
     }
 }
 
+/// One row for the "SSH → Known hosts" management view (WS3): a single trusted
+/// (or revoked / CA) `known_hosts` entry. Hashed hosts surface their raw `|1|…`
+/// field (the hash can't be reversed to a hostname). Listed daemon-side because
+/// the daemon owns file access on the native path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownHostEntry {
+    /// Raw host field as stored (`example.com`, `[h]:2222`, a comma list, or a
+    /// `|1|salt|hash` hashed token).
+    pub host: String,
+    /// `"@cert-authority"` / `"@revoked"` when the line carries a marker.
+    #[serde(default)]
+    pub marker: Option<String>,
+    /// Key algorithm string (`ssh-ed25519`, `ecdsa-sha2-nistp256`, …).
+    pub key_type: String,
+    /// `SHA256:…` fingerprint, or `"?"` for an entry whose blob doesn't parse.
+    pub fingerprint_sha256: String,
+    /// Stable identity used to delete this exact entry.
+    pub id: KnownHostId,
+}
+
+/// Content-based identity of one `known_hosts` entry (host field + key type +
+/// blob), so a delete survives unrelated edits between list and delete rather
+/// than relying on a fragile line index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownHostId {
+    pub host: String,
+    pub key_type: String,
+    pub keyblob: String,
+}
+
 /// One prompt in a keyboard-interactive challenge (RFC 4256).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KiPrompt {
@@ -653,6 +683,11 @@ pub enum ClientMsg {
         request_id: u64,
         response: AuthResponse,
     },
+    /// List the OpenSSH `known_hosts` entries for the "SSH → Known hosts" settings
+    /// section (control connection; daemon replies with `KnownHostsList`).
+    ListKnownHosts,
+    /// Delete one `known_hosts` entry, then reply with the refreshed list.
+    DeleteKnownHost(KnownHostId),
 }
 
 /// Messages the daemon sends back to the GUI client.
@@ -699,6 +734,8 @@ pub enum DaemonMsg {
     },
     /// Progress of a native-SSH spawn (connect/auth/connected/failed).
     SshStatus { phase: SshPhase },
+    /// Reply to `ListKnownHosts` and `DeleteKnownHost`.
+    KnownHostsList(Vec<KnownHostEntry>),
     /// A request failed (e.g. `Attach` to an unknown/dead pane id).
     Error(String),
 }
@@ -735,6 +772,10 @@ mod kind {
     pub const SPAWN_NATIVE_SSH: u8 = 14;
     /// `AuthResponse` — the GUI's reply to an `AUTH_PROMPT`.
     pub const AUTH_RESPONSE: u8 = 15;
+    /// `ListKnownHosts` — control request for the known_hosts management view.
+    pub const LIST_KNOWN_HOSTS: u8 = 16;
+    /// `DeleteKnownHost` — remove one known_hosts entry.
+    pub const DELETE_KNOWN_HOST: u8 = 17;
 
     // Daemon -> client
     pub const SPAWNED: u8 = 1;
@@ -753,6 +794,8 @@ mod kind {
     pub const AUTH_PROMPT: u8 = 13;
     /// `SshStatus` — native-SSH spawn progress.
     pub const SSH_STATUS: u8 = 14;
+    /// `KnownHostsList` — reply to `LIST_KNOWN_HOSTS` / `DELETE_KNOWN_HOST`.
+    pub const KNOWN_HOSTS_LIST: u8 = 15;
 }
 
 /// Write one framed message: `[u32 LE len][u8 kind][payload]`.
@@ -875,6 +918,10 @@ impl ClientMsg {
                 request_id,
                 response,
             } => write_frame(w, kind::AUTH_RESPONSE, &to_json(&(request_id, response))?),
+            ClientMsg::ListKnownHosts => write_frame(w, kind::LIST_KNOWN_HOSTS, &[]),
+            ClientMsg::DeleteKnownHost(id) => {
+                write_frame(w, kind::DELETE_KNOWN_HOST, &to_json(id)?)
+            }
         }
     }
 
@@ -919,6 +966,8 @@ impl ClientMsg {
                     response,
                 }
             }
+            kind::LIST_KNOWN_HOSTS => ClientMsg::ListKnownHosts,
+            kind::DELETE_KNOWN_HOST => ClientMsg::DeleteKnownHost(from_json(&payload)?),
             other => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -964,6 +1013,9 @@ impl DaemonMsg {
                 write_frame(w, kind::AUTH_PROMPT, &to_json(&(request_id, prompt))?)
             }
             DaemonMsg::SshStatus { phase } => write_frame(w, kind::SSH_STATUS, &to_json(phase)?),
+            DaemonMsg::KnownHostsList(list) => {
+                write_frame(w, kind::KNOWN_HOSTS_LIST, &to_json(list)?)
+            }
             DaemonMsg::Error(msg) => write_frame(w, kind::ERROR, &to_json(msg)?),
         }
     }
@@ -1000,6 +1052,7 @@ impl DaemonMsg {
             kind::SSH_STATUS => DaemonMsg::SshStatus {
                 phase: from_json(&payload)?,
             },
+            kind::KNOWN_HOSTS_LIST => DaemonMsg::KnownHostsList(from_json(&payload)?),
             kind::ERROR => DaemonMsg::Error(from_json(&payload)?),
             other => {
                 return Err(io::Error::new(
@@ -1158,6 +1211,12 @@ mod tests {
                 remote_host: "127.0.0.1".into(),
                 remote_port: 3000,
             }),
+            ClientMsg::ListKnownHosts,
+            ClientMsg::DeleteKnownHost(KnownHostId {
+                host: "example.com".into(),
+                key_type: "ssh-ed25519".into(),
+                keyblob: "AAAAC3Nz".into(),
+            }),
         ];
         let mut buf = Vec::new();
         for m in &msgs {
@@ -1279,6 +1338,17 @@ mod tests {
                 local_port: 49152,
                 age_secs: 12,
                 idle_secs: 3,
+            }]),
+            DaemonMsg::KnownHostsList(vec![KnownHostEntry {
+                host: "example.com".into(),
+                marker: Some("@revoked".into()),
+                key_type: "ssh-ed25519".into(),
+                fingerprint_sha256: "SHA256:abc".into(),
+                id: KnownHostId {
+                    host: "example.com".into(),
+                    key_type: "ssh-ed25519".into(),
+                    keyblob: "AAAAC3Nz".into(),
+                },
             }]),
             DaemonMsg::Error("nope".into()),
         ];

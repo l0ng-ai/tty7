@@ -217,6 +217,13 @@ pub struct Tty7App {
     /// (not a tab), so it covers the tab rail / title bar and never clutters the
     /// tab list. Holds all the settings widget state + its subscriptions.
     settings: Option<SettingsState>,
+    /// In-pane native-SSH auth / host-key sheet state (WS3). Holds the active
+    /// prompt (keyed to the pane that raised it), its input widgets, and
+    /// dismissable banners. Empty when no prompt is pending.
+    pub(crate) ssh_prompt: crate::ui::ssh_prompt::SshPromptState,
+    /// Cached `known_hosts` entries for the "SSH → Known hosts" settings section,
+    /// refreshed from the daemon when that section is opened / after a delete.
+    pub(crate) known_hosts: Vec<crate::daemon::protocol::KnownHostEntry>,
 }
 
 impl Tty7App {
@@ -346,6 +353,8 @@ impl Tty7App {
             sidebar_search,
             _sidebar_search_sub: sidebar_search_sub,
             settings: None,
+            ssh_prompt: crate::ui::ssh_prompt::SshPromptState::new(cx),
+            known_hosts: Vec::new(),
         };
         // Discover this machine's shells for the "+" dropdown off the UI thread
         // (the WSL probe on Windows spawns a process, and /etc/shells hits the
@@ -840,6 +849,28 @@ impl Tty7App {
 
     pub(crate) fn set_ssh_loopback_forward(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.ssh_loopback_forward = on);
+    }
+
+    /// Global default for native-SSH host-key verification (WS3, FR-S4). A
+    /// per-profile override still wins where set.
+    pub(crate) fn set_verify_host_keys(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.verify_host_keys = on);
+    }
+
+    /// Re-fetch the daemon's `known_hosts` entries for the settings section.
+    pub(crate) fn refresh_known_hosts(&mut self, cx: &mut Context<Self>) {
+        self.known_hosts = crate::terminal::RemoteTerminal::list_known_hosts();
+        cx.notify();
+    }
+
+    /// Delete one `known_hosts` entry and refresh the list from the daemon.
+    pub(crate) fn delete_known_host(
+        &mut self,
+        id: crate::daemon::protocol::KnownHostId,
+        cx: &mut Context<Self>,
+    ) {
+        self.known_hosts = crate::terminal::RemoteTerminal::delete_known_host(id);
+        cx.notify();
     }
 
     pub(crate) fn refresh_loopback_forwards(&mut self, cx: &mut Context<Self>) {
@@ -2217,6 +2248,10 @@ impl Tty7App {
             // the interceptor doesn't keep swallowing keys off-screen.
             s.recording = None;
         }
+        // Opening the SSH section pulls a fresh known_hosts list from the daemon.
+        if target == SettingsSection::Ssh {
+            self.refresh_known_hosts(cx);
+        }
         cx.notify();
     }
 
@@ -2549,6 +2584,11 @@ impl Render for Tty7App {
             // the terminal area when the active pane is an SSH session.
             .when_some(active_ssh_pane, |this, (pane_id, remote)| {
                 this.child(self.render_loopback_forward_overlay(pane_id, &remote, cx))
+            })
+            // In-pane native-SSH auth / host-key sheet (WS3), shown over the pane
+            // that raised the prompt.
+            .when_some(self.render_ssh_prompt_overlay(window, cx), |this, el| {
+                this.child(el)
             });
 
         // The two layouts. Horizontal (default): a column of [title bar / body].
@@ -2879,6 +2919,17 @@ fn new_terminal(
     cx.subscribe_in(&view, window, |app, view, _: &ChildExited, window, cx| {
         app.on_child_exited(view.clone(), window, cx);
     })
+    .detach();
+    // Native-SSH auth/host-key prompts raised by this pane → in-pane sheet. Same
+    // single build site as ChildExited, so every pane (new tab, split, restore)
+    // is covered.
+    cx.subscribe_in(
+        &view,
+        window,
+        |app, view, _: &crate::terminal::view::AuthPromptReady, window, cx| {
+            app.on_auth_prompt_ready(view.clone(), window, cx);
+        },
+    )
     .detach();
     view
 }

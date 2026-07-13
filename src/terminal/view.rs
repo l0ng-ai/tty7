@@ -63,6 +63,15 @@ pub struct ChildExited;
 
 impl gpui::EventEmitter<ChildExited> for TerminalView {}
 
+/// A native-SSH pane raised an interactive auth/host-key prompt (or a status
+/// change) that the app should surface in an in-pane sheet. `Tty7App` subscribes
+/// (see `new_terminal`) and drains the pane's pending prompts into
+/// `ui::ssh_prompt`. Zero-payload — the app reads the prompt off the pane's
+/// `RemoteTerminal` (`take_auth_prompt` / `ssh_phase`).
+pub struct AuthPromptReady;
+
+impl gpui::EventEmitter<AuthPromptReady> for TerminalView {}
+
 /// See `TerminalView::drag_scroll`.
 #[derive(Clone, Copy)]
 struct DragScroll {
@@ -865,6 +874,12 @@ impl TerminalView {
         // Surface a child-exit/daemon-disconnect noticed by the reader thread into
         // the field the view reads directly (`self.terminal.exited`).
         self.terminal.poll_exited();
+        // A native-SSH pane may have queued an auth/host-key prompt behind this
+        // wakeup; let the app drain it into the in-pane sheet. Cheap check —
+        // only true during the brief pre-Output auth window.
+        if self.terminal.has_pending_auth() {
+            cx.emit(AuthPromptReady);
+        }
         match ev {
             AlacEvent::Wakeup => cx.notify(),
             AlacEvent::Title(title) => {

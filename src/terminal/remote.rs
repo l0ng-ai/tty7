@@ -33,10 +33,13 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi;
 
+use std::collections::VecDeque;
+
 use crate::core::osc::OscTokenizer;
 use crate::daemon::protocol::{
-    ClientMsg, DaemonMsg, LoopbackForward, LoopbackForwardId, LoopbackForwardInfo,
-    LoopbackForwardRequest, RemoteContext, ShellSpec, WinSize,
+    AuthPromptKind, AuthResponse, ClientMsg, DaemonMsg, KnownHostEntry, KnownHostId, LoopbackForward,
+    LoopbackForwardId, LoopbackForwardInfo, LoopbackForwardRequest, NativeSshSpec, RemoteContext,
+    ShellSpec, SshPhase, WinSize,
 };
 use crate::daemon::transport::{self, Stream};
 
@@ -104,6 +107,15 @@ struct ReaderSignals {
     exited: Arc<AtomicBool>,
     child_exited: Arc<AtomicBool>,
     zle_reading: Arc<AtomicBool>,
+    /// FIFO of pending native-SSH auth/host-key prompts (and banners, id 0)
+    /// pushed by the reader as `DaemonMsg::AuthPrompt` frames arrive. The view
+    /// drains these into the in-pane auth sheet (`ui::ssh_prompt`). Keyed per
+    /// pane implicitly — one `RemoteTerminal` is one pane — so switching tabs
+    /// never misroutes a prompt.
+    auth: Arc<Mutex<VecDeque<(u64, AuthPromptKind)>>>,
+    /// Latest native-SSH spawn phase from `DaemonMsg::SshStatus`, for the status
+    /// line. `None` until the first status frame (a plain shell pane never sets it).
+    phase: Arc<Mutex<Option<SshPhase>>>,
 }
 
 /// A terminal whose PTY lives in the daemon. Mirrors `backend::Terminal`'s public
@@ -153,6 +165,22 @@ pub struct RemoteTerminal {
     /// touch it (a historical `B` says nothing about now). Gates the typeahead
     /// wipe: a `^U` written before zle reads is kernel-echoed as literal junk.
     zle_reading: Arc<AtomicBool>,
+    /// Pending native-SSH auth/host-key prompts, filled by the reader thread. The
+    /// view drains these each event batch (`take_auth_prompt`) into the in-pane
+    /// sheet. Shared with the reader thread.
+    auth_prompts: Arc<Mutex<VecDeque<(u64, AuthPromptKind)>>>,
+    /// Latest native-SSH spawn phase (`SshStatus`), for the status line.
+    ssh_phase: Arc<Mutex<Option<SshPhase>>>,
+    /// The endpoint (`host`, `port`) this pane connected to, retained from the
+    /// `NativeSshSpec` at spawn so the auth sheet can build the keychain account
+    /// (`user@host:port`) for a "remember" checkbox — the `Password` prompt only
+    /// carries user+host, not the port. `None` for non-native panes.
+    ssh_endpoint: Option<(String, u16)>,
+    /// Whether this connect attempt was launched with a keychain-resolved stored
+    /// password pre-filled into the spec. Drives FR-A6: a `Password` prompt that
+    /// arrives *after* an auto-supplied stored password means the server rejected
+    /// it, so the sheet warns and offers to overwrite/clear the stale entry.
+    auto_supplied_password: bool,
     reader_thread: Option<JoinHandle<()>>,
 }
 
@@ -274,6 +302,9 @@ impl RemoteTerminal {
         let exited_flag = Arc::new(AtomicBool::new(false));
         let child_exited = Arc::new(AtomicBool::new(false));
         let zle_reading = Arc::new(AtomicBool::new(false));
+        let auth_prompts: Arc<Mutex<VecDeque<(u64, AuthPromptKind)>>> =
+            Arc::new(Mutex::new(VecDeque::new()));
+        let ssh_phase: Arc<Mutex<Option<SshPhase>>> = Arc::new(Mutex::new(None));
 
         let reader_thread = Self::spawn_reader(
             term.clone(),
@@ -286,6 +317,8 @@ impl RemoteTerminal {
                 exited: exited_flag.clone(),
                 child_exited: child_exited.clone(),
                 zle_reading: zle_reading.clone(),
+                auth: auth_prompts.clone(),
+                phase: ssh_phase.clone(),
             },
         );
 
@@ -303,6 +336,10 @@ impl RemoteTerminal {
             exited_flag,
             child_exited,
             zle_reading,
+            auth_prompts,
+            ssh_phase,
+            ssh_endpoint: None,
+            auto_supplied_password: false,
             reader_thread: Some(reader_thread),
         })
     }
@@ -335,6 +372,8 @@ impl RemoteTerminal {
                     exited: exited_flag,
                     child_exited,
                     zle_reading,
+                    auth,
+                    phase,
                 } = signals;
                 // The client end of the visible-output path: keep it off the
                 // efficiency cores (see `core::threads`).
@@ -564,6 +603,26 @@ impl RemoteTerminal {
                                 if let Ok(mut guard) = remote.lock() {
                                     *guard = ctx;
                                 }
+                            }
+                            // A native-SSH pane's interactive auth/host-key
+                            // request. Queue it and wake the view; the sheet is
+                            // rendered and its reply sent via `respond_auth`.
+                            // Banners (id 0) ride the same queue and the UI shows
+                            // them without a reply.
+                            DaemonMsg::AuthPrompt { request_id, prompt } => {
+                                flush_batch!();
+                                if let Ok(mut guard) = auth.lock() {
+                                    guard.push_back((request_id, prompt));
+                                }
+                                proxy.send_event(AlacEvent::Wakeup);
+                            }
+                            // Native-SSH spawn progress for the status line.
+                            DaemonMsg::SshStatus { phase: p } => {
+                                flush_batch!();
+                                if let Ok(mut guard) = phase.lock() {
+                                    *guard = Some(p);
+                                }
+                                proxy.send_event(AlacEvent::Wakeup);
                             }
                             DaemonMsg::Exited { .. } => {
                                 // Child gone: apply what it printed last, then
@@ -862,6 +921,132 @@ impl RemoteTerminal {
         }
         query(id).unwrap_or_default()
     }
+
+    // ── Native SSH (WS3): auth/host-key prompt plumbing ──────────────────────
+
+    /// Spawn a native russh-backed pane for `spec`, mirroring [`spawn`] but over
+    /// the `SpawnNativeSsh` path. The connection's auth/host-key prompts and
+    /// status arrive on this pane's own stream and are surfaced via
+    /// [`take_auth_prompt`]/[`ssh_phase`]. Returns the terminal + daemon pane id.
+    ///
+    /// The single place a secret-bearing spec crosses to the daemon; the caller
+    /// (the GUI spec-builder, `ui::ssh_connect`) has already resolved keychain
+    /// secrets into `spec`.
+    pub fn spawn_native_ssh(
+        size: TermSize,
+        cell_w: u16,
+        cell_h: u16,
+        cwd: Option<PathBuf>,
+        spec: Box<NativeSshSpec>,
+    ) -> anyhow::Result<(Self, u64)> {
+        let mut stream = connect()?;
+        let win = win_size(size, cell_w, cell_h);
+        // Retain what the auth sheet needs before the spec moves onto the wire:
+        // the endpoint (for the keychain account) and whether we pre-filled a
+        // stored password (FR-A6).
+        let endpoint = (spec.host.clone(), spec.port);
+        let auto_supplied_password = spec.password.is_some();
+
+        ClientMsg::SpawnNativeSsh {
+            cwd,
+            size: win,
+            spec,
+        }
+        .encode(&mut stream)?;
+        let pane_id = match DaemonMsg::read(&mut stream)? {
+            DaemonMsg::Spawned { pane_id } => pane_id,
+            DaemonMsg::Error(msg) => {
+                return Err(anyhow::anyhow!("daemon refused SpawnNativeSsh: {msg}"));
+            }
+            other => {
+                return Err(anyhow::anyhow!(
+                    "unexpected daemon reply to SpawnNativeSsh: {other:?}"
+                ));
+            }
+        };
+
+        let mut term = Self::from_stream(stream, size)?;
+        term.ssh_endpoint = Some(endpoint);
+        term.auto_supplied_password = auto_supplied_password;
+        Ok((term, pane_id))
+    }
+
+    /// Pop the next pending native-SSH auth/host-key prompt (or banner, id 0), in
+    /// FIFO order. `None` when the queue is empty. The view calls this while
+    /// draining its event batch.
+    pub fn take_auth_prompt(&self) -> Option<(u64, AuthPromptKind)> {
+        self.auth_prompts.lock().ok().and_then(|mut q| q.pop_front())
+    }
+
+    /// Whether any native-SSH prompt is waiting (cheap check the view uses to
+    /// decide whether to emit an `AuthPromptReady` up to the app).
+    pub fn has_pending_auth(&self) -> bool {
+        self.auth_prompts
+            .lock()
+            .map(|q| !q.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// The latest native-SSH spawn phase, if any (`None` for a plain pane).
+    pub fn ssh_phase(&self) -> Option<SshPhase> {
+        self.ssh_phase.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// The `(host, port)` this native-SSH pane connected to, for building the
+    /// keychain account in the auth sheet. `None` for a non-native pane.
+    pub fn ssh_endpoint(&self) -> Option<(String, u16)> {
+        self.ssh_endpoint.clone()
+    }
+
+    /// Whether this connect pre-supplied a keychain-stored password (FR-A6): a
+    /// later `Password` prompt then means the server rejected the stored value.
+    pub fn auto_supplied_password(&self) -> bool {
+        self.auto_supplied_password
+    }
+
+    /// Reply to a `DaemonMsg::AuthPrompt` with the given `request_id`, sending a
+    /// `ClientMsg::AuthResponse` over this pane's own connection (the same socket
+    /// the prompt arrived on). Best-effort: a dead socket just fails the auth step
+    /// daemon-side, which surfaces as the usual disconnect.
+    pub fn respond_auth(&self, request_id: u64, response: AuthResponse) {
+        if let Ok(mut writer) = self.writer.lock() {
+            let _ = ClientMsg::AuthResponse {
+                request_id,
+                response,
+            }
+            .encode(&mut *writer);
+        }
+    }
+
+    /// List the daemon's `known_hosts` entries over a short-lived control
+    /// connection (for the "SSH → Known hosts" settings section). Empty on any
+    /// error.
+    pub fn list_known_hosts() -> Vec<KnownHostEntry> {
+        fn query() -> anyhow::Result<Vec<KnownHostEntry>> {
+            let mut stream = connect()?;
+            ClientMsg::ListKnownHosts.encode(&mut stream)?;
+            match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::KnownHostsList(list) => Ok(list),
+                other => Err(anyhow::anyhow!("unexpected reply to ListKnownHosts: {other:?}")),
+            }
+        }
+        query().unwrap_or_default()
+    }
+
+    /// Delete one `known_hosts` entry, returning the refreshed list.
+    pub fn delete_known_host(id: KnownHostId) -> Vec<KnownHostEntry> {
+        fn query(id: KnownHostId) -> anyhow::Result<Vec<KnownHostEntry>> {
+            let mut stream = connect()?;
+            ClientMsg::DeleteKnownHost(id).encode(&mut stream)?;
+            match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::KnownHostsList(list) => Ok(list),
+                other => Err(anyhow::anyhow!(
+                    "unexpected reply to DeleteKnownHost: {other:?}"
+                )),
+            }
+        }
+        query(id).unwrap_or_default()
+    }
 }
 
 fn daemon_disconnected_before_spawn_reply(err: &anyhow::Error) -> bool {
@@ -1153,6 +1338,46 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(term.exited_flag.load(Ordering::SeqCst));
+    }
+
+    /// Native-SSH `AuthPrompt` and `SshStatus` frames must surface through the
+    /// reader thread into the per-pane queue / phase cell the auth sheet reads.
+    #[test]
+    fn reader_surfaces_auth_prompt_and_status() {
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        DaemonMsg::SshStatus {
+            phase: SshPhase::Authenticating,
+        }
+        .encode(&mut daemon_side)
+        .unwrap();
+        DaemonMsg::AuthPrompt {
+            request_id: 7,
+            prompt: AuthPromptKind::Password {
+                user: "deploy".into(),
+                host: "10.0.0.5".into(),
+            },
+        }
+        .encode(&mut daemon_side)
+        .unwrap();
+        daemon_side.flush().unwrap();
+
+        // Poll until the prompt lands (reader applies frames asynchronously).
+        let mut prompt = None;
+        for _ in 0..200 {
+            if let Some(p) = term.take_auth_prompt() {
+                prompt = Some(p);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let (id, kind) = prompt.expect("auth prompt should have surfaced");
+        assert_eq!(id, 7);
+        assert!(matches!(kind, AuthPromptKind::Password { .. }));
+        assert_eq!(term.ssh_phase(), Some(SshPhase::Authenticating));
+        // The queue is now drained.
+        assert!(!term.has_pending_auth());
     }
 
     /// A `DaemonMsg::Exited` frame (the child really ended) must set

@@ -39,6 +39,7 @@ pub(crate) enum SettingsSection {
     Appearance,
     Terminal,
     Shell,
+    Ssh,
     WindowTabs,
     Keybindings,
     About,
@@ -52,6 +53,7 @@ impl SettingsSection {
             SettingsSection::Appearance => "settings:appearance",
             SettingsSection::Terminal => "settings:terminal",
             SettingsSection::Shell => "settings:shell",
+            SettingsSection::Ssh => "settings:ssh",
             SettingsSection::WindowTabs => "settings:window-tabs",
             SettingsSection::Keybindings => "settings:keybindings",
             SettingsSection::About => "settings:about",
@@ -193,6 +195,17 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             section: Shell,
             title: "Working directory",
             keywords: "cwd start folder path directory",
+        },
+        // SSH
+        SearchEntry {
+            section: Ssh,
+            title: "Verify host keys",
+            keywords: "ssh security known_hosts fingerprint mitm host key verification",
+        },
+        SearchEntry {
+            section: Ssh,
+            title: "Known hosts",
+            keywords: "ssh known_hosts trusted fingerprint delete revoked certificate authority",
         },
         // Window & Tabs
         SearchEntry {
@@ -427,6 +440,7 @@ impl Tty7App {
                 SettingsSection::Shell,
                 IconName::SquareTerminal,
             ))
+            .child(nav_item("SSH", SettingsSection::Ssh, IconName::Globe))
             .child(nav_item(
                 "Window & Tabs",
                 SettingsSection::WindowTabs,
@@ -491,6 +505,7 @@ impl Tty7App {
             SettingsSection::Appearance => self.render_settings_appearance(cx),
             SettingsSection::Terminal => self.render_settings_terminal(cx),
             SettingsSection::Shell => self.render_settings_shell(cx),
+            SettingsSection::Ssh => self.render_settings_ssh(cx),
             SettingsSection::WindowTabs => self.render_settings_window_tabs(cx),
             SettingsSection::Keybindings => self.render_settings_keybindings(cx),
             SettingsSection::About => self.render_settings_about(cx),
@@ -1022,6 +1037,95 @@ impl Tty7App {
             .child(ColorPicker::new(&state).small())
             .into_any_element();
         self.settings_row(label, "", control, cx)
+    }
+
+    /// SSH section: the global host-key verification default (a per-profile
+    /// override still wins where set) and a manager for the OpenSSH `known_hosts`
+    /// file — list trusted/revoked/CA entries and delete them (PRD FR-S3/S4).
+    fn render_settings_ssh(&self, cx: &mut Context<Self>) -> AnyElement {
+        let muted_fg = cx.theme().muted_foreground;
+        let verify = cx.global::<Config>().verify_host_keys;
+
+        let verify_switch = Switch::new("ssh-verify-host-keys")
+            .checked(verify)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_verify_host_keys(*on, cx)))
+            .into_any_element();
+
+        let mut list = v_flex().gap_1().w_full();
+        if self.known_hosts.is_empty() {
+            list = list.child(
+                div()
+                    .text_sm()
+                    .text_color(muted_fg)
+                    .child("No known hosts recorded yet."),
+            );
+        } else {
+            for (i, entry) in self.known_hosts.iter().enumerate() {
+                let id = entry.id.clone();
+                let marker = entry
+                    .marker
+                    .as_deref()
+                    .map(|m| format!("{m} "))
+                    .unwrap_or_default();
+                let label = format!("{marker}{}  ·  {}", entry.host, entry.key_type);
+                let fp = entry.fingerprint_sha256.clone();
+                list = list.child(
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .w_full()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_sm().child(label))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(muted_fg)
+                                        .child(fp),
+                                ),
+                        )
+                        .child(
+                            Button::new(("ssh-known-host-del", i))
+                                .label("Delete")
+                                .small()
+                                .on_click(cx.listener(move |this, _, _w, cx| {
+                                    this.delete_known_host(id.clone(), cx)
+                                })),
+                        ),
+                );
+            }
+        }
+
+        v_flex()
+            .child(self.section_header("Host keys", cx))
+            .child(self.settings_row(
+                "Verify host keys",
+                "Check each server's key against known_hosts and confirm unknown or \
+                 changed keys. A profile can override this. Turning it off disables \
+                 host-key checking for the native SSH path.",
+                verify_switch,
+                cx,
+            ))
+            .child(self.section_rule(cx))
+            .child(self.section_intro(
+                "Known hosts",
+                "Trusted, revoked, and certificate-authority entries in your \
+                 ~/.ssh/known_hosts. Delete an entry to be re-prompted on the next \
+                 connection.",
+                cx,
+            ))
+            .child(
+                Button::new("ssh-known-hosts-refresh")
+                    .label("Refresh")
+                    .small()
+                    .on_click(cx.listener(|this, _, _w, cx| this.refresh_known_hosts(cx))),
+            )
+            .child(list)
+            .into_any_element()
     }
 
     /// Shell section: the program tty7 launches in each new terminal, plus its

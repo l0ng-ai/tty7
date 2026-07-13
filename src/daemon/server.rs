@@ -373,6 +373,23 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             Ok(())
         }
 
+        ClientMsg::ListKnownHosts => {
+            let mut w = write_stream;
+            let list = crate::daemon::ssh::known_hosts::list();
+            DaemonMsg::KnownHostsList(list).encode(&mut w)?;
+            Ok(())
+        }
+
+        ClientMsg::DeleteKnownHost(id) => {
+            let mut w = write_stream;
+            // Best effort: a delete failure still returns the (unchanged) list so
+            // the UI reflects reality rather than hanging.
+            let _ = crate::daemon::ssh::known_hosts::delete(&id);
+            let list = crate::daemon::ssh::known_hosts::list();
+            DaemonMsg::KnownHostsList(list).encode(&mut w)?;
+            Ok(())
+        }
+
         // `Input` / `Resize` / `Detach` as an opening message are meaningless (no
         // pane is bound yet); ignore and close.
         other => {

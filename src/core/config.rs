@@ -177,6 +177,14 @@ pub struct Config {
     /// are user-owned, editable profiles that can be imported from `~/.ssh/config`.
     #[serde(default)]
     pub ssh_profiles: Vec<crate::core::ssh_profile::SshProfile>,
+    /// Global default for verifying SSH host keys against `known_hosts` on the
+    /// native (russh) path. On by default (never weaken security silently). A
+    /// per-profile `verify_host_keys` override wins over this when set; this is
+    /// the fallback when a profile leaves it unset and for QuickConnect. Turning
+    /// it off disables unknown/changed-host-key confirmation entirely — a
+    /// deliberate, documented escape hatch (PRD FR-S4).
+    #[serde(default = "default_true")]
+    pub verify_host_keys: bool,
 }
 
 /// Policy for a shell's starting directory (see [`Config::working_directory`]).
@@ -368,6 +376,7 @@ impl Default for Config {
             working_directory: WorkingDirectory::default(),
             env: HashMap::new(),
             ssh_profiles: Vec::new(),
+            verify_host_keys: true,
         }
     }
 }

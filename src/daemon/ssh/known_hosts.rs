@@ -199,6 +199,124 @@ pub fn fingerprint_sha256(key: &PublicKey) -> String {
     key.fingerprint(HashAlg::Sha256).to_string()
 }
 
+pub use crate::daemon::protocol::{KnownHostEntry, KnownHostId};
+
+/// List every parseable entry in the default `known_hosts` file, in file order.
+/// A missing/unreadable file lists as empty.
+pub fn list() -> Vec<KnownHostEntry> {
+    match default_path() {
+        Some(path) => match std::fs::read_to_string(&path) {
+            Ok(contents) => list_in_str(&contents),
+            Err(_) => Vec::new(),
+        },
+        None => Vec::new(),
+    }
+}
+
+/// The testable core of [`list`]: parse entries out of file text.
+pub fn list_in_str(contents: &str) -> Vec<KnownHostEntry> {
+    let mut out = Vec::new();
+    for line in contents.lines() {
+        let Some(entry) = KnownHostsLine::parse(line) else {
+            continue;
+        };
+        let fingerprint_sha256 = entry
+            .key()
+            .map(|k| fingerprint_sha256(&k))
+            .unwrap_or_else(|| "?".to_string());
+        out.push(KnownHostEntry {
+            host: entry.hosts.to_string(),
+            marker: entry.marker.map(|m| match m {
+                Marker::CertAuthority => "@cert-authority".to_string(),
+                Marker::Revoked => "@revoked".to_string(),
+            }),
+            key_type: entry.keytype.to_string(),
+            fingerprint_sha256,
+            id: KnownHostId {
+                host: entry.hosts.to_string(),
+                key_type: entry.keytype.to_string(),
+                keyblob: entry.keyblob.to_string(),
+            },
+        });
+    }
+    out
+}
+
+/// Delete the entry matching `id` from the default `known_hosts` file. Every
+/// other line — comments, blanks, unrelated entries, and the file's exact line
+/// endings — is preserved verbatim. A no-op (Ok) when the file is absent or the
+/// entry isn't found.
+pub fn delete(id: &KnownHostId) -> std::io::Result<()> {
+    let Some(path) = default_path() else {
+        return Ok(());
+    };
+    delete_in_file(&path, id)
+}
+
+/// The testable core of [`delete`]: rewrite `path` without the matching entry.
+pub fn delete_in_file(path: &Path, id: &KnownHostId) -> std::io::Result<()> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let (new_contents, removed) = delete_in_str(&contents, id);
+    if !removed {
+        return Ok(());
+    }
+    // Preserve permissions/atomicity expectations: write back in place. `known_hosts`
+    // is small and single-user; a straight write is fine (and matches OpenSSH,
+    // which rewrites the whole file on `ssh-keygen -R`).
+    std::fs::write(path, new_contents)
+}
+
+/// Remove the line matching `id` from `contents`, preserving all other lines and
+/// their exact terminators byte-for-byte. Returns the new text and whether a line
+/// was removed. Only the first matching line is dropped (ids are unique in
+/// practice).
+pub fn delete_in_str(contents: &str, id: &KnownHostId) -> (String, bool) {
+    let mut out = String::with_capacity(contents.len());
+    let mut removed = false;
+    // Split keeping terminators so we never alter unrelated bytes (CRLF, a
+    // missing final newline, blank lines, comment spacing).
+    for segment in split_keep_terminators(contents) {
+        if !removed {
+            // Match against the line's text without its terminator/leading space.
+            let line = segment.trim_end_matches(['\n', '\r']);
+            if let Some(entry) = KnownHostsLine::parse(line) {
+                if entry.hosts == id.host
+                    && entry.keytype == id.key_type
+                    && entry.keyblob == id.keyblob
+                {
+                    removed = true;
+                    continue;
+                }
+            }
+        }
+        out.push_str(segment);
+    }
+    (out, removed)
+}
+
+/// Split text into segments that each still carry their trailing `\n` (and any
+/// `\r`), so rejoining is byte-identical to the input. The final segment has no
+/// terminator when the file doesn't end in a newline.
+fn split_keep_terminators(text: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let bytes = text.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' {
+            segments.push(&text[start..=i]);
+            start = i + 1;
+        }
+    }
+    if start < text.len() {
+        segments.push(&text[start..]);
+    }
+    segments
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Marker {
     CertAuthority,
@@ -252,25 +370,85 @@ impl<'a> KnownHostsLine<'a> {
     }
 
     /// Does this line's host field cover `token`? Handles plaintext host lists
-    /// (comma-separated) and the `|1|salt|hash` hashed form.
+    /// (comma-separated), OpenSSH glob patterns (`*` / `?`), `!` negations, and
+    /// the `|1|salt|hash` hashed form.
+    ///
+    /// OpenSSH semantics: the field is a comma-separated pattern list; a leading
+    /// `!` negates. If *any* negated pattern matches the host, the line does not
+    /// apply at all (even when a positive pattern also matches); otherwise the
+    /// line applies iff at least one positive pattern matches. Hostname matching
+    /// is case-insensitive. A hashed entry carries exactly one host and never
+    /// globs.
     fn matches_host(&self, token: &str) -> bool {
+        let mut matched = false;
         for pattern in self.hosts.split(',') {
+            let pattern = pattern.trim();
             if pattern.is_empty() {
                 continue;
             }
-            if let Some(hashed) = pattern.strip_prefix("|1|") {
-                if hashed_host_matches(hashed, token) {
-                    return true;
+            let (negated, pat) = match pattern.strip_prefix('!') {
+                Some(rest) => (true, rest),
+                None => (false, pattern),
+            };
+            let hit = if let Some(hashed) = pat.strip_prefix("|1|") {
+                hashed_host_matches(hashed, token)
+            } else {
+                host_glob_matches(pat, token)
+            };
+            if hit {
+                if negated {
+                    // A negated match disqualifies the whole line, regardless of
+                    // any positive match elsewhere on it.
+                    return false;
                 }
-            } else if pattern == token {
-                // Negations (`!pattern`) and wildcards are not part of the v1
-                // trust surface; an exact token match is enough for the hosts
-                // tty7 writes and the common OpenSSH plaintext entries.
-                return true;
+                matched = true;
             }
         }
-        false
+        matched
     }
+}
+
+/// Match a single OpenSSH host pattern (which may contain `*` / `?` wildcards)
+/// against a host token, case-insensitively. `*` matches any run of characters
+/// (including empty), `?` matches exactly one character — OpenSSH's `match_pattern`
+/// glob, not a regex. Wildcard-free patterns are a plain case-insensitive compare.
+fn host_glob_matches(pattern: &str, token: &str) -> bool {
+    if !pattern.as_bytes().iter().any(|&b| b == b'*' || b == b'?') {
+        return pattern.eq_ignore_ascii_case(token);
+    }
+    glob_match(pattern.as_bytes(), token.as_bytes())
+}
+
+/// Iterative backtracking glob for `*`/`?`, ASCII-case-insensitive (host names
+/// fold case in OpenSSH). Linear-ish with a single backtrack pointer for `*`.
+fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
+    let (mut p, mut t) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut star_t = 0usize;
+    while t < text.len() {
+        if p < pattern.len()
+            && (pattern[p] == b'?'
+                || pattern[p].eq_ignore_ascii_case(&text[t]))
+        {
+            p += 1;
+            t += 1;
+        } else if p < pattern.len() && pattern[p] == b'*' {
+            star = Some(p);
+            star_t = t;
+            p += 1;
+        } else if let Some(sp) = star {
+            // Backtrack: let the last `*` swallow one more character.
+            p = sp + 1;
+            star_t += 1;
+            t = star_t;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == b'*' {
+        p += 1;
+    }
+    p == pattern.len()
 }
 
 /// Check a `|1|salt|hash` hashed-host field (base64 salt + base64 HMAC-SHA1)
@@ -550,6 +728,136 @@ mod tests {
             HostKeyStatus::Known
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn wildcard_star_matches_hostname_glob() {
+        let ka = key(KEY_A);
+        let file = format!("*.example.com {KEY_A}\n");
+        assert_eq!(
+            check_in_str(&file, "web1.example.com", 22, &ka),
+            HostKeyStatus::Known
+        );
+        assert_eq!(
+            check_in_str(&file, "a.b.example.com", 22, &ka),
+            HostKeyStatus::Known
+        );
+        // `*` does not cross into a different domain suffix.
+        assert_eq!(
+            check_in_str(&file, "web1.example.org", 22, &ka),
+            HostKeyStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn wildcard_question_matches_single_char() {
+        let ka = key(KEY_A);
+        let file = format!("host? {KEY_A}\n");
+        assert_eq!(check_in_str(&file, "host1", 22, &ka), HostKeyStatus::Known);
+        // `?` is exactly one char — "host" (zero) and "host12" (two) don't match.
+        assert_eq!(check_in_str(&file, "host", 22, &ka), HostKeyStatus::Unknown);
+        assert_eq!(check_in_str(&file, "host12", 22, &ka), HostKeyStatus::Unknown);
+    }
+
+    #[test]
+    fn negated_pattern_disqualifies_the_line() {
+        let ka = key(KEY_A);
+        // Matches the whole domain except the negated host — even though the
+        // positive `*.example.com` would otherwise cover it.
+        let file = format!("*.example.com,!secret.example.com {KEY_A}\n");
+        assert_eq!(
+            check_in_str(&file, "web.example.com", 22, &ka),
+            HostKeyStatus::Known
+        );
+        assert_eq!(
+            check_in_str(&file, "secret.example.com", 22, &ka),
+            HostKeyStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn host_match_is_case_insensitive() {
+        let ka = key(KEY_A);
+        let file = format!("Example.COM {KEY_A}\n");
+        assert_eq!(
+            check_in_str(&file, "example.com", 22, &ka),
+            HostKeyStatus::Known
+        );
+    }
+
+    #[test]
+    fn comma_list_of_hosts_matches_any_member() {
+        let ka = key(KEY_A);
+        let file = format!("alpha.example.com,10.0.0.5 {KEY_A}\n");
+        assert_eq!(
+            check_in_str(&file, "10.0.0.5", 22, &ka),
+            HostKeyStatus::Known
+        );
+    }
+
+    #[test]
+    fn list_reports_host_type_and_fingerprint() {
+        let file = format!(
+            "example.com {KEY_A}\n@revoked bad.example.com {KEY_B}\n# comment\n"
+        );
+        let entries = list_in_str(&file);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].host, "example.com");
+        assert_eq!(entries[0].marker, None);
+        assert_eq!(entries[0].key_type, "ssh-ed25519");
+        assert!(entries[0].fingerprint_sha256.starts_with("SHA256:"));
+        assert_eq!(entries[1].marker.as_deref(), Some("@revoked"));
+    }
+
+    #[test]
+    fn delete_removes_only_the_matching_entry_byte_for_byte() {
+        // A file with CRLF, a comment, a blank line, and no trailing newline on
+        // the last entry — deletion must preserve every unrelated byte.
+        let contents = format!(
+            "# my hosts\r\nkeep.example.com {KEY_B}\n\ndrop.example.com {KEY_A}"
+        );
+        let entries = list_in_str(&contents);
+        let target = entries
+            .iter()
+            .find(|e| e.host == "drop.example.com")
+            .unwrap()
+            .id
+            .clone();
+        let (after, removed) = delete_in_str(&contents, &target);
+        assert!(removed);
+        // Everything except the dropped line is preserved exactly.
+        let expected = format!("# my hosts\r\nkeep.example.com {KEY_B}\n\n");
+        assert_eq!(after, expected);
+        // And the dropped host is now unknown.
+        let ka = key(KEY_A);
+        assert_eq!(
+            check_in_str(&after, "drop.example.com", 22, &ka),
+            HostKeyStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn delete_of_absent_entry_is_a_noop() {
+        let contents = format!("keep.example.com {KEY_B}\n");
+        let missing = KnownHostId {
+            host: "nope.example.com".into(),
+            key_type: "ssh-ed25519".into(),
+            keyblob: "AAAA".into(),
+        };
+        let (after, removed) = delete_in_str(&contents, &missing);
+        assert!(!removed);
+        assert_eq!(after, contents);
+    }
+
+    #[test]
+    fn glob_matcher_edge_cases() {
+        assert!(glob_match(b"*", b""));
+        assert!(glob_match(b"*", b"anything"));
+        assert!(glob_match(b"a*c", b"ac"));
+        assert!(glob_match(b"a*c", b"abbbc"));
+        assert!(!glob_match(b"a*c", b"abbb"));
+        assert!(glob_match(b"a?c", b"abc"));
+        assert!(!glob_match(b"a?c", b"ac"));
     }
 
     fn hex(bytes: &[u8]) -> String {
