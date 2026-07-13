@@ -87,7 +87,7 @@ impl Tty7App {
                 div()
                     .text_sm()
                     .text_color(muted_foreground)
-                    .child("No active forwards for this pane."),
+                    .child("No active forwards for this host."),
             )
         } else {
             let mut list = v_flex().gap_2();
@@ -127,24 +127,29 @@ impl Tty7App {
                                 div()
                                     .text_xs()
                                     .text_color(muted_foreground)
-                                    .child(format!("Pane {pane_id} on {}", remote.target)),
+                                    .child(remote.target.clone()),
                             ),
                     )
                     .child(h_flex().gap_2().child(refresh).child(close)),
             )
-            .child(self.render_loopback_forward_form(pane_id, cx))
+            .child(self.render_loopback_forward_form(pane_id, &remote.target, cx))
             .child(body)
     }
 
-    fn render_loopback_forward_form(&self, pane_id: u64, cx: &mut Context<Self>) -> Div {
+    fn render_loopback_forward_form(
+        &self,
+        pane_id: u64,
+        remote_target: &str,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = cx.theme();
         let host_input = self.loopback_panel.host_input.clone();
         let port_input = self.loopback_panel.port_input.clone();
         let editing = self.loopback_panel.editing.clone();
         let pane_label = editing
             .as_ref()
-            .map(|id| format!("Pane {} on {}", id.pane_id, id.target))
-            .unwrap_or_else(|| format!("Pane {pane_id}"));
+            .map(|id| id.target.clone())
+            .unwrap_or_else(|| remote_target.to_string());
         let title = if editing.is_some() {
             "Edit forward"
         } else {
