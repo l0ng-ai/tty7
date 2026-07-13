@@ -373,15 +373,20 @@ mod kind {
     pub const KILL: u8 = 6;
     pub const LIST: u8 = 7;
     pub const SHUTDOWN: u8 = 8;
-    /// `Spawn` with an explicit shell override. A separate kind (rather than a
-    /// new field under `SPAWN`) so a default spawn stays byte-identical on the
-    /// wire: the GUI and the long-lived daemon can be different versions, and
-    /// an old daemon must keep serving new-GUI default spawns. Only picking a
-    /// non-default shell sends this, and only a too-old daemon rejects it.
+    /// `Spawn` with an explicit, non-managed shell override. A separate kind
+    /// (rather than a new field under `SPAWN`) so a default spawn stays
+    /// byte-identical on the wire: the GUI and the long-lived daemon can be
+    /// different versions, and an old daemon must keep serving new-GUI default
+    /// spawns.
     pub const SPAWN_SHELL: u8 = 9;
     pub const ENSURE_LOOPBACK_FORWARD: u8 = 10;
     pub const LIST_LOOPBACK_FORWARDS: u8 = 11;
     pub const CLOSE_LOOPBACK_FORWARD: u8 = 12;
+    /// `Spawn` with `ShellSpec.ssh`. It must not share `SPAWN_SHELL`: a daemon
+    /// from before the `ssh` field existed would deserialize the rest of
+    /// `ShellSpec`, ignore the unknown managed-SSH field, and silently launch a
+    /// plain `ssh` tab with no ControlMaster/RemoteContext.
+    pub const SPAWN_MANAGED_SSH: u8 = 13;
 
     // Daemon -> client
     pub const SPAWNED: u8 = 1;
@@ -486,8 +491,15 @@ impl ClientMsg {
             ClientMsg::Spawn {
                 cwd,
                 size,
-                shell: shell @ Some(_),
-            } => write_frame(w, kind::SPAWN_SHELL, &to_json(&(cwd, size, shell))?),
+                shell: shell @ Some(spec),
+            } => {
+                let kind = if spec.ssh.is_some() {
+                    kind::SPAWN_MANAGED_SSH
+                } else {
+                    kind::SPAWN_SHELL
+                };
+                write_frame(w, kind, &to_json(&(cwd, size, shell))?)
+            }
             ClientMsg::Attach { pane_id, size } => {
                 write_frame(w, kind::ATTACH, &to_json(&(pane_id, size))?)
             }
@@ -518,7 +530,7 @@ impl ClientMsg {
                     shell: None,
                 }
             }
-            kind::SPAWN_SHELL => {
+            kind::SPAWN_SHELL | kind::SPAWN_MANAGED_SSH => {
                 let (cwd, size, shell) = from_json(&payload)?;
                 ClientMsg::Spawn { cwd, size, shell }
             }
@@ -905,6 +917,40 @@ mod tests {
                 cwd: Some(PathBuf::from("/old")),
                 size: SIZE,
                 shell: None,
+            }
+        );
+    }
+
+    #[test]
+    fn managed_ssh_spawn_uses_non_legacy_kind() {
+        let shell = ShellSpec {
+            program: "ssh".to_string(),
+            args: vec!["dev".to_string()],
+            ssh: Some(SshSpec {
+                target: "dev".to_string(),
+                args: Vec::new(),
+            }),
+        };
+        let msg = ClientMsg::Spawn {
+            cwd: Some(PathBuf::from("/work")),
+            size: SIZE,
+            shell: Some(shell.clone()),
+        };
+        let mut buf = Vec::new();
+        msg.encode(&mut buf).unwrap();
+        let (k, payload) = read_frame(&mut std::io::Cursor::new(&buf)).unwrap();
+        assert_eq!(
+            k,
+            kind::SPAWN_MANAGED_SSH,
+            "managed SSH must not use SPAWN_SHELL, because older daemons ignore unknown ShellSpec fields"
+        );
+        let decoded = ClientMsg::from_frame(k, payload).unwrap();
+        assert_eq!(
+            decoded,
+            ClientMsg::Spawn {
+                cwd: Some(PathBuf::from("/work")),
+                size: SIZE,
+                shell: Some(shell),
             }
         );
     }
