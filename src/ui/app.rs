@@ -3024,9 +3024,9 @@ mod keybinding_gpui_tests {
     use crate::core::session::Session;
     use crate::ui::app::Tty7App;
     use crate::ui::settings::SettingsSection;
-    use gpui::{TestAppContext, VisualTestContext, WindowHandle};
+    use gpui::{AppContext, Entity, TestAppContext, VisualTestContext};
 
-    fn harness(cx: &mut TestAppContext) -> (WindowHandle<Tty7App>, VisualTestContext) {
+    fn harness(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
         // The pause-to-commit is a real `smol::Timer` (off the deterministic
         // executor), so waiting on it parks the test thread.
         cx.executor().allow_parking();
@@ -3035,26 +3035,40 @@ mod keybinding_gpui_tests {
             cx.set_global(Config::default());
             crate::ui::keymap::init(cx);
         });
-        let window =
-            cx.add_window(|window, cx| Tty7App::with_session(Some(Session::default()), window, cx));
+        // Wrap the app in a `gpui_component::Root` exactly like `main.rs` does:
+        // the settings overlay's search box (and other gpui-component widgets)
+        // reach for `Root` on the window, which panics if the window's first
+        // layer isn't one. `Root::view()` hands the typed app entity back so the
+        // tests still drive `Tty7App` directly.
+        let window = cx.add_window(|window, cx| {
+            let app = cx.new(|cx| Tty7App::with_session(Some(Session::default()), window, cx));
+            gpui_component::Root::new(app, window, cx)
+        });
         window
             .update(cx, |_, window, _| window.activate_window())
             .unwrap();
         cx.background_executor.run_until_parked();
+        let app = window
+            .update(cx, |root, _, _| {
+                root.view()
+                    .clone()
+                    .downcast::<Tty7App>()
+                    .ok()
+                    .expect("window root wraps a Tty7App")
+            })
+            .unwrap();
         let vcx = VisualTestContext::from_window(window.into(), cx);
-        (window, vcx)
+        (app, vcx)
     }
 
     /// Open Settings → Keybindings and begin capturing `action`.
-    fn begin_capture(window: &WindowHandle<Tty7App>, vcx: &mut VisualTestContext, action: &str) {
+    fn begin_capture(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, action: &str) {
         let action = action.to_string();
-        window
-            .update(vcx, |app, window, cx| {
-                app.toggle_settings(window, cx);
-                app.select_settings_section(SettingsSection::Keybindings, cx);
-                app.start_recording_key(action, window, cx);
-            })
-            .unwrap();
+        app.update_in(vcx, |app, window, cx| {
+            app.toggle_settings(window, cx);
+            app.select_settings_section(SettingsSection::Keybindings, cx);
+            app.start_recording_key(action, window, cx);
+        });
     }
 
     /// Poll (bounded) until `action` has the expected override in config — the
@@ -3081,17 +3095,15 @@ mod keybinding_gpui_tests {
     // `start_recording_key`, not just the pure helpers.
     #[gpui::test]
     fn recording_a_shortcut_writes_the_override_and_ends_capture(cx: &mut TestAppContext) {
-        let (window, mut vcx) = harness(cx);
-        begin_capture(&window, &mut vcx, "NewTab");
+        let (app, mut vcx) = harness(cx);
+        begin_capture(&app, &mut vcx, "NewTab");
         // The platform-primary modifier normalizes to `secondary` on write.
         vcx.simulate_keystrokes("secondary-shift-n");
         wait_for_binding(&mut vcx, "NewTab", "secondary-shift-n");
 
-        let recording = window
-            .update(&mut vcx, |app, _, _| {
-                app.active_settings().map(|s| s.recording.is_some())
-            })
-            .unwrap();
+        let recording = app.update_in(&mut vcx, |app, _, _| {
+            app.active_settings().map(|s| s.recording.is_some())
+        });
         assert_eq!(
             recording,
             Some(false),
@@ -3102,8 +3114,8 @@ mod keybinding_gpui_tests {
     // A two-chord sequence (the tmux-style `ctrl-b x`) records as one binding.
     #[gpui::test]
     fn recording_a_two_chord_sequence_writes_the_full_spec(cx: &mut TestAppContext) {
-        let (window, mut vcx) = harness(cx);
-        begin_capture(&window, &mut vcx, "CloseActiveTab");
+        let (app, mut vcx) = harness(cx);
+        begin_capture(&app, &mut vcx, "CloseActiveTab");
         // Two chords in quick succession, then the pause commits the sequence.
         // `secondary-b` is used (not a bare `ctrl-b`) so the recorded spec is
         // identical on macOS and elsewhere — the primary modifier normalizes to
@@ -3116,24 +3128,20 @@ mod keybinding_gpui_tests {
     // Esc during capture cancels without touching config.
     #[gpui::test]
     fn escape_cancels_capture_without_writing(cx: &mut TestAppContext) {
-        let (window, mut vcx) = harness(cx);
-        window
-            .update(&mut vcx, |app, window, cx| {
-                app.toggle_settings(window, cx);
-                app.select_settings_section(SettingsSection::Keybindings, cx);
-                app.start_recording_key("NewTab".to_string(), window, cx);
-            })
-            .unwrap();
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.toggle_settings(window, cx);
+            app.select_settings_section(SettingsSection::Keybindings, cx);
+            app.start_recording_key("NewTab".to_string(), window, cx);
+        });
         vcx.simulate_keystrokes("escape");
         vcx.background_executor.run_until_parked();
 
         let stored = vcx.update(|_, cx| cx.global::<Config>().keybindings.contains_key("NewTab"));
         assert!(!stored, "Esc must not persist a binding");
-        let recording = window
-            .update(&mut vcx, |app, _, _| {
-                app.active_settings().map(|s| s.recording.is_some())
-            })
-            .unwrap();
+        let recording = app.update_in(&mut vcx, |app, _, _| {
+            app.active_settings().map(|s| s.recording.is_some())
+        });
         assert_eq!(recording, Some(false));
     }
 }
