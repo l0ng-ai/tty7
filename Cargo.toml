@@ -83,6 +83,13 @@ portable-pty = "0.8"
 # bridges to it through blocking `Read`/`Write` adapters.
 russh = "0.62"
 
+# SFTP client for the native SSH engine (`daemon::ssh::sftp`, Workstream 5).
+# Not part of russh proper: `russh-sftp` drives the SFTP subsystem over any
+# AsyncRead+AsyncWrite stream, which a russh session channel provides via
+# `Channel::into_stream()`. Version-independent of russh (it only needs the
+# channel byte stream), so it rides the same tokio runtime `daemon::ssh` owns.
+russh-sftp = "2"
+
 # tokio powers only the russh session engine — a single runtime `daemon::ssh`
 # owns. The daemon's PTY/reader/writer threads remain std threads and never touch
 # it; they cross into async through bounded/unbounded channels (the blocking
@@ -95,6 +102,9 @@ tokio = { version = "1", features = [
     "time",
     "macros",
     "process",
+    # `fs` powers the local side of SFTP transfers (`daemon::ssh::sftp`): async
+    # file/dir IO on the daemon process's own filesystem during upload/download.
+    "fs",
 ] }
 
 # SIMD byte search for the OSC tokenizer's Ground/Ignore fast paths — the

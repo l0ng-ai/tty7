@@ -86,6 +86,21 @@ impl Registry {
     }
 }
 
+/// Resolve a pane id to its live native-SSH connection, for the SFTP control
+/// handlers. Errors (as a client-facing string) when the pane is unknown or isn't
+/// a native-SSH pane with an established connection (a PTY / compat-`ssh` pane, or
+/// one still authenticating).
+fn ssh_connection_for(
+    registry: &Registry,
+    pane_id: u64,
+) -> Result<Arc<crate::daemon::ssh::SshConnection>, String> {
+    let pane = registry
+        .get(pane_id)
+        .ok_or_else(|| format!("no such pane {pane_id}"))?;
+    pane.ssh_connection()
+        .ok_or_else(|| "pane has no native SSH connection (SFTP needs a native-SSH pane)".to_string())
+}
+
 /// Run the daemon: bind the socket and serve connections forever. Returns `Err`
 /// only on a fatal setup failure (bad socket path, bind error); the accept loop
 /// itself runs until the process is killed.
@@ -370,6 +385,62 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             crate::daemon::forward::ForwardManager::global().close(&id);
             let list = crate::daemon::forward::ForwardManager::global().list();
             DaemonMsg::LoopbackForwardList(list).encode(&mut w)?;
+            Ok(())
+        }
+
+        ClientMsg::SftpList { pane_id, path } => {
+            let mut w = write_stream;
+            match ssh_connection_for(&registry, pane_id) {
+                Ok(conn) => {
+                    match crate::daemon::ssh::sftp::SftpManager::global().list(&conn, &path) {
+                        Ok(entries) => DaemonMsg::SftpEntries(entries).encode(&mut w)?,
+                        Err(e) => DaemonMsg::Error(e).encode(&mut w)?,
+                    }
+                }
+                Err(e) => DaemonMsg::Error(e).encode(&mut w)?,
+            }
+            Ok(())
+        }
+
+        ClientMsg::SftpOp { pane_id, op } => {
+            let mut w = write_stream;
+            match ssh_connection_for(&registry, pane_id) {
+                Ok(conn) => {
+                    let result = crate::daemon::ssh::sftp::SftpManager::global().op(&conn, &op);
+                    DaemonMsg::SftpOpResult(result).encode(&mut w)?;
+                }
+                Err(e) => DaemonMsg::Error(e).encode(&mut w)?,
+            }
+            Ok(())
+        }
+
+        ClientMsg::SftpTransferStart(spec) => {
+            let mut w = write_stream;
+            match ssh_connection_for(&registry, spec.pane_id) {
+                Ok(conn) => {
+                    match crate::daemon::ssh::sftp::SftpManager::global()
+                        .start_transfer(&conn, spec)
+                    {
+                        Ok(job_id) => DaemonMsg::SftpTransferStarted { job_id }.encode(&mut w)?,
+                        Err(e) => DaemonMsg::Error(e).encode(&mut w)?,
+                    }
+                }
+                Err(e) => DaemonMsg::Error(e).encode(&mut w)?,
+            }
+            Ok(())
+        }
+
+        ClientMsg::SftpTransferCancel { job_id } => {
+            let mut w = write_stream;
+            let jobs = crate::daemon::ssh::sftp::SftpManager::global().cancel(job_id);
+            DaemonMsg::SftpTransferProgress(jobs).encode(&mut w)?;
+            Ok(())
+        }
+
+        ClientMsg::SftpTransferList { pane_id } => {
+            let mut w = write_stream;
+            let jobs = crate::daemon::ssh::sftp::SftpManager::global().list_jobs(pane_id);
+            DaemonMsg::SftpTransferProgress(jobs).encode(&mut w)?;
             Ok(())
         }
 

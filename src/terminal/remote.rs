@@ -36,7 +36,8 @@ use alacritty_terminal::vte::ansi;
 use crate::core::osc::OscTokenizer;
 use crate::daemon::protocol::{
     ClientMsg, DaemonMsg, LoopbackForward, LoopbackForwardId, LoopbackForwardInfo,
-    LoopbackForwardRequest, RemoteContext, ShellSpec, WinSize,
+    LoopbackForwardRequest, RemoteContext, ShellSpec, SftpEntry, SftpJobProgress, SftpOp,
+    SftpOpResult, SftpTransferSpec, WinSize,
 };
 use crate::daemon::transport::{self, Stream};
 
@@ -861,6 +862,84 @@ impl RemoteTerminal {
             }
         }
         query(id).unwrap_or_default()
+    }
+
+    // --- SFTP (Workstream 5) -------------------------------------------------
+    //
+    // Each is a synchronous one-shot control request modeled on the loopback
+    // helpers above: connect, send one `ClientMsg`, read one `DaemonMsg`. SFTP
+    // targets a native-SSH pane; the daemon errors if `pane_id` isn't one.
+
+    /// List a remote directory over the pane's SFTP session.
+    pub fn sftp_list(pane_id: u64, path: &str) -> Result<Vec<SftpEntry>, String> {
+        fn query(pane_id: u64, path: String) -> anyhow::Result<Result<Vec<SftpEntry>, String>> {
+            let mut stream = connect()?;
+            ClientMsg::SftpList { pane_id, path }.encode(&mut stream)?;
+            Ok(match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::SftpEntries(entries) => Ok(entries),
+                DaemonMsg::Error(msg) => Err(msg),
+                other => Err(format!("unexpected reply to SftpList: {other:?}")),
+            })
+        }
+        query(pane_id, path.to_string()).unwrap_or_else(|e| Err(e.to_string()))
+    }
+
+    /// Run a one-shot SFTP filesystem operation.
+    pub fn sftp_op(pane_id: u64, op: SftpOp) -> SftpOpResult {
+        fn query(pane_id: u64, op: SftpOp) -> anyhow::Result<SftpOpResult> {
+            let mut stream = connect()?;
+            ClientMsg::SftpOp { pane_id, op }.encode(&mut stream)?;
+            Ok(match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::SftpOpResult(result) => result,
+                DaemonMsg::Error(msg) => SftpOpResult::Error(msg),
+                other => SftpOpResult::Error(format!("unexpected reply to SftpOp: {other:?}")),
+            })
+        }
+        query(pane_id, op).unwrap_or_else(|e| SftpOpResult::Error(e.to_string()))
+    }
+
+    /// Start a background transfer job; returns its id.
+    pub fn sftp_transfer_start(spec: SftpTransferSpec) -> Result<u64, String> {
+        fn query(spec: SftpTransferSpec) -> anyhow::Result<Result<u64, String>> {
+            let mut stream = connect()?;
+            ClientMsg::SftpTransferStart(spec).encode(&mut stream)?;
+            Ok(match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::SftpTransferStarted { job_id } => Ok(job_id),
+                DaemonMsg::Error(msg) => Err(msg),
+                other => Err(format!("unexpected reply to SftpTransferStart: {other:?}")),
+            })
+        }
+        query(spec).unwrap_or_else(|e| Err(e.to_string()))
+    }
+
+    /// Cancel a transfer job; returns the pane's refreshed progress list.
+    pub fn sftp_transfer_cancel(job_id: u64) -> Vec<SftpJobProgress> {
+        fn query(job_id: u64) -> anyhow::Result<Vec<SftpJobProgress>> {
+            let mut stream = connect()?;
+            ClientMsg::SftpTransferCancel { job_id }.encode(&mut stream)?;
+            match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::SftpTransferProgress(jobs) => Ok(jobs),
+                other => Err(anyhow::anyhow!(
+                    "unexpected reply to SftpTransferCancel: {other:?}"
+                )),
+            }
+        }
+        query(job_id).unwrap_or_default()
+    }
+
+    /// Poll the transfer jobs for a pane (drives the tray while it is visible).
+    pub fn sftp_transfer_list(pane_id: u64) -> Vec<SftpJobProgress> {
+        fn query(pane_id: u64) -> anyhow::Result<Vec<SftpJobProgress>> {
+            let mut stream = connect()?;
+            ClientMsg::SftpTransferList { pane_id }.encode(&mut stream)?;
+            match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::SftpTransferProgress(jobs) => Ok(jobs),
+                other => Err(anyhow::anyhow!(
+                    "unexpected reply to SftpTransferList: {other:?}"
+                )),
+            }
+        }
+        query(pane_id).unwrap_or_default()
     }
 }
 
