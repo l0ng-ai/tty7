@@ -6,6 +6,7 @@
 //! depends back on `ui`.
 
 pub mod app;
+pub mod forwards;
 pub mod hints;
 pub mod home;
 pub mod keymap;

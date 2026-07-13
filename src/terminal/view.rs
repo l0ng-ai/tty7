@@ -29,7 +29,7 @@ use crate::core::actions::{
     CloseActiveTab, NewTab, SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
 };
 use crate::core::config::{Config, NotifyMode};
-use crate::daemon::protocol::ShellSpec;
+use crate::daemon::protocol::{RemoteContext, ShellSpec};
 
 /// Inset (px) between the terminal-surface edge and the cell grid. The prompt
 /// editor and the floating completion / history menus are absolutely positioned
@@ -822,6 +822,10 @@ impl TerminalView {
     /// new tabs / splits can open in the same place. `None` if it can't be read.
     pub fn cwd(&self) -> Option<std::path::PathBuf> {
         self.terminal.foreground_cwd()
+    }
+
+    pub fn remote_context(&self) -> Option<RemoteContext> {
+        self.terminal.remote_context()
     }
 
     /// The shell this pane was explicitly spawned with (new-tab dropdown pick),

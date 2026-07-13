@@ -21,7 +21,6 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_f
 use std::sync::Arc;
 
 use crate::core::config::{Config, CursorStyle, NewTabPosition, NotifyMode};
-use crate::daemon::protocol::{LoopbackForwardId, LoopbackForwardInfo};
 use crate::ui::app::{FONT_SIZE_STEP, LINE_HEIGHT_STEP, ThemeEdit, Tty7App};
 use crate::ui::presets;
 
@@ -97,14 +96,6 @@ pub(crate) struct SettingsState {
     pub(crate) theme_panel_open: bool,
     /// Live filter for the theme picker panel's list.
     pub(crate) theme_search: Entity<InputState>,
-    /// Last daemon-reported SSH loopback forwards shown in Terminal → Links.
-    pub(crate) loopback_forwards: Vec<LoopbackForwardInfo>,
-    /// Pane selected when Settings opened; manual forwards use this pane's
-    /// proven SSH context.
-    pub(crate) loopback_default_pane_id: Option<u64>,
-    pub(crate) loopback_host_input: Entity<InputState>,
-    pub(crate) loopback_port_input: Entity<InputState>,
-    pub(crate) loopback_editing: Option<LoopbackForwardId>,
     /// `Some` while a Keybindings row is capturing a new shortcut: the action
     /// being rebound plus the live keystroke interceptor that swallows and
     /// records the next keypress (see `Tty7App::start_recording_key`).
@@ -147,16 +138,6 @@ pub(crate) fn humanize_action(action: &str) -> String {
         out.push(ch);
     }
     out
-}
-
-fn human_duration(secs: u64) -> String {
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 60 * 60 {
-        format!("{}m", secs / 60)
-    } else {
-        format!("{}h", secs / 3600)
-    }
 }
 
 impl Tty7App {
@@ -370,249 +351,6 @@ impl Tty7App {
                     ),
             )
             .child(control)
-    }
-
-    fn render_loopback_forwards(
-        &self,
-        forwards: &[LoopbackForwardInfo],
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let theme = cx.theme();
-        let refresh = Button::new("ssh-forward-refresh")
-            .label("Refresh")
-            .small()
-            .on_click(cx.listener(|this, _, _w, cx| this.refresh_loopback_forwards(cx)));
-
-        let header = h_flex()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.foreground)
-                    .child("Active SSH forwards"),
-            )
-            .child(refresh);
-
-        let body = if forwards.is_empty() {
-            v_flex().child(
-                div()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("No active SSH loopback forwards."),
-            )
-        } else {
-            forwards.iter().fold(v_flex().gap_2(), |list, forward| {
-                list.child(self.render_loopback_forward_row(forward, cx))
-            })
-        };
-
-        v_flex().gap_2().py_2().child(header).child(body)
-    }
-
-    fn render_loopback_forward_form(&self, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme();
-        let Some(settings) = self.active_settings() else {
-            return div();
-        };
-        let host_input = settings.loopback_host_input.clone();
-        let port_input = settings.loopback_port_input.clone();
-        let editing = settings.loopback_editing.clone();
-        let pane_label = editing
-            .as_ref()
-            .map(|id| format!("Pane {} on {}", id.pane_id, id.target))
-            .or_else(|| {
-                settings
-                    .loopback_default_pane_id
-                    .map(|pane_id| format!("Current pane {pane_id}"))
-            })
-            .unwrap_or_else(|| "Open Settings from an SSH pane".to_string());
-        let title = if editing.is_some() {
-            "Edit SSH forward"
-        } else {
-            "Add SSH forward"
-        };
-        let save_label = if editing.is_some() { "Save" } else { "Add" };
-        let cancel =
-            editing.is_some().then(|| {
-                Button::new("ssh-forward-cancel")
-                    .label("Cancel")
-                    .small()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.cancel_loopback_forward_edit(window, cx)
-                    }))
-            });
-
-        let host = div()
-            .w(px(180.))
-            .child(Input::new(&host_input).small())
-            .into_any_element();
-        let port = div()
-            .w(px(92.))
-            .child(Input::new(&port_input).small())
-            .into_any_element();
-
-        v_flex()
-            .gap_2()
-            .py_2()
-            .child(
-                h_flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        v_flex()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.foreground)
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(pane_label),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("ssh-forward-save")
-                                    .label(save_label)
-                                    .small()
-                                    .primary()
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.save_loopback_forward_form(window, cx)
-                                    })),
-                            )
-                            .when_some(cancel, |row, button| row.child(button)),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(host)
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child(":"),
-                    )
-                    .child(port),
-            )
-    }
-
-    fn render_loopback_forward_row(
-        &self,
-        forward: &LoopbackForwardInfo,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let theme = cx.theme();
-        let id = forward.id.clone();
-        let remote = format!(
-            "{}:{} on {}",
-            forward.id.remote_host, forward.id.remote_port, forward.id.target
-        );
-        let local = format!("127.0.0.1:{}", forward.local_port);
-        let local_for_copy = local.clone();
-        let details = format!(
-            "Pane {} · idle {} · age {}",
-            forward.id.pane_id,
-            human_duration(forward.idle_secs),
-            human_duration(forward.age_secs)
-        );
-        let close_id = SharedString::from(format!(
-            "ssh-forward-close-{}-{}-{}-{}",
-            forward.id.pane_id, forward.id.target, forward.id.remote_host, forward.id.remote_port
-        ));
-        let edit_id = SharedString::from(format!(
-            "ssh-forward-edit-{}-{}-{}-{}",
-            forward.id.pane_id, forward.id.target, forward.id.remote_host, forward.id.remote_port
-        ));
-        let copy_id = SharedString::from(format!(
-            "ssh-forward-copy-{}-{}-{}-{}-{}",
-            forward.id.pane_id,
-            forward.id.target,
-            forward.id.remote_host,
-            forward.id.remote_port,
-            forward.local_port
-        ));
-
-        h_flex()
-            .items_center()
-            .gap_4()
-            .px_3()
-            .py_2()
-            .border_1()
-            .border_color(theme.border)
-            .rounded_md()
-            .child(
-                v_flex()
-                    .gap_0p5()
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(div().text_sm().text_color(theme.foreground).child(remote))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("->"),
-                            )
-                            .child(
-                                div()
-                                    .id(copy_id)
-                                    .text_sm()
-                                    .text_color(theme.accent)
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(theme.accent.opacity(0.08)))
-                                    .child(local)
-                                    .on_click(cx.listener(move |this, _, _window, cx| {
-                                        this.copy_loopback_forward_address(
-                                            local_for_copy.clone(),
-                                            cx,
-                                        )
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(details),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new(edit_id)
-                            .label("Edit")
-                            .small()
-                            .on_click(cx.listener({
-                                let id = id.clone();
-                                move |this, _, window, cx| {
-                                    this.edit_loopback_forward(id.clone(), window, cx)
-                                }
-                            })),
-                    )
-                    .child(
-                        Button::new(close_id)
-                            .label("Close")
-                            .small()
-                            .on_click(cx.listener(move |this, _, _w, cx| {
-                                this.close_loopback_forward(id.clone(), cx)
-                            })),
-                    ),
-            )
     }
 
     /// A segmented control (gpui-component's `ButtonGroup`, outline) for a small
@@ -1106,8 +844,8 @@ impl Tty7App {
             NotifyMode::Unfocused => 1,
             NotifyMode::Always => 2,
         };
-        let (scroll_slider, loopback_forwards) = match self.active_settings() {
-            Some(s) => (s.scroll_slider.clone(), s.loopback_forwards.clone()),
+        let scroll_slider = match self.active_settings() {
+            Some(s) => s.scroll_slider.clone(),
             None => return div().into_any_element(),
         };
 
@@ -1245,8 +983,6 @@ impl Tty7App {
                 ssh_loopback_switch,
                 cx,
             ))
-            .child(self.render_loopback_forward_form(cx))
-            .child(self.render_loopback_forwards(&loopback_forwards, cx))
             .child(self.section_rule(cx))
             .child(self.section_header("Clipboard", cx))
             .child(self.settings_row(
