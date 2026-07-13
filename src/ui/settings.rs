@@ -22,7 +22,6 @@ use std::sync::Arc;
 
 use crate::core::config::{Config, CursorStyle, NewTabPosition, NotifyMode};
 use crate::ui::app::{FONT_SIZE_STEP, LINE_HEIGHT_STEP, ThemeEdit, Tty7App};
-use crate::ui::keymap::default_bindings;
 use crate::ui::presets;
 
 /// Which section of the settings panel is currently selected in the sidebar.
@@ -97,7 +96,25 @@ pub(crate) struct SettingsState {
     pub(crate) theme_panel_open: bool,
     /// Live filter for the theme picker panel's list.
     pub(crate) theme_search: Entity<InputState>,
+    /// `Some` while a Keybindings row is capturing a new shortcut: the action
+    /// being rebound plus the live keystroke interceptor that swallows and
+    /// records the next keypress (see `Tty7App::start_recording_key`).
+    pub(crate) recording: Option<Recording>,
+    /// A transient one-line note under the Keybindings header — e.g. after a
+    /// captured key was already taken and its previous owner was unbound.
+    /// Cleared when the next capture starts.
+    pub(crate) rebinding_note: Option<String>,
     pub(crate) _subs: Vec<Subscription>,
+}
+
+/// In-progress capture of a new shortcut for one action (click a Keybindings
+/// row). The interceptor lives here so it stays active only while recording;
+/// dropping it (capture done / Esc) removes the key swallow.
+pub(crate) struct Recording {
+    /// The action name whose shortcut is being captured.
+    pub(crate) action: String,
+    /// Keeps the keystroke interceptor alive for the duration of the capture.
+    pub(crate) _intercept: Subscription,
 }
 
 /// Sentinel first row in the bold/italic font pickers meaning "no distinct face
@@ -107,7 +124,7 @@ pub(crate) const FONT_DEFAULT_LABEL: &str = "Default (match primary)";
 
 /// Humanize a CamelCase action name for display: "CloseActiveTab" → "Close
 /// Active Tab".
-fn humanize_action(action: &str) -> String {
+pub(crate) fn humanize_action(action: &str) -> String {
     let mut out = String::new();
     for (i, ch) in action.chars().enumerate() {
         if i > 0 && ch.is_uppercase() {
@@ -1306,26 +1323,42 @@ impl Tty7App {
 
     /// Keybindings section: the effective shortcut list (defaults + overrides).
     fn render_settings_keybindings(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let foreground = theme.foreground;
-        let border = theme.border;
-        let kbd_bg = theme.secondary.opacity(0.6);
+        let (foreground, muted, border, kbd_bg, accent) = {
+            let t = cx.theme();
+            (
+                t.foreground,
+                t.muted_foreground,
+                t.border,
+                t.secondary.opacity(0.6),
+                t.primary,
+            )
+        };
 
-        let cfg = cx.global::<Config>();
-        let keybindings: Vec<(String, String)> = default_bindings()
-            .into_iter()
-            .map(|(action, key)| {
-                let key = cfg
-                    .keybindings
-                    .get(action)
-                    .cloned()
-                    .unwrap_or_else(|| key.to_string());
-                (action.to_string(), key)
-            })
-            .collect();
+        // Config-derived state, read into owned values so the `cx` borrow is
+        // free for `effective_bindings` and the click listeners below.
+        let (preset, prefix, overridden) = {
+            let cfg = cx.global::<Config>();
+            let overridden: std::collections::HashSet<String> =
+                cfg.keybindings.keys().cloned().collect();
+            (
+                cfg.keybinding_preset.clone(),
+                cfg.prefix.clone(),
+                overridden,
+            )
+        };
+        let tmux = preset == "tmux";
+        let effective = crate::ui::keymap::effective_bindings(cx);
 
-        // A single key glyph rendered as a small keycap, so a shortcut reads like
-        // keys on a keyboard rather than a run of slashed-together text.
+        // The row currently capturing a shortcut, and any pending takeover note.
+        let recording = self
+            .active_settings()
+            .and_then(|s| s.recording.as_ref())
+            .map(|r| r.action.clone());
+        let note = self
+            .active_settings()
+            .and_then(|s| s.rebinding_note.clone());
+
+        // One key glyph as a small keycap, so a shortcut reads like real keys.
         let keycap = move |tok: String| {
             div()
                 .flex()
@@ -1343,14 +1376,152 @@ impl Tty7App {
                 .child(tok)
         };
 
-        let count = keybindings.len();
-        let mut list = v_flex();
-        for (i, (action, key)) in keybindings.into_iter().enumerate() {
+        // A preset toggle button, highlighted when active.
+        let preset_button = |id: &'static str, label: &'static str, value: &'static str, on: bool| {
+            Button::new(id)
+                .label(label)
+                .small()
+                .selected(on)
+                .on_click(cx.listener(move |this, _, _w, cx| {
+                    this.set_keybinding_preset(value, cx)
+                }))
+        };
+        // A prefix choice button (tmux preset only).
+        let prefix_button = |id: &'static str, label: &'static str, value: &'static str, on: bool| {
+            Button::new(id)
+                .label(label)
+                .small()
+                .selected(on)
+                .on_click(cx.listener(move |this, _, _w, cx| {
+                    this.set_keybinding_prefix(value, cx)
+                }))
+        };
+
+        let preset_row = h_flex()
+            .items_center()
+            .justify_between()
+            .py_2()
+            .child(
+                v_flex()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(foreground)
+                            .child("Preset"),
+                    )
+                    .child(div().text_xs().text_color(muted).child(
+                        "tmux remaps pane/tab actions onto prefix sequences (e.g. Ctrl-B then C).",
+                    )),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(preset_button("preset-default", "Default", "default", !tmux))
+                    .child(preset_button("preset-tmux", "tmux", "tmux", tmux)),
+            );
+
+        let prefix_row = h_flex()
+            .items_center()
+            .justify_between()
+            .py_2()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(foreground)
+                    .child("Prefix"),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(prefix_button(
+                        "prefix-ctrl-b",
+                        "Ctrl-B",
+                        "ctrl-b",
+                        prefix == "ctrl-b",
+                    ))
+                    .child(prefix_button(
+                        "prefix-ctrl-a",
+                        "Ctrl-A",
+                        "ctrl-a",
+                        prefix == "ctrl-a",
+                    )),
+            );
+
+        let count = effective.len();
+        let mut list = v_flex().mt_2();
+        for (i, (action, key)) in effective.into_iter().enumerate() {
+            let is_recording = recording.as_deref() == Some(action.as_str());
+            let is_overridden = overridden.contains(&action);
+
+            // Right side: the recording prompt, the keycap sequence, or "—".
+            let captured: gpui::AnyElement = if is_recording {
+                div()
+                    .text_xs()
+                    .text_color(accent)
+                    .child("Press keys… Esc to cancel")
+                    .into_any_element()
+            } else if key.is_empty() {
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("—")
+                    .into_any_element()
+            } else {
+                // Each whitespace-separated chord becomes its own keycap cluster,
+                // with a wider gap between clusters than within one.
+                h_flex()
+                    .gap_2()
+                    .children(crate::ui::keymap::key_chords(&key).into_iter().map(|chord| {
+                        h_flex()
+                            .gap_1()
+                            .children(chord.into_iter().map(&keycap))
+                    }))
+                    .into_any_element()
+            };
+
+            // The whole right cell is clickable to start capturing this row.
+            let action_for_click = action.clone();
+            let capture = div()
+                .id(SharedString::from(format!("kb-{action}")))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .when(is_recording, |d| {
+                    d.border_1().border_color(accent)
+                })
+                .hover(|d| d.bg(kbd_bg))
+                .child(captured)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.start_recording_key(action_for_click.clone(), window, cx)
+                }));
+
+            let action_for_reset = action.clone();
+            let right = h_flex().items_center().gap_1().child(capture).when(
+                is_overridden,
+                |r| {
+                    r.child(
+                        Button::new(SharedString::from(format!("reset-{action}")))
+                            .label("Reset")
+                            .small()
+                            .on_click(cx.listener(move |this, _, _w, cx| {
+                                this.reset_keybinding(action_for_reset.clone(), cx)
+                            })),
+                    )
+                },
+            );
+
             list = list.child(
                 h_flex()
                     .items_center()
                     .justify_between()
-                    .py_2p5()
+                    .py_1p5()
                     .when(i + 1 < count, |s| s.border_b_1().border_color(border))
                     .child(
                         div()
@@ -1358,22 +1529,36 @@ impl Tty7App {
                             .text_color(foreground)
                             .child(humanize_action(&action)),
                     )
-                    .child(
-                        h_flex().gap_1().children(
-                            crate::ui::keymap::key_tokens(&key)
-                                .into_iter()
-                                .map(|t| keycap(t)),
-                        ),
-                    ),
+                    .child(right),
             );
         }
 
         v_flex()
             .child(self.section_intro(
                 "Keyboard Shortcuts",
-                "Remap keys by editing config.json (restart to apply).",
+                "Click a shortcut to change it, then press the new keys (Esc cancels, Backspace resets to default). Changes apply immediately.",
                 cx,
             ))
+            .child(preset_row)
+            .when(tmux, |v| v.child(prefix_row))
+            .when(tmux, |v| {
+                v.child(div().py_1().text_xs().text_color(muted).child(
+                    "With a prefix active, a bare prefix key reaches the shell after a ~1s pause, and prefix + an unbound key is sent through to the terminal.",
+                ))
+            })
+            .when_some(note, |v, note| {
+                v.child(div().py_1().text_xs().text_color(accent).child(note))
+            })
+            .child(
+                h_flex().justify_end().py_2().child(
+                    Button::new("kb-restore-all")
+                        .label("Restore all defaults")
+                        .small()
+                        .on_click(cx.listener(|this, _, _w, cx| {
+                            this.restore_default_keybindings(cx)
+                        })),
+                ),
+            )
             .child(list)
             .into_any_element()
     }

@@ -47,6 +47,17 @@ pub struct Config {
     /// actions and unparseable keystrokes are ignored (with a warning) so a bad
     /// entry never blocks startup.
     pub keybindings: HashMap<String, String>,
+    /// Keybinding preset layered between the built-in defaults and the user's
+    /// `keybindings` overrides. `"default"` (the default) adds nothing; `"tmux"`
+    /// remaps pane/tab actions onto `prefix`-led sequences (e.g. `ctrl-b c`).
+    /// Parsed leniently — an unknown value resolves back to the default preset.
+    #[serde(default = "default_preset")]
+    pub keybinding_preset: String,
+    /// The prefix chord the `tmux` preset builds its sequences from (tmux's
+    /// `C-b`). Only meaningful when `keybinding_preset` is `"tmux"`. Validated as
+    /// a gpui keystroke where it's consumed; a common alternative is `ctrl-a`.
+    #[serde(default = "default_prefix")]
+    pub prefix: String,
     /// Optional shell override for the terminals tty7 spawns. When unset (the
     /// default), the platform's default shell is used: the user's login shell on
     /// Unix (via `$SHELL`), and PowerShell on Windows (PowerShell 7 when
@@ -242,6 +253,8 @@ impl Default for Config {
             // depend on ui). Unknown ids fall back to it anyway.
             theme_preset: "light".to_string(),
             keybindings: HashMap::new(),
+            keybinding_preset: default_preset(),
+            prefix: default_prefix(),
             // `None` → the platform default shell (login shell on Unix,
             // PowerShell 7 / Windows PowerShell on Windows), chosen by the
             // daemon at spawn time.
@@ -486,6 +499,16 @@ pub fn extra_env() -> HashMap<String, String> {
     Config::load().env
 }
 
+/// Serde default for [`Config::keybinding_preset`]: the no-op `"default"` preset.
+fn default_preset() -> String {
+    "default".to_string()
+}
+
+/// Serde default for [`Config::prefix`]: tmux's classic `C-b`.
+fn default_prefix() -> String {
+    "ctrl-b".to_string()
+}
+
 /// Upper bound on `scrollback_limit`. Matches alacritty_terminal's own history
 /// ceiling — asking for more just wastes memory since the emulator caps there.
 pub const MAX_SCROLLBACK: usize = 100_000;
@@ -679,6 +702,24 @@ mod tests {
         assert_eq!(clamp(0), 100); // floor
         assert_eq!(clamp(10_000), 10_000); // untouched in-band
         assert_eq!(clamp(usize::MAX), MAX_SCROLLBACK); // ceiling
+    }
+
+    #[test]
+    fn keybinding_preset_and_prefix_default_and_round_trip() {
+        // Missing fields fall back to the no-op preset and the tmux-classic prefix.
+        let cfg = Config::default();
+        assert_eq!(cfg.keybinding_preset, "default");
+        assert_eq!(cfg.prefix, "ctrl-b");
+
+        let cfg: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert_eq!(cfg.keybinding_preset, "default");
+        assert_eq!(cfg.prefix, "ctrl-b");
+
+        // Explicit values survive a parse.
+        let cfg: Config =
+            serde_json::from_str(r#"{"keybinding_preset": "tmux", "prefix": "ctrl-a"}"#).unwrap();
+        assert_eq!(cfg.keybinding_preset, "tmux");
+        assert_eq!(cfg.prefix, "ctrl-a");
     }
 
     #[test]

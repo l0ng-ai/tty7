@@ -98,8 +98,10 @@ The essentials:
 | | |
 |---|---|
 | <kbd>⌘ T</kbd> · <kbd>⌘ W</kbd> · <kbd>⌘ ⇧ T</kbd> | new tab · close tab · reopen closed tab |
+| <kbd>⌘ 1</kbd>…<kbd>⌘ 9</kbd> · <kbd>⌃ ⇥</kbd> · <kbd>⌃ ⇧ ⇥</kbd> | jump to tab 1–9 · next tab · previous tab |
 | <kbd>⌘ D</kbd> · <kbd>⌘ ⇧ D</kbd> | split right · split down |
 | <kbd>⌘ ]</kbd> · <kbd>⌘ [</kbd> | next pane · previous pane |
+| <kbd>⌘ ⌥ ←→↑↓</kbd> | focus the pane in that direction |
 | <kbd>⌘ ⏎</kbd> · <kbd>⌘ ⇧ ⏎</kbd> | toggle fullscreen · maximize / restore the pane |
 | <kbd>⌘ K</kbd> | clear the screen and scrollback |
 | <kbd>⌘ P</kbd> | command palette |
@@ -107,7 +109,14 @@ The essentials:
 | <kbd>⌃ R</kbd> | fuzzy-search shell history |
 | <kbd>⌘ +</kbd> · <kbd>⌘ −</kbd> · <kbd>⌘ 0</kbd> | font size up · down · reset |
 
-The full list — and any overrides — lives in **Settings → Keybindings**.
+**Settings → Keybindings** lists every shortcut. Click one, press the new keys
+(<kbd>Esc</kbd> cancels, <kbd>Backspace</kbd> resets to default), and it takes
+effect immediately. Pane resize and swap have no default keys — bind them here or
+run them from the command palette. Prefer tmux muscle memory? Flip the **tmux**
+preset to remap pane/tab actions onto a prefix (default <kbd>⌃ B</kbd>): <kbd>⌃ B</kbd>
+<kbd>C</kbd> opens a tab, <kbd>⌃ B</kbd> <kbd>%</kbd> splits, <kbd>⌃ B</kbd> then an
+arrow moves focus. A bare prefix reaches the shell after a brief pause, and
+`prefix` + an unbound key is passed straight through to the terminal.
 
 ---
 

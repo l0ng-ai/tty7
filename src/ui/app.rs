@@ -2,8 +2,7 @@
 //! with the active terminal filling the rest. Owns all tabs (each its own PTY).
 
 use gpui::{
-    App, Axis, Context, Entity, KeyDownEvent, PromptLevel, Subscription, Window, div, prelude::*,
-    px,
+    App, Axis, Context, Entity, PromptLevel, Subscription, Window, div, prelude::*, px,
 };
 use gpui_component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{InputEvent, InputState};
@@ -19,9 +18,9 @@ use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
 use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::palette::{Command, CommandKind, PaletteEvent, PaletteView};
-use crate::ui::pane::{CloseOutcome, Pane};
+use crate::ui::pane::{CloseOutcome, Dir, Pane};
 use crate::ui::presets::Fill;
-use crate::ui::settings::{SettingsSection, SettingsState, ThemeEditor};
+use crate::ui::settings::{Recording, SettingsSection, SettingsState, ThemeEditor, humanize_action};
 use crate::ui::theme::{apply_theme, set_menus};
 
 /// One editable color of a user theme, targeted by the in-app color editor. Maps
@@ -58,6 +57,10 @@ pub(crate) const LINE_HEIGHT_STEP: f32 = 0.05;
 /// Cap on the recently-closed-tab stack, bounding memory and the JSON we'd
 /// otherwise keep growing without limit.
 const MAX_CLOSED_TABS: usize = 20;
+
+/// How much one resize step nudges a split's ratio (see `resize_pane`). Matches
+/// the divider's clamp band granularity in `pane.rs`.
+const RESIZE_STEP: f32 = 0.05;
 
 /// One tab: a split-pane tree plus an optional user-assigned name.
 pub struct Tab {
@@ -1049,6 +1052,76 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Move focus to the pane adjacent to the focused one in `dir` (tmux
+    /// directional focus). A no-op when there's no neighbor that way.
+    fn focus_pane_dir(&mut self, dir: Dir, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.pane.neighbor_in_dir(dir, window, cx))
+        else {
+            return;
+        };
+        self.maximized = None;
+        self.focus_leaf(&target, window, cx);
+        cx.notify();
+    }
+
+    /// Grow/shrink the focused pane along `dir` by one step, adjusting its
+    /// nearest matching-axis split. Persists the new layout. A no-op when no
+    /// split matches (e.g. a single-pane tab, or no divider on that axis).
+    fn resize_pane(&mut self, dir: Dir, window: &mut Window, cx: &mut Context<Self>) {
+        let changed = self
+            .tabs
+            .get(self.active)
+            .is_some_and(|tab| tab.pane.resize_focused_pane(dir, RESIZE_STEP, window, cx));
+        if changed {
+            self.save_session(cx);
+            cx.notify();
+        }
+    }
+
+    /// Swap the focused pane with its next / previous sibling in leaf order
+    /// (tmux `prefix }` / `prefix {`). The terminals trade tree positions;
+    /// focus rides along with the moved terminal. Needs at least two panes.
+    fn swap_pane(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let (from, len) = match self.tabs.get(self.active) {
+            Some(tab) => (tab.pane.focused_index(window, cx), tab.pane.leaves().len()),
+            None => return,
+        };
+        if len < 2 {
+            return;
+        }
+        let from = from.unwrap_or(0);
+        let to = if forward {
+            (from + 1) % len
+        } else {
+            (from + len - 1) % len
+        };
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            if tab.pane.swap_leaf_indices(from, to) {
+                self.maximized = None;
+                self.save_session(cx);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Switch to the next / previous tab, wrapping around (tmux `prefix n/p`).
+    /// A no-op with fewer than two tabs.
+    fn cycle_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let n = self.tabs.len();
+        if n < 2 {
+            return;
+        }
+        let next = if forward {
+            (self.active + 1) % n
+        } else {
+            (self.active + n - 1) % n
+        };
+        self.activate(next, window, cx);
+    }
+
     pub(crate) fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.tabs.len() && index != self.active {
             self.maximized = None;
@@ -1207,28 +1280,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    // Cmd+1‑9 (⌘ on macOS, Ctrl elsewhere) tab switching. New Tab / Close Tab /
-    // Toggle Theme are bound via the keymap (see `init`) so they share one path
-    // with the menu bar.
-    fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let m = &ev.keystroke.modifiers;
-        // Use the portable "secondary" modifier so this matches the keymap's
-        // `secondary-*` bindings. Reject the other platform-ish key (⌃ on macOS,
-        // Win/Super elsewhere) and Alt so only the bare secondary chord triggers.
-        let extra_platform = if cfg!(target_os = "macos") {
-            m.control
-        } else {
-            m.platform
-        };
-        if !m.secondary() || m.alt || extra_platform {
-            return;
-        }
-        // Cmd/Ctrl+1..9 → tabs 0..8 (the 0 key has no tab and is ignored).
-        if let Some(n @ 1..=9) = ev.keystroke.key.chars().next().and_then(|c| c.to_digit(10)) {
-            self.activate(n as usize - 1, window, cx);
-        }
-    }
-
     // ----- Command palette -------------------------------------------------
 
     /// Build the full command catalog: the static commands plus one
@@ -1302,6 +1353,18 @@ impl Tty7App {
             ClosePane => self.close_pane(window, cx),
             NextPane => self.cycle_pane(true, window, cx),
             PrevPane => self.cycle_pane(false, window, cx),
+            FocusPaneLeft => self.focus_pane_dir(Dir::Left, window, cx),
+            FocusPaneRight => self.focus_pane_dir(Dir::Right, window, cx),
+            FocusPaneUp => self.focus_pane_dir(Dir::Up, window, cx),
+            FocusPaneDown => self.focus_pane_dir(Dir::Down, window, cx),
+            ResizePaneLeft => self.resize_pane(Dir::Left, window, cx),
+            ResizePaneRight => self.resize_pane(Dir::Right, window, cx),
+            ResizePaneUp => self.resize_pane(Dir::Up, window, cx),
+            ResizePaneDown => self.resize_pane(Dir::Down, window, cx),
+            SwapPaneNext => self.swap_pane(true, window, cx),
+            SwapPanePrev => self.swap_pane(false, window, cx),
+            NextTab => self.cycle_tab(true, window, cx),
+            PrevTab => self.cycle_tab(false, window, cx),
             ToggleMaximizePane => self.toggle_maximize(window, cx),
             ToggleFullscreen => window.toggle_fullscreen(),
             ResetFontSize => self.reset_font_size(cx),
@@ -1393,6 +1456,8 @@ impl Tty7App {
                 theme_editor: None,
                 theme_panel_open: false,
                 theme_search,
+                recording: None,
+                rebinding_note: None,
                 _subs: subs,
             }),
         });
@@ -1828,7 +1893,160 @@ impl Tty7App {
             .and_then(|t| t.settings.as_mut())
         {
             s.section = target;
+            // Leaving the Keybindings page abandons any in-progress capture, so
+            // the interceptor doesn't keep swallowing keys off-screen.
+            s.recording = None;
         }
+        cx.notify();
+    }
+
+    // ----- Keybindings editing (Settings → Keybindings) --------------------
+
+    /// Begin capturing a new shortcut for `action`: install a keystroke
+    /// interceptor that swallows the next keypress and records it, and stash it
+    /// on the settings state so it stays active only while recording. Any prior
+    /// capture is replaced.
+    pub(crate) fn start_recording_key(
+        &mut self,
+        action: String,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The interceptor fires app-wide *before* keymap dispatch, so a chord
+        // like ⌘T is captured here instead of opening a new tab. It runs until
+        // the returned `Subscription` is dropped (capture done / Esc / cancel).
+        let this = cx.weak_entity();
+        let intercept = cx.intercept_keystrokes(move |ev, _window, cx| {
+            let keystroke = ev.keystroke.clone();
+            let _ = this.update(cx, |this, cx| this.on_record_key(&keystroke, cx));
+            // Keep the key from also triggering an action / reaching a surface.
+            cx.stop_propagation();
+        });
+        if let Some(s) = self.active_settings_mut() {
+            s.rebinding_note = None;
+            s.recording = Some(Recording {
+                action,
+                _intercept: intercept,
+            });
+        }
+        cx.notify();
+    }
+
+    /// Handle a keystroke captured during recording: Esc cancels,
+    /// Backspace/Delete resets the action to its default, and anything else is
+    /// normalized to a config spec and stored as the action's override.
+    fn on_record_key(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) {
+        let Some(action) = self
+            .active_settings()
+            .and_then(|s| s.recording.as_ref())
+            .map(|r| r.action.clone())
+        else {
+            return;
+        };
+        match keystroke.key.as_str() {
+            "escape" => {
+                self.stop_recording(cx);
+                return;
+            }
+            "backspace" | "delete" => {
+                self.stop_recording(cx);
+                self.reset_keybinding(action, cx);
+                return;
+            }
+            _ => {}
+        }
+        // A lone modifier press (⌘ held, no key yet) has nothing to bind — keep
+        // waiting for a real key.
+        let Some(spec) = crate::ui::keymap::spec_from_keystroke(keystroke) else {
+            return;
+        };
+        self.stop_recording(cx);
+        self.assign_keybinding(action, spec, cx);
+    }
+
+    /// Drop the active capture (interceptor released) without changing anything.
+    fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        if let Some(s) = self.active_settings_mut() {
+            s.recording = None;
+        }
+        cx.notify();
+    }
+
+    /// Assign `spec` to `action`. If another action already owns that keystroke,
+    /// unbind it (last-writer-wins would otherwise be order-dependent) and note
+    /// the takeover so the user can undo it with a reset.
+    fn assign_keybinding(&mut self, action: String, spec: String, cx: &mut Context<Self>) {
+        // Find the current owner of this exact keystroke, if it isn't `action`.
+        let displaced = crate::ui::keymap::effective_bindings(cx)
+            .into_iter()
+            .find(|(a, k)| *k == spec && *a != action)
+            .map(|(a, _)| a);
+        let note = displaced.as_ref().map(|other| {
+            format!(
+                "{} took the shortcut from {}, which is now unset.",
+                humanize_action(&action),
+                humanize_action(other)
+            )
+        });
+        self.update_config(cx, |cfg| {
+            if let Some(other) = &displaced {
+                // Explicit empty override = "unbound" (distinct from a reset,
+                // which would restore that action's default and re-conflict).
+                cfg.keybindings.insert(other.clone(), String::new());
+            }
+            cfg.keybindings.insert(action, spec);
+        });
+        crate::ui::keymap::rebind(cx);
+        if let Some(s) = self.active_settings_mut() {
+            s.rebinding_note = note;
+        }
+        cx.notify();
+    }
+
+    /// Reset one action to its built-in default (drop its override) and
+    /// re-install the keymap.
+    pub(crate) fn reset_keybinding(&mut self, action: String, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| {
+            cfg.keybindings.remove(&action);
+        });
+        crate::ui::keymap::rebind(cx);
+        if let Some(s) = self.active_settings_mut() {
+            s.recording = None;
+            s.rebinding_note = None;
+        }
+        cx.notify();
+    }
+
+    /// Clear every keybinding override, restoring the full default table.
+    pub(crate) fn restore_default_keybindings(&mut self, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.keybindings.clear());
+        crate::ui::keymap::rebind(cx);
+        if let Some(s) = self.active_settings_mut() {
+            s.recording = None;
+            s.rebinding_note = None;
+        }
+        cx.notify();
+    }
+
+    /// Switch the keybinding preset ("default" / "tmux") and re-install the
+    /// keymap so the change is live immediately.
+    pub(crate) fn set_keybinding_preset(&mut self, preset: &str, cx: &mut Context<Self>) {
+        let preset = preset.to_string();
+        self.update_config(cx, |cfg| cfg.keybinding_preset = preset);
+        crate::ui::keymap::rebind(cx);
+        if let Some(s) = self.active_settings_mut() {
+            s.recording = None;
+            s.rebinding_note = None;
+        }
+        cx.notify();
+    }
+
+    /// Set the tmux preset's prefix chord (e.g. `ctrl-b` / `ctrl-a`) and
+    /// re-install the keymap.
+    pub(crate) fn set_keybinding_prefix(&mut self, prefix: &str, cx: &mut Context<Self>) {
+        let prefix = prefix.to_string();
+        self.update_config(cx, |cfg| cfg.prefix = prefix);
+        crate::ui::keymap::rebind(cx);
         cx.notify();
     }
 
@@ -1906,7 +2124,6 @@ impl Render for Tty7App {
             .flex_col()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .on_key_down(cx.listener(Self::on_key_down))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
             .on_action(
@@ -1930,6 +2147,51 @@ impl Render for Tty7App {
                     this.cycle_pane(false, window, cx)
                 }),
             )
+            .on_action(cx.listener(|this, _: &FocusPaneLeft, window, cx| {
+                this.focus_pane_dir(Dir::Left, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPaneRight, window, cx| {
+                this.focus_pane_dir(Dir::Right, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPaneUp, window, cx| {
+                this.focus_pane_dir(Dir::Up, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPaneDown, window, cx| {
+                this.focus_pane_dir(Dir::Down, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ResizePaneLeft, window, cx| {
+                this.resize_pane(Dir::Left, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ResizePaneRight, window, cx| {
+                this.resize_pane(Dir::Right, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ResizePaneUp, window, cx| {
+                this.resize_pane(Dir::Up, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ResizePaneDown, window, cx| {
+                this.resize_pane(Dir::Down, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SwapPaneNext, window, cx| {
+                this.swap_pane(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SwapPanePrev, window, cx| {
+                this.swap_pane(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NextTab, window, cx| {
+                this.cycle_tab(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
+                this.cycle_tab(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ActivateTab1, window, cx| this.activate(0, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateTab2, window, cx| this.activate(1, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateTab3, window, cx| this.activate(2, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateTab4, window, cx| this.activate(3, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateTab5, window, cx| this.activate(4, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateTab6, window, cx| this.activate(5, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateTab7, window, cx| this.activate(6, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateTab8, window, cx| this.activate(7, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateTab9, window, cx| this.activate(8, window, cx)))
             .on_action(cx.listener(|this, _: &IncreaseFontSize, _window, cx| {
                 this.change_font_size(FONT_SIZE_STEP, cx)
             }))
@@ -2118,4 +2380,81 @@ fn new_terminal(
     })
     .detach();
     view
+}
+
+#[cfg(test)]
+mod keybinding_gpui_tests {
+    use crate::core::config::Config;
+    use crate::core::session::Session;
+    use crate::ui::app::Tty7App;
+    use crate::ui::settings::SettingsSection;
+    use gpui::{TestAppContext, VisualTestContext, WindowHandle};
+
+    fn harness(cx: &mut TestAppContext) -> (WindowHandle<Tty7App>, VisualTestContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+        });
+        let window =
+            cx.add_window(|window, cx| Tty7App::with_session(Some(Session::default()), window, cx));
+        window
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.background_executor.run_until_parked();
+        let vcx = VisualTestContext::from_window(window.into(), cx);
+        (window, vcx)
+    }
+
+    // End-to-end: open Settings → Keybindings, capture a shortcut for New Tab,
+    // and confirm the recorded keystroke is normalized, persisted to config, and
+    // the capture ends. This drives the real interceptor path installed by
+    // `start_recording_key`, not just the pure helpers.
+    #[gpui::test]
+    fn recording_a_shortcut_writes_the_override_and_ends_capture(cx: &mut TestAppContext) {
+        let (window, mut vcx) = harness(cx);
+        window
+            .update(&mut vcx, |app, window, cx| {
+                app.toggle_settings(window, cx);
+                app.select_settings_section(SettingsSection::Keybindings, cx);
+                app.start_recording_key("NewTab".to_string(), window, cx);
+            })
+            .unwrap();
+        // The platform-primary modifier normalizes to `secondary` on write.
+        vcx.simulate_keystrokes("secondary-shift-n");
+        vcx.background_executor.run_until_parked();
+
+        let stored = vcx.update(|_, cx| cx.global::<Config>().keybindings.get("NewTab").cloned());
+        assert_eq!(stored.as_deref(), Some("secondary-shift-n"));
+        let recording = window
+            .update(&mut vcx, |app, _, _| {
+                app.active_settings().map(|s| s.recording.is_some())
+            })
+            .unwrap();
+        assert_eq!(recording, Some(false), "capture should end after a key");
+    }
+
+    // Esc during capture cancels without touching config.
+    #[gpui::test]
+    fn escape_cancels_capture_without_writing(cx: &mut TestAppContext) {
+        let (window, mut vcx) = harness(cx);
+        window
+            .update(&mut vcx, |app, window, cx| {
+                app.toggle_settings(window, cx);
+                app.select_settings_section(SettingsSection::Keybindings, cx);
+                app.start_recording_key("NewTab".to_string(), window, cx);
+            })
+            .unwrap();
+        vcx.simulate_keystrokes("escape");
+        vcx.background_executor.run_until_parked();
+
+        let stored = vcx.update(|_, cx| cx.global::<Config>().keybindings.contains_key("NewTab"));
+        assert!(!stored, "Esc must not persist a binding");
+        let recording = window
+            .update(&mut vcx, |app, _, _| {
+                app.active_settings().map(|s| s.recording.is_some())
+            })
+            .unwrap();
+        assert_eq!(recording, Some(false));
+    }
 }

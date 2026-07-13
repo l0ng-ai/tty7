@@ -40,6 +40,50 @@ pub enum Pane<L = Entity<TerminalView>> {
     Empty,
 }
 
+/// A direction for pane focus / resize, mapped from the arrow-key actions.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Dir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl Dir {
+    /// The split axis this direction operates along: Left/Right divide width
+    /// (a horizontal split), Up/Down divide height (a vertical split).
+    fn axis(self) -> Axis {
+        match self {
+            Dir::Left | Dir::Right => Axis::Horizontal,
+            Dir::Up | Dir::Down => Axis::Vertical,
+        }
+    }
+
+    /// Whether this direction *grows* the focused pane (Right/Down) as opposed
+    /// to shrinking it (Left/Up).
+    fn grows(self) -> bool {
+        matches!(self, Dir::Right | Dir::Down)
+    }
+}
+
+/// A leaf's normalized rectangle within the tab (the whole tab is the unit
+/// square `0,0 → 1,1`). Derived purely from split axes and ratios, so directional
+/// focus is a geometry query independent of the actual pixel layout.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// Overlap length of two 1-D intervals `[a0, a0+alen)` and `[b0, b0+blen)`
+/// (0 when they don't overlap). Used to score how well two panes line up on the
+/// axis perpendicular to a move.
+fn overlap_1d(a0: f32, alen: f32, b0: f32, blen: f32) -> f32 {
+    ((a0 + alen).min(b0 + blen) - a0.max(b0)).max(0.0)
+}
+
 /// Result of attempting to close the focused leaf.
 pub enum CloseOutcome {
     /// No focused leaf in this subtree.
@@ -166,6 +210,186 @@ impl<L: Clone> Pane<L> {
             Pane::Empty => CloseOutcome::NotFound,
         }
     }
+
+    /// Push a mutable reference to every leaf payload, depth-first (`a` before
+    /// `b`), matching `leaves()` order. Used by `swap_leaf_indices`.
+    fn collect_leaves_mut<'a>(&'a mut self, out: &mut Vec<&'a mut L>) {
+        match self {
+            Pane::Leaf(v) => out.push(v),
+            Pane::Split { a, b, .. } => {
+                a.collect_leaves_mut(out);
+                b.collect_leaves_mut(out);
+            }
+            Pane::Empty => {}
+        }
+    }
+
+    /// Swap the payloads of the leaves at ordered indices `i` and `j` (indices
+    /// into `leaves()`), leaving the tree *structure* untouched — only the two
+    /// terminals trade places. Returns whether the swap happened (false for
+    /// `i == j` or an out-of-range index).
+    pub fn swap_leaf_indices(&mut self, i: usize, j: usize) -> bool {
+        if i == j {
+            return false;
+        }
+        let mut refs: Vec<&mut L> = Vec::new();
+        self.collect_leaves_mut(&mut refs);
+        let (lo, hi) = (i.min(j), i.max(j));
+        if hi >= refs.len() {
+            return false;
+        }
+        // Split so the two `&mut L` come from disjoint slices — the borrow
+        // checker won't let us index the same slice mutably twice.
+        let (left, right) = refs.split_at_mut(hi);
+        std::mem::swap(&mut *left[lo], &mut *right[0]);
+        true
+    }
+
+    /// The normalized rectangle of every leaf within the unit-square tab, in
+    /// `leaves()` order. A horizontal split divides width at its ratio (`a` left,
+    /// `b` right); a vertical split divides height (`a` top, `b` bottom) — the
+    /// same geometry `render` lays out with flex.
+    pub fn leaf_rects(&self) -> Vec<(L, Rect)> {
+        let mut out = Vec::new();
+        self.collect_rects(
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+            },
+            &mut out,
+        );
+        out
+    }
+
+    fn collect_rects(&self, area: Rect, out: &mut Vec<(L, Rect)>) {
+        match self {
+            Pane::Leaf(v) => out.push((v.clone(), area)),
+            Pane::Split { axis, a, b, ratio, .. } => {
+                let r = ratio.get().clamp(MIN_RATIO, MAX_RATIO);
+                match axis {
+                    Axis::Horizontal => {
+                        let aw = area.w * r;
+                        a.collect_rects(Rect { w: aw, ..area }, out);
+                        b.collect_rects(
+                            Rect {
+                                x: area.x + aw,
+                                w: area.w - aw,
+                                ..area
+                            },
+                            out,
+                        );
+                    }
+                    Axis::Vertical => {
+                        let ah = area.h * r;
+                        a.collect_rects(Rect { h: ah, ..area }, out);
+                        b.collect_rects(
+                            Rect {
+                                y: area.y + ah,
+                                h: area.h - ah,
+                                ..area
+                            },
+                            out,
+                        );
+                    }
+                }
+            }
+            Pane::Empty => {}
+        }
+    }
+
+    /// The ordered index of the pane adjacent to leaf `from` in direction `dir`,
+    /// or `None` at the edge. tmux semantics: among panes whose edge sits on the
+    /// far side of `from` in that direction and which overlap it on the
+    /// perpendicular axis, pick the nearest edge, breaking ties by the largest
+    /// overlap.
+    pub fn neighbor_in_direction(&self, from: usize, dir: Dir) -> Option<usize> {
+        let rects = self.leaf_rects();
+        let f = rects.get(from)?.1;
+        const EPS: f32 = 1e-4;
+        let mut best: Option<(usize, f32, f32)> = None; // (index, edge distance, overlap)
+        for (i, (_, c)) in rects.iter().enumerate() {
+            if i == from {
+                continue;
+            }
+            let (dist, overlap) = match dir {
+                Dir::Left => (f.x - (c.x + c.w), overlap_1d(f.y, f.h, c.y, c.h)),
+                Dir::Right => (c.x - (f.x + f.w), overlap_1d(f.y, f.h, c.y, c.h)),
+                Dir::Up => (f.y - (c.y + c.h), overlap_1d(f.x, f.w, c.x, c.w)),
+                Dir::Down => (c.y - (f.y + f.h), overlap_1d(f.x, f.w, c.x, c.w)),
+            };
+            // Must lie in the requested direction (distance ≥ 0) and share some
+            // perpendicular extent, or it isn't a real neighbor.
+            if dist < -EPS || overlap <= EPS {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some((_, bd, bo)) => dist < bd - EPS || (dist <= bd + EPS && overlap > bo + EPS),
+            };
+            if better {
+                best = Some((i, dist, overlap));
+            }
+        }
+        best.map(|(i, _, _)| i)
+    }
+
+    /// Grow or shrink the focused pane along `dir` by `step`, by nudging the
+    /// ratio of its nearest enclosing split whose axis matches `dir`. `step`
+    /// grows the focused pane when `dir` is Right/Down and shrinks it when
+    /// Left/Up, regardless of which side of the split it sits on. Ratios stay
+    /// clamped to the legal band. Returns whether a matching split was found.
+    /// Takes `&self`: split ratios live in shared `Cell`s, so no `&mut` needed.
+    pub fn resize_focused(&self, is_focused: &impl Fn(&L) -> bool, dir: Dir, step: f32) -> bool {
+        let mut path: Vec<(&Pane<L>, bool)> = Vec::new();
+        if !self.focus_path(is_focused, &mut path) {
+            return false;
+        }
+        let target_axis = dir.axis();
+        // Nearest enclosing matching-axis split = deepest entry in the path.
+        for (node, went_a) in path.iter().rev() {
+            if let Pane::Split { axis, ratio, .. } = node {
+                if *axis == target_axis {
+                    // ratio is `a`'s share; +step enlarges `a`. Growing the
+                    // focused pane means +step when it's in `a` and we grow, or
+                    // in `b` and we shrink (== moves the divider toward `b`).
+                    let delta = if *went_a == dir.grows() { step } else { -step };
+                    let r = (ratio.get() + delta).clamp(MIN_RATIO, MAX_RATIO);
+                    ratio.set(r);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Record the path of splits from the root down to the focused leaf, each
+    /// tagged with whether the leaf lies in the split's `a` (true) or `b`
+    /// (false) child. Returns whether the focused leaf was found.
+    fn focus_path<'a>(
+        &'a self,
+        is_focused: &impl Fn(&L) -> bool,
+        path: &mut Vec<(&'a Pane<L>, bool)>,
+    ) -> bool {
+        match self {
+            Pane::Leaf(v) => is_focused(v),
+            Pane::Split { a, b, .. } => {
+                path.push((self, true));
+                if a.focus_path(is_focused, path) {
+                    return true;
+                }
+                path.pop();
+                path.push((self, false));
+                if b.focus_path(is_focused, path) {
+                    return true;
+                }
+                path.pop();
+                false
+            }
+            Pane::Empty => false,
+        }
+    }
 }
 
 /// Focus- and render-aware operations on the concrete terminal-view tree.
@@ -194,6 +418,42 @@ impl Pane<Entity<TerminalView>> {
     /// focused. This is the standard "act on the current pane" selection rule.
     pub fn focused_or_first(&self, window: &Window, cx: &App) -> Option<Entity<TerminalView>> {
         self.focused_leaf(window, cx).or_else(|| self.first_leaf())
+    }
+
+    /// The pane adjacent to the focused one in direction `dir`, matched by
+    /// normalized geometry (tmux directional focus). `None` when nothing is
+    /// focused or the focused pane is already at that edge.
+    pub fn neighbor_in_dir(
+        &self,
+        dir: Dir,
+        window: &Window,
+        cx: &App,
+    ) -> Option<Entity<TerminalView>> {
+        let focused = self.focused_leaf(window, cx)?;
+        let leaves = self.leaves();
+        let from = leaves
+            .iter()
+            .position(|l| l.entity_id() == focused.entity_id())?;
+        let target = self.neighbor_in_direction(from, dir)?;
+        leaves.get(target).cloned()
+    }
+
+    /// Resize the focused pane along `dir` by `step` (see the generic
+    /// `resize_focused`). Returns whether a matching split was adjusted.
+    pub fn resize_focused_pane(&self, dir: Dir, step: f32, window: &Window, cx: &App) -> bool {
+        let Some(focused) = self.focused_leaf(window, cx) else {
+            return false;
+        };
+        self.resize_focused(&|v| v.entity_id() == focused.entity_id(), dir, step)
+    }
+
+    /// The ordered index of the focused leaf within `leaves()`, if any. Lets the
+    /// shell pick the swap partner (`index ± 1`) without re-walking the tree.
+    pub fn focused_index(&self, window: &Window, cx: &App) -> Option<usize> {
+        let focused = self.focused_leaf(window, cx)?;
+        self.leaves()
+            .iter()
+            .position(|l| l.entity_id() == focused.entity_id())
     }
 
     /// Split a specific leaf (matched by entity identity) along `axis`, inserting
@@ -757,5 +1017,159 @@ mod tests {
             CloseOutcome::NotFound
         ));
         assert!(matches!(pane, Pane::Empty));
+    }
+
+    /// The rect for leaf `id` in a pane, by value.
+    fn rect_of(pane: &TestPane, id: u32) -> Rect {
+        pane.leaf_rects()
+            .into_iter()
+            .find(|(v, _)| *v == id)
+            .map(|(_, r)| r)
+            .unwrap()
+    }
+
+    /// Assert two rects match within floating-point tolerance (ratios multiply
+    /// out to values like 0.39999998, so exact equality is too strict).
+    fn assert_rect(got: Rect, want: Rect) {
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        assert!(
+            close(got.x, want.x) && close(got.y, want.y) && close(got.w, want.w) && close(got.h, want.h),
+            "rect {got:?} != {want:?}"
+        );
+    }
+
+    // Nested splits with non-even ratios must tile the unit square exactly:
+    // a horizontal split divides width, a nested vertical split divides its
+    // child's height, and the pieces stay gap-free and non-overlapping.
+    #[test]
+    fn leaf_rects_tile_the_unit_square_with_nested_ratios() {
+        // [0 |(0.25) [1 /(0.6) 2]]
+        let pane = TestPane::split_node(
+            Axis::Horizontal,
+            0.25,
+            Pane::Leaf(0),
+            TestPane::split_node(Axis::Vertical, 0.6, Pane::Leaf(1), Pane::Leaf(2)),
+        );
+        assert_rect(rect_of(&pane, 0), Rect { x: 0.0, y: 0.0, w: 0.25, h: 1.0 });
+        assert_rect(rect_of(&pane, 1), Rect { x: 0.25, y: 0.0, w: 0.75, h: 0.6 });
+        assert_rect(rect_of(&pane, 2), Rect { x: 0.25, y: 0.6, w: 0.75, h: 0.4 });
+        // Rects come back in leaves() order.
+        assert_eq!(
+            pane.leaf_rects().iter().map(|(v, _)| *v).collect::<Vec<_>>(),
+            pane.leaves()
+        );
+    }
+
+    // Directional focus is edge-adjacency: right of 0 is 1, and from 1 the pane
+    // to the left is 0. A pane with no neighbor in a direction returns None.
+    #[test]
+    fn neighbor_in_direction_finds_the_adjacent_pane() {
+        // [0 | 1]
+        let mut pane = TestPane::leaf(0);
+        split(&mut pane, 0, Axis::Horizontal, 1);
+        let idx = |id: u32| pane.leaves().iter().position(|v| *v == id).unwrap();
+        assert_eq!(pane.neighbor_in_direction(idx(0), Dir::Right), Some(idx(1)));
+        assert_eq!(pane.neighbor_in_direction(idx(1), Dir::Left), Some(idx(0)));
+        // Nothing above/below in a purely horizontal split.
+        assert_eq!(pane.neighbor_in_direction(idx(0), Dir::Up), None);
+        assert_eq!(pane.neighbor_in_direction(idx(1), Dir::Right), None);
+    }
+
+    // When several panes sit in the requested direction, the one with the
+    // largest perpendicular overlap wins (tmux's "line up with the cursor").
+    #[test]
+    fn neighbor_in_direction_prefers_the_largest_overlap() {
+        // Left column is 0 (full height); right column is stacked [1 /(0.7) 2].
+        // Moving right from 0 should land on 1 — it covers 70% of the shared
+        // edge versus 2's 30%.
+        let pane = TestPane::split_node(
+            Axis::Horizontal,
+            0.5,
+            Pane::Leaf(0),
+            TestPane::split_node(Axis::Vertical, 0.7, Pane::Leaf(1), Pane::Leaf(2)),
+        );
+        let idx = |id: u32| pane.leaves().iter().position(|v| *v == id).unwrap();
+        assert_eq!(pane.neighbor_in_direction(idx(0), Dir::Right), Some(idx(1)));
+    }
+
+    // Resize nudges the nearest matching-axis ancestor's ratio and always grows
+    // the focused pane on Right/Down, whichever side it's on.
+    #[test]
+    fn resize_grows_the_focused_pane_from_either_side() {
+        let build = || TestPane::split_node(Axis::Horizontal, 0.5, Pane::Leaf(0), Pane::Leaf(1));
+        let ratio = |p: &TestPane| match p {
+            Pane::Split { ratio, .. } => ratio.get(),
+            _ => unreachable!(),
+        };
+        // Focus in `a` (left): Right grows a → ratio up.
+        let p = build();
+        assert!(p.resize_focused(&is(0), Dir::Right, 0.05));
+        assert!((ratio(&p) - 0.55).abs() < 1e-6);
+        // Focus in `b` (right): Right grows b → ratio down.
+        let p = build();
+        assert!(p.resize_focused(&is(1), Dir::Right, 0.05));
+        assert!((ratio(&p) - 0.45).abs() < 1e-6);
+        // Left shrinks the focused pane (focus in a → ratio down).
+        let p = build();
+        assert!(p.resize_focused(&is(0), Dir::Left, 0.05));
+        assert!((ratio(&p) - 0.45).abs() < 1e-6);
+    }
+
+    // A resize whose axis matches no ancestor split is a no-op: a purely
+    // horizontal split has no vertical divider to move.
+    #[test]
+    fn resize_without_a_matching_axis_is_a_noop() {
+        let pane = TestPane::split_node(Axis::Horizontal, 0.5, Pane::Leaf(0), Pane::Leaf(1));
+        assert!(!pane.resize_focused(&is(0), Dir::Up, 0.05));
+        assert!(!pane.resize_focused(&is(0), Dir::Down, 0.05));
+        // An unfocused/absent target also reports no-op.
+        assert!(!pane.resize_focused(&is(99), Dir::Right, 0.05));
+    }
+
+    // Resize with a nested tree targets the *nearest* enclosing matching-axis
+    // split, not an outer one of the same axis.
+    #[test]
+    fn resize_targets_the_nearest_matching_axis_ancestor() {
+        // [0 |(0.5) [1 |(0.5) 2]] — two nested horizontal splits.
+        let pane = TestPane::split_node(
+            Axis::Horizontal,
+            0.5,
+            Pane::Leaf(0),
+            TestPane::split_node(Axis::Horizontal, 0.5, Pane::Leaf(1), Pane::Leaf(2)),
+        );
+        assert!(pane.resize_focused(&is(1), Dir::Right, 0.05));
+        // Inner split moved; outer untouched.
+        match &pane {
+            Pane::Split { ratio, b, .. } => {
+                assert!((ratio.get() - 0.5).abs() < 1e-6, "outer split must not move");
+                match &**b {
+                    Pane::Split { ratio, .. } => {
+                        assert!((ratio.get() - 0.55).abs() < 1e-6, "inner split should grow 1");
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    // Swapping two leaves trades their payloads but keeps the tree shape and
+    // leaf *positions* — only the values at those positions change.
+    #[test]
+    fn swap_leaf_indices_trades_payloads_in_place() {
+        // [[0 / 3] | [1 / 2]] → leaves = [0, 3, 1, 2]
+        let mut pane = TestPane::leaf(0);
+        split(&mut pane, 0, Axis::Horizontal, 1);
+        split(&mut pane, 1, Axis::Vertical, 2);
+        split(&mut pane, 0, Axis::Vertical, 3);
+        assert_eq!(pane.leaves(), vec![0, 3, 1, 2]);
+        // Swap positions 0 and 2 (values 0 and 1).
+        assert!(pane.swap_leaf_indices(0, 2));
+        assert_eq!(pane.leaves(), vec![1, 3, 0, 2]);
+        assert_well_formed(&pane);
+        // No-op cases.
+        assert!(!pane.swap_leaf_indices(1, 1));
+        assert!(!pane.swap_leaf_indices(0, 99));
+        assert_eq!(pane.leaves(), vec![1, 3, 0, 2]);
     }
 }
