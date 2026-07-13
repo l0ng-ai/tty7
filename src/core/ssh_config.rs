@@ -8,7 +8,9 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use crate::core::ssh_profile::SshProfile as ManagedProfile;
+use crate::core::ssh_profile::{
+    ForwardKind, ForwardRule, HostPort, SshProfile as ManagedProfile,
+};
 
 const MAX_INCLUDE_DEPTH: usize = 8;
 const MAX_CONFIG_FILES: usize = 256;
@@ -208,15 +210,21 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 // ssh_config → profile import (PRD §3.3)
 //
 // `discover_profiles` above stays untouched (live alias discovery for the
-// palette). The code below resolves the common fields of each concrete `Host`
-// alias into a [`ManagedProfile`], so users who want credentials / SFTP / forward
-// management on a config entry can import it. Scope, per PRD §3.3:
+// palette). The code below resolves the russh-mappable fields of each concrete
+// `Host` alias into a [`ManagedProfile`], so a config entry can connect natively
+// (there is no system-ssh fallback). Scope, per PRD §3.3:
 //
-// - fields resolved: HostName, User, Port, IdentityFile (multiple), ProxyJump,
-//   ProxyCommand, ForwardAgent;
+// - fields resolved onto the native spec: HostName, User, Port, IdentityFile
+//   (multiple), ProxyJump, ProxyCommand, ForwardAgent, ConnectTimeout,
+//   ServerAliveInterval, ServerAliveCountMax, Ciphers, MACs, KexAlgorithms,
+//   HostKeyAlgorithms, Compression, ForwardX11, StrictHostKeyChecking, and
+//   LocalForward / RemoteForward / DynamicForward;
 // - first-match-wins per OpenSSH semantics, including wildcard `Host *` fallbacks;
-// - `Match` blocks and `canonicalize` are intentionally NOT evaluated (a config
-//   that needs them should use per-profile system-ssh compat mode instead);
+//   IdentityFile and the forward directives accumulate across matching blocks;
+// - algorithm lists (`Ciphers`/`MACs`/…) are taken verbatim as an explicit list;
+//   OpenSSH's `+`/`-`/`^` modifier syntax is NOT applied (such values are dropped);
+// - `Match` blocks and `canonicalize` are intentionally NOT evaluated, and there
+//   is no fallback for a config that needs them (explicit tradeoff — see the doc);
 // - import is explicit and repeatable: re-importing an unchanged config is a
 //   no-op (existing profiles are matched by name and their ids/secrets/flags kept).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -267,18 +275,90 @@ pub fn import_profiles_from(root: PathBuf, home: &Path) -> Vec<ImportedProfile> 
             let resolved = resolve_alias(&alias, &blocks);
             let mut profile = ManagedProfile::new(alias.clone());
             profile.group = Some(IMPORTED_GROUP.to_string());
-            profile.host = resolved.hostname.unwrap_or(alias);
-            profile.user = resolved.user.unwrap_or_default();
-            profile.port = resolved.port.unwrap_or(22);
-            profile.identity_files = resolved.identity_files;
-            profile.proxy_command = resolved.proxy_command;
-            profile.agent_forward = resolved.forward_agent.unwrap_or(false);
+            let proxy_jump = apply_resolved(&mut profile, &alias, resolved);
             ImportedProfile {
                 profile,
-                proxy_jump: resolved.proxy_jump,
+                proxy_jump,
             }
         })
         .collect()
+}
+
+/// One alias resolved against `~/.ssh/config` into a transient in-memory profile,
+/// plus the raw `ProxyJump` target the alias set (if any). Unlike an
+/// [`ImportedProfile`], this is *not* persisted: it's built fresh per connect for
+/// the native (russh) path, so it carries a new id, no group, and no credential
+/// reference. The `proxy_jump` string is conveyed alongside because a transient
+/// profile has no store to resolve a jump *profile* against — the caller resolves
+/// the raw hop (another alias, or `user@host:port`) into the nested spec itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedAlias {
+    pub profile: ManagedProfile,
+    pub proxy_jump: Option<String>,
+}
+
+/// Resolve a single `~/.ssh/config` alias into a transient [`ManagedProfile`] for
+/// a native connect (PRD §3.3). Returns `None` when nothing in the config applies
+/// to `alias` (no matching `Host` block and no `HostName`), so the caller can fall
+/// back to treating the alias string as a bare hostname.
+pub fn resolve_alias_to_profile(alias: &str) -> Option<ResolvedAlias> {
+    let home = home_dir()?;
+    resolve_alias_to_profile_from(home.join(".ssh/config"), &home, alias)
+}
+
+/// [`resolve_alias_to_profile`] against an explicit root/home (for tests).
+pub fn resolve_alias_to_profile_from(
+    root: PathBuf,
+    home: &Path,
+    alias: &str,
+) -> Option<ResolvedAlias> {
+    let blocks = parse_config_blocks(root, home);
+    let matched = blocks.iter().any(|block| block_matches(block, alias));
+    let resolved = resolve_alias(alias, &blocks);
+    // Nothing in the config touches this alias — let the caller use it as a host.
+    if !matched && resolved.hostname.is_none() {
+        return None;
+    }
+    let mut profile = ManagedProfile::new(alias.to_string());
+    let proxy_jump = apply_resolved(&mut profile, alias, resolved);
+    Some(ResolvedAlias {
+        profile,
+        proxy_jump,
+    })
+}
+
+/// Map a [`ResolvedHost`] onto `profile`'s connection/session/algorithm/forward
+/// fields, returning the raw `ProxyJump` target (resolved to an id / nested spec
+/// by the caller). Shared by the import path and the transient-alias resolver.
+fn apply_resolved(profile: &mut ManagedProfile, alias: &str, r: ResolvedHost) -> Option<String> {
+    profile.host = r.hostname.unwrap_or_else(|| alias.to_string());
+    profile.user = r.user.unwrap_or_default();
+    profile.port = r.port.unwrap_or(22);
+    profile.identity_files = r.identity_files;
+    profile.proxy_command = r.proxy_command;
+    profile.agent_forward = r.forward_agent.unwrap_or(false);
+    profile.connect_timeout_s = r.connect_timeout;
+    profile.keepalive_interval_s = r.keepalive_interval;
+    profile.keepalive_count_max = r.keepalive_count_max;
+    profile.x11 = r.forward_x11.unwrap_or(false);
+    profile.verify_host_keys = r.verify_host_keys;
+    profile.algorithms.cipher = r.ciphers.unwrap_or_default();
+    profile.algorithms.mac = r.macs.unwrap_or_default();
+    profile.algorithms.kex = r.kex.unwrap_or_default();
+    profile.algorithms.hostkey = r.hostkey_algorithms.unwrap_or_default();
+    // ssh_config `Compression yes` → offer the OpenSSH compression set; anything
+    // else leaves the list empty (russh defaults, i.e. no compression).
+    profile.algorithms.compression = if r.compression == Some(true) {
+        vec![
+            "zlib@openssh.com".to_string(),
+            "zlib".to_string(),
+            "none".to_string(),
+        ]
+    } else {
+        Vec::new()
+    };
+    profile.forwards = r.forwards;
+    r.proxy_jump
 }
 
 /// Upsert `imported` into `existing`, matched by profile **name** (the alias).
@@ -361,6 +441,22 @@ struct ResolvedHost {
     proxy_jump: Option<String>,
     proxy_command: Option<String>,
     forward_agent: Option<bool>,
+    connect_timeout: Option<u32>,
+    keepalive_interval: Option<u32>,
+    keepalive_count_max: Option<u32>,
+    ciphers: Option<Vec<String>>,
+    macs: Option<Vec<String>>,
+    kex: Option<Vec<String>>,
+    hostkey_algorithms: Option<Vec<String>>,
+    compression: Option<bool>,
+    forward_x11: Option<bool>,
+    /// `None` = follow the global setting; `Some(false)` = `StrictHostKeyChecking
+    /// no` (disable verification). Only "no" maps; `accept-new`/`yes`/default leave
+    /// this `None`. `strict_seen` gives first-match-wins over the tri-state.
+    verify_host_keys: Option<bool>,
+    strict_seen: bool,
+    /// LocalForward / RemoteForward / DynamicForward, in config order (accumulated).
+    forwards: Vec<ForwardRule>,
 }
 
 /// Walk the config (expanding `Include` inline so file order — and thus
@@ -502,8 +598,59 @@ fn resolve_alias(alias: &str, blocks: &[HostBlock]) -> ResolvedHost {
                     }
                 }
                 "forwardagent" if r.forward_agent.is_none() => {
-                    r.forward_agent = first_word(val)
-                        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "yes" | "true"));
+                    r.forward_agent = first_word(val).map(|v| yes_no(&v));
+                }
+                "connecttimeout" if r.connect_timeout.is_none() => {
+                    r.connect_timeout = first_word(val).and_then(|v| v.parse::<u32>().ok());
+                }
+                "serveraliveinterval" if r.keepalive_interval.is_none() => {
+                    r.keepalive_interval = first_word(val).and_then(|v| v.parse::<u32>().ok());
+                }
+                "serveralivecountmax" if r.keepalive_count_max.is_none() => {
+                    r.keepalive_count_max = first_word(val).and_then(|v| v.parse::<u32>().ok());
+                }
+                "ciphers" if r.ciphers.is_none() => {
+                    r.ciphers = parse_algorithm_list(val);
+                }
+                "macs" if r.macs.is_none() => {
+                    r.macs = parse_algorithm_list(val);
+                }
+                "kexalgorithms" if r.kex.is_none() => {
+                    r.kex = parse_algorithm_list(val);
+                }
+                "hostkeyalgorithms" if r.hostkey_algorithms.is_none() => {
+                    r.hostkey_algorithms = parse_algorithm_list(val);
+                }
+                "compression" if r.compression.is_none() => {
+                    r.compression = first_word(val).map(|v| yes_no(&v));
+                }
+                "forwardx11" if r.forward_x11.is_none() => {
+                    r.forward_x11 = first_word(val).map(|v| yes_no(&v));
+                }
+                "stricthostkeychecking" if !r.strict_seen => {
+                    r.strict_seen = true;
+                    // Only an explicit "no" (disable) maps to a native override;
+                    // accept-new / yes / ask / default leave it to the global check.
+                    if let Some(v) = first_word(val) {
+                        if matches!(v.to_ascii_lowercase().as_str(), "no" | "off" | "false") {
+                            r.verify_host_keys = Some(false);
+                        }
+                    }
+                }
+                "localforward" => {
+                    if let Some(rule) = parse_forward_rule(ForwardKind::Local, val) {
+                        r.forwards.push(rule);
+                    }
+                }
+                "remoteforward" => {
+                    if let Some(rule) = parse_forward_rule(ForwardKind::Remote, val) {
+                        r.forwards.push(rule);
+                    }
+                }
+                "dynamicforward" => {
+                    if let Some(rule) = parse_forward_rule(ForwardKind::Dynamic, val) {
+                        r.forwards.push(rule);
+                    }
                 }
                 _ => {}
             }
@@ -531,6 +678,82 @@ fn block_matches(block: &HostBlock, alias: &str) -> bool {
 /// The first whitespace-delimited word of a value, respecting quotes.
 fn first_word(value: &str) -> Option<String> {
     split_words(value).into_iter().next()
+}
+
+/// Parse an OpenSSH yes/no-style boolean (case-insensitive; `true`/`false` too).
+fn yes_no(value: &str) -> bool {
+    matches!(value.to_ascii_lowercase().as_str(), "yes" | "true")
+}
+
+/// Parse a comma-separated algorithm list (`Ciphers`/`MACs`/`KexAlgorithms`/…)
+/// into an explicit list. OpenSSH's `+`/`-`/`^` modifier syntax (append / remove /
+/// move-to-front relative to the built-in defaults) is NOT applied — such values
+/// are dropped (`None`) rather than mis-interpreted as an absolute list.
+fn parse_algorithm_list(value: &str) -> Option<Vec<String>> {
+    let token = first_word(value)?;
+    if token.starts_with(['+', '-', '^']) {
+        return None;
+    }
+    let list: Vec<String> = token
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    (!list.is_empty()).then_some(list)
+}
+
+/// Parse a `LocalForward`/`RemoteForward` (`[bind:]port host:hostport`) or a
+/// `DynamicForward` (`[bind:]port`) value into a [`ForwardRule`]. Returns `None`
+/// for a malformed line (so a single bad forward is skipped, never fatal).
+fn parse_forward_rule(kind: ForwardKind, value: &str) -> Option<ForwardRule> {
+    let words = split_words(value);
+    let (bind_host, bind_port) = parse_forward_endpoint(words.first()?)?;
+    let bind = HostPort::new(forward_bind_host(bind_host), bind_port);
+    let target = match kind {
+        ForwardKind::Dynamic => HostPort::default(),
+        ForwardKind::Local | ForwardKind::Remote => {
+            let (target_host, target_port) = parse_forward_endpoint(words.get(1)?)?;
+            if target_host.is_empty() {
+                return None; // a Local/Remote forward target needs a host
+            }
+            HostPort::new(target_host, target_port)
+        }
+    };
+    Some(ForwardRule {
+        kind,
+        bind,
+        target,
+        description: String::new(),
+    })
+}
+
+/// Parse a `[host:]port` / `[ipv6]:port` forward endpoint. An omitted host yields
+/// an empty string (the listen side may omit it).
+fn parse_forward_endpoint(token: &str) -> Option<(String, u16)> {
+    if let Some(rest) = token.strip_prefix('[') {
+        let close = rest.find(']')?;
+        let host = rest[..close].to_string();
+        let port = rest[close + 1..].strip_prefix(':')?.parse::<u16>().ok()?;
+        return Some((host, port));
+    }
+    match token.rfind(':') {
+        Some(ix) => {
+            let host = token[..ix].to_string();
+            let port = token[ix + 1..].parse::<u16>().ok()?;
+            Some((host, port))
+        }
+        None => Some((String::new(), token.parse::<u16>().ok()?)),
+    }
+}
+
+/// A listen-side bind host with the OpenSSH default (loopback) substituted for an
+/// omitted address.
+fn forward_bind_host(host: String) -> String {
+    if host.is_empty() {
+        "127.0.0.1".to_string()
+    } else {
+        host
+    }
 }
 
 #[cfg(test)]
@@ -731,6 +954,126 @@ mod tests {
         let prod = existing.iter().find(|p| p.name == "prod").unwrap();
         // The `me@bastion:2222` jump target resolves to the `bastion` profile's id.
         assert_eq!(prod.jump_host, Some(bastion_id));
+    }
+
+    #[test]
+    fn resolve_alias_maps_native_fields() {
+        let root = temp_root("resolve-native");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(
+            ssh.join("config"),
+            concat!(
+                "Host prod\n",
+                "  HostName 10.0.0.5\n",
+                "  User deploy\n",
+                "  Port 2222\n",
+                "  IdentityFile ~/.ssh/id_prod\n",
+                "  ProxyJump me@bastion:2200\n",
+                "  ConnectTimeout 15\n",
+                "  ServerAliveInterval 30\n",
+                "  ServerAliveCountMax 4\n",
+                "  Ciphers aes256-ctr,aes128-ctr\n",
+                "  MACs hmac-sha2-256\n",
+                "  KexAlgorithms curve25519-sha256\n",
+                "  HostKeyAlgorithms ssh-ed25519\n",
+                "  Compression yes\n",
+                "  ForwardX11 yes\n",
+                "  StrictHostKeyChecking no\n",
+                "  LocalForward 8080 localhost:80\n",
+                "  RemoteForward 9000 127.0.0.1:3000\n",
+                "  DynamicForward 1080\n",
+            ),
+        )
+        .unwrap();
+
+        let resolved = resolve_alias_to_profile_from(ssh.join("config"), &root, "prod").unwrap();
+        let p = &resolved.profile;
+        assert_eq!(p.host, "10.0.0.5");
+        assert_eq!(p.user, "deploy");
+        assert_eq!(p.port, 2222);
+        assert_eq!(p.identity_files, vec!["~/.ssh/id_prod".to_string()]);
+        assert_eq!(resolved.proxy_jump.as_deref(), Some("me@bastion:2200"));
+        assert_eq!(p.connect_timeout_s, Some(15));
+        assert_eq!(p.keepalive_interval_s, Some(30));
+        assert_eq!(p.keepalive_count_max, Some(4));
+        assert_eq!(p.algorithms.cipher, vec!["aes256-ctr", "aes128-ctr"]);
+        assert_eq!(p.algorithms.mac, vec!["hmac-sha2-256"]);
+        assert_eq!(p.algorithms.kex, vec!["curve25519-sha256"]);
+        assert_eq!(p.algorithms.hostkey, vec!["ssh-ed25519"]);
+        assert!(!p.algorithms.compression.is_empty()); // Compression yes → offered
+        assert!(p.x11);
+        assert_eq!(p.verify_host_keys, Some(false)); // StrictHostKeyChecking no
+        // Transient profile: fresh id, no group, no credential.
+        assert!(p.group.is_none());
+        assert!(p.credential_ref.is_none());
+
+        // Forwards: Local, Remote, Dynamic — in config order, loopback bind default.
+        let forwards = &p.forwards;
+        assert_eq!(forwards.len(), 3);
+        assert_eq!(forwards[0].kind, ForwardKind::Local);
+        assert_eq!(forwards[0].bind, HostPort::new("127.0.0.1", 8080));
+        assert_eq!(forwards[0].target, HostPort::new("localhost", 80));
+        assert_eq!(forwards[1].kind, ForwardKind::Remote);
+        assert_eq!(forwards[1].bind, HostPort::new("127.0.0.1", 9000));
+        assert_eq!(forwards[1].target, HostPort::new("127.0.0.1", 3000));
+        assert_eq!(forwards[2].kind, ForwardKind::Dynamic);
+        assert_eq!(forwards[2].bind, HostPort::new("127.0.0.1", 1080));
+    }
+
+    #[test]
+    fn resolve_alias_drops_algorithm_modifier_syntax() {
+        let root = temp_root("resolve-modifiers");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        // A `+`-prefixed Ciphers list modifies the defaults; we don't apply it.
+        std::fs::write(
+            ssh.join("config"),
+            "Host m\n  HostName h\n  Ciphers +aes256-gcm@openssh.com\n",
+        )
+        .unwrap();
+        let resolved = resolve_alias_to_profile_from(ssh.join("config"), &root, "m").unwrap();
+        assert!(resolved.profile.algorithms.cipher.is_empty());
+    }
+
+    #[test]
+    fn resolve_alias_wildcard_only_and_unknown() {
+        let root = temp_root("resolve-wildcard");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(ssh.join("config"), "Host *\n  User fallback\n").unwrap();
+
+        // A bare host matches `Host *`, so the fallback User applies and the host
+        // is the alias itself.
+        let resolved =
+            resolve_alias_to_profile_from(ssh.join("config"), &root, "example.com").unwrap();
+        assert_eq!(resolved.profile.host, "example.com");
+        assert_eq!(resolved.profile.user, "fallback");
+
+        // With no config at all, resolution yields nothing → caller uses the alias.
+        assert!(
+            resolve_alias_to_profile_from(root.join("missing"), &root, "whatever").is_none()
+        );
+    }
+
+    #[test]
+    fn resolve_alias_proxy_jump_can_resolve_recursively() {
+        let root = temp_root("resolve-jump");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(
+            ssh.join("config"),
+            "Host prod\n  HostName 10.0.0.5\n  ProxyJump bastion\nHost bastion\n  HostName jump.example.com\n  User jumper\n",
+        )
+        .unwrap();
+
+        let prod = resolve_alias_to_profile_from(ssh.join("config"), &root, "prod").unwrap();
+        assert_eq!(prod.proxy_jump.as_deref(), Some("bastion"));
+        // The raw jump alias resolves against the same config into its own profile.
+        let bastion =
+            resolve_alias_to_profile_from(ssh.join("config"), &root, "bastion").unwrap();
+        assert_eq!(bastion.profile.host, "jump.example.com");
+        assert_eq!(bastion.profile.user, "jumper");
     }
 
     fn temp_root(name: &str) -> PathBuf {
