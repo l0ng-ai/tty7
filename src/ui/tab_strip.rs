@@ -149,15 +149,23 @@ impl Render for DragTab {
 impl Tty7App {
     /// The display label for a tab: the user-set name if present, otherwise the
     /// focused terminal's title (shortened), falling back to
-    /// "Session N" when there's no title yet.
-    pub(crate) fn tab_label(&self, tab: &Tab, index: usize, cx: &App) -> String {
+    /// "Session N" when there's no title yet. Pass `window` so the label tracks
+    /// the focused pane in a split; `None` (no window available) uses the first
+    /// leaf.
+    pub(crate) fn tab_label(
+        &self,
+        tab: &Tab,
+        index: usize,
+        window: Option<&Window>,
+        cx: &App,
+    ) -> String {
         if let Some(name) = tab.name.as_ref() {
             let trimmed = name.trim();
             if !trimmed.is_empty() {
                 return trimmed.to_string();
             }
         }
-        let raw = tab.leaf_title(cx);
+        let raw = tab.leaf_title(window, cx);
         let label = short_title(&raw);
         if label.trim().is_empty() {
             format!("Session {}", index + 1)
@@ -298,7 +306,7 @@ impl Tty7App {
                 break;
             }
             let is_active = i == active;
-            let label = self.tab_label(tab, i, cx);
+            let label = self.tab_label(tab, i, Some(window), cx);
 
             // Inline rename input for this tab, if it's the one being renamed.
             let rename_input = self

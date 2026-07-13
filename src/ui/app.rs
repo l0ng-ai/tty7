@@ -97,14 +97,17 @@ impl Tab {
         Self { pane, name: None }
     }
 
-    /// The title of the tab's representative terminal (its first leaf), used to
-    /// derive both the tab label and its context icon. Empty when there's no
-    /// terminal or no title yet.
-    pub(crate) fn leaf_title(&self, cx: &App) -> String {
-        self.pane
-            .first_leaf()
-            .map(|l| l.read(cx).title.clone())
-            .unwrap_or_default()
+    /// The title used to derive the tab label. With a `window`, this is the
+    /// *focused* pane's title (falling back to the first leaf when nothing in
+    /// the tab holds focus) so the label tracks the pane you're working in;
+    /// without one (e.g. the command palette, which has no window), it's the
+    /// first leaf. Empty when there's no terminal or no title yet.
+    pub(crate) fn leaf_title(&self, window: Option<&Window>, cx: &App) -> String {
+        let leaf = match window {
+            Some(window) => self.pane.focused_or_first(window, cx),
+            None => self.pane.first_leaf(),
+        };
+        leaf.map(|l| l.read(cx).title.clone()).unwrap_or_default()
     }
 }
 
@@ -1509,7 +1512,7 @@ impl Tty7App {
         if self.tabs.get(index).is_none() {
             return;
         }
-        let current = self.tab_label(&self.tabs[index], index, cx);
+        let current = self.tab_label(&self.tabs[index], index, Some(&*window), cx);
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
         input.update(cx, |state, cx| state.focus(window, cx));
         let subs = vec![cx.subscribe_in(
@@ -1564,7 +1567,7 @@ impl Tty7App {
             if i == self.active {
                 continue;
             }
-            let label = self.tab_label(tab, i, cx);
+            let label = self.tab_label(tab, i, None, cx);
             commands.push(Command {
                 title: format!("Switch to Tab: {label}"),
                 kind: CommandKind::ActivateTab(i),

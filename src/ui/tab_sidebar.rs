@@ -75,7 +75,7 @@ impl Tty7App {
 
         for (i, tab) in self.tabs.iter().enumerate() {
             let is_active = i == active;
-            let label = self.tab_label(tab, i, cx);
+            let label = self.tab_label(tab, i, Some(window), cx);
             // Filter by the search box; matching is on the visible label. The row
             // keeps its real index `i`, so activate/close/move still hit the right
             // tab even when the list is narrowed.
