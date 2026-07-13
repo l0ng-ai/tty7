@@ -238,8 +238,8 @@ impl Tty7App {
         let theme = cx.theme();
         let id = forward.id.clone();
         let remote = format!("{}:{}", forward.id.remote_host, forward.id.remote_port);
-        let local = format!("127.0.0.1:{}", forward.local_port);
-        let local_for_copy = local.clone();
+        let local = format!("http://127.0.0.1:{}", forward.local_port);
+        let local_url = local.clone();
         let details = format!(
             "idle {} · age {}",
             human_duration(forward.idle_secs),
@@ -253,8 +253,8 @@ impl Tty7App {
             "ssh-forward-edit-{}-{}-{}-{}",
             forward.id.pane_id, forward.id.target, forward.id.remote_host, forward.id.remote_port
         ));
-        let copy_id = SharedString::from(format!(
-            "ssh-forward-copy-{}-{}-{}-{}-{}",
+        let open_id = SharedString::from(format!(
+            "ssh-forward-open-{}-{}-{}-{}-{}",
             forward.id.pane_id,
             forward.id.target,
             forward.id.remote_host,
@@ -288,17 +288,14 @@ impl Tty7App {
                             )
                             .child(
                                 div()
-                                    .id(copy_id)
+                                    .id(open_id)
                                     .text_sm()
                                     .text_color(theme.accent)
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(theme.accent.opacity(0.08)))
+                                    .hover(|style| style.bg(theme.accent.opacity(0.08)).underline())
                                     .child(local)
-                                    .on_click(cx.listener(move |this, _, _window, cx| {
-                                        this.copy_loopback_forward_address(
-                                            local_for_copy.clone(),
-                                            cx,
-                                        )
+                                    .on_click(cx.listener(move |_this, _, _window, cx| {
+                                        cx.open_url(&local_url);
                                     })),
                             ),
                     )

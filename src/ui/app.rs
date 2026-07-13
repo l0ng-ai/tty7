@@ -1,10 +1,7 @@
 //! The window shell: a transparent unified title bar carrying the tab strip,
 //! with the active terminal filling the rest. Owns all tabs (each its own PTY).
 
-use gpui::{
-    App, Axis, ClipboardItem, Context, Entity, PromptLevel, Subscription, Window, div, prelude::*,
-    px,
-};
+use gpui::{App, Axis, Context, Entity, PromptLevel, Subscription, Window, div, prelude::*, px};
 use gpui_component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
@@ -824,14 +821,6 @@ impl Tty7App {
     pub(crate) fn close_loopback_forward(&mut self, id: LoopbackForwardId, cx: &mut Context<Self>) {
         self.loopback_panel.forwards = crate::terminal::RemoteTerminal::close_loopback_forward(id);
         cx.notify();
-    }
-
-    pub(crate) fn copy_loopback_forward_address(
-        &mut self,
-        address: String,
-        cx: &mut Context<Self>,
-    ) {
-        cx.write_to_clipboard(ClipboardItem::new_string(address));
     }
 
     pub(crate) fn toggle_loopback_forward_panel(&mut self, pane_id: u64, cx: &mut Context<Self>) {
