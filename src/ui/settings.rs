@@ -15,6 +15,7 @@ use gpui_component::Selectable as _;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_component::color_picker::{ColorPicker, ColorPickerState};
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::select::{SearchableVec, Select, SelectState};
 use gpui_component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
 use gpui_component::slider::{Slider, SliderState};
@@ -1297,6 +1298,7 @@ impl Tty7App {
         }
         for p in &profiles {
             let id = p.id;
+            let row_idx = id.as_u128() as usize;
             let subtitle = to_connect_string(p);
             let title = if p.name.is_empty() {
                 subtitle.clone()
@@ -1304,9 +1306,18 @@ impl Tty7App {
                 p.name.clone()
             };
             let selected = editing_id == Some(id);
+            // A group so this row's ⋯ affordance can reveal on hover
+            // (progressive disclosure) without touching its neighbours.
+            let group_name = SharedString::from(format!("ssh-profile-row-{row_idx}"));
+            let hover_group = group_name.clone();
+            // Weak handles so the hover ⋯ dropdown and the right-click context
+            // menu can drive the same `Tty7App` handlers the inline buttons used.
+            let menu_app = cx.entity().downgrade();
+            let ctx_app = cx.entity().downgrade();
             list = list.child(
                 h_flex()
-                    .id(("ssh-profile-row", id.as_u128() as usize))
+                    .id(("ssh-profile-row", row_idx))
+                    .group(group_name.clone())
                     .items_center()
                     .justify_between()
                     .w_full()
@@ -1316,6 +1327,29 @@ impl Tty7App {
                     .border_b_1()
                     .border_color(border)
                     .when(selected, |r| r.bg(cx.theme().secondary.opacity(0.4)))
+                    // A subtle hover fill so the whole row reads as the (clickable)
+                    // edit affordance; the selected row keeps its own highlight.
+                    .when(!selected, |r| {
+                        r.hover(|s| s.bg(cx.theme().secondary.opacity(0.2)))
+                    })
+                    // Left-click anywhere on the row opens the inline edit form —
+                    // the row *is* the edit target. Clicks on the trailing ⋯ are
+                    // swallowed by its wrapper, so they don't also start an edit.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            if let Some(profile) = cx
+                                .global::<Config>()
+                                .ssh_profiles
+                                .iter()
+                                .find(|p| p.id == id)
+                                .cloned()
+                            {
+                                this.ssh_form_load(&profile, window, cx);
+                            }
+                        }),
+                    )
                     .child(
                         v_flex()
                             .gap_0p5()
@@ -1323,63 +1357,37 @@ impl Tty7App {
                             .child(div().text_xs().text_color(muted).child(subtitle)),
                     )
                     .child(
-                        h_flex()
-                            .gap_1()
+                        // Trailing ⋯ overflow menu, revealed on row hover. Its
+                        // wrapper swallows the mouse-down so opening the menu never
+                        // also fires the row's edit click.
+                        div()
+                            .flex_shrink_0()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .when(!selected, move |s| {
+                                s.opacity(0.).group_hover(hover_group, |s| s.opacity(1.))
+                            })
                             .child(
-                                Button::new(("ssh-prof-connect", id.as_u128() as usize))
-                                    .label("Connect")
-                                    .primary()
-                                    .small()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.close_settings(window, cx);
-                                        this.connect_ssh_profile(id, window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new(("ssh-prof-edit", id.as_u128() as usize))
-                                    .label("Edit")
-                                    .outline()
-                                    .small()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        if let Some(profile) = cx
-                                            .global::<Config>()
-                                            .ssh_profiles
-                                            .iter()
-                                            .find(|p| p.id == id)
-                                            .cloned()
-                                        {
-                                            this.ssh_form_load(&profile, window, cx);
-                                        }
-                                    })),
-                            )
-                            .child(
-                                Button::new(("ssh-prof-copy", id.as_u128() as usize))
-                                    .label("Copy")
+                                Button::new(("ssh-prof-menu", row_idx))
+                                    .icon(IconName::Ellipsis)
                                     .ghost()
                                     .small()
-                                    .on_click(cx.listener(move |this, _, _w, cx| {
-                                        this.copy_profile_connect_string(id, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new(("ssh-prof-dup", id.as_u128() as usize))
-                                    .label("Duplicate")
-                                    .ghost()
-                                    .small()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.duplicate_profile(id, window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new(("ssh-prof-del", id.as_u128() as usize))
-                                    .label("Delete")
-                                    .ghost()
-                                    .small()
-                                    .on_click(cx.listener(move |this, _, _w, cx| {
-                                        this.delete_profile(id, cx)
-                                    })),
+                                    .dropdown_menu_with_anchor(
+                                        gpui::Anchor::TopRight,
+                                        move |menu, _window, cx| {
+                                            Self::ssh_profile_row_menu(
+                                                menu,
+                                                id,
+                                                cx.theme().danger,
+                                                &menu_app,
+                                            )
+                                        },
+                                    ),
                             ),
-                    ),
+                    )
+                    // Right-click anywhere on the row opens the same menu.
+                    .context_menu(move |menu, _window, cx| {
+                        Self::ssh_profile_row_menu(menu, id, cx.theme().danger, &ctx_app)
+                    }),
             );
         }
 
@@ -1389,6 +1397,54 @@ impl Tty7App {
             block = block.child(self.render_ssh_profile_form(cx));
         }
         block.into_any_element()
+    }
+
+    /// Build the per-profile overflow menu shared by the hover ⋯ dropdown and the
+    /// row's right-click context menu: Connect, Copy, Duplicate, then the
+    /// destructive Delete — rendered last, set apart by a separator and drawn in
+    /// danger red. Each item drives the same `Tty7App` handler the old inline
+    /// buttons did, via the weak `app` handle.
+    fn ssh_profile_row_menu(
+        menu: PopupMenu,
+        id: Uuid,
+        danger: gpui::Hsla,
+        app: &gpui::WeakEntity<Self>,
+    ) -> PopupMenu {
+        let menu = menu
+            .min_w(px(180.))
+            .item(PopupMenuItem::new("Connect").on_click({
+                let app = app.clone();
+                move |_, window, cx| {
+                    let _ = app.update(cx, |this, cx| {
+                        this.close_settings(window, cx);
+                        this.connect_ssh_profile(id, window, cx);
+                    });
+                }
+            }))
+            .item(PopupMenuItem::new("Copy").on_click({
+                let app = app.clone();
+                move |_, _window, cx| {
+                    let _ = app.update(cx, |this, cx| this.copy_profile_connect_string(id, cx));
+                }
+            }))
+            .item(PopupMenuItem::new("Duplicate").on_click({
+                let app = app.clone();
+                move |_, window, cx| {
+                    let _ = app.update(cx, |this, cx| this.duplicate_profile(id, window, cx));
+                }
+            }))
+            .separator();
+
+        // Destructive, last, in danger red and set apart by the separator above.
+        menu.item(
+            PopupMenuItem::element(move |_window, _cx| div().text_color(danger).child("Delete"))
+                .on_click({
+                    let app = app.clone();
+                    move |_, _window, cx| {
+                        let _ = app.update(cx, |this, cx| this.delete_profile(id, cx));
+                    }
+                }),
+        )
     }
 
     /// Known-hosts block (unchanged behaviour, moved below Profiles): the trusted /
