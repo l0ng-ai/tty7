@@ -209,11 +209,6 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             title: "Verify host keys",
             keywords: "ssh security known_hosts fingerprint mitm host key verification",
         },
-        SearchEntry {
-            section: Ssh,
-            title: "Known hosts",
-            keywords: "ssh known_hosts trusted fingerprint delete revoked certificate authority",
-        },
         // Window & Tabs
         SearchEntry {
             section: WindowTabs,
@@ -335,7 +330,23 @@ pub(crate) struct SettingsState {
     /// input set) each time, so the section never carries N profiles' worth of
     /// inputs up front. See `SshProfileForm`.
     pub(crate) ssh_form: Option<SshProfileForm>,
+    /// Which detail the SSH section's right (detail) pane is showing. The section
+    /// is a two-column master-detail: the left column lists profiles, and this
+    /// tracks the selected one. `Profile(id)` pairs with `ssh_form` (the loaded
+    /// edit form); `None` shows the empty state (the "pick a profile" hint plus
+    /// the two global security toggles).
+    pub(crate) ssh_detail: SshDetail,
     pub(crate) _subs: Vec<Subscription>,
+}
+
+/// The SSH section's right-pane selection (see [`SettingsState::ssh_detail`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SshDetail {
+    /// Nothing selected — the right pane shows the empty state (the "pick a
+    /// profile" hint plus the two global security toggles).
+    None,
+    /// A profile's edit form (paired with `ssh_form`, keyed by the profile id).
+    Profile(Uuid),
 }
 
 /// The live edit-form state for one SSH profile, folded into Settings → SSH.
@@ -707,20 +718,35 @@ impl Tty7App {
         // One continuous, flat sheet (no cards) — one document: bold section
         // headers and full-width rules carry the structure, so settings read as a
         // unified document rather than a widget floating in empty space.
-        let content_pane = v_flex()
-            .id("settings-content")
-            .flex_1()
-            .h_full()
-            .bg(background)
-            .overflow_y_scroll()
-            .child(
-                div()
-                    .px_10()
-                    .py_8()
-                    // Fill the pane edge-to-edge; cap only on very wide windows so
-                    // rows never stretch to an unreadable width.
-                    .child(div().w_full().max_w(px(860.)).child(content)),
-            );
+        //
+        // The SSH section is the exception: it is its own two-column master-detail
+        // that fills the pane height, with each column owning its scroll — so it
+        // bypasses the shared padded, single-scroll wrapper (which would otherwise
+        // give the whole section one outer scrollbar and no definite height for the
+        // columns to fill) and is dropped in flush instead.
+        let content_pane = if section == SettingsSection::Ssh {
+            v_flex()
+                .id("settings-content")
+                .flex_1()
+                .h_full()
+                .bg(background)
+                .child(content)
+        } else {
+            v_flex()
+                .id("settings-content")
+                .flex_1()
+                .h_full()
+                .bg(background)
+                .overflow_y_scroll()
+                .child(
+                    div()
+                        .px_10()
+                        .py_8()
+                        // Fill the pane edge-to-edge; cap only on very wide windows so
+                        // rows never stretch to an unreadable width.
+                        .child(div().w_full().max_w(px(860.)).child(content)),
+                )
+        };
 
         let root = div()
             .size_full()
@@ -1232,61 +1258,90 @@ impl Tty7App {
         self.settings_row(label, "", control, cx)
     }
 
-    /// SSH section: saved connection profiles (list + inline editor), the OpenSSH
-    /// `known_hosts` manager (PRD FR-S3/S4), and the security toggles (the global
-    /// host-key verification default and warn-on-close; a per-profile override
-    /// still wins where set). One scrollable page, Profiles → Known hosts →
-    /// Security, so profiles are managed here rather than as a parallel page.
+    /// SSH section: saved connection profiles plus the global security toggles
+    /// (host-key verification default and warn-on-close; a per-profile override
+    /// still wins where set).
+    ///
+    /// A two-column master-detail (like the theme picker): the **left** column is
+    /// a fixed-width, self-scrolling master — Import / Add on top, then the profile
+    /// list; the **right** column is the flex-1, self-scrolling detail pane showing
+    /// the selected profile's edit form, or — with nothing selected — an empty
+    /// state carrying the "pick a profile" hint and the two global security
+    /// toggles. Selection is tracked in [`SettingsState::ssh_detail`].
     fn render_settings_ssh(&self, cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
-            .child(self.render_ssh_profiles_block(cx))
-            .child(self.section_rule(cx))
-            .child(self.render_ssh_known_hosts_block(cx))
-            .child(self.section_rule(cx))
-            .child(self.render_ssh_security_block(cx))
+        let border = cx.theme().border;
+        h_flex()
+            .size_full()
+            .items_start()
+            .child(
+                // LEFT (master): fixed width, its own scroll, a right divider.
+                v_flex()
+                    .id("ssh-master")
+                    .flex_shrink_0()
+                    .w(px(280.))
+                    .h_full()
+                    .border_r_1()
+                    .border_color(border)
+                    .overflow_y_scroll()
+                    .child(self.render_ssh_master(cx)),
+            )
+            .child(
+                // RIGHT (detail): flex-1, its own scroll.
+                v_flex()
+                    .id("ssh-detail")
+                    .flex_1()
+                    .h_full()
+                    .overflow_y_scroll()
+                    .child(
+                        // Clear the title-bar drag strip / close ✕ up top, and cap
+                        // the detail width so the form stays readable on wide panes.
+                        div()
+                            .pt(px(crate::ui::app::TITLE_BAR_HEIGHT))
+                            .px_8()
+                            .pb_8()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .max_w(px(720.))
+                                    .child(self.render_ssh_detail(cx)),
+                            ),
+                    ),
+            )
             .into_any_element()
     }
 
-    /// Profiles block: header + Import / Add controls, the saved-profile list, and
-    /// — when a profile is being added or edited — the inline edit form below it.
-    fn render_ssh_profiles_block(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The left (master) column: the Import / Add buttons on top, then the
+    /// saved-profile list (each row selects into the detail pane).
+    fn render_ssh_master(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let border = cx.theme().border;
         let profiles = cx.global::<Config>().ssh_profiles.clone();
+        let detail = self
+            .active_settings()
+            .map(|s| s.ssh_detail)
+            .unwrap_or(SshDetail::None);
 
-        let header = h_flex()
-            .items_center()
-            .justify_between()
-            .child(self.section_header("Profiles", cx))
+        // Import / Add stacked full-width: the long import label doesn't fit beside
+        // Add in the narrow column.
+        let header = v_flex()
+            .gap_2()
             .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("ssh-profiles-import")
-                            .label("Import from ~/.ssh/config")
-                            .outline()
-                            .small()
-                            .on_click(
-                                cx.listener(|this, _, _w, cx| this.import_ssh_config_profiles(cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("ssh-profiles-add")
-                            .label("Add")
-                            .primary()
-                            .small()
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.add_new_profile(window, cx)),
-                            ),
-                    ),
+                Button::new("ssh-profiles-add")
+                    .label("Add profile")
+                    .primary()
+                    .small()
+                    .w_full()
+                    .on_click(cx.listener(|this, _, window, cx| this.add_new_profile(window, cx))),
+            )
+            .child(
+                Button::new("ssh-profiles-import")
+                    .label("Import from ~/.ssh/config")
+                    .outline()
+                    .small()
+                    .w_full()
+                    .on_click(cx.listener(|this, _, _w, cx| this.import_ssh_config_profiles(cx))),
             );
 
-        let editing_id = self
-            .active_settings()
-            .and_then(|s| s.ssh_form.as_ref())
-            .map(|f| f.editing);
-
-        let mut list = v_flex().gap_1().w_full();
+        let mut list = v_flex().gap_0p5().w_full();
         if profiles.is_empty() {
             list = list.child(
                 div()
@@ -1305,7 +1360,7 @@ impl Tty7App {
             } else {
                 p.name.clone()
             };
-            let selected = editing_id == Some(id);
+            let selected = detail == SshDetail::Profile(id);
             // A group so this row's ⋯ affordance can reveal on hover
             // (progressive disclosure) without touching its neighbours.
             let group_name = SharedString::from(format!("ssh-profile-row-{row_idx}"));
@@ -1324,16 +1379,14 @@ impl Tty7App {
                     .py_2()
                     .px_2()
                     .rounded_md()
-                    .border_b_1()
-                    .border_color(border)
                     .when(selected, |r| r.bg(cx.theme().secondary.opacity(0.4)))
                     // A subtle hover fill so the whole row reads as the (clickable)
-                    // edit affordance; the selected row keeps its own highlight.
+                    // select affordance; the selected row keeps its own highlight.
                     .when(!selected, |r| {
                         r.hover(|s| s.bg(cx.theme().secondary.opacity(0.2)))
                     })
-                    // Left-click anywhere on the row opens the inline edit form —
-                    // the row *is* the edit target. Clicks on the trailing ⋯ are
+                    // Left-click anywhere on the row selects it — its edit form
+                    // opens in the detail pane. Clicks on the trailing ⋯ are
                     // swallowed by its wrapper, so they don't also start an edit.
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1352,14 +1405,15 @@ impl Tty7App {
                     )
                     .child(
                         v_flex()
+                            .min_w_0()
                             .gap_0p5()
-                            .child(div().text_sm().child(title))
-                            .child(div().text_xs().text_color(muted).child(subtitle)),
+                            .child(div().text_sm().truncate().child(title))
+                            .child(div().text_xs().text_color(muted).truncate().child(subtitle)),
                     )
                     .child(
                         // Trailing ⋯ overflow menu, revealed on row hover. Its
                         // wrapper swallows the mouse-down so opening the menu never
-                        // also fires the row's edit click.
+                        // also fires the row's select click.
                         div()
                             .flex_shrink_0()
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1391,12 +1445,43 @@ impl Tty7App {
             );
         }
 
-        let mut block = v_flex().gap_2().child(header).child(list);
-        // The inline edit form, rendered below the list for the selected profile.
-        if self.active_settings().is_some_and(|s| s.ssh_form.is_some()) {
-            block = block.child(self.render_ssh_profile_form(cx));
+        v_flex()
+            .p_2()
+            .gap_2()
+            // Clear the title-bar drag strip up top so the buttons stay clickable.
+            .pt(px(crate::ui::app::TITLE_BAR_HEIGHT))
+            .child(header)
+            .child(list)
+            .into_any_element()
+    }
+
+    /// The right (detail) pane: a selected profile's edit form, or — with nothing
+    /// selected — the empty state (a "pick a profile" hint plus the two global
+    /// security toggles).
+    fn render_ssh_detail(&self, cx: &mut Context<Self>) -> AnyElement {
+        let detail = self
+            .active_settings()
+            .map(|s| s.ssh_detail)
+            .unwrap_or(SshDetail::None);
+        match detail {
+            SshDetail::Profile(_)
+                if self.active_settings().is_some_and(|s| s.ssh_form.is_some()) =>
+            {
+                self.render_ssh_profile_form(cx)
+            }
+            // No selection (or a stale profile whose form is gone): the empty-state
+            // hint, then the global security toggles below it.
+            _ => v_flex()
+                .gap_6()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Select a profile to edit, or add a new one."),
+                )
+                .child(self.render_ssh_security_block(cx))
+                .into_any_element(),
         }
-        block.into_any_element()
     }
 
     /// Build the per-profile overflow menu shared by the hover ⋯ dropdown and the
@@ -1445,72 +1530,6 @@ impl Tty7App {
                     }
                 }),
         )
-    }
-
-    /// Known-hosts block (unchanged behaviour, moved below Profiles): the trusted /
-    /// revoked / CA entries in `~/.ssh/known_hosts`, each deletable to re-prompt.
-    fn render_ssh_known_hosts_block(&self, cx: &mut Context<Self>) -> AnyElement {
-        let muted_fg = cx.theme().muted_foreground;
-        let mut list = v_flex().gap_1().w_full();
-        if self.known_hosts.is_empty() {
-            list = list.child(
-                div()
-                    .text_sm()
-                    .text_color(muted_fg)
-                    .child("No known hosts recorded yet."),
-            );
-        } else {
-            for (i, entry) in self.known_hosts.iter().enumerate() {
-                let id = entry.id.clone();
-                let marker = entry
-                    .marker
-                    .as_deref()
-                    .map(|m| format!("{m} "))
-                    .unwrap_or_default();
-                let label = format!("{marker}{}  ·  {}", entry.host, entry.key_type);
-                let fp = entry.fingerprint_sha256.clone();
-                list = list.child(
-                    h_flex()
-                        .items_center()
-                        .justify_between()
-                        .w_full()
-                        .gap_2()
-                        .py_1()
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .child(div().text_sm().child(label))
-                                .child(div().text_xs().text_color(muted_fg).child(fp)),
-                        )
-                        .child(
-                            Button::new(("ssh-known-host-del", i))
-                                .label("Delete")
-                                .small()
-                                .on_click(cx.listener(move |this, _, _w, cx| {
-                                    this.delete_known_host(id.clone(), cx)
-                                })),
-                        ),
-                );
-            }
-        }
-
-        v_flex()
-            .child(self.section_intro(
-                "Known hosts",
-                "Trusted, revoked, and certificate-authority entries in your \
-                 ~/.ssh/known_hosts. Delete an entry to be re-prompted on the next \
-                 connection.",
-                cx,
-            ))
-            .child(
-                Button::new("ssh-known-hosts-refresh")
-                    .label("Refresh")
-                    .small()
-                    .on_click(cx.listener(|this, _, _w, cx| this.refresh_known_hosts(cx))),
-            )
-            .child(list)
-            .into_any_element()
     }
 
     /// Security block: the global host-key verification default and warn-on-close
@@ -1676,8 +1695,12 @@ impl Tty7App {
             warn_on_close: profile.warn_on_close,
             _subs: subs,
         };
+        let editing = form.editing;
         if let Some(s) = self.active_settings_mut() {
             s.ssh_form = Some(form);
+            // Loading a form selects that profile in the master-detail layout, so
+            // its row highlights and the detail pane shows the form.
+            s.ssh_detail = SshDetail::Profile(editing);
         }
         cx.notify();
     }
@@ -1748,19 +1771,21 @@ impl Tty7App {
         Some(id)
     }
 
-    /// Save the form and collapse it back to the list.
+    /// Save the form and return the detail pane to its empty state.
     pub(crate) fn save_ssh_form(&mut self, cx: &mut Context<Self>) {
         self.save_editing_profile(cx);
         if let Some(s) = self.active_settings_mut() {
             s.ssh_form = None;
+            s.ssh_detail = SshDetail::None;
         }
         cx.notify();
     }
 
-    /// Collapse the form without saving (discard unsaved edits).
+    /// Discard unsaved edits and return the detail pane to its empty state (Back).
     pub(crate) fn close_ssh_form(&mut self, cx: &mut Context<Self>) {
         if let Some(s) = self.active_settings_mut() {
             s.ssh_form = None;
+            s.ssh_detail = SshDetail::None;
         }
         cx.notify();
     }
@@ -1807,13 +1832,13 @@ impl Tty7App {
             cfg.ssh_profiles.retain(|p| p.id != id);
             cfg.ssh_profile_frecency.remove(&id);
         });
-        let editing_deleted = self
-            .active_settings()
-            .and_then(|s| s.ssh_form.as_ref())
-            .map(|f| f.editing)
-            == Some(id);
+        let editing_deleted =
+            self.active_settings().map(|s| s.ssh_detail) == Some(SshDetail::Profile(id));
         if let Some(s) = self.active_settings_mut().filter(|_| editing_deleted) {
+            // The deleted profile was selected: drop its form and clear the
+            // selection back to the empty state.
             s.ssh_form = None;
+            s.ssh_detail = SshDetail::None;
         }
         cx.notify();
     }
@@ -1849,7 +1874,6 @@ impl Tty7App {
         let Some(form) = self.active_settings().and_then(|s| s.ssh_form.as_ref()) else {
             return div().into_any_element();
         };
-        let border = cx.theme().border;
         let is_new = !cx
             .global::<Config>()
             .ssh_profiles
@@ -1956,11 +1980,7 @@ impl Tty7App {
             ));
 
         v_flex()
-            .mt_2()
-            .pt_4()
             .gap_4()
-            .border_t_1()
-            .border_color(border)
             .child(header)
             .child(core)
             .child(self.render_ssh_profile_jump_section(form, cx))

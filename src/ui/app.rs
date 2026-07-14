@@ -231,9 +231,6 @@ pub struct Tty7App {
     /// prompt (keyed to the pane that raised it), its input widgets, and
     /// dismissable banners. Empty when no prompt is pending.
     pub(crate) ssh_prompt: crate::ui::ssh_prompt::SshPromptState,
-    /// Cached `known_hosts` entries for the "SSH → Known hosts" settings section,
-    /// refreshed from the daemon when that section is opened / after a delete.
-    pub(crate) known_hosts: Vec<crate::daemon::protocol::KnownHostEntry>,
     /// In-pane "confirm close of a live SSH session" state (PRD FR-E3): the close
     /// action awaiting confirmation, or `None` when no prompt is up.
     pub(crate) ssh_close_confirm: Option<SshCloseKind>,
@@ -391,7 +388,6 @@ impl Tty7App {
             _sidebar_search_sub: sidebar_search_sub,
             settings: None,
             ssh_prompt: crate::ui::ssh_prompt::SshPromptState::new(cx),
-            known_hosts: Vec::new(),
             ssh_close_confirm: None,
         };
         // Discover this machine's shells for the "+" dropdown off the UI thread
@@ -903,22 +899,6 @@ impl Tty7App {
     /// A per-profile `warn_on_close` override still wins where set.
     pub(crate) fn set_ssh_warn_on_close(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.ssh_warn_on_close = on);
-    }
-
-    /// Re-fetch the daemon's `known_hosts` entries for the settings section.
-    pub(crate) fn refresh_known_hosts(&mut self, cx: &mut Context<Self>) {
-        self.known_hosts = crate::terminal::RemoteTerminal::list_known_hosts();
-        cx.notify();
-    }
-
-    /// Delete one `known_hosts` entry and refresh the list from the daemon.
-    pub(crate) fn delete_known_host(
-        &mut self,
-        id: crate::daemon::protocol::KnownHostId,
-        cx: &mut Context<Self>,
-    ) {
-        self.known_hosts = crate::terminal::RemoteTerminal::delete_known_host(id);
-        cx.notify();
     }
 
     pub(crate) fn refresh_loopback_forwards(&mut self, cx: &mut Context<Self>) {
@@ -2084,6 +2064,7 @@ impl Tty7App {
             recording: None,
             rebinding_note: None,
             ssh_form: None,
+            ssh_detail: crate::ui::settings::SshDetail::None,
             _subs: subs,
         });
         // Land the caret in the search box so Settings opens ready to type/filter
@@ -2715,10 +2696,6 @@ impl Tty7App {
             // Leaving the Keybindings page abandons any in-progress capture, so
             // the interceptor doesn't keep swallowing keys off-screen.
             s.recording = None;
-        }
-        // Opening the SSH section pulls a fresh known_hosts list from the daemon.
-        if target == SettingsSection::Ssh {
-            self.refresh_known_hosts(cx);
         }
         cx.notify();
     }
