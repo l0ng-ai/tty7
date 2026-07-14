@@ -6,8 +6,7 @@
 //! disclosure — four fields up front (name, host+port, user, auth mode) and
 //! collapsed sections for jump host, port forwards, and advanced options
 //! (identity files, proxies, algorithms, keepalive/timeouts, X11, login scripts,
-//! banner, host-key verification, warn-on-close, and the `use_system_ssh`
-//! compat-mode escape hatch).
+//! banner, host-key verification, and warn-on-close).
 //!
 //! Edits are committed to `Config::ssh_profiles` (via `update_config`) only on
 //! **Save**, so the form can be abandoned freely. Connect and "copy
@@ -85,7 +84,6 @@ pub(crate) struct ProfileEditorState {
     agent_forward: bool,
     x11: bool,
     skip_banner: bool,
-    use_system_ssh: bool,
     verify_host_keys: Option<bool>,
     warn_on_close: Option<bool>,
 
@@ -312,7 +310,6 @@ impl Tty7App {
             agent_forward: false,
             x11: false,
             skip_banner: false,
-            use_system_ssh: false,
             verify_host_keys: None,
             warn_on_close: None,
             _subs: Vec::new(),
@@ -384,7 +381,6 @@ impl Tty7App {
         state.agent_forward = profile.agent_forward;
         state.x11 = profile.x11;
         state.skip_banner = profile.skip_banner;
-        state.use_system_ssh = profile.use_system_ssh;
         state.verify_host_keys = profile.verify_host_keys;
         state.warn_on_close = profile.warn_on_close;
         state.show_jump = profile.jump_host.is_some();
@@ -497,7 +493,6 @@ impl Tty7App {
                 compression: split_list(&state.compression.read(cx).value()),
             },
             verify_host_keys: state.verify_host_keys,
-            use_system_ssh: state.use_system_ssh,
         })
     }
 
@@ -1057,7 +1052,7 @@ impl Tty7App {
         let mut section = v_flex().child(self.disclosure_header(
             "prof-sec-adv",
             "Advanced",
-            "algorithms / keepalive / proxies / X11 / login scripts / compat mode",
+            "algorithms / keepalive / proxies / X11 / login scripts",
             state.show_advanced,
             cx,
             |this, cx| {
@@ -1277,24 +1272,7 @@ impl Tty7App {
                     },
                 ),
                 cx,
-            ))
-            .child(
-                self.settings_row(
-                    "System ssh compat mode",
-                    "Connect via the system `ssh` binary instead of the native engine. \
-                 SFTP, GUI auth, and the credential vault are disabled for this profile.",
-                    Switch::new("prof-compat")
-                        .checked(state.use_system_ssh)
-                        .on_click(cx.listener(|this, on: &bool, _w, cx| {
-                            if let Some(s) = this.profiles_editor.as_mut() {
-                                s.use_system_ssh = *on;
-                                cx.notify();
-                            }
-                        }))
-                        .into_any_element(),
-                    cx,
-                ),
-            );
+            ));
         section.into_any_element()
     }
 }

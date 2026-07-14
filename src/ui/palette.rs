@@ -65,16 +65,17 @@ pub enum CommandKind {
     OpenThemePicker,
     /// Opens a typed SSH connection sub-list. Handled in `PaletteView`.
     OpenSshConnectInput,
-    /// Open a tty7-managed SSH tab from a typed target/options line.
+    /// Open a native SSH tab from a typed target/options line.
     OpenSshConnect(String),
     /// Apply the preset at this index in `presets::all()`. Emitted from the
     /// theme sub-list.
     SetTheme(usize),
-    /// Open a tty7-managed SSH tab for this discovered OpenSSH host alias.
+    /// Open a native SSH tab for this discovered OpenSSH host alias (resolved
+    /// against `~/.ssh/config`).
     OpenSshProfile(SshProfile),
     /// Switch to the tab at this index in `Tty7App::tabs`.
     ActivateTab(usize),
-    /// Connect a saved SSH profile by id (native or compat, per its flag).
+    /// Connect a saved SSH profile by id (over the native engine).
     ConnectSavedProfile(Uuid),
     /// Open the profile editor focused on this saved profile (⌘⏎ / → on a row).
     EditSavedProfile(Uuid),

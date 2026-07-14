@@ -49,10 +49,8 @@ impl Tty7App {
         )
     }
 
-    /// Connect a saved profile (PRD FR-P3). Honors the per-profile
-    /// `use_system_ssh` compat-mode flag (FR-C5): flagged profiles go through the
-    /// frozen shell-out path (no SFTP / GUI auth / vault); everything else takes
-    /// the native russh path. Bumps the profile's frecency either way.
+    /// Connect a saved profile (PRD FR-P3) over the native (russh) engine — the
+    /// only SSH path. Bumps the profile's frecency.
     pub(crate) fn connect_ssh_profile(
         &mut self,
         profile_id: uuid::Uuid,
@@ -69,13 +67,8 @@ impl Tty7App {
             return;
         };
         self.bump_ssh_frecency(profile_id, cx);
-        if profile.use_system_ssh {
-            let spec = compat_ssh_spec(&profile, &cx.global::<Config>().ssh_profiles);
-            self.open_managed_ssh_spec(spec, window, cx);
-        } else {
-            let spec = Box::new(self.native_ssh_spec_for_profile(&profile, cx));
-            self.open_native_ssh_tab(spec, window, cx);
-        }
+        let spec = Box::new(self.native_ssh_spec_for_profile(&profile, cx));
+        self.open_native_ssh_tab(spec, window, cx);
     }
 
     /// QuickConnect to a typed `user@host[:port]` target (PRD FR-P4), always via
@@ -184,48 +177,6 @@ pub(crate) fn resolve_persisted_ssh_spec(
         )),
         None => spec,
     }
-}
-
-/// Build a compat-mode [`SshSpec`] (system `ssh` shell-out) from a profile
-/// (PRD FR-C5). A best-effort mapping of the common fields — the compat path is
-/// frozen (PRD §3.1), so exotic options aren't threaded through here; users who
-/// need them keep them in `~/.ssh/config`.
-fn compat_ssh_spec(
-    profile: &SshProfile,
-    profiles: &[SshProfile],
-) -> crate::daemon::protocol::SshSpec {
-    let target = if profile.user.is_empty() {
-        profile.host.clone()
-    } else {
-        format!("{}@{}", profile.user, profile.host)
-    };
-    let mut args: Vec<String> = Vec::new();
-    if profile.port != 22 {
-        args.push("-p".to_string());
-        args.push(profile.port.to_string());
-    }
-    for id in profile.expanded_identity_files() {
-        args.push("-i".to_string());
-        args.push(id);
-    }
-    // A jump host resolves to a `-J user@host` hop (single level; deeper chains
-    // are rare in compat mode and left to ssh_config).
-    if let Some(jump) = profile
-        .jump_host
-        .and_then(|id| profiles.iter().find(|p| p.id == id))
-    {
-        let hop = if jump.user.is_empty() {
-            jump.host.clone()
-        } else {
-            format!("{}@{}", jump.user, jump.host)
-        };
-        args.push("-J".to_string());
-        args.push(hop);
-    }
-    if profile.agent_forward {
-        args.push("-A".to_string());
-    }
-    crate::daemon::protocol::SshSpec { target, args }
 }
 
 /// Build a [`NativeSshSpec`] from `profile`, resolving keychain secrets via
@@ -393,6 +344,101 @@ fn map_algorithms(a: &Algorithms) -> SshAlgorithms {
     }
 }
 
+/// Resolves a raw `~/.ssh/config` jump hop into a transient profile plus its own
+/// raw `ProxyJump`. Injected so [`native_spec_from_transient_profile`] is testable
+/// without touching the real `~/.ssh/config` (production passes a closure over
+/// [`crate::core::ssh_config::resolve_alias_to_profile`]).
+pub(crate) type AliasResolver<'a> = dyn Fn(&str) -> Option<(SshProfile, Option<String>)> + 'a;
+
+/// Build a [`NativeSshSpec`] from a **transient** (unsaved) profile — resolved
+/// from a `~/.ssh/config` alias or a typed connect line — whose jump host is a
+/// raw string rather than a stored profile id. The base spec is built like any
+/// profile (keychain lookup by endpoint still applies); the raw `proxy_jump` is
+/// then resolved into the nested jump chain via `resolve_alias` (recursing through
+/// config alias hops and `user@host[:port]` targets), guarding against cycles.
+pub(crate) fn native_spec_from_transient_profile(
+    profile: &SshProfile,
+    proxy_jump: Option<String>,
+    store: &dyn CredentialStore,
+    global_verify_host_keys: bool,
+    resolve_alias: &AliasResolver<'_>,
+) -> NativeSshSpec {
+    let mut spec = build_native_ssh_spec(profile, &[], store, global_verify_host_keys);
+    if let Some(raw) = proxy_jump {
+        let mut visited = HashSet::new();
+        // Guard against an alias whose jump chain leads back to itself.
+        visited.insert(profile.name.clone());
+        spec.jump = resolve_jump_chain(
+            &raw,
+            store,
+            global_verify_host_keys,
+            resolve_alias,
+            &mut visited,
+        );
+    }
+    spec
+}
+
+/// Resolve a (possibly comma-separated) `ProxyJump` value into a nested jump spec.
+/// A chain `a,b` connects `a` first, then tunnels to `b`; `b` is this connection's
+/// direct jump and `a` is `b`'s jump (deepest = first-connected).
+fn resolve_jump_chain(
+    raw: &str,
+    store: &dyn CredentialStore,
+    verify: bool,
+    resolve_alias: &AliasResolver<'_>,
+    visited: &mut HashSet<String>,
+) -> Option<Box<NativeSshSpec>> {
+    let hops: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    build_jump_from_hops(&hops, store, verify, resolve_alias, visited)
+}
+
+fn build_jump_from_hops(
+    hops: &[&str],
+    store: &dyn CredentialStore,
+    verify: bool,
+    resolve_alias: &AliasResolver<'_>,
+    visited: &mut HashSet<String>,
+) -> Option<Box<NativeSshSpec>> {
+    let (last, earlier) = hops.split_last()?;
+    // Cycle guard: a hop already on the chain terminates the recursion.
+    if !visited.insert((*last).to_string()) {
+        return None;
+    }
+    // A config alias resolves to its own transient profile (and its own ProxyJump,
+    // honored only when this hop wasn't given an explicit earlier chain); an
+    // unknown hop is parsed as a `user@host[:port]` target.
+    let (profile, own_jump) = match resolve_alias(last) {
+        Some((profile, own_jump)) => (profile, if earlier.is_empty() { own_jump } else { None }),
+        None => (transient_profile_from_target(last)?, None),
+    };
+    let mut spec = build_native_ssh_spec(&profile, &[], store, verify);
+    spec.jump = if !earlier.is_empty() {
+        build_jump_from_hops(earlier, store, verify, resolve_alias, visited)
+    } else if let Some(own_jump) = own_jump {
+        resolve_jump_chain(&own_jump, store, verify, resolve_alias, visited)
+    } else {
+        None
+    };
+    Some(Box::new(spec))
+}
+
+/// A transient profile from a bare `user@host[:port]` jump/connect target.
+fn transient_profile_from_target(target: &str) -> Option<SshProfile> {
+    let qc = crate::core::ssh_profile::parse_quick_connect(target)?;
+    let mut profile = SshProfile::new(qc.host.clone());
+    profile.port = qc.port_or_default();
+    profile.host = qc.host;
+    if let Some(user) = qc.user {
+        profile.user = user;
+    }
+    Some(profile)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,31 +521,76 @@ mod tests {
     }
 
     #[test]
-    fn compat_ssh_spec_maps_common_fields() {
-        let bastion = profile("bastion", "bastion.example.com", "jump");
-        let mut p = profile("web", "10.0.0.5", "deploy");
-        p.port = 2222;
-        p.identity_files = vec!["~/.ssh/id_ed25519".to_string()];
-        p.agent_forward = true;
-        p.jump_host = Some(bastion.id);
-        let profiles = vec![bastion.clone(), p.clone()];
-
-        let spec = compat_ssh_spec(&p, &profiles);
-        assert_eq!(spec.target, "deploy@10.0.0.5");
-        assert!(spec.args.windows(2).any(|w| w == ["-p", "2222"]));
-        assert!(spec.args.iter().any(|a| a == "-i"));
-        assert!(
-            spec.args
-                .windows(2)
-                .any(|w| w == ["-J", "jump@bastion.example.com"])
+    fn transient_profile_maps_and_resolves_alias_jump_chain() {
+        let store = InMemoryCredentialStore::new();
+        // A transient alias profile with a raw ProxyJump naming another alias.
+        let mut prod = profile("prod", "10.0.0.5", "deploy");
+        prod.port = 2222;
+        // Fake resolver: `bastion` is a known alias that itself jumps to `edge`.
+        let resolve = |a: &str| -> Option<(SshProfile, Option<String>)> {
+            match a {
+                "bastion" => Some((profile("bastion", "bastion.example.com", "jump"), None)),
+                _ => None,
+            }
+        };
+        let spec = native_spec_from_transient_profile(
+            &prod,
+            Some("bastion".to_string()),
+            &store,
+            true,
+            &resolve,
         );
-        assert!(spec.args.iter().any(|a| a == "-A"));
-        // A default-port, user-less profile omits `-p` and `user@`.
-        let mut bare = profile("bare", "host", "");
-        bare.port = 22;
-        let spec = compat_ssh_spec(&bare, &[]);
-        assert_eq!(spec.target, "host");
-        assert!(!spec.args.iter().any(|a| a == "-p"));
+        assert_eq!(spec.host, "10.0.0.5");
+        assert_eq!(spec.port, 2222);
+        let jump = spec.jump.expect("jump resolves from alias");
+        assert_eq!(jump.host, "bastion.example.com");
+        assert_eq!(jump.user, "jump");
+        assert!(jump.jump.is_none());
+    }
+
+    #[test]
+    fn transient_profile_jump_falls_back_to_user_host_port() {
+        let store = InMemoryCredentialStore::new();
+        let prod = profile("prod", "10.0.0.5", "deploy");
+        // No alias resolves → the raw hop is parsed as user@host:port.
+        let resolve = |_: &str| None;
+        let spec = native_spec_from_transient_profile(
+            &prod,
+            Some("me@jump.example.com:2200".to_string()),
+            &store,
+            true,
+            &resolve,
+        );
+        let jump = spec.jump.expect("jump parses as target");
+        assert_eq!(jump.host, "jump.example.com");
+        assert_eq!(jump.user, "me");
+        assert_eq!(jump.port, 2200);
+    }
+
+    #[test]
+    fn transient_profile_jump_cycle_is_broken() {
+        let store = InMemoryCredentialStore::new();
+        let prod = profile("prod", "10.0.0.5", "deploy");
+        // `bastion` jumps back to `prod`, which is the top-level alias → cut.
+        let resolve = |a: &str| -> Option<(SshProfile, Option<String>)> {
+            match a {
+                "bastion" => Some((
+                    profile("bastion", "bastion.example.com", "jump"),
+                    Some("prod".to_string()),
+                )),
+                _ => None,
+            }
+        };
+        let spec = native_spec_from_transient_profile(
+            &prod,
+            Some("bastion".to_string()),
+            &store,
+            true,
+            &resolve,
+        );
+        let jump = spec.jump.expect("first hop resolves");
+        assert_eq!(jump.host, "bastion.example.com");
+        assert!(jump.jump.is_none(), "cycle back to prod is cut");
     }
 
     #[test]

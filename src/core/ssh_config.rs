@@ -8,9 +8,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use crate::core::ssh_profile::{
-    ForwardKind, ForwardRule, HostPort, SshProfile as ManagedProfile,
-};
+use crate::core::ssh_profile::{ForwardKind, ForwardRule, HostPort, SshProfile as ManagedProfile};
 
 const MAX_INCLUDE_DEPTH: usize = 8;
 const MAX_CONFIG_FILES: usize = 256;
@@ -631,10 +629,10 @@ fn resolve_alias(alias: &str, blocks: &[HostBlock]) -> ResolvedHost {
                     r.strict_seen = true;
                     // Only an explicit "no" (disable) maps to a native override;
                     // accept-new / yes / ask / default leave it to the global check.
-                    if let Some(v) = first_word(val) {
-                        if matches!(v.to_ascii_lowercase().as_str(), "no" | "off" | "false") {
-                            r.verify_host_keys = Some(false);
-                        }
+                    if first_word(val).is_some_and(|v| {
+                        matches!(v.to_ascii_lowercase().as_str(), "no" | "off" | "false")
+                    }) {
+                        r.verify_host_keys = Some(false);
                     }
                 }
                 "localforward" => {
@@ -1051,9 +1049,7 @@ mod tests {
         assert_eq!(resolved.profile.user, "fallback");
 
         // With no config at all, resolution yields nothing → caller uses the alias.
-        assert!(
-            resolve_alias_to_profile_from(root.join("missing"), &root, "whatever").is_none()
-        );
+        assert!(resolve_alias_to_profile_from(root.join("missing"), &root, "whatever").is_none());
     }
 
     #[test]
@@ -1070,8 +1066,7 @@ mod tests {
         let prod = resolve_alias_to_profile_from(ssh.join("config"), &root, "prod").unwrap();
         assert_eq!(prod.proxy_jump.as_deref(), Some("bastion"));
         // The raw jump alias resolves against the same config into its own profile.
-        let bastion =
-            resolve_alias_to_profile_from(ssh.join("config"), &root, "bastion").unwrap();
+        let bastion = resolve_alias_to_profile_from(ssh.join("config"), &root, "bastion").unwrap();
         assert_eq!(bastion.profile.host, "jump.example.com");
         assert_eq!(bastion.profile.user, "jumper");
     }

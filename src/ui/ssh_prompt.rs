@@ -478,6 +478,14 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Surface a connect-time failure (a typed line that can't be parsed into a
+    /// host, or an unresolvable alias) as a dismissable inline banner over the
+    /// focused pane — a diagnosable message rather than a silent no-op.
+    pub(crate) fn push_ssh_connect_error(&mut self, reason: String, cx: &mut Context<Self>) {
+        self.ssh_prompt.banners.push(reason);
+        cx.notify();
+    }
+
     /// Dismiss one banner by index.
     pub(crate) fn dismiss_ssh_banner(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix < self.ssh_prompt.banners.len() {

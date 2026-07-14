@@ -96,8 +96,8 @@ pub struct TerminalView {
     /// inherit the same shell.
     shell_spec: Option<ShellSpec>,
     /// The native-SSH spec this pane was spawned with, **secrets stripped**
-    /// ([`NativeSshSpec::without_secrets`]). `None` for local shells and
-    /// compat-mode (shell-out) SSH panes. Persisted into the session so a *dead*
+    /// ([`NativeSshSpec::without_secrets`]). `None` for local shells (and a
+    /// foreground `ssh` typed in one). Persisted into the session so a *dead*
     /// native-SSH pane can be respawned/reconnected on restore (PRD FR-E4 / C2),
     /// and read live to drive the in-pane reconnect (`RestartSshSession`).
     ssh_spec: Option<Box<crate::daemon::protocol::NativeSshSpec>>,
@@ -3275,14 +3275,13 @@ impl TerminalView {
     }
 
     fn can_forward_loopback(&self, cx: &mut Context<Self>) -> bool {
+        // A loopback one-click forward runs over the pane's native russh connection
+        // (FR-F4, direct-tcpip). Only native-SSH panes have one.
         cx.global::<Config>().ssh_loopback_forward
-            && self.terminal.remote_context().is_some_and(|remote| {
-                // A compat-mode ssh pane forwards through its ControlMaster socket; a
-                // native russh pane (WS4, FR-F4) forwards through its in-memory
-                // connection — neither of which the other has, so accept either.
-                remote.control_path.is_some()
-                    || remote.kind == crate::daemon::protocol::RemoteKind::NativeSsh
-            })
+            && self
+                .terminal
+                .remote_context()
+                .is_some_and(|remote| remote.kind == crate::daemon::protocol::RemoteKind::NativeSsh)
     }
 
     /// Update the remembered hovered link for the screen cell `(col, row)` and

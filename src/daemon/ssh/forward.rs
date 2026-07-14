@@ -1,8 +1,7 @@
 //! Port forwarding for native-SSH panes (Workstream 4).
 //!
-//! Three forward types ride the pane's shared [`SshConnection`] (never a control
-//! socket — that path is the frozen ssh-binary ControlMaster mode in
-//! `daemon::forward`):
+//! Three forward types ride the pane's shared [`SshConnection`] (russh channels,
+//! never a control socket — every forward is native):
 //!
 //! - **Local** (FR-F1): a TCP listener on `bind_host:bind_port`; each accepted
 //!   connection opens a `direct-tcpip` channel to `target_host:target_port` on the
@@ -286,8 +285,7 @@ impl ForwardEntry {
 
 /// A native-loopback ("Cmd-click a `localhost:PORT` link") forward on a native-SSH
 /// pane (FR-F4). Kept separately from managed forwards so it surfaces in the GUI's
-/// existing loopback list alongside the ControlMaster ones, with the same
-/// `LoopbackForwardInfo` shape.
+/// loopback list with the `LoopbackForwardInfo` shape.
 struct LoopbackEntry {
     local_port: u16,
     created_at: Instant,
@@ -568,9 +566,8 @@ impl SshForwardRegistry {
     // ---- Native loopback (FR-F4) --------------------------------------------
 
     /// Ensure a native-SSH loopback forward `127.0.0.1:<ephemeral> → host:port`
-    /// exists for `pane_id`, reusing an existing one for the same target. Mirrors
-    /// the ControlMaster `ForwardManager::ensure` reply shape so the GUI's
-    /// Cmd-click flow is unchanged.
+    /// exists for `pane_id`, reusing an existing one for the same target. Returns
+    /// the `LoopbackForward` reply shape the GUI's Cmd-click flow consumes.
     pub async fn ensure_loopback(
         &self,
         pane_id: u64,

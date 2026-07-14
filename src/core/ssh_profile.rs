@@ -27,7 +27,7 @@ pub struct SshProfile {
     pub group: Option<String>,
 
     // ── Connection ───────────────────────────────────────────────────────────
-    /// Target host (an IP, DNS name, or — for compat-mode — an `ssh_config` alias).
+    /// Target host (an IP or DNS name).
     pub host: String,
     /// TCP port. Defaults to 22.
     #[serde(default = "default_port")]
@@ -85,10 +85,6 @@ pub struct SshProfile {
     /// Per-profile override for host-key verification (`None` = follow the global
     /// setting; `Some(false)` disables verification for this profile).
     pub verify_host_keys: Option<bool>,
-    /// Compat-mode escape hatch: connect via the shell-out system `ssh` instead of
-    /// the native (russh) path. Manager features (SFTP / GUI auth / vault) are
-    /// unavailable for such profiles. Frozen — see PRD §3.1.
-    pub use_system_ssh: bool,
 }
 
 impl Default for SshProfile {
@@ -118,7 +114,6 @@ impl Default for SshProfile {
             x11: false,
             algorithms: Algorithms::default(),
             verify_host_keys: None,
-            use_system_ssh: false,
         }
     }
 }
@@ -572,8 +567,16 @@ mod tests {
         assert_eq!(p.host, "h");
         assert_eq!(p.port, 22);
         assert_eq!(p.auth, AuthMode::Auto);
-        assert!(!p.use_system_ssh);
         assert!(p.credential_ref.is_none());
+
+        // Back-compat: a config.json from a build that still wrote the removed
+        // `use_system_ssh` flag loads fine — serde ignores the unknown field
+        // (the struct has container-level `#[serde(default)]`, no
+        // `deny_unknown_fields`).
+        let p: SshProfile =
+            serde_json::from_str(r#"{"name":"old","host":"h","use_system_ssh":true}"#).unwrap();
+        assert_eq!(p.name, "old");
+        assert_eq!(p.host, "h");
 
         // A bad `auth` value falls back leniently instead of failing the parse.
         let p: SshProfile =
@@ -596,7 +599,6 @@ mod tests {
         original.socks_proxy = Some(HostPort::new("proxy", 1080));
         original.algorithms.kex = vec!["curve25519-sha256".to_string()];
         original.credential_ref = Some(CredentialRef::password("deploy", "10.0.0.9", 2222));
-        original.use_system_ssh = true;
 
         let json = serde_json::to_string(&original).unwrap();
         let back: SshProfile = serde_json::from_str(&json).unwrap();

@@ -19,8 +19,7 @@ use crate::core::session::{Session, SessionAxis, SessionPane, SessionTab};
 use crate::core::shells::DetectedShell;
 use crate::core::ssh_config;
 use crate::daemon::protocol::{
-    LoopbackForwardId, LoopbackForwardInfo, RemoteContext, ShellSpec, SshSpec,
-    ssh_option_takes_value,
+    LoopbackForwardId, LoopbackForwardInfo, RemoteContext, ShellSpec, ssh_option_takes_value,
 };
 use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::palette::{Command, CommandKind, PaletteEvent, PaletteView};
@@ -1152,74 +1151,62 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// The frozen **system-ssh compat funnel** (PRD §3.1): spawn a tty7-managed
-    /// shell-out `ssh` tab (ControlMaster loopback forwarding, no native engine /
-    /// SFTP / GUI auth / vault). The only paths that reach it are the deliberate
-    /// escape hatches — `use_system_ssh` profiles (`connect_ssh_profile`),
-    /// `~/.ssh/config` aliases (`open_compat_alias`), and arg-bearing typed
-    /// connects (`open_typed_ssh_connect`). It is not on the default path and must
-    /// not gain new callers; the default is native russh (`open_native_ssh_tab`).
-    pub(crate) fn open_managed_ssh_spec(
-        &mut self,
-        ssh: SshSpec,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if ssh.validate().is_err() {
-            return;
-        }
-        let mut shell_args = ssh.args.clone();
-        shell_args.push(ssh.target.clone());
-        self.new_tab_with_shell(
-            Some(ShellSpec {
-                program: "ssh".to_string(),
-                args: shell_args,
-                ssh: Some(ssh),
-            }),
-            window,
-            cx,
-        );
-    }
-
-    /// Open a `~/.ssh/config` host alias through the frozen system-ssh compat
-    /// funnel (PRD §3.3). OpenSSH stays the source of truth for the alias, so it
-    /// runs as shell-out `ssh <alias>` — russh can't fully resolve ssh_config
-    /// (`Match`/canonicalize/deep `ProxyJump`), so aliases intentionally stay on
-    /// the compat path. Routed via [`Self::open_managed_ssh_spec`], the same
-    /// funnel `use_system_ssh` profiles use, rather than a bespoke spawn.
-    pub(crate) fn open_compat_alias(
+    /// Open a `~/.ssh/config` host alias over the native (russh) engine (PRD §3.3).
+    /// The alias is resolved against `~/.ssh/config` (common fields, best-effort;
+    /// `Match`/canonicalize unsupported with no fallback) into a transient profile,
+    /// its `ProxyJump` resolved into the nested jump chain. An alias unknown to the
+    /// config falls back to being treated as a bare hostname.
+    pub(crate) fn open_native_alias(
         &mut self,
         alias: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_managed_ssh_spec(
-            SshSpec {
-                target: alias,
-                args: Vec::new(),
-            },
-            window,
-            cx,
-        );
+        let verify = cx.global::<Config>().verify_host_keys;
+        match ssh_config::resolve_alias_to_profile(&alias) {
+            Some(resolved) => {
+                let spec = crate::ui::ssh_connect::native_spec_from_transient_profile(
+                    &resolved.profile,
+                    resolved.proxy_jump,
+                    &crate::core::keychain::OsCredentialStore,
+                    verify,
+                    &|a| ssh_config::resolve_alias_to_profile(a).map(|r| (r.profile, r.proxy_jump)),
+                );
+                self.open_native_ssh_tab(Box::new(spec), window, cx);
+            }
+            // Not in ssh_config → treat the alias as a bare host (QuickConnect).
+            None => {
+                if let Some(qc) = crate::core::ssh_profile::parse_quick_connect(&alias) {
+                    self.quick_connect(qc, window, cx);
+                } else {
+                    self.push_ssh_connect_error(
+                        format!("Can't connect to \u{201c}{alias}\u{201d}"),
+                        cx,
+                    );
+                }
+            }
+        }
     }
 
-    /// Route a typed "SSH: Add Connection…" line to the right path (PRD §3.1/§3.3
-    /// path policy). A bare `user@host[:port]` target takes the **default** native
-    /// russh path ([`Self::quick_connect`]); anything else — a bare token that
-    /// only names a `~/.ssh/config` alias, or a line carrying extra ssh flags/args
-    /// (a system-ssh scenario) — falls to the frozen shell-out compat funnel. The
-    /// compat funnel is the labeled exception here, never the default.
+    /// Route a typed "SSH: Add Connection…" line to the native engine (PRD §3.1/
+    /// §3.3). The input is parsed as best-effort into a transient profile — a
+    /// `user@host[:port]` target plus the trivially-mappable flags (`-p`, `-i`,
+    /// `-l`, `-J`, `-o User=`/`-o Port=`). A line that can't be parsed into a host
+    /// surfaces a diagnosable inline notice rather than silently shelling out.
     fn open_typed_ssh_connect(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(target) = bare_ssh_target(input)
-            && let Some(qc) = crate::core::ssh_profile::parse_quick_connect(&target)
-        {
-            self.quick_connect(qc, window, cx);
-            return;
-        }
-        // A bare config alias (unparseable as a target) or an arg-bearing `ssh …`
-        // line: the frozen system-ssh compat path.
-        if let Ok(ssh) = parse_ssh_connect_input(input) {
-            self.open_managed_ssh_spec(ssh, window, cx);
+        match parse_ssh_connect_input(input) {
+            Ok(parsed) => {
+                let verify = cx.global::<Config>().verify_host_keys;
+                let spec = crate::ui::ssh_connect::native_spec_from_transient_profile(
+                    &parsed.profile,
+                    parsed.proxy_jump,
+                    &crate::core::keychain::OsCredentialStore,
+                    verify,
+                    &|a| ssh_config::resolve_alias_to_profile(a).map(|r| (r.profile, r.proxy_jump)),
+                );
+                self.open_native_ssh_tab(Box::new(spec), window, cx);
+            }
+            Err(reason) => self.push_ssh_connect_error(reason, cx),
         }
     }
 
@@ -1866,7 +1853,7 @@ impl Tty7App {
         let mut commands = Command::base_commands();
 
         // Saved SSH profiles, ordered by frecency then name (PRD FR-P3). Each row
-        // connects on Enter (native or compat per its flag) and edits on ⌘⏎ / →.
+        // connects (natively) on Enter and edits on ⌘⏎ / →.
         let cfg = cx.global::<Config>();
         let now = crate::core::config::unix_now();
         let mut profiles: Vec<&crate::core::ssh_profile::SshProfile> =
@@ -1899,17 +1886,15 @@ impl Tty7App {
             );
         }
 
-        // Live `~/.ssh/config` aliases, marked and connected via the (frozen)
-        // shell-out alias path — OpenSSH stays their source of truth (PRD §3.3).
-        // The subtitle flags that these run on the system `ssh` compat path (no
-        // native engine / SFTP / GUI auth), unlike the saved profiles above.
+        // Live `~/.ssh/config` aliases: resolved (common fields, best-effort) and
+        // connected over the native engine, same as saved profiles (PRD §3.3).
         for alias in ssh_config::discover_profiles() {
             commands.push(
                 Command::new(
                     format!("SSH: {}", alias.alias),
                     CommandKind::OpenSshProfile(alias),
                 )
-                .with_subtitle("~/.ssh/config · system ssh"),
+                .with_subtitle("~/.ssh/config"),
             );
         }
 
@@ -2028,7 +2013,7 @@ impl Tty7App {
                     self.set_preset(&id, window, cx);
                 }
             }
-            OpenSshProfile(profile) => self.open_compat_alias(profile.alias, window, cx),
+            OpenSshProfile(profile) => self.open_native_alias(profile.alias, window, cx),
             OpenSshConnect(input) => self.open_typed_ssh_connect(&input, window, cx),
             ConnectSavedProfile(id) => self.connect_ssh_profile(id, window, cx),
             EditSavedProfile(id) => self.open_ssh_profiles_for(Some(id), None, window, cx),
@@ -2550,8 +2535,8 @@ impl Tty7App {
 
     /// The status-dot colour for a tab whose representative pane is an SSH
     /// session (PRD FR-E2): native panes are phase-coloured (connecting = warning,
-    /// connected = accent, failed/disconnected = red); shell-out (compat) SSH
-    /// panes get a plain neutral dot. `None` for non-SSH tabs (no dot).
+    /// connected = accent, failed/disconnected = red); a foreground `ssh` typed
+    /// into a shell gets a plain neutral dot. `None` for non-SSH tabs (no dot).
     pub(crate) fn tab_ssh_dot(&self, tab: &Tab, cx: &App) -> Option<gpui::Hsla> {
         use crate::daemon::protocol::SshPhase;
         let leaf = tab.pane.first_leaf()?;
@@ -2570,7 +2555,7 @@ impl Tty7App {
             };
             Some(color)
         } else if v.remote_context().is_some() {
-            // Compat-mode / detected shell-out ssh: a plain neutral dot.
+            // A foreground `ssh` typed into a shell: a plain neutral dot.
             Some(theme.muted_foreground)
         } else {
             None
@@ -3454,100 +3439,148 @@ pub(crate) fn parse_ssh_option_words(input: &str) -> Result<Vec<String>, ()> {
     Ok(words)
 }
 
-/// If `input` is a single bare destination token (optionally prefixed with the
-/// literal `ssh`) carrying no options, return it — the candidate for the native
-/// QuickConnect path. Any leading `-flag`, extra words, or an unclosed quote
-/// yields `None`, marking the line as arg-bearing (a system-ssh compat input).
-fn bare_ssh_target(input: &str) -> Option<String> {
-    let mut words = parse_ssh_option_words(input).ok()?;
-    if words.first().is_some_and(|w| w == "ssh") {
-        words.remove(0);
-    }
-    match words.as_slice() {
-        [only] if !only.starts_with('-') => Some(only.clone()),
-        _ => None,
-    }
+/// The data a typed "SSH: Add Connection…" line resolves to: a transient profile
+/// plus the raw `ProxyJump` target (from `-J`), ready for
+/// [`crate::ui::ssh_connect::native_spec_from_transient_profile`].
+pub(crate) struct ParsedSshConnect {
+    pub profile: crate::core::ssh_profile::SshProfile,
+    pub proxy_jump: Option<String>,
 }
 
-pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<SshSpec, ()> {
-    let mut words = parse_ssh_option_words(input)?;
+/// Parse a typed connect line (`[ssh] [flags] user@host[:port]`) into native
+/// connect data (PRD §3.1). Only the trivially-mappable flags are honored — `-p`,
+/// `-l`, `-i` (repeatable), `-J`, and `-o User=`/`-o Port=`/`-o ProxyJump=`; other
+/// options are ignored (best-effort). A remote command, a `--` separator, an
+/// unbalanced quote, or a missing/invalid host is an `Err(reason)` surfaced as an
+/// inline notice — never a silent shell-out. Returns the user-facing reason string.
+pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, String> {
+    use crate::core::ssh_profile::{SshProfile, parse_quick_connect};
+
+    let mut words = parse_ssh_option_words(input)
+        .map_err(|_| "Unbalanced quotes in the SSH command".to_string())?;
     if words.first().is_some_and(|word| word == "ssh") {
         words.remove(0);
     }
-    let Some(target_ix) = ssh_connect_target_ix(&words) else {
-        return Err(());
-    };
-    let target = words.remove(target_ix);
-    if target.trim().is_empty() {
-        return Err(());
-    }
-    let ssh = SshSpec {
-        target,
-        args: words,
-    };
-    ssh.validate().map_err(|_| ())?;
-    Ok(ssh)
-}
 
-fn ssh_connect_target_ix(words: &[String]) -> Option<usize> {
+    let mut target: Option<String> = None;
+    let mut user: Option<String> = None;
+    let mut port: Option<u16> = None;
+    let mut identities: Vec<String> = Vec::new();
+    let mut jump: Option<String> = None;
+
     let mut i = 0;
     while i < words.len() {
-        let word = &words[i];
+        let word = words[i].clone();
         if word == "--" {
-            return None;
+            return Err("Remote commands aren't supported here".to_string());
         }
-        if !word.starts_with('-') {
-            return Some(i);
-        }
-        if ssh_short_option_value_flag(word).is_some() {
-            i += 1;
-            if i >= words.len() {
-                return None;
+        if let Some((flag, attached)) = ssh_short_flag(&word) {
+            // Consume the value (attached `-p2222` form or the next word) when the
+            // flag takes one.
+            let value = if ssh_option_takes_value(flag) {
+                if !attached.is_empty() {
+                    attached
+                } else {
+                    i += 1;
+                    match words.get(i) {
+                        Some(v) => v.clone(),
+                        None => return Err(format!("-{flag} needs a value")),
+                    }
+                }
+            } else {
+                String::new()
+            };
+            match flag {
+                'p' => {
+                    port = Some(
+                        value
+                            .parse::<u16>()
+                            .ok()
+                            .filter(|&p| p != 0)
+                            .ok_or_else(|| format!("Invalid port \u{201c}{value}\u{201d}"))?,
+                    )
+                }
+                'l' => user = Some(value),
+                'i' => identities.push(value),
+                'J' => jump = Some(value),
+                'o' => apply_ssh_o_option(&value, &mut user, &mut port, &mut jump)?,
+                // Any other flag (value already consumed if it took one) is ignored.
+                _ => {}
             }
+        } else if word.starts_with('-') {
+            // A long option (`--foo`) or bare `-`: not something we map.
+            return Err(format!("Unsupported option \u{201c}{word}\u{201d}"));
+        } else if target.is_none() {
+            target = Some(word);
+        } else {
+            return Err("Remote commands aren't supported here".to_string());
         }
         i += 1;
     }
-    None
+
+    let target = target.ok_or_else(|| "Enter a host to connect to".to_string())?;
+    let qc = parse_quick_connect(&target)
+        .ok_or_else(|| format!("Can't parse host \u{201c}{target}\u{201d}"))?;
+
+    let mut profile = SshProfile::new(qc.host.clone());
+    profile.host = qc.host;
+    // Explicit `-p` / `-o Port=` wins over a `:port` on the target, else default 22.
+    profile.port = port.or(qc.port).unwrap_or(22);
+    // Explicit `-l` / `-o User=` wins over `user@` on the target.
+    if let Some(user) = user.or(qc.user) {
+        profile.user = user;
+    }
+    profile.identity_files = identities;
+
+    Ok(ParsedSshConnect {
+        profile,
+        proxy_jump: jump,
+    })
 }
 
-fn ssh_short_option_value_flag(word: &str) -> Option<char> {
-    let short = word.strip_prefix('-')?;
-    if short.is_empty() || short.starts_with('-') {
+/// Split a short-option word into `(flag, attached_value)` — `-p2222` → `('p',
+/// "2222")`, `-J` → `('J', "")`. `None` for a non-option, `--`/long option, or a
+/// bare `-`.
+fn ssh_short_flag(word: &str) -> Option<(char, String)> {
+    let rest = word.strip_prefix('-')?;
+    if rest.is_empty() || rest.starts_with('-') {
         return None;
     }
-    let mut chars = short.chars();
+    let mut chars = rest.chars();
     let flag = chars.next()?;
-    if ssh_option_takes_value(flag) && chars.as_str().is_empty() {
-        Some(flag)
-    } else {
-        None
+    Some((flag, chars.as_str().to_string()))
+}
+
+/// Apply the trivially-mappable `-o Name=Value` options (`User`/`Port`/
+/// `ProxyJump`); anything else is ignored (best-effort).
+fn apply_ssh_o_option(
+    value: &str,
+    user: &mut Option<String>,
+    port: &mut Option<u16>,
+    jump: &mut Option<String>,
+) -> Result<(), String> {
+    let Some((name, val)) = value.split_once('=') else {
+        return Ok(());
+    };
+    match name.to_ascii_lowercase().as_str() {
+        "user" => *user = Some(val.to_string()),
+        "port" => {
+            *port = Some(
+                val.parse::<u16>()
+                    .ok()
+                    .filter(|&p| p != 0)
+                    .ok_or_else(|| format!("Invalid port \u{201c}{val}\u{201d}"))?,
+            )
+        }
+        "proxyjump" => *jump = Some(val.to_string()),
+        _ => {}
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{bare_ssh_target, parse_ssh_connect_input, parse_ssh_option_words};
-
-    #[test]
-    fn bare_ssh_target_recognizes_single_tokens_only() {
-        // Bare targets (→ native QuickConnect), optional `ssh` prefix stripped.
-        assert_eq!(
-            bare_ssh_target("deploy@10.0.0.5").as_deref(),
-            Some("deploy@10.0.0.5")
-        );
-        assert_eq!(
-            bare_ssh_target("ssh host:2222").as_deref(),
-            Some("host:2222")
-        );
-        assert_eq!(bare_ssh_target("  myalias  ").as_deref(), Some("myalias"));
-        // Arg-bearing or flag-led lines are NOT bare (→ compat shell-out).
-        assert_eq!(bare_ssh_target("dev -p 2222"), None);
-        assert_eq!(bare_ssh_target("-J jump host"), None);
-        assert_eq!(bare_ssh_target("ssh -p 2222 dev"), None);
-        assert_eq!(bare_ssh_target(""), None);
-        // An unclosed quote is a parse error, not a bare target.
-        assert_eq!(bare_ssh_target("'unterminated"), None);
-    }
+    use super::{parse_ssh_connect_input, parse_ssh_option_words};
 
     #[test]
     fn parses_ssh_option_words_with_quotes() {
@@ -3563,41 +3596,56 @@ mod tests {
     }
 
     #[test]
-    fn parses_ssh_connect_input_with_optional_ssh_prefix() {
+    fn parses_typed_connect_into_native_profile() {
+        // Bare `user@host:port` (optional `ssh` prefix) → transient profile.
+        let p = parse_ssh_connect_input("ssh deploy@10.0.0.5:2222").unwrap();
+        assert_eq!(p.profile.host, "10.0.0.5");
+        assert_eq!(p.profile.user, "deploy");
+        assert_eq!(p.profile.port, 2222);
+        assert!(p.proxy_jump.is_none());
+    }
+
+    #[test]
+    fn parses_typed_connect_flags_and_jump() {
+        // Options before and after the target; `-p`/`-l`/`-i`/`-J` all map.
+        let p =
+            parse_ssh_connect_input("ssh -p 2222 -l dev -i ~/.ssh/id_ed25519 -J 'jump host' host")
+                .unwrap();
+        assert_eq!(p.profile.host, "host");
+        assert_eq!(p.profile.user, "dev");
+        assert_eq!(p.profile.port, 2222);
         assert_eq!(
-            parse_ssh_connect_input("ssh dev -p 2222 -J 'jump host'")
-                .unwrap()
-                .target,
-            "dev"
+            p.profile.identity_files,
+            vec!["~/.ssh/id_ed25519".to_string()]
         );
-        let parsed = parse_ssh_connect_input("dev -p 2222").unwrap();
-        assert_eq!(parsed.target, "dev");
-        assert_eq!(parsed.args, vec!["-p", "2222"]);
+        assert_eq!(p.proxy_jump.as_deref(), Some("jump host"));
+
+        // Attached short-flag form (`-p2222`) and `-o User=`/`-o Port=`.
+        let p = parse_ssh_connect_input("host -p2222 -o User=deploy -o Port=2200").unwrap();
+        assert_eq!(p.profile.user, "deploy");
+        // `-o Port=` wins over an earlier `-p` (last write wins in the -o pass).
+        assert_eq!(p.profile.port, 2200);
     }
 
     #[test]
-    fn parses_ssh_connect_input_with_options_before_target() {
-        let parsed = parse_ssh_connect_input("ssh -p 2222 -J 'jump host' dev").unwrap();
-        assert_eq!(parsed.target, "dev");
-        assert_eq!(parsed.args, vec!["-p", "2222", "-J", "jump host"]);
+    fn explicit_flags_override_target_userhost() {
+        // `-l` / `-p` override the `user@host:port` on the target.
+        let p = parse_ssh_connect_input("ssh me@host:22 -l other -p 2200").unwrap();
+        assert_eq!(p.profile.user, "other");
+        assert_eq!(p.profile.port, 2200);
     }
 
     #[test]
-    fn parses_ssh_connect_input_with_quoted_target() {
-        let parsed = parse_ssh_connect_input("ssh -l dev 'host name'").unwrap();
-        assert_eq!(parsed.target, "host name");
-        assert_eq!(parsed.args, vec!["-l", "dev"]);
-    }
-
-    #[test]
-    fn rejects_ssh_connect_input_without_target() {
+    fn rejects_bad_typed_connect_lines() {
+        // No host at all.
         assert!(parse_ssh_connect_input("ssh -p 2222").is_err());
-    }
-
-    #[test]
-    fn rejects_ssh_connect_input_with_remote_command() {
+        // A remote command or `--` separator is not a connect line.
         assert!(parse_ssh_connect_input("ssh dev uptime").is_err());
         assert!(parse_ssh_connect_input("ssh -- dev").is_err());
+        // Unbalanced quote.
+        assert!(parse_ssh_connect_input("ssh 'host").is_err());
+        // Invalid port.
+        assert!(parse_ssh_connect_input("ssh host -p 0").is_err());
     }
 }
 

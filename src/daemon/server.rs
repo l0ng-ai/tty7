@@ -360,13 +360,11 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                 return Ok(());
             };
             let Some(remote) = pane.remote_context() else {
-                DaemonMsg::Error("pane has no managed ssh remote context".to_string())
-                    .encode(&mut w)?;
+                DaemonMsg::Error("pane has no ssh remote context".to_string()).encode(&mut w)?;
                 return Ok(());
             };
-            // Native-SSH panes have no ControlMaster socket (FR-F4): create/reuse a
-            // Local `direct-tcpip` forward on the pane's russh connection instead,
-            // returning the same reply shape so the GUI's Cmd-click flow is unchanged.
+            // A loopback forward (FR-F4) is a Local `direct-tcpip` on the pane's
+            // russh connection — native-SSH panes only.
             let result = if remote.kind == RemoteKind::NativeSsh {
                 match pane.ssh_connection() {
                     Some(conn) => crate::daemon::ssh::SshManager::global()
@@ -381,9 +379,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                     None => Err("native ssh connection is not ready".to_string()),
                 }
             } else {
-                crate::daemon::forward::ForwardManager::global()
-                    .ensure(req.pane_id, &remote, &req.remote_host, req.remote_port)
-                    .map_err(|e| e.to_string())
+                Err("pane is not a native ssh session".to_string())
             };
             match result {
                 Ok(forward) => DaemonMsg::LoopbackForward(forward).encode(&mut w)?,
@@ -394,22 +390,15 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
 
         ClientMsg::ListLoopbackForwards => {
             let mut w = write_stream;
-            // The loopback panel shows both ControlMaster (compat-mode) and native
-            // russh loopback forwards.
-            let mut list = crate::daemon::forward::ForwardManager::global().list();
-            list.extend(crate::daemon::ssh::SshManager::global().list_loopback_forwards());
+            let list = crate::daemon::ssh::SshManager::global().list_loopback_forwards();
             DaemonMsg::LoopbackForwardList(list).encode(&mut w)?;
             Ok(())
         }
 
         ClientMsg::CloseLoopbackForward(id) => {
             let mut w = write_stream;
-            // Try both backends; only one owns the id.
-            if !crate::daemon::forward::ForwardManager::global().close(&id) {
-                crate::daemon::ssh::SshManager::global().close_loopback_forward(&id);
-            }
-            let mut list = crate::daemon::forward::ForwardManager::global().list();
-            list.extend(crate::daemon::ssh::SshManager::global().list_loopback_forwards());
+            crate::daemon::ssh::SshManager::global().close_loopback_forward(&id);
+            let list = crate::daemon::ssh::SshManager::global().list_loopback_forwards();
             DaemonMsg::LoopbackForwardList(list).encode(&mut w)?;
             Ok(())
         }

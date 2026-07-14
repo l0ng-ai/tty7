@@ -53,161 +53,11 @@ pub struct ShellSpec {
     pub program: String,
     #[serde(default)]
     pub args: Vec<String>,
-    /// When present, this pane is a tty7-owned SSH session. The daemon injects
-    /// a ControlMaster/ControlPath at spawn time and later reuses that master for
-    /// loopback forwards; ordinary shell picks leave this empty.
-    #[serde(default)]
-    pub ssh: Option<SshSpec>,
 }
 
-/// The connect recipe for a **compat-mode** (shell-out `ssh`) pane.
-///
-/// FROZEN (PRD §3.1): the system-ssh escape hatch, carried by `SPAWN_MANAGED_SSH`.
-/// The native russh path uses [`NativeSshSpec`] instead. Kept functional but not
-/// extended — new SSH features land on the native spec, never here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SshSpec {
-    /// The destination token (`host`, `user@host`, or ssh config alias).
-    pub target: String,
-    /// SSH client options that are safe to reuse for the master connection.
-    #[serde(default)]
-    pub args: Vec<String>,
-}
-
-impl SshSpec {
-    pub fn validate(&self) -> Result<(), String> {
-        let target = self.target.trim();
-        if target.is_empty() {
-            return Err("ssh target is empty".to_string());
-        }
-        // The target is appended as the trailing ssh argument without a `--`
-        // separator, so a value starting with `-` would be parsed as an option
-        // (e.g. `-oProxyCommand=…`, which ssh runs through a shell). ssh itself
-        // rejects such destinations; refuse them here too rather than hand ssh
-        // an option in destination position.
-        if target.starts_with('-') {
-            return Err("ssh target must not start with '-'".to_string());
-        }
-        validate_managed_ssh_args(&self.args)
-    }
-}
-
-fn validate_managed_ssh_args(args: &[String]) -> Result<(), String> {
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-        if arg == "--" {
-            return Err("ssh options must not include a remote command".to_string());
-        }
-        if arg == "-N" || arg == "-f" || arg == "-T" {
-            return Err(format!(
-                "ssh option {arg} is not supported for managed SSH tabs"
-            ));
-        }
-        if matches!(arg.as_str(), "-W" | "-w" | "-L" | "-R" | "-D" | "-S" | "-O") {
-            return Err(format!(
-                "ssh option {arg} conflicts with tty7-managed forwarding"
-            ));
-        }
-        if arg == "-o" {
-            i += 1;
-            let Some(value) = args.get(i) else {
-                return Err("ssh -o requires an option value".to_string());
-            };
-            let (name, _) = split_ssh_option(value);
-            if managed_ssh_option_is_blocked(name) {
-                return Err(format!(
-                    "ssh option {name} conflicts with tty7-managed forwarding"
-                ));
-            }
-            i += 1;
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix("-o")
-            && !value.is_empty()
-        {
-            let value = value.strip_prefix('=').unwrap_or(value);
-            let (name, _) = split_ssh_option(value);
-            if managed_ssh_option_is_blocked(name) {
-                return Err(format!(
-                    "ssh option {name} conflicts with tty7-managed forwarding"
-                ));
-            }
-            i += 1;
-            continue;
-        }
-        if let Some(short) = arg.strip_prefix('-')
-            && !short.starts_with('-')
-            && short.len() > 1
-        {
-            let mut chars = short.chars();
-            let Some(flag) = chars.next() else {
-                return Err("empty ssh option".to_string());
-            };
-            if matches!(
-                flag,
-                'W' | 'w' | 'L' | 'R' | 'D' | 'S' | 'O' | 'N' | 'f' | 'T'
-            ) {
-                return Err(format!(
-                    "ssh option -{flag} conflicts with tty7-managed forwarding"
-                ));
-            }
-            if ssh_option_takes_value(flag) && chars.as_str().is_empty() {
-                i += 1;
-                if i >= args.len() {
-                    return Err(format!("ssh option -{flag} requires a value"));
-                }
-            }
-            i += 1;
-            continue;
-        }
-        if arg.starts_with("--") {
-            return Err(format!(
-                "long ssh option {arg} is not supported for managed SSH tabs"
-            ));
-        }
-        if !arg.starts_with('-') {
-            return Err("ssh target must be entered separately from ssh options".to_string());
-        }
-        if arg.len() == 2 {
-            let flag = arg.as_bytes()[1] as char;
-            if ssh_option_takes_value(flag) {
-                i += 1;
-                if i >= args.len() {
-                    return Err(format!("ssh option {arg} requires a value"));
-                }
-            }
-        }
-        i += 1;
-    }
-    Ok(())
-}
-
-fn split_ssh_option(value: &str) -> (&str, &str) {
-    value
-        .split_once('=')
-        .map(|(name, value)| (name, value))
-        .unwrap_or((value, ""))
-}
-
-fn managed_ssh_option_is_blocked(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "controlmaster"
-            | "controlpath"
-            | "controlpersist"
-            | "exitonforwardfailure"
-            | "forkafterauthentication"
-            | "localforward"
-            | "remoteforward"
-            | "dynamicforward"
-            | "permitlocalcommand"
-            | "proxycommand"
-            | "sessiontype"
-            | "requesttty"
-    )
-}
-
+/// Whether a short `ssh` option flag consumes the following argument as its
+/// value. Used by the GUI's typed-connect parser to skip an option's value while
+/// hunting for the destination token.
 pub(crate) fn ssh_option_takes_value(flag: char) -> bool {
     matches!(
         flag,
@@ -256,23 +106,18 @@ pub struct RemoteContext {
     pub argv: Vec<String>,
     /// The destination token (`host`, `user@host`, or ssh config alias).
     pub target: String,
-    /// tty7-owned SSH master socket for this pane. Present only for managed SSH
-    /// panes created through tty7; absent for process-table-detected foreground
-    /// ssh commands typed inside a normal shell.
-    #[serde(default)]
-    pub control_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RemoteKind {
-    /// A tty7-managed SSH pane backed by the *system* `ssh` binary (compat mode)
-    /// or a foreground `ssh` typed in a shell. Carries a ControlMaster socket
-    /// when tty7-managed (`RemoteContext.control_path`).
+    /// A foreground `ssh` process typed into a normal shell, detected from the
+    /// local process table. Status/label only — it has no tty7-owned connection,
+    /// so forwarding / SFTP don't apply to it.
     Ssh,
     /// A pane backed by the daemon's native russh session engine
-    /// (`daemon::ssh`). `control_path` is always `None`; forwarding / SFTP reach
-    /// the connection through the in-memory registry, not a control socket.
+    /// (`daemon::ssh`). Forwarding / SFTP reach the connection through the
+    /// in-memory registry.
     NativeSsh,
 }
 
@@ -401,7 +246,7 @@ pub struct SshForwardRule {
 // panes sharing it) and answers directory listings / file operations / transfer
 // jobs. All requests carry the `pane_id`; the daemon resolves it to the pane's
 // `SshConnection` through the registry. Only native-SSH panes have one — a PTY
-// or compat-`ssh` pane replies with an `Error`.
+// pane (or a foreground `ssh` typed in a shell) replies with an `Error`.
 // ---------------------------------------------------------------------------
 
 /// The classification of one remote directory entry. Symlinks are reported as
@@ -984,11 +829,8 @@ mod kind {
     pub const ENSURE_LOOPBACK_FORWARD: u8 = 10;
     pub const LIST_LOOPBACK_FORWARDS: u8 = 11;
     pub const CLOSE_LOOPBACK_FORWARD: u8 = 12;
-    /// `Spawn` with `ShellSpec.ssh`. It must not share `SPAWN_SHELL`: a daemon
-    /// from before the `ssh` field existed would deserialize the rest of
-    /// `ShellSpec`, ignore the unknown managed-SSH field, and silently launch a
-    /// plain `ssh` tab with no ControlMaster/RemoteContext.
-    pub const SPAWN_MANAGED_SSH: u8 = 13;
+    // 13 (was `SPAWN_MANAGED_SSH`, the system-ssh compat funnel) is retired: all
+    // SSH goes through the native russh engine (`SPAWN_NATIVE_SSH`).
     /// `SpawnNativeSsh` — the native russh session engine. A brand-new kind, so a
     /// daemon that predates WS2 rejects it (unknown kind → error) rather than
     /// mis-spawning; a native-SSH pane must never silently fall back to anything.
@@ -1130,15 +972,8 @@ impl ClientMsg {
             ClientMsg::Spawn {
                 cwd,
                 size,
-                shell: shell @ Some(spec),
-            } => {
-                let kind = if spec.ssh.is_some() {
-                    kind::SPAWN_MANAGED_SSH
-                } else {
-                    kind::SPAWN_SHELL
-                };
-                write_frame(w, kind, &to_json(&(cwd, size, shell))?)
-            }
+                shell: shell @ Some(_),
+            } => write_frame(w, kind::SPAWN_SHELL, &to_json(&(cwd, size, shell))?),
             ClientMsg::Attach { pane_id, size } => {
                 write_frame(w, kind::ATTACH, &to_json(&(pane_id, size))?)
             }
@@ -1205,7 +1040,7 @@ impl ClientMsg {
                     shell: None,
                 }
             }
-            kind::SPAWN_SHELL | kind::SPAWN_MANAGED_SSH => {
+            kind::SPAWN_SHELL => {
                 let (cwd, size, shell) = from_json(&payload)?;
                 ClientMsg::Spawn { cwd, size, shell }
             }
@@ -1492,19 +1327,6 @@ mod tests {
                 shell: Some(ShellSpec {
                     program: "wsl.exe".into(),
                     args: vec!["--distribution".into(), "Ubuntu".into()],
-                    ssh: None,
-                }),
-            },
-            ClientMsg::Spawn {
-                cwd: Some(PathBuf::from("/tmp/x")),
-                size: SIZE,
-                shell: Some(ShellSpec {
-                    program: "ssh".into(),
-                    args: vec!["-p".into(), "2222".into(), "dev".into()],
-                    ssh: Some(SshSpec {
-                        target: "dev".into(),
-                        args: vec!["-p".into(), "2222".into()],
-                    }),
                 }),
             },
             ClientMsg::Attach {
@@ -1612,76 +1434,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ssh_spec_allows_connection_options() {
-        SshSpec {
-            target: "dev".into(),
-            args: vec![
-                "-p".into(),
-                "2222".into(),
-                "-Jjump".into(),
-                "-i".into(),
-                "~/.ssh/id_ed25519".into(),
-                "-o".into(),
-                "UserKnownHostsFile=/tmp/known_hosts".into(),
-            ],
-        }
-        .validate()
-        .unwrap();
-    }
-
-    #[test]
-    fn ssh_spec_rejects_forward_and_control_options() {
-        for args in [
-            vec!["-L".to_string(), "127.0.0.1:1:127.0.0.1:1".to_string()],
-            vec!["-S".to_string(), "/tmp/other.sock".to_string()],
-            vec!["-O".to_string(), "forward".to_string()],
-            vec!["-o".to_string(), "ControlPath=/tmp/other.sock".to_string()],
-            vec!["-oControlPath=/tmp/other.sock".to_string()],
-            vec![
-                "-o".to_string(),
-                "LocalForward=127.0.0.1:1 127.0.0.1:1".to_string(),
-            ],
-            vec!["dev".to_string()],
-        ] {
-            assert!(
-                SshSpec {
-                    target: "dev".into(),
-                    args: args.clone(),
-                }
-                .validate()
-                .is_err(),
-                "must reject {args:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn ssh_spec_rejects_option_like_target() {
-        // A target starting with `-` is appended in destination position without
-        // a `--` guard, so ssh would parse it as an option (e.g. an injected
-        // `-oProxyCommand=…`). It must be refused regardless of surrounding
-        // whitespace.
-        for target in ["-oProxyCommand=touch /tmp/pwned", "-D8080", "  -N", "-"] {
-            assert!(
-                SshSpec {
-                    target: target.into(),
-                    args: vec![],
-                }
-                .validate()
-                .is_err(),
-                "must reject option-like target {target:?}"
-            );
-        }
-        // A host that merely contains a dash elsewhere is fine.
-        SshSpec {
-            target: "my-host".into(),
-            args: vec![],
-        }
-        .validate()
-        .unwrap();
-    }
-
     /// Round-trip every `DaemonMsg` variant through encode → read.
     #[test]
     fn daemon_roundtrip() {
@@ -1708,7 +1460,6 @@ mod tests {
                 kind: RemoteKind::Ssh,
                 argv: vec!["ssh".into(), "-p".into(), "2222".into(), "dev".into()],
                 target: "dev".into(),
-                control_path: Some(PathBuf::from("/tmp/tty7-ssh-1.sock")),
             })),
             DaemonMsg::RemoteContext(None),
             DaemonMsg::LoopbackForward(LoopbackForward { local_port: 49152 }),
@@ -1848,15 +1599,13 @@ mod tests {
         );
     }
 
+    /// An explicit-shell spawn rides the `SPAWN_SHELL` frame (not the legacy
+    /// `SPAWN` kind), and round-trips through encode → decode.
     #[test]
-    fn managed_ssh_spawn_uses_non_legacy_kind() {
+    fn explicit_shell_spawn_uses_shell_kind() {
         let shell = ShellSpec {
-            program: "ssh".to_string(),
-            args: vec!["dev".to_string()],
-            ssh: Some(SshSpec {
-                target: "dev".to_string(),
-                args: Vec::new(),
-            }),
+            program: "fish".to_string(),
+            args: vec!["-l".to_string()],
         };
         let msg = ClientMsg::Spawn {
             cwd: Some(PathBuf::from("/work")),
@@ -1866,11 +1615,7 @@ mod tests {
         let mut buf = Vec::new();
         msg.encode(&mut buf).unwrap();
         let (k, payload) = read_frame(&mut std::io::Cursor::new(&buf)).unwrap();
-        assert_eq!(
-            k,
-            kind::SPAWN_MANAGED_SSH,
-            "managed SSH must not use SPAWN_SHELL, because older daemons ignore unknown ShellSpec fields"
-        );
+        assert_eq!(k, kind::SPAWN_SHELL);
         let decoded = ClientMsg::from_frame(k, payload).unwrap();
         assert_eq!(
             decoded,

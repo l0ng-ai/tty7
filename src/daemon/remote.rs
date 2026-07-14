@@ -91,7 +91,6 @@ pub(crate) fn parse_ssh_invocation(argv: &[String]) -> Option<SshInvocation> {
             kind: RemoteKind::Ssh,
             argv: argv.to_vec(),
             target: target.clone(),
-            control_path: None,
         },
         forward_args,
     })

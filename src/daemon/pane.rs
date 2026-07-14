@@ -25,7 +25,7 @@
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Condvar, Mutex, Weak};
@@ -36,8 +36,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use crate::core::osc::OscTokenizer;
 use crate::daemon::protocol::{
-    AuthResponse, DaemonMsg, NativeSshSpec, PaneInfo, RemoteContext, RemoteKind, ShellSpec,
-    SshSpec, WinSize,
+    AuthResponse, DaemonMsg, NativeSshSpec, PaneInfo, RemoteContext, RemoteKind, ShellSpec, WinSize,
 };
 use crate::daemon::shell_integration;
 
@@ -140,46 +139,16 @@ struct SpawnConfig {
 }
 
 fn build_spawn_config(
-    id: u64,
     cwd: Option<PathBuf>,
     shell: Option<ShellSpec>,
 ) -> anyhow::Result<SpawnConfig> {
     let initial_cwd = initial_working_directory(cwd);
-    let Some(mut shell) = shell else {
-        let (cmd, integration_dir) = build_shell_command(None, &initial_cwd)?;
-        return Ok(SpawnConfig {
-            cmd,
-            initial_cwd,
-            integration_dir,
-            remote: None,
-        });
-    };
-    let Some(ssh) = shell.ssh.take() else {
-        let (cmd, integration_dir) = build_shell_command(Some(shell), &initial_cwd)?;
-        return Ok(SpawnConfig {
-            cmd,
-            initial_cwd,
-            integration_dir,
-            remote: None,
-        });
-    };
-
-    let control_path = ssh_control_path(id)?;
-    let _ = std::fs::remove_file(&control_path);
-    let cmd = build_managed_ssh_command(&shell.program, &ssh, &control_path, &initial_cwd)?;
-    let mut argv = vec![shell.program];
-    argv.extend(ssh.args.clone());
-    argv.push(ssh.target.clone());
+    let (cmd, integration_dir) = build_shell_command(shell, &initial_cwd)?;
     Ok(SpawnConfig {
         cmd,
         initial_cwd,
-        integration_dir: None,
-        remote: Some(RemoteContext {
-            kind: RemoteKind::Ssh,
-            argv,
-            target: ssh.target,
-            control_path: Some(control_path),
-        }),
+        integration_dir,
+        remote: None,
     })
 }
 
@@ -224,79 +193,6 @@ fn build_shell_command(
     let integration_dir = integration.as_ref().and_then(|i| i.dir.clone());
     apply_common_command_setup(&mut cmd, initial_cwd);
     Ok((cmd, integration_dir))
-}
-
-/// Build the shell-out `ssh` command for a compat-mode pane.
-///
-/// FROZEN (PRD §3.1): the system-ssh escape hatch. It sets up the ControlMaster
-/// socket that `daemon::forward` later drives for loopback forwarding. Only
-/// reached via `SPAWN_MANAGED_SSH` (the compat funnel); native panes never come
-/// through here. Kept working but not extended.
-fn build_managed_ssh_command(
-    program: &str,
-    ssh: &SshSpec,
-    control_path: &Path,
-    initial_cwd: &Option<PathBuf>,
-) -> anyhow::Result<CommandBuilder> {
-    ssh.validate().map_err(anyhow::Error::msg)?;
-    let name = Path::new(program)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow::anyhow!("ssh program is empty"))?;
-    if !matches!(name, "ssh" | "ssh.exe") {
-        anyhow::bail!("managed SSH tabs must launch ssh, not {program}");
-    }
-
-    let mut cmd = CommandBuilder::new(program);
-    cmd.args([
-        "-tt".to_string(),
-        "-o".to_string(),
-        "ControlMaster=yes".to_string(),
-        "-o".to_string(),
-        "ControlPersist=no".to_string(),
-        "-o".to_string(),
-        format!("ControlPath={}", control_path.display()),
-    ]);
-    cmd.args(&ssh.args);
-    cmd.args([ssh.target.clone()]);
-    apply_common_command_setup(&mut cmd, initial_cwd);
-    Ok(cmd)
-}
-
-fn ssh_control_path(id: u64) -> anyhow::Result<PathBuf> {
-    let dir = ssh_control_dir()?;
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir.join(format!("pane-{id}.sock")))
-}
-
-#[cfg(unix)]
-fn ssh_control_dir() -> anyhow::Result<PathBuf> {
-    use std::os::unix::ffi::OsStrExt as _;
-
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|d| !d.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let config_dir = crate::core::config::config_dir_path()
-        .ok_or_else(|| anyhow::anyhow!("could not resolve config dir for ssh control socket"))?;
-    let hash = fnv1a64(config_dir.as_os_str().as_bytes());
-    Ok(base.join(format!("tty7-ssh-{hash:016x}")))
-}
-
-#[cfg(not(unix))]
-fn ssh_control_dir() -> anyhow::Result<PathBuf> {
-    let config_dir = crate::core::config::config_dir_path()
-        .ok_or_else(|| anyhow::anyhow!("could not resolve config dir for ssh control socket"))?;
-    Ok(config_dir.join("ssh-control"))
-}
-
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x100_0000_01b3);
-    }
-    h
 }
 
 fn initial_working_directory(cwd: Option<PathBuf>) -> Option<PathBuf> {
@@ -613,7 +509,7 @@ impl DaemonPane {
         let pty_size = pty_size(size);
 
         let pair = native_pty_system().openpty(pty_size)?;
-        let spawn = build_spawn_config(id, cwd, shell)?;
+        let spawn = build_spawn_config(cwd, shell)?;
 
         let child = pair.slave.spawn_command(spawn.cmd)?;
         let shell_pid = child.process_id();
@@ -719,8 +615,7 @@ impl DaemonPane {
         let connection: crate::daemon::ssh::SharedConnection = Arc::new(Mutex::new(Weak::new()));
 
         // The remote context the GUI reads to label this as a native-SSH pane.
-        // `control_path` is `None` — forwarding/SFTP reach the connection through
-        // the in-memory registry, not a control socket.
+        // Forwarding/SFTP reach the connection through the in-memory registry.
         let target = spec
             .display_name
             .clone()
@@ -729,7 +624,6 @@ impl DaemonPane {
             kind: RemoteKind::NativeSsh,
             argv: Vec::new(),
             target,
-            control_path: None,
         };
 
         let state = Arc::new(Mutex::new(PaneState {
@@ -929,12 +823,15 @@ impl DaemonPane {
                             let remote = if std::time::Instant::now() >= next_remote_check {
                                 next_remote_check =
                                     std::time::Instant::now() + REMOTE_CONTEXT_POLL_INTERVAL;
+                                // A native-SSH pane already carries its own remote
+                                // context; process-table detection must not clobber
+                                // it (this pane *is* SSH). Only a plain PTY pane gets
+                                // foreground `ssh` detection.
                                 let managed = {
                                     let st = state.lock().unwrap();
                                     st.remote
                                         .as_ref()
-                                        .and_then(|remote| remote.control_path.as_ref())
-                                        .is_some()
+                                        .is_some_and(|remote| remote.kind == RemoteKind::NativeSsh)
                                 };
                                 (!managed).then(&foreground_remote)
                             } else {
@@ -1812,7 +1709,6 @@ mod tests {
         let over = ShellSpec {
             program: "fish".into(),
             args: vec!["-l".into()],
-            ssh: None,
         };
         let cfg = ("zsh".to_string(), vec!["-i".to_string()]);
 
@@ -1825,42 +1721,6 @@ mod tests {
         assert_eq!(choose_shell(None, Some(cfg.clone())), Some(cfg));
         // Neither → platform default.
         assert_eq!(choose_shell(None, None), None);
-    }
-
-    #[test]
-    fn managed_ssh_command_uses_control_master_without_persisting() {
-        let ssh = SshSpec {
-            target: "dev".into(),
-            args: vec!["-p".into(), "2222".into()],
-        };
-        let cmd = build_managed_ssh_command(
-            "ssh",
-            &ssh,
-            std::path::Path::new("/tmp/tty7-ssh.sock"),
-            &None,
-        )
-        .unwrap();
-        let argv: Vec<_> = cmd
-            .get_argv()
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(
-            argv,
-            vec![
-                "ssh",
-                "-tt",
-                "-o",
-                "ControlMaster=yes",
-                "-o",
-                "ControlPersist=no",
-                "-o",
-                "ControlPath=/tmp/tty7-ssh.sock",
-                "-p",
-                "2222",
-                "dev",
-            ]
-        );
     }
 
     #[test]

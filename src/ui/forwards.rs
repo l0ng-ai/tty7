@@ -295,17 +295,9 @@ impl Tty7App {
                     )
                     .child(h_flex().gap_2().child(refresh).child(close)),
             )
-            // Compat (shell-out) pane: managed L/R/D forwards, SFTP and GUI auth
-            // need the native engine, so note why they're absent here (FR-C5). The
-            // loopback one-click list below still works via ControlMaster.
-            .when(!is_native, |this| {
-                this.child(div().text_xs().text_color(muted_foreground).child(
-                    "System ssh compat mode — managed forwards, SFTP and GUI auth \
-                             unavailable. Loopback links still work.",
-                ))
-            })
-            // Managed L/R/D forwards come first for native panes; the loopback
-            // one-click list stays below and is shown for both pane kinds.
+            // Managed L/R/D forwards for native panes; the loopback one-click list
+            // below stays available regardless. A non-native pane (a foreground
+            // `ssh` typed in a shell) has no connection to add managed forwards on.
             .when(is_native, |this| {
                 this.child(self.render_managed_forwards_section(pane_id, cx))
             })
