@@ -2938,6 +2938,17 @@ impl Render for Tty7App {
         // connected native-SSH pane; a foreground `ssh` or a still-connecting
         // session shows only the top-left status strip, no action buttons.
         let active_ssh_pane = self.active_connected_native_ssh_pane(window, cx);
+        // The Cmd+F find bar pins to the same top-right slot as these action
+        // buttons and, being deep inside the pane tree, paints *under* them
+        // (gpui stacks by child order, and this overlay is a later sibling of
+        // `body`). Give the find bar that slot: while it's open on the focused
+        // pane, suppress the tunnel/SFTP icons so they don't bleed through.
+        let search_open = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.pane.focused_or_first(window, cx))
+            .map(|leaf| leaf.read(cx).search.is_some())
+            .unwrap_or(false);
         // Native-SSH status strip / reconnect notice for the focused pane (E1/E4).
         let ssh_status = self
             .tabs
@@ -2992,13 +3003,17 @@ impl Render for Tty7App {
             // the terminal area when the active pane is a connected native SSH
             // session (the tunnel button also drives the forwards panel).
             .when_some(active_ssh_pane, |this, (pane_id, remote)| {
-                this.child(self.render_loopback_forward_overlay(pane_id, &remote, cx))
-                    // Pane-contextual SFTP panel (WS5), docked right when open for
-                    // this (native-SSH) pane.
-                    .when_some(
-                        self.render_sftp_overlay(pane_id, &remote, window, cx),
-                        |this, panel| this.child(panel),
-                    )
+                // Hide the top-right tunnel/SFTP icons while the find bar owns
+                // that slot; the bottom-docked SFTP panel is unaffected.
+                this.when(!search_open, |this| {
+                    this.child(self.render_loopback_forward_overlay(pane_id, &remote, cx))
+                })
+                // Pane-contextual SFTP panel (WS5), docked right when open for
+                // this (native-SSH) pane.
+                .when_some(
+                    self.render_sftp_overlay(pane_id, &remote, window, cx),
+                    |this, panel| this.child(panel),
+                )
             })
             // In-pane native-SSH auth / host-key sheet (WS3), shown over the pane
             // that raised the prompt.
