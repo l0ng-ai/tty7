@@ -234,9 +234,6 @@ pub struct Tty7App {
     /// Cached `known_hosts` entries for the "SSH → Known hosts" settings section,
     /// refreshed from the daemon when that section is opened / after a delete.
     pub(crate) known_hosts: Vec<crate::daemon::protocol::KnownHostEntry>,
-    /// `Some` while the SSH profile editor page is open (a full-window overlay
-    /// like Settings; see `ui::profile_editor`).
-    pub(crate) profiles_editor: Option<crate::ui::profile_editor::ProfileEditorState>,
     /// In-pane "confirm close of a live SSH session" state (PRD FR-E3): the close
     /// action awaiting confirmation, or `None` when no prompt is up.
     pub(crate) ssh_close_confirm: Option<SshCloseKind>,
@@ -395,7 +392,6 @@ impl Tty7App {
             settings: None,
             ssh_prompt: crate::ui::ssh_prompt::SshPromptState::new(cx),
             known_hosts: Vec::new(),
-            profiles_editor: None,
             ssh_close_confirm: None,
         };
         // Discover this machine's shells for the "+" dropdown off the UI thread
@@ -2016,14 +2012,14 @@ impl Tty7App {
             OpenSshProfile(profile) => self.open_native_alias(profile.alias, window, cx),
             OpenSshConnect(input) => self.open_typed_ssh_connect(&input, window, cx),
             ConnectSavedProfile(id) => self.connect_ssh_profile(id, window, cx),
-            EditSavedProfile(id) => self.open_ssh_profiles_for(Some(id), None, window, cx),
+            EditSavedProfile(id) => self.open_ssh_profile_in_settings(id, window, cx),
             QuickConnect(target) => {
                 if let Some(qc) = crate::core::ssh_profile::parse_quick_connect(&target) {
                     self.quick_connect(qc, window, cx);
                 }
             }
-            SaveQuickConnect(target) => self.open_ssh_profiles_for(None, Some(target), window, cx),
-            OpenSshProfiles => self.open_ssh_profiles_for(None, None, window, cx),
+            SaveQuickConnect(target) => self.open_ssh_profile_new_from_target(target, window, cx),
+            OpenSshProfiles => self.open_settings_section(SettingsSection::Ssh, window, cx),
             // Handled inside `PaletteView` (opens a sub-list); these never emit a
             // `Confirm` for this variant, so they never reach here.
             OpenThemePicker | OpenSshConnectInput => {}
@@ -2087,6 +2083,7 @@ impl Tty7App {
             theme_search,
             recording: None,
             rebinding_note: None,
+            ssh_form: None,
             _subs: subs,
         });
         // Land the caret in the search box so Settings opens ready to type/filter
@@ -2296,6 +2293,64 @@ impl Tty7App {
             self.focus_active(window, cx);
             cx.notify();
         }
+    }
+
+    /// Open Settings focused on `section`, opening the overlay if it's closed.
+    /// Unlike `toggle_settings`, this never closes an already-open Settings — the
+    /// entry points that jump to a specific section (e.g. SSH profiles) use it.
+    pub(crate) fn open_settings_section(
+        &mut self,
+        section: SettingsSection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.is_none() {
+            self.toggle_settings(window, cx);
+        }
+        self.select_settings_section(section, cx);
+    }
+
+    /// Open Settings → SSH with `id`'s profile loaded into the inline edit form
+    /// (the ⌘⏎ / Edit affordance on a saved profile).
+    pub(crate) fn open_ssh_profile_in_settings(
+        &mut self,
+        id: uuid::Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_section(SettingsSection::Ssh, window, cx);
+        if let Some(profile) = cx
+            .global::<Config>()
+            .ssh_profiles
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+        {
+            self.ssh_form_load(&profile, window, cx);
+        }
+    }
+
+    /// Open Settings → SSH with a new profile seeded from a QuickConnect target
+    /// ("save as profile"), ready to edit and save.
+    pub(crate) fn open_ssh_profile_new_from_target(
+        &mut self,
+        target: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_section(SettingsSection::Ssh, window, cx);
+        let mut profile = crate::core::ssh_profile::SshProfile::new(String::new());
+        if let Some(qc) = crate::core::ssh_profile::parse_quick_connect(&target) {
+            profile.port = qc.port_or_default();
+            profile.host = qc.host;
+            if let Some(user) = qc.user {
+                profile.user = user;
+            }
+            if profile.name.is_empty() {
+                profile.name = profile.host.clone();
+            }
+        }
+        self.ssh_form_load(&profile, window, cx);
     }
 
     /// Apply the picked font family live to every terminal and persist it.
@@ -3050,17 +3105,6 @@ impl Render for Tty7App {
                 .child(self.render_settings(cx))
         });
 
-        // SSH profile editor — a second full-window overlay (PRD §6.2 ②),
-        // mounted the same way as Settings.
-        let profiles_overlay = self.profiles_editor.is_some().then(|| {
-            div()
-                .absolute()
-                .inset_0()
-                .occlude()
-                .bg(cx.theme().background)
-                .child(self.render_profile_editor(cx))
-        });
-
         div()
             .id("tty7-root")
             .size_full()
@@ -3189,7 +3233,7 @@ impl Render for Tty7App {
             // doesn't reach while focus is deep in the terminal view).
             .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
             .on_action(cx.listener(|this, _: &OpenSshProfiles, window, cx| {
-                this.open_ssh_profiles_for(None, None, window, cx)
+                this.open_settings_section(SettingsSection::Ssh, window, cx)
             }))
             .on_action(cx.listener(|this, _: &RestartSshSession, window, cx| {
                 this.restart_ssh_session(window, cx)
@@ -3197,8 +3241,6 @@ impl Render for Tty7App {
             .child(main_layout)
             // Settings overlay, above the tabs/terminal when open.
             .when_some(settings_overlay, |this, overlay| this.child(overlay))
-            // SSH profile editor overlay.
-            .when_some(profiles_overlay, |this, overlay| this.child(overlay))
             // Command palette overlay, layered above everything when open.
             .when_some(self.palette.clone(), |this, palette| this.child(palette))
     }

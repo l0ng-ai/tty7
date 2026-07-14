@@ -6,15 +6,15 @@
 //! window shell stays focused on tab/pane orchestration.
 
 use gpui::{
-    AnyElement, Context, Div, Entity, FontWeight, Image, ImageFormat, KeyDownEvent, MouseButton,
-    SharedString, Stateful, Subscription, Window, WindowControlArea, div, img, prelude::*, px,
-    relative, rgb,
+    AnyElement, App, Context, Div, Entity, FontWeight, Image, ImageFormat, KeyDownEvent,
+    MouseButton, SharedString, Stateful, Subscription, Window, WindowControlArea, div, img,
+    prelude::*, px, relative, rgb,
 };
 use gpui_component::InteractiveElementExt as _;
 use gpui_component::Selectable as _;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_component::color_picker::{ColorPicker, ColorPickerState};
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SearchableVec, Select, SelectState};
 use gpui_component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
 use gpui_component::slider::{Slider, SliderState};
@@ -24,8 +24,14 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use uuid::Uuid;
+
 use crate::core::config::{
     BellMode, Config, CursorStyle, NewTabPosition, NotifyMode, TabBarPosition,
+};
+use crate::core::keychain::CredentialRef;
+use crate::core::ssh_profile::{
+    Algorithms, AuthMode, ForwardKind, ForwardRule, HostPort, SshProfile, to_connect_string,
 };
 use crate::ui::app::{FONT_SIZE_STEP, LINE_HEIGHT_STEP, ThemeEdit, Tty7App};
 use crate::ui::presets;
@@ -322,7 +328,73 @@ pub(crate) struct SettingsState {
     /// captured key was already taken and its previous owner was unbound.
     /// Cleared when the next capture starts.
     pub(crate) rebinding_note: Option<String>,
+    /// The SSH-profile edit form, when a profile in the SSH section is being
+    /// added or edited. `None` shows just the saved-profile list. Its widgets
+    /// (inputs) are built lazily when a profile is selected and rebuilt (a fresh
+    /// input set) each time, so the section never carries N profiles' worth of
+    /// inputs up front. See `SshProfileForm`.
+    pub(crate) ssh_form: Option<SshProfileForm>,
     pub(crate) _subs: Vec<Subscription>,
+}
+
+/// The live edit-form state for one SSH profile, folded into Settings → SSH.
+/// A single reusable input set, rebuilt (via `Tty7App::ssh_form_load`) each time
+/// a profile is selected. Edits are committed to `Config::ssh_profiles` only on
+/// Save, so the form can be abandoned freely. Mirrors the four-core-fields +
+/// collapsible jump / forwards / advanced disclosure the old standalone editor
+/// exposed.
+pub(crate) struct SshProfileForm {
+    /// The profile id being edited. A *new* (unsaved) profile carries a freshly
+    /// minted id here and is only written to config on Save.
+    editing: Uuid,
+    /// The group / credential_ref carried over from the profile being edited, so
+    /// a Save round-trips fields the form doesn't expose.
+    carry_group: Option<String>,
+    carry_credential_ref: Option<CredentialRef>,
+
+    // Section expansion (progressive disclosure).
+    show_jump: bool,
+    show_forwards: bool,
+    show_advanced: bool,
+
+    // Core fields.
+    name: Entity<InputState>,
+    host: Entity<InputState>,
+    port: Entity<InputState>,
+    user: Entity<InputState>,
+    auth: AuthMode,
+
+    // Jump host (a profile name; empty = none).
+    jump: Entity<InputState>,
+
+    // Forwards, one rule per line: `L bind_host:bind_port target_host:target_port [desc]`.
+    forwards: Entity<InputState>,
+
+    // Advanced text inputs.
+    identity_files: Entity<InputState>,
+    proxy_command: Entity<InputState>,
+    socks: Entity<InputState>,
+    http: Entity<InputState>,
+    kex: Entity<InputState>,
+    cipher: Entity<InputState>,
+    mac: Entity<InputState>,
+    hostkey: Entity<InputState>,
+    compression: Entity<InputState>,
+    keepalive_interval: Entity<InputState>,
+    keepalive_count: Entity<InputState>,
+    connect_timeout: Entity<InputState>,
+    login_scripts: Entity<InputState>,
+
+    // Advanced booleans / tri-states.
+    agent_forward: bool,
+    x11: bool,
+    skip_banner: bool,
+    verify_host_keys: Option<bool>,
+    warn_on_close: Option<bool>,
+
+    /// Keeps the inputs' change subscriptions alive for this form; dropped (and
+    /// re-created) whenever the form is rebuilt for another profile.
+    _subs: Vec<Subscription>,
 }
 
 /// In-progress capture of a new shortcut for one action (click a Keybindings
@@ -356,6 +428,126 @@ pub(crate) fn humanize_action(action: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+// ── SSH-profile form parsing helpers (moved here from the standalone editor) ──
+
+/// Parse a `host:port` fragment into a [`HostPort`], or `None` when empty/blank.
+fn parse_host_port(s: &str) -> Option<HostPort> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    match s.rsplit_once(':') {
+        Some((h, p)) => Some(HostPort::new(h.trim(), p.trim().parse().unwrap_or(0))),
+        None => Some(HostPort::new(s, 0)),
+    }
+}
+
+/// Render a `HostPort` back to `host:port` for the form (empty string for `None`).
+fn host_port_text(hp: &Option<HostPort>) -> String {
+    hp.as_ref()
+        .map(|h| format!("{}:{}", h.host, h.port))
+        .unwrap_or_default()
+}
+
+/// Split a comma/whitespace list into non-empty items (algorithms, etc.).
+fn split_list(s: &str) -> Vec<String> {
+    s.split([',', ' ', '\n'])
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Split a multiline input into non-empty trimmed lines.
+fn split_lines(s: &str) -> Vec<String> {
+    s.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Parse the forwards text area (one rule per line) into [`ForwardRule`]s.
+/// Lines that don't parse are skipped rather than failing the whole save.
+fn parse_forwards(s: &str) -> Vec<ForwardRule> {
+    let mut out = Vec::new();
+    for line in s.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(4, char::is_whitespace);
+        let kind = match parts.next().map(|k| k.to_ascii_uppercase()) {
+            Some(k) if k == "L" || k == "LOCAL" => ForwardKind::Local,
+            Some(k) if k == "R" || k == "REMOTE" => ForwardKind::Remote,
+            Some(k) if k == "D" || k == "DYNAMIC" => ForwardKind::Dynamic,
+            _ => continue,
+        };
+        let Some(bind) = parts.next().and_then(parse_host_port) else {
+            continue;
+        };
+        // Dynamic ignores the target; Local/Remote need it.
+        let target = if kind == ForwardKind::Dynamic {
+            HostPort::default()
+        } else {
+            match parts.next().and_then(parse_host_port) {
+                Some(t) => t,
+                None => continue,
+            }
+        };
+        let description = parts.next().unwrap_or("").trim().to_string();
+        out.push(ForwardRule {
+            kind,
+            bind,
+            target,
+            description,
+        });
+    }
+    out
+}
+
+/// Render `ForwardRule`s back into the text-area format.
+fn forwards_text(rules: &[ForwardRule]) -> String {
+    rules
+        .iter()
+        .map(|r| {
+            let kind = match r.kind {
+                ForwardKind::Local => "L",
+                ForwardKind::Remote => "R",
+                ForwardKind::Dynamic => "D",
+            };
+            let bind = format!("{}:{}", r.bind.host, r.bind.port);
+            if r.kind == ForwardKind::Dynamic {
+                format!("{kind} {bind} {}", r.description)
+                    .trim()
+                    .to_string()
+            } else {
+                let target = format!("{}:{}", r.target.host, r.target.port);
+                format!("{kind} {bind} {target} {}", r.description)
+                    .trim()
+                    .to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Build an `InputState` seeded with `value` (single- or multi-line). A free
+/// function so `window` auto-reborrows cleanly at each call site.
+fn seed_input(
+    window: &mut Window,
+    cx: &mut Context<Tty7App>,
+    value: &str,
+    multi_line: bool,
+) -> Entity<InputState> {
+    let value = value.to_string();
+    cx.new(|cx| {
+        InputState::new(window, cx)
+            .multi_line(multi_line)
+            .default_value(value)
+    })
 }
 
 impl Tty7App {
@@ -1039,24 +1231,170 @@ impl Tty7App {
         self.settings_row(label, "", control, cx)
     }
 
-    /// SSH section: the global host-key verification default (a per-profile
-    /// override still wins where set) and a manager for the OpenSSH `known_hosts`
-    /// file — list trusted/revoked/CA entries and delete them (PRD FR-S3/S4).
+    /// SSH section: saved connection profiles (list + inline editor), the OpenSSH
+    /// `known_hosts` manager (PRD FR-S3/S4), and the security toggles (the global
+    /// host-key verification default and warn-on-close; a per-profile override
+    /// still wins where set). One scrollable page, Profiles → Known hosts →
+    /// Security, so profiles are managed here rather than as a parallel page.
     fn render_settings_ssh(&self, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .child(self.render_ssh_profiles_block(cx))
+            .child(self.section_rule(cx))
+            .child(self.render_ssh_known_hosts_block(cx))
+            .child(self.section_rule(cx))
+            .child(self.render_ssh_security_block(cx))
+            .into_any_element()
+    }
+
+    /// Profiles block: header + Import / Add controls, the saved-profile list, and
+    /// — when a profile is being added or edited — the inline edit form below it.
+    fn render_ssh_profiles_block(&self, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+        let profiles = cx.global::<Config>().ssh_profiles.clone();
+
+        let header = h_flex()
+            .items_center()
+            .justify_between()
+            .child(self.section_header("Profiles", cx))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("ssh-profiles-import")
+                            .label("Import from ~/.ssh/config")
+                            .outline()
+                            .small()
+                            .on_click(
+                                cx.listener(|this, _, _w, cx| this.import_ssh_config_profiles(cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("ssh-profiles-add")
+                            .label("Add")
+                            .primary()
+                            .small()
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.add_new_profile(window, cx)),
+                            ),
+                    ),
+            );
+
+        let editing_id = self
+            .active_settings()
+            .and_then(|s| s.ssh_form.as_ref())
+            .map(|f| f.editing);
+
+        let mut list = v_flex().gap_1().w_full();
+        if profiles.is_empty() {
+            list = list.child(
+                div()
+                    .py_4()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("No saved profiles yet. Add one, or import from ~/.ssh/config."),
+            );
+        }
+        for p in &profiles {
+            let id = p.id;
+            let subtitle = to_connect_string(p);
+            let title = if p.name.is_empty() {
+                subtitle.clone()
+            } else {
+                p.name.clone()
+            };
+            let selected = editing_id == Some(id);
+            list = list.child(
+                h_flex()
+                    .id(("ssh-profile-row", id.as_u128() as usize))
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .py_2()
+                    .px_2()
+                    .rounded_md()
+                    .border_b_1()
+                    .border_color(border)
+                    .when(selected, |r| r.bg(cx.theme().secondary.opacity(0.4)))
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(div().text_sm().child(title))
+                            .child(div().text_xs().text_color(muted).child(subtitle)),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new(("ssh-prof-connect", id.as_u128() as usize))
+                                    .label("Connect")
+                                    .primary()
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.close_settings(window, cx);
+                                        this.connect_ssh_profile(id, window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new(("ssh-prof-edit", id.as_u128() as usize))
+                                    .label("Edit")
+                                    .outline()
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if let Some(profile) = cx
+                                            .global::<Config>()
+                                            .ssh_profiles
+                                            .iter()
+                                            .find(|p| p.id == id)
+                                            .cloned()
+                                        {
+                                            this.ssh_form_load(&profile, window, cx);
+                                        }
+                                    })),
+                            )
+                            .child(
+                                Button::new(("ssh-prof-copy", id.as_u128() as usize))
+                                    .label("Copy")
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, _w, cx| {
+                                        this.copy_profile_connect_string(id, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(("ssh-prof-dup", id.as_u128() as usize))
+                                    .label("Duplicate")
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.duplicate_profile(id, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(("ssh-prof-del", id.as_u128() as usize))
+                                    .label("Delete")
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, _w, cx| {
+                                        this.delete_profile(id, cx)
+                                    })),
+                            ),
+                    ),
+            );
+        }
+
+        let mut block = v_flex().gap_2().child(header).child(list);
+        // The inline edit form, rendered below the list for the selected profile.
+        if self.active_settings().is_some_and(|s| s.ssh_form.is_some()) {
+            block = block.child(self.render_ssh_profile_form(cx));
+        }
+        block.into_any_element()
+    }
+
+    /// Known-hosts block (unchanged behaviour, moved below Profiles): the trusted /
+    /// revoked / CA entries in `~/.ssh/known_hosts`, each deletable to re-prompt.
+    fn render_ssh_known_hosts_block(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted_fg = cx.theme().muted_foreground;
-        let verify = cx.global::<Config>().verify_host_keys;
-
-        let verify_switch = Switch::new("ssh-verify-host-keys")
-            .checked(verify)
-            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_verify_host_keys(*on, cx)))
-            .into_any_element();
-
-        let warn_on_close = cx.global::<Config>().ssh_warn_on_close;
-        let warn_switch = Switch::new("ssh-warn-on-close")
-            .checked(warn_on_close)
-            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_ssh_warn_on_close(*on, cx)))
-            .into_any_element();
-
         let mut list = v_flex().gap_1().w_full();
         if self.known_hosts.is_empty() {
             list = list.child(
@@ -1102,23 +1440,6 @@ impl Tty7App {
         }
 
         v_flex()
-            .child(self.section_header("Host keys", cx))
-            .child(self.settings_row(
-                "Verify host keys",
-                "Check each server's key against known_hosts and confirm unknown or \
-                 changed keys. A profile can override this. Turning it off disables \
-                 host-key checking for the native SSH path.",
-                verify_switch,
-                cx,
-            ))
-            .child(self.settings_row(
-                "Warn before closing",
-                "Ask for confirmation before closing a tab or pane with a live SSH \
-                 session. A profile can override this.",
-                warn_switch,
-                cx,
-            ))
-            .child(self.section_rule(cx))
             .child(self.section_intro(
                 "Known hosts",
                 "Trusted, revoked, and certificate-authority entries in your \
@@ -1134,6 +1455,797 @@ impl Tty7App {
             )
             .child(list)
             .into_any_element()
+    }
+
+    /// Security block: the global host-key verification default and warn-on-close
+    /// toggle (both overridable per profile).
+    fn render_ssh_security_block(&self, cx: &mut Context<Self>) -> AnyElement {
+        let verify = cx.global::<Config>().verify_host_keys;
+        let verify_switch = Switch::new("ssh-verify-host-keys")
+            .checked(verify)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_verify_host_keys(*on, cx)))
+            .into_any_element();
+
+        let warn_on_close = cx.global::<Config>().ssh_warn_on_close;
+        let warn_switch = Switch::new("ssh-warn-on-close")
+            .checked(warn_on_close)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_ssh_warn_on_close(*on, cx)))
+            .into_any_element();
+
+        v_flex()
+            .child(self.section_header("Security", cx))
+            .child(self.settings_row(
+                "Verify host keys",
+                "Check each server's key against known_hosts and confirm unknown or \
+                 changed keys. A profile can override this. Turning it off disables \
+                 host-key checking for the native SSH path.",
+                verify_switch,
+                cx,
+            ))
+            .child(self.settings_row(
+                "Warn before closing",
+                "Ask for confirmation before closing a tab or pane with a live SSH \
+                 session. A profile can override this.",
+                warn_switch,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    // ── SSH profile edit form (folded into Settings → SSH) ───────────────────
+
+    /// The open SSH edit form, mutably (for section toggles / auth / switches).
+    fn ssh_form_mut(&mut self) -> Option<&mut SshProfileForm> {
+        self.active_settings_mut().and_then(|s| s.ssh_form.as_mut())
+    }
+
+    /// Build the edit-form inputs seeded from `profile` and open the form. A fresh
+    /// input set each call (the old set drops with the previous form), so the SSH
+    /// section never carries every profile's inputs at once.
+    pub(crate) fn ssh_form_load(
+        &mut self,
+        profile: &SshProfile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let jump_name = profile
+            .jump_host
+            .and_then(|id| {
+                cx.global::<Config>()
+                    .ssh_profiles
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.name.clone())
+            })
+            .unwrap_or_default();
+
+        let name = seed_input(window, cx, &profile.name, false);
+        let host = seed_input(window, cx, &profile.host, false);
+        let port = seed_input(window, cx, &profile.port.to_string(), false);
+        let user = seed_input(window, cx, &profile.user, false);
+        let jump = seed_input(window, cx, &jump_name, false);
+        let forwards = seed_input(window, cx, &forwards_text(&profile.forwards), true);
+        let identity_files = seed_input(window, cx, &profile.identity_files.join("\n"), true);
+        let proxy_command = seed_input(
+            window,
+            cx,
+            profile.proxy_command.as_deref().unwrap_or(""),
+            false,
+        );
+        let socks = seed_input(window, cx, &host_port_text(&profile.socks_proxy), false);
+        let http = seed_input(window, cx, &host_port_text(&profile.http_proxy), false);
+        let kex = seed_input(window, cx, &profile.algorithms.kex.join(", "), false);
+        let cipher = seed_input(window, cx, &profile.algorithms.cipher.join(", "), false);
+        let mac = seed_input(window, cx, &profile.algorithms.mac.join(", "), false);
+        let hostkey = seed_input(window, cx, &profile.algorithms.hostkey.join(", "), false);
+        let compression = seed_input(
+            window,
+            cx,
+            &profile.algorithms.compression.join(", "),
+            false,
+        );
+        let keepalive_interval = seed_input(
+            window,
+            cx,
+            &profile
+                .keepalive_interval_s
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+            false,
+        );
+        let keepalive_count = seed_input(
+            window,
+            cx,
+            &profile
+                .keepalive_count_max
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+            false,
+        );
+        let connect_timeout = seed_input(
+            window,
+            cx,
+            &profile
+                .connect_timeout_s
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+            false,
+        );
+        let login_scripts = seed_input(window, cx, &profile.login_scripts.join("\n"), true);
+
+        // The jump-host summary and the forwards count recompute live from these
+        // two inputs, so a keystroke in either re-renders the section.
+        let mut subs = Vec::new();
+        for input in [&jump, &forwards] {
+            subs.push(
+                cx.subscribe_in(input, window, |_this, _i, ev: &InputEvent, _w, cx| {
+                    if matches!(ev, InputEvent::Change) {
+                        cx.notify();
+                    }
+                }),
+            );
+        }
+
+        let form = SshProfileForm {
+            editing: profile.id,
+            carry_group: profile.group.clone(),
+            carry_credential_ref: profile.credential_ref.clone(),
+            show_jump: profile.jump_host.is_some(),
+            show_forwards: !profile.forwards.is_empty(),
+            show_advanced: false,
+            name,
+            host,
+            port,
+            user,
+            auth: profile.auth,
+            jump,
+            forwards,
+            identity_files,
+            proxy_command,
+            socks,
+            http,
+            kex,
+            cipher,
+            mac,
+            hostkey,
+            compression,
+            keepalive_interval,
+            keepalive_count,
+            connect_timeout,
+            login_scripts,
+            agent_forward: profile.agent_forward,
+            x11: profile.x11,
+            skip_banner: profile.skip_banner,
+            verify_host_keys: profile.verify_host_keys,
+            warn_on_close: profile.warn_on_close,
+            _subs: subs,
+        };
+        if let Some(s) = self.active_settings_mut() {
+            s.ssh_form = Some(form);
+        }
+        cx.notify();
+    }
+
+    /// Read the edit form back into an [`SshProfile`], preserving the id and the
+    /// carried-over group / credential_ref.
+    fn ssh_form_collect(&self, cx: &App) -> Option<SshProfile> {
+        let form = self.active_settings()?.ssh_form.as_ref()?;
+        let id = form.editing;
+        let val = |e: &Entity<InputState>| e.read(cx).value().trim().to_string();
+
+        let jump_name = val(&form.jump);
+        let jump_host = if jump_name.is_empty() {
+            None
+        } else {
+            cx.global::<Config>()
+                .ssh_profiles
+                .iter()
+                .find(|p| p.name == jump_name && p.id != id)
+                .map(|p| p.id)
+        };
+
+        Some(SshProfile {
+            id,
+            name: val(&form.name),
+            group: form.carry_group.clone(),
+            host: val(&form.host),
+            port: val(&form.port).parse().unwrap_or(22),
+            user: val(&form.user),
+            jump_host,
+            proxy_command: (!val(&form.proxy_command).is_empty()).then(|| val(&form.proxy_command)),
+            socks_proxy: parse_host_port(&val(&form.socks)),
+            http_proxy: parse_host_port(&val(&form.http)),
+            auth: form.auth,
+            identity_files: split_lines(&form.identity_files.read(cx).value()),
+            agent_forward: form.agent_forward,
+            credential_ref: form.carry_credential_ref.clone(),
+            forwards: parse_forwards(&form.forwards.read(cx).value()),
+            keepalive_interval_s: val(&form.keepalive_interval).parse().ok(),
+            keepalive_count_max: val(&form.keepalive_count).parse().ok(),
+            connect_timeout_s: val(&form.connect_timeout).parse().ok(),
+            warn_on_close: form.warn_on_close,
+            skip_banner: form.skip_banner,
+            login_scripts: split_lines(&form.login_scripts.read(cx).value()),
+            x11: form.x11,
+            algorithms: Algorithms {
+                kex: split_list(&form.kex.read(cx).value()),
+                cipher: split_list(&form.cipher.read(cx).value()),
+                mac: split_list(&form.mac.read(cx).value()),
+                hostkey: split_list(&form.hostkey.read(cx).value()),
+                compression: split_list(&form.compression.read(cx).value()),
+            },
+            verify_host_keys: form.verify_host_keys,
+        })
+    }
+
+    /// Save the edit form into `Config::ssh_profiles` (upsert by id).
+    pub(crate) fn save_editing_profile(&mut self, cx: &mut Context<Self>) -> Option<Uuid> {
+        let profile = self.ssh_form_collect(cx)?;
+        let id = profile.id;
+        self.update_config(cx, |cfg| {
+            if let Some(slot) = cfg.ssh_profiles.iter_mut().find(|p| p.id == id) {
+                *slot = profile;
+            } else {
+                cfg.ssh_profiles.push(profile);
+            }
+        });
+        Some(id)
+    }
+
+    /// Save the form and collapse it back to the list.
+    pub(crate) fn save_ssh_form(&mut self, cx: &mut Context<Self>) {
+        self.save_editing_profile(cx);
+        if let Some(s) = self.active_settings_mut() {
+            s.ssh_form = None;
+        }
+        cx.notify();
+    }
+
+    /// Collapse the form without saving (discard unsaved edits).
+    pub(crate) fn close_ssh_form(&mut self, cx: &mut Context<Self>) {
+        if let Some(s) = self.active_settings_mut() {
+            s.ssh_form = None;
+        }
+        cx.notify();
+    }
+
+    /// Save the current form, then close Settings and connect the saved profile.
+    pub(crate) fn save_and_connect_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.save_editing_profile(cx) {
+            self.close_settings(window, cx);
+            self.connect_ssh_profile(id, window, cx);
+        }
+    }
+
+    /// Add a fresh blank profile and open it in the edit form.
+    pub(crate) fn add_new_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let profile = SshProfile::new(String::new());
+        self.ssh_form_load(&profile, window, cx);
+    }
+
+    /// Duplicate a saved profile (new id, "… (copy)" name) and edit the copy.
+    pub(crate) fn duplicate_profile(
+        &mut self,
+        id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut profile) = cx
+            .global::<Config>()
+            .ssh_profiles
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        profile.id = Uuid::new_v4();
+        profile.name = format!("{} (copy)", profile.name);
+        self.update_config(cx, |cfg| cfg.ssh_profiles.push(profile.clone()));
+        self.ssh_form_load(&profile, window, cx);
+    }
+
+    /// Delete a saved profile and its frecency entry.
+    pub(crate) fn delete_profile(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| {
+            cfg.ssh_profiles.retain(|p| p.id != id);
+            cfg.ssh_profile_frecency.remove(&id);
+        });
+        let editing_deleted = self
+            .active_settings()
+            .and_then(|s| s.ssh_form.as_ref())
+            .map(|f| f.editing)
+            == Some(id);
+        if let Some(s) = self.active_settings_mut().filter(|_| editing_deleted) {
+            s.ssh_form = None;
+        }
+        cx.notify();
+    }
+
+    /// Import `~/.ssh/config` aliases as profiles (idempotent upsert by name).
+    pub(crate) fn import_ssh_config_profiles(&mut self, cx: &mut Context<Self>) {
+        let imported = crate::core::ssh_config::import_profiles();
+        if imported.is_empty() {
+            return;
+        }
+        self.update_config(cx, |cfg| {
+            crate::core::ssh_config::merge_imported(&mut cfg.ssh_profiles, imported);
+        });
+        cx.notify();
+    }
+
+    /// Copy a saved profile's `user@host:port` to the clipboard (FR-P5).
+    pub(crate) fn copy_profile_connect_string(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(profile) = cx
+            .global::<Config>()
+            .ssh_profiles
+            .iter()
+            .find(|p| p.id == id)
+        {
+            let s = to_connect_string(profile);
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(s));
+        }
+    }
+
+    /// The inline edit form: four core fields + collapsible jump / forwards /
+    /// advanced, rendered below the profile list for the selected profile.
+    fn render_ssh_profile_form(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(form) = self.active_settings().and_then(|s| s.ssh_form.as_ref()) else {
+            return div().into_any_element();
+        };
+        let border = cx.theme().border;
+        let is_new = !cx
+            .global::<Config>()
+            .ssh_profiles
+            .iter()
+            .any(|p| p.id == form.editing);
+        let title = if is_new {
+            "New profile"
+        } else {
+            "Edit profile"
+        };
+
+        let auth_idx = match form.auth {
+            AuthMode::Auto => 0,
+            AuthMode::Password => 1,
+            AuthMode::PublicKey => 2,
+            AuthMode::Agent => 3,
+            AuthMode::KeyboardInteractive => 4,
+        };
+        let header = h_flex()
+            .items_center()
+            .justify_between()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("ssh-form-back")
+                            .label("‹ Back")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _, _w, cx| this.close_ssh_form(cx))),
+                    )
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title)),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("ssh-form-connect")
+                            .label("Connect")
+                            .outline()
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.save_and_connect_profile(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("ssh-form-save")
+                            .label("Save")
+                            .primary()
+                            .small()
+                            .on_click(cx.listener(|this, _, _w, cx| this.save_ssh_form(cx))),
+                    ),
+            );
+
+        let core = v_flex()
+            .gap_3()
+            .child(self.settings_row(
+                "Name",
+                "A label for this connection.",
+                Input::new(&form.name).small().into_any_element(),
+                cx,
+            ))
+            .child(
+                self.settings_row(
+                    "Host",
+                    "Hostname or IP address.",
+                    h_flex()
+                        .gap_2()
+                        .child(Input::new(&form.host).small())
+                        .child(div().w(px(80.)).child(Input::new(&form.port).small()))
+                        .into_any_element(),
+                    cx,
+                ),
+            )
+            .child(self.settings_row(
+                "User",
+                "Login user (blank = resolve at connect).",
+                Input::new(&form.user).small().into_any_element(),
+                cx,
+            ))
+            .child(self.settings_row(
+                "Auth",
+                "Authentication method. Auto tries every applicable method.",
+                self.segmented(
+                    "ssh-form-auth",
+                    &["Auto", "Password", "Key", "Agent", "2FA"],
+                    auth_idx,
+                    cx,
+                    |this, ix, _w, cx| {
+                        if let Some(f) = this.ssh_form_mut() {
+                            f.auth = match ix {
+                                0 => AuthMode::Auto,
+                                1 => AuthMode::Password,
+                                2 => AuthMode::PublicKey,
+                                3 => AuthMode::Agent,
+                                _ => AuthMode::KeyboardInteractive,
+                            };
+                            cx.notify();
+                        }
+                    },
+                ),
+                cx,
+            ));
+
+        v_flex()
+            .mt_2()
+            .pt_4()
+            .gap_4()
+            .border_t_1()
+            .border_color(border)
+            .child(header)
+            .child(core)
+            .child(self.render_ssh_profile_jump_section(form, cx))
+            .child(self.render_ssh_profile_forwards_section(form, cx))
+            .child(self.render_ssh_profile_advanced_section(form, cx))
+            .into_any_element()
+    }
+
+    /// A collapsible section header (▸/▾ label + summary), toggling `open`.
+    fn disclosure_header(
+        &self,
+        id: &'static str,
+        label: &str,
+        summary: &str,
+        open: bool,
+        cx: &mut Context<Self>,
+        on_toggle: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let caret = if open { "▾" } else { "▸" };
+        h_flex()
+            .id(id)
+            .items_center()
+            .gap_2()
+            .py_2()
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _w, cx| on_toggle(this, cx)),
+            )
+            .child(div().text_color(muted).child(caret.to_string()))
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(label.to_string()),
+            )
+            .child(div().text_xs().text_color(muted).child(summary.to_string()))
+            .into_any_element()
+    }
+
+    fn render_ssh_profile_jump_section(
+        &self,
+        form: &SshProfileForm,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let summary = {
+            let name = form.jump.read(cx).value().trim().to_string();
+            if name.is_empty() {
+                "(none)".to_string()
+            } else {
+                name
+            }
+        };
+        let mut section = v_flex().child(self.disclosure_header(
+            "ssh-sec-jump",
+            "Jump host",
+            &summary,
+            form.show_jump,
+            cx,
+            |this, cx| {
+                if let Some(f) = this.ssh_form_mut() {
+                    f.show_jump = !f.show_jump;
+                    cx.notify();
+                }
+            },
+        ));
+        if form.show_jump {
+            section = section.child(self.settings_row(
+                "Jump host",
+                "Name of another profile to tunnel through (blank = direct).",
+                Input::new(&form.jump).small().into_any_element(),
+                cx,
+            ));
+        }
+        section.into_any_element()
+    }
+
+    fn render_ssh_profile_forwards_section(
+        &self,
+        form: &SshProfileForm,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let count = parse_forwards(&form.forwards.read(cx).value()).len();
+        let mut section = v_flex().child(self.disclosure_header(
+            "ssh-sec-fwd",
+            "Port forwards",
+            &format!("({count})"),
+            form.show_forwards,
+            cx,
+            |this, cx| {
+                if let Some(f) = this.ssh_form_mut() {
+                    f.show_forwards = !f.show_forwards;
+                    cx.notify();
+                }
+            },
+        ));
+        if form.show_forwards {
+            section = section
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(
+                            "One rule per line: L|R|D bind_host:port target_host:port [description]. Dynamic (D) omits the target.",
+                        ),
+                )
+                .child(div().w_full().child(Input::new(&form.forwards).small()));
+        }
+        section.into_any_element()
+    }
+
+    fn render_ssh_profile_advanced_section(
+        &self,
+        form: &SshProfileForm,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut section = v_flex().child(self.disclosure_header(
+            "ssh-sec-adv",
+            "Advanced",
+            "algorithms / keepalive / proxies / X11 / login scripts",
+            form.show_advanced,
+            cx,
+            |this, cx| {
+                if let Some(f) = this.ssh_form_mut() {
+                    f.show_advanced = !f.show_advanced;
+                    cx.notify();
+                }
+            },
+        ));
+        if !form.show_advanced {
+            return section.into_any_element();
+        }
+
+        let text_row = |this: &Self,
+                        label: &str,
+                        desc: &str,
+                        input: &Entity<InputState>,
+                        cx: &mut Context<Self>| {
+            this.settings_row(
+                label.to_string(),
+                desc.to_string(),
+                Input::new(input).small().into_any_element(),
+                cx,
+            )
+        };
+
+        // Verify host keys / warn-on-close tri-states (Default / On / Off).
+        let vhk_idx = match form.verify_host_keys {
+            None => 0,
+            Some(true) => 1,
+            Some(false) => 2,
+        };
+        let woc_idx = match form.warn_on_close {
+            None => 0,
+            Some(true) => 1,
+            Some(false) => 2,
+        };
+
+        section = section
+            .child(text_row(
+                self,
+                "Identity files",
+                "Private-key paths, one per line (%h/%r expand).",
+                &form.identity_files,
+                cx,
+            ))
+            .child(
+                self.settings_row(
+                    "Agent forwarding",
+                    "Forward the local ssh-agent to the session.",
+                    Switch::new("ssh-form-agent")
+                        .checked(form.agent_forward)
+                        .on_click(cx.listener(|this, on: &bool, _w, cx| {
+                            if let Some(f) = this.ssh_form_mut() {
+                                f.agent_forward = *on;
+                                cx.notify();
+                            }
+                        }))
+                        .into_any_element(),
+                    cx,
+                ),
+            )
+            .child(text_row(
+                self,
+                "ProxyCommand",
+                "Transport command (%h/%p/%r substituted).",
+                &form.proxy_command,
+                cx,
+            ))
+            .child(text_row(
+                self,
+                "SOCKS5 proxy",
+                "host:port (blank = none).",
+                &form.socks,
+                cx,
+            ))
+            .child(text_row(
+                self,
+                "HTTP proxy",
+                "host:port (blank = none).",
+                &form.http,
+                cx,
+            ))
+            .child(text_row(
+                self,
+                "KEX algorithms",
+                "Comma-separated (blank = library default).",
+                &form.kex,
+                cx,
+            ))
+            .child(text_row(
+                self,
+                "Ciphers",
+                "Comma-separated (blank = default).",
+                &form.cipher,
+                cx,
+            ))
+            .child(text_row(
+                self,
+                "MACs",
+                "Comma-separated (blank = default).",
+                &form.mac,
+                cx,
+            ))
+            .child(text_row(
+                self,
+                "Host-key algorithms",
+                "Comma-separated (blank = default).",
+                &form.hostkey,
+                cx,
+            ))
+            .child(text_row(
+                self,
+                "Compression",
+                "Comma-separated (blank = default).",
+                &form.compression,
+                cx,
+            ))
+            .child(text_row(
+                self,
+                "Keepalive interval (s)",
+                "Blank = library default.",
+                &form.keepalive_interval,
+                cx,
+            ))
+            .child(text_row(
+                self,
+                "Keepalive count max",
+                "Missed keepalives before dead.",
+                &form.keepalive_count,
+                cx,
+            ))
+            .child(text_row(
+                self,
+                "Connect timeout (s)",
+                "Blank = library default.",
+                &form.connect_timeout,
+                cx,
+            ))
+            .child(
+                self.settings_row(
+                    "X11 forwarding",
+                    "Request X11 forwarding (needs XQuartz on macOS).",
+                    Switch::new("ssh-form-x11")
+                        .checked(form.x11)
+                        .on_click(cx.listener(|this, on: &bool, _w, cx| {
+                            if let Some(f) = this.ssh_form_mut() {
+                                f.x11 = *on;
+                                cx.notify();
+                            }
+                        }))
+                        .into_any_element(),
+                    cx,
+                ),
+            )
+            .child(text_row(
+                self,
+                "Login scripts",
+                "Commands sent after the shell opens, one per line.",
+                &form.login_scripts,
+                cx,
+            ))
+            .child(
+                self.settings_row(
+                    "Skip banner",
+                    "Suppress the server login banner.",
+                    Switch::new("ssh-form-banner")
+                        .checked(form.skip_banner)
+                        .on_click(cx.listener(|this, on: &bool, _w, cx| {
+                            if let Some(f) = this.ssh_form_mut() {
+                                f.skip_banner = *on;
+                                cx.notify();
+                            }
+                        }))
+                        .into_any_element(),
+                    cx,
+                ),
+            )
+            .child(self.settings_row(
+                "Verify host keys",
+                "Override the global known_hosts check for this profile.",
+                self.segmented(
+                    "ssh-form-vhk",
+                    &["Default", "On", "Off"],
+                    vhk_idx,
+                    cx,
+                    |this, ix, _w, cx| {
+                        if let Some(f) = this.ssh_form_mut() {
+                            f.verify_host_keys = match ix {
+                                1 => Some(true),
+                                2 => Some(false),
+                                _ => None,
+                            };
+                            cx.notify();
+                        }
+                    },
+                ),
+                cx,
+            ))
+            .child(self.settings_row(
+                "Warn on close",
+                "Override the global confirm-before-closing for this profile.",
+                self.segmented(
+                    "ssh-form-woc",
+                    &["Default", "On", "Off"],
+                    woc_idx,
+                    cx,
+                    |this, ix, _w, cx| {
+                        if let Some(f) = this.ssh_form_mut() {
+                            f.warn_on_close = match ix {
+                                1 => Some(true),
+                                2 => Some(false),
+                                _ => None,
+                            };
+                            cx.notify();
+                        }
+                    },
+                ),
+                cx,
+            ));
+        section.into_any_element()
     }
 
     /// Shell section: the program tty7 launches in each new terminal, plus its
@@ -2282,5 +3394,50 @@ mod tests {
             "Toggle Maximize Pane"
         );
         assert_eq!(humanize_action("Quit"), "Quit");
+    }
+
+    #[test]
+    fn forwards_round_trip_through_text() {
+        let rules = vec![
+            ForwardRule {
+                kind: ForwardKind::Local,
+                bind: HostPort::new("127.0.0.1", 8080),
+                target: HostPort::new("10.0.0.1", 80),
+                description: "web".to_string(),
+            },
+            ForwardRule {
+                kind: ForwardKind::Dynamic,
+                bind: HostPort::new("127.0.0.1", 1080),
+                target: HostPort::default(),
+                description: String::new(),
+            },
+        ];
+        let text = forwards_text(&rules);
+        let parsed = parse_forwards(&text);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].kind, ForwardKind::Local);
+        assert_eq!(parsed[0].bind.port, 8080);
+        assert_eq!(parsed[0].target.host, "10.0.0.1");
+        assert_eq!(parsed[0].description, "web");
+        assert_eq!(parsed[1].kind, ForwardKind::Dynamic);
+        assert_eq!(parsed[1].bind.port, 1080);
+    }
+
+    #[test]
+    fn parse_forwards_skips_malformed_lines() {
+        // Bad kind, and a Local rule missing its target — both skipped.
+        let parsed = parse_forwards("X 1:2 3:4\nL 127.0.0.1:9000\nR 0.0.0.0:80 10.0.0.2:8080");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].kind, ForwardKind::Remote);
+    }
+
+    #[test]
+    fn parse_host_port_handles_blank_and_ports() {
+        assert!(parse_host_port("  ").is_none());
+        let hp = parse_host_port("example.com:2222").unwrap();
+        assert_eq!(hp.host, "example.com");
+        assert_eq!(hp.port, 2222);
+        // No colon → host only, port 0.
+        assert_eq!(parse_host_port("host").unwrap().port, 0);
     }
 }
