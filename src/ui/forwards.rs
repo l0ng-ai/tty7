@@ -30,6 +30,14 @@ impl Tty7App {
         let view = leaf.read(cx);
         let phase = view.ssh_phase()?;
         let disconnected = view.ssh_disconnected();
+        // Once connected, the tab status dot already carries the connection state and
+        // the top-right tunnel/SFTP icons signal "this is an SSH pane" — an in-pane
+        // chip here would just float over the shell output. Only surface the strip
+        // while still connecting (blank pane, no overlap) or after a drop (the
+        // actionable reconnect notice).
+        if matches!(phase, SshPhase::Connected) && !disconnected {
+            return None;
+        }
         let host = view
             .terminal
             .ssh_endpoint()
