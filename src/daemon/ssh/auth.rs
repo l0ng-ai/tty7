@@ -233,11 +233,42 @@ async fn try_identity_file(
 }
 
 async fn try_agent(handle: &mut Handle<ClientHandler>, spec: &NativeSshSpec) -> Outcome {
-    let mut agent = match AgentClient::connect_env().await {
-        Ok(a) => a,
-        // No agent available (SSH_AUTH_SOCK unset / unreachable): just skip.
-        Err(_) => return Outcome::Skipped,
-    };
+    // Agent transport is per-platform: a Unix-domain socket named by
+    // SSH_AUTH_SOCK, or Windows OpenSSH's named pipe. The identity loop below
+    // is shared via `try_agent_identities`, generic over the stream.
+    #[cfg(unix)]
+    {
+        let agent = match AgentClient::connect_env().await {
+            Ok(a) => a,
+            // No agent available (SSH_AUTH_SOCK unset / unreachable): just skip.
+            Err(_) => return Outcome::Skipped,
+        };
+        try_agent_identities(handle, spec, agent).await
+    }
+    #[cfg(windows)]
+    {
+        // Windows OpenSSH's agent listens on a fixed named pipe; honor
+        // SSH_AUTH_SOCK as an override for nonstandard setups. (A Cygwin/MSYS
+        // socket *file* in that variable simply fails to open → skip.)
+        let pipe = std::env::var("SSH_AUTH_SOCK")
+            .unwrap_or_else(|_| r"\\.\pipe\openssh-ssh-agent".to_string());
+        let agent = match AgentClient::connect_named_pipe(&pipe).await {
+            Ok(a) => a,
+            // No agent available: just skip.
+            Err(_) => return Outcome::Skipped,
+        };
+        try_agent_identities(handle, spec, agent).await
+    }
+}
+
+async fn try_agent_identities<S>(
+    handle: &mut Handle<ClientHandler>,
+    spec: &NativeSshSpec,
+    mut agent: AgentClient<S>,
+) -> Outcome
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
     let identities = match agent.request_identities().await {
         Ok(ids) => ids,
         Err(_) => return Outcome::Skipped,
