@@ -9,9 +9,11 @@
 //! (`sftp_list` / `sftp_op` / `sftp_transfer_*`).
 //!
 //! Layout: a breadcrumb path bar, a filter box, a toolbar (up / refresh / new
-//! folder / upload / go-to-shell-cwd), a dir-first entry list with per-row actions
-//! (download / rename / delete / chmod), an inline edit form, and a bottom
-//! transfer tray that polls job progress while the panel is open.
+//! folder / upload / go-to-shell-cwd), a dir-first entry list whose per-row
+//! actions (open/download / follow-symlink / rename / chmod / delete) live in a
+//! right-click context menu (PRD §6.3: hotkeys + right-click, not a permanent
+//! toolbar), an inline edit form, and a bottom transfer tray that polls job
+//! progress while the panel is open.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -22,6 +24,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
+use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
 };
@@ -811,7 +814,14 @@ impl Tty7App {
         container.child(list)
     }
 
-    fn render_sftp_row(&self, entry: &SftpEntry, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// One entry row: icon + name (+ a `→` marker for symlinks) + a muted
+    /// size/mode column. Per-row actions (open/download, follow, rename, chmod,
+    /// delete) live in the right-click context menu built by
+    /// [`sftp_row_context_menu`](Self::sftp_row_context_menu) rather than as a
+    /// row of inline buttons (PRD §6.3: hotkeys + right-click, not a permanent
+    /// toolbar). Left-click / double-click on the name still opens a directory or
+    /// downloads a file — the primary interaction is unchanged.
+    fn render_sftp_row(&self, entry: &SftpEntry, cx: &mut Context<Self>) -> AnyElement {
         let foreground = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
         let accent = cx.theme().accent;
@@ -837,10 +847,10 @@ impl Tty7App {
         let row_id = SharedString::from(format!("sftp-row-{}", entry.name));
 
         let open_entry = entry.clone();
-        let del_entry = entry.clone();
-        let rename_name = entry.name.clone();
-        let chmod_entry = entry.clone();
-        let follow_entry = entry.clone();
+        let menu_entry = entry.clone();
+        // Weak app handle so the context-menu item handlers (which get `&mut App`,
+        // not `Context<Self>`) can call back into `Tty7App`.
+        let app = cx.entity().downgrade();
 
         let name_id = SharedString::from(format!("sftp-name-{}", entry.name));
         h_flex()
@@ -884,58 +894,83 @@ impl Tty7App {
                         )
                     }),
             )
-            .child(
-                h_flex()
-                    .gap_0p5()
-                    .when(is_symlink, |row| {
-                        row.child(
-                            Button::new(SharedString::from(format!("sftp-fl-{}", entry.name)))
-                                .label("Follow")
-                                .xsmall()
-                                .ghost()
-                                .on_click(cx.listener(move |this, _, _w, cx| {
-                                    this.sftp_follow_symlink(follow_entry.clone(), cx)
-                                })),
-                        )
-                    })
-                    .child(
-                        Button::new(SharedString::from(format!("sftp-dl-{}", entry.name)))
-                            .label("↓")
-                            .xsmall()
-                            .ghost()
-                            .on_click(cx.listener({
-                                let e = entry.clone();
-                                move |this, _, _w, cx| this.sftp_download_entry(e.clone(), cx)
-                            })),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("sftp-rn-{}", entry.name)))
-                            .label("Rename")
-                            .xsmall()
-                            .ghost()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.sftp_begin_rename(rename_name.clone(), window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("sftp-cm-{}", entry.name)))
-                            .label("chmod")
-                            .xsmall()
-                            .ghost()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.sftp_begin_chmod(chmod_entry.clone(), window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("sftp-del-{}", entry.name)))
-                            .label("Delete")
-                            .xsmall()
-                            .ghost()
-                            .on_click(cx.listener(move |this, _, _w, cx| {
-                                this.sftp_delete_entry(del_entry.clone(), cx)
-                            })),
-                    ),
-            )
+            .context_menu(move |menu, _window, cx| {
+                let danger = cx.theme().danger;
+                Self::sftp_row_context_menu(menu, &menu_entry, dir_like, is_symlink, danger, &app)
+            })
+            .into_any_element()
+    }
+
+    /// Build the per-row right-click menu: the primary open/download action
+    /// first, an optional follow-symlink, rename, chmod, and finally the
+    /// destructive delete (separated). Each item drives the same `Tty7App`
+    /// handler the old inline buttons did, via the weak `app` handle.
+    fn sftp_row_context_menu(
+        menu: gpui_component::menu::PopupMenu,
+        entry: &SftpEntry,
+        dir_like: bool,
+        is_symlink: bool,
+        danger: gpui::Hsla,
+        app: &gpui::WeakEntity<Self>,
+    ) -> gpui_component::menu::PopupMenu {
+        let mut menu = menu.min_w(px(180.));
+
+        // Primary action, first: open a directory or download a file. Reuses
+        // `sftp_open_entry`, which dispatches on the entry kind.
+        let primary_label = if dir_like { "Open" } else { "Download" };
+        menu = menu.item(PopupMenuItem::new(primary_label).on_click({
+            let app = app.clone();
+            let entry = entry.clone();
+            move |_, _window, cx| {
+                let entry = entry.clone();
+                let _ = app.update(cx, |this, cx| this.sftp_open_entry(entry, cx));
+            }
+        }));
+
+        // Follow symlink — only for symlinks.
+        if is_symlink {
+            menu = menu.item(PopupMenuItem::new("Follow symlink").on_click({
+                let app = app.clone();
+                let entry = entry.clone();
+                move |_, _window, cx| {
+                    let entry = entry.clone();
+                    let _ = app.update(cx, |this, cx| this.sftp_follow_symlink(entry, cx));
+                }
+            }));
+        }
+
+        menu = menu
+            .item(PopupMenuItem::new("Rename").on_click({
+                let app = app.clone();
+                let name = entry.name.clone();
+                move |_, window, cx| {
+                    let name = name.clone();
+                    let _ = app.update(cx, |this, cx| this.sftp_begin_rename(name, window, cx));
+                }
+            }))
+            .item(PopupMenuItem::new("chmod…").on_click({
+                let app = app.clone();
+                let entry = entry.clone();
+                move |_, window, cx| {
+                    let entry = entry.clone();
+                    let _ = app.update(cx, |this, cx| this.sftp_begin_chmod(entry, window, cx));
+                }
+            }))
+            .separator();
+
+        // Destructive, rendered last in danger red and set apart by the
+        // separator above.
+        menu.item(
+            PopupMenuItem::element(move |_window, _cx| div().text_color(danger).child("Delete"))
+                .on_click({
+                    let app = app.clone();
+                    let entry = entry.clone();
+                    move |_, _window, cx| {
+                        let entry = entry.clone();
+                        let _ = app.update(cx, |this, cx| this.sftp_delete_entry(entry, cx));
+                    }
+                }),
+        )
     }
 
     /// The bottom transfer tray, if there are any jobs to show.
