@@ -726,10 +726,15 @@ impl Tty7App {
         // bypasses the shared padded, single-scroll wrapper (which would otherwise
         // give the whole section one outer scrollbar and no definite height for the
         // columns to fill) and is dropped in flush instead.
+        // A `flex_1` pane still defaults to `min-width: auto`, so on a narrow
+        // window it refuses to shrink below its content's intrinsic width and
+        // shoves the fixed 300px theme panel (and its close `×`) off the right
+        // edge. `min_w_0` lets the pane yield so the panel stays fully on-screen.
         let content_pane = if section == SettingsSection::Ssh {
             v_flex()
                 .id("settings-content")
                 .flex_1()
+                .min_w_0()
                 .h_full()
                 .bg(background)
                 .child(content)
@@ -737,6 +742,7 @@ impl Tty7App {
             v_flex()
                 .id("settings-content")
                 .flex_1()
+                .min_w_0()
                 .h_full()
                 .bg(background)
                 .overflow_y_scroll()
