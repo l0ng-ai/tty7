@@ -324,6 +324,11 @@ pub struct TerminalView {
     /// double-click selected, so the drag can grow the selection by whole words
     /// (keeping the anchor word intact). `None` for a plain char-granular drag.
     editor_drag_word: Option<(usize, usize)>,
+    /// Sticky target column for vertical caret motion (↑/↓ across a multi-line
+    /// buffer). Set on the first vertical step from the caret's current visual
+    /// column and preserved across a run of ↑/↓ so passing through a short line
+    /// doesn't lose the column; any other motion or edit clears it (`None`).
+    editor_goal_col: Option<usize>,
     /// The URL currently under the mouse (an OSC 8 hyperlink or a bare URL found
     /// in the row text), if any. Drives the hover underline and the pointing-hand
     /// cursor that mark a link as clickable. Stored in scroll-stable grid
@@ -914,6 +919,7 @@ impl TerminalView {
             editor_selecting: false,
             editor_select_gesture: false,
             editor_drag_word: None,
+            editor_goal_col: None,
             hovered_link: None,
             _focus_subs: focus_subs,
         }
@@ -1372,6 +1378,11 @@ impl TerminalView {
         let m = &ks.modifiers;
         let key = ks.key.as_str();
         self.cursor_visible = true;
+        // Any key other than a vertical step drops the sticky goal column, so the
+        // next ↑/↓ takes its column from wherever the caret ends up.
+        if key != "up" && key != "down" {
+            self.editor_goal_col = None;
+        }
 
         // A reverse search, when active, owns the keyboard.
         if self.reverse_search.is_some() {
@@ -1521,6 +1532,14 @@ impl TerminalView {
 
         match key {
             "enter" => {
+                // Shift+Enter / Opt+Enter inserts a newline to author (or extend)
+                // a multi-line command; a plain Enter submits the whole buffer.
+                if (m.shift || m.alt) && !m.control && !m.platform {
+                    self.cmd.insert_str("\n");
+                    self.history_nav = None;
+                    cx.notify();
+                    return;
+                }
                 self.submit_command(cx);
                 return;
             }
@@ -1574,11 +1593,23 @@ impl TerminalView {
             "home" => self.editor_move_edge(false, m.shift),
             "end" => self.editor_move_edge(true, m.shift),
             "up" => {
-                self.history_prev(cx);
+                // Within a multi-line buffer ↑ moves up a visual row; from the
+                // top row it recalls the previous history entry.
+                if self.editor_move_v(false, m.shift) {
+                    cx.notify();
+                } else {
+                    self.history_prev(cx);
+                }
                 return;
             }
             "down" => {
-                self.history_next(cx);
+                // The mirror of ↑: down a visual row, or newer history from the
+                // bottom row.
+                if self.editor_move_v(true, m.shift) {
+                    cx.notify();
+                } else {
+                    self.history_next(cx);
+                }
                 return;
             }
             "escape" => {
@@ -1736,6 +1767,79 @@ impl TerminalView {
         }
     }
 
+    /// Vertical caret motion across a multi-line / wrapped input buffer (↑/↓),
+    /// with a sticky goal column so passing through a short line keeps the
+    /// target column. Returns `true` if the caret moved within the buffer;
+    /// `false` means it was already on the top row (↑) or bottom row (↓), so the
+    /// caller falls through to history recall — matching how fish/zsh edit a
+    /// multi-line line. Shift extends the selection.
+    fn editor_move_v(&mut self, down: bool, shift: bool) -> bool {
+        let Some((_, scol)) = self.cursor_cell() else {
+            return false;
+        };
+        let cols = self.terminal.term.lock().columns().max(1);
+        let chars: Vec<char> = self.cmd.text().chars().collect();
+        let len = chars.len();
+        let (positions, _r, _c) = input_char_positions(&chars, scol, cols);
+        // The caret renders on the cell of the char it sits before, or on a
+        // trailing slot at the buffer end (a fresh row when the buffer ends in a
+        // newline).
+        let end_caret = if len == 0 {
+            (0usize, scol)
+        } else {
+            let (r, c, w) = positions[len - 1];
+            if chars[len - 1] == '\n' {
+                (r + 1, 0)
+            } else {
+                (r, c + w)
+            }
+        };
+        let (cur_row, cur_col) = if self.cmd.cursor() < len {
+            let (r, c, _) = positions[self.cmd.cursor()];
+            (r, c)
+        } else {
+            end_caret
+        };
+        let mut max_row = positions.iter().map(|&(r, _, _)| r).max().unwrap_or(0);
+        if chars.last() == Some(&'\n') {
+            max_row += 1;
+        }
+        // On the boundary row in the travel direction, defer to history recall.
+        if (down && cur_row >= max_row) || (!down && cur_row == 0) {
+            self.editor_goal_col = None;
+            return false;
+        }
+        let target = if down { cur_row + 1 } else { cur_row - 1 };
+        let goal = *self.editor_goal_col.get_or_insert(cur_col);
+        // Land on the caret slot of the target row nearest the goal column. Char
+        // `i`'s slot is the caret *before* it; the buffer-end slot is `len`.
+        let mut best: Option<(usize, usize)> = None; // (index, |col - goal|)
+        for (i, &(r, c, _)) in positions.iter().enumerate() {
+            if r == target {
+                let dist = c.abs_diff(goal);
+                if best.is_none_or(|(_, bd)| dist < bd) {
+                    best = Some((i, dist));
+                }
+            }
+        }
+        if end_caret.0 == target {
+            let dist = end_caret.1.abs_diff(goal);
+            if best.is_none_or(|(_, bd)| dist < bd) {
+                best = Some((len, dist));
+            }
+        }
+        let Some((idx, _)) = best else {
+            return false;
+        };
+        if shift {
+            self.cmd.begin_selection();
+        } else {
+            self.cmd.clear_selection();
+        }
+        self.cmd.set_cursor(idx);
+        true
+    }
+
     fn has_selection(&self) -> bool {
         self.terminal.term.lock().selection.is_some()
     }
@@ -1811,6 +1915,7 @@ impl TerminalView {
             let trimmed = text.strip_suffix('\n').unwrap_or(&text);
             self.cmd.insert_str(trimmed);
             self.history_nav = None;
+            self.editor_goal_col = None;
             self.close_completion();
             self.cursor_visible = true;
             cx.notify();
@@ -2290,6 +2395,7 @@ impl TerminalView {
             }
         }
         self.editor_select_gesture = true;
+        self.editor_goal_col = None;
         self.close_completion();
         self.cursor_visible = true;
         cx.notify();
@@ -2499,7 +2605,10 @@ impl TerminalView {
         // "ls" strays + "pwd\r" runs `lspwd`. Wipe first: FIFO puts the ^U
         // ahead of the line bytes.
         self.wipe_pending_typeahead();
-        let mut bytes = line.into_bytes();
+        // Replay each embedded newline as an Enter so the shell's own line editor
+        // assembles the multi-line command — backslash / open-quote continuation
+        // with its PS2 prompts — exactly as if it had been typed line by line.
+        let mut bytes = line.replace('\n', "\r").into_bytes();
         bytes.push(b'\r');
         self.terminal.write(bytes);
         self.cmd.clear();
@@ -3009,6 +3118,7 @@ impl TerminalView {
             // re-filters to the extended word (and closes once nothing matches).
             self.cmd.insert_str(text);
             self.history_nav = None;
+            self.editor_goal_col = None;
             self.completion_refilter();
             self.cursor_visible = true;
             cx.notify();
@@ -3584,35 +3694,68 @@ impl TerminalView {
             d.into_any_element()
         };
 
-        // Leading spacer the width of the shell prompt: the first input row begins
-        // right after the prompt, while wrapped rows start at the grid's left edge
-        // — matching how a real terminal wraps a long command line.
-        let mut children: Vec<gpui::AnyElement> = vec![
-            div()
-                .flex_none()
-                .w(cell_w * (ccol as f32))
-                .h(lh)
-                .into_any_element(),
-        ];
+        // A blank cell of the given width and the line height — used for the
+        // leading prompt spacer and for a selected/caret slot standing in for a
+        // hard line break.
+        let blank = move |w: gpui::Pixels| div().flex_none().w(w).h(lh);
+
+        // The buffer's logical lines, each rendered as its own `flex_wrap` row and
+        // stacked in a column, so an embedded `'\n'` (from a pasted multi-line
+        // command, or Shift/Opt+Enter) shows as a real line break instead of
+        // flowing into one wrapped blob. Within a line, soft-wrapping is left to
+        // `flex_wrap` exactly as before. `lines` grows a fresh row on each `'\n'`.
+        let mut lines: Vec<Vec<gpui::AnyElement>> = vec![vec![
+            // Leading spacer the width of the shell prompt: the first line begins
+            // right after the prompt; continuation lines start at the grid's left
+            // edge, matching how the shell lays a multi-line command out.
+            blank(cell_w * (ccol as f32)).into_any_element(),
+        ]];
+
+        // Ghost suggestion only makes sense for a single-line command (it completes
+        // the whole history entry); suppress it once the buffer holds a newline.
+        let is_multiline = chars.contains(&'\n');
 
         for i in 0..len {
             // IME pre-edit shows underlined at the caret; the bar caret is hidden
             // while composing.
             if i == cursor && has_marked {
                 for mc in marked.chars() {
-                    children.push(cell(fg, mc, false, false, true));
+                    lines.last_mut().unwrap().push(cell(fg, mc, false, false, true));
                 }
+            }
+            if chars[i] == '\n' {
+                // The newline is a hard break, not a glyph. If the caret sits on it
+                // (end of this visual line) draw a trailing caret slot before the
+                // break so it stays visible; if the newline falls inside a selection
+                // draw a thin selected slot so a multi-line selection reads across
+                // the break. Then start the next row.
+                if selection.is_none() && !has_marked && cursor_on && cursor == i {
+                    lines
+                        .last_mut()
+                        .unwrap()
+                        .push(blank(cell_w).relative().child(caret_bar()).into_any_element());
+                } else if selection.is_some_and(|(s, e)| i >= s && i < e) {
+                    lines
+                        .last_mut()
+                        .unwrap()
+                        .push(blank(cell_w).bg(sel_bg).into_any_element());
+                }
+                lines.push(Vec::new());
+                continue;
             }
             let selected = selection.is_some_and(|(s, e)| i >= s && i < e);
             let caret = selection.is_none() && !has_marked && cursor_on && cursor == i;
-            children.push(cell(colors[i], chars[i], selected, caret, false));
+            lines
+                .last_mut()
+                .unwrap()
+                .push(cell(colors[i], chars[i], selected, caret, false));
         }
 
         // Ghost autosuggestion remainder (only when caret is at the end, no
-        // selection / IME), computed up front so the end-of-line caret can ride on
-        // the first ghost cell instead of needing its own (which would push the
-        // ghost a full cell to the right).
-        let ghost: Option<String> = if selection.is_none() && !has_marked {
+        // selection / IME / newline), computed up front so the end-of-line caret can
+        // ride on the first ghost cell instead of needing its own (which would push
+        // the ghost a full cell to the right).
+        let ghost: Option<String> = if selection.is_none() && !has_marked && !is_multiline {
             self.ghost_suggestion()
                 .map(|full| full.chars().skip(len).collect::<String>())
                 .filter(|r| !r.is_empty())
@@ -3620,30 +3763,43 @@ impl TerminalView {
             None
         };
 
-        // Caret / pre-edit at end of line.
+        // Caret / pre-edit at the end of the buffer — lands on the last row (a
+        // fresh empty row when the buffer ends in a newline).
         if cursor == len {
+            let last = lines.last_mut().unwrap();
             if has_marked {
                 for mc in marked.chars() {
-                    children.push(cell(fg, mc, false, false, true));
+                    last.push(cell(fg, mc, false, false, true));
                 }
             } else if ghost.is_none() {
                 // No ghost following: a trailing cell carries the caret (and is the
                 // click target for "end of line").
-                let mut tail = div().relative().flex_none().w(cell_w).h(lh);
+                let mut tail = blank(cell_w).relative();
                 if selection.is_none() && cursor_on {
                     tail = tail.child(caret_bar());
                 }
-                children.push(tail.into_any_element());
+                last.push(tail.into_any_element());
             }
             // else: the caret rides on the first ghost cell below.
         }
 
         if let Some(rem) = ghost {
+            let last = lines.last_mut().unwrap();
             for (gi, gc) in rem.chars().enumerate() {
                 let caret = gi == 0 && cursor == len && cursor_on;
-                children.push(cell(muted, gc, false, caret, false));
+                last.push(cell(muted, gc, false, caret, false));
             }
         }
+
+        let rows = lines.into_iter().map(move |cells| {
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .w_full()
+                .min_h(lh)
+                .children(cells)
+        });
 
         div()
             .absolute()
@@ -3652,15 +3808,14 @@ impl TerminalView {
             .right_4()
             .min_h(lh)
             .flex()
-            .flex_wrap()
-            .items_center()
+            .flex_col()
             // Transparent: the text overlays the grid in place, reading as a
             // natural continuation of the shell prompt rather than a separate bar.
             .font_family(self.font.family.clone())
             .text_size(self.font_size)
             .line_height(lh)
             .text_color(fg)
-            .children(children)
+            .children(rows)
     }
 
     /// The floating completion menu, shown below the word while a completion is
@@ -4552,6 +4707,38 @@ fn menu_layout(
 /// first char snaps to that char; past a row's content snaps to the next row's
 /// first char (or the line end). Rows beyond the input return `len` with
 /// `clamp` (for drags) and `None` without (so the click isn't an editor click).
+/// Visual `(row, start-col, width)` of every char in the wrapped input line,
+/// matching `render_input_bar`'s layout: char 0 starts at column `scol` (right
+/// after the prompt), a `'\n'` is a hard break to column 0 of the next row (and
+/// occupies no cell — width 0), and within a line a char that would overflow
+/// wraps whole to column 0 of the next row. Also returns the pen `(row, col)`
+/// after the last char, so callers can place the trailing end-of-line caret.
+fn input_char_positions(
+    chars: &[char],
+    scol: usize,
+    cols: usize,
+) -> (Vec<(usize, usize, usize)>, usize, usize) {
+    let mut positions: Vec<(usize, usize, usize)> = Vec::with_capacity(chars.len());
+    let mut r = 0usize;
+    let mut c = scol;
+    for &ch in chars {
+        if ch == '\n' {
+            positions.push((r, c, 0));
+            r += 1;
+            c = 0;
+            continue;
+        }
+        let w = display_width(ch).max(1);
+        if c + w > cols {
+            r += 1;
+            c = 0;
+        }
+        positions.push((r, c, w));
+        c += w;
+    }
+    (positions, r, c)
+}
+
 fn wrapped_click_index(
     chars: &[char],
     scol: usize,
@@ -4561,19 +4748,9 @@ fn wrapped_click_index(
     clamp: bool,
 ) -> Option<usize> {
     let len = chars.len();
-    // `positions[i]` is the (row, start-col, width) of char `i`.
-    let mut positions: Vec<(usize, usize, usize)> = Vec::with_capacity(len);
-    let mut r = 0usize;
-    let mut c = scol;
-    for &ch in chars {
-        let w = display_width(ch).max(1);
-        if c + w > cols {
-            r += 1;
-            c = 0;
-        }
-        positions.push((r, c, w));
-        c += w;
-    }
+    // `positions[i]` is the (row, start-col, width) of char `i`; `r`/`c` are the
+    // pen position after the last char.
+    let (positions, r, c) = input_char_positions(chars, scol, cols);
     // The renderer appends a one-cell end-of-line caret slot after the last
     // char; when the content exactly fills its row, that slot wraps to the next
     // row (where the caret is visibly drawn), so clicks there must still count
@@ -4594,7 +4771,16 @@ fn wrapped_click_index(
             return Some(fi);
         }
     }
-    // Past the row's content → start of the next row, or end of line.
+    // Past the row's content. If the row ends at a hard line break, snap to that
+    // newline — the end of this logical line — rather than jumping onto the next
+    // line. (A soft-wrapped row has no newline, so it continues below.)
+    if let Some(last) = positions.iter().rposition(|&(pr, _, _)| pr == target) {
+        if chars[last] == '\n' {
+            return Some(last);
+        }
+    }
+    // Otherwise the line soft-wraps: snap to the first char of the next visual
+    // row, or the buffer end.
     match positions.iter().position(|&(pr, _, _)| pr > target) {
         Some(ni) => Some(ni),
         None => Some(len),
@@ -5133,6 +5319,25 @@ mod tests {
         // Two rows down is still past the input.
         let chars: Vec<char> = "abcdef".chars().collect();
         assert_eq!(wrapped_click_index(&chars, 4, 10, 0, 2, false), None);
+    }
+
+    #[test]
+    fn wrapped_click_index_treats_newlines_as_hard_breaks() {
+        // "a\nbc" after a 4-col prompt lays out as row 0 = "a" (col 4) and
+        // row 1 = "bc" (cols 0..2). Indices: 0='a', 1='\n', 2='b', 3='c'.
+        assert_eq!(click("a\nbc", 4, 80, 4, 0), Some(0)); // 'a'
+        assert_eq!(click("a\nbc", 4, 80, 0, 1), Some(2)); // 'b' on the next line
+        assert_eq!(click("a\nbc", 4, 80, 1, 1), Some(3)); // 'c'
+        // Clicking past the end of the first line snaps to the newline (the end
+        // of that logical line), not onto the second line.
+        assert_eq!(click("a\nbc", 4, 80, 40, 0), Some(1));
+        // Past the last line's content → buffer end.
+        assert_eq!(click("a\nbc", 4, 80, 40, 1), Some(4));
+        // A blank line in the middle ("a\n\nb") is its own row; clicking it lands
+        // on that empty line rather than falling through to "b".
+        // Indices: 0='a', 1='\n', 2='\n', 3='b'. Row 1 holds the second newline.
+        assert_eq!(click("a\n\nb", 4, 80, 3, 1), Some(2));
+        assert_eq!(click("a\n\nb", 4, 80, 0, 2), Some(3)); // 'b' on row 2
     }
 
     #[test]
