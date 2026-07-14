@@ -181,7 +181,7 @@ impl Theme {
 }
 
 /// Blend `a` toward `b` by `t` (0.0 = all `a`, 1.0 = all `b`), per channel.
-fn mix(a: u32, b: u32, t: f32) -> u32 {
+pub(crate) fn mix(a: u32, b: u32, t: f32) -> u32 {
     let (ar, ag, ab) = (a >> 16 & 0xff, a >> 8 & 0xff, a & 0xff);
     let (br, bg, bb) = (b >> 16 & 0xff, b >> 8 & 0xff, b & 0xff);
     let ch = |x: u32, y: u32| (x as f32 + (y as f32 - x as f32) * t).round() as u32;

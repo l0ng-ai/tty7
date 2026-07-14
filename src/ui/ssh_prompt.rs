@@ -21,8 +21,9 @@ use gpui::{
     Subscription, Window, div, prelude::*, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use crate::core::keychain::{CredentialStore as _, OsCredentialStore};
 use crate::daemon::protocol::{AuthPromptKind, AuthResponse, SshPhase};
@@ -668,9 +669,9 @@ impl Tty7App {
             .occlude()
             .track_focus(&self.ssh_prompt.focus_handle)
             .key_context("SshPrompt")
-            .w(px(460.))
-            .gap_2()
-            .p_3()
+            .w(px(420.))
+            .gap_3()
+            .p_4()
             .bg(cx.theme().popover)
             .border_1()
             .rounded_lg()
@@ -835,16 +836,16 @@ impl Tty7App {
     }
 
     fn render_ssh_remember(&self, cx: &mut Context<Self>) -> AnyElement {
-        Button::new("ssh-remember")
-            .label(if self.ssh_prompt.remember {
-                "☑ Remember (keychain)"
-            } else {
-                "☐ Remember (keychain)"
-            })
-            .small()
-            .ghost()
-            .selected(self.ssh_prompt.remember)
-            .on_click(cx.listener(|this, _, _w, cx| this.toggle_ssh_remember(cx)))
+        // A real checkbox, left-aligned in its own row. The old ghost Button
+        // stretched to the card's full width, so its selected-state fill read as
+        // a full-width grey bar rather than a checkbox.
+        h_flex()
+            .child(
+                Checkbox::new("ssh-remember")
+                    .label("Remember (keychain)")
+                    .checked(self.ssh_prompt.remember)
+                    .on_click(cx.listener(|this, _, _w, cx| this.toggle_ssh_remember(cx))),
+            )
             .into_any_element()
     }
 

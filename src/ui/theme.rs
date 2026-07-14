@@ -136,6 +136,28 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     t.tokens.accent = Hsla::from(accent_fill).into();
     t.tokens.accent_foreground = accent_text.into();
 
+    // Primary buttons (Connect, Reconnect, Trust, Save…) fill from
+    // `tokens.button_primary`; the raw default is the foreground — a pure
+    // near-black in a light theme, which reads harsh. Nudge it toward the
+    // background so it lands on a softer dark charcoal (and, symmetrically, a
+    // slightly dimmed near-white in dark themes). We set the whole primary token
+    // family (both the plain `primary*` fields — used for the border and outline
+    // text — and the `button_primary*` tokens the fill actually reads) so every
+    // primary button shifts together, hover/pressed included. The stock
+    // `button_primary_foreground` stays legible on top either way.
+    let primary_base: Hsla = rgb(presets::mix(m.foreground, m.background, 0.20)).into();
+    let primary_hover: Hsla = rgb(presets::mix(m.foreground, m.background, 0.30)).into();
+    let primary_active: Hsla = rgb(presets::mix(m.foreground, m.background, 0.10)).into();
+    t.primary = primary_base;
+    t.primary_hover = primary_hover;
+    t.primary_active = primary_active;
+    t.tokens.primary = primary_base.into();
+    t.tokens.primary_hover = primary_hover.into();
+    t.tokens.primary_active = primary_active.into();
+    t.tokens.button_primary = primary_base.into();
+    t.tokens.button_primary_hover = primary_hover.into();
+    t.tokens.button_primary_active = primary_active.into();
+
     t.caret = rgb(m.caret).into();
     t.selection = rgb(m.selection).into(); // text selection highlight
 

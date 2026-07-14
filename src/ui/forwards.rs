@@ -10,31 +10,24 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 
-use crate::daemon::protocol::{
-    ForwardStatus, ManagedForward, RemoteContext, SshForwardKind, SshPhase,
-};
+use crate::daemon::protocol::{ForwardStatus, ManagedForward, RemoteContext, SshForwardKind};
 use crate::terminal::view::TerminalView;
 use crate::ui::app::Tty7App;
 
 impl Tty7App {
-    /// The in-pane native-SSH status strip (PRD FR-E1): a subtle ` SSH ` chip
-    /// coloured by the connection phase, with the hostname, pinned top-left of the
-    /// terminal body. A dead pane also shows the "connection lost — ⌘⇧R to
-    /// reconnect" notice (FR-E4). Returns `None` for a non-native pane.
+    /// The in-pane native-SSH notice (PRD FR-E4): a dead pane shows a
+    /// bottom-centered "Disconnected — ⌘⇧R to reconnect" bar. Live/connecting
+    /// panes show nothing here — the tab status dot already carries the phase and
+    /// the daemon prints connect progress/failures into the buffer. Returns
+    /// `None` for a non-native or still-alive pane.
     pub(crate) fn render_ssh_status_strip(
         &self,
         leaf: &Entity<TerminalView>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let view = leaf.read(cx);
-        let phase = view.ssh_phase()?;
-        let disconnected = view.ssh_disconnected();
-        // Once connected, the tab status dot already carries the connection state and
-        // the top-right tunnel/SFTP icons signal "this is an SSH pane" — an in-pane
-        // chip here would just float over the shell output. Only surface the strip
-        // while still connecting (blank pane, no overlap) or after a drop (the
-        // actionable reconnect notice).
-        if matches!(phase, SshPhase::Connected) && !disconnected {
+        view.ssh_phase()?;
+        if !view.ssh_disconnected() {
             return None;
         }
         let host = view
@@ -45,69 +38,54 @@ impl Tty7App {
             .unwrap_or_default();
 
         let theme = cx.theme();
-        // Phase → accent. Connecting/authenticating are cautionary (yellow),
-        // connected reads calm (accent), failed/disconnected are red.
-        let (color, label) = if disconnected {
-            (theme.danger, "SSH ✕")
-        } else {
-            match &phase {
-                SshPhase::Connecting => (theme.warning, "SSH …"),
-                SshPhase::Authenticating => (theme.warning, "SSH ⚿"),
-                SshPhase::Connected => (theme.accent, "SSH"),
-                SshPhase::Failed { .. } => (theme.danger, "SSH ✕"),
-            }
-        };
 
-        let chip = h_flex()
+        // The failure reason is already printed into the terminal buffer
+        // (top-left, in red) by the daemon, so a top-left overlay would sit right
+        // on top of it. Dock the (actionable) reconnect notice at the
+        // bottom-center — clear of the output, a familiar "connection lost,
+        // reconnect" spot.
+        let bar = h_flex()
+            .occlude()
             .items_center()
-            .gap_1p5()
-            .px_2()
-            .py_0p5()
-            .rounded_md()
-            .bg(color.opacity(0.15))
+            .gap_2()
+            .px_3()
+            .py_1p5()
+            .rounded_lg()
+            .bg(theme.popover)
             .border_1()
-            .border_color(color.opacity(0.5))
+            .border_color(theme.danger.opacity(0.4))
+            .shadow_md()
             .text_xs()
-            .text_color(color)
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(label))
-            .when(!host.is_empty(), |d| {
-                d.child(div().text_color(theme.muted_foreground).child(host))
-            });
-
-        let mut col = div().flex().flex_col().items_start().gap_1().child(chip);
-
-        if disconnected {
-            col = col.child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .bg(theme.danger.opacity(0.12))
-                    .border_1()
-                    .border_color(theme.danger.opacity(0.4))
-                    .text_xs()
+            .text_color(theme.muted_foreground)
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.foreground)
-                    .child("Connection lost — press ⌘⇧R to reconnect")
-                    .child(
-                        Button::new("ssh-reconnect")
-                            .label("Reconnect")
-                            .primary()
-                            .small()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.restart_ssh_session(window, cx)
-                            })),
+                    .child(if host.is_empty() {
+                        "Disconnected".to_string()
+                    } else {
+                        format!("Disconnected from {host}")
+                    }),
+            )
+            .child(div().child("· ⌘⇧R"))
+            .child(
+                Button::new("ssh-reconnect")
+                    .label("Reconnect")
+                    .primary()
+                    .small()
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.restart_ssh_session(window, cx)),
                     ),
             );
-        }
-
         Some(
             div()
                 .absolute()
-                .top_2()
-                .left_4()
-                .child(col)
+                .left_0()
+                .right_0()
+                .bottom_4()
+                .flex()
+                .justify_center()
+                .child(bar)
                 .into_any_element(),
         )
     }
