@@ -268,8 +268,10 @@ impl Tty7App {
         let foreground = cx.theme().foreground;
         let muted_foreground = cx.theme().muted_foreground;
         let close = Button::new(("ssh-forward-panel-close", pane_id))
-            .label("Close")
+            .icon(IconName::Close)
+            .ghost()
             .small()
+            .tooltip("Close")
             .on_click(cx.listener(|this, _, _w, cx| this.close_loopback_forward_panel(cx)));
 
         v_flex()
@@ -356,6 +358,7 @@ impl Tty7App {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let kind = self.loopback_panel.mf_kind;
+        let editing = self.loopback_panel.mf_editing.is_some();
         let selected = match kind {
             SshForwardKind::Local => 0,
             SshForwardKind::Remote => 1,
@@ -423,15 +426,29 @@ impl Tty7App {
                     .child(target_port),
             )
             .child(
-                h_flex().items_center().gap_2().child(description).child(
-                    Button::new(("ssh-managed-forward-add", pane_id))
-                        .label("Add")
-                        .small()
-                        .primary()
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.add_managed_forward(pane_id, window, cx)
-                        })),
-                ),
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(description)
+                    .when(editing, |row| {
+                        row.child(
+                            Button::new(("ssh-managed-forward-cancel", pane_id))
+                                .label("Cancel")
+                                .small()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.cancel_managed_forward_edit(window, cx)
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::new(("ssh-managed-forward-add", pane_id))
+                            .label(if editing { "Save" } else { "Add" })
+                            .small()
+                            .primary()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.add_managed_forward(pane_id, window, cx)
+                            })),
+                    ),
             )
     }
 
@@ -454,6 +471,7 @@ impl Tty7App {
         };
         let pane_id = forward.pane_id;
         let forward_id = forward.id;
+        let forward_for_edit = forward.clone();
 
         h_flex()
             .items_center()
@@ -493,6 +511,14 @@ impl Tty7App {
                         )
                     })
                     .child(div().text_xs().text_color(status_color).child(status_text)),
+            )
+            .child(
+                Button::new(("ssh-managed-forward-edit", forward_id as usize))
+                    .label("Edit")
+                    .small()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.edit_managed_forward(forward_for_edit.clone(), window, cx)
+                    })),
             )
             .child(
                 Button::new(("ssh-managed-forward-del", forward_id as usize))

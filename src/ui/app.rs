@@ -126,6 +126,9 @@ pub(crate) struct LoopbackForwardPanelState {
     pub(crate) mf_target_host: Entity<InputState>,
     pub(crate) mf_target_port: Entity<InputState>,
     pub(crate) mf_description: Entity<InputState>,
+    /// When editing an existing forward, the id being edited — the form shows
+    /// Save/Cancel and re-establishes the forward on save. `None` = adding.
+    pub(crate) mf_editing: Option<u64>,
 }
 
 pub struct Tty7App {
@@ -363,6 +366,7 @@ impl Tty7App {
                 mf_target_host,
                 mf_target_port,
                 mf_description,
+                mf_editing: None,
             },
             sftp_panel,
             sidebar_width: Rc::new(Cell::new(sidebar_width)),
@@ -968,6 +972,11 @@ impl Tty7App {
             target_port,
             description: (!description.is_empty()).then_some(description),
         };
+        // Editing an existing forward = re-establish it: drop the old one first so
+        // its listener frees the (possibly reused) bind port before the new one binds.
+        if let Some(old_id) = self.loopback_panel.mf_editing.take() {
+            let _ = crate::terminal::RemoteTerminal::remove_forward(pane_id, old_id);
+        }
         self.loopback_panel.managed = crate::terminal::RemoteTerminal::add_forward(pane_id, rule);
         // Reset the value-carrying fields; keep bind host default.
         for input in [
@@ -978,6 +987,64 @@ impl Tty7App {
         ] {
             input.update(cx, |input, cx| input.set_value("", window, cx));
         }
+        cx.notify();
+    }
+
+    /// Load an existing forward's values into the add form for editing
+    /// (VSCode-style: change the port/target, Save re-establishes it).
+    pub(crate) fn edit_managed_forward(
+        &mut self,
+        forward: crate::daemon::protocol::ManagedForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.loopback_panel.mf_kind = forward.kind;
+        self.loopback_panel.mf_editing = Some(forward.id);
+        let target_port = if forward.target_port == 0 {
+            String::new()
+        } else {
+            forward.target_port.to_string()
+        };
+        let fields: [(&Entity<InputState>, String); 5] = [
+            (&self.loopback_panel.mf_bind_host, forward.bind_host.clone()),
+            (
+                &self.loopback_panel.mf_bind_port,
+                forward.bind_port.to_string(),
+            ),
+            (
+                &self.loopback_panel.mf_target_host,
+                forward.target_host.clone(),
+            ),
+            (&self.loopback_panel.mf_target_port, target_port),
+            (
+                &self.loopback_panel.mf_description,
+                forward.description.clone().unwrap_or_default(),
+            ),
+        ];
+        for (input, value) in fields {
+            input.update(cx, |input, cx| input.set_value(&value, window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Leave edit mode without saving; clear the form back to the add defaults.
+    pub(crate) fn cancel_managed_forward_edit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.loopback_panel.mf_editing = None;
+        for input in [
+            &self.loopback_panel.mf_bind_port,
+            &self.loopback_panel.mf_target_host,
+            &self.loopback_panel.mf_target_port,
+            &self.loopback_panel.mf_description,
+        ] {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        self.loopback_panel
+            .mf_bind_host
+            .update(cx, |input, cx| input.set_value("127.0.0.1", window, cx));
         cx.notify();
     }
 
