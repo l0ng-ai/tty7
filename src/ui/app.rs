@@ -18,9 +18,7 @@ use crate::core::config::{Config, NewTabPosition, ShellConfig, TabBarPosition};
 use crate::core::session::{Session, SessionAxis, SessionPane, SessionTab};
 use crate::core::shells::DetectedShell;
 use crate::core::ssh_config;
-use crate::daemon::protocol::{
-    LoopbackForwardId, LoopbackForwardInfo, RemoteContext, ShellSpec, ssh_option_takes_value,
-};
+use crate::daemon::protocol::{RemoteContext, ShellSpec, ssh_option_takes_value};
 use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::palette::{Command, CommandKind, PaletteEvent, PaletteView};
 use crate::ui::pane::{CloseOutcome, Dir, Pane};
@@ -118,11 +116,8 @@ pub(crate) struct Renaming {
 
 pub(crate) struct LoopbackForwardPanelState {
     pub(crate) open_pane_id: Option<u64>,
-    pub(crate) forwards: Vec<LoopbackForwardInfo>,
-    pub(crate) host_input: Entity<InputState>,
-    pub(crate) port_input: Entity<InputState>,
-    pub(crate) editing: Option<LoopbackForwardId>,
-    /// Managed forwards (Local/Remote/Dynamic) for the open native-SSH pane (WS4).
+    /// The unified forwards list (Local/Remote/Dynamic, including auto localhost
+    /// forwards) for the open native-SSH pane (WS4).
     pub(crate) managed: Vec<crate::daemon::protocol::ManagedForward>,
     /// Add-forward form state (native-SSH panes only).
     pub(crate) mf_kind: crate::daemon::protocol::SshForwardKind,
@@ -275,13 +270,6 @@ impl Tty7App {
         let font_family_bold = cx.global::<Config>().font_family_bold.clone();
         let font_family_italic = cx.global::<Config>().font_family_italic.clone();
         let font_features = cx.global::<Config>().font_features.clone();
-        let loopback_host_input =
-            cx.new(|cx| InputState::new(window, cx).default_value("localhost"));
-        let loopback_port_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("3000")
-                .default_value("")
-        });
         let sftp_panel = crate::ui::sftp::SftpPanelState::new(window, cx);
         // Managed-forward add-form inputs (native-SSH panes).
         let mf_bind_host = cx.new(|cx| InputState::new(window, cx).default_value("127.0.0.1"));
@@ -368,10 +356,6 @@ impl Tty7App {
             detected_shells: Vec::new(),
             loopback_panel: LoopbackForwardPanelState {
                 open_pane_id: None,
-                forwards: crate::terminal::RemoteTerminal::list_loopback_forwards(),
-                host_input: loopback_host_input,
-                port_input: loopback_port_input,
-                editing: None,
                 managed: Vec::new(),
                 mf_kind: crate::daemon::protocol::SshForwardKind::Local,
                 mf_bind_host,
@@ -901,16 +885,6 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.ssh_warn_on_close = on);
     }
 
-    pub(crate) fn refresh_loopback_forwards(&mut self, cx: &mut Context<Self>) {
-        self.loopback_panel.forwards = crate::terminal::RemoteTerminal::list_loopback_forwards();
-        cx.notify();
-    }
-
-    pub(crate) fn close_loopback_forward(&mut self, id: LoopbackForwardId, cx: &mut Context<Self>) {
-        self.loopback_panel.forwards = crate::terminal::RemoteTerminal::close_loopback_forward(id);
-        cx.notify();
-    }
-
     /// Refresh the managed (Local/Remote/Dynamic) forwards for `pane_id` (WS4).
     pub(crate) fn refresh_managed_forwards(&mut self, pane_id: u64, cx: &mut Context<Self>) {
         self.loopback_panel.managed = crate::terminal::RemoteTerminal::list_forwards(pane_id);
@@ -1023,107 +997,15 @@ impl Tty7App {
         let should_open = self.loopback_panel.open_pane_id != Some(pane_id);
         if should_open {
             self.loopback_panel.open_pane_id = Some(pane_id);
-            if self
-                .loopback_panel
-                .editing
-                .as_ref()
-                .is_some_and(|id| id.pane_id != pane_id)
-            {
-                self.loopback_panel.editing = None;
-            }
-            self.refresh_loopback_forwards(cx);
             self.refresh_managed_forwards(pane_id, cx);
         } else {
             self.loopback_panel.open_pane_id = None;
-            self.loopback_panel.editing = None;
         }
         cx.notify();
     }
 
     pub(crate) fn close_loopback_forward_panel(&mut self, cx: &mut Context<Self>) {
         self.loopback_panel.open_pane_id = None;
-        self.loopback_panel.editing = None;
-        cx.notify();
-    }
-
-    pub(crate) fn save_loopback_forward_form(
-        &mut self,
-        pane_id: u64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let host = self
-            .loopback_panel
-            .host_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_string();
-        let Some(port) = self
-            .loopback_panel
-            .port_input
-            .read(cx)
-            .value()
-            .trim()
-            .parse::<u16>()
-            .ok()
-        else {
-            return;
-        };
-        if host.is_empty() {
-            return;
-        }
-        let editing = self.loopback_panel.editing.clone();
-        let pane_id = editing.as_ref().map(|id| id.pane_id).unwrap_or(pane_id);
-
-        if crate::terminal::RemoteTerminal::ensure_loopback_forward(pane_id, &host, port).is_ok() {
-            if let Some(old) = editing {
-                if old.remote_host != host || old.remote_port != port {
-                    let _ = crate::terminal::RemoteTerminal::close_loopback_forward(old);
-                }
-            }
-            self.loopback_panel.forwards =
-                crate::terminal::RemoteTerminal::list_loopback_forwards();
-            self.loopback_panel.editing = None;
-            self.loopback_panel.host_input.update(cx, |input, cx| {
-                input.set_value("localhost", window, cx);
-            });
-            self.loopback_panel.port_input.update(cx, |input, cx| {
-                input.set_value("", window, cx);
-            });
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn edit_loopback_forward(
-        &mut self,
-        id: LoopbackForwardId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.loopback_panel.open_pane_id = Some(id.pane_id);
-        self.loopback_panel.editing = Some(id.clone());
-        self.loopback_panel.host_input.update(cx, |input, cx| {
-            input.set_value(id.remote_host, window, cx);
-        });
-        self.loopback_panel.port_input.update(cx, |input, cx| {
-            input.set_value(id.remote_port.to_string(), window, cx);
-        });
-        cx.notify();
-    }
-
-    pub(crate) fn cancel_loopback_forward_edit(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.loopback_panel.editing = None;
-        self.loopback_panel.host_input.update(cx, |input, cx| {
-            input.set_value("localhost", window, cx);
-        });
-        self.loopback_panel.port_input.update(cx, |input, cx| {
-            input.set_value("", window, cx);
-        });
         cx.notify();
     }
 

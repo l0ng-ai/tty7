@@ -172,14 +172,18 @@ impl SshManager {
         ))
     }
 
-    /// The active native-SSH loopback forwards, in the GUI's loopback list shape.
+    /// Loopback forwards are no longer tracked separately — a Cmd-clicked
+    /// `localhost` link registers a plain Local managed forward (see
+    /// [`SshForwardRegistry::ensure_loopback`]), surfaced through `list_forwards`.
+    /// This wire endpoint is kept for protocol compatibility and always empty.
     pub fn list_loopback_forwards(&self) -> Vec<LoopbackForwardInfo> {
-        self.forwards.list_loopback()
+        Vec::new()
     }
 
-    /// Close one native-SSH loopback forward.
-    pub fn close_loopback_forward(&self, id: &LoopbackForwardId) -> bool {
-        self.forwards.close_loopback(id)
+    /// No-op: there is no separate loopback registry to close from (kept for
+    /// protocol compatibility). Auto forwards are removed via the managed list.
+    pub fn close_loopback_forward(&self, _id: &LoopbackForwardId) -> bool {
+        false
     }
 
     /// Kick off a native-SSH shell for a pane. Returns immediately; the connect →

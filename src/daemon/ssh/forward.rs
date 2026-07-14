@@ -28,15 +28,13 @@ use std::io;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Instant;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::AbortHandle;
 
 use crate::daemon::protocol::{
-    ForwardStatus, LoopbackForward, LoopbackForwardId, LoopbackForwardInfo, ManagedForward,
-    SshForwardKind, SshForwardRule,
+    ForwardStatus, LoopbackForward, ManagedForward, SshForwardKind, SshForwardRule,
 };
 
 use super::session::SshConnection;
@@ -265,6 +263,10 @@ struct ForwardEntry {
     description: Option<String>,
     status: ForwardStatus,
     cancel: ForwardCancel,
+    /// True for a forward auto-created by a Cmd-clicked `localhost:PORT` link
+    /// (FR-F4). Such entries are eligible for reuse when the same target is
+    /// clicked again, and read as a plain Local row in the unified forwards list.
+    auto_local: bool,
 }
 
 impl ForwardEntry {
@@ -283,21 +285,10 @@ impl ForwardEntry {
     }
 }
 
-/// A native-loopback ("Cmd-click a `localhost:PORT` link") forward on a native-SSH
-/// pane (FR-F4). Kept separately from managed forwards so it surfaces in the GUI's
-/// loopback list with the `LoopbackForwardInfo` shape.
-struct LoopbackEntry {
-    local_port: u16,
-    created_at: Instant,
-    last_used: Instant,
-    cancel: AbortHandle,
-}
-
 /// The per-process registry of managed forwards, owned by [`super::SshManager`].
 #[derive(Default)]
 pub struct SshForwardRegistry {
     panes: Mutex<HashMap<u64, Vec<ForwardEntry>>>,
-    loopback: Mutex<HashMap<LoopbackForwardId, LoopbackEntry>>,
     next_id: AtomicU64,
 }
 
@@ -328,6 +319,7 @@ impl SshForwardRegistry {
             description: rule.description.clone(),
             status,
             cancel,
+            auto_local: false,
         };
         let managed = entry.to_managed(pane_id);
         self.panes
@@ -380,19 +372,6 @@ impl SshForwardRegistry {
         let entries = self.panes.lock().unwrap().remove(&pane_id);
         for entry in entries.into_iter().flatten() {
             Self::cancel_entry(entry).await;
-        }
-        // Also drop any native-loopback forwards belonging to this pane.
-        let loopback_ids: Vec<LoopbackForwardId> = {
-            let map = self.loopback.lock().unwrap();
-            map.keys()
-                .filter(|k| k.pane_id == pane_id)
-                .cloned()
-                .collect()
-        };
-        for id in loopback_ids {
-            if let Some(entry) = self.loopback.lock().unwrap().remove(&id) {
-                entry.cancel.abort();
-            }
         }
     }
 
@@ -566,97 +545,81 @@ impl SshForwardRegistry {
     // ---- Native loopback (FR-F4) --------------------------------------------
 
     /// Ensure a native-SSH loopback forward `127.0.0.1:<ephemeral> → host:port`
-    /// exists for `pane_id`, reusing an existing one for the same target. Returns
-    /// the `LoopbackForward` reply shape the GUI's Cmd-click flow consumes.
+    /// exists for `pane_id`, reusing an existing auto-created one for the same
+    /// target. The forward is registered in the *same* managed registry as
+    /// [`Self::establish`], so it shows up as a plain Local row in `list(pane_id)`
+    /// — there is no separate loopback bookkeeping. Returns the `LoopbackForward`
+    /// reply shape the GUI's Cmd-click flow consumes (just the local port), so the
+    /// wire reply is unchanged.
+    ///
+    /// `_target` (the pane's remote hostname) is retained for call-site
+    /// compatibility; dedup keys on the concrete `remote_host:remote_port`.
     pub async fn ensure_loopback(
         &self,
         pane_id: u64,
         conn: Arc<SshConnection>,
-        target: &str,
+        _target: &str,
         remote_host: &str,
         remote_port: u16,
     ) -> io::Result<LoopbackForward> {
-        let id = LoopbackForwardId {
-            pane_id,
-            target: target.to_string(),
-            remote_host: remote_host.to_string(),
-            remote_port,
+        // Dedup: a live auto-forward to the same target is reused rather than
+        // duplicated (preserving the old `ensure_loopback` behavior).
+        if let Some(local_port) = self.find_auto_local(pane_id, remote_host, remote_port) {
+            return Ok(LoopbackForward { local_port });
+        }
+        let rule = SshForwardRule {
+            kind: SshForwardKind::Local,
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 0,
+            target_host: remote_host.to_string(),
+            target_port: remote_port,
+            description: Some(format!("localhost link → :{remote_port}")),
         };
-        if let Some(entry) = self.loopback.lock().unwrap().get_mut(&id) {
-            entry.last_used = Instant::now();
-            return Ok(LoopbackForward {
-                local_port: entry.local_port,
-            });
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (bind_port, status, cancel) = self.start_local(&conn, &rule).await;
+        // A bind failure must surface to the Cmd-click caller (it previously
+        // propagated via `?`), and no dead entry is registered.
+        if let ForwardStatus::Error(e) = &status {
+            return Err(io::Error::other(e.clone()));
         }
-        // Bind an ephemeral loopback listener and forward it to the remote target.
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
-        let local_port = listener.local_addr()?.port();
-        let remote_host_owned = remote_host.to_string();
-        let handle = tokio::spawn(async move {
-            loop {
-                let Ok((sock, _peer)) = listener.accept().await else {
-                    break;
-                };
-                if !conn.is_alive() {
-                    break;
-                }
-                let conn = conn.clone();
-                let remote_host = remote_host_owned.clone();
-                tokio::spawn(async move {
-                    match conn.open_direct_tcpip(&remote_host, remote_port).await {
-                        Ok(channel) => {
-                            let _ = bridge(sock, channel.into_stream()).await;
-                        }
-                        Err(e) => log::info!(
-                            "loopback forward to {remote_host}:{remote_port} rejected: {e}"
-                        ),
-                    }
-                });
-            }
-        });
-        self.loopback.lock().unwrap().insert(
+        let entry = ForwardEntry {
             id,
-            LoopbackEntry {
-                local_port,
-                created_at: Instant::now(),
-                last_used: Instant::now(),
-                cancel: handle.abort_handle(),
-            },
-        );
-        Ok(LoopbackForward { local_port })
+            kind: SshForwardKind::Local,
+            bind_host: rule.bind_host.clone(),
+            bind_port,
+            target_host: rule.target_host.clone(),
+            target_port: rule.target_port,
+            description: rule.description.clone(),
+            status,
+            cancel,
+            auto_local: true,
+        };
+        self.panes
+            .lock()
+            .unwrap()
+            .entry(pane_id)
+            .or_default()
+            .push(entry);
+        Ok(LoopbackForward {
+            local_port: bind_port,
+        })
     }
 
-    /// The active native-loopback forwards, in the `LoopbackForwardInfo` shape the
-    /// GUI's loopback panel already renders.
-    pub fn list_loopback(&self) -> Vec<LoopbackForwardInfo> {
-        let map = self.loopback.lock().unwrap();
-        let mut list: Vec<_> = map
+    /// The local port of a live auto-created loopback forward on `pane_id` targeting
+    /// `remote_host:remote_port`, if one exists (dedup for Cmd-click).
+    fn find_auto_local(&self, pane_id: u64, remote_host: &str, remote_port: u16) -> Option<u16> {
+        let panes = self.panes.lock().unwrap();
+        panes
+            .get(&pane_id)?
             .iter()
-            .map(|(id, entry)| LoopbackForwardInfo {
-                id: id.clone(),
-                local_port: entry.local_port,
-                age_secs: entry.created_at.elapsed().as_secs(),
-                idle_secs: entry.last_used.elapsed().as_secs(),
+            .find(|e| {
+                e.auto_local
+                    && e.kind == SshForwardKind::Local
+                    && e.target_host == remote_host
+                    && e.target_port == remote_port
+                    && matches!(e.status, ForwardStatus::Listening)
             })
-            .collect();
-        list.sort_by(|a, b| {
-            a.id.target
-                .cmp(&b.id.target)
-                .then_with(|| a.id.remote_host.cmp(&b.id.remote_host))
-                .then_with(|| a.id.remote_port.cmp(&b.id.remote_port))
-                .then_with(|| a.local_port.cmp(&b.local_port))
-        });
-        list
-    }
-
-    /// Close one native-loopback forward. Returns whether it existed.
-    pub fn close_loopback(&self, id: &LoopbackForwardId) -> bool {
-        if let Some(entry) = self.loopback.lock().unwrap().remove(id) {
-            entry.cancel.abort();
-            true
-        } else {
-            false
-        }
+            .map(|e| e.bind_port)
     }
 }
 
@@ -824,6 +787,7 @@ mod tests {
                 description: None,
                 status: ForwardStatus::Listening,
                 cancel: ForwardCancel::Task(task.abort_handle()),
+                auto_local: false,
             }
         };
         {
