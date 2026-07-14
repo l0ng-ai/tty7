@@ -1325,9 +1325,11 @@ impl Tty7App {
         let header = v_flex()
             .gap_2()
             .child(
+                // Plain (not `.primary()`): a solid near-black fill reads far too
+                // heavy against this soft, mostly-outline sheet — a subtle default
+                // fill still reads as the primary create action above outline Import.
                 Button::new("ssh-profiles-add")
                     .label("Add profile")
-                    .primary()
                     .small()
                     .w_full()
                     .on_click(cx.listener(|this, _, window, cx| this.add_new_profile(window, cx))),
@@ -1921,9 +1923,11 @@ impl Tty7App {
                             })),
                     )
                     .child(
+                        // Plain, not `.primary()`: keep the soft sheet aesthetic (see
+                        // the Add-profile / Duplicate-to-Edit buttons) — a near-black
+                        // fill is too jarring here.
                         Button::new("ssh-form-save")
                             .label("Save")
-                            .primary()
                             .small()
                             .on_click(cx.listener(|this, _, _w, cx| this.save_ssh_form(cx))),
                     ),
