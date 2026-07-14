@@ -2682,6 +2682,28 @@ impl Tty7App {
         Some((pane.pane_id, pane.remote_context()?))
     }
 
+    /// The focused pane when it is a *connected native* SSH session — the gate for
+    /// the pane's tunnel / SFTP action buttons (top-right of the terminal body).
+    /// `None` for a foreground `ssh`, a still-connecting native pane, or a non-SSH
+    /// pane, so those never grow the action buttons.
+    pub(crate) fn active_connected_native_ssh_pane(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> Option<(u64, RemoteContext)> {
+        use crate::daemon::protocol::{RemoteKind, SshPhase};
+        let (pane_id, remote) = self.active_ssh_pane(window, cx)?;
+        if remote.kind != RemoteKind::NativeSsh {
+            return None;
+        }
+        let leaf = self
+            .tabs
+            .get(self.active)?
+            .pane
+            .focused_or_first(window, cx)?;
+        matches!(leaf.read(cx).ssh_phase(), Some(SshPhase::Connected)).then_some((pane_id, remote))
+    }
+
     /// Select a sidebar section in the settings page (no-op when it's closed).
     pub(crate) fn select_settings_section(
         &mut self,
@@ -2981,7 +3003,10 @@ impl Render for Tty7App {
             && !self.tabs.is_empty();
         let strip = self.tab_strip(!vertical, window, cx);
         let sidebar = vertical.then(|| self.tab_sidebar(window, cx));
-        let active_ssh_pane = self.active_ssh_pane(window, cx);
+        // Gate the pane action buttons (tunnel / SFTP) + their panels to a
+        // connected native-SSH pane; a foreground `ssh` or a still-connecting
+        // session shows only the top-left status strip, no action buttons.
+        let active_ssh_pane = self.active_connected_native_ssh_pane(window, cx);
         // Native-SSH status strip / reconnect notice for the focused pane (E1/E4).
         let ssh_status = self
             .tabs
@@ -3032,8 +3057,9 @@ impl Render for Tty7App {
             .relative()
             .overflow_hidden()
             .child(body)
-            // Pane-contextual SSH loopback ("Ports") overlay, pinned top-right of
-            // the terminal area when the active pane is an SSH session.
+            // Pane-contextual tunnel / SFTP action buttons, pinned top-right of
+            // the terminal area when the active pane is a connected native SSH
+            // session (the tunnel button also drives the forwards panel).
             .when_some(active_ssh_pane, |this, (pane_id, remote)| {
                 this.child(self.render_loopback_forward_overlay(pane_id, &remote, cx))
                     // Pane-contextual SFTP panel (WS5), docked right when open for

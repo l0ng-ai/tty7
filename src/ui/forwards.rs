@@ -5,9 +5,10 @@
 
 use gpui::{AnyElement, Context, Div, Entity, FontWeight, SharedString, div, prelude::*, px};
 use gpui_component::Selectable as _;
+use gpui_component::badge::Badge;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
-use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 
 use crate::daemon::protocol::{
     ForwardStatus, LoopbackForwardInfo, ManagedForward, RemoteContext, RemoteKind, SshForwardKind,
@@ -168,6 +169,16 @@ impl Tty7App {
         )
     }
 
+    /// Pane-contextual action buttons for a connected native-SSH pane, pinned
+    /// top-right of the terminal body: a **tunnel** icon that toggles the port
+    /// forwarding panel and an **SFTP** icon that toggles the file browser. The
+    /// panels themselves are unchanged; these are just discoverable entry points
+    /// beside the top-left ` SSH ` status strip (status vs. actions). The tunnel
+    /// icon carries a small count badge when one or more forwards are active.
+    ///
+    /// The caller gates this to a connected native pane (see `app.rs` render), so
+    /// the buttons never appear for a plain foreground `ssh` or a still-connecting
+    /// session.
     pub(crate) fn render_loopback_forward_overlay(
         &self,
         pane_id: u64,
@@ -176,19 +187,45 @@ impl Tty7App {
     ) -> AnyElement {
         let foreground = cx.theme().foreground;
         let pane_forwards = self.loopback_forwards_for_pane(pane_id);
-        let is_native = remote.kind == RemoteKind::NativeSsh;
-        let managed_count = if is_native {
-            self.loopback_panel.managed.len()
-        } else {
-            0
-        };
+        let managed_count = self
+            .loopback_panel
+            .managed
+            .iter()
+            .filter(|m| m.pane_id == pane_id)
+            .count();
         let active_count = pane_forwards.len() + managed_count;
         let panel_open = self.loopback_panel.open_pane_id == Some(pane_id);
-        let label = if active_count == 0 {
-            "Ports".to_string()
+        let sftp_open = self.sftp_panel.open_pane_id == Some(pane_id);
+
+        // Tunnel (port forwarding). ExternalLink is the closest network/arrows
+        // glyph the icon set ships — it reads as "traffic forwarded out".
+        let tunnel_button = Button::new(("ssh-forward-icon", pane_id))
+            .icon(IconName::ExternalLink)
+            .ghost()
+            .small()
+            .selected(panel_open)
+            .tooltip("Port forwarding")
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                this.toggle_loopback_forward_panel(pane_id, cx)
+            }));
+        // A tiny count badge when ≥1 forward is active; the bare icon otherwise.
+        let tunnel: AnyElement = if active_count > 0 {
+            Badge::new()
+                .count(active_count)
+                .child(tunnel_button)
+                .into_any_element()
         } else {
-            format!("Ports {active_count}")
+            tunnel_button.into_any_element()
         };
+
+        // SFTP (file browser). Folder is the natural glyph.
+        let sftp_button = Button::new(("ssh-sftp-icon", pane_id))
+            .icon(IconName::Folder)
+            .ghost()
+            .small()
+            .selected(sftp_open)
+            .tooltip("SFTP")
+            .on_click(cx.listener(move |this, _, window, cx| this.toggle_sftp(window, cx)));
 
         div()
             .absolute()
@@ -199,13 +236,11 @@ impl Tty7App {
             .items_end()
             .gap_2()
             .child(
-                Button::new(("ssh-forward-chip", pane_id))
-                    .label(label)
-                    .small()
-                    .selected(panel_open)
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.toggle_loopback_forward_panel(pane_id, cx)
-                    })),
+                h_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(tunnel)
+                    .child(sftp_button),
             )
             .when(panel_open, |this| {
                 this.child(self.render_loopback_forward_panel(pane_id, remote, &pane_forwards, cx))
