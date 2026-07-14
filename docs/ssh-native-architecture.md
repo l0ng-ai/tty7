@@ -7,9 +7,9 @@ API WS4/WS5 build on, and the seams intentionally left open.
 Code lives under `src/daemon/ssh/` plus a backend seam in `src/daemon/pane.rs`
 and wire types in `src/daemon/protocol.rs`.
 
-> **Status:** WS1–WS7 merged. The native russh engine is the default path; the
-> seams in §5 below are resolved (see the per-row notes). WS7 froze the shell-out
-> path as the system-ssh compat escape hatch — see [§6 Path policy](#6-path-policy-ws7).
+> **Status:** WS1–WS7 merged. The native russh engine is the **only** SSH path;
+> the seams in §5 below are resolved (see the per-row notes). There is no
+> shell-out / system-ssh compat mode — see [§6 Path policy](#6-path-policy).
 
 ---
 
@@ -174,7 +174,7 @@ brief §5); SFTP opens a session channel and drives the subsystem.
 | Seam | State in WS2 | Owner |
 |---|---|---|
 | Port forwards (L/R/D) | **DONE (WS4)** — `daemon::ssh::forward` (`SshForwardRegistry`): Local/Dynamic TCP listeners + `open_direct_tcpip`, Remote via `tcpip_forward` + `RemoteForwardTable` in the handler; preconfigured forwards established post-auth in `run_session`; protocol `AddForward`/`RemoveForward`/`ListForwards` (client kinds 20–22) → `ForwardList` (daemon kind 20) | WS4 |
-| `RemoteContext.control_path` | always `None` for native; native loopback (FR-F4) now goes through `SshManager::ensure_loopback_forward` (a Local `direct-tcpip`), server-side branch on `RemoteKind::NativeSsh` | WS4 |
+| Loopback forward (FR-F4) | **DONE** — `SshManager::ensure_loopback_forward` opens a Local `direct-tcpip` on the pane's connection; the server `EnsureLoopbackForward`/`List`/`Close` handlers are native-only (`RemoteKind::NativeSsh`). `RemoteContext` carries no control socket. | WS4 |
 | X11 forwarding | `NativeSshSpec.x11` carried only; **seam documented** in `daemon::ssh::handler` (P1, deferred — needs `request_x11` + `server_channel_open_x11` + `$DISPLAY` bridge) | WS4/WS5 |
 | SFTP | none; `open_session_channel` provided for the subsystem | WS5 |
 | Agent forwarding channels | `agent_forward` requests `auth-agent-req` on the shell channel; incoming agent-channel bridging to `SSH_AUTH_SOCK` not wired | WS4/WS5 |
@@ -190,34 +190,42 @@ a mechanical `ssh_spec: None`, no UI behavior changed.)
 
 ---
 
-## 6. Path policy (WS7)
+## 6. Path policy
 
-Native russh is the default and only path with the full manager feature set;
-the shell-out `ssh` path is a **frozen** compat escape hatch (PRD §3.1). Every
-SSH entry point resolves to exactly one of the two backends:
+**Native russh is the only SSH path.** There is no shell-out / system-ssh compat
+mode — no `ssh` subprocess, no ControlMaster. Every SSH entry point resolves the
+connection (keychain secrets + jump chain) into a `NativeSshSpec` and spawns it
+through `SPAWN_NATIVE_SSH`:
 
-| Entry point | Routes to | Backend |
-|---|---|---|
-| Saved profile, `use_system_ssh` **off** (`connect_ssh_profile`) | `open_native_ssh_tab` | native russh |
-| Typed `user@host[:port]` (`OpenSshConnect` bare target) / palette QuickConnect row | `quick_connect` → `open_native_ssh_tab` | native russh |
-| Saved profile, `use_system_ssh` **on** | `compat_ssh_spec` → `open_managed_ssh_spec` | compat shell-out |
-| `~/.ssh/config` alias row (`OpenSshProfile`) | `open_compat_alias` → `open_managed_ssh_spec` | compat shell-out |
-| Typed line carrying ssh flags/args (`ssh … -p … -J …`) | `parse_ssh_connect_input` → `open_managed_ssh_spec` | compat shell-out |
+| Entry point | Routes to |
+|---|---|
+| Saved profile (`connect_ssh_profile`) | `native_ssh_spec_for_profile` → `open_native_ssh_tab` |
+| Typed `user@host[:port]` / QuickConnect row (`quick_connect`) | `open_native_ssh_tab` |
+| Typed connect line, incl. flags (`parse_ssh_connect_input`) | `native_spec_from_transient_profile` → `open_native_ssh_tab` |
+| `~/.ssh/config` alias row (`open_native_alias`) | `resolve_alias_to_profile` → `native_spec_from_transient_profile` → `open_native_ssh_tab` |
 
-**Compat funnel.** `Tty7App::open_managed_ssh_spec` is the single funnel onto
-`SPAWN_MANAGED_SSH`; its only callers are the three escape hatches above. No
-default path reaches it.
+**`~/.ssh/config` aliases** are resolved natively (`core::ssh_config`), not shelled
+out. The resolver maps the russh-mappable directives best-effort — HostName, User,
+Port, IdentityFile, ProxyJump, ProxyCommand, ForwardAgent, ConnectTimeout,
+ServerAlive{Interval,CountMax}, Ciphers/MACs/KexAlgorithms/HostKeyAlgorithms (an
+explicit list; `+`/`-`/`^` modifier forms are dropped), Compression, ForwardX11,
+StrictHostKeyChecking (`no` → verify off), and LocalForward/RemoteForward/
+DynamicForward — with first-match-wins + `Host *` fallback + `Include` walking. A
+`ProxyJump` hop resolves recursively (another alias, or `user@host[:port]`) into
+the nested jump spec, with a cycle guard.
 
-**Frozen surface** (kept working, never extended — module-level notes cite this
-policy): `daemon::protocol::SshSpec`, `daemon::pane::build_managed_ssh_command`
-(`SPAWN_MANAGED_SSH`), and `daemon::forward` (ControlMaster `ssh -O forward`
-loopback). The `EnsureLoopbackForward` server handler branches on `RemoteKind`
-so `daemon::forward` only ever sees compat panes; native panes take
-`daemon::ssh::forward` + `SshManager::ensure_loopback_forward` (direct-tcpip).
+> **Explicit tradeoff — no fallback.** `Match`, `canonicalize`, GSSAPI, and other
+> exotic config that russh/the resolver don't model are **unsupported**, and there
+> is no shell-out to fall back to. A config that needs them won't connect the same
+> way `ssh` would; the affected directives are simply not applied.
 
-**Compat feature gating (FR-C5).** A compat pane has no russh connection, so
-SFTP, the managed L/R/D forward add-form, and GUI auth/host-key sheets are
-unavailable — each surfaces a visible reason (SFTP panel notice, a muted line in
-the Ports panel, and the profile editor's compat-mode switch note), never a
-silent miss. Loopback one-click forwards (FR-F4) and `~/.ssh/config` forwards
-still work on compat panes via ControlMaster.
+**Diagnosable, never silent.** A typed line that can't be parsed into a host (a
+remote command, `--`, unbalanced quotes, a bad port) surfaces a dismissable inline
+banner over the focused pane rather than silently doing nothing or shelling out.
+
+**One backend for everything.** SFTP, managed L/R/D forwards, GUI auth/host-key
+sheets, and one-click loopback forwards (FR-F4, a Local `direct-tcpip`) all ride
+the pane's russh connection and are available on every native-SSH pane. A
+foreground `ssh` typed into a local shell is still detected for status/labeling
+(`RemoteKind::Ssh`), but it has no tty7-owned connection, so those features don't
+apply to it.
