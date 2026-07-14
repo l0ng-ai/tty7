@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::task::AbortHandle;
+use tokio::task::JoinHandle;
 
 use crate::daemon::protocol::{
     ForwardStatus, LoopbackForward, ManagedForward, SshForwardKind, SshForwardRule,
@@ -241,8 +241,12 @@ impl RemoteForwardTable {
 
 /// A live forward's teardown handle.
 enum ForwardCancel {
-    /// A Local/Dynamic accept loop; aborting it drops the `TcpListener`.
-    Task(AbortHandle),
+    /// A Local/Dynamic accept loop. Held as the full `JoinHandle` (not just an
+    /// `AbortHandle`) so [`SshForwardRegistry::cancel_entry`] can `abort()` *and*
+    /// `await` it: `abort()` only *requests* cancellation, so awaiting is what
+    /// guarantees the task — and the `TcpListener` it owns — is fully dropped,
+    /// freeing the bound port before `remove`/`teardown_pane` returns.
+    Task(JoinHandle<()>),
     /// A Remote binding to cancel via `cancel_tcpip_forward` on teardown.
     Remote {
         conn: Weak<SshConnection>,
@@ -377,7 +381,14 @@ impl SshForwardRegistry {
 
     async fn cancel_entry(entry: ForwardEntry) {
         match entry.cancel {
-            ForwardCancel::Task(handle) => handle.abort(),
+            ForwardCancel::Task(handle) => {
+                // `abort()` only *schedules* cancellation; awaiting the handle
+                // drives the task to completion so its `TcpListener` is dropped
+                // (socket closed) before we return. The task was cancelled, so
+                // the `JoinError` is expected and ignored.
+                handle.abort();
+                let _ = handle.await;
+            }
             ForwardCancel::Remote {
                 conn,
                 bind_host,
@@ -440,11 +451,7 @@ impl SshForwardRegistry {
                 });
             }
         });
-        (
-            bound,
-            ForwardStatus::Listening,
-            ForwardCancel::Task(handle.abort_handle()),
-        )
+        (bound, ForwardStatus::Listening, ForwardCancel::Task(handle))
     }
 
     async fn start_dynamic(
@@ -504,11 +511,7 @@ impl SshForwardRegistry {
                 });
             }
         });
-        (
-            bound,
-            ForwardStatus::Listening,
-            ForwardCancel::Task(handle.abort_handle()),
-        )
+        (bound, ForwardStatus::Listening, ForwardCancel::Task(handle))
     }
 
     async fn start_remote(
@@ -786,7 +789,7 @@ mod tests {
                 target_port: 80,
                 description: None,
                 status: ForwardStatus::Listening,
-                cancel: ForwardCancel::Task(task.abort_handle()),
+                cancel: ForwardCancel::Task(task),
                 auto_local: false,
             }
         };
@@ -809,6 +812,80 @@ mod tests {
         // teardown clears the pane entirely (blast-radius on death).
         reg.teardown_pane(7).await;
         assert!(reg.list(7).is_empty());
+    }
+
+    /// Removing (or tearing down) a Local/Dynamic forward must fully drop its
+    /// accept-loop task — and the `TcpListener` it owns — *before* the call
+    /// returns, so the bound port is freed synchronously. A plain
+    /// `AbortHandle::abort()` only *requests* cancellation, so the task (and its
+    /// socket) can outlive the call and leak the port; `cancel_entry` must abort
+    /// *and* await.
+    ///
+    /// The assertion is race-free: the accept task owns both a real bound
+    /// `TcpListener` (fidelity with `start_local`) and a clone of an `Arc` guard.
+    /// Once the task's future is dropped, the guard clone is dropped, so the
+    /// registry-side `Arc` becomes uniquely owned. With only `abort()` (no await)
+    /// the task has not been polled on this current-thread runtime when the call
+    /// returns, so the guard is still held (`strong_count == 2`) — the bug.
+    #[tokio::test]
+    async fn remove_frees_listening_socket_synchronously() {
+        async fn spawn_listener_entry(id: u64, guard: &Arc<()>) -> ForwardEntry {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let guard = guard.clone();
+            // Mirror start_local's accept loop: the task owns the listener, so
+            // only fully dropping the task closes the socket. `guard` rides along
+            // and is dropped exactly when the task's future is dropped.
+            let handle = tokio::spawn(async move {
+                let _guard = guard;
+                loop {
+                    if listener.accept().await.is_err() {
+                        break;
+                    }
+                }
+            });
+            ForwardEntry {
+                id,
+                kind: SshForwardKind::Local,
+                bind_host: "127.0.0.1".into(),
+                bind_port: port,
+                target_host: "h".into(),
+                target_port: 80,
+                description: None,
+                status: ForwardStatus::Listening,
+                cancel: ForwardCancel::Task(handle),
+                auto_local: false,
+            }
+        }
+
+        let reg = SshForwardRegistry::default();
+
+        // remove() path: the task's future (holding the listener) must be gone.
+        let guard = Arc::new(());
+        let entry = spawn_listener_entry(0, &guard).await;
+        reg.panes.lock().unwrap().entry(1).or_default().push(entry);
+        assert_eq!(
+            Arc::strong_count(&guard),
+            2,
+            "task holds the socket while live"
+        );
+        reg.remove(1, 0).await;
+        assert_eq!(
+            Arc::strong_count(&guard),
+            1,
+            "remove() must drop the accept task (and its TcpListener) synchronously"
+        );
+
+        // teardown_pane() path (pane death / connection loss) frees it too.
+        let guard2 = Arc::new(());
+        let entry2 = spawn_listener_entry(1, &guard2).await;
+        reg.panes.lock().unwrap().entry(2).or_default().push(entry2);
+        reg.teardown_pane(2).await;
+        assert_eq!(
+            Arc::strong_count(&guard2),
+            1,
+            "teardown_pane() must drop every accept task synchronously"
+        );
     }
 
     /// `rekey` moves a binding to the server-assigned port (bind_port 0 case).
