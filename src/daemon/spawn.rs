@@ -99,11 +99,26 @@ pub fn ensure_running() -> anyhow::Result<()> {
 /// quitting/reopening the GUI alone doesn't touch the detached daemon. Safe with
 /// no daemon running — it just spawns a fresh one.
 pub fn restart() -> anyhow::Result<()> {
+    stop();
+    ensure_running()
+}
+
+/// Stop the running daemon and leave nothing running: ask it to shut down —
+/// which hangs up every live shell — wait for it to exit, escalate to a
+/// pid-based reap if it won't, and clear its endpoint marker. A no-op when no
+/// daemon is running. Unlike [`restart`], this does not spawn a replacement.
+///
+/// This backs both the GUI's restart (which calls it, then respawns) and the
+/// `--stop-daemon` CLI entry point the Windows installer/uninstaller runs before
+/// replacing or deleting `tty7.exe`: the detached daemon is the running image of
+/// that same file, so Windows locks it until the daemon exits. Stopping it here
+/// releases the lock so the install/uninstall can overwrite/remove the binary.
+pub fn stop() {
     use crate::daemon::protocol::ClientMsg;
     use std::io::Write as _;
 
     // Ask a running daemon to stop. Best effort: a failed connect/write means
-    // nothing is listening, so we fall through to spawning a fresh one.
+    // nothing is listening, so we fall through to the reap/clear below.
     if let Ok(mut stream) = transport::connect() {
         if ClientMsg::Shutdown.encode(&mut stream).is_ok() {
             let _ = stream.flush();
@@ -117,19 +132,17 @@ pub fn restart() -> anyhow::Result<()> {
     }
 
     // If the old daemon is still alive here, `Shutdown` didn't stop it — a
-    // binary that predates the message, or a wedged teardown. Restarting
-    // *means* the old daemon must go: quietly claiming its endpoint while it
-    // lives is how sessions got stranded (unreachable daemon, panes and
-    // children still running — issue #42). Escalate by recorded pid.
+    // binary that predates the message, or a wedged teardown. Stopping *means*
+    // the old daemon must go: quietly claiming its endpoint while it lives is
+    // how sessions got stranded (unreachable daemon, panes and children still
+    // running — issue #42). Escalate by recorded pid.
     reap_recorded_daemon();
 
-    // The daemon removes its own endpoint marker on shutdown, but clear defensively
-    // in case it was killed mid-teardown, then bring a fresh daemon up and wait for
-    // it to listen. `ensure_running` re-probes and spawns only if nothing answers.
+    // The daemon removes its own endpoint marker on shutdown, but clear
+    // defensively in case it was killed mid-teardown.
     if transport::endpoint_exists() {
         transport::remove_stale_endpoint();
     }
-    ensure_running()
 }
 
 /// Reap the daemon recorded in the pidfile, if it is still alive: the caller

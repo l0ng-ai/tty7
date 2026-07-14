@@ -261,6 +261,16 @@ fn main() {
         return;
     }
 
+    // Stop mode: `--stop-daemon` shuts the persistent daemon down (hanging up
+    // every shell) and returns without ever opening a window. On Windows the
+    // detached daemon is the running image of `tty7.exe`, so it locks the file
+    // and blocks an upgrade/uninstall from replacing it; the installer runs this
+    // first to release the lock. Harmless when no daemon is running.
+    if std::env::args().any(|a| a == "--stop-daemon") {
+        crate::daemon::spawn::stop();
+        return;
+    }
+
     // GUI path: repair the starved Launch Services PATH before anything reads it
     // (completion scans it per keystroke; the daemon we spawn below inherits it).
     #[cfg(unix)]

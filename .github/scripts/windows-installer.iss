@@ -41,6 +41,13 @@ OutputBaseFilename={#OutputName}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+; The persistent daemon (tty7.exe --daemon) is a detached background process
+; that outlives the GUI and holds the running image of tty7.exe, so Windows
+; locks the file and an upgrade can't replace it. We stop it explicitly in
+; PrepareToInstall below; keep the Restart Manager as a backstop but don't let
+; it relaunch anything (the GUI respawns the daemon itself on next start).
+CloseApplications=yes
+RestartApplications=no
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -57,3 +64,30 @@ Name: "{autodesktop}\tty7"; Filename: "{app}\tty7.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\tty7.exe"; Description: "{cm:LaunchProgram,tty7}"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+; Stop the daemon before the uninstaller deletes tty7.exe — the running daemon
+; is the locked image of that file, so removing it fails otherwise. This runs at
+; the start of uninstallation, before any files are removed. The installed binary
+; is this version, which understands the flag; runhidden suppresses any flash and
+; the call returns without opening a window. RunOnceId keys the entry so a repeated
+; uninstall doesn't run it twice.
+Filename: "{app}\tty7.exe"; Parameters: "--stop-daemon"; Flags: runhidden waituntilterminated; RunOnceId: "StopDaemon"
+
+[Code]
+{ Gracefully stop the persistent daemon before we overwrite tty7.exe. We can't
+  run the *installed* binary here — on an upgrade from an older build it may not
+  understand --stop-daemon and would launch the GUI instead — so we extract the
+  *new* tty7.exe to {tmp} and run that. It connects to the running daemon, hangs
+  up every shell, waits for it to exit (releasing the file lock), then returns
+  without opening a window. Best effort: any failure falls through to the Restart
+  Manager backstop, and a fresh install simply has no daemon to stop. }
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  ExtractTemporaryFile('tty7.exe');
+  Exec(ExpandConstant('{tmp}\tty7.exe'), '--stop-daemon', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := '';
+end;

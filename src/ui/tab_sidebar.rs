@@ -75,7 +75,7 @@ impl Tty7App {
 
         for (i, tab) in self.tabs.iter().enumerate() {
             let is_active = i == active;
-            let label = self.tab_label(tab, i, cx);
+            let label = self.tab_label(tab, i, Some(window), cx);
             // SSH status dot (PRD FR-E2).
             let ssh_dot = self.tab_ssh_dot(tab, cx);
             // Filter by the search box; matching is on the visible label. The row
