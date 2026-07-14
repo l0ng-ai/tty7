@@ -74,12 +74,35 @@ impl Tty7App {
     /// QuickConnect to a typed `user@host[:port]` target (PRD FR-P4), always via
     /// the native path. Builds a transient profile so keychain lookup by endpoint
     /// still applies (a QuickConnect can reuse a remembered password).
+    ///
+    /// `ssh <target>` semantics: a host naming a `~/.ssh/config` alias resolves
+    /// through it (HostName/User/Port/IdentityFile/ProxyJump), with the typed
+    /// `user@` / `:port` overriding the config's values. The palette lists only
+    /// saved profiles, so this is how a config alias connects without importing.
     pub(crate) fn quick_connect(
         &mut self,
         qc: crate::core::ssh_profile::QuickConnect,
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) {
+        if let Some(resolved) = crate::core::ssh_config::resolve_alias_to_profile(&qc.host) {
+            let mut profile = resolved.profile;
+            if let Some(user) = qc.user {
+                profile.user = user;
+            }
+            if let Some(port) = qc.port {
+                profile.port = port;
+            }
+            let spec = native_spec_from_transient_profile(
+                &profile,
+                resolved.proxy_jump,
+                &OsCredentialStore,
+                cx.global::<Config>().verify_host_keys,
+                &config_alias_resolver,
+            );
+            self.open_native_ssh_tab(Box::new(spec), window, cx);
+            return;
+        }
         let port = qc.port_or_default();
         let mut profile = SshProfile::new(qc.host.clone());
         profile.host = qc.host;
@@ -349,6 +372,12 @@ fn map_algorithms(a: &Algorithms) -> SshAlgorithms {
 /// without touching the real `~/.ssh/config` (production passes a closure over
 /// [`crate::core::ssh_config::resolve_alias_to_profile`]).
 pub(crate) type AliasResolver<'a> = dyn Fn(&str) -> Option<(SshProfile, Option<String>)> + 'a;
+
+/// The standard [`AliasResolver`]: resolve against the live `~/.ssh/config`.
+/// Shared by every typed-connect path (QuickConnect, "SSH: Add Connection…").
+pub(crate) fn config_alias_resolver(alias: &str) -> Option<(SshProfile, Option<String>)> {
+    crate::core::ssh_config::resolve_alias_to_profile(alias).map(|r| (r.profile, r.proxy_jump))
+}
 
 /// Build a [`NativeSshSpec`] from a **transient** (unsaved) profile — resolved
 /// from a `~/.ssh/config` alias or a typed connect line — whose jump host is a

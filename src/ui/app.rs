@@ -1079,43 +1079,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Open a `~/.ssh/config` host alias over the native (russh) engine (PRD §3.3).
-    /// The alias is resolved against `~/.ssh/config` (common fields, best-effort;
-    /// `Match`/canonicalize unsupported with no fallback) into a transient profile,
-    /// its `ProxyJump` resolved into the nested jump chain. An alias unknown to the
-    /// config falls back to being treated as a bare hostname.
-    pub(crate) fn open_native_alias(
-        &mut self,
-        alias: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let verify = cx.global::<Config>().verify_host_keys;
-        match ssh_config::resolve_alias_to_profile(&alias) {
-            Some(resolved) => {
-                let spec = crate::ui::ssh_connect::native_spec_from_transient_profile(
-                    &resolved.profile,
-                    resolved.proxy_jump,
-                    &crate::core::keychain::OsCredentialStore,
-                    verify,
-                    &|a| ssh_config::resolve_alias_to_profile(a).map(|r| (r.profile, r.proxy_jump)),
-                );
-                self.open_native_ssh_tab(Box::new(spec), window, cx);
-            }
-            // Not in ssh_config → treat the alias as a bare host (QuickConnect).
-            None => {
-                if let Some(qc) = crate::core::ssh_profile::parse_quick_connect(&alias) {
-                    self.quick_connect(qc, window, cx);
-                } else {
-                    self.push_ssh_connect_error(
-                        format!("Can't connect to \u{201c}{alias}\u{201d}"),
-                        cx,
-                    );
-                }
-            }
-        }
-    }
-
     /// Route a typed "SSH: Add Connection…" line to the native engine (PRD §3.1/
     /// §3.3). The input is parsed as best-effort into a transient profile — a
     /// `user@host[:port]` target plus the trivially-mappable flags (`-p`, `-i`,
@@ -1124,13 +1087,35 @@ impl Tty7App {
     fn open_typed_ssh_connect(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
         match parse_ssh_connect_input(input) {
             Ok(parsed) => {
+                // `ssh` semantics: a target naming a `~/.ssh/config` alias
+                // resolves through it, with typed flags overriding the config's
+                // values. (After parsing, a port of 22 is indistinguishable
+                // from "not given", so an explicit `-p 22` can't override a
+                // config port — the one caveat of this overlay.)
+                let (profile, proxy_jump) =
+                    match ssh_config::resolve_alias_to_profile(&parsed.profile.host) {
+                        Some(resolved) => {
+                            let mut p = resolved.profile;
+                            if !parsed.profile.user.is_empty() {
+                                p.user = parsed.profile.user;
+                            }
+                            if parsed.profile.port != 22 {
+                                p.port = parsed.profile.port;
+                            }
+                            if !parsed.profile.identity_files.is_empty() {
+                                p.identity_files = parsed.profile.identity_files;
+                            }
+                            (p, parsed.proxy_jump.or(resolved.proxy_jump))
+                        }
+                        None => (parsed.profile, parsed.proxy_jump),
+                    };
                 let verify = cx.global::<Config>().verify_host_keys;
                 let spec = crate::ui::ssh_connect::native_spec_from_transient_profile(
-                    &parsed.profile,
-                    parsed.proxy_jump,
+                    &profile,
+                    proxy_jump,
                     &crate::core::keychain::OsCredentialStore,
                     verify,
-                    &|a| ssh_config::resolve_alias_to_profile(a).map(|r| (r.profile, r.proxy_jump)),
+                    &crate::ui::ssh_connect::config_alias_resolver,
                 );
                 self.open_native_ssh_tab(Box::new(spec), window, cx);
             }
@@ -1837,17 +1822,12 @@ impl Tty7App {
             );
         }
 
-        // Live `~/.ssh/config` aliases: resolved (common fields, best-effort) and
-        // connected over the native engine, same as saved profiles (PRD §3.3).
-        for alias in ssh_config::discover_profiles() {
-            commands.push(
-                Command::new(
-                    format!("SSH: {}", alias.alias),
-                    CommandKind::OpenSshProfile(alias),
-                )
-                .with_subtitle("~/.ssh/config"),
-            );
-        }
+        // Saved profiles are the palette's *only* SSH listing: `~/.ssh/config`
+        // hosts appear here after Settings → SSH → "Import from ~/.ssh/config"
+        // turns them into profiles, never as a parallel live-discovered source
+        // (two lists of the same hosts with different behaviors confused more
+        // than it helped). Typing an alias into "SSH: Add Connection…" still
+        // resolves it against ssh_config on the spot.
 
         for (i, tab) in self.tabs.iter().enumerate() {
             // Skip the active tab — "switch to the tab you're already on" is a
@@ -1964,7 +1944,6 @@ impl Tty7App {
                     self.set_preset(&id, window, cx);
                 }
             }
-            OpenSshProfile(profile) => self.open_native_alias(profile.alias, window, cx),
             OpenSshConnect(input) => self.open_typed_ssh_connect(&input, window, cx),
             ConnectSavedProfile(id) => self.connect_ssh_profile(id, window, cx),
             EditSavedProfile(id) => self.open_ssh_profile_in_settings(id, window, cx),

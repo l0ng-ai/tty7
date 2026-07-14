@@ -17,7 +17,7 @@ tty7 当前把系统 `ssh` 二进制丢进 daemon 拥有的 PTY 运行(`daemon/p
 
 **已有可复用的地基:**
 - daemon 拥有全部 PTY,GUI 经 socket 镜像字节流(`terminal/remote.rs` 的 `RemoteTerminal`)——字节源已抽象,是 russh shell channel 的天然接缝
-- palette 已能实时发现 `~/.ssh/config` 的 Host alias(`core/ssh_config.rs`,仅发现不解析)
+- `core/ssh_config.rs` 已能解析 `~/.ssh/config`(含 Include),供导入与按名 resolve 使用
 - pane 级滑入面板(`ui/forwards.rs`)、全窗口设置页、竖向 tab 侧栏均已存在
 - **完全没有的**:profile 存储、keychain/凭据、GUI 认证、SFTP、Remote/Dynamic 转发
 
@@ -97,7 +97,7 @@ tty7 当前把系统 `ssh` 二进制丢进 daemon 拥有的 PTY 运行(`daemon/p
 ### 3.3 ssh_config 处理
 | 决策 | v1 做法 |
 |---|---|
-| **alias 实时发现(已有)** | 保留 `core/ssh_config.rs` 的实时 alias 发现,palette 里 config alias 始终与文件同步,不吃"导入快照过期"的亏 |
+| **alias 按名 resolve** | palette 只列保存的 profile(唯一来源,避免同一主机两套行为);config alias 不再实时列出,但在输入连接目标时按名现场 resolve(等价 `ssh <alias>`),或经导入转成 profile |
 | **导入为 profile(可选)** | 解析常见字段(Host/HostName/User/Port/IdentityFile/ProxyJump)导成 profile,给想要凭据/SFTP/转发管理的条目用;导入是显式动作,可重复执行(按 alias 去重更新) |
 | **运行时完整解析(Match/canonicalize)** | v1 不做;复杂 config 用户对该 profile 勾"系统 ssh 兼容模式"(§3.1) |
 
@@ -194,7 +194,7 @@ tty7 当前把系统 `ssh` 二进制丢进 daemon 拥有的 PTY 运行(`daemon/p
 ### 5.4 Profile 管理 + 凭据(P0)
 - **FR-P1** Profile 存储完整字段(见 §7 数据模型),支持分组。
 - **FR-P2** 密码 / passphrase 存 OS keychain(macOS Keychain;Windows Credential Manager;Linux libsecret),配置文件只存引用不存明文。
-- **FR-P3** palette 为统一入口:同框展示保存的 profile + ssh_config alias + "现连"项,按 frecency 排序。
+- **FR-P3** palette 为统一入口:SSH 列表只来自保存的 profile(按 frecency 排序)+ "现连"项;ssh_config 主机经导入成为 profile 后出现,或直接输入 alias 现连。
 - **FR-P4** QuickConnect 解析 `[ssh] user@host[:port] [flags]`,支持 IPv6 `[::1]:port`。
 - **FR-P5** profile → `user@host:port` 一键复制;`~/.ssh/config` 一键导入。
 
@@ -379,7 +379,7 @@ struct SshProfile {
 | **russh 兼容性长尾**(Tabby 前车之鉴:#10188/#10207/#11058) | 部分用户切换后连不上 | 系统 ssh 兼容模式逃生门 + GA 前 ≥2 周 dogfood + 认证失败信息可诊断(展示服务端拒绝原因) |
 | russh 特性缺口(FIDO/PKCS#11) | 部分密钥类型连不上 | 引导用户经 ssh-agent 认证(签名由 agent 完成);仍不行走兼容模式 |
 | GSSAPI/Kerberos 用户 | 管理器路径无法连接 | 兼容模式覆盖,文档说明 |
-| ssh_config 复杂语义(Match/多跳) | 导入不完整 | 实时 alias 发现保底;v1 只导入常见字段;复杂场景引导兼容模式 |
+| ssh_config 复杂语义(Match/多跳) | 导入不完整 | 输入 alias 按名 resolve 保底;v1 只导入常见字段;复杂场景引导兼容模式 |
 | known_hosts 格式细节 | 误报/漏报 host key | 只做明文/hashed/@revoked 的信任判定,@cert-authority 尽力而为;解析层绝不改写无关行;充分测试 |
 | 连接复用爆炸半径 | 一条连接挂掉拖垮多个 pane | FR-C2 明确断开语义:所有共享 pane 同步提示,一键重连全部恢复 |
 | X11 转发依赖 XQuartz(macOS) | 开了不生效,用户困惑 | 检测不到 X server 时提示安装 XQuartz,而非静默失败 |

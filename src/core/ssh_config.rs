@@ -1,11 +1,15 @@
-//! Lightweight discovery of OpenSSH host aliases for UI pickers.
+//! `~/.ssh/config` parsing: alias resolution for typed connects and the
+//! Settings-page import (PRD §3.3).
 //!
-//! tty7 does not try to resolve the final SSH configuration here. OpenSSH is the
-//! source of truth for `HostName`, `User`, `Port`, `ProxyJump`, `Match`, and the
-//! rest when we eventually run `ssh <alias>`. This module only finds concrete
-//! `Host` aliases worth listing in the command palette.
+//! Saved profiles are the app's single listed source of SSH hosts; this module
+//! never feeds a UI list directly. It resolves a *named* alias on demand
+//! (`resolve_alias_to_profile`, used when a typed target names a config Host)
+//! and turns the whole config into managed profiles on explicit import
+//! (`import_profiles` + `merge_imported`, behind Settings → SSH → "Import
+//! from ~/.ssh/config"). `Match` blocks and `canonicalize` are intentionally
+//! not evaluated.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::core::ssh_profile::{ForwardKind, ForwardRule, HostPort, SshProfile as ManagedProfile};
@@ -17,68 +21,6 @@ const MAX_CONFIG_FILES: usize = 256;
 /// marker used to recognize them). Newly imported entries get this; an existing
 /// profile's group is preserved on re-import.
 pub const IMPORTED_GROUP: &str = "Imported from ssh_config";
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SshProfile {
-    pub alias: String,
-    pub source: PathBuf,
-}
-
-pub fn discover_profiles() -> Vec<SshProfile> {
-    let Some(home) = home_dir() else {
-        return Vec::new();
-    };
-    discover_profiles_from(home.join(".ssh/config"), &home)
-}
-
-fn discover_profiles_from(root: PathBuf, home: &Path) -> Vec<SshProfile> {
-    let mut profiles = Vec::new();
-    let mut aliases = HashSet::new();
-    let mut seen_files = HashSet::new();
-    let mut queue = VecDeque::from([(root, 0usize)]);
-
-    while let Some((path, depth)) = queue.pop_front() {
-        if depth > MAX_INCLUDE_DEPTH || seen_files.len() >= MAX_CONFIG_FILES {
-            continue;
-        }
-        let path = expand_path(&path, home);
-        if !seen_files.insert(path.clone()) {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let base = path.parent().unwrap_or(home);
-        for line in text.lines() {
-            let line = strip_comment(line).trim();
-            if line.is_empty() {
-                continue;
-            }
-            let Some((key, rest)) = split_keyword(line) else {
-                continue;
-            };
-            if key.eq_ignore_ascii_case("host") {
-                for token in split_words(rest) {
-                    if concrete_host_alias(&token) && aliases.insert(token.clone()) {
-                        profiles.push(SshProfile {
-                            alias: token,
-                            source: path.clone(),
-                        });
-                    }
-                }
-            } else if key.eq_ignore_ascii_case("include") {
-                for token in split_words(rest) {
-                    for include in expand_include(&token, base, home) {
-                        queue.push_back((include, depth + 1));
-                    }
-                }
-            }
-        }
-    }
-
-    profiles.sort_by(|a, b| a.alias.cmp(&b.alias).then_with(|| a.source.cmp(&b.source)));
-    profiles
-}
 
 fn home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
@@ -239,8 +181,7 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 // ─────────────────────────────────────────────────────────────────────────────
 // ssh_config → profile import (PRD §3.3)
 //
-// `discover_profiles` above stays untouched (live alias discovery for the
-// palette). The code below resolves the russh-mappable fields of each concrete
+// The code below resolves the russh-mappable fields of each concrete
 // `Host` alias into a [`ManagedProfile`], so a config entry can connect natively
 // (there is no system-ssh fallback). Scope, per PRD §3.3:
 //
@@ -807,9 +748,9 @@ mod tests {
         )
         .unwrap();
 
-        let aliases: Vec<_> = discover_profiles_from(ssh.join("config"), &root)
+        let aliases: Vec<_> = import_profiles_from(ssh.join("config"), &root)
             .into_iter()
-            .map(|p| p.alias)
+            .map(|p| p.profile.name)
             .collect();
         assert_eq!(aliases, vec!["dev", "prod", "quoted host"]);
     }
@@ -823,9 +764,9 @@ mod tests {
         std::fs::write(ssh.join("conf.d/dev"), "Host dev\n").unwrap();
         std::fs::write(ssh.join("conf.d/prod"), "Host prod\n").unwrap();
 
-        let aliases: Vec<_> = discover_profiles_from(ssh.join("config"), &root)
+        let aliases: Vec<_> = import_profiles_from(ssh.join("config"), &root)
             .into_iter()
-            .map(|p| p.alias)
+            .map(|p| p.profile.name)
             .collect();
         assert_eq!(aliases, vec!["dev", "prod", "root"]);
     }

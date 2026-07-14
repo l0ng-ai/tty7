@@ -22,7 +22,6 @@ use gpui_component::{
 use uuid::Uuid;
 
 use crate::core::config::Config;
-use crate::core::ssh_config::SshProfile;
 use crate::core::ssh_profile::parse_quick_connect;
 
 /// What a command actually does. Most variants map to an existing `Tty7App`
@@ -70,9 +69,6 @@ pub enum CommandKind {
     /// Apply the preset at this index in `presets::all()`. Emitted from the
     /// theme sub-list.
     SetTheme(usize),
-    /// Open a native SSH tab for this discovered OpenSSH host alias (resolved
-    /// against `~/.ssh/config`).
-    OpenSshProfile(SshProfile),
     /// Switch to the tab at this index in `Tty7App::tabs`.
     ActivateTab(usize),
     /// Connect a saved SSH profile by id (over the native engine).
@@ -140,7 +136,6 @@ impl CommandKind {
             | OpenSshConnectInput
             | OpenSshConnect(_)
             | SetTheme(_)
-            | OpenSshProfile(_)
             | ActivateTab(_)
             | ConnectSavedProfile(_)
             | EditSavedProfile(_)

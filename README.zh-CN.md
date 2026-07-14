@@ -68,7 +68,7 @@ macOS、Windows、Linux 三平台原生构建，每个 release 一起打出。
 
 - **QuickConnect** —— 面板里打 `user@host[:port]` 回车即连；支持 IPv6 `[::1]:port`
 - **保存 profile** —— 完整连接配置，密码 / passphrase 进 OS keychain，绝不落盘
-- **`~/.ssh/config` alias** —— 原生解析（常用字段，尽力而为）后走 russh 连接
+- **`~/.ssh/config` alias** —— 直接输入 alias 即连（原生解析常用字段，尽力而为，走 russh），也可在设置页一键导入为 profile
 - **GUI 认证** —— pane 内 sheet 输入密码、私钥 passphrase、2FA，并确认主机密钥（新主机 vs 已变更）
 - **内置 SFTP** —— 滑入式文件面板：浏览、上传 / 下载、重命名 / 删除 / chmod，可拖进 Finder
 - **端口转发** —— Local / Remote / Dynamic，预配置或运行时增删，外加 ⌘ 点击 `localhost:PORT` 一键转发

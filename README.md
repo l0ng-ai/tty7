@@ -73,7 +73,7 @@ and SFTP without ever shelling out to `ssh`. There is no system-ssh compat mode.
 
 - **QuickConnect** — type `user@host[:port]` in the palette and connect; IPv6 `[::1]:port` supported
 - **Saved profiles** — full connection config with passwords / passphrases in the OS keychain, never on disk
-- **`~/.ssh/config` aliases** — resolved natively (common fields, best-effort) and connected over russh
+- **`~/.ssh/config` aliases** — type one to connect (resolved natively — common fields, best-effort — over russh), or import them as profiles in Settings
 - **GUI auth** — in-pane sheets for password, key passphrase, 2FA, and host-key confirmation (new vs. changed)
 - **Built-in SFTP** — a slide-in file panel: browse, upload / download, rename / delete / chmod, drag to Finder
 - **Port forwarding** — Local / Remote / Dynamic, preconfigured or added live, plus ⌘-click `localhost:PORT` to auto-forward
