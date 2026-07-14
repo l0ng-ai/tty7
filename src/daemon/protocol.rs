@@ -294,6 +294,10 @@ pub enum SftpOp {
     Mkdir {
         path: String,
     },
+    /// Create a new empty file, failing if one already exists at `path`.
+    CreateFile {
+        path: String,
+    },
     RemoveFile {
         path: String,
     },

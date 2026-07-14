@@ -585,6 +585,19 @@ async fn run_op(sftp: &SftpSession, op: &SftpOp) -> Result<SftpOpResult, String>
                 .map_err(|e| format!("{e}"))?;
             SftpOpResult::Done
         }
+        SftpOp::CreateFile { path } => {
+            // EXCLUDE => fail rather than clobber an existing file. The OPEN
+            // itself creates the (empty) file server-side; flush/shutdown closes
+            // the handle cleanly.
+            let flags = OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE;
+            let mut file = sftp
+                .open_with_flags(path.clone(), flags)
+                .await
+                .map_err(|e| format!("{e}"))?;
+            file.flush().await.ok();
+            file.shutdown().await.ok();
+            SftpOpResult::Done
+        }
         SftpOp::RemoveFile { path } => {
             sftp.remove_file(path.clone())
                 .await
