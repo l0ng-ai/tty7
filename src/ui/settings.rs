@@ -20,7 +20,9 @@ use gpui_component::select::{SearchableVec, Select, SelectState};
 use gpui_component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
 use gpui_component::slider::{Slider, SliderState};
 use gpui_component::switch::Switch;
-use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -1520,6 +1522,18 @@ impl Tty7App {
                     let _ = app.update(cx, |this, cx| this.duplicate_profile(id, window, cx));
                 }
             }))
+            .item(PopupMenuItem::new("Forget password").on_click({
+                let app = app.clone();
+                move |_, window, cx| {
+                    if let Some(msg) = app
+                        .update(cx, |this, cx| this.forget_profile_password(id, cx))
+                        .ok()
+                        .flatten()
+                    {
+                        window.push_notification(msg, cx);
+                    }
+                }
+            }))
             .separator();
 
         // Destructive, last, in danger red and set apart by the separator above.
@@ -1868,6 +1882,32 @@ impl Tty7App {
             let s = to_connect_string(profile);
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(s));
         }
+    }
+
+    /// Remove any keychain-stored password for this profile's endpoint
+    /// (`user@host:port`). The profile itself is untouched — the next connect will
+    /// prompt again. A no-op if nothing was stored. Returns a status line for the
+    /// caller to surface as a notification. Credentials are keyed by endpoint, not
+    /// profile, so this only matches when the profile pins an explicit user.
+    pub(crate) fn forget_profile_password(
+        &mut self,
+        id: Uuid,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        use crate::core::keychain::{CredentialStore, OsCredentialStore};
+        let (user, host, port) = cx
+            .global::<Config>()
+            .ssh_profiles
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| (p.user.clone(), p.host.clone(), p.port))?;
+        let endpoint = format!("{user}@{host}:{port}");
+        Some(
+            match OsCredentialStore.delete_password(&user, &host, port) {
+                Ok(()) => format!("Forgot saved password for {endpoint}"),
+                Err(e) => format!("Couldn't forget password for {endpoint}: {e}"),
+            },
+        )
     }
 
     /// The inline edit form: four core fields + collapsible jump / forwards /
