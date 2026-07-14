@@ -13,7 +13,7 @@
 //! whose root reads `SFTP` and which double-clicks into a "type a path" text
 //! input; a toolbar (refresh / filter / new folder / upload / go-to-shell-cwd);
 //! a filter box hidden behind the toolbar's Filter toggle; a dir-first entry
-//! list led by a `Go up` row (when not at the root) whose per-row actions
+//! list led by a `..` parent row (when not at the root) whose per-row actions
 //! (open/download / follow-symlink / rename / chmod / delete) live in a
 //! right-click context menu (PRD §6.3: hotkeys + right-click, not a permanent
 //! toolbar); an inline edit form; and a bottom transfer tray that polls job
@@ -1068,8 +1068,8 @@ impl Tty7App {
         let filter = self.sftp_panel.filter_input.read(cx).value().to_string();
         let entries = sorted_filtered_entries(&self.sftp_panel.entries, &filter);
 
-        // "Go up" leads the list (tabby-style) when not at the root and not
-        // actively filtering — it replaces the old toolbar "Up" button.
+        // A `..` parent row leads the list when not at the root and not
+        // actively filtering — the file-manager convention for going up.
         let show_go_up = self.sftp_panel.cwd != "/" && filter.trim().is_empty();
 
         if entries.is_empty() && !show_go_up {
@@ -1093,9 +1093,11 @@ impl Tty7App {
         container.child(list)
     }
 
-    /// The leading "⤴ Go up" list row (shown when not at the filesystem root).
+    /// The leading `..` parent row (shown when not at the filesystem root), styled
+    /// like a directory entry (WinRAR/file-manager convention) so it reads as
+    /// "the parent folder" and matches the rows below rather than a toolbar action.
     fn render_sftp_go_up_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
+        let foreground = cx.theme().foreground;
         let list_hover = cx.theme().list_hover;
         h_flex()
             .id("sftp-go-up")
@@ -1106,14 +1108,14 @@ impl Tty7App {
             .rounded_md()
             .cursor_pointer()
             .hover(|s| s.bg(list_hover))
-            .child(Icon::new(IconName::ArrowUp).small().text_color(muted))
+            .child(Icon::new(IconName::Folder).small().text_color(foreground))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .text_sm()
-                    .text_color(muted)
-                    .child("Go up"),
+                    .text_color(foreground)
+                    .child(".."),
             )
             .on_click(cx.listener(|this, _, _w, cx| this.sftp_up(cx)))
             .into_any_element()
