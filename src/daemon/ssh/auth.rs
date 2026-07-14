@@ -353,7 +353,19 @@ async fn try_keyboard_interactive(
         Err(e) => return failed(format!("keyboard-interactive start error: {e}")),
     };
 
+    // Cap the round count (OpenSSH keeps a similar client-side device cap): a
+    // hostile or looping server must not be able to spin this task forever with
+    // zero-prompt or auto-filled requests. The stored password is auto-filled
+    // once only — a server re-asking means it was rejected (PAM retries), so
+    // later rounds fall through to prompting the user for the real one.
+    const MAX_ROUNDS: u32 = 16;
+    let mut rounds = 0u32;
+    let mut stored_password_used = false;
     loop {
+        rounds += 1;
+        if rounds > MAX_ROUNDS {
+            return failed("keyboard-interactive gave up after too many rounds");
+        }
         match resp {
             KeyboardInteractiveAuthResponse::Success => return Outcome::Authenticated,
             KeyboardInteractiveAuthResponse::Failure {
@@ -381,11 +393,21 @@ async fn try_keyboard_interactive(
                     continue;
                 }
 
-                let answers =
-                    match collect_ki_answers(spec, broker, &name, &instructions, &prompts).await {
-                        Some(a) => a,
-                        None => return failed("keyboard-interactive cancelled"),
-                    };
+                let allow_stored = !stored_password_used;
+                stored_password_used = true;
+                let answers = match collect_ki_answers(
+                    spec,
+                    broker,
+                    &name,
+                    &instructions,
+                    &prompts,
+                    allow_stored,
+                )
+                .await
+                {
+                    Some(a) => a,
+                    None => return failed("keyboard-interactive cancelled"),
+                };
                 resp = match handle
                     .authenticate_keyboard_interactive_respond(answers)
                     .await
@@ -399,19 +421,22 @@ async fn try_keyboard_interactive(
 }
 
 /// Answer a keyboard-interactive info-request. When *every* prompt is a
-/// password-type field and a spec password is available, auto-fill without
-/// bothering the GUI; otherwise surface the whole prompt set to the GUI.
+/// password-type field and a spec password is available (and this round may
+/// still use it — the first only; a re-ask means the server rejected it),
+/// auto-fill without bothering the GUI; otherwise surface the whole prompt set
+/// to the GUI.
 async fn collect_ki_answers(
     spec: &NativeSshSpec,
     broker: &Arc<PromptBroker>,
     name: &str,
     instructions: &str,
     prompts: &[russh::client::Prompt],
+    allow_stored: bool,
 ) -> Option<Vec<String>> {
     let all_password_type = prompts
         .iter()
         .all(|p| !p.echo && p.prompt.to_lowercase().contains("password"));
-    if all_password_type {
+    if all_password_type && allow_stored {
         if let Some(pw) = &spec.password {
             return Some(prompts.iter().map(|_| pw.clone()).collect());
         }

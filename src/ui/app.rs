@@ -8,7 +8,7 @@ use gpui_component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
 use gpui_component::slider::{SliderEvent, SliderState};
-use gpui_component::{ActiveTheme as _, IndexPath, TitleBar};
+use gpui_component::{ActiveTheme as _, IndexPath, TitleBar, WindowExt as _};
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -1355,7 +1355,14 @@ impl Tty7App {
                 .focused_or_first(window, cx)
                 .and_then(|leaf| leaf.read(cx).cwd())
         });
-        let view = new_terminal_native(self.font_size, cwd, spec, window, cx);
+        let view = match new_terminal_native(self.font_size, cwd, spec, window, cx) {
+            Ok(view) => view,
+            Err(e) => {
+                log::error!("native SSH spawn failed: {e}");
+                window.push_notification(format!("SSH connection failed: {e}"), cx);
+                return;
+            }
+        };
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
         self.tabs.insert(insert_at, Tab::new(Pane::leaf(view)));
@@ -1376,7 +1383,14 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         let cwd = dead.read(cx).cwd();
-        let fresh = new_terminal_native(self.font_size, cwd, spec, window, cx);
+        let fresh = match new_terminal_native(self.font_size, cwd, spec, window, cx) {
+            Ok(view) => view,
+            Err(e) => {
+                log::error!("native SSH respawn failed: {e}");
+                window.push_notification(format!("SSH reconnect failed: {e}"), cx);
+                return;
+            }
+        };
         // Swap the fresh leaf into the dead one's position across every tab.
         for tab in &mut self.tabs {
             if tab.pane.replace_leaf(dead, fresh.clone()) {
@@ -1492,6 +1506,15 @@ impl Tty7App {
         else {
             return; // already closed (e.g. by the user racing the exit)
         };
+        // A native-SSH pane lingers instead of closing (PRD FR-C2/E4): a failed
+        // connect's diagnostic must stay readable, and a dropped session's pane
+        // is the anchor for the in-pane reconnect (`restart_ssh_session`) —
+        // auto-close would make both unreachable. Only local shells fall through
+        // to the close below.
+        if view.read(cx).ssh_disconnected() {
+            cx.notify();
+            return;
+        }
         match self.tabs[index].pane.close_leaf(&view) {
             // The exited pane was the tab's only leaf: close the whole tab
             // (which snapshots it for reopen and kills its daemon panes).
@@ -3313,8 +3336,12 @@ fn session_to_pane(
             if restore.is_none() {
                 if let Some(spec) = ssh_spec.clone() {
                     let resolved = crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
-                    let view = new_terminal_native(font_size, cwd.clone(), resolved, window, cx);
-                    return Pane::leaf(view);
+                    match new_terminal_native(font_size, cwd.clone(), resolved, window, cx) {
+                        Ok(view) => return Pane::leaf(view),
+                        // Keep restore alive: fall through to a local shell in
+                        // this slot rather than aborting startup.
+                        Err(e) => log::error!("restoring native SSH pane failed: {e}"),
+                    }
                 }
             }
             // A shell pick isn't persisted in the session, so a stale pane that
@@ -3376,16 +3403,18 @@ fn new_terminal(
 /// per-pane subscriptions (`ChildExited`, `AuthPromptReady`) as [`new_terminal`]
 /// so it participates in auto-close and the in-pane auth sheets. Mirrors
 /// `new_terminal` but takes the resolved connect spec instead of a shell.
+/// Errors (daemon down/stale, spawn refused) are returned, never panicked —
+/// callers surface them and keep the app alive.
 pub(crate) fn new_terminal_native(
     font_size: f32,
     working_directory: Option<std::path::PathBuf>,
     spec: Box<crate::daemon::protocol::NativeSshSpec>,
     window: &mut Window,
     cx: &mut Context<Tty7App>,
-) -> Entity<TerminalView> {
+) -> anyhow::Result<Entity<TerminalView>> {
+    let parts = TerminalView::spawn_native_ssh_terminal(spec, working_directory)?;
     let view = cx.new(|cx| {
-        let mut view = TerminalView::new_native_ssh(spec, working_directory, window, cx)
-            .expect("failed to start native SSH session");
+        let mut view = TerminalView::from_native_ssh_parts(parts, window, cx);
         view.font_size = px(font_size);
         view
     });
@@ -3401,7 +3430,7 @@ pub(crate) fn new_terminal_native(
         },
     )
     .detach();
-    view
+    Ok(view)
 }
 
 pub(crate) fn parse_ssh_option_words(input: &str) -> Result<Vec<String>, ()> {

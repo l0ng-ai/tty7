@@ -72,6 +72,16 @@ pub struct AuthPromptReady;
 
 impl gpui::EventEmitter<AuthPromptReady> for TerminalView {}
 
+/// An established native-SSH daemon pane, ready to be wrapped in a view: the
+/// output of the fallible [`TerminalView::spawn_native_ssh_terminal`], consumed
+/// by the infallible [`TerminalView::from_native_ssh_parts`].
+pub struct NativeSshParts {
+    terminal: RemoteTerminal,
+    pane_id: u64,
+    /// Secret-free spec copy retained for session restore / in-pane reconnect.
+    persist: Box<crate::daemon::protocol::NativeSshSpec>,
+}
+
 /// See `TerminalView::drag_scroll`.
 #[derive(Clone, Copy)]
 struct DragScroll {
@@ -618,12 +628,15 @@ impl TerminalView {
     /// the in-pane reconnect. Auth/host-key prompts and the connection phase ride
     /// this pane's own stream and surface through the usual `AuthPromptReady`
     /// path.
-    pub fn new_native_ssh(
+    /// The fallible half of a native-SSH view: establish the daemon pane first,
+    /// so a refused spawn (daemon down, stale pre-SSH daemon, protocol error)
+    /// surfaces as an `Err` the caller can report — building the view itself
+    /// (inside `cx.new`, via [`Self::from_native_ssh_parts`]) has no failure
+    /// path of its own.
+    pub fn spawn_native_ssh_terminal(
         spec: Box<crate::daemon::protocol::NativeSshSpec>,
         working_directory: Option<std::path::PathBuf>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<NativeSshParts> {
         let persist = Box::new(spec.without_secrets());
         let (terminal, pane_id) = RemoteTerminal::spawn_native_ssh(
             TermSize::new(80, 24),
@@ -632,9 +645,23 @@ impl TerminalView {
             working_directory,
             spec,
         )?;
-        let mut view = Self::with_terminal(terminal, pane_id, window, cx);
-        view.ssh_spec = Some(persist);
-        Ok(view)
+        Ok(NativeSshParts {
+            terminal,
+            pane_id,
+            persist,
+        })
+    }
+
+    /// Wrap an established native-SSH pane (from
+    /// [`Self::spawn_native_ssh_terminal`]) in a view.
+    pub fn from_native_ssh_parts(
+        parts: NativeSshParts,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut view = Self::with_terminal(parts.terminal, parts.pane_id, window, cx);
+        view.ssh_spec = Some(parts.persist);
+        view
     }
 
     /// Build the view around an already-connected terminal. Split from [`new`]

@@ -344,18 +344,25 @@ impl Tty7App {
             // Only pull a new sheet if none is active; always harvest banners.
             let want_prompt = self.ssh_prompt.model.is_none();
             loop {
-                match term.take_auth_prompt() {
-                    Some((_, AuthPromptKind::Banner { text })) => banners.push(text),
-                    Some(p) if want_prompt => {
-                        next = Some(p);
-                        break;
+                if want_prompt {
+                    match term.take_auth_prompt() {
+                        Some((_, AuthPromptKind::Banner { text })) => banners.push(text),
+                        Some(p) => {
+                            next = Some(p);
+                            break;
+                        }
+                        None => break,
                     }
-                    // A sheet is already up: leave this prompt for later by
-                    // re-queuing is not possible (popped), so stop draining
-                    // non-banner prompts. In practice the daemon serializes auth
-                    // steps, so at most one real prompt is outstanding.
-                    Some(_) => break,
-                    None => break,
+                } else {
+                    // A sheet is already up (another pane's): harvest banners
+                    // only, leaving the real prompt *queued* — popping it here
+                    // would drop it (no re-queue) and that pane's auth would
+                    // dangle until the broker timeout. `dismiss_and_advance`
+                    // picks queued prompts up when the active sheet resolves.
+                    match term.take_auth_banner() {
+                        Some(text) => banners.push(text),
+                        None => break,
+                    }
                 }
             }
             (
@@ -508,6 +515,19 @@ impl Tty7App {
         if let Some(pane) = pane {
             self.on_auth_prompt_ready(pane, window, cx);
         }
+        // Still no sheet: another pane's prompt may have arrived while ours was
+        // up. It was deliberately left queued (see `on_auth_prompt_ready`), and
+        // its pane may get no further wakeup to re-raise it — find it now.
+        if self.ssh_prompt.model.is_none() {
+            let waiting = self
+                .tabs
+                .iter()
+                .flat_map(|t| t.pane.leaves())
+                .find(|l| l.read(cx).terminal.has_pending_auth());
+            if let Some(view) = waiting {
+                self.on_auth_prompt_ready(view, window, cx);
+            }
+        }
         cx.notify();
     }
 
@@ -523,7 +543,9 @@ impl Tty7App {
                 port,
                 secret,
             } => {
-                let _ = store.set_password(&user, &host, port, &secret);
+                if let Err(e) = store.set_password(&user, &host, port, &secret) {
+                    log::warn!("could not save password to keychain: {e}");
+                }
             }
             KeychainWrite::DeletePassword { user, host, port } => {
                 let _ = store.delete_password(&user, &host, port);
@@ -531,10 +553,18 @@ impl Tty7App {
             KeychainWrite::SetKeyPassphrase { key_path, secret } => {
                 // The keychain account is the key file's content hash. If the key
                 // can't be read we skip remember rather than store under a guessed
-                // account (documented WS3 fallback).
-                if let Ok(bytes) = std::fs::read(&key_path) {
-                    let account = crate::core::keychain::key_account_from_contents(&bytes);
-                    let _ = store.set_key_passphrase(&account, &secret);
+                // account (documented WS3 fallback). The prompt's key_path is the
+                // spec's raw entry, which can still carry a `~` (e.g. an old
+                // persisted spec) — expand before reading.
+                let path = crate::core::ssh_profile::expand_tilde(&key_path);
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        let account = crate::core::keychain::key_account_from_contents(&bytes);
+                        if let Err(e) = store.set_key_passphrase(&account, &secret) {
+                            log::warn!("could not save key passphrase to keychain: {e}");
+                        }
+                    }
+                    Err(e) => log::warn!("not remembering passphrase; cannot read {path}: {e}"),
                 }
             }
         }

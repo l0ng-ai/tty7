@@ -374,8 +374,14 @@ pub fn to_connect_string(profile: &SshProfile) -> String {
 }
 
 /// Expand `%h` (host) and `%r` (remote user) placeholders in an identity-file path
-/// (PRD FR-A2). A single left-to-right pass, so a `%h` that expands to text
-/// containing `%r` is not re-expanded. `%%` yields a literal `%`.
+/// (PRD FR-A2), plus a leading `~/` to the home directory. A single left-to-right
+/// pass, so a `%h` that expands to text containing `%r` is not re-expanded. `%%`
+/// yields a literal `%`.
+///
+/// The tilde matters GUI-side: identity paths are overwhelmingly `~/.ssh/...`
+/// (every ssh_config import), and the keychain passphrase scheme hashes the key
+/// *file contents* — an unexpanded `~` makes that read silently fail, so
+/// "remember passphrase" would neither store nor resolve.
 pub fn expand_identity_placeholders(path: &str, host: &str, user: &str) -> String {
     let mut out = String::with_capacity(path.len());
     let mut chars = path.chars();
@@ -396,7 +402,30 @@ pub fn expand_identity_placeholders(path: &str, host: &str, user: &str) -> Strin
             None => out.push('%'),
         }
     }
-    out
+    expand_tilde(&out)
+}
+
+/// Expand a leading `~/` (or a bare `~`) to the user's home directory; every
+/// other path passes through unchanged, as does `~` when no home is known.
+pub fn expand_tilde(path: &str) -> String {
+    let home = || {
+        #[cfg(windows)]
+        let var = "USERPROFILE";
+        #[cfg(not(windows))]
+        let var = "HOME";
+        std::env::var(var).ok().filter(|h| !h.is_empty())
+    };
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = home() {
+            let sep = if home.ends_with('/') { "" } else { "/" };
+            return format!("{home}{sep}{rest}");
+        }
+    } else if path == "~" {
+        if let Some(home) = home() {
+            return home;
+        }
+    }
+    path.to_string()
 }
 
 #[cfg(test)]
@@ -519,13 +548,16 @@ mod tests {
 
     #[test]
     fn identity_placeholder_expansion() {
+        // `~/` expands to the real home dir (the GUI hashes the key file's
+        // contents for the keychain, so the path must be readable as-is).
+        let home = expand_tilde("~");
         assert_eq!(
             expand_identity_placeholders("~/.ssh/id_%h", "example.com", "deploy"),
-            "~/.ssh/id_example.com"
+            format!("{home}/.ssh/id_example.com")
         );
         assert_eq!(
             expand_identity_placeholders("~/keys/%r@%h.pem", "host", "alice"),
-            "~/keys/alice@host.pem"
+            format!("{home}/keys/alice@host.pem")
         );
         // A literal %% survives as a single %, and unknown tokens stay verbatim.
         assert_eq!(
@@ -534,11 +566,22 @@ mod tests {
         );
         // Single left-to-right pass: %h expanding to text with %r is not re-expanded.
         assert_eq!(expand_identity_placeholders("%h", "%r", "u"), "%r");
-        // No placeholders → unchanged.
+        // No placeholders and no tilde → unchanged.
         assert_eq!(
-            expand_identity_placeholders("~/.ssh/id_ed25519", "h", "u"),
-            "~/.ssh/id_ed25519"
+            expand_identity_placeholders("/abs/.ssh/id_ed25519", "h", "u"),
+            "/abs/.ssh/id_ed25519"
         );
+    }
+
+    #[test]
+    fn expand_tilde_only_touches_a_leading_tilde() {
+        let home = expand_tilde("~");
+        assert!(!home.is_empty() && home != "~");
+        assert_eq!(expand_tilde("~/.ssh/id"), format!("{home}/.ssh/id"));
+        // Not a home reference: mid-path or suffixed tildes stay verbatim.
+        assert_eq!(expand_tilde("/a/~/b"), "/a/~/b");
+        assert_eq!(expand_tilde("~user/x"), "~user/x");
+        assert_eq!(expand_tilde("/abs/path"), "/abs/path");
     }
 
     #[test]
@@ -550,11 +593,12 @@ mod tests {
             "~/.ssh/id_%r_%h".to_string(),
             "~/.ssh/id_ed25519".to_string(),
         ];
+        let home = expand_tilde("~");
         assert_eq!(
             p.expanded_identity_files(),
             vec![
-                "~/.ssh/id_bob_srv".to_string(),
-                "~/.ssh/id_ed25519".to_string()
+                format!("{home}/.ssh/id_bob_srv"),
+                format!("{home}/.ssh/id_ed25519")
             ]
         );
     }

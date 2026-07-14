@@ -39,7 +39,7 @@ use crate::daemon::protocol::{
     RemoteContext, RemoteKind, SftpEntry, SftpEntryKind, SftpJobProgress, SftpJobState, SftpOp,
     SftpOpResult, SftpTransferKind, SftpTransferSpec,
 };
-use crate::daemon::ssh::sftp::{remote_basename, remote_join, remote_parent};
+use crate::daemon::ssh::sftp::{remote_basename, remote_join, remote_parent, safe_local_name};
 use crate::terminal::RemoteTerminal;
 use crate::ui::app::Tty7App;
 
@@ -423,6 +423,15 @@ impl Tty7App {
         let Some(pane_id) = self.sftp_panel.open_pane_id else {
             return;
         };
+        // The entry name is server-supplied: a traversing name (`..`, `a/b`,
+        // absolute — which `Path::join` would let replace the base entirely)
+        // must not become the local destination. Same guard the daemon applies
+        // to names discovered during the recursive walk.
+        if !safe_local_name(&entry.name) {
+            self.sftp_panel.error = Some(format!("refusing unsafe remote name {:?}", entry.name));
+            cx.notify();
+            return;
+        }
         let remote = remote_join(&self.sftp_panel.cwd, &entry.name);
         let local = local_download_dir().join(&entry.name);
         let recursive = matches!(entry.kind, SftpEntryKind::Dir);

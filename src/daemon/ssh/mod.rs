@@ -369,10 +369,18 @@ impl SshManager {
             }
 
             // Establish the jump connection first (recursively) so its
-            // `direct-tcpip` channel can be this connection's transport.
+            // `direct-tcpip` channel can be this connection's transport — unless
+            // a ProxyCommand is also configured: it outranks the jump in
+            // `build_transport`, and establishing (and interactively
+            // authenticating) a jump connection that would then be discarded
+            // wastes the user's prompts.
+            let has_proxy_command =
+                matches!(&spec.proxy, crate::daemon::protocol::SshProxy::Command(_));
             let jump = match &spec.jump {
-                Some(jump_spec) => Some(self.open_connection(jump_spec, broker).await?.0),
-                None => None,
+                Some(jump_spec) if !has_proxy_command => {
+                    Some(self.open_connection(jump_spec, broker).await?.0)
+                }
+                _ => None,
             };
 
             // Transport + SSH handshake under the connect-timeout budget. Auth is
@@ -400,10 +408,27 @@ impl SshManager {
                     .await
                     .map_err(|e| anyhow::anyhow!("ssh handshake failed: {e}"))
             };
-            let mut handle = match tokio::time::timeout(budget, handshake).await {
-                Ok(Ok(h)) => h,
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Err(anyhow::anyhow!("connection timed out")),
+            // Watchdog rather than a flat `timeout(budget, ...)`: russh raises the
+            // host-key confirmation *inside* connect_stream (via
+            // `check_server_key`), and the user reading a fingerprint must not
+            // race the network timeout. Ticks are only billed against the budget
+            // while no broker prompt is pending; the broker's own per-prompt
+            // timeout still bounds an unanswered dialog.
+            let mut handshake = std::pin::pin!(handshake);
+            let mut remaining = budget;
+            const TICK: Duration = Duration::from_millis(200);
+            let mut handle = loop {
+                match tokio::time::timeout(TICK, handshake.as_mut()).await {
+                    Ok(Ok(h)) => break h,
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) if broker.has_pending() => {}
+                    Err(_) => {
+                        remaining = remaining.saturating_sub(TICK);
+                        if remaining.is_zero() {
+                            return Err(anyhow::anyhow!("connection timed out"));
+                        }
+                    }
+                }
             };
 
             broker.status(SshPhase::Authenticating);

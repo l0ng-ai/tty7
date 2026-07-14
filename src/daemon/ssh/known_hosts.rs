@@ -108,6 +108,7 @@ pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> H
 
     // Second pass — normal known/changed resolution (revocation already handled).
     let mut changed: Option<String> = None;
+    let mut changed_other_alg: Option<String> = None;
     for line in contents.lines() {
         let Some(entry) = KnownHostsLine::parse(line) else {
             continue;
@@ -125,6 +126,14 @@ pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> H
             None => {
                 let Some(stored) = entry.key() else { continue };
                 if stored.algorithm() != our_alg {
+                    // The host is known, just via a different key type. If no
+                    // same-type line resolves this below, report Changed, like
+                    // OpenSSH: a MITM can present a key of an algorithm absent
+                    // from the file precisely to downgrade the changed-key
+                    // warning to a benign first-connect prompt.
+                    if changed_other_alg.is_none() {
+                        changed_other_alg = Some(fingerprint_sha256(&stored));
+                    }
                     continue;
                 }
                 if &stored == key {
@@ -140,7 +149,7 @@ pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> H
         }
     }
 
-    match changed {
+    match changed.or(changed_other_alg) {
         Some(old_fingerprint_sha256) => HostKeyStatus::Changed {
             old_fingerprint_sha256,
         },
@@ -276,10 +285,21 @@ pub fn delete_in_file(path: &Path, id: &KnownHostId) -> std::io::Result<()> {
     if !removed {
         return Ok(());
     }
-    // Preserve permissions/atomicity expectations: write back in place. `known_hosts`
-    // is small and single-user; a straight write is fine (and matches OpenSSH,
-    // which rewrites the whole file on `ssh-keygen -R`).
-    std::fs::write(path, new_contents)
+    // Write a sibling temp then rename over the original: an in-place truncating
+    // write would leave a truncated known_hosts behind a crash mid-write. (A
+    // concurrent O_APPEND from another connection's TOFU accept can still be
+    // lost to the read-modify-write window — data-loss only; a lost entry fails
+    // toward re-prompting, never toward trusting.)
+    let tmp = path.with_extension("tty7-tmp");
+    std::fs::write(&tmp, new_contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 /// Remove the line matching `id` from `contents`, preserving all other lines and
@@ -648,6 +668,25 @@ mod tests {
             HostKeyStatus::Changed { .. } => {}
             other => panic!("expected Changed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn different_key_type_for_a_known_host_reports_changed_not_unknown() {
+        // The host is known via ed25519 only; a presented ECDSA key must raise
+        // the changed-key warning, not the benign first-connect prompt — a MITM
+        // can pick an algorithm absent from the file to get the softer dialog.
+        const KEY_ECDSA: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCdv5xfuuCGyVbYZSTqcFjQWE7YtIsx8fqlXF1+v728j1RUnELLVrmgsC6gZ0zObXAzJ39JEynaQv9tf/v16V58=";
+        let file = format!("example.com {KEY_A}\n");
+        match check_in_str(&file, "example.com", 22, &key(KEY_ECDSA)) {
+            HostKeyStatus::Changed { .. } => {}
+            other => panic!("expected Changed, got {other:?}"),
+        }
+        // A same-type exact match elsewhere still wins over the mismatch.
+        let file = format!("example.com {KEY_A}\nexample.com {KEY_ECDSA}\n");
+        assert_eq!(
+            check_in_str(&file, "example.com", 22, &key(KEY_ECDSA)),
+            HostKeyStatus::Known
+        );
     }
 
     #[test]

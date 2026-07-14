@@ -126,7 +126,7 @@ pub fn upload_temp_name(remote: &str) -> String {
 /// write (CVE-2019-6111-class). Accept only a name that is exactly one *normal*
 /// path component: reject empty, `.`, `..`, anything containing a `/` or `\\`
 /// separator, and anything that doesn't resolve to a single `Component::Normal`.
-fn safe_local_name(name: &str) -> bool {
+pub fn safe_local_name(name: &str) -> bool {
     if name.is_empty() || name == "." || name == ".." {
         return false;
     }
@@ -609,7 +609,12 @@ async fn run_op(sftp: &SftpSession, op: &SftpOp) -> Result<SftpOpResult, String>
             SftpOpResult::Done
         }
         SftpOp::Rename { from, to } => {
-            rename_over(sftp, from, to).await?;
+            // Plain rename, no overwrite: a user rename onto an existing name
+            // must fail, not silently delete the target (`rename_over` is for
+            // the upload temp-swap only, where we own both paths).
+            sftp.rename(from.clone(), to.clone())
+                .await
+                .map_err(|e| format!("rename failed: {e}"))?;
             SftpOpResult::Done
         }
         SftpOp::Chmod { path, mode } => {
@@ -715,15 +720,19 @@ async fn download(sftp: &SftpSession, spec: &SftpTransferSpec, job: &Job) -> Res
     let total = remote_size(sftp, &spec.remote, spec.recursive, job).await?;
     job.set_total(total);
 
-    let mut stack = vec![(spec.remote.clone(), spec.local.clone())];
-    while let Some((rpath, lpath)) = stack.pop() {
+    // The root is stat'ed (following a symlink deliberately — the user picked
+    // it); children carry their lstat-style attrs from the directory listing so
+    // symlinks are recognized and skipped, never followed: following them would
+    // loop forever on a cyclic link and copy whole trees through e.g. `-> /`.
+    let root_attrs = sftp
+        .metadata(spec.remote.clone())
+        .await
+        .map_err(|e| format!("{e}"))?;
+    let mut stack = vec![(spec.remote.clone(), spec.local.clone(), root_attrs)];
+    while let Some((rpath, lpath, attrs)) = stack.pop() {
         if job.is_cancelled() {
             return Err(cancelled());
         }
-        let attrs = sftp
-            .metadata(rpath.clone())
-            .await
-            .map_err(|e| format!("{e}"))?;
         if attrs.is_dir() {
             if !spec.recursive {
                 return Err("remote path is a directory (enable recursive)".to_string());
@@ -749,7 +758,12 @@ async fn download(sftp: &SftpSession, spec: &SftpTransferSpec, job: &Job) -> Res
                     );
                     continue;
                 }
-                stack.push((remote_join(&rpath, &name), lpath.join(&name)));
+                let cattrs = entry.metadata();
+                if cattrs.is_symlink() {
+                    log::debug!("sftp download: skipping symlink {name:?} under {rpath}");
+                    continue;
+                }
+                stack.push((remote_join(&rpath, &name), lpath.join(&name), cattrs));
             }
         } else {
             download_file(sftp, &rpath, &lpath, attrs.permissions, job).await?;
@@ -796,7 +810,12 @@ async fn download_file(
                 .map_err(|e| format!("write local: {e}"))?;
             job.add_bytes(n as u64);
         }
-        local.flush().await.ok();
+        // A failed flush means the temp is incomplete (e.g. disk full) — it must
+        // abort here, before the rename commits the temp over a good target.
+        local
+            .flush()
+            .await
+            .map_err(|e| format!("write local: {e}"))?;
         Ok(())
     }
     .await;
@@ -820,15 +839,19 @@ async fn upload(sftp: &SftpSession, spec: &SftpTransferSpec, job: &Job) -> Resul
     let total = local_size(&spec.local, spec.recursive, job).await?;
     job.set_total(total);
 
-    let mut stack = vec![(spec.local.clone(), spec.remote.clone())];
-    while let Some((lpath, rpath)) = stack.pop() {
+    // Mirrors the download walker's symlink policy: the root is stat'ed
+    // (following a symlink deliberately), children are classified by their
+    // lstat-style file type and symlinks are skipped, never followed.
+    let root_is_dir = tokio::fs::metadata(&spec.local)
+        .await
+        .map_err(|e| format!("stat {}: {e}", spec.local.display()))?
+        .is_dir();
+    let mut stack = vec![(spec.local.clone(), spec.remote.clone(), root_is_dir)];
+    while let Some((lpath, rpath, is_dir)) = stack.pop() {
         if job.is_cancelled() {
             return Err(cancelled());
         }
-        let meta = tokio::fs::metadata(&lpath)
-            .await
-            .map_err(|e| format!("stat {}: {e}", lpath.display()))?;
-        if meta.is_dir() {
+        if is_dir {
             if !spec.recursive {
                 return Err("local path is a directory (enable recursive)".to_string());
             }
@@ -842,8 +865,16 @@ async fn upload(sftp: &SftpSession, spec: &SftpTransferSpec, job: &Job) -> Resul
                 .await
                 .map_err(|e| format!("read local dir: {e}"))?
             {
+                let ftype = child
+                    .file_type()
+                    .await
+                    .map_err(|e| format!("stat {}: {e}", child.path().display()))?;
+                if ftype.is_symlink() {
+                    log::debug!("sftp upload: skipping symlink {}", child.path().display());
+                    continue;
+                }
                 let name = child.file_name().to_string_lossy().to_string();
-                stack.push((child.path(), remote_join(&rpath, &name)));
+                stack.push((child.path(), remote_join(&rpath, &name), ftype.is_dir()));
             }
         } else {
             upload_file(sftp, &lpath, &rpath, job).await?;
@@ -884,8 +915,16 @@ async fn upload_file(
                 .map_err(|e| format!("write remote: {e}"))?;
             job.add_bytes(n as u64);
         }
-        remote.flush().await.ok();
-        remote.shutdown().await.ok();
+        // Surface late write errors before the rename commits the temp over the
+        // target; a truncated temp must fail the transfer, not replace the file.
+        remote
+            .flush()
+            .await
+            .map_err(|e| format!("write remote: {e}"))?;
+        remote
+            .shutdown()
+            .await
+            .map_err(|e| format!("write remote: {e}"))?;
         Ok(())
     }
     .await;
@@ -911,15 +950,15 @@ async fn remote_size(
     job: &Job,
 ) -> Result<u64, String> {
     let mut total = 0u64;
-    let mut stack = vec![root.to_string()];
-    while let Some(path) = stack.pop() {
+    let root_attrs = match sftp.metadata(root.to_string()).await {
+        Ok(a) => a,
+        Err(_) => return Ok(0),
+    };
+    let mut stack = vec![(root.to_string(), root_attrs)];
+    while let Some((path, attrs)) = stack.pop() {
         if job.is_cancelled() {
             return Err(cancelled());
         }
-        let attrs = match sftp.metadata(path.clone()).await {
-            Ok(a) => a,
-            Err(_) => continue,
-        };
         if attrs.is_dir() {
             if !recursive {
                 continue;
@@ -930,12 +969,16 @@ async fn remote_size(
                     if name == "." || name == ".." {
                         continue;
                     }
-                    // Skip the same unsafe names the download walker skips so the
-                    // size denominator matches what is actually transferred.
+                    // Skip the same unsafe names and symlinks the download walker
+                    // skips so the size denominator matches what is transferred.
                     if !safe_local_name(&name) {
                         continue;
                     }
-                    stack.push(remote_join(&path, &name));
+                    let cattrs = entry.metadata();
+                    if cattrs.is_symlink() {
+                        continue;
+                    }
+                    stack.push((remote_join(&path, &name), cattrs));
                 }
             }
         } else {
@@ -953,6 +996,9 @@ async fn local_size(root: &Path, recursive: bool, job: &Job) -> Result<u64, Stri
         if job.is_cancelled() {
             return Err(cancelled());
         }
+        // Root uses stat (a root symlink is followed deliberately); children
+        // below use their lstat file type, so links are counted at zero and
+        // never followed — matching the upload walker.
         let meta = match tokio::fs::metadata(&path).await {
             Ok(m) => m,
             Err(_) => continue,
@@ -963,7 +1009,11 @@ async fn local_size(root: &Path, recursive: bool, job: &Job) -> Result<u64, Stri
             }
             if let Ok(mut rd) = tokio::fs::read_dir(&path).await {
                 while let Ok(Some(child)) = rd.next_entry().await {
-                    stack.push(child.path());
+                    match child.file_type().await {
+                        Ok(t) if t.is_symlink() => continue,
+                        Ok(_) => stack.push(child.path()),
+                        Err(_) => continue,
+                    }
                 }
             }
         } else {

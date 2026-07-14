@@ -940,6 +940,35 @@ impl RemoteTerminal {
         cwd: Option<PathBuf>,
         spec: Box<NativeSshSpec>,
     ) -> anyhow::Result<(Self, u64)> {
+        // Mirror `spawn`'s stale-daemon protection: a running daemon from a
+        // pre-SSH build drops the connection on the unknown message kind without
+        // replying (and never sends an Error frame pre-dispatch), which reads as
+        // EOF here. Restart it once and retry so the first SSH connect after an
+        // upgrade recovers instead of failing.
+        match Self::spawn_native_ssh_once(size, cell_w, cell_h, cwd.clone(), spec.clone()) {
+            Err(first_err) if daemon_disconnected_before_spawn_reply(&first_err) => {
+                if let Err(restart_err) = crate::daemon::spawn::restart() {
+                    return Err(anyhow::anyhow!(
+                        "daemon disconnected before SpawnNativeSsh reply ({first_err}); restart failed: {restart_err}"
+                    ));
+                }
+                Self::spawn_native_ssh_once(size, cell_w, cell_h, cwd, spec).map_err(|second_err| {
+                    anyhow::anyhow!(
+                        "daemon disconnected before SpawnNativeSsh reply ({first_err}); restarted daemon but it still failed: {second_err}"
+                    )
+                })
+            }
+            other => other,
+        }
+    }
+
+    fn spawn_native_ssh_once(
+        size: TermSize,
+        cell_w: u16,
+        cell_h: u16,
+        cwd: Option<PathBuf>,
+        spec: Box<NativeSshSpec>,
+    ) -> anyhow::Result<(Self, u64)> {
         let mut stream = connect()?;
         let win = win_size(size, cell_w, cell_h);
         // Retain what the auth sheet needs before the spec moves onto the wire:
@@ -980,6 +1009,20 @@ impl RemoteTerminal {
             .lock()
             .ok()
             .and_then(|mut q| q.pop_front())
+    }
+
+    /// Pop the next pending prompt only when it is a banner; a real
+    /// (interactive) prompt stays queued. Used while another pane's sheet is
+    /// active — popping a real prompt then would drop it (there is no re-queue),
+    /// silently failing that pane's auth after the broker timeout.
+    pub fn take_auth_banner(&self) -> Option<String> {
+        let mut q = self.auth_prompts.lock().ok()?;
+        if matches!(q.front(), Some((_, AuthPromptKind::Banner { .. }))) {
+            if let Some((_, AuthPromptKind::Banner { text })) = q.pop_front() {
+                return Some(text);
+            }
+        }
+        None
     }
 
     /// Whether any native-SSH prompt is waiting (cheap check the view uses to

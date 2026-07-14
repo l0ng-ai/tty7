@@ -95,8 +95,40 @@ fn home_dir() -> Option<PathBuf> {
     }
 }
 
+/// Expand `HostName` percent-tokens: `%h` → the alias being resolved, `%%` → a
+/// literal `%`. Unknown tokens stay verbatim (matching
+/// `expand_identity_placeholders`' policy).
+fn expand_hostname_tokens(hostname: &str, alias: &str) -> String {
+    let mut out = String::with_capacity(hostname.len());
+    let mut chars = hostname.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('h') => out.push_str(alias),
+            Some('%') => out.push('%'),
+            Some(other) => {
+                out.push('%');
+                out.push(other);
+            }
+            None => out.push('%'),
+        }
+    }
+    out
+}
+
+/// OpenSSH's ssh_config has no trailing-comment syntax: `#` only starts a
+/// comment at the beginning of a (whitespace-trimmed) line, and a `#` inside a
+/// value (a `ProxyCommand` fragment, a filename) is literal. Truncating
+/// mid-line would silently corrupt such values.
 fn strip_comment(line: &str) -> &str {
-    line.split_once('#').map(|(head, _)| head).unwrap_or(line)
+    if line.trim_start().starts_with('#') {
+        ""
+    } else {
+        line
+    }
 }
 
 fn split_keyword(line: &str) -> Option<(&str, &str)> {
@@ -329,7 +361,13 @@ pub fn resolve_alias_to_profile_from(
 /// fields, returning the raw `ProxyJump` target (resolved to an id / nested spec
 /// by the caller). Shared by the import path and the transient-alias resolver.
 fn apply_resolved(profile: &mut ManagedProfile, alias: &str, r: ResolvedHost) -> Option<String> {
-    profile.host = r.hostname.unwrap_or_else(|| alias.to_string());
+    // OpenSSH expands `%h` in HostName to the name given on the command line
+    // (the alias) — the common `Host *.corp` + `HostName %h.internal` pattern
+    // relies on it; taken verbatim it would try to resolve a literal `%h.…`.
+    profile.host = r
+        .hostname
+        .map(|h| expand_hostname_tokens(&h, alias))
+        .unwrap_or_else(|| alias.to_string());
     profile.user = r.user.unwrap_or_default();
     profile.port = r.port.unwrap_or(22);
     profile.identity_files = r.identity_files;
@@ -952,6 +990,51 @@ mod tests {
         let prod = existing.iter().find(|p| p.name == "prod").unwrap();
         // The `me@bastion:2222` jump target resolves to the `bastion` profile's id.
         assert_eq!(prod.jump_host, Some(bastion_id));
+    }
+
+    #[test]
+    fn hostname_percent_h_expands_to_the_alias() {
+        let root = temp_root("resolve-percent-h");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(
+            ssh.join("config"),
+            "Host web1\n  HostName %h.internal.example\n  User me\n",
+        )
+        .unwrap();
+        let resolved = resolve_alias_to_profile_from(ssh.join("config"), &root, "web1").unwrap();
+        assert_eq!(resolved.profile.host, "web1.internal.example");
+
+        assert_eq!(expand_hostname_tokens("%h.x", "a"), "a.x");
+        assert_eq!(expand_hostname_tokens("100%%", "a"), "100%");
+        assert_eq!(expand_hostname_tokens("%q", "a"), "%q");
+    }
+
+    #[test]
+    fn hash_only_comments_whole_lines_not_values() {
+        // OpenSSH has no trailing-comment syntax: a `#` inside a value is
+        // literal (e.g. in a ProxyCommand), while a line starting with `#`
+        // (after leading whitespace) is a comment.
+        let root = temp_root("resolve-hash");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(
+            ssh.join("config"),
+            concat!(
+                "# a comment\n",
+                "Host dev\n",
+                "  ProxyCommand connect -H proxy#1 %h %p\n",
+                "  # indented comment\n",
+                "  User me\n",
+            ),
+        )
+        .unwrap();
+        let resolved = resolve_alias_to_profile_from(ssh.join("config"), &root, "dev").unwrap();
+        assert_eq!(
+            resolved.profile.proxy_command.as_deref(),
+            Some("connect -H proxy#1 %h %p")
+        );
+        assert_eq!(resolved.profile.user, "me");
     }
 
     #[test]

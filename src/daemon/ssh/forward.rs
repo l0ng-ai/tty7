@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 use crate::daemon::protocol::{
@@ -38,6 +38,25 @@ use crate::daemon::protocol::{
 };
 
 use super::session::SshConnection;
+
+/// Accept a connection, retrying transient errors instead of killing the
+/// listener: ECONNABORTED (client gave up mid-handshake) and EMFILE/ENFILE
+/// (fd pressure) are momentary, and exiting the accept loop on them would
+/// leave the forward dead while its status still says "listening". `None`
+/// only on errors that persist after a backoff (listener genuinely broken).
+async fn accept_retrying(listener: &TcpListener) -> Option<(TcpStream, std::net::SocketAddr)> {
+    let mut failures = 0u32;
+    loop {
+        match listener.accept().await {
+            Ok(pair) => return Some(pair),
+            Err(_) if failures >= 10 => return None,
+            Err(_) => {
+                failures += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(50 << failures.min(5))).await;
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Bidirectional socket<->channel bridge (Tabby brief §5).
@@ -187,17 +206,29 @@ pub struct RemoteForwardTable {
 }
 
 impl RemoteForwardTable {
+    /// Register a binding, refusing a duplicate: overwriting would hijack the
+    /// existing forward's routing, and the caller's on-failure rollback would
+    /// then delete the *original* entry, leaving its live server binding
+    /// unroutable. Returns whether the key was free.
     pub(super) fn register(
         &self,
         bind_host: &str,
         bind_port: u16,
         target_host: &str,
         target_port: u16,
-    ) {
-        self.inner.lock().unwrap().insert(
-            (bind_host.to_string(), bind_port),
-            (target_host.to_string(), target_port),
-        );
+    ) -> bool {
+        match self
+            .inner
+            .lock()
+            .unwrap()
+            .entry((bind_host.to_string(), bind_port))
+        {
+            std::collections::hash_map::Entry::Occupied(_) => false,
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert((target_host.to_string(), target_port));
+                true
+            }
+        }
     }
 
     pub(super) fn unregister(&self, bind_host: &str, bind_port: u16) {
@@ -217,9 +248,11 @@ impl RemoteForwardTable {
     }
 
     /// Resolve an incoming `forwarded-tcpip` channel's connected address/port to a
-    /// local target. Tries the exact `(address, port)` first, then any binding on
-    /// the same port (the server may report `127.0.0.1` for a `localhost` bind, or
-    /// `0.0.0.0` for an empty bind address).
+    /// local target. Tries the exact `(address, port)` first, then a port-only
+    /// match (the server may report `127.0.0.1` for a `localhost` bind, or
+    /// `0.0.0.0` for an empty bind address) — but only when the port match is
+    /// unambiguous: with two bindings on the same port and different addresses,
+    /// guessing could bridge traffic to the wrong local target.
     pub(super) fn lookup(
         &self,
         connected_address: &str,
@@ -229,9 +262,11 @@ impl RemoteForwardTable {
         if let Some(t) = map.get(&(connected_address.to_string(), connected_port)) {
             return Some(t.clone());
         }
-        map.iter()
-            .find(|((_, p), _)| *p == connected_port)
-            .map(|(_, t)| t.clone())
+        let mut same_port = map.iter().filter(|((_, p), _)| *p == connected_port);
+        match (same_port.next(), same_port.next()) {
+            (Some((_, t)), None) => Some(t.clone()),
+            _ => None,
+        }
     }
 }
 
@@ -429,8 +464,9 @@ impl SshForwardRegistry {
         let target_port = rule.target_port;
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((sock, _peer)) = listener.accept().await else {
-                    break;
+                let sock = match accept_retrying(&listener).await {
+                    Some((sock, _peer)) => sock,
+                    None => break,
                 };
                 if !conn.is_alive() {
                     break;
@@ -479,8 +515,9 @@ impl SshForwardRegistry {
         let conn = conn.clone();
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((sock, _peer)) = listener.accept().await else {
-                    break;
+                let sock = match accept_retrying(&listener).await {
+                    Some((sock, _peer)) => sock,
+                    None => break,
                 };
                 if !conn.is_alive() {
                     break;

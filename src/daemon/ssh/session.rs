@@ -354,8 +354,14 @@ impl SshConnection {
         target_host: &str,
         target_port: u16,
     ) -> Result<u16, String> {
-        self.remote_forwards
-            .register(bind_host, bind_port, target_host, target_port);
+        if !self
+            .remote_forwards
+            .register(bind_host, bind_port, target_host, target_port)
+        {
+            return Err(format!(
+                "remote forward {bind_host}:{bind_port} already exists on this connection"
+            ));
+        }
         let requested = self
             .handle
             .lock()

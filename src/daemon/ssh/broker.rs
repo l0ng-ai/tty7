@@ -49,6 +49,13 @@ impl PromptBroker {
         })
     }
 
+    /// Whether an interactive prompt is currently awaiting the user's reply.
+    /// The connect watchdog reads this to stop billing the connect timeout
+    /// while the user is thinking (e.g. reading a host-key fingerprint).
+    pub fn has_pending(&self) -> bool {
+        !self.pending.lock().unwrap().is_empty()
+    }
+
     /// Send an interactive prompt to the GUI and block (async) for its reply.
     /// Returns [`AuthResponse::Cancelled`] on user cancel, timeout, or if no GUI
     /// ever attaches to receive it — every one of which fails the auth step

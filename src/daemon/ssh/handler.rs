@@ -75,9 +75,23 @@ impl russh::client::Handler for ClientHandler {
         &mut self,
         server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
-        // A per-profile / global opt-out (FR-S4): trust unconditionally.
+        // A per-profile / global opt-out (FR-S4): trust without prompting — but
+        // still honor `@revoked` markers, like OpenSSH under
+        // `StrictHostKeyChecking no`: an explicitly revoked key is never
+        // acceptable, opt-out or not.
         if !self.verify_host_keys {
-            return Ok(true);
+            let revoked = matches!(
+                known_hosts::check(&self.host, self.port, server_public_key),
+                HostKeyStatus::Revoked
+            );
+            if revoked {
+                log::warn!(
+                    "rejecting revoked host key for {}:{} despite verify_host_keys=false",
+                    self.host,
+                    self.port
+                );
+            }
+            return Ok(!revoked);
         }
 
         let algorithm = server_public_key.algorithm().as_str().to_string();
