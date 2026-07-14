@@ -1404,8 +1404,25 @@ impl Tty7App {
         // split was opened with an explicit pick (a WSL/fish tab splits into
         // more WSL/fish, not back to the default).
         let cwd = target.read(cx).cwd();
-        let shell = target.read(cx).shell_spec();
-        let new = new_terminal(self.font_size, cwd, None, shell, window, cx);
+        // Splitting a native-SSH pane opens another SSH pane on the same
+        // connection rather than dropping back to a local shell. Re-resolve the
+        // persisted (secret-free) spec from its saved profile so keychain
+        // secrets are re-applied, mirroring the reconnect path.
+        let ssh_spec = target.read(cx).ssh_spec();
+        let new = if let Some(spec) = ssh_spec {
+            let resolved = crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
+            match new_terminal_native(self.font_size, cwd, resolved, window, cx) {
+                Ok(view) => view,
+                Err(e) => {
+                    log::error!("native SSH split spawn failed: {e}");
+                    window.push_notification(format!("SSH connection failed: {e}"), cx);
+                    return;
+                }
+            }
+        } else {
+            let shell = target.read(cx).shell_spec();
+            new_terminal(self.font_size, cwd, None, shell, window, cx)
+        };
         if let Some(tab) = self.tabs.get_mut(self.active) {
             if tab.pane.split_leaf(&target, axis, new.clone()) {
                 self.maximized = None;
