@@ -12,9 +12,8 @@ use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Rgb};
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, CursorStyle, Element, ElementId, Font, FontStyle,
     FontWeight, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, Hsla, IntoElement, LayoutId,
-    MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, SharedString, Style,
-    TextAlign, TextRun, Window, fill, outline, point, px, relative, size,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, SharedString,
+    Style, TextAlign, TextRun, Window, fill, outline, point, px, relative, size,
 };
 use gpui_component::ActiveTheme as _;
 

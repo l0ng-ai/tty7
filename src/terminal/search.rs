@@ -79,8 +79,11 @@ impl TerminalView {
             let seed = self
                 .selected_search_seed()
                 .unwrap_or_else(|| self.search_last_query.clone());
-            let input =
-                cx.new(|cx| InputState::new(window, cx).placeholder("Find").default_value(seed));
+            let input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Find")
+                    .default_value(seed)
+            });
             let subs = vec![cx.subscribe_in(&input, window, Self::on_search_event)];
             self.search = Some(SearchState {
                 input,
