@@ -3720,7 +3720,10 @@ impl TerminalView {
             // while composing.
             if i == cursor && has_marked {
                 for mc in marked.chars() {
-                    lines.last_mut().unwrap().push(cell(fg, mc, false, false, true));
+                    lines
+                        .last_mut()
+                        .unwrap()
+                        .push(cell(fg, mc, false, false, true));
                 }
             }
             if chars[i] == '\n' {
@@ -3730,10 +3733,12 @@ impl TerminalView {
                 // draw a thin selected slot so a multi-line selection reads across
                 // the break. Then start the next row.
                 if selection.is_none() && !has_marked && cursor_on && cursor == i {
-                    lines
-                        .last_mut()
-                        .unwrap()
-                        .push(blank(cell_w).relative().child(caret_bar()).into_any_element());
+                    lines.last_mut().unwrap().push(
+                        blank(cell_w)
+                            .relative()
+                            .child(caret_bar())
+                            .into_any_element(),
+                    );
                 } else if selection.is_some_and(|(s, e)| i >= s && i < e) {
                     lines
                         .last_mut()
