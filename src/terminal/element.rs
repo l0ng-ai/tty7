@@ -1550,10 +1550,16 @@ impl Element for TerminalElement {
 
         self.register_mouse_handlers(geom, bounds, prepaint.hitbox.id, window);
 
-        // A pointing-hand cursor over a hovered link reinforces that it's
-        // clickable (Cmd+click opens it).
-        if self.view.read(cx).hovered_link.is_some() {
+        // Mouse pointer over the surface: a pointing hand over a hovered link
+        // (Cmd+click opens it); otherwise an I-beam over the selectable text,
+        // like every other terminal. Once a program takes over mouse reporting
+        // the pointer stays the default arrow, signalling "the app owns this"
+        // (matching Terminal.app / iTerm).
+        let view = self.view.read(cx);
+        if view.hovered_link.is_some() {
             window.set_cursor_style(CursorStyle::PointingHand, &prepaint.hitbox);
+        } else if !view.mouse_mode() {
+            window.set_cursor_style(CursorStyle::IBeam, &prepaint.hitbox);
         }
 
         if let Some(start) = fps_start {
