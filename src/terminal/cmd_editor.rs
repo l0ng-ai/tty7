@@ -277,8 +277,31 @@ impl CmdEditor {
         }
     }
 
+    /// Char index of the start of the logical line containing `idx` — just after
+    /// the preceding `'\n'`, or `0`. A multi-line buffer (from a pasted command)
+    /// keeps its `'\n'`s inline; Home / Ctrl-A act within the current line.
+    pub fn line_start(&self, idx: usize) -> usize {
+        let mut s = idx.min(self.chars.len());
+        while s > 0 && self.chars[s - 1] != '\n' {
+            s -= 1;
+        }
+        s
+    }
+
+    /// Char index of the end of the logical line containing `idx` — the next
+    /// `'\n'`, or the buffer end.
+    pub fn line_end(&self, idx: usize) -> usize {
+        let mut e = idx.min(self.chars.len());
+        while e < self.chars.len() && self.chars[e] != '\n' {
+            e += 1;
+        }
+        e
+    }
+
+    /// Move to the start of the current logical line (Home / Ctrl-A). On a
+    /// single-line buffer this is column 0, unchanged.
     pub fn move_home(&mut self) {
-        self.cursor = 0;
+        self.cursor = self.line_start(self.cursor);
     }
 
     /// Place the cursor at char index `idx` (clamped to the line length). Used to
@@ -287,8 +310,10 @@ impl CmdEditor {
         self.cursor = idx.min(self.chars.len());
     }
 
+    /// Move to the end of the current logical line (End / Ctrl-E). On a
+    /// single-line buffer this is the buffer end, unchanged.
     pub fn move_end(&mut self) {
-        self.cursor = self.chars.len();
+        self.cursor = self.line_end(self.cursor);
     }
 
     /// Move left to the start of the previous word (skip trailing whitespace, then
@@ -737,6 +762,33 @@ mod tests {
         e.delete_word_right();
         assert_eq!(e.text(), "ab");
         assert_eq!(e.selected_text().as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn home_end_are_logical_line_relative_in_a_multiline_buffer() {
+        // A pasted multi-line command keeps its '\n's inline; Home/End act within
+        // the line the caret sits on, not the whole buffer.
+        let mut e = ed("one\ntwo\nthree", 5); // caret in "two" (after 't', 'w')
+        e.move_home();
+        assert_eq!(e.cursor(), 4, "start of the 'two' line");
+        e.move_end();
+        assert_eq!(e.cursor(), 7, "end of the 'two' line (before the '\\n')");
+        // First line: Home is column 0, End is just before the first '\n'.
+        e.set_cursor(1);
+        e.move_home();
+        assert_eq!(e.cursor(), 0);
+        e.move_end();
+        assert_eq!(e.cursor(), 3);
+        // Last line has no trailing '\n': End is the buffer end.
+        e.set_cursor(10);
+        e.move_end();
+        assert_eq!(e.cursor(), 13);
+        // A single-line buffer is unaffected: Home/End are the buffer edges.
+        let mut s = ed("git push", 4);
+        s.move_home();
+        assert_eq!(s.cursor(), 0);
+        s.move_end();
+        assert_eq!(s.cursor(), 8);
     }
 
     #[test]

@@ -141,6 +141,17 @@ impl<L: Clone> Pane<L> {
         }
     }
 
+    /// The leaf satisfying `pred`, or the first leaf if none does. Used to
+    /// restore a remembered pane (matched by identity) when switching back to a
+    /// tab, gracefully degrading to the first leaf when that pane has since
+    /// closed.
+    pub fn leaf_matching_or_first(&self, pred: impl Fn(&L) -> bool) -> Option<L> {
+        self.leaves()
+            .into_iter()
+            .find(|l| pred(l))
+            .or_else(|| self.first_leaf())
+    }
+
     /// Split the first leaf matching `is_target` along `axis`, inserting `new`
     /// as the second child. Returns whether a matching leaf was found.
     fn split_leaf_where(&mut self, is_target: &impl Fn(&L) -> bool, axis: Axis, new: L) -> bool {
@@ -817,6 +828,27 @@ mod tests {
         split(&mut pane, 0, Axis::Vertical, 3);
         assert_eq!(pane.leaves(), vec![0, 3, 1, 2]);
         assert_eq!(pane.first_leaf(), Some(0));
+    }
+
+    // Restoring a tab's remembered pane: `leaf_matching_or_first` returns the
+    // matched leaf when present, and degrades to the first leaf when the
+    // remembered pane has closed (predicate matches nothing). This is the pure
+    // core of the "switching tabs keeps the active pane" fix.
+    #[test]
+    fn leaf_matching_or_first_prefers_the_match_then_falls_back_to_first() {
+        // [0 | [1 / 2]] → leaves = [0, 1, 2]
+        let mut pane = TestPane::leaf(0);
+        split(&mut pane, 0, Axis::Horizontal, 1);
+        split(&mut pane, 1, Axis::Vertical, 2);
+        assert_eq!(pane.leaves(), vec![0, 1, 2]);
+
+        // A remembered pane that still exists is restored (not the first leaf).
+        assert_eq!(pane.leaf_matching_or_first(is(2)), Some(2));
+        assert_eq!(pane.leaf_matching_or_first(is(1)), Some(1));
+        // A remembered pane that has since closed falls back to the first leaf.
+        assert_eq!(pane.leaf_matching_or_first(is(99)), Some(0));
+        // On an empty tree there is nothing to restore or fall back to.
+        assert_eq!(TestPane::Empty.leaf_matching_or_first(is(0)), None);
     }
 
     // Closing the tab's only pane must not mutate the tree; the caller reacts

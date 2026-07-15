@@ -87,22 +87,46 @@ pub struct Tab {
     /// User-set custom name (via "Rename Tab"). `None` → derive the label from
     /// the focused terminal's title at render time.
     pub name: Option<String>,
+    /// Entity id of the pane that last held focus in this tab. Recorded when we
+    /// leave the tab (see `remember_active_pane`) and restored on return, so
+    /// switching away and back keeps the active pane instead of jumping to the
+    /// first leaf. `None` for a tab never left, or after its focused pane closed
+    /// — both fall back to `first_leaf()`.
+    last_focused: Option<gpui::EntityId>,
 }
 
 impl Tab {
     fn new(pane: Pane) -> Self {
-        Self { pane, name: None }
+        Self {
+            pane,
+            name: None,
+            last_focused: None,
+        }
     }
 
-    /// The title used to derive the tab label. With a `window`, this is the
-    /// *focused* pane's title (falling back to the first leaf when nothing in
-    /// the tab holds focus) so the label tracks the pane you're working in;
-    /// without one (e.g. the command palette, which has no window), it's the
-    /// first leaf. Empty when there's no terminal or no title yet.
+    /// The pane to focus when this tab becomes active: the last-focused leaf if
+    /// it still exists, otherwise the first leaf.
+    fn focus_target(&self) -> Option<Entity<TerminalView>> {
+        match self.last_focused {
+            Some(id) => self.pane.leaf_matching_or_first(|l| l.entity_id() == id),
+            None => self.pane.first_leaf(),
+        }
+    }
+
+    /// The title used to derive the tab label: the pane the tab is working in.
+    /// Only the *active* tab has a live focused pane, so for an inactive tab
+    /// (which holds no window focus) we fall back to the pane it last had
+    /// focused (`focus_target`) rather than always its first leaf — otherwise a
+    /// background tab's label would snap to its first pane. Without a `window`
+    /// (e.g. the command palette) the same `focus_target` is the best we have.
+    /// Empty when there's no terminal or no title yet.
     pub(crate) fn leaf_title(&self, window: Option<&Window>, cx: &App) -> String {
         let leaf = match window {
-            Some(window) => self.pane.focused_or_first(window, cx),
-            None => self.pane.first_leaf(),
+            Some(window) => self
+                .pane
+                .focused_leaf(window, cx)
+                .or_else(|| self.focus_target()),
+            None => self.focus_target(),
         };
         leaf.map(|l| l.read(cx).title.clone()).unwrap_or_default()
     }
@@ -557,6 +581,9 @@ impl Tty7App {
         };
         let alive = alive_panes();
         let pane = session_to_pane(&st.pane, &alive, self.font_size, window, cx);
+        // Leaving the current tab for the reopened one; snapshot its focused
+        // pane so switching back restores it (same as `activate`).
+        self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
         self.tabs.insert(
@@ -564,6 +591,7 @@ impl Tty7App {
             Tab {
                 pane,
                 name: st.name,
+                last_focused: None,
             },
         );
         self.active = insert_at;
@@ -1344,9 +1372,22 @@ impl Tty7App {
             window.focus(&self.home_focus, cx);
             return;
         };
-        if let Some(leaf) = tab.pane.first_leaf() {
+        if let Some(leaf) = tab.focus_target() {
             let handle = leaf.read(cx).focus_handle.clone();
             window.focus(&handle, cx);
+        }
+    }
+
+    /// Snapshot which pane currently holds focus in the active tab into that
+    /// tab's `last_focused`, so `focus_active` can restore it when we come back.
+    /// Call this before any transition that moves focus off the active tab
+    /// (switching tabs, opening a focus-stealing overlay).
+    fn remember_active_pane(&mut self, window: &Window, cx: &App) {
+        let active = self.active;
+        if let Some(tab) = self.tabs.get_mut(active) {
+            if let Some(leaf) = tab.pane.focused_leaf(window, cx) {
+                tab.last_focused = Some(leaf.entity_id());
+            }
         }
     }
 
@@ -1385,6 +1426,9 @@ impl Tty7App {
                 .and_then(|leaf| leaf.read(cx).cwd())
         });
         let tab = new_terminal(self.font_size, cwd, None, shell, window, cx);
+        // Leaving the current tab for the new one; snapshot its focused pane
+        // so switching back restores it (same as `activate`).
+        self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
         self.tabs.insert(insert_at, Tab::new(Pane::leaf(tab)));
@@ -1417,6 +1461,9 @@ impl Tty7App {
                 return;
             }
         };
+        // Leaving the current tab for the new one; snapshot its focused pane
+        // so switching back restores it (same as `activate`).
+        self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
         self.tabs.insert(insert_at, Tab::new(Pane::leaf(view)));
@@ -1473,8 +1520,25 @@ impl Tty7App {
         // split was opened with an explicit pick (a WSL/fish tab splits into
         // more WSL/fish, not back to the default).
         let cwd = target.read(cx).cwd();
-        let shell = target.read(cx).shell_spec();
-        let new = new_terminal(self.font_size, cwd, None, shell, window, cx);
+        // Splitting a native-SSH pane opens another SSH pane on the same
+        // connection rather than dropping back to a local shell. Re-resolve the
+        // persisted (secret-free) spec from its saved profile so keychain
+        // secrets are re-applied, mirroring the reconnect path.
+        let ssh_spec = target.read(cx).ssh_spec();
+        let new = if let Some(spec) = ssh_spec {
+            let resolved = crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
+            match new_terminal_native(self.font_size, cwd, resolved, window, cx) {
+                Ok(view) => view,
+                Err(e) => {
+                    log::error!("native SSH split spawn failed: {e}");
+                    window.push_notification(format!("SSH connection failed: {e}"), cx);
+                    return;
+                }
+            }
+        } else {
+            let shell = target.read(cx).shell_spec();
+            new_terminal(self.font_size, cwd, None, shell, window, cx)
+        };
         if let Some(tab) = self.tabs.get_mut(self.active) {
             if tab.pane.split_leaf(&target, axis, new.clone()) {
                 self.maximized = None;
@@ -1686,6 +1750,9 @@ impl Tty7App {
 
     pub(crate) fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.tabs.len() && index != self.active {
+            // Remember the pane we're leaving focused so returning to this tab
+            // restores it instead of jumping to the first leaf.
+            self.remember_active_pane(window, cx);
             self.maximized = None;
             self.active = index;
             // In sidebar mode, pull the newly active row into view (a no-op when
@@ -2161,6 +2228,9 @@ impl Tty7App {
             self.close_settings(window, cx);
             return;
         }
+        // Settings is about to steal focus; snapshot the active pane so closing
+        // it lands back on the same terminal rather than the tab's first leaf.
+        self.remember_active_pane(window, cx);
         let focus_handle = cx.focus_handle();
         let mut subs = Vec::new();
         let (font_select, font_bold_select, font_italic_select) =
@@ -3493,6 +3563,7 @@ fn tabs_from_session(
         tabs.push(Tab {
             pane,
             name: st.name.clone(),
+            last_focused: None,
         });
     }
     // Clamp the saved active index into the rebuilt range.
