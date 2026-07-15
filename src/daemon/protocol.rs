@@ -780,6 +780,17 @@ pub enum DaemonMsg {
     PaneList(Vec<PaneInfo>),
     /// The foreground remote context, or `None` when the pane is local / unknown.
     RemoteContext(Option<RemoteContext>),
+    /// The third-party CLI coding agent currently running in the foreground
+    /// (Claude Code, Codex, Gemini, …), or `None` when no known agent is running.
+    /// Detected daemon-side from the foreground `argv` — see
+    /// [`crate::core::cli_agent`].
+    Agent(Option<crate::core::cli_agent::CLIAgent>),
+    /// The rich per-session agent status (idle / working / waiting / done +
+    /// native session id), sniffed daemon-side from the pane's OSC stream
+    /// (tty7's sentinel events, with an opaque OSC 9/777 fallback) — see
+    /// [`crate::core::cli_agent::AgentSessionState`]. `None` clears it (the
+    /// agent exited).
+    AgentStatus(Option<crate::core::cli_agent::AgentSessionState>),
     /// Reply to `EnsureLoopbackForward`.
     LoopbackForward(LoopbackForward),
     /// Reply to `ListLoopbackForwards` and `CloseLoopbackForward`.
@@ -886,6 +897,10 @@ mod kind {
     // (15–19 reserved: WS3 auth extensions.)
     /// `ForwardList` — reply to the WS4 managed-forward messages.
     pub const FORWARD_LIST: u8 = 20;
+    /// `Agent` — the foreground CLI coding agent detected on a pane (or its clear).
+    pub const AGENT: u8 = 21;
+    /// `AgentStatus` — the pane's rich agent-session status (or its clear).
+    pub const AGENT_STATUS: u8 = 22;
 }
 
 /// Write one framed message: `[u32 LE len][u8 kind][payload]`.
@@ -1140,6 +1155,8 @@ impl DaemonMsg {
             DaemonMsg::RemoteContext(remote) => {
                 write_frame(w, kind::REMOTE_CONTEXT, &to_json(remote)?)
             }
+            DaemonMsg::Agent(agent) => write_frame(w, kind::AGENT, &to_json(agent)?),
+            DaemonMsg::AgentStatus(state) => write_frame(w, kind::AGENT_STATUS, &to_json(state)?),
             DaemonMsg::LoopbackForward(forward) => {
                 write_frame(w, kind::LOOPBACK_FORWARD, &to_json(forward)?)
             }
@@ -1193,6 +1210,8 @@ impl DaemonMsg {
             },
             kind::PANE_LIST => DaemonMsg::PaneList(from_json(&payload)?),
             kind::REMOTE_CONTEXT => DaemonMsg::RemoteContext(from_json(&payload)?),
+            kind::AGENT => DaemonMsg::Agent(from_json(&payload)?),
+            kind::AGENT_STATUS => DaemonMsg::AgentStatus(from_json(&payload)?),
             kind::LOOPBACK_FORWARD => DaemonMsg::LoopbackForward(from_json(&payload)?),
             kind::LOOPBACK_FORWARD_LIST => DaemonMsg::LoopbackForwardList(from_json(&payload)?),
             kind::AUTH_PROMPT => {
@@ -1466,6 +1485,16 @@ mod tests {
                 target: "dev".into(),
             })),
             DaemonMsg::RemoteContext(None),
+            DaemonMsg::Agent(Some(crate::core::cli_agent::CLIAgent::Claude)),
+            DaemonMsg::Agent(Some(crate::core::cli_agent::CLIAgent::Codex)),
+            DaemonMsg::Agent(None),
+            DaemonMsg::AgentStatus(Some(crate::core::cli_agent::AgentSessionState {
+                status: crate::core::cli_agent::AgentStatus::Waiting,
+                message: Some("Claude needs your permission to use Bash".into()),
+                session_id: Some("abc-123".into()),
+                rich: true,
+            })),
+            DaemonMsg::AgentStatus(None),
             DaemonMsg::LoopbackForward(LoopbackForward { local_port: 49152 }),
             DaemonMsg::LoopbackForwardList(vec![LoopbackForwardInfo {
                 id: LoopbackForwardId {

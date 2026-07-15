@@ -66,6 +66,19 @@ Download the build for your platform from
 - **⌘-click links** · desktop notifications
 - **Eight themes** · CJK / IME input
 
+### CLI coding agents
+
+tty7 recognizes third-party coding agents running in a pane (Claude Code,
+Codex, Gemini CLI, Aider, Amp, OpenCode, and ~10 more) and enriches them — it
+never wraps or replaces the agent.
+
+- **Brand avatars** — the tab chip / sidebar row shows which agent runs where; custom wrappers map in via `agent_commands` in `config.json`
+- **Live status dot** — working (blue) / needs your input (amber) / done (green), driven by agent-reported events over an OSC channel; run *Agent: Install Claude Code Hooks* from the palette to wire Claude Code up
+- **Notifications that matter** — "needs your permission…" the moment an agent blocks on you, and "finished after Ns" per turn, honoring your notification policy
+- **Branch at a glance** — each sidebar row shows its pane's git branch and working-tree diff (`+N −M`), refreshed on `cd` and when a command finishes
+- **Session resume** — panes lost to a reboot re-launch their agent conversation (`claude --resume …`) on restore (`restore_agent_sessions`, on by default)
+- **Context feed** — palette commands send the current selection or the repo's `git diff` to the running agent as a ready-made prompt
+
 ### SSH connection manager
 
 A native Rust SSH stack (russh) is the **only** path — profiles, credentials,

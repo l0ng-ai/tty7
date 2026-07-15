@@ -221,6 +221,14 @@ fn apply_common_command_setup(cmd: &mut CommandBuilder, initial_cwd: &Option<Pat
     // Advertise a widely-available terminfo + truecolor.
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
+    // Mark the session as tty7's, for tooling that adapts to its host terminal
+    // — most importantly the `tty7 agent-hook` emitter, which stays silent
+    // without it so globally-installed agent hooks can't leak escape sequences
+    // into other terminals (see `core::agent_hooks`).
+    cmd.env(
+        crate::core::agent_hooks::TTY7_ENV_MARKER,
+        env!("CARGO_PKG_VERSION"),
+    );
     // User-configured environment variables, injected last so they can override
     // the inherited environment (but not TERM/COLORTERM above, which reflect our
     // emulator's real capabilities).
@@ -353,6 +361,15 @@ struct PaneState {
     shell: ShellState,
     /// Trusted foreground remote context from the local process table.
     remote: Option<RemoteContext>,
+    /// The third-party CLI coding agent running in the foreground, detected from
+    /// the foreground `argv` (same process-table poll as `remote`). `None` when
+    /// no known agent runs — see [`crate::core::cli_agent`].
+    agent: Option<crate::core::cli_agent::CLIAgent>,
+    /// The rich agent-session status (idle/working/waiting/done + native
+    /// session id), folded from the sentinel OSC events the agent's hooks emit
+    /// (with an opaque OSC 9/777 fallback). Cleared when the agent exits.
+    /// See [`crate::core::cli_agent::AgentSessionState`].
+    agent_session: Option<crate::core::cli_agent::AgentSessionState>,
     /// Last geometry the PTY was sized to (spawn size, then each `resize`).
     /// Reported to a re-attaching client as `DaemonMsg::Size` so its replay of
     /// the ring runs at the geometry the ring was recorded under.
@@ -371,6 +388,18 @@ struct PaneState {
 enum PaneBackend {
     Pty(PtyBackend),
     NativeSsh(NativeSshBackend),
+}
+
+/// The reader thread's two off-hot-path foreground probes, bundled so
+/// [`DaemonPane::spawn_reader`] takes them as one argument. Both are
+/// process-table reads (foreground process-group leader → `argv`) run together
+/// on the reader's 0.5 s poll: `remote` classifies an SSH context, `agent`
+/// classifies a third-party coding agent. Boxed rather than generic because
+/// they're invoked at most twice a second — the indirection is free here and
+/// keeps the reader's signature readable.
+struct ForegroundProbes {
+    remote: Box<dyn Fn() -> Option<RemoteContext> + Send>,
+    agent: Box<dyn Fn() -> Option<crate::core::cli_agent::CLIAgent> + Send>,
 }
 
 /// The local-PTY backend: the same handles `DaemonPane` has always owned.
@@ -533,6 +562,8 @@ impl DaemonPane {
             cwd: spawn.initial_cwd,
             shell: ShellState::default(),
             remote: spawn.remote.clone(),
+            agent: None,
+            agent_session: None,
             size,
             alive: true,
         }));
@@ -579,13 +610,17 @@ impl DaemonPane {
         // keyboard — see `foreground_command_running` / issue #26.
         let fg_master = master.clone();
         let remote_master = master.clone();
+        let agent_master = master.clone();
         let reader = Self::spawn_reader(
             state,
             shutting_down,
             gate,
             reader_handle,
             move || foreground_command_running(&fg_master, shell_pid),
-            move || foreground_remote_context(&remote_master),
+            ForegroundProbes {
+                remote: Box::new(move || foreground_remote_context(&remote_master)),
+                agent: Box::new(move || foreground_agent(&agent_master)),
+            },
             death,
         );
         *pane.reader.lock().unwrap() = Some(reader);
@@ -634,6 +669,10 @@ impl DaemonPane {
             cwd: None,
             shell: ShellState::default(),
             remote: Some(remote),
+            // A native-SSH pane has no local process group, so foreground-argv
+            // agent detection never runs for it.
+            agent: None,
+            agent_session: None,
             size,
             alive: true,
         }));
@@ -679,7 +718,10 @@ impl DaemonPane {
             gate,
             reader_handle,
             || false,
-            || None,
+            ForegroundProbes {
+                remote: Box::new(|| None),
+                agent: Box::new(|| None),
+            },
             death,
         );
         *pane.reader.lock().unwrap() = Some(reader);
@@ -727,6 +769,10 @@ impl DaemonPane {
     /// `Prompt` on change. On EOF it reports the death through `death` — marking
     /// the pane not-alive and sending `Exited`, keeping the ring for a later
     /// attach, or handing an unattached pane to `on_dead` (see [`DeathReporter`]).
+    ///
+    /// The two off-hot-path foreground probes (remote context + coding agent)
+    /// travel together in [`ForegroundProbes`]: both are process-table reads run
+    /// on the same 0.5 s poll, and bundling them keeps the signature at arity.
     fn spawn_reader(
         state: Arc<Mutex<PaneState>>,
         shutting_down: Arc<AtomicBool>,
@@ -736,9 +782,13 @@ impl DaemonPane {
         // when a prompt mark arrives, to reject marks a foreground program emits —
         // see the call site and [`foreground_command_running`].
         foreground_running: impl Fn() -> bool + Send + 'static,
-        foreground_remote: impl Fn() -> Option<RemoteContext> + Send + 'static,
+        probes: ForegroundProbes,
         death: Arc<DeathReporter>,
     ) -> JoinHandle<()> {
+        let ForegroundProbes {
+            remote: foreground_remote,
+            agent: foreground_agent_fn,
+        } = probes;
         std::thread::Builder::new()
             .name("tty7-daemon-pane-reader".to_string())
             .spawn(move || {
@@ -815,14 +865,19 @@ impl DaemonPane {
                                 }
                             }
 
-                            // SSH-context detection is a process-table query
-                            // (sysctl/procfs). Keep it out of the state lock and
-                            // off the per-chunk hot path; half-second freshness is
-                            // enough for link hover/click state while keeping PTY
-                            // drain latency predictable.
-                            let remote = if std::time::Instant::now() >= next_remote_check {
+                            // SSH-context + coding-agent detection are process-table
+                            // queries (sysctl/procfs). Keep them out of the state lock
+                            // and off the per-chunk hot path; half-second freshness is
+                            // enough for link hover/click state and the agent tab chip
+                            // while keeping PTY drain latency predictable. Both ride the
+                            // one poll gate so we read the foreground process at most
+                            // twice per interval.
+                            let poll_now = std::time::Instant::now() >= next_remote_check;
+                            if poll_now {
                                 next_remote_check =
                                     std::time::Instant::now() + REMOTE_CONTEXT_POLL_INTERVAL;
+                            }
+                            let remote = if poll_now {
                                 // A native-SSH pane already carries its own remote
                                 // context; process-table detection must not clobber
                                 // it (this pane *is* SSH). Only a plain PTY pane gets
@@ -837,6 +892,7 @@ impl DaemonPane {
                             } else {
                                 None
                             };
+                            let agent = poll_now.then(&foreground_agent_fn);
 
                             let tr1 = trace.then(std::time::Instant::now);
                             let mut st = state.lock().unwrap();
@@ -853,6 +909,9 @@ impl DaemonPane {
                             apply_signals(&mut st, signals);
                             if let Some(remote) = remote {
                                 apply_remote_context(&mut st, remote);
+                            }
+                            if let Some(agent) = agent {
+                                apply_agent(&mut st, agent);
                             }
                             if let Some(tr1) = tr1 {
                                 tr_disp_t += tr1.elapsed();
@@ -1394,6 +1453,12 @@ fn attach_subscriber(st: &mut PaneState, subscriber: Sender<DaemonMsg>) -> u64 {
     if st.remote.is_some() {
         let _ = subscriber.send(DaemonMsg::RemoteContext(st.remote.clone()));
     }
+    if st.agent.is_some() {
+        let _ = subscriber.send(DaemonMsg::Agent(st.agent));
+    }
+    if st.agent_session.is_some() {
+        let _ = subscriber.send(DaemonMsg::AgentStatus(st.agent_session.clone()));
+    }
     // A dead pane's reader thread — the one that reports the child's exit — is
     // long gone, so replay its exit too: without this an attach racing the
     // child's death (it exited between the client's `List` and its `Attach`)
@@ -1427,6 +1492,61 @@ fn apply_signals(st: &mut PaneState, signals: SniffSignals) {
             });
         }
     }
+    apply_agent_signals(st, signals.agent_events, signals.notification);
+}
+
+/// Fold the chunk's agent signals into the pane's session state and push any
+/// resulting change. Called with the state lock held.
+///
+/// Two tiers: sentinel events (hooks installed) drive the full
+/// state machine and may even *identify* the agent where argv detection can't
+/// see through a wrapper; a plain OSC 9/777 notification is the no-hooks
+/// fallback — it only means "the agent pinged you", so it marks the session
+/// `Waiting` (non-rich) and never overrides live rich state.
+fn apply_agent_signals(
+    st: &mut PaneState,
+    events: Vec<crate::core::cli_agent::AgentEvent>,
+    notification: Option<String>,
+) {
+    use crate::core::cli_agent::{AgentSessionState, AgentStatus};
+
+    if events.is_empty() && notification.is_none() {
+        return;
+    }
+    let before = st.agent_session.clone();
+
+    for event in &events {
+        // An event naming an agent brands the pane even when the process-table
+        // poll can't (an unrecognized wrapper binary): identity via protocol.
+        if st.agent.is_none() && event.agent.is_some() {
+            st.agent = event.agent;
+            if let Some(sub) = &st.subscriber {
+                let _ = sub.send(DaemonMsg::Agent(st.agent));
+            }
+        }
+        st.agent_session
+            .get_or_insert_with(AgentSessionState::default)
+            .apply_event(event);
+    }
+
+    // Opaque fallback: only meaningful when we know an agent runs here, and
+    // never on top of rich state (the hooks channel owns it then).
+    if let Some(body) = notification
+        && st.agent.is_some()
+        && !st.agent_session.as_ref().is_some_and(|s| s.rich)
+    {
+        let sess = st
+            .agent_session
+            .get_or_insert_with(AgentSessionState::default);
+        sess.status = AgentStatus::Waiting;
+        sess.message = Some(body);
+    }
+
+    if st.agent_session != before
+        && let Some(sub) = &st.subscriber
+    {
+        let _ = sub.send(DaemonMsg::AgentStatus(st.agent_session.clone()));
+    }
 }
 
 fn apply_remote_context(st: &mut PaneState, remote: Option<RemoteContext>) {
@@ -1437,6 +1557,26 @@ fn apply_remote_context(st: &mut PaneState, remote: Option<RemoteContext>) {
         let _ = sub.send(DaemonMsg::RemoteContext(remote.clone()));
     }
     st.remote = remote;
+}
+
+fn apply_agent(st: &mut PaneState, agent: Option<crate::core::cli_agent::CLIAgent>) {
+    if st.agent == agent {
+        return;
+    }
+    // The agent leaving the foreground ends its session: clear the rich state
+    // (and tell the client) so a stale "waiting" dot can't outlive the process.
+    // The poll can blip momentarily (an agent-spawned subcommand takes the
+    // foreground group), but events re-establish state on the next signal.
+    if agent.is_none() && st.agent_session.is_some() {
+        st.agent_session = None;
+        if let Some(sub) = &st.subscriber {
+            let _ = sub.send(DaemonMsg::AgentStatus(None));
+        }
+    }
+    if let Some(sub) = &st.subscriber {
+        let _ = sub.send(DaemonMsg::Agent(agent));
+    }
+    st.agent = agent;
 }
 
 /// Whether a foreground command — not the shell itself — currently owns the
@@ -1494,6 +1634,28 @@ fn foreground_remote_context(_master: &Mutex<Box<dyn MasterPty + Send>>) -> Opti
     None
 }
 
+/// Identify the third-party CLI coding agent (Claude Code, Codex, …) owning the
+/// PTY foreground, from its `argv`. Same process-table read as
+/// [`foreground_remote_context`]; runs off the hot path on the 0.5 s poll.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn foreground_agent(
+    master: &Mutex<Box<dyn MasterPty + Send>>,
+) -> Option<crate::core::cli_agent::CLIAgent> {
+    let pid = master.lock().ok().and_then(|m| m.process_group_leader())?;
+    let argv = crate::daemon::remote::foreground_argv(pid)?;
+    crate::core::cli_agent::CLIAgent::detect_from_argv_with(
+        &argv,
+        crate::core::config::agent_commands_cached(),
+    )
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn foreground_agent(
+    _master: &Mutex<Box<dyn MasterPty + Send>>,
+) -> Option<crate::core::cli_agent::CLIAgent> {
+    None
+}
+
 // ---------------------------------------------------------------------------
 // OSC sniffer (cwd + prompt). The byte-level OSC framing lives in
 // `core::osc::OscTokenizer` (shared with the client's notification scanner);
@@ -1515,6 +1677,14 @@ struct ShellState {
 struct SniffSignals {
     cwd: Option<PathBuf>,
     shell: Option<ShellState>,
+    /// Sentinel agent events completed in this chunk, in stream order — each
+    /// one is a state-machine step, so unlike cwd/shell they must *all* apply
+    /// (a `stop` directly after a `notification` still means "done").
+    agent_events: Vec<crate::core::cli_agent::AgentEvent>,
+    /// A plain (non-sentinel) OSC 9/777 desktop notification completed in this
+    /// chunk — the opaque "the agent pinged you" fallback signal for panes
+    /// whose agent has no hooks installed. Last body wins.
+    notification: Option<String>,
 }
 
 struct OscSniffer {
@@ -1526,7 +1696,10 @@ struct OscSniffer {
 impl OscSniffer {
     fn new() -> Self {
         Self {
-            tok: OscTokenizer::new(&[b"7", b"133"]),
+            // 9 / 777 are the notification channels the agent-status layer
+            // rides (sentinel events + opaque fallback); the client sniffs the
+            // same two independently for its desktop toasts.
+            tok: OscTokenizer::new(&[b"7", b"133", b"9", b"777"]),
             shell: ShellState::default(),
         }
     }
@@ -1543,6 +1716,14 @@ impl OscSniffer {
             } else if let Some(rest) = payload.strip_prefix(b"133;") {
                 handle_osc133(shell, rest);
                 signals.shell = Some(shell.clone());
+            } else if let Some(event) = crate::core::cli_agent::parse_agent_event(payload) {
+                signals.agent_events.push(event);
+            } else if let Some((title, body)) = crate::core::osc::parse_notification(payload) {
+                // A sentinel-titled payload whose JSON failed to parse is
+                // protocol traffic, not a user notification — drop it.
+                if title.as_deref() != Some(crate::core::cli_agent::AGENT_EVENT_SENTINEL) {
+                    signals.notification = Some(body);
+                }
             }
         });
         signals
@@ -1701,6 +1882,56 @@ fn proc_name(pid: i32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// End-to-end check of the *live* agent-detection chain this feature rides
+    /// on macOS/Linux: spawn a real PTY child whose `argv[0]` names a coding
+    /// agent (`exec -a codex …`), then follow the exact path `foreground_agent`
+    /// uses — read the PTY's foreground process-group leader, read its `argv`
+    /// from the process table, and run `detect_from_argv`. Guards against a
+    /// regression in the platform `process_group_leader` / `foreground_argv`
+    /// plumbing that the pure `detect_from_argv` unit tests can't see.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn live_pty_child_argv_detects_the_agent() {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+
+        let pty = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+        // `exec -a codex` replaces the shell with `cat`, giving it argv[0]=codex
+        // while it blocks on stdin — so it stays the PTY's foreground group long
+        // enough to observe. `cat` (not `sleep`) keeps it alive until the master
+        // is dropped and its stdin EOFs.
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args(["-c", "exec -a codex cat"]);
+        let mut child = pty.slave.spawn_command(cmd).expect("spawn child");
+        let master = Mutex::new(pty.master);
+
+        // Poll for the foreground group to become the child (not the transient
+        // `sh`), then detect. Bounded so a stuck spawn fails the test rather than
+        // hanging CI.
+        let mut detected = None;
+        for _ in 0..200 {
+            if let Some(agent) = foreground_agent(&master) {
+                detected = Some(agent);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(
+            detected,
+            Some(crate::core::cli_agent::CLIAgent::Codex),
+            "a live PTY child with argv[0]=codex must be detected as Codex"
+        );
+    }
 
     /// Spawn shell precedence: explicit override > configured > platform
     /// default (`None`). Locks the contract stated on [`choose_shell`].
@@ -2220,6 +2451,8 @@ mod tests {
             cwd: None,
             shell: ShellState::default(),
             remote: None,
+            agent: None,
+            agent_session: None,
             size: WinSize {
                 cols: 80,
                 rows: 24,
@@ -2228,6 +2461,107 @@ mod tests {
             },
             alive,
         }
+    }
+
+    /// The full daemon-side rich-status path: sentinel OSC events sniffed out
+    /// of the byte stream drive the pane's session state machine, identify the
+    /// agent when argv detection hasn't, and stream every change to the
+    /// subscriber — while a plain notification only fires the opaque fallback.
+    #[test]
+    fn sentinel_events_drive_agent_session_state() {
+        use crate::core::cli_agent::{AgentStatus, CLIAgent};
+
+        let mut st = test_state(true);
+        let (tx, rx) = mpsc::channel();
+        st.subscriber = Some(tx);
+
+        let mut sniffer = OscSniffer::new();
+        let stream = concat!(
+            "\x1b]777;notify;tty7://cli-agent;",
+            r#"{"v":1,"agent":"claude","event":"session-start","session_id":"sid-9"}"#,
+            "\x07",
+            "\x1b]777;notify;tty7://cli-agent;",
+            r#"{"v":1,"agent":"claude","event":"prompt-submit"}"#,
+            "\x07",
+        );
+        apply_signals(&mut st, sniffer.feed(stream.as_bytes()));
+
+        // The event branded the pane (argv detection never ran here)…
+        assert_eq!(st.agent, Some(CLIAgent::Claude));
+        // …and the state machine folded both events: idle → working, id kept.
+        let sess = st.agent_session.clone().expect("session state exists");
+        assert_eq!(sess.status, AgentStatus::Working);
+        assert_eq!(sess.session_id.as_deref(), Some("sid-9"));
+        assert!(sess.rich);
+
+        // The subscriber saw the identity and the (final) status.
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DaemonMsg::Agent(Some(CLIAgent::Claude)))
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DaemonMsg::AgentStatus(Some(s))) if s.status == AgentStatus::Working
+        ));
+
+        // A waiting event lands with its message.
+        let waiting = concat!(
+            "\x1b]777;notify;tty7://cli-agent;",
+            r#"{"event":"notification","message":"Claude needs your permission to use Bash"}"#,
+            "\x07",
+        );
+        apply_signals(&mut st, sniffer.feed(waiting.as_bytes()));
+        assert_eq!(
+            st.agent_session.as_ref().unwrap().status,
+            AgentStatus::Waiting
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DaemonMsg::AgentStatus(Some(s))) if s.message.as_deref().unwrap().contains("permission")
+        ));
+
+        // The agent leaving the foreground clears the session (and says so).
+        apply_agent(&mut st, None);
+        assert!(st.agent_session.is_none());
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::AgentStatus(None))));
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Agent(None))));
+    }
+
+    /// The opaque fallback: with an agent detected but no hooks, a plain OSC 9
+    /// notification marks the session waiting (non-rich); without an agent it
+    /// does nothing; and it never clobbers live rich state.
+    #[test]
+    fn opaque_notifications_only_fall_back_when_no_rich_state() {
+        use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
+
+        // No agent → the notification is ignored (it's just a toast).
+        let mut st = test_state(true);
+        let mut sniffer = OscSniffer::new();
+        apply_signals(&mut st, sniffer.feed(b"\x1b]9;Build finished\x07"));
+        assert!(st.agent_session.is_none());
+
+        // Agent detected, no hooks → waiting, non-rich, body kept.
+        st.agent = Some(CLIAgent::Codex);
+        apply_signals(
+            &mut st,
+            sniffer.feed(b"\x1b]9;Codex wants to run tests\x07"),
+        );
+        let sess = st.agent_session.clone().unwrap();
+        assert_eq!(sess.status, AgentStatus::Waiting);
+        assert!(!sess.rich);
+
+        // Rich state present → the opaque ping is ignored.
+        st.agent_session = Some(AgentSessionState {
+            status: AgentStatus::Working,
+            message: None,
+            session_id: Some("sid".into()),
+            rich: true,
+        });
+        apply_signals(&mut st, sniffer.feed(b"\x1b]9;noise\x07"));
+        assert_eq!(
+            st.agent_session.as_ref().unwrap().status,
+            AgentStatus::Working
+        );
     }
 
     /// Attaching replays Size → Snapshot (→ Cwd) in order and installs the
@@ -2301,7 +2635,10 @@ mod tests {
             Arc::new(OutputGate::new()),
             Box::new(std::io::Cursor::new(b"tail".to_vec())),
             || false, // no PTY here → treat the shell as foreground
-            || None,
+            ForegroundProbes {
+                remote: Box::new(|| None),
+                agent: Box::new(|| None),
+            },
             Arc::new(DeathReporter::new(move || {
                 dead_flag.store(true, Ordering::SeqCst)
             })),
@@ -2335,7 +2672,10 @@ mod tests {
             Arc::new(OutputGate::new()),
             Box::new(std::io::Cursor::new(Vec::new())),
             || false,
-            || None,
+            ForegroundProbes {
+                remote: Box::new(|| None),
+                agent: Box::new(|| None),
+            },
             Arc::new(DeathReporter::new(move || dead_tx.send(()).unwrap())),
         );
         handle.join().unwrap();
@@ -2358,7 +2698,10 @@ mod tests {
             Arc::new(OutputGate::new()),
             Box::new(std::io::Cursor::new(Vec::new())),
             || false,
-            || None,
+            ForegroundProbes {
+                remote: Box::new(|| None),
+                agent: Box::new(|| None),
+            },
             Arc::new(DeathReporter::new(move || {
                 dead_flag.store(true, Ordering::SeqCst)
             })),
@@ -2414,6 +2757,25 @@ mod tests {
         assert!(dead_rx.try_recv().is_err(), "on_dead must fire only once");
     }
 
+    /// Every spawned shell carries the `TTY7` marker, so the `tty7 agent-hook`
+    /// emitter fires (it stays silent without it). This is the env side of the
+    /// rich-status channel — a regression here silently breaks all hook-based
+    /// agent status, which no other test would catch.
+    #[test]
+    fn spawned_shell_carries_the_tty7_marker() {
+        let cmd = build_shell_command(None, &Some(PathBuf::from("/tmp")))
+            .expect("build default shell command")
+            .0;
+        let tty7 = cmd
+            .get_env(crate::core::agent_hooks::TTY7_ENV_MARKER)
+            .and_then(|v| v.to_str());
+        assert_eq!(
+            tty7,
+            Some(env!("CARGO_PKG_VERSION")),
+            "the daemon must inject TTY7 into every spawned shell"
+        );
+    }
+
     /// `apply_signals` writes sniffed cwd/shell state into the pane state.
     #[test]
     fn apply_signals_updates_state() {
@@ -2424,7 +2786,7 @@ mod tests {
             &mut st,
             SniffSignals {
                 cwd: Some(PathBuf::from("/tmp/x")),
-                shell: None,
+                ..SniffSignals::default()
             },
         );
         assert_eq!(st.cwd, Some(PathBuf::from("/tmp/x")));
@@ -2433,12 +2795,12 @@ mod tests {
         apply_signals(
             &mut st,
             SniffSignals {
-                cwd: None,
                 shell: Some(ShellState {
                     active: true,
                     at_prompt: true,
                     last_exit_code: Some(0),
                 }),
+                ..SniffSignals::default()
             },
         );
         assert!(st.shell.active && st.shell.at_prompt);

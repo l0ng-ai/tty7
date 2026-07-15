@@ -179,6 +179,48 @@ impl OscTokenizer {
     }
 }
 
+/// Parse a buffered OSC payload (the bytes after `ESC ]`, e.g. `9;Build done`
+/// or `777;notify;Title;Body`) into a `(title, body)` desktop notification, or
+/// `None` if it isn't one. Shared by the client's notification toaster
+/// (`terminal::remote`) and the daemon's agent-status sniffer (`daemon::pane`),
+/// so ConEmu's OSC 9 subcommand quirks are handled in exactly one place.
+///
+/// tty7's own agent-event sentinel (`777;notify;tty7://cli-agent;{json}` — see
+/// [`crate::core::cli_agent::AGENT_EVENT_SENTINEL`]) parses as a notification
+/// *shape*, but it is machine-to-machine traffic: callers that surface toasts
+/// must check for it first (via [`crate::core::cli_agent::parse_agent_event`])
+/// rather than showing the raw JSON to the user.
+pub fn parse_notification(payload: &[u8]) -> Option<(Option<String>, String)> {
+    // OSC 9 ; <text>  — iTerm2 / growl style; title-less, body is the text.
+    if let Some(rest) = payload.strip_prefix(b"9;") {
+        // ConEmu overloads OSC 9 with numeric subcommands (`9;4;…` progress,
+        // `9;9;<cwd>`, …); those aren't notifications, so skip a `<digit>;`/`<digit>`
+        // leading field. A real message rarely starts with a bare single digit.
+        let first = rest.split(|&b| b == b';').next().unwrap_or(rest);
+        if first.len() == 1 && first[0].is_ascii_digit() {
+            return None;
+        }
+        let body = String::from_utf8_lossy(rest).into_owned();
+        return (!body.is_empty()).then_some((None, body));
+    }
+    // OSC 777 ; notify ; <title> ; <body>  — urxvt style.
+    if let Some(rest) = payload.strip_prefix(b"777;notify;") {
+        let mut parts = rest.splitn(2, |&b| b == b';');
+        let first = String::from_utf8_lossy(parts.next().unwrap_or(b"")).into_owned();
+        let second = parts
+            .next()
+            .map(|b| String::from_utf8_lossy(b).into_owned());
+        // With both fields present it's title + body; with only one it's a body-only
+        // notification (some senders omit the title).
+        let (title, body) = match second {
+            Some(body) if !body.is_empty() => (Some(first), body),
+            _ => (None, first),
+        };
+        return (!body.is_empty()).then_some((title, body));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

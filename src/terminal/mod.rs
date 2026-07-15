@@ -21,6 +21,7 @@ pub mod element;
 pub mod fps;
 mod fuzzy;
 mod generator;
+pub(crate) mod git_status;
 mod highlight;
 mod history;
 mod hold;
@@ -36,4 +37,5 @@ mod typeahead;
 pub mod view;
 
 pub use remote::RemoteTerminal;
+pub(crate) use remote::notify_desktop;
 pub use size::TermSize;

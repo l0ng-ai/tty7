@@ -71,13 +71,66 @@ impl Tty7App {
             .min_h_0()
             .overflow_y_scroll()
             .p_1p5()
+            // Tight row-to-row spacing so the tabs read as one list, not a set
+            // of far-apart cards (each row already has its own inner padding).
             .gap_0p5();
 
         for (i, tab) in self.tabs.iter().enumerate() {
             let is_active = i == active;
             let label = self.tab_label(tab, i, Some(window), cx);
-            // SSH status dot (PRD FR-E2).
+            // No status/cwd text line under the title: the avatar's status dot
+            // already carries working/waiting/done, and the title + git branch
+            // line carry the location — a "Working…" or cwd line would just be
+            // noise. The row is title + (optional) branch line, nothing else.
+            // Leading avatar inputs: the SSH connection-status colour (PRD
+            // FR-E2) and the coding agent running in the tab, if any — the
+            // avatar brands the row by whichever applies.
             let ssh_dot = self.tab_ssh_dot(tab, cx);
+            let agent = tab.agent(cx);
+            let agent_status = tab.agent_status(cx);
+            let agent_unread = tab.agent_result_unread(cx);
+            // Third line (when the pane's cwd is inside a git work tree): the
+            // branch, then the working-tree diff as green `+N` / red `−N`
+            // badges — a per-session branch row. Built here so the row can
+            // grow to fit it (a non-repo pane keeps the compact two-line row).
+            let git_line = tab.git_status(Some(window), cx).map(|g| {
+                let mut line = h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_1p5()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        gpui::svg()
+                            .path("icons/git-branch.svg")
+                            .flex_shrink_0()
+                            .size(px(11.))
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    // Branch name flexes and truncates; the badges stay pinned
+                    // to the right (a long branch ellipsizes, the counts don't).
+                    .child(div().flex_1().min_w_0().truncate().child(g.branch.clone()));
+                // Diff counts in plain (not bold) coloured text — a quiet
+                // green/red readout, not a loud badge, so a big `+1590` doesn't
+                // dominate the row.
+                if g.added > 0 {
+                    line = line.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(cx.theme().success)
+                            .child(format!("+{}", g.added)),
+                    );
+                }
+                if g.removed > 0 {
+                    line = line.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(cx.theme().danger)
+                            .child(format!("−{}", g.removed)),
+                    );
+                }
+                line
+            });
             // Filter by the search box; matching is on the visible label. The row
             // keeps its real index `i`, so activate/close/move still hit the right
             // tab even when the list is narrowed.
@@ -105,17 +158,25 @@ impl Tty7App {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(Input::new(&input).appearance(false))
                     .into_any_element(),
-                None => div()
+                None => v_flex()
                     .id(("sidebar-label", i))
                     .flex_1()
                     .min_w_0()
-                    // Ellipsis-truncate so a long label degrades gracefully in the
-                    // fixed-width rail rather than hard-clipping mid-glyph.
-                    .truncate()
-                    .text_sm()
-                    // Active row carries a hair more weight, matching the chip.
-                    .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
-                    .child(label)
+                    // A touch of air between the title and branch lines.
+                    .gap(px(2.5))
+                    // Title line — ellipsis-truncate so a long label degrades
+                    // gracefully in the fixed-width rail rather than hard-clipping.
+                    .child(
+                        div()
+                            .w_full()
+                            .truncate()
+                            .text_sm()
+                            // Active row carries a hair more weight, matching the chip.
+                            .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
+                            .child(label),
+                    )
+                    // Branch + diff line, when the pane sits in a git repo.
+                    .children(git_line)
                     // Single click activates; double click starts a rename.
                     .on_mouse_down(
                         MouseButton::Left,
@@ -148,11 +209,17 @@ impl Tty7App {
                 // hover without touching siblings (same trick as the chip).
                 .group(SharedString::from(format!("tab-row-{i}")))
                 .w_full()
-                .h(px(34.))
+                // Size to content with a small, uniform vertical padding rather
+                // than forcing a fixed height: a one-line shell tab is a short
+                // row, a two/three-line agent tab is a taller one. The *padding*
+                // is what stays consistent, so rows read as harmonious even
+                // though a single-line tab no longer gets padded out into a big
+                // half-empty box.
+                .py_1p5()
                 .items_center()
                 .justify_between()
-                .gap_1p5()
-                .pl_3()
+                .gap_2()
+                .pl_2()
                 .pr_1p5()
                 .rounded_lg()
                 // Sidebar-surface token scheme (gpui-component's Sidebar
@@ -182,10 +249,8 @@ impl Tty7App {
                         this.activate(i, window, cx);
                     }),
                 )
-                // Leading SSH status dot when this tab hosts an SSH session.
-                .when_some(ssh_dot, |c, color| {
-                    c.child(div().flex_shrink_0().size(px(6.)).rounded_full().bg(color))
-                })
+                // Leading avatar: agent brand mark, SSH status, or shell glyph.
+                .child(self.tab_avatar(agent, agent_status, agent_unread, ssh_dot, 22., cx))
                 .child(label_region)
                 // Trailing slot: while the shortcut hints are armed it shows the
                 // row's ⌘N switch digit; otherwise the close affordance — always

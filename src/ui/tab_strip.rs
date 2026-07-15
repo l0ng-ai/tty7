@@ -28,7 +28,7 @@ const KEEP_SEGMENTS: usize = 3;
 /// Abbreviate a leading `$HOME` to `~` (an integrated shell usually already
 /// does this, but absolute paths from other shells won't be). Borrows when
 /// there's nothing to rewrite.
-fn abbreviate_home(path: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn abbreviate_home(path: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     if path.starts_with('~') {
         return Cow::Borrowed(path);
@@ -147,6 +147,127 @@ impl Render for DragTab {
 }
 
 impl Tty7App {
+    /// The status dot pinned to an agent avatar's bottom-right corner: a solid
+    /// `rgb` disc with a surface-colored separator ring so it reads as sitting
+    /// on the badge. When `unread` (a finished turn you haven't looked at), the
+    /// dot gains a crisp outer ring of the same hue — the dot's separator ring
+    /// becomes the gap, so it reads as a clean target (core · gap · ring), a
+    /// sharper "come look" than a soft halo. `size` is the avatar edge.
+    fn status_dot(rgb: u32, unread: bool, size: f32, cx: &App) -> gpui::AnyElement {
+        let d = (size * 0.42).max(7.);
+        let bg = cx.theme().background;
+        // The read dot: a solid disc with a 2px surface-colored separator ring,
+        // so its *green core* is `d - 4`. The unread variant keeps that exact
+        // core and only wraps it in a hairline gap + ring — so switching read↔
+        // unread never changes the dot's apparent size, just adds a thin target
+        // rim. (The earlier version accidentally grew the core, which read as a
+        // much bigger dot.)
+        if unread {
+            let core = (d - 4.0).max(3.0); // identical green core to the read dot
+            let gap = 0.9; // hairline surface-colored gap
+            let ring = (d * 0.10).max(0.85); // ~0.9px same-hue outer rim
+            let inner = core + gap * 2.0; // green core + gap
+            let outer = inner + ring * 2.0; // + outer ring
+            let inner_dot = div()
+                .size(px(inner))
+                .rounded_full()
+                .border_1()
+                .border_color(bg)
+                .bg(gpui::rgb(rgb));
+            // Center the outer disc on the read dot's center (same corner point).
+            div()
+                .absolute()
+                .right(px(-(outer - d) / 2.0 - d * 0.22))
+                .bottom(px(-(outer - d) / 2.0 - d * 0.22))
+                .size(px(outer))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::rgb(rgb))
+                .child(inner_dot)
+                .into_any_element()
+        } else {
+            div()
+                .absolute()
+                .right(px(-(d * 0.22)))
+                .bottom(px(-(d * 0.22)))
+                .size(px(d))
+                .rounded_full()
+                .border_2()
+                .border_color(bg)
+                .bg(gpui::rgb(rgb))
+                .into_any_element()
+        }
+    }
+
+    /// The leading avatar for a tab row/chip: a rounded badge that brands the
+    /// tab by what's running in it — each session fronted with an icon. A
+    /// recognized coding agent gets its brand mark — a white silhouette
+    /// (gpui tints SVGs as an alpha mask) on the vendor accent; an SSH pane gets
+    /// a terminal glyph ringed in its connection-status colour; a plain shell
+    /// gets a neutral terminal glyph. An agent's live status rides the corner as
+    /// a [`status_dot`](Self::status_dot). `size` is the badge's edge in px.
+    pub(crate) fn tab_avatar(
+        &self,
+        agent: Option<crate::core::cli_agent::CLIAgent>,
+        status: Option<crate::core::cli_agent::AgentStatus>,
+        unread: bool,
+        ssh: Option<gpui::Hsla>,
+        size: f32,
+        cx: &App,
+    ) -> gpui::AnyElement {
+        let base = div()
+            .flex_shrink_0()
+            .size(px(size))
+            .flex()
+            .items_center()
+            .justify_center();
+        // A circle for every kind — the brand mark / glyph sits
+        // small and centred with generous padding rather than filling the badge.
+        match agent {
+            Some(agent) => {
+                // The agent's live status as a small dot pinned to the badge's
+                // bottom-right corner (blue working / amber waiting / green
+                // done), ringed in the surface color so it reads as sitting on
+                // the badge rather than clipped by it. Idle (or unknown) draws
+                // no dot — a resting agent is just its brand mark. An *unread*
+                // finished turn adds a translucent same-hue halo around the dot
+                // — a soft "come look" that clears (back to a plain dot) once
+                // you view the pane, without ever hiding the done state.
+                let dot = status
+                    .and_then(|s| s.dot_rgb())
+                    .map(|rgb| Self::status_dot(rgb, unread, size, cx));
+                base.relative()
+                    .rounded_full()
+                    .bg(gpui::rgb(agent.accent_rgb()))
+                    .child(
+                        gpui::svg()
+                            .path(agent.icon_path())
+                            .size(px(size * 0.54))
+                            .text_color(gpui::white()),
+                    )
+                    .when_some(dot, |b, dot| b.child(dot))
+                    .into_any_element()
+            }
+            None => base
+                .rounded_full()
+                // A clearly-visible neutral disc (a neutral grey shell badge), not a
+                // near-transparent tint — so the avatar column reads as a column.
+                .bg(cx.theme().muted)
+                .when_some(ssh, |d, c| d.border_2().border_color(c))
+                .child(
+                    // A flush `>_` prompt (not the boxed `square-terminal`) so it
+                    // fills the badge at the same visual weight as a brand mark.
+                    gpui::svg()
+                        .path("icons/terminal.svg")
+                        .size(px(size * 0.56))
+                        .text_color(cx.theme().foreground.opacity(0.65)),
+                )
+                .into_any_element(),
+        }
+    }
+
     /// The display label for a tab: the user-set name if present, otherwise the
     /// focused terminal's title (shortened), falling back to
     /// "Session N" when there's no title yet. Pass `window` so the label tracks
@@ -308,6 +429,12 @@ impl Tty7App {
             let label = self.tab_label(tab, i, Some(window), cx);
             // SSH status dot (PRD FR-E2): coloured by the pane's connection phase.
             let ssh_dot = self.tab_ssh_dot(tab, cx);
+            // A coding agent running in this tab (Claude Code, Codex, …) fronts
+            // its chip with the vendor brand mark so it's recognizable at a
+            // glance across a crowded strip.
+            let agent = tab.agent(cx);
+            let agent_status = tab.agent_status(cx);
+            let agent_unread = tab.agent_result_unread(cx);
 
             // Inline rename input for this tab, if it's the one being renamed.
             let rename_input = self
@@ -436,9 +563,21 @@ impl Tty7App {
                 .when_some(ssh_dot, |c, color| {
                     c.child(div().flex_shrink_0().size(px(6.)).rounded_full().bg(color))
                 })
-                // Clickable / editable label region. No leading context glyph —
-                // the label carries the whole chip, so a row of tabs reads as
-                // plain text rather than icon-per-chip busy.
+                // Leading agent brand avatar, when a coding agent runs in this
+                // tab — the vendor mark on its accent. Only agents get an avatar
+                // here: ordinary shells stay text-only so the strip reads as
+                // tabs, not icon-per-chip busy.
+                .when_some(agent, |chip, agent| {
+                    chip.child(self.tab_avatar(
+                        Some(agent),
+                        agent_status,
+                        agent_unread,
+                        None,
+                        18.,
+                        cx,
+                    ))
+                })
+                // Clickable / editable label region.
                 .child(label_region)
                 // Trailing slot: normally the close affordance — always shown on
                 // the active tab; on the others it stays out of the way

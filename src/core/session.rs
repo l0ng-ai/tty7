@@ -44,6 +44,16 @@ pub enum SessionPane {
         /// for sessions written before this field existed.
         #[serde(default)]
         ssh_spec: Option<Box<NativeSshSpec>>,
+        /// The coding agent this leaf was running at save time, plus its native
+        /// session id (from the agent's own `session-start` event). When the
+        /// pane can't re-attach on restore, these drive the cmux-style resume:
+        /// the fresh shell is handed the agent's resume command
+        /// (`claude --resume <id>`, …) so the conversation continues. `None`
+        /// for panes without an agent, agents without hooks, or old sessions.
+        #[serde(default)]
+        agent: Option<crate::core::cli_agent::CLIAgent>,
+        #[serde(default)]
+        agent_session_id: Option<String>,
     },
     /// A split of two subtrees along `axis`, with `a` taking `ratio` of space.
     Split {
@@ -173,6 +183,8 @@ mod tests {
                         cwd: Some(PathBuf::from("/work")),
                         pane_id: Some(7),
                         ssh_spec: None,
+                        agent: None,
+                        agent_session_id: None,
                     },
                 },
                 SessionTab {
@@ -184,11 +196,15 @@ mod tests {
                             cwd: None,
                             pane_id: None,
                             ssh_spec: None,
+                            agent: None,
+                            agent_session_id: None,
                         }),
                         b: Box::new(SessionPane::Leaf {
                             cwd: Some(PathBuf::from("/tmp")),
                             pane_id: Some(9),
                             ssh_spec: None,
+                            agent: None,
+                            agent_session_id: None,
                         }),
                     },
                 },
@@ -209,6 +225,42 @@ mod tests {
             SessionPane::Split { ratio, .. } => assert!((ratio - 0.3).abs() < 1e-6),
             _ => panic!("expected a split"),
         }
+    }
+
+    #[test]
+    fn leaf_agent_resume_fields_round_trip_and_default() {
+        // Round trip: the agent + native session id survive serialization.
+        let leaf = SessionPane::Leaf {
+            cwd: None,
+            pane_id: None,
+            ssh_spec: None,
+            agent: Some(crate::core::cli_agent::CLIAgent::Claude),
+            agent_session_id: Some("abc-123".into()),
+        };
+        let back: SessionPane =
+            serde_json::from_str(&serde_json::to_string(&leaf).unwrap()).unwrap();
+        match back {
+            SessionPane::Leaf {
+                agent,
+                agent_session_id,
+                ..
+            } => {
+                assert_eq!(agent, Some(crate::core::cli_agent::CLIAgent::Claude));
+                assert_eq!(agent_session_id.as_deref(), Some("abc-123"));
+            }
+            _ => panic!("expected leaf"),
+        }
+        // A session written before these fields existed decodes with `None`s.
+        let old: SessionPane =
+            serde_json::from_str(r#"{"Leaf":{"cwd":"/x","pane_id":3}}"#).unwrap();
+        assert!(matches!(
+            old,
+            SessionPane::Leaf {
+                agent: None,
+                agent_session_id: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -242,6 +294,8 @@ mod tests {
                     cwd: Some(PathBuf::from("/home/u")),
                     pane_id: Some(1),
                     ssh_spec: None,
+                    agent: None,
+                    agent_session_id: None,
                 },
             }],
         };

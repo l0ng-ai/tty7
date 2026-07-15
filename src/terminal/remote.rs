@@ -35,6 +35,7 @@ use alacritty_terminal::vte::ansi;
 
 use std::collections::VecDeque;
 
+use crate::core::cli_agent::{AgentSessionState, CLIAgent};
 use crate::core::osc::OscTokenizer;
 use crate::daemon::protocol::{
     AuthPromptKind, AuthResponse, ClientMsg, DaemonMsg, KnownHostEntry, KnownHostId,
@@ -105,6 +106,8 @@ struct ReaderSignals {
     cwd: Arc<Mutex<Option<PathBuf>>>,
     shell: Arc<Mutex<ShellState>>,
     remote: Arc<Mutex<Option<RemoteContext>>>,
+    agent: Arc<Mutex<Option<CLIAgent>>>,
+    agent_session: Arc<Mutex<Option<AgentSessionState>>>,
     exited: Arc<AtomicBool>,
     child_exited: Arc<AtomicBool>,
     zle_reading: Arc<AtomicBool>,
@@ -182,6 +185,15 @@ pub struct RemoteTerminal {
     /// arrives *after* an auto-supplied stored password means the server rejected
     /// it, so the sheet warns and offers to overwrite/clear the stale entry.
     auto_supplied_password: bool,
+    /// The third-party CLI coding agent running in the pane's foreground, last
+    /// reported by the daemon via `Agent` (detected from the foreground `argv`).
+    /// `None` when no known agent runs. Drives the tab avatar's brand mark — see
+    /// [`crate::core::cli_agent`].
+    agent: Arc<Mutex<Option<CLIAgent>>>,
+    /// The agent's rich session status (idle/working/waiting/done + native
+    /// session id), last reported by the daemon via `AgentStatus`. Drives the
+    /// status dot, "needs your input" notifications, and session resume.
+    agent_session: Arc<Mutex<Option<AgentSessionState>>>,
     reader_thread: Option<JoinHandle<()>>,
 }
 
@@ -300,6 +312,8 @@ impl RemoteTerminal {
         let cwd: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
         let shell_state: Arc<Mutex<ShellState>> = Arc::new(Mutex::new(ShellState::default()));
         let remote_context: Arc<Mutex<Option<RemoteContext>>> = Arc::new(Mutex::new(None));
+        let agent: Arc<Mutex<Option<CLIAgent>>> = Arc::new(Mutex::new(None));
+        let agent_session: Arc<Mutex<Option<AgentSessionState>>> = Arc::new(Mutex::new(None));
         let exited_flag = Arc::new(AtomicBool::new(false));
         let child_exited = Arc::new(AtomicBool::new(false));
         let zle_reading = Arc::new(AtomicBool::new(false));
@@ -315,6 +329,8 @@ impl RemoteTerminal {
                 cwd: cwd.clone(),
                 shell: shell_state.clone(),
                 remote: remote_context.clone(),
+                agent: agent.clone(),
+                agent_session: agent_session.clone(),
                 exited: exited_flag.clone(),
                 child_exited: child_exited.clone(),
                 zle_reading: zle_reading.clone(),
@@ -341,6 +357,8 @@ impl RemoteTerminal {
             ssh_phase,
             ssh_endpoint: None,
             auto_supplied_password: false,
+            agent,
+            agent_session,
             reader_thread: Some(reader_thread),
         })
     }
@@ -370,6 +388,8 @@ impl RemoteTerminal {
                     cwd,
                     shell,
                     remote,
+                    agent,
+                    agent_session,
                     exited: exited_flag,
                     child_exited,
                     zle_reading,
@@ -625,6 +645,21 @@ impl RemoteTerminal {
                                 }
                                 proxy.send_event(AlacEvent::Wakeup);
                             }
+                            DaemonMsg::Agent(a) => {
+                                flush_batch!();
+                                if let Ok(mut guard) = agent.lock() {
+                                    *guard = a;
+                                }
+                            }
+                            DaemonMsg::AgentStatus(state) => {
+                                flush_batch!();
+                                if let Ok(mut guard) = agent_session.lock() {
+                                    *guard = state;
+                                }
+                                // Status changes repaint the tab chip / sidebar
+                                // dot even when the pane printed nothing.
+                                proxy.send_event(AlacEvent::Wakeup);
+                            }
                             DaemonMsg::Exited { .. } => {
                                 // Child gone: apply what it printed last, then
                                 // mark the emulator exited and flip the shared
@@ -835,6 +870,20 @@ impl RemoteTerminal {
     /// Whether zle is reading the keyboard right now (live `133;B` seen, no
     /// later mark). See the field docs; this is the gate for writing the
     /// typeahead wipe without it echoing into the scrollback.
+    /// The third-party CLI coding agent (Claude Code, Codex, …) running in the
+    /// pane's foreground, as last reported by the daemon, or `None`. Cheap cache
+    /// read — detection runs daemon-side. See [`crate::core::cli_agent`].
+    pub fn foreground_agent(&self) -> Option<CLIAgent> {
+        self.agent.lock().ok().and_then(|g| *g)
+    }
+
+    /// The rich agent-session status (idle/working/waiting/done + native
+    /// session id), as last reported by the daemon, or `None` when no agent
+    /// session is live. Cheap cache read — sniffing runs daemon-side.
+    pub fn agent_session(&self) -> Option<AgentSessionState> {
+        self.agent_session.lock().ok().and_then(|g| g.clone())
+    }
+
     pub fn zle_reading(&self) -> bool {
         self.zle_reading.load(Ordering::Relaxed)
     }
@@ -1312,7 +1361,7 @@ fn stale_mode_resets(mode: TermMode) -> Vec<u8> {
 ///
 /// Note: `notify-rust`'s macOS backend uses the deprecated `NSUserNotification`,
 /// which is acceptable for a completion toast.
-pub(super) fn notify_desktop(title: Option<&str>, body: &str) {
+pub(crate) fn notify_desktop(title: Option<&str>, body: &str) {
     let summary = title.unwrap_or("tty7").to_string();
     let body = body.to_string();
     std::thread::spawn(move || {
@@ -1377,36 +1426,22 @@ impl OscNotifyScanner {
 
 /// Parse a buffered OSC payload (the bytes after `ESC ]`, e.g. `9;Build done` or
 /// `777;notify;Title;Body`) into a `(title, body)` notification, or `None` if it
-/// isn't a notification we surface.
+/// isn't a notification we surface. The parsing itself lives in
+/// [`crate::core::osc::parse_notification`] (shared with the daemon's agent
+/// sniffer); this wrapper additionally drops tty7's own agent-event sentinel —
+/// those payloads are machine-to-machine JSON for the daemon's state machine,
+/// and toasting them would show raw JSON to the user.
 fn parse_osc_notification(payload: &[u8]) -> Option<(Option<String>, String)> {
-    // OSC 9 ; <text>  — iTerm2 / growl style; title-less, body is the text.
-    if let Some(rest) = payload.strip_prefix(b"9;") {
-        // ConEmu overloads OSC 9 with numeric subcommands (`9;4;…` progress,
-        // `9;9;<cwd>`, …); those aren't notifications, so skip a `<digit>;`/`<digit>`
-        // leading field. A real message rarely starts with a bare single digit.
-        let first = rest.split(|&b| b == b';').next().unwrap_or(rest);
-        if first.len() == 1 && first[0].is_ascii_digit() {
-            return None;
-        }
-        let body = String::from_utf8_lossy(rest).into_owned();
-        return (!body.is_empty()).then_some((None, body));
+    if crate::core::cli_agent::parse_agent_event(payload).is_some() {
+        return None;
     }
-    // OSC 777 ; notify ; <title> ; <body>  — urxvt style.
-    if let Some(rest) = payload.strip_prefix(b"777;notify;") {
-        let mut parts = rest.splitn(2, |&b| b == b';');
-        let first = String::from_utf8_lossy(parts.next().unwrap_or(b"")).into_owned();
-        let second = parts
-            .next()
-            .map(|b| String::from_utf8_lossy(b).into_owned());
-        // With both fields present it's title + body; with only one it's a body-only
-        // notification (some senders omit the title).
-        let (title, body) = match second {
-            Some(body) if !body.is_empty() => (Some(first), body),
-            _ => (None, first),
-        };
-        return (!body.is_empty()).then_some((title, body));
+    let (title, body) = crate::core::osc::parse_notification(payload)?;
+    // A sentinel-titled payload whose JSON failed to parse is still not a
+    // user-facing notification; never toast it.
+    if title.as_deref() == Some(crate::core::cli_agent::AGENT_EVENT_SENTINEL) {
+        return None;
     }
-    None
+    Some((title, body))
 }
 
 /// Open a fresh connection to the daemon's listening endpoint. The endpoint is
@@ -2121,6 +2156,81 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(at, "at_prompt should become true after the Prompt report");
+    }
+
+    /// `foreground_agent` reflects the daemon's last `Agent` report — `None`
+    /// before any report, the detected agent after one, and back to `None` when
+    /// the agent exits (the daemon reports `Agent(None)`).
+    #[test]
+    fn foreground_agent_follows_daemon_agent_reports() {
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        assert_eq!(term.foreground_agent(), None, "none before any report");
+
+        let poll = |want: Option<CLIAgent>| {
+            for _ in 0..200 {
+                if term.foreground_agent() == want {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            false
+        };
+
+        DaemonMsg::Agent(Some(CLIAgent::Claude))
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+        assert!(poll(Some(CLIAgent::Claude)), "agent report should surface");
+
+        DaemonMsg::Agent(None).encode(&mut daemon_side).unwrap();
+        daemon_side.flush().unwrap();
+        assert!(poll(None), "agent exit should clear it");
+    }
+
+    /// `DaemonMsg::AgentStatus` frames must land in the client's session
+    /// cache (and a `None` clear it) — the reader half of the rich-status
+    /// channel the daemon's sniffer feeds.
+    #[test]
+    fn agent_session_follows_daemon_status_reports() {
+        use crate::core::cli_agent::{AgentSessionState, AgentStatus};
+
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        assert_eq!(term.agent_session(), None, "none before any report");
+
+        let poll = |want: &dyn Fn(Option<AgentSessionState>) -> bool| {
+            for _ in 0..200 {
+                if want(term.agent_session()) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            false
+        };
+
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status: AgentStatus::Waiting,
+            message: Some("Claude needs your permission".into()),
+            session_id: Some("sid-1".into()),
+            rich: true,
+        }))
+        .encode(&mut daemon_side)
+        .unwrap();
+        daemon_side.flush().unwrap();
+        assert!(
+            poll(&|s| s.is_some_and(|s| s.status == AgentStatus::Waiting
+                && s.session_id.as_deref() == Some("sid-1")
+                && s.rich)),
+            "status report should surface with message + session id"
+        );
+
+        DaemonMsg::AgentStatus(None)
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+        assert!(poll(&|s| s.is_none()), "a None report clears the session");
     }
 
     /// The typeahead wipe (^U) may only be written once zle actually reads the

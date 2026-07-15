@@ -106,6 +106,76 @@ impl Tab {
         };
         leaf.map(|l| l.read(cx).title.clone()).unwrap_or_default()
     }
+
+    /// The git snapshot (branch + working-tree diff) of the tab's label-driving
+    /// terminal — the focused leaf with a `window`, else the first — for the
+    /// sidebar row's branch line (the branch and change count shown under the
+    /// title). `None` when that leaf isn't inside a git work tree, or before
+    /// its first probe lands.
+    pub(crate) fn git_status(
+        &self,
+        window: Option<&Window>,
+        cx: &App,
+    ) -> Option<crate::terminal::git_status::GitStatus> {
+        let leaf = match window {
+            Some(window) => self.pane.focused_or_first(window, cx),
+            None => self.pane.first_leaf(),
+        }?;
+        leaf.read(cx).git_status()
+    }
+
+    /// The coding agent running in this tab, or `None`. Any leaf counts (a
+    /// split with a shell on the left and Claude on the right is an agent
+    /// tab); the first agent leaf in tree order wins. Drives the tab avatar's
+    /// brand mark.
+    pub(crate) fn agent(&self, cx: &App) -> Option<crate::core::cli_agent::CLIAgent> {
+        self.pane
+            .leaves()
+            .into_iter()
+            .find_map(|l| l.read(cx).agent())
+    }
+
+    /// The tab's most urgent agent status across its leaves — waiting beats
+    /// working beats done beats idle — or `None` when no leaf runs an agent.
+    /// The green `Done` state always shows (a finished turn stays visible until
+    /// the next one); [`agent_result_unread`](Self::agent_result_unread) then
+    /// says whether to emphasize it as unread. Drives the avatar dot and the
+    /// sidebar counts.
+    pub(crate) fn agent_status(&self, cx: &App) -> Option<crate::core::cli_agent::AgentStatus> {
+        use crate::core::cli_agent::AgentStatus;
+        let urgency = |s: AgentStatus| match s {
+            AgentStatus::Waiting => 3,
+            AgentStatus::Working => 2,
+            AgentStatus::Done => 1,
+            AgentStatus::Idle => 0,
+        };
+        self.pane
+            .leaves()
+            .into_iter()
+            .filter(|l| l.read(cx).agent().is_some())
+            .map(|l| {
+                l.read(cx)
+                    .agent_session()
+                    .map(|s| s.status)
+                    .unwrap_or(AgentStatus::Idle)
+            })
+            .max_by_key(|s| urgency(*s))
+    }
+
+    /// Whether the tab's shown status is an *unread* finished turn — a `Done`
+    /// the user hasn't looked at since. Drives the avatar dot's unread halo:
+    /// the green dot stays either way, the halo just says "new, come look."
+    /// Only meaningful when the shown status is `Done`.
+    pub(crate) fn agent_result_unread(&self, cx: &App) -> bool {
+        use crate::core::cli_agent::AgentStatus;
+        self.agent_status(cx) == Some(AgentStatus::Done)
+            && self.pane.leaves().into_iter().any(|l| {
+                let v = l.read(cx);
+                v.agent_session().map(|s| s.status) == Some(AgentStatus::Done)
+                    && v.agent_result_unread()
+            })
+    }
+
 }
 
 /// In-progress inline rename of a tab (double-click a tab label). Holds the
@@ -1954,10 +2024,131 @@ impl Tty7App {
             }
             SaveQuickConnect(target) => self.open_ssh_profile_new_from_target(target, window, cx),
             OpenSshProfiles => self.open_settings_section(SettingsSection::Ssh, window, cx),
+            SendSelectionToAgent => self.send_selection_to_agent(window, cx),
+            SendGitDiffToAgent => self.send_git_diff_to_agent(window, cx),
+            InstallClaudeHooks => {
+                // Synchronous file edit; report the outcome as a toast either
+                // way. Installing over an existing install just refreshes the
+                // entries (e.g. after the tty7 binary moved) — say so.
+                let refreshed = crate::core::agent_hooks::claude_hooks_installed();
+                match crate::core::agent_hooks::install_claude_hooks() {
+                    Ok(summary) if refreshed => crate::terminal::notify_desktop(
+                        Some("tty7"),
+                        &format!("Refreshed: {summary}"),
+                    ),
+                    Ok(summary) => crate::terminal::notify_desktop(Some("tty7"), &summary),
+                    Err(e) => crate::terminal::notify_desktop(
+                        Some("tty7"),
+                        &format!("Claude Code hook install failed: {e}"),
+                    ),
+                }
+            }
             // Handled inside `PaletteView` (opens a sub-list); these never emit a
             // `Confirm` for this variant, so they never reach here.
             OpenThemePicker | OpenSshConnectInput => {}
             ActivateTab(i) => self.activate(i, window, cx),
+        }
+    }
+
+    // ----- Agent context feed (palette: "Agent: …") -------------------------
+
+    /// The pane the agent-feed commands deliver to: the first leaf running a
+    /// recognized coding agent, preferring the active tab, then any tab. `None`
+    /// when no agent runs anywhere.
+    fn agent_target_leaf(&self, cx: &App) -> Option<Entity<TerminalView>> {
+        let runs_agent = |leaf: &Entity<TerminalView>| leaf.read(cx).agent().is_some();
+        if let Some(tab) = self.tabs.get(self.active)
+            && let Some(leaf) = tab.pane.leaves().into_iter().find(runs_agent)
+        {
+            return Some(leaf);
+        }
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != self.active)
+            .flat_map(|(_, t)| t.pane.leaves())
+            .find(runs_agent)
+    }
+
+    /// Deliver `prompt` into the agent pane's PTY and bring that pane's tab to
+    /// the front so the user sees the turn start. Toasts when no agent runs.
+    fn deliver_agent_prompt(&mut self, prompt: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.agent_target_leaf(cx) else {
+            crate::terminal::notify_desktop(
+                Some("tty7"),
+                "No running coding agent found — start one (claude, codex, …) in a pane first.",
+            );
+            return;
+        };
+        target.read(cx).send_agent_prompt(prompt);
+        if let Some(i) = self
+            .tabs
+            .iter()
+            .position(|t| t.pane.leaves().contains(&target))
+        {
+            self.activate(i, window, cx);
+        }
+    }
+
+    /// "Agent: Send Selection" — the focused pane's selection, phrased as a
+    /// prompt, into the running agent's pane (the context-feed idea).
+    fn send_selection_to_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let source = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.pane.focused_or_first(window, cx));
+        let (selection, cwd) = match &source {
+            Some(view) => (view.read(cx).selection_text(), view.read(cx).cwd()),
+            None => (None, None),
+        };
+        let Some(selection) = selection else {
+            crate::terminal::notify_desktop(
+                Some("tty7"),
+                "Nothing selected — select some terminal output first.",
+            );
+            return;
+        };
+        let cwd = cwd.map(|c| c.to_string_lossy().into_owned());
+        if let Some(prompt) =
+            crate::core::agent_prompt::build_selection_prompt(&selection, cwd.as_deref())
+        {
+            self.deliver_agent_prompt(&prompt, window, cx);
+        }
+    }
+
+    /// "Agent: Send Git Diff for Review" — the focused pane's repo diff
+    /// (unstaged + staged), phrased as a review prompt, into the agent's pane.
+    fn send_git_diff_to_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.pane.focused_or_first(window, cx))
+            .and_then(|view| view.read(cx).cwd());
+        let Some(cwd) = cwd else {
+            crate::terminal::notify_desktop(Some("tty7"), "This pane has no known directory.");
+            return;
+        };
+        // Unstaged + staged, concatenated — "everything not yet committed",
+        // which is what a review pass wants. Both invocations are quick; the
+        // prompt builder caps runaway diffs.
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&cwd)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default()
+        };
+        let diff = format!("{}{}", run(&["diff"]), run(&["diff", "--cached"]));
+        let cwd_s = cwd.to_string_lossy().into_owned();
+        match crate::core::agent_prompt::build_diff_review_prompt(&diff, Some(&cwd_s)) {
+            Some(prompt) => self.deliver_agent_prompt(&prompt, window, cx),
+            None => crate::terminal::notify_desktop(
+                Some("tty7"),
+                &format!("No uncommitted changes in {cwd_s} (or not a git repository)."),
+            ),
         }
     }
 
@@ -3239,6 +3430,11 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
                 // reconnected on restore (FR-E4/C2); `None` for local panes. A
                 // live pane reattaches by `pane_id` and never needs this.
                 ssh_spec: view.ssh_spec(),
+                // The running agent + its native session id (when its hooks
+                // reported one), so a pane the daemon loses can resume the
+                // agent conversation instead of just reopening a shell.
+                agent: view.agent(),
+                agent_session_id: view.agent_session().and_then(|s| s.session_id),
             }
         }
         Pane::Split {
@@ -3258,6 +3454,8 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
             cwd: None,
             pane_id: None,
             ssh_spec: None,
+            agent: None,
+            agent_session_id: None,
         },
     }
 }
@@ -3319,6 +3517,8 @@ fn session_to_pane(
             cwd,
             pane_id,
             ssh_spec,
+            agent,
+            agent_session_id,
         } => {
             // Only restore the pane id when the daemon confirms it's still live;
             // a stale id (daemon restarted, pane killed) falls back to a spawn.
@@ -3341,6 +3541,19 @@ fn session_to_pane(
             // A shell pick isn't persisted in the session, so a stale pane that
             // must respawn comes back on the default shell.
             let view = new_terminal(font_size, cwd.clone(), restore, None, window, cx);
+            // A pane that could NOT re-attach lost its running agent with the
+            // daemon; when we captured that agent's native session id, hand
+            // the fresh shell its resume command so the conversation picks up
+            // where it left off (cmux's auto-resume, config-gated). The bytes
+            // sit in the PTY input queue until the shell reads its first
+            // command — same mechanism as tmux send-keys at spawn.
+            if restore.is_none()
+                && cx.global::<Config>().restore_agent_sessions
+                && let (Some(agent), Some(id)) = (agent, agent_session_id)
+                && let Some(cmd) = agent.resume_command(id)
+            {
+                view.read(cx).run_command_line(&cmd);
+            }
             Pane::leaf(view)
         }
         SessionPane::Split { axis, ratio, a, b } => {

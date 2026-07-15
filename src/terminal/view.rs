@@ -224,6 +224,42 @@ pub struct TerminalView {
     /// long-running commands completed while the window is in the background.
     running_since: Option<std::time::Instant>,
     running_title: String,
+    /// The coding agent (if any) detected during the current foreground-command
+    /// episode, captured so its completion notification can be branded ("Claude
+    /// Code finished" rather than a generic "command finished"). Set the moment
+    /// the daemon reports an agent while a command runs; cleared when it ends.
+    running_agent: Option<crate::core::cli_agent::CLIAgent>,
+    /// The rich agent status last seen by the poll, so transitions (working →
+    /// waiting, working → done) fire exactly one notification each and repaint
+    /// the status dot.
+    last_agent_status: Option<crate::core::cli_agent::AgentStatus>,
+    /// When the current rich turn entered `Working`, for the "finished after
+    /// Ns" copy on its `Done` notification.
+    agent_turn_started: Option<std::time::Instant>,
+    /// Whether this pane's agent ever reported over the rich sentinel channel.
+    /// While true, the coarse process-exit "agent finished" notification is
+    /// suppressed — the turn-level `stop` events already said it better.
+    agent_was_rich: bool,
+    /// Whether the agent's last finished turn (the green `Done` dot) is *unread*
+    /// — a turn ended that the user hasn't looked at since. Set when a new turn
+    /// finishes while this pane is unfocused; cleared the moment the pane gains
+    /// focus (you're looking at it). The tab avatar only paints the Done dot
+    /// while this is true, so a result you've already seen stops nagging. Blue
+    /// (working) / amber (waiting) are unaffected — they track live state.
+    agent_result_unread: bool,
+    /// The pane's last-computed git snapshot (branch + working-tree diff size),
+    /// shown as the sidebar row's third line. Computed off-thread by
+    /// [`refresh_git_status`](Self::refresh_git_status) on a cwd change or a
+    /// command finishing; `None` outside a git work tree (or before the first
+    /// probe lands).
+    git_status: Option<crate::terminal::git_status::GitStatus>,
+    /// The cwd `git_status` was last computed (or scheduled) for, so the poll
+    /// loop only reprobes when the working directory actually changes.
+    git_status_cwd: Option<std::path::PathBuf>,
+    /// Monotonic tag bumped on every git reprobe; a background result is dropped
+    /// unless it still matches, so a slow probe from a since-changed cwd can't
+    /// overwrite a fresher one (same guard as `completion_generation`).
+    git_status_gen: u64,
     /// The inline command line editor. Live only while the shell sits idle
     /// at its prompt (`input_active`): there the terminal keeps keyboard focus and
     /// we run our own line editor (so we own Tab / ↑ / ↓ for completion and
@@ -447,6 +483,15 @@ fn notify_command_finished(label: &str, elapsed: std::time::Duration) {
         format!("{label} — finished after {secs}s")
     };
     super::remote::notify_desktop(Some("tty7"), &body);
+}
+
+/// Post a branded "the agent finished" notification — the coding-agent form of
+/// [`notify_command_finished`], titled with the agent so it's obvious *which*
+/// session came back.
+fn notify_agent_finished(agent: crate::core::cli_agent::CLIAgent, elapsed: std::time::Duration) {
+    let secs = elapsed.as_secs();
+    let body = format!("Finished after {secs}s");
+    super::remote::notify_desktop(Some(agent.display_name()), &body);
 }
 
 /// Ring the OS system bell for the `Audible` bell mode. Returns `true` if a
@@ -779,6 +824,9 @@ impl TerminalView {
             cx.on_focus_in(&focus_handle, window, |view, _window, cx| {
                 view.focused = true;
                 view.cursor_visible = true;
+                // Looking at the pane marks its finished turn read, so the tab
+                // avatar's green Done dot clears.
+                view.agent_result_unread = false;
                 view.report_focus_change(true);
                 cx.notify();
             }),
@@ -892,6 +940,14 @@ impl TerminalView {
             last_at_prompt: false,
             running_since: None,
             running_title: String::new(),
+            running_agent: None,
+            last_agent_status: None,
+            agent_turn_started: None,
+            agent_was_rich: false,
+            agent_result_unread: false,
+            git_status: None,
+            git_status_cwd: None,
+            git_status_gen: 0,
             cmd: CmdEditor::new(),
             typeahead: Typeahead::new(),
             hold: GapHold::new(),
@@ -944,6 +1000,66 @@ impl TerminalView {
 
     pub fn remote_context(&self) -> Option<RemoteContext> {
         self.terminal.remote_context()
+    }
+
+    /// The coding agent running in this pane's foreground, or `None` when none
+    /// is. Identity comes from the daemon's foreground-`argv` detection (plus
+    /// the sentinel event channel, which can brand wrappers argv can't see
+    /// through). The tab avatar brands the pane with it. See
+    /// [`crate::core::cli_agent`].
+    pub fn agent(&self) -> Option<crate::core::cli_agent::CLIAgent> {
+        self.terminal.foreground_agent()
+    }
+
+    /// The agent's rich session status (idle / working / waiting / done +
+    /// native session id), when the pane's agent reports events over the
+    /// sentinel OSC channel (or the opaque notification fallback). Drives the
+    /// avatar's status dot, "needs your input" notifications, and resume. An
+    /// output-idle *guess* is deliberately still absent — agents are quietest
+    /// while thinking, so only agent-reported state is trusted.
+    pub fn agent_session(&self) -> Option<crate::core::cli_agent::AgentSessionState> {
+        self.terminal.agent_session()
+    }
+
+    /// Whether this pane's finished turn (the green `Done` dot) is unread — a
+    /// turn ended that the user hasn't looked at since (see
+    /// [`agent_result_unread`](Self::agent_result_unread) field). Drives the
+    /// avatar dot's unread halo; the dot itself shows for any `Done`.
+    pub fn agent_result_unread(&self) -> bool {
+        self.agent_result_unread
+    }
+
+    /// The pane's last-computed git snapshot (branch + working-tree diff), for
+    /// the sidebar row's branch line. `None` outside a git work tree or before
+    /// the first background probe lands.
+    pub fn git_status(&self) -> Option<crate::terminal::git_status::GitStatus> {
+        self.git_status.clone()
+    }
+
+    /// The current grid selection as text, if any non-blank one exists — the
+    /// source for "Agent: Send Selection".
+    pub fn selection_text(&self) -> Option<String> {
+        self.terminal
+            .term
+            .lock()
+            .selection_to_string()
+            .filter(|t| !t.trim().is_empty())
+    }
+
+    /// Deliver a built prompt into this pane's PTY as a bracketed paste + CR —
+    /// the submit path for the agent context-feed commands. See
+    /// [`crate::core::agent_prompt::submit_bytes`].
+    pub fn send_agent_prompt(&self, prompt: &str) {
+        self.terminal
+            .write(crate::core::agent_prompt::submit_bytes(prompt));
+    }
+
+    /// Type one command line + Enter into the pane's PTY, as if the user had.
+    /// Used by session restore to hand a fresh shell an agent resume command;
+    /// the bytes queue in the PTY until the (possibly still-starting) shell
+    /// reads them.
+    pub fn run_command_line(&self, cmd: &str) {
+        self.terminal.write(format!("{cmd}\r").into_bytes());
     }
 
     /// The shell this pane was explicitly spawned with (new-tab dropdown pick),
@@ -2163,34 +2279,188 @@ impl TerminalView {
             cx.notify();
         }
 
+        // Whether the configured notification policy allows a post right now:
+        // never / only-when-unfocused / always. Shared by the command-finished,
+        // agent-finished, and agent-waiting notifications.
+        let notify_allowed = match cx.global::<Config>().notify_on_command_finish {
+            NotifyMode::Never => false,
+            NotifyMode::Unfocused => !window.is_window_active(),
+            NotifyMode::Always => true,
+        };
+
         // "Command finished" notification: a foreground command (not at prompt)
-        // that ran long and finished while the window was in the background.
+        // that ran long and finished while the window was in the background. When
+        // the command was a recognized coding agent, brand the notification with
+        // the agent instead of the generic "command finished" copy.
         let running = !at_prompt;
+        // While a command runs, latch the agent the daemon reports for it — the
+        // detection poll can land a beat after the command starts, so capture it
+        // whenever it appears rather than only at the start edge.
+        if running && self.running_agent.is_none() {
+            self.running_agent = self.terminal.foreground_agent();
+        }
+        // A command finishing (back-to-prompt edge) may have edited files or
+        // switched branch, so reprobe git after it — captured before the match
+        // below clears `running_since`.
+        let cmd_finished = self.running_since.is_some() && !running;
         match (self.running_since, running) {
             (None, true) => {
                 self.running_since = Some(std::time::Instant::now());
                 self.running_title = self.title.clone();
+                self.running_agent = self.terminal.foreground_agent();
             }
             (Some(start), false) => {
                 let elapsed = start.elapsed();
                 let title = std::mem::take(&mut self.running_title);
+                let agent = self.running_agent.take();
                 self.running_since = None;
-                // Gate on the configured policy: never / only-when-unfocused /
-                // always. The configured long-command floor still applies
-                // regardless.
-                let cfg = cx.global::<Config>();
-                let notify = match cfg.notify_on_command_finish {
-                    NotifyMode::Never => false,
-                    NotifyMode::Unfocused => !window.is_window_active(),
-                    NotifyMode::Always => true,
-                };
-                let threshold = std::time::Duration::from_secs(cfg.notify_threshold_secs);
-                if elapsed >= threshold && notify {
-                    notify_command_finished(&title, elapsed);
+                if notify_allowed {
+                    match agent {
+                        // A rich-channel agent already announced each turn's
+                        // end (`stop` events below); a second "finished" on
+                        // process exit would be noise.
+                        Some(_) if self.agent_was_rich => {}
+                        // An agent session ends the moment it finishes — no
+                        // duration floor: "Claude Code finished" is worth saying
+                        // even for a quick turn you stepped away from.
+                        Some(agent) => notify_agent_finished(agent, elapsed),
+                        None => {
+                            let threshold = std::time::Duration::from_secs(
+                                cx.global::<Config>().notify_threshold_secs,
+                            );
+                            if elapsed >= threshold {
+                                notify_command_finished(&title, elapsed);
+                            }
+                        }
+                    }
                 }
             }
             _ => {}
         }
+
+        self.poll_agent_status(notify_allowed, cx);
+
+        // Refresh the sidebar's git branch/diff line when the working directory
+        // changed (a `cd`) or a command just finished. Both are rare edges, so
+        // the off-thread `git` shell-out runs seldom, not every 300ms tick.
+        let cwd_now = self.cwd();
+        if cwd_now.as_ref() != self.git_status_cwd.as_ref() || cmd_finished {
+            self.refresh_git_status(cwd_now, cx);
+        }
+    }
+
+    /// Kick off an off-thread git probe for `cwd` and fold the result back on
+    /// the main thread, tagged with a generation so a stale probe (cwd changed
+    /// meanwhile) is dropped. Clears the status when there's no cwd (e.g. a
+    /// native-SSH pane pre-OSC-7, where a local `git` would be meaningless).
+    fn refresh_git_status(
+        &mut self,
+        cwd: Option<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        self.git_status_cwd = cwd.clone();
+        let Some(cwd) = cwd else {
+            if self.git_status.take().is_some() {
+                cx.notify();
+            }
+            return;
+        };
+        self.git_status_gen += 1;
+        let generation = self.git_status_gen;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::terminal::git_status::compute(&cwd) })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                // Drop a probe whose cwd has since been superseded.
+                if view.git_status_gen != generation {
+                    return;
+                }
+                if view.git_status != result {
+                    view.git_status = result;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Fold the pane's rich agent status into turn-level notifications and the
+    /// status dot. Runs on the same cadence as the notification poll above.
+    ///
+    /// Only *transitions* act: entering `Waiting` says the agent needs you
+    /// (the reason attached), and a `Working → Done` edge says the turn
+    /// finished — with its duration when we saw it start. Non-rich (fallback)
+    /// state paints the dot but stays silent: the agent's own OSC notification
+    /// was already toasted by the reader thread, and echoing it would double
+    /// up. Attach replays land as a bare status with no observed transition
+    /// history, so a restored `Done` never re-notifies.
+    fn poll_agent_status(&mut self, notify_allowed: bool, cx: &mut Context<Self>) {
+        use crate::core::cli_agent::AgentStatus;
+
+        let session = self.terminal.agent_session();
+        if session.as_ref().is_some_and(|s| s.rich) {
+            self.agent_was_rich = true;
+        }
+        if self.terminal.foreground_agent().is_none() && session.is_none() {
+            self.agent_was_rich = false;
+        }
+
+        let status = session.as_ref().map(|s| s.status);
+        if status == self.last_agent_status {
+            return;
+        }
+        let prev = std::mem::replace(&mut self.last_agent_status, status);
+
+        // Read/unread for the green Done dot: a turn just finished is "unread"
+        // only if you weren't looking (focused pane = you watched it finish, so
+        // it's already read). Any non-Done status has no result to be unread.
+        match status {
+            Some(AgentStatus::Done) if prev != Some(AgentStatus::Done) => {
+                self.agent_result_unread = !self.focused;
+            }
+            Some(AgentStatus::Done) => {}
+            _ => self.agent_result_unread = false,
+        }
+
+        let rich = session.as_ref().is_some_and(|s| s.rich);
+        let agent_name = self
+            .terminal
+            .foreground_agent()
+            .map(|a| a.display_name())
+            .unwrap_or("Agent");
+        match status {
+            Some(AgentStatus::Working) => {
+                self.agent_turn_started = Some(std::time::Instant::now());
+            }
+            Some(AgentStatus::Waiting) if rich && notify_allowed => {
+                let body = session
+                    .as_ref()
+                    .and_then(|s| s.message.clone())
+                    .unwrap_or_else(|| "Waiting for your input".to_string());
+                super::remote::notify_desktop(Some(agent_name), &body);
+            }
+            // Done only counts off an *observed* turn (working/waiting seen
+            // live), so an attach replay of old state stays quiet.
+            Some(AgentStatus::Done)
+                if rich
+                    && notify_allowed
+                    && matches!(
+                        prev,
+                        Some(AgentStatus::Working) | Some(AgentStatus::Waiting)
+                    ) =>
+            {
+                let body = match self.agent_turn_started.take() {
+                    Some(start) => format!("Finished after {}s", start.elapsed().as_secs()),
+                    None => "Turn finished".to_string(),
+                };
+                super::remote::notify_desktop(Some(agent_name), &body);
+            }
+            _ => {}
+        }
+        // Status changed: repaint so the avatar dot / sidebar line track it.
+        cx.notify();
     }
 
     /// True when the shell sits idle at its prompt: the PTY's foreground process

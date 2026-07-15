@@ -8,6 +8,9 @@
 //! code.
 
 pub mod actions;
+pub mod agent_hooks;
+pub mod agent_prompt;
+pub mod cli_agent;
 pub mod config;
 // SSH connection-manager data layer (WS1). Its public API is consumed by the
 // daemon-session, auth, forwarding, and UI workstreams, which land separately —

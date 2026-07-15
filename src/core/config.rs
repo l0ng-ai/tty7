@@ -198,6 +198,22 @@ pub struct Config {
     /// rows. Entries for deleted profiles are harmless (never surfaced).
     #[serde(default)]
     pub ssh_profile_frecency: HashMap<uuid::Uuid, ProfileUsage>,
+
+    // ── CLI coding agents ────────────────────────────────────────────────────
+    /// User-defined agent-detection rules: a command basename → an agent slug
+    /// (`{"cc": "claude", "my-codex": "codex"}`), so personal wrappers get
+    /// branded like the agent they launch. Complements the built-in registry in
+    /// [`crate::core::cli_agent`]; built-ins win on their own names. The daemon
+    /// reads this once per process (restart the daemon to apply changes).
+    #[serde(default)]
+    pub agent_commands: HashMap<String, String>,
+    /// On session restore, when a pane can't re-attach (the daemon lost it —
+    /// reboot, daemon restart) but it was running a coding agent whose native
+    /// session id we captured, type that agent's resume command into the fresh
+    /// shell (`claude --resume <id>`, `codex resume <id>`, …) so the
+    /// conversation continues where it left off. cmux-style; on by default.
+    #[serde(default = "default_true")]
+    pub restore_agent_sessions: bool,
 }
 
 /// One saved profile's usage record for palette frecency (see
@@ -426,6 +442,8 @@ impl Default for Config {
             verify_host_keys: true,
             ssh_warn_on_close: false,
             ssh_profile_frecency: HashMap::new(),
+            agent_commands: HashMap::new(),
+            restore_agent_sessions: true,
         }
     }
 }
@@ -647,6 +665,22 @@ pub fn working_directory_base() -> Option<PathBuf> {
 /// `config.json` on the daemon side (which has no GPUI `Config` global).
 pub fn extra_env() -> HashMap<String, String> {
     Config::load().env
+}
+
+/// User-defined agent-detection rules (`agent_commands`), keys lowercased,
+/// cached once per process. The daemon consults this from its 0.5 s foreground
+/// poll on every pane, so it must not re-read `config.json` each time; the
+/// trade-off is that rule edits apply on the next daemon start (the GUI's
+/// "Restart daemon" command counts).
+pub fn agent_commands_cached() -> &'static HashMap<String, String> {
+    static CACHE: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        Config::load()
+            .agent_commands
+            .into_iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v))
+            .collect()
+    })
 }
 
 /// Serde default for [`Config::keybinding_preset`]: the no-op `"default"` preset.

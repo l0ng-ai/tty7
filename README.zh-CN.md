@@ -62,6 +62,17 @@ macOS、Windows、Linux 三平台原生构建，每个 release 一起打出。
 - **⌘ 点击打开链接** · 桌面通知
 - **8 套主题** · CJK / 输入法输入
 
+### CLI coding agent
+
+tty7 能识别 pane 里跑着的第三方 coding agent（Claude Code、Codex、Gemini CLI、Aider、Amp、OpenCode 等约 17 个）并为其增强体验 —— 只观察、只加分，绝不包裹或替代 agent 本身。
+
+- **品牌头像** —— 标签 chip / 侧栏行显示每个 pane 跑的是哪个 agent；自定义包装命令可通过 `config.json` 的 `agent_commands` 映射
+- **实时状态点** —— 工作中（蓝）/ 等你输入（琥珀）/ 完成（绿），由 agent 自己上报的 OSC 事件驱动；在命令面板运行 *Agent: Install Claude Code Hooks* 一键接通 Claude Code
+- **真正有用的通知** —— agent 卡在等你批准的那一刻弹 "needs your permission…"，每轮结束弹 "finished after Ns"，遵循你的通知策略
+- **一眼看分支** —— 侧栏每行显示该 pane 的 git 分支和工作区改动（`+N −M`），`cd` 或命令跑完时自动刷新
+- **会话恢复** —— 重启后无法重连的 pane 会自动续上 agent 对话（`claude --resume …`；`restore_agent_sessions`，默认开启）
+- **上下文回填** —— 面板命令把当前选区或仓库 `git diff` 打包成 prompt 直接喂给正在跑的 agent
+
 ### SSH 连接管理器
 
 **唯一**路径就是原生 Rust SSH 栈（russh）—— profile、凭据、SFTP 全部内置，绝不 shell 出 `ssh`。没有系统 ssh 兼容模式。

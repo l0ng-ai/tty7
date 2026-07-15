@@ -12,10 +12,10 @@ mod ui;
 
 use crate::core::config::Config;
 use crate::ui::app::Tty7App;
+use crate::ui::assets::Assets;
 use crate::ui::keymap;
 use gpui::*;
 use gpui_component::{ActiveTheme as _, Root, TitleBar};
-use gpui_component_assets::Assets;
 
 /// Register the bundled Hack monospace faces with gpui's text system so the
 /// default `font_family` ("Hack") renders identically on every machine, with no
@@ -245,6 +245,21 @@ fn enrich_path_from_login_shell() {
 }
 
 fn main() {
+    // Agent-hook mode: `tty7 agent-hook <agent> <event>` is the tiny emitter
+    // Claude Code's hooks invoke (see `core::agent_hooks`). It reads the hook
+    // payload from stdin, writes one OSC sequence to the controlling terminal,
+    // and exits — never touching config, the daemon, or the GUI. Checked first
+    // so a hook can never accidentally boot a window.
+    {
+        let args: Vec<String> = std::env::args().skip(1).take(3).collect();
+        if args.first().map(String::as_str) == Some("agent-hook") {
+            if let [_, agent, event] = args.as_slice() {
+                crate::core::agent_hooks::run_agent_hook(agent, event);
+            }
+            return;
+        }
+    }
+
     // Resolve the config directory override (if any) up front, before any code
     // path touches config/session/history files (the daemon socket path resolves
     // under this dir too, so the order matters).
