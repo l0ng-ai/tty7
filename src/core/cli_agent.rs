@@ -455,7 +455,6 @@ impl AgentStatus {
             AgentStatus::Done => Some(0x22C55E),    // green: result ready
         }
     }
-
 }
 
 impl AgentSessionState {

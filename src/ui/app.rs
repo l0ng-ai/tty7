@@ -175,7 +175,6 @@ impl Tab {
                     && v.agent_result_unread()
             })
     }
-
 }
 
 /// In-progress inline rename of a tab (double-click a tab label). Holds the

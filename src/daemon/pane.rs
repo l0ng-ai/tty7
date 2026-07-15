@@ -1906,8 +1906,9 @@ mod tests {
         // `exec -a codex` replaces the shell with `cat`, giving it argv[0]=codex
         // while it blocks on stdin — so it stays the PTY's foreground group long
         // enough to observe. `cat` (not `sleep`) keeps it alive until the master
-        // is dropped and its stdin EOFs.
-        let mut cmd = CommandBuilder::new("sh");
+        // is dropped and its stdin EOFs. Must be bash: `exec -a` is a bashism
+        // that dash (Ubuntu's /bin/sh) rejects.
+        let mut cmd = CommandBuilder::new("bash");
         cmd.args(["-c", "exec -a codex cat"]);
         let mut child = pty.slave.spawn_command(cmd).expect("spawn child");
         let master = Mutex::new(pty.master);

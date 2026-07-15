@@ -2338,13 +2338,15 @@ impl TerminalView {
             _ => {}
         }
 
-        self.poll_agent_status(notify_allowed, cx);
+        let turn_finished = self.poll_agent_status(notify_allowed, cx);
 
         // Refresh the sidebar's git branch/diff line when the working directory
-        // changed (a `cd`) or a command just finished. Both are rare edges, so
-        // the off-thread `git` shell-out runs seldom, not every 300ms tick.
+        // changed (a `cd`), a command just finished, or an agent turn ended —
+        // an agent's session is one long foreground command, so its edits would
+        // otherwise stay invisible until it exits. All rare edges, so the
+        // off-thread `git` shell-out runs seldom, not every 300ms tick.
         let cwd_now = self.cwd();
-        if cwd_now.as_ref() != self.git_status_cwd.as_ref() || cmd_finished {
+        if cwd_now.as_ref() != self.git_status_cwd.as_ref() || cmd_finished || turn_finished {
             self.refresh_git_status(cwd_now, cx);
         }
     }
@@ -2353,11 +2355,7 @@ impl TerminalView {
     /// the main thread, tagged with a generation so a stale probe (cwd changed
     /// meanwhile) is dropped. Clears the status when there's no cwd (e.g. a
     /// native-SSH pane pre-OSC-7, where a local `git` would be meaningless).
-    fn refresh_git_status(
-        &mut self,
-        cwd: Option<std::path::PathBuf>,
-        cx: &mut Context<Self>,
-    ) {
+    fn refresh_git_status(&mut self, cwd: Option<std::path::PathBuf>, cx: &mut Context<Self>) {
         self.git_status_cwd = cwd.clone();
         let Some(cwd) = cwd else {
             if self.git_status.take().is_some() {
@@ -2396,7 +2394,12 @@ impl TerminalView {
     /// was already toasted by the reader thread, and echoing it would double
     /// up. Attach replays land as a bare status with no observed transition
     /// history, so a restored `Done` never re-notifies.
-    fn poll_agent_status(&mut self, notify_allowed: bool, cx: &mut Context<Self>) {
+    ///
+    /// Returns whether a turn just ended (a transition *into* `Done`) — the
+    /// caller uses it to reprobe git: an agent's whole session is one long
+    /// foreground command, so the back-to-prompt edge that normally refreshes
+    /// the branch/diff line never fires while it works.
+    fn poll_agent_status(&mut self, notify_allowed: bool, cx: &mut Context<Self>) -> bool {
         use crate::core::cli_agent::AgentStatus;
 
         let session = self.terminal.agent_session();
@@ -2409,9 +2412,10 @@ impl TerminalView {
 
         let status = session.as_ref().map(|s| s.status);
         if status == self.last_agent_status {
-            return;
+            return false;
         }
         let prev = std::mem::replace(&mut self.last_agent_status, status);
+        let turn_finished = status == Some(AgentStatus::Done) && prev != Some(AgentStatus::Done);
 
         // Read/unread for the green Done dot: a turn just finished is "unread"
         // only if you weren't looking (focused pane = you watched it finish, so
@@ -2461,6 +2465,7 @@ impl TerminalView {
         }
         // Status changed: repaint so the avatar dot / sidebar line track it.
         cx.notify();
+        turn_finished
     }
 
     /// True when the shell sits idle at its prompt: the PTY's foreground process
