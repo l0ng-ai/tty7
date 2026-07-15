@@ -334,6 +334,16 @@ fn main() {
             // if so, Settings → About surfaces a download prompt. Fails soft and
             // is a no-op when `check_for_updates` is disabled.
             crate::core::update::spawn_check(cx);
+            // If any agent's installed hooks point at a moved/stale tty7
+            // binary (the app updated or relocated since they were
+            // installed), rewrite them in place — off the startup path, since
+            // it reads (and rarely writes) the agents' config files. No-op in
+            // debug builds and when hooks are absent or already current.
+            cx.background_executor()
+                .spawn(async {
+                    crate::core::agent_hooks::refresh_hooks_at_launch();
+                })
+                .detach();
             keymap::init(cx);
 
             cx.spawn(async move |cx| {

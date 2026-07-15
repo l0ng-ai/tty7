@@ -49,6 +49,7 @@ pub(crate) enum SettingsSection {
     Terminal,
     Shell,
     Ssh,
+    Agents,
     WindowTabs,
     Keybindings,
     About,
@@ -63,6 +64,7 @@ impl SettingsSection {
             SettingsSection::Terminal => "settings:terminal",
             SettingsSection::Shell => "settings:shell",
             SettingsSection::Ssh => "settings:ssh",
+            SettingsSection::Agents => "settings:agents",
             SettingsSection::WindowTabs => "settings:window-tabs",
             SettingsSection::Keybindings => "settings:keybindings",
             SettingsSection::About => "settings:about",
@@ -211,6 +213,32 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             title: "Verify host keys",
             keywords: "ssh security known_hosts fingerprint mitm host key verification",
         },
+        // Agents
+        SearchEntry {
+            section: Agents,
+            title: "Claude Code hooks",
+            keywords: "agent integration install uninstall status rich session working waiting sidebar badge claude",
+        },
+        SearchEntry {
+            section: Agents,
+            title: "Codex hooks",
+            keywords: "agent integration install openai codex",
+        },
+        SearchEntry {
+            section: Agents,
+            title: "Copilot CLI hooks",
+            keywords: "agent integration install github copilot",
+        },
+        SearchEntry {
+            section: Agents,
+            title: "OpenCode plugin",
+            keywords: "agent integration install opencode",
+        },
+        SearchEntry {
+            section: Agents,
+            title: "Pi extension",
+            keywords: "agent integration install pi",
+        },
         // Window & Tabs
         SearchEntry {
             section: WindowTabs,
@@ -338,6 +366,16 @@ pub(crate) struct SettingsState {
     /// edit form); `None` shows the empty state (the "pick a profile" hint plus
     /// the two global security toggles).
     pub(crate) ssh_detail: SshDetail,
+    /// Install state of each agent's hook integration (Agents section), in
+    /// [`crate::core::agent_hooks::HookAgent::ALL`] order. Cached — captured
+    /// when the panel opens, re-read when the section is selected, and updated
+    /// after each install/uninstall — so rendering never touches the agents'
+    /// config files.
+    pub(crate) agent_hooks_states:
+        Vec<(crate::core::agent_hooks::HookAgent, crate::core::agent_hooks::HooksState)>,
+    /// Outcome of the last Agents-section hook action (install summary or
+    /// error), shown under that agent's row. Replaced by the next action.
+    pub(crate) agent_hooks_note: Option<(crate::core::agent_hooks::HookAgent, String)>,
     pub(crate) _subs: Vec<Subscription>,
 }
 
@@ -647,6 +685,7 @@ impl Tty7App {
                 IconName::SquareTerminal,
             ))
             .child(nav_item("SSH", SettingsSection::Ssh, IconName::Globe))
+            .child(nav_item("Agents", SettingsSection::Agents, IconName::Bot))
             .child(nav_item(
                 "Window & Tabs",
                 SettingsSection::WindowTabs,
@@ -712,6 +751,7 @@ impl Tty7App {
             SettingsSection::Terminal => self.render_settings_terminal(cx),
             SettingsSection::Shell => self.render_settings_shell(cx),
             SettingsSection::Ssh => self.render_settings_ssh(cx),
+            SettingsSection::Agents => self.render_settings_agents(cx),
             SettingsSection::WindowTabs => self.render_settings_window_tabs(cx),
             SettingsSection::Keybindings => self.render_settings_keybindings(cx),
             SettingsSection::About => self.render_settings_about(cx),
@@ -2744,6 +2784,90 @@ impl Tty7App {
                 cx,
             ))
             .into_any_element()
+    }
+
+    /// Agents section: one row per hook-capable agent — install state + actions
+    /// per row, copy kept terse.
+    fn render_settings_agents(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::core::agent_hooks::{HookAgent, HooksState};
+
+        let theme = cx.theme();
+        let (foreground, muted_fg) = (theme.foreground, theme.muted_foreground);
+        let (success, warning) = (theme.success, theme.warning);
+        let (states, note) = match self.active_settings() {
+            Some(s) => (s.agent_hooks_states.clone(), s.agent_hooks_note.clone()),
+            None => (Vec::new(), None),
+        };
+
+        let mut page = v_flex().child(self.section_intro(
+            "Agents",
+            "Hook integrations give panes running these agents live session status \
+             (working / waiting / done) in the sidebar. Only active inside tty7.",
+            cx,
+        ));
+        for (i, (agent, state)) in states.into_iter().enumerate() {
+            // Status: a colored dot + one word; the dot is the only color on
+            // the page, so state reads at a glance.
+            let (dot_color, status_text) = match state {
+                HooksState::NotInstalled => (muted_fg, "Not installed"),
+                HooksState::Installed => (success, "Installed"),
+                HooksState::Outdated => (warning, "Outdated — points at another tty7"),
+            };
+            // The primary action reads as what it will *do* from this state.
+            let primary_label = match state {
+                HooksState::NotInstalled => "Install",
+                HooksState::Installed => "Reinstall",
+                HooksState::Outdated => "Update",
+            };
+            let row_note = note
+                .as_ref()
+                .filter(|(for_agent, _)| *for_agent == agent)
+                .map(|(_, text)| text.clone());
+
+            let control = v_flex()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().size_2().rounded_full().bg(dot_color))
+                        .child(div().text_sm().text_color(foreground).child(status_text)),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new(("agent-hooks-install", i))
+                                .label(primary_label)
+                                .small()
+                                .on_click(cx.listener(move |this, _, _w, cx| {
+                                    this.settings_install_agent_hooks(agent, cx)
+                                })),
+                        )
+                        .when(state != HooksState::NotInstalled, |row| {
+                            row.child(
+                                Button::new(("agent-hooks-uninstall", i))
+                                    .label("Uninstall")
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, _w, cx| {
+                                        this.settings_uninstall_agent_hooks(agent, cx)
+                                    })),
+                            )
+                        }),
+                )
+                .when_some(row_note, |col, text| {
+                    col.child(div().text_xs().text_color(muted_fg).child(text))
+                })
+                .into_any_element();
+
+            page = page.child(self.settings_row(
+                agent.display_name(),
+                agent.target_display(),
+                control,
+                cx,
+            ));
+        }
+        page.into_any_element()
     }
 
     /// Window & Tabs section: the app window's lifecycle and tab placement.

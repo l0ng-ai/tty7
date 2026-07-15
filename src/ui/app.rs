@@ -2096,8 +2096,10 @@ impl Tty7App {
                 // Synchronous file edit; report the outcome as a toast either
                 // way. Installing over an existing install just refreshes the
                 // entries (e.g. after the tty7 binary moved) — say so.
-                let refreshed = crate::core::agent_hooks::claude_hooks_installed();
-                match crate::core::agent_hooks::install_claude_hooks() {
+                use crate::core::agent_hooks::{HookAgent, HooksState};
+                let refreshed =
+                    crate::core::agent_hooks::hooks_state(HookAgent::Claude) != HooksState::NotInstalled;
+                match crate::core::agent_hooks::install_hooks(HookAgent::Claude) {
                     Ok(summary) if refreshed => crate::terminal::notify_desktop(
                         Some("tty7"),
                         &format!("Refreshed: {summary}"),
@@ -2107,6 +2109,11 @@ impl Tty7App {
                         Some("tty7"),
                         &format!("Claude Code hook install failed: {e}"),
                     ),
+                }
+                // Keep an open Settings → Agents page truthful about what just
+                // happened behind its back.
+                if let Some(s) = self.settings.as_mut() {
+                    s.agent_hooks_states = Self::agent_hooks_snapshot();
                 }
             }
             // Handled inside `PaletteView` (opens a sub-list); these never emit a
@@ -2279,6 +2286,8 @@ impl Tty7App {
             rebinding_note: None,
             ssh_form: None,
             ssh_detail: crate::ui::settings::SshDetail::None,
+            agent_hooks_states: Self::agent_hooks_snapshot(),
+            agent_hooks_note: None,
             _subs: subs,
         });
         // Land the caret in the search box so Settings opens ready to type/filter
@@ -2910,6 +2919,64 @@ impl Tty7App {
             // Leaving the Keybindings page abandons any in-progress capture, so
             // the interceptor doesn't keep swallowing keys off-screen.
             s.recording = None;
+            // Entering Agents re-reads the hook install states, so edits made
+            // behind the panel's back (another tty7, a hand edit) show up.
+            if target == SettingsSection::Agents {
+                s.agent_hooks_states = Self::agent_hooks_snapshot();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Every hook-capable agent paired with its current on-disk install state,
+    /// in the order the Agents section lists them.
+    fn agent_hooks_snapshot()
+    -> Vec<(crate::core::agent_hooks::HookAgent, crate::core::agent_hooks::HooksState)> {
+        crate::core::agent_hooks::HookAgent::ALL
+            .into_iter()
+            .map(|agent| (agent, crate::core::agent_hooks::hooks_state(agent)))
+            .collect()
+    }
+
+    /// Settings → Agents: install (or rewrite in place) one agent's hooks,
+    /// then fold the outcome back into the panel — status row + note line.
+    pub(crate) fn settings_install_agent_hooks(
+        &mut self,
+        agent: crate::core::agent_hooks::HookAgent,
+        cx: &mut Context<Self>,
+    ) {
+        let result = crate::core::agent_hooks::install_hooks(agent);
+        self.finish_agent_hooks_action(agent, result, cx);
+    }
+
+    /// Settings → Agents: remove one agent's tty7 hooks (user hooks survive).
+    pub(crate) fn settings_uninstall_agent_hooks(
+        &mut self,
+        agent: crate::core::agent_hooks::HookAgent,
+        cx: &mut Context<Self>,
+    ) {
+        let result = crate::core::agent_hooks::uninstall_hooks(agent);
+        self.finish_agent_hooks_action(agent, result, cx);
+    }
+
+    /// Shared tail of the Agents-section hook actions: re-read the on-disk
+    /// states (the ground truth, whatever the action just did) and surface the
+    /// action's own summary or error as the note under that agent's row.
+    fn finish_agent_hooks_action(
+        &mut self,
+        agent: crate::core::agent_hooks::HookAgent,
+        result: anyhow::Result<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(s) = self.settings.as_mut() {
+            s.agent_hooks_states = Self::agent_hooks_snapshot();
+            s.agent_hooks_note = Some((
+                agent,
+                match result {
+                    Ok(summary) => summary,
+                    Err(e) => format!("Failed: {e}"),
+                },
+            ));
         }
         cx.notify();
     }
