@@ -226,7 +226,12 @@ impl HookAgent {
         match self {
             HookAgent::Claude => claude_settings_path(),
             HookAgent::Codex => Some(home_dir()?.join(".codex").join("hooks.json")),
-            HookAgent::Copilot => Some(home_dir()?.join(".copilot").join("hooks").join(OWNED_FILE_STEM_JSON)),
+            HookAgent::Copilot => Some(
+                home_dir()?
+                    .join(".copilot")
+                    .join("hooks")
+                    .join(OWNED_FILE_STEM_JSON),
+            ),
             HookAgent::OpenCode => Some(
                 xdg_config_dir()?
                     .join("opencode")
@@ -883,7 +888,11 @@ mod tests {
             Some("permission-request")
         );
         assert_eq!(
-            effective_event("copilot", "notification", r#"{"type":"elicitation_dialog"}"#),
+            effective_event(
+                "copilot",
+                "notification",
+                r#"{"type":"elicitation_dialog"}"#
+            ),
             Some("permission-request")
         );
         assert_eq!(
@@ -943,7 +952,12 @@ mod tests {
     /// generated file carries its ownership marker and this binary's path.
     #[test]
     fn owned_file_contents_carry_marker_and_exe() {
-        let exe = std::env::current_exe().unwrap().display().to_string();
+        // The exe path is embedded inside JSON / JS string literals, so look
+        // for its string-escaped form — on Windows the raw path's backslashes
+        // appear as `\\` in the generated content.
+        let exe_raw = std::env::current_exe().unwrap().display().to_string();
+        let exe_json = serde_json::to_string(&exe_raw).unwrap();
+        let exe = exe_json.trim_matches('"').to_string();
 
         let copilot = copilot_hooks_json().expect("copilot content builds");
         let parsed: serde_json::Value = serde_json::from_str(&copilot).expect("valid JSON");

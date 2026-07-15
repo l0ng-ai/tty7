@@ -2097,8 +2097,8 @@ impl Tty7App {
                 // way. Installing over an existing install just refreshes the
                 // entries (e.g. after the tty7 binary moved) — say so.
                 use crate::core::agent_hooks::{HookAgent, HooksState};
-                let refreshed =
-                    crate::core::agent_hooks::hooks_state(HookAgent::Claude) != HooksState::NotInstalled;
+                let refreshed = crate::core::agent_hooks::hooks_state(HookAgent::Claude)
+                    != HooksState::NotInstalled;
                 match crate::core::agent_hooks::install_hooks(HookAgent::Claude) {
                     Ok(summary) if refreshed => crate::terminal::notify_desktop(
                         Some("tty7"),
@@ -2930,8 +2930,10 @@ impl Tty7App {
 
     /// Every hook-capable agent paired with its current on-disk install state,
     /// in the order the Agents section lists them.
-    fn agent_hooks_snapshot()
-    -> Vec<(crate::core::agent_hooks::HookAgent, crate::core::agent_hooks::HooksState)> {
+    fn agent_hooks_snapshot() -> Vec<(
+        crate::core::agent_hooks::HookAgent,
+        crate::core::agent_hooks::HooksState,
+    )> {
         crate::core::agent_hooks::HookAgent::ALL
             .into_iter()
             .map(|agent| (agent, crate::core::agent_hooks::hooks_state(agent)))

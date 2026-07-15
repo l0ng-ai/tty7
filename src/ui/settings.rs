@@ -371,8 +371,10 @@ pub(crate) struct SettingsState {
     /// when the panel opens, re-read when the section is selected, and updated
     /// after each install/uninstall — so rendering never touches the agents'
     /// config files.
-    pub(crate) agent_hooks_states:
-        Vec<(crate::core::agent_hooks::HookAgent, crate::core::agent_hooks::HooksState)>,
+    pub(crate) agent_hooks_states: Vec<(
+        crate::core::agent_hooks::HookAgent,
+        crate::core::agent_hooks::HooksState,
+    )>,
     /// Outcome of the last Agents-section hook action (install summary or
     /// error), shown under that agent's row. Replaced by the next action.
     pub(crate) agent_hooks_note: Option<(crate::core::agent_hooks::HookAgent, String)>,
