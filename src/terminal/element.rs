@@ -1181,6 +1181,7 @@ impl TerminalElement {
                 return;
             }
             let (col, row, left) = geom.pos_to_cell(ev.position);
+            let raw_row = geom.pos_to_row_raw(ev.position);
             let mods = ev.modifiers;
             let button = ev.button;
             let clicks = ev.click_count;
@@ -1199,7 +1200,8 @@ impl TerminalElement {
                 // A left click/double-click/triple-click on the command-editor
                 // line drives its caret/selection instead of a (meaningless)
                 // terminal selection over it.
-                if button == MouseButton::Left && v.editor_click(col, row, clicks, mods.shift, cx) {
+                if button == MouseButton::Left && v.editor_click(col, raw_row, clicks, mods.shift, cx)
+                {
                     return;
                 }
                 if button == MouseButton::Left {
@@ -1211,6 +1213,7 @@ impl TerminalElement {
         let view = self.view.clone();
         window.on_mouse_event(move |ev: &MouseMoveEvent, _phase, window, cx| {
             let (col, row, left) = geom.pos_to_cell(ev.position);
+            let raw_row = geom.pos_to_row_raw(ev.position);
             let mods = ev.modifiers;
             let Some(button) = ev.pressed_button else {
                 // No button down: detect a link under the cursor so it underlines.
@@ -1252,7 +1255,7 @@ impl TerminalElement {
                 }
                 // A drag that began on the command-editor line extends its
                 // selection rather than the terminal's.
-                if button == MouseButton::Left && v.editor_drag(col, row, cx) {
+                if button == MouseButton::Left && v.editor_drag(col, raw_row, cx) {
                     return;
                 }
                 if button == MouseButton::Left {
@@ -1393,10 +1396,16 @@ impl Element for TerminalElement {
         // the next older row (the "sliver"). Mouse mapping stays consistent
         // automatically: `pos_to_cell` measures from this shifted origin.
         let frac = self.view.read(cx).scroll_frac.clamp(0., 1.);
+        // While the command editor's wrapped input would spill past the bottom
+        // row, the whole grid shifts up by that many lines — the top rows are
+        // clipped by the content mask and the overlay's wrapped tail lands in
+        // the vacated strip, emulating the scroll an echoing shell would do.
+        // Mouse mapping follows automatically via the shifted origin.
+        let input_shift = self.view.read(cx).input_scroll_rows();
         let geom = CellGeom {
             origin: point(
                 bounds.origin.x,
-                bounds.origin.y + prepaint.line_height * frac,
+                bounds.origin.y + prepaint.line_height * (frac - input_shift as f32),
             ),
             cell_width: prepaint.cell_width,
             line_height: prepaint.line_height,
@@ -1599,6 +1608,16 @@ impl CellGeom {
             ((ly / self.line_height.as_f32()).floor() as usize).min(self.rows.saturating_sub(1));
         let left = (colf - colf.floor()) <= 0.5;
         (col, row, left)
+    }
+
+    /// The row under `pos` without `pos_to_cell`'s bottom clamp. While the
+    /// input overlay shifts the grid up, its wrapped rows extend past
+    /// `rows - 1` into the vacated strip; the command editor needs those raw
+    /// rows so clicks and drags land on the right wrapped line. (Terminal
+    /// consumers — selection, mouse reports — keep the clamped row.)
+    fn pos_to_row_raw(&self, pos: Point<Pixels>) -> usize {
+        let ly = (pos.y - self.origin.y).as_f32().max(0.);
+        (ly / self.line_height.as_f32()).floor() as usize
     }
 }
 

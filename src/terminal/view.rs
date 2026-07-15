@@ -2606,6 +2606,44 @@ impl TerminalView {
         (row >= 0).then_some((row as usize, col))
     }
 
+    /// How many rows the whole surface — grid and input overlay together —
+    /// shifts up so a wrapped command at a bottom-of-screen prompt stays
+    /// visible, emulating the scroll the shell itself would perform if the
+    /// input were echoed. `element::paint` raises the grid origin by this many
+    /// lines (clipping the top rows) and `render_input_bar` anchors the same
+    /// rows higher, so the wrapped tail lands in the vacated strip. Zero
+    /// whenever nothing overflows, while scrolled into history (the overlay is
+    /// off-screen anyway and the view shouldn't fight the user's scroll), or
+    /// in reverse-search mode (a single fixed row).
+    pub(super) fn input_scroll_rows(&self) -> usize {
+        if !self.input_active() || self.reverse_search.is_some() {
+            return 0;
+        }
+        let Some((crow, ccol)) = self.cursor_cell() else {
+            return 0;
+        };
+        let (rows, cols, offset) = {
+            let term = self.terminal.term.lock();
+            (
+                term.screen_lines(),
+                term.columns(),
+                term.grid().display_offset(),
+            )
+        };
+        if offset != 0 {
+            return 0;
+        }
+        let chars: Vec<char> = self.cmd.text().chars().collect();
+        let (visual_rows, caret_vrow) = input_overlay_rows(
+            &chars,
+            self.cmd.cursor(),
+            &self.marked_text,
+            ccol,
+            cols.max(1),
+        );
+        input_overflow_shift(crow, caret_vrow, visual_rows, rows)
+    }
+
     /// Handle a left click while the command editor is live: if it lands on the
     /// input line, move the caret to the clicked position and report `true` (so
     /// the caller skips starting a terminal text-selection). The line is rendered
@@ -3846,7 +3884,13 @@ impl TerminalView {
     fn render_input_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (crow, ccol) = self.cursor_cell().unwrap_or((0, 0));
         let cx_left = px(GRID_PAD_X) + self.cell_width * (ccol as f32);
-        let cy_top = px(GRID_PAD_Y) + self.line_height * (crow as f32);
+        // The overlay rides the same upward shift `element::paint` applies to
+        // the grid when the wrapped input would spill past the bottom, so its
+        // first line keeps hugging the (shifted) prompt row. May go negative
+        // when the input is taller than the screen — the parent's
+        // `overflow_hidden` clips the rows that scroll off the top.
+        let shift = self.input_scroll_rows();
+        let cy_top = px(GRID_PAD_Y) + self.line_height * (crow as f32 - shift as f32);
 
         // Reverse-search mode replaces the line with a `(reverse-i-search)` prompt
         // showing the query and the selected match; the ranked candidates float
@@ -4111,6 +4155,10 @@ impl TerminalView {
             return None;
         }
         let (srow, scol) = self.cursor_cell()?;
+        // Anchor rows are *visual*: when the overflowing input shifts the whole
+        // surface up (`input_scroll_rows`), the menu must follow the shifted
+        // input row, not the unshifted grid row.
+        let srow = srow.saturating_sub(self.input_scroll_rows());
 
         // Decide how many rows to show and whether to drop the menu below the input
         // row or flip it above — based on the room actually available in the grid,
@@ -5019,6 +5067,44 @@ fn input_char_positions(
     (positions, r, c)
 }
 
+/// Visual size of the rendered input overlay: how many wrapped rows it
+/// occupies and which of them carries the caret. Mirrors `render_input_bar`'s
+/// layout: the IME pre-edit is inserted at the caret, and a one-cell caret
+/// slot trails the buffer when the caret sits at the end (wrapping to a fresh
+/// row when the content exactly fills its last one). The ghost autosuggestion
+/// is deliberately excluded — the screen shouldn't scroll to reveal a
+/// suggestion the user hasn't accepted.
+fn input_overlay_rows(
+    chars: &[char],
+    cursor: usize,
+    marked: &str,
+    scol: usize,
+    cols: usize,
+) -> (usize, usize) {
+    let mut merged: Vec<char> = Vec::with_capacity(chars.len() + marked.len());
+    let cursor = cursor.min(chars.len());
+    merged.extend_from_slice(&chars[..cursor]);
+    merged.extend(marked.chars());
+    merged.extend_from_slice(&chars[cursor..]);
+    let (positions, r, c) = input_char_positions(&merged, scol, cols);
+    let end_row = if cursor >= chars.len() && marked.is_empty() && c >= cols {
+        r + 1
+    } else {
+        r
+    };
+    let caret_vrow = positions.get(cursor).map_or(end_row, |&(pr, _, _)| pr);
+    (end_row + 1, caret_vrow)
+}
+
+/// Rows the grid (and the input overlay riding on it) must shift up so the
+/// wrapped command editor stays visible when the prompt sits near the bottom:
+/// enough that the overlay's last row lands on the last grid row — capped so
+/// the caret's row never scrolls off the top when the input is taller than
+/// the whole screen.
+fn input_overflow_shift(crow: usize, caret_vrow: usize, visual_rows: usize, rows: usize) -> usize {
+    (crow + visual_rows).saturating_sub(rows).min(crow + caret_vrow)
+}
+
 fn wrapped_click_index(
     chars: &[char],
     scol: usize,
@@ -5092,7 +5178,8 @@ mod tests {
     use super::{
         SelectEndCopy, WheelRoute, clipboard_paste_text, display_width, drag_scroll_step,
         encode_mouse, fallback_chain, fig_icon_emoji, fig_icon_glyph, focus_report_bytes,
-        menu_layout, paste_bytes, select_end_copy, shell_escape_path, smooth_scroll_step,
+        input_overflow_shift, input_overlay_rows, menu_layout, paste_bytes, select_end_copy,
+        shell_escape_path, smooth_scroll_step,
         trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
     use alacritty_terminal::term::TermMode;
@@ -5618,6 +5705,42 @@ mod tests {
         // Indices: 0='a', 1='\n', 2='\n', 3='b'. Row 1 holds the second newline.
         assert_eq!(click("a\n\nb", 4, 80, 3, 1), Some(2));
         assert_eq!(click("a\n\nb", 4, 80, 0, 2), Some(3)); // 'b' on row 2
+    }
+
+    #[test]
+    fn input_overlay_rows_counts_wraps_slot_marked_and_newlines() {
+        let rows = |text: &str, cursor: usize, marked: &str, scol: usize, cols: usize| {
+            let chars: Vec<char> = text.chars().collect();
+            input_overlay_rows(&chars, cursor, marked, scol, cols)
+        };
+        // Empty input: just the caret slot on the prompt row.
+        assert_eq!(rows("", 0, "", 3, 8), (1, 0));
+        // 10 chars after a 6-col prompt in an 8-col grid fill rows 0..=1
+        // exactly, so the end-of-line caret slot wraps to row 2.
+        assert_eq!(rows("aaaaaaaaaa", 10, "", 6, 8), (3, 2));
+        // Same content with the caret in the middle: no trailing slot beyond
+        // the content, and the caret sits on the char's own row.
+        assert_eq!(rows("aaaaaaaaaa", 3, "", 6, 8), (2, 1));
+        // A hard newline is its own break; caret at the end lands on row 1.
+        assert_eq!(rows("ab\ncd", 5, "", 0, 8), (2, 1));
+        // IME pre-edit is inserted at the caret and counts its display width:
+        // the two-cell 漢 doesn't fit in the last column of row 0, so it wraps
+        // whole — pulling the caret's row down with it.
+        assert_eq!(rows("ab", 1, "漢", 6, 8), (2, 1));
+    }
+
+    #[test]
+    fn input_overflow_shift_keeps_the_tail_and_caret_visible() {
+        // Fits: a 3-row input anchored at row 5 of a 22-row grid.
+        assert_eq!(input_overflow_shift(5, 2, 3, 22), 0);
+        // Spills one row past the bottom → shift up by one.
+        assert_eq!(input_overflow_shift(20, 2, 3, 22), 1);
+        // Taller than the whole screen, caret at the end: shift so the last
+        // row lands on the last grid row (caret stays visible with it).
+        assert_eq!(input_overflow_shift(21, 29, 30, 22), 29);
+        // Same giant input with the caret back on its first row: the cap
+        // stops the caret row from scrolling off the top.
+        assert_eq!(input_overflow_shift(21, 0, 30, 22), 21);
     }
 
     #[test]
