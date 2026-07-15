@@ -1200,7 +1200,8 @@ impl TerminalElement {
                 // A left click/double-click/triple-click on the command-editor
                 // line drives its caret/selection instead of a (meaningless)
                 // terminal selection over it.
-                if button == MouseButton::Left && v.editor_click(col, raw_row, clicks, mods.shift, cx)
+                if button == MouseButton::Left
+                    && v.editor_click(col, raw_row, clicks, mods.shift, cx)
                 {
                     return;
                 }

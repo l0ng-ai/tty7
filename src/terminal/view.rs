@@ -5102,7 +5102,9 @@ fn input_overlay_rows(
 /// the caret's row never scrolls off the top when the input is taller than
 /// the whole screen.
 fn input_overflow_shift(crow: usize, caret_vrow: usize, visual_rows: usize, rows: usize) -> usize {
-    (crow + visual_rows).saturating_sub(rows).min(crow + caret_vrow)
+    (crow + visual_rows)
+        .saturating_sub(rows)
+        .min(crow + caret_vrow)
 }
 
 fn wrapped_click_index(
@@ -5179,8 +5181,8 @@ mod tests {
         SelectEndCopy, WheelRoute, clipboard_paste_text, display_width, drag_scroll_step,
         encode_mouse, fallback_chain, fig_icon_emoji, fig_icon_glyph, focus_report_bytes,
         input_overflow_shift, input_overlay_rows, menu_layout, paste_bytes, select_end_copy,
-        shell_escape_path, smooth_scroll_step,
-        trim_trailing_spaces, wheel_route, wrapped_click_index,
+        shell_escape_path, smooth_scroll_step, trim_trailing_spaces, wheel_route,
+        wrapped_click_index,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
