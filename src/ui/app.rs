@@ -512,6 +512,9 @@ impl Tty7App {
         };
         let alive = alive_panes();
         let pane = session_to_pane(&st.pane, &alive, self.font_size, window, cx);
+        // Leaving the current tab for the reopened one; snapshot its focused
+        // pane so switching back restores it (same as `activate`).
+        self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
         self.tabs.insert(
@@ -1354,6 +1357,9 @@ impl Tty7App {
                 .and_then(|leaf| leaf.read(cx).cwd())
         });
         let tab = new_terminal(self.font_size, cwd, None, shell, window, cx);
+        // Leaving the current tab for the new one; snapshot its focused pane
+        // so switching back restores it (same as `activate`).
+        self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
         self.tabs.insert(insert_at, Tab::new(Pane::leaf(tab)));
@@ -1386,6 +1392,9 @@ impl Tty7App {
                 return;
             }
         };
+        // Leaving the current tab for the new one; snapshot its focused pane
+        // so switching back restores it (same as `activate`).
+        self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
         self.tabs.insert(insert_at, Tab::new(Pane::leaf(view)));
