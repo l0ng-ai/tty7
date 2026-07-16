@@ -287,17 +287,25 @@ async fn fetch_latest_version() -> Result<String> {
     Ok(release.tag_name)
 }
 
-/// Parse a version string into a `(major, minor, patch)` triple, tolerating a
-/// leading `v` and ignoring any pre-release / build suffix (`-rc.1`, `+build`).
-/// Missing minor/patch components read as `0`. Returns `None` if the numeric
-/// core doesn't parse — the caller treats that as "don't prompt".
-fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
+/// Parse a version string into a `(major, minor, patch, is_release)` tuple,
+/// tolerating a leading `v`. Missing minor/patch components read as `0`.
+/// Returns `None` if the numeric core doesn't parse — the caller treats that
+/// as "don't prompt".
+///
+/// The trailing `is_release` flag implements semver's pre-release ordering
+/// through plain tuple comparison: a `-nightly.20260716` (or `-rc.1`) suffix
+/// makes it `false`, which sorts *below* the same core with `true` — so a
+/// nightly binary counts as older than the stable release it previews, and the
+/// prompt fires when that stable ships. Finer ordering *between* pre-releases
+/// isn't needed: the check only ever compares against `/releases/latest`,
+/// which never returns a pre-release. Build metadata (`+ci`) is ignored, as
+/// semver says it should be.
+fn parse_version(s: &str) -> Option<(u64, u64, u64, bool)> {
     let trimmed = s.trim();
     // Strip a single optional `v` prefix. `strip_prefix` (not `trim_start_matches`)
     // so a doubled `vv0.3.1` fails to parse instead of silently losing the extra v.
     let core = trimmed.strip_prefix('v').unwrap_or(trimmed);
-    // A pre-release/build tag (`0.4.0-rc.1`, `0.4.0+ci`) compares by its release
-    // core here; we don't ship pre-releases, so finer ordering isn't worth it.
+    let is_release = !core.split('+').next().unwrap_or(core).contains('-');
     let core = core.split(['-', '+']).next().unwrap_or(core);
     let mut parts = core.split('.');
     let major = parts.next()?.parse().ok()?;
@@ -308,7 +316,7 @@ fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
     if parts.next().is_some() {
         return None;
     }
-    Some((major, minor, patch))
+    Some((major, minor, patch, is_release))
 }
 
 /// Whether `latest` names a strictly newer version than `current`. If either
@@ -327,15 +335,20 @@ mod tests {
 
     #[test]
     fn parses_versions_with_and_without_prefix() {
-        assert_eq!(parse_version("v0.3.1"), Some((0, 3, 1)));
-        assert_eq!(parse_version("0.3.1"), Some((0, 3, 1)));
-        assert_eq!(parse_version(" 1.2.0 "), Some((1, 2, 0)));
+        assert_eq!(parse_version("v0.3.1"), Some((0, 3, 1, true)));
+        assert_eq!(parse_version("0.3.1"), Some((0, 3, 1, true)));
+        assert_eq!(parse_version(" 1.2.0 "), Some((1, 2, 0, true)));
         // Missing components default to zero.
-        assert_eq!(parse_version("v2"), Some((2, 0, 0)));
-        assert_eq!(parse_version("v2.5"), Some((2, 5, 0)));
-        // Pre-release / build metadata is ignored down to the release core.
-        assert_eq!(parse_version("v0.4.0-rc.1"), Some((0, 4, 0)));
-        assert_eq!(parse_version("0.4.0+ci.7"), Some((0, 4, 0)));
+        assert_eq!(parse_version("v2"), Some((2, 0, 0, true)));
+        assert_eq!(parse_version("v2.5"), Some((2, 5, 0, true)));
+        // A pre-release suffix keeps the core but sorts below the release…
+        assert_eq!(parse_version("v0.4.0-rc.1"), Some((0, 4, 0, false)));
+        assert_eq!(
+            parse_version("26.7.1-nightly.20260716"),
+            Some((26, 7, 1, false))
+        );
+        // …while build metadata alone is still a release.
+        assert_eq!(parse_version("0.4.0+ci.7"), Some((0, 4, 0, true)));
         // Garbage yields None.
         assert_eq!(parse_version("nightly"), None);
         assert_eq!(parse_version(""), None);
@@ -351,6 +364,8 @@ mod tests {
         assert!(is_update_available("v0.3.1", "0.3.0"));
         assert!(is_update_available("v1.0.0", "0.9.9"));
         assert!(is_update_available("0.4.0", "0.3.99"));
+        // CalVer jump over the old 0.x tags still orders correctly.
+        assert!(is_update_available("v26.7.0", "0.17.0"));
     }
 
     #[test]
@@ -358,6 +373,16 @@ mod tests {
         assert!(!is_update_available("v0.3.0", "0.3.0"));
         assert!(!is_update_available("v0.2.9", "0.3.0"));
         assert!(!is_update_available("0.3.0", "0.3.1"));
+    }
+
+    #[test]
+    fn nightly_binaries_prompt_when_their_stable_ships() {
+        // A nightly previews the next stable: same core, sorts below it.
+        assert!(is_update_available("v26.7.1", "26.7.1-nightly.20260716"));
+        // …but the stable it was built *after* is not an update.
+        assert!(!is_update_available("v26.7.0", "26.7.1-nightly.20260716"));
+        // A stable binary is never downgraded to a pre-release of itself.
+        assert!(!is_update_available("v26.7.1-rc.1", "26.7.1"));
     }
 
     #[test]

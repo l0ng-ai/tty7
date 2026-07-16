@@ -1,0 +1,190 @@
+name: Nightly
+
+# Unattended nightly channel: build `main` every night, stamp a pre-release
+# CalVer version (<next-stable>-nightly.<YYYYMMDD>), and publish everything to
+# a single rolling `nightly` prerelease. Stable releases (release.yml) are
+# untouched; the update checker ignores prereleases via /releases/latest.
+
+on:
+  schedule:
+    - cron: "0 18 * * *" # 18:00 UTC = 02:00 Beijing
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  # Decide whether tonight needs a build, and compute the version once.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags — needed for the skip check and version math
+
+      - id: plan
+        run: |
+          # Skip when HEAD is already published: last night's nightly points at
+          # it (main hasn't moved) or a stable tag does (tonight would just
+          # rebuild the release under a nightly name).
+          if git tag --points-at HEAD | grep -qE '^(nightly$|v[0-9])'; then
+            echo "nothing new since the last published build — skipping"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Nightly version = next stable patch + date suffix, so semver
+          # ordering lands between the previous and the next stable release:
+          # 26.7.0 < 26.7.1-nightly.20260716 < 26.7.1.
+          LAST=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          BASE=${LAST#v}
+          NEXT="${BASE%.*}.$(( ${BASE##*.} + 1 ))"
+          VERSION="${NEXT}-nightly.$(date -u +%Y%m%d)"
+          echo "building $VERSION from ${GITHUB_SHA::7}"
+          echo "build=true" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  # Mirrors release.yml's build matrix; keep the two in sync when editing.
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            os: macos
+            arch: arm64
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            os: macos
+            arch: x86_64
+            target: x86_64-apple-darwin
+          - runner: windows-latest
+            os: windows
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+          - runner: ubuntu-latest
+            os: linux
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout tty7
+        uses: actions/checkout@v4
+        with:
+          path: tty7
+
+      # Everything versioned — the binary (CARGO_PKG_VERSION), asset names,
+      # DMG plist, Inno installer — reads Cargo.toml, so stamping it here is
+      # the only edit needed. Cargo.lock is left alone: cargo refreshes the
+      # root package's own lock entry automatically, without network access.
+      - name: Stamp nightly version
+        working-directory: tty7
+        shell: bash
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          awk -v ver="$VERSION" '!done && /^version = /{ $0 = "version = \"" ver "\""; done = 1 } { print }' \
+            Cargo.toml > Cargo.toml.tmp
+          mv Cargo.toml.tmp Cargo.toml
+          grep -m1 '^version' Cargo.toml
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config cmake clang libxkbcommon-dev \
+            libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev \
+            libwayland-dev libx11-dev libxcb1-dev libzstd-dev libssl-dev \
+            libkrb5-dev libfuse2 file imagemagick
+          echo "LIBGSSAPI_IMPL=mit" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tty7
+
+      - name: Build
+        working-directory: tty7
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Bundle macOS DMG
+        if: matrix.os == 'macos'
+        working-directory: tty7
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash .github/scripts/bundle-macos.sh "${{ matrix.target }}" "${{ matrix.arch }}"
+
+      - name: Package Linux tarball
+        if: matrix.os == 'linux'
+        working-directory: tty7
+        run: bash .github/scripts/bundle-linux.sh "${{ matrix.target }}" "${{ matrix.arch }}"
+
+      - name: Package Linux AppImage
+        if: matrix.os == 'linux'
+        working-directory: tty7
+        run: bash .github/scripts/bundle-appimage.sh "${{ matrix.target }}" "${{ matrix.arch }}"
+
+      - name: Package Windows installer + zip
+        if: matrix.os == 'windows'
+        working-directory: tty7
+        shell: pwsh
+        run: '& ./.github/scripts/bundle-windows.ps1 "${{ matrix.target }}" "${{ matrix.arch }}"'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-${{ matrix.os }}-${{ matrix.arch }}
+          path: tty7/dist/*
+          if-no-files-found: error
+
+  # Single publish step after all platforms succeed, so the rolling release is
+  # always complete — a failed platform means tonight's nightly is skipped
+  # entirely and users keep yesterday's, never a partial asset set.
+  publish:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Update rolling nightly release
+        run: |
+          # Move the tag first so the release object follows it to this SHA.
+          git push -f origin "$GITHUB_SHA:refs/tags/nightly"
+
+          TITLE="Nightly $VERSION"
+          NOTES="Automated nightly build of \`main\` @ ${GITHUB_SHA::7} ($(date -u +%F)). Rolling prerelease — assets are replaced every night; for the latest stable release see https://github.com/${GITHUB_REPOSITORY}/releases/latest."
+
+          if gh release view nightly >/dev/null 2>&1; then
+            # Old assets carry the previous version in their names, so clear
+            # them out instead of relying on --clobber's same-name matching.
+            gh release view nightly --json assets -q '.assets[].name' |
+              xargs -r -I{} gh release delete-asset nightly {} -y
+            gh release edit nightly --prerelease --title "$TITLE" --notes "$NOTES"
+          else
+            gh release create nightly --prerelease --title "$TITLE" --notes "$NOTES"
+          fi
+          gh release upload nightly dist/* --clobber
