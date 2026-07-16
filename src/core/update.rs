@@ -383,6 +383,13 @@ mod tests {
         assert!(!is_update_available("v26.7.0", "26.7.1-nightly.20260716"));
         // A stable binary is never downgraded to a pre-release of itself.
         assert!(!is_update_available("v26.7.1-rc.1", "26.7.1"));
+        // Nightly-to-nightly is deliberately not an update: pre-releases with
+        // the same core compare equal, and the check only ever sees
+        // /releases/latest, which is never a pre-release anyway.
+        assert!(!is_update_available(
+            "26.7.1-nightly.20260717",
+            "26.7.1-nightly.20260716"
+        ));
     }
 
     #[test]

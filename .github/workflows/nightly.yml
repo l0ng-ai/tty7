@@ -179,12 +179,18 @@ jobs:
           NOTES="Automated nightly build of \`main\` @ ${GITHUB_SHA::7} ($(date -u +%F)). Rolling prerelease — assets are replaced every night; for the latest stable release see https://github.com/${GITHUB_REPOSITORY}/releases/latest."
 
           if gh release view nightly >/dev/null 2>&1; then
-            # Old assets carry the previous version in their names, so clear
-            # them out instead of relying on --clobber's same-name matching.
-            gh release view nightly --json assets -q '.assets[].name' |
-              xargs -r -I{} gh release delete-asset nightly {} -y
             gh release edit nightly --prerelease --title "$TITLE" --notes "$NOTES"
           else
             gh release create nightly --prerelease --title "$TITLE" --notes "$NOTES"
           fi
+
+          # Upload before deleting: date-suffixed names never collide across
+          # nights, so both sets briefly coexist — if an upload dies midway,
+          # yesterday's complete nightly is still intact.
           gh release upload nightly dist/* --clobber
+
+          # Now prune the previous night's assets (anything we didn't upload).
+          gh release view nightly --json assets -q '.assets[].name' |
+            while read -r name; do
+              [ -e "dist/$name" ] || gh release delete-asset nightly "$name" -y
+            done
