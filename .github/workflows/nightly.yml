@@ -147,10 +147,18 @@ jobs:
         shell: pwsh
         run: '& ./.github/scripts/bundle-windows.ps1 "${{ matrix.target }}" "${{ matrix.arch }}"'
 
+      # Same glob list as release.yml's Release step: the bundle scripts leave
+      # intermediates in dist/ (tty7.app, entitlements.plist, the Windows
+      # staging dir) that must not reach the release assets.
       - uses: actions/upload-artifact@v4
         with:
           name: nightly-${{ matrix.os }}-${{ matrix.arch }}
-          path: tty7/dist/*
+          path: |
+            tty7/dist/*.dmg
+            tty7/dist/*.tar.gz
+            tty7/dist/*.zip
+            tty7/dist/*-setup.exe
+            tty7/dist/*.AppImage
           if-no-files-found: error
 
   # Single publish step after all platforms succeed, so the rolling release is
