@@ -36,6 +36,7 @@ Aider、Amp、OpenCode 等约 17 个）并在其外围加功能 —— 绝不包
 - **会话恢复** —— 重启后无法重连的 pane 会自动续上 agent 对话，并带上原始启动 flags（`claude --dangerously-skip-permissions --resume …`；`restore_agent_sessions`，默认开启）
 - **上下文回填** —— 面板命令把当前选区或仓库 `git diff` 打包成 prompt 直接喂给正在跑的 agent
 - **托盘图标** —— 系统托盘 / 菜单栏常驻图标，任何 agent 等你输入时立即切换为提醒态；菜单列出所有 agent pane（品牌头像 + 状态点，点击直达）、可切换通知策略，并在保留会话的普通退出之外提供 *Quit and Stop Daemon*（`show_tray_icon`，默认开启）
+- **任务栏状态点**（Windows）—— 每个窗口的任务栏按钮带一个状态角标，配色与窗口内状态点一致：蓝色表示命令或 agent 正在运行，绿色表示有任务在后台完成（激活窗口即清除），琥珀色表示 agent 等你输入（`taskbar_status_icon`，默认开启）
 
 ## SSH
 
