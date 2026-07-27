@@ -497,9 +497,12 @@ enum RowSeg {
     /// recurs far more often than a per-phrase one.
     Wide {
         start: usize,
-        /// Columns covered (2 per glyph, spacers included) — the clip width.
+        /// Columns covered — always 2 (the glyph plus its spacer).
         cells: usize,
-        text: String,
+        /// Interned via [`char_string`], so re-painting a screen full of CJK
+        /// allocates nothing: the same `SharedString` is handed to `shape_line`
+        /// every frame, which is also what keys its layout cache.
+        text: SharedString,
     },
     /// A cell painted on its own: any single-width non-ASCII glyph (box
     /// drawing, accented Latin, …) that may route to a fallback face whose
@@ -611,7 +614,7 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
                 segs.push(RowSeg::Wide {
                     start: col,
                     cells: 2,
-                    text: cell.c.to_string(),
+                    text: char_string(cell.c),
                 });
             } else if !is_sara_am(cell.c)
                 && let Some(am) = sara_am_at(row, col + 1)
@@ -905,13 +908,9 @@ fn paint_glyphs(
                 ),
                 // Each wide glyph is pinned to its own two-column slot; the
                 // clip stops an oversized fallback glyph bleeding past the run.
-                RowSeg::Wide { start, cells, text } => (
-                    start,
-                    cells,
-                    SharedString::from(text),
-                    Some(geom.cell_width * 2.),
-                    false,
-                ),
+                RowSeg::Wide { start, cells, text } => {
+                    (start, cells, text, Some(geom.cell_width * 2.), false)
+                }
                 // Always exactly one column now — anything with a trailing
                 // spacer became a Wide run in `segment_row`. No `force_width`
                 // for a single glyph — it paints at the run origin regardless.
@@ -2014,7 +2013,7 @@ mod tests {
         RowSeg::Wide {
             start,
             cells,
-            text: text.to_string(),
+            text: text.into(),
         }
     }
 
