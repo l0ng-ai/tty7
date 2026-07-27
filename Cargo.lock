@@ -9568,6 +9568,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "plist",
  "portable-pty",
+ "raw-window-handle",
  "regex",
  "reqwest_client",
  "resvg",
@@ -9582,6 +9583,7 @@ dependencies = [
  "tokio",
  "tray-icon",
  "uuid",
+ "windows 0.61.3",
  "windows-sys 0.59.0",
  "winresource",
 ]

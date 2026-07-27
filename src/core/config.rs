@@ -177,6 +177,14 @@ pub struct Config {
     /// second, so toggling it (Settings or a `config.json` edit) applies live.
     #[serde(default = "default_true")]
     pub show_tray_icon: bool,
+    /// Windows: stamp a status dot on each window's taskbar button — amber
+    /// when an agent needs input, blue while a command or agent works, green
+    /// when work finished unfocused (cleared on activation). Colors match the
+    /// in-window status dots. On by default; the overlay poll re-reads this
+    /// every second, so the toggle and a `config.json` hot-reload apply live.
+    /// Ignored off Windows (a macOS Dock badge would be its own setting).
+    #[serde(default = "default_true")]
+    pub taskbar_status_icon: bool,
     /// Whether the user has already been told, once, that closing a window puts
     /// its workspace away rather than ending it. ⌘W is muscle memory and the
     /// result is off-screen, so the first time it happens deserves one line
@@ -618,6 +626,7 @@ impl Default for Config {
             notify_threshold_secs: default_notify_threshold_secs(),
             restore_session: true,
             show_tray_icon: true,
+            taskbar_status_icon: true,
             workspace_detach_hint_seen: false,
             // Visual flash preserves the pre-config behavior (the bell always
             // flashed); opting into None/Audible is a deliberate change.

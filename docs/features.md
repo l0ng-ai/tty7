@@ -62,6 +62,7 @@ it never wraps or replaces the agent.
 - **Session resume** — panes lost to a reboot re-launch their agent conversation on restore, carrying the original launch flags (`claude --dangerously-skip-permissions --resume …`) (`restore_agent_sessions`, on by default)
 - **Context feed** — palette commands send the current selection or the repo's `git diff` to the running agent as a ready-made prompt
 - **Tray icon** — a system tray / menu bar item that flips to an attention state the moment any agent needs your input; its menu lists every agent pane (brand avatar + status dot, click to reveal), switches the notification policy, and offers *Quit and Stop Daemon* alongside the plain session-keeping quit (`show_tray_icon`, on by default)
+- **Taskbar status dot** (Windows) — each window's taskbar button carries a status overlay in the same colors as the in-window dots: blue while a command or agent is working, green when work finished in the background (cleared the moment you activate the window), amber when an agent needs your input (`taskbar_status_icon`, on by default)
 
 ## SSH
 

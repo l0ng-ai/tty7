@@ -3441,6 +3441,7 @@ impl Tty7App {
         let restore_session = cfg.restore_session;
         let remember_window_size = cfg.remember_window_size;
         let show_tray_icon = cfg.show_tray_icon;
+        let taskbar_status_icon = cfg.taskbar_status_icon;
         let tab_bar_idx = match cfg.tab_bar_position {
             TabBarPosition::Top => 0,
             TabBarPosition::Left => 1,
@@ -3508,6 +3509,10 @@ impl Tty7App {
         let tray_switch = crate::ui::theme::switch("wt-tray-icon", cx)
             .checked(show_tray_icon)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_show_tray_icon(*on, cx)))
+            .into_any_element();
+        let taskbar_switch = Switch::new("wt-taskbar-status")
+            .checked(taskbar_status_icon)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_taskbar_status_icon(*on, cx)))
             .into_any_element();
         let startup_radio = self.segmented(
             "wt-startup",
@@ -3597,6 +3602,19 @@ impl Tty7App {
                 tray_switch,
                 cx,
             ))
+            // Windows only: `SetOverlayIcon` is a taskbar concept. The row is
+            // simply absent elsewhere rather than shown disabled — a switch
+            // that can never do anything is noise, not a setting.
+            .children(cfg!(windows).then(|| {
+                self.settings_row(
+                    "Taskbar status dot",
+                    "Badge the taskbar icon with each window's status: blue while a \
+                     command or agent is working, green when one finishes in the \
+                     background, amber when an agent needs your input.",
+                    taskbar_switch,
+                    cx,
+                )
+            }))
             .child(self.section_rule(cx))
             .child(self.section_header("Tabs", cx))
             .child(self.settings_row(

@@ -1262,6 +1262,14 @@ impl TerminalView {
         self.terminal.agent_session()
     }
 
+    /// Whether the shell is off its prompt running a command (see
+    /// [`RemoteTerminal::shell_busy`] for why integration-less panes answer
+    /// `false` rather than "busy forever"). Feeds the Windows taskbar overlay.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn shell_busy(&self) -> bool {
+        self.terminal.shell_busy()
+    }
+
     /// Whether this pane's finished turn (the green `Done` dot) is unread — a
     /// turn ended that the user hasn't looked at since (see
     /// [`agent_result_unread`](Self::agent_result_unread) field). Feeds the

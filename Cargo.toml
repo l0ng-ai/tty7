@@ -180,6 +180,24 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
 ] }
 
+# Taskbar overlay badge (`ui::taskbar`): stamps a status dot on the window's
+# taskbar button (busy / finished / agent-needs-input). `SetOverlayIcon` lives
+# on the COM interface `ITaskbarList3`, which `windows-sys` deliberately omits
+# — the full `windows` crate carries it. Pinned to the exact version gpui's
+# Windows backend already builds (see gpui_windows), so this pins no new
+# native code. Windows-only, matching the taskbar it paints.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# Unwraps gpui's `HasWindowHandle` into the raw Win32 HWND that
+# `SetOverlayIcon` targets. Same version gpui_windows pins — already in the
+# tree, no new native code.
+raw-window-handle = "0.6"
+
 # Embeds `assets/favicon.ico` into the `.exe` so Windows shows the tty7 logo in
 # the taskbar / window / Explorer (macOS gets its icon from the `.app` bundle via
 # bundle.sh instead). Only needed at build time on Windows — see build.rs.

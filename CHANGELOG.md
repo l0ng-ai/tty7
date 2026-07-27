@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Taskbar status dot** (Windows) — each window's taskbar button now carries
+  a status overlay in the same colors as the in-window dots: blue while a
+  command or agent is working, green when work finished in the background
+  (cleared the moment you activate the window), amber when an agent needs
+  your input. Settings → Window grows a "Taskbar status dot" toggle
+  (`taskbar_status_icon`, on by default). (#199)
 - **The window's leading corner carries the app's mark off macOS** — macOS fills
   the top-left with the traffic lights; on Windows and Linux that corner was
   empty, with everything the caption row holds (the rail's "+" and collapse, the
