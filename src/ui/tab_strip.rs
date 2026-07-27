@@ -1518,6 +1518,25 @@ impl Tty7App {
                 // Negative off macOS only: the bar already inset us past the window
                 // controls, and there the reserve *is* the clearance.
                 .ml(px(crate::ui::app::title_bar_hug_offset()))
+                // The brand mark follows the rail's controls into the strip, so
+                // collapsing the sidebar doesn't strip the window's leading corner
+                // back to nothing (see `app::window_mark`). The group is anchored by
+                // its tiles' *hit boxes*, which start `tile_trailing_inset()` from
+                // the window edge; the mark has no box, so it adds the difference
+                // back to land its own ink on `CONTENT_INSET` like the rail's did.
+                .when_some(crate::ui::app::window_mark(), |group, mark| {
+                    group.child(
+                        div()
+                            .flex_shrink_0()
+                            .pl(px(crate::ui::app::CONTENT_INSET
+                                - crate::ui::app::tile_trailing_inset()))
+                            // The mark is solid where the tiles are line work, so it
+                            // needs more air than the 2px that separates two tiles
+                            // before the "+" beside it stops reading as part of it.
+                            .pr(px(4.))
+                            .child(mark),
+                    )
+                })
                 .child(
                     div().occlude().flex_shrink_0().child(
                         self.attach_new_tab_menu(

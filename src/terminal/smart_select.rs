@@ -71,6 +71,16 @@ pub(super) fn grid_smart_range<T: EventListener>(
     term: &Term<T>,
     click: Point,
 ) -> Option<SmartRange> {
+    // 0) The click carries the geometry of the frame that dispatched it, and
+    //    the grid can shrink out from under it (a split, a window drag, a
+    //    replayed attach size landing on the reader thread). Both walks below
+    //    index `grid[click.line]` straight away, and `Grid`'s `Index<Line>`
+    //    only `debug_assert`s the bound — a release build walks off the
+    //    storage. Same guard, same reason, as `TerminalView::grid_line`.
+    if click.line < term.topmost_line() || click.line > term.bottommost_line() {
+        return None;
+    }
+
     // 1) An explicit OSC 8 hyperlink run wins outright — the program told us
     //    the exact extent, no guessing needed.
     if let Some((start, end)) = hyperlink_run(term, click) {
@@ -803,6 +813,20 @@ mod tests {
         let term = term_with(10, 2, "hello");
         assert!(grid_smart_range(&term, Point::new(Line(0), Column(10))).is_none());
         assert!(grid_smart_range(&term, Point::new(Line(0), Column(99))).is_none());
+    }
+
+    /// A double-click dispatched with the previous frame's geometry can name a
+    /// row the grid has since dropped. Indexing it walks off the storage, and
+    /// the click arrives in a gpui `extern "C"` callback where that panic
+    /// aborts instead of unwinding — so the row has to be refused first.
+    #[test]
+    fn click_outside_the_grid_rows_yields_no_range() {
+        let term = term_with(10, 2, "hello");
+        // Below the last row of a shrunken grid...
+        assert!(grid_smart_range(&term, Point::new(Line(2), Column(0))).is_none());
+        assert!(grid_smart_range(&term, Point::new(Line(9_000), Column(0))).is_none());
+        // ...and above the top of a scrollback this short.
+        assert!(grid_smart_range(&term, Point::new(Line(-1), Column(0))).is_none());
     }
 
     fn selected(text: &str, click: usize) -> Option<String> {

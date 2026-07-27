@@ -11,8 +11,7 @@ use gpui::{
     prelude::*, px, relative, rgb,
 };
 use gpui_component::InteractiveElementExt as _;
-use gpui_component::Selectable as _;
-use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _};
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::color_picker::{ColorPicker, ColorPickerState};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::link::Link;
@@ -20,7 +19,6 @@ use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, Po
 use gpui_component::select::{SearchableVec, Select, SelectState};
 use gpui_component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
 use gpui_component::slider::{Slider, SliderState};
-use gpui_component::switch::Switch;
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
@@ -467,7 +465,7 @@ pub(crate) struct SettingsState {
     pub(crate) shell_args_input: Entity<InputState>,
     /// Custom working-directory path (used when the strategy is `Custom`).
     pub(crate) wd_path_input: Entity<InputState>,
-    /// Command template run when ⌘-clicking a file link (Links section). Empty
+    /// Command template run when ⌘/Ctrl-clicking a file link (Links section). Empty
     /// clears the override, restoring the built-in "open in default app".
     pub(crate) link_file_command_input: Entity<InputState>,
     /// Mouse-scroll multiplier slider (Terminal section).
@@ -621,6 +619,14 @@ pub(crate) struct Recording {
 /// — reuse the primary family with synthesized emphasis". Chosen to be an
 /// unlikely real font name.
 pub(crate) const FONT_DEFAULT_LABEL: &str = "Default (match primary)";
+
+/// How the link-click modifier is spelled in the Links copy. It's gpui's
+/// `secondary` (see `Modifiers::secondary`), so it must read ⌘ on macOS and
+/// Ctrl on Windows/Linux — same split `key_tokens` uses for keycaps.
+#[cfg(target_os = "macos")]
+const LINK_MODIFIER_LABEL: &str = "⌘";
+#[cfg(not(target_os = "macos"))]
+const LINK_MODIFIER_LABEL: &str = "Ctrl";
 
 /// Humanize a CamelCase action name for display: "CloseActiveTab" → "Close
 /// Active Tab".
@@ -1139,7 +1145,7 @@ impl Tty7App {
             .px_2p5()
             .mx_neg_2p5()
             .rounded_lg()
-            .hover(|h| h.bg(theme.secondary.opacity(0.2)))
+            .hover(|h| h.bg(gpui::rgb(cx.global::<presets::Surfaces>().window.hover)))
             .child(
                 v_flex()
                     .gap_0p5()
@@ -1165,13 +1171,30 @@ impl Tty7App {
             .child(h_flex().flex_shrink_0().child(control))
     }
 
-    /// A segmented control (gpui-component's `ButtonGroup`, outline) for a small
-    /// set of mutually-exclusive options — the refined stand-in for a raw row of
-    /// radio circles, which read as an unstyled form beside the sheet's tuned
-    /// steppers and chips. Joined outline segments with a soft-filled active one
-    /// speak the same segmented language as the −│value│+ stepper; `small` pins
-    /// every option control to the same 24px height as the selects beside them.
-    /// `selected` is the active index; `on_pick` fires with the newly chosen one.
+    /// A segmented control for a small set of mutually-exclusive options — the
+    /// refined stand-in for a raw row of radio circles, which read as an unstyled
+    /// form beside the sheet's tuned steppers and chips. Joined segments in a
+    /// single outlined track, one of them filled, speak the same segmented
+    /// language as the −│value│+ stepper right beside them; the 24px height
+    /// matches the selects in the same rows. `selected` is the active index;
+    /// `on_pick` fires with the newly chosen one.
+    ///
+    /// # Why this is hand-rolled
+    ///
+    /// It used to be gpui-component's `ButtonGroup::outline()` with
+    /// `Button::selected`, and that is what issue #197 was reported against. That
+    /// path derives the selected segment's fill from `Theme::input` and gives it
+    /// the *same* border and the *same* label color as its unselected siblings —
+    /// so the entire selection signal was one fill, and that fill came from a
+    /// grey unrelated to the active theme. On Dracula it measured **1.03:1**.
+    ///
+    /// `Theme::input` is now themed (see `ui::theme::apply_theme`), which fixes
+    /// the stock control for inputs and selects. But a segmented control is the
+    /// one place in the app where several options sit visibly side by side with a
+    /// *static* selection, so it is precisely where a fill alone is not enough
+    /// (see `presets::Surface`) — and the stock button exposes no way to vary the
+    /// label's weight. Owning the 30 lines is cheaper than a fork patch, and it
+    /// puts the control on the same ladder every hand-rolled surface reads.
     pub(crate) fn segmented(
         &self,
         id: &'static str,
@@ -1180,19 +1203,78 @@ impl Tty7App {
         cx: &mut Context<Self>,
         on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
-        ButtonGroup::new(id)
-            .outline()
-            .small()
+        let sf = cx.global::<presets::Surfaces>().window;
+        self.segmented_on(sf, id, options, selected, cx, on_pick)
+    }
+
+    /// [`Self::segmented`] for a control that does *not* sit on the settings
+    /// sheet. The track paints its own opaque ground, so it has to be told which
+    /// one: dropped on the right panel's sunk rail, a window-surface track reads
+    /// as a faintly darker box cut out of the column it sits in — and every rung
+    /// above it was derived against the wrong ground.
+    pub(crate) fn segmented_on(
+        &self,
+        sf: presets::Surface,
+        id: &'static str,
+        options: &'static [&'static str],
+        selected: usize,
+        cx: &mut Context<Self>,
+        on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let border = cx.theme().border;
+        let on_pick = std::rc::Rc::new(on_pick);
+        h_flex()
+            .id(id)
+            .h(px(24.))
+            .rounded_lg()
+            .border_1()
+            .border_color(border)
+            // The track paints its own ground rather than letting the sheet show
+            // through. Every rung of the ladder was derived against this colour,
+            // so painting it is what makes those ratios true — a control that
+            // leaves its ground to whatever it happens to be composited over is
+            // the shape of the bug this whole change is about.
+            .bg(gpui::rgb(sf.base))
+            // One track, clipped so the end segments' fills follow its rounding
+            // instead of squaring off the corners they sit in.
+            .overflow_hidden()
             .children(options.iter().enumerate().map(|(i, label)| {
-                // `(id, i)` keeps each segment's element id unique across the
-                // several segmented controls on the page.
-                Button::new((id, i)).label(*label).selected(i == selected)
-            }))
-            .on_click(cx.listener(move |this, clicks: &Vec<usize>, window, cx| {
-                // Single-select: `clicks` carries just the newly chosen index.
-                if let Some(&ix) = clicks.first() {
-                    on_pick(this, ix, window, cx);
-                }
+                let active = i == selected;
+                let on_pick = on_pick.clone();
+                h_flex()
+                    // `(id, i)` keeps each segment's element id unique across the
+                    // several segmented controls on the page.
+                    .id((id, i))
+                    .items_center()
+                    .justify_center()
+                    .h_full()
+                    .px_2p5()
+                    .text_sm()
+                    .cursor_pointer()
+                    // Hairlines *between* segments only — the track already owns
+                    // its outer edge, and a border on the first segment would
+                    // double it.
+                    .when(i > 0, |s| s.border_l_1().border_color(border))
+                    // Both channels, every time. The fill locates the selection in
+                    // the row; the label color and weight say it is the one — and
+                    // keep saying it on a translucent window, where the fill is
+                    // washing over whatever is behind the sheet.
+                    .when(active, |s| {
+                        s.bg(gpui::rgb(sf.selected))
+                            .text_color(gpui::rgb(sf.text_selected))
+                            .font_weight(FontWeight::MEDIUM)
+                    })
+                    .when(!active, |s| {
+                        s.text_color(gpui::rgb(sf.text_resting))
+                            .hover(|h| h.bg(gpui::rgb(sf.hover)))
+                    })
+                    // Pressed reads past selected, so pushing the segment that is
+                    // already chosen still acknowledges the click.
+                    .active(|s| s.bg(gpui::rgb(sf.pressed)))
+                    .child(*label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        on_pick(this, i, window, cx);
+                    }))
             }))
             .into_any_element()
     }
@@ -1202,7 +1284,10 @@ impl Tty7App {
         let theme = cx.theme();
         let foreground = theme.foreground;
         let border = theme.border;
-        let hover_bg = theme.secondary.opacity(0.6);
+        // Hover comes off the ladder; `stepper_bg` stays a soft resting tint —
+        // it decorates a container rather than signalling a state, which is the
+        // one job an alpha-multiplied grey is still fine for.
+        let hover_bg = gpui::rgb(cx.global::<presets::Surfaces>().window.hover);
         let stepper_bg = theme.secondary.opacity(0.35);
         let font_size = self.font_size;
         let (font_select, font_bold_select, font_italic_select) = match self.active_settings() {
@@ -1326,7 +1411,7 @@ impl Tty7App {
         let font_family_control = font_dropdown(&font_select);
         let font_bold_control = font_dropdown(&font_bold_select);
         let font_italic_control = font_dropdown(&font_italic_select);
-        let ligature_switch = Switch::new("font-ligatures")
+        let ligature_switch = crate::ui::theme::switch("font-ligatures", cx)
             .checked(font_ligatures)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_font_ligatures(*on, cx)))
             .into_any_element();
@@ -1352,7 +1437,7 @@ impl Tty7App {
         );
         // Blink lives here beside the shape — one Cursor home, not "shape is
         // appearance, blink is behavior" split across two pages.
-        let blink_switch = Switch::new("cursor-blink")
+        let blink_switch = crate::ui::theme::switch("cursor-blink", cx)
             .checked(cursor_blink)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_cursor_blink(*on, cx)))
             .into_any_element();
@@ -1455,7 +1540,7 @@ impl Tty7App {
                     .child(format!("{:.0}%", opacity * 100.)),
             )
             .into_any_element();
-        let blur_switch = Switch::new("window-blur")
+        let blur_switch = crate::ui::theme::switch("window-blur", cx)
             .checked(blur)
             .on_click(
                 cx.listener(|this, on: &bool, window, cx| this.set_window_blur(*on, window, cx)),
@@ -1715,6 +1800,8 @@ impl Tty7App {
     /// saved-profile list (each row selects into the detail pane).
     fn render_ssh_master(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
+        // Rows in this list paint on the settings sheet, i.e. the window surface.
+        let sf = cx.global::<presets::Surfaces>().window;
         let profiles = cx.global::<Config>().ssh_profiles.clone();
         let detail = self
             .active_settings()
@@ -1782,12 +1869,18 @@ impl Tty7App {
                     .py_2()
                     .px_2()
                     .rounded_md()
-                    .when(selected, |r| r.bg(cx.theme().secondary.opacity(0.4)))
+                    // The window ladder, both channels. This row used to tint with
+                    // `secondary.opacity(0.4)` — a 9% grey at 40% alpha, i.e. an
+                    // effective 3.6% tint, which put the selected row 1.05–1.12:1
+                    // from a resting one and 1.02–1.06:1 from a hovered one. It was
+                    // the second site named in issue #197. Multiplying a soft grey
+                    // by alpha is how a fill silently disappears: the result depends
+                    // on whatever it happens to be composited over, which is
+                    // exactly the unknown a per-surface ladder removes.
+                    .when(selected, |r| r.bg(gpui::rgb(sf.selected)))
                     // A subtle hover fill so the whole row reads as the (clickable)
                     // select affordance; the selected row keeps its own highlight.
-                    .when(!selected, |r| {
-                        r.hover(|s| s.bg(cx.theme().secondary.opacity(0.2)))
-                    })
+                    .when(!selected, |r| r.hover(|s| s.bg(gpui::rgb(sf.hover))))
                     // Left-click anywhere on the row selects it — its edit form
                     // opens in the detail pane. Clicks on the trailing ⋯ are
                     // swallowed by its wrapper, so they don't also start an edit.
@@ -1810,7 +1903,21 @@ impl Tty7App {
                         v_flex()
                             .min_w_0()
                             .gap_0p5()
-                            .child(div().text_sm().truncate().child(title))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .truncate()
+                                    // The label channel: the selected row's title
+                                    // steps up in colour and weight, so which
+                                    // profile is loaded in the detail pane reads
+                                    // from the type and not from the fill alone.
+                                    .when(selected, |d| {
+                                        d.text_color(gpui::rgb(sf.text_selected))
+                                            .font_weight(FontWeight::MEDIUM)
+                                    })
+                                    .when(!selected, |d| d.text_color(gpui::rgb(sf.text_resting)))
+                                    .child(title),
+                            )
                             .child(div().text_xs().text_color(muted).truncate().child(subtitle)),
                     )
                     .child(
@@ -1956,13 +2063,13 @@ impl Tty7App {
     /// under the form or the empty-state hint.
     fn render_ssh_security_block(&self, cx: &mut Context<Self>) -> AnyElement {
         let verify = cx.global::<Config>().verify_host_keys;
-        let verify_switch = Switch::new("ssh-verify-host-keys")
+        let verify_switch = crate::ui::theme::switch("ssh-verify-host-keys", cx)
             .checked(verify)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_verify_host_keys(*on, cx)))
             .into_any_element();
 
         let warn_on_close = cx.global::<Config>().ssh_warn_on_close;
-        let warn_switch = Switch::new("ssh-warn-on-close")
+        let warn_switch = crate::ui::theme::switch("ssh-warn-on-close", cx)
             .checked(warn_on_close)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_ssh_warn_on_close(*on, cx)))
             .into_any_element();
@@ -2631,7 +2738,7 @@ impl Tty7App {
                 self.settings_row(
                     "Agent forwarding",
                     "Forward the local ssh-agent to the session.",
-                    Switch::new("ssh-form-agent")
+                    crate::ui::theme::switch("ssh-form-agent", cx)
                         .checked(form.agent_forward)
                         .on_click(cx.listener(|this, on: &bool, _w, cx| {
                             if let Some(f) = this.ssh_form_mut() {
@@ -2724,7 +2831,7 @@ impl Tty7App {
                 self.settings_row(
                     "X11 forwarding",
                     "Request X11 forwarding (needs XQuartz on macOS).",
-                    Switch::new("ssh-form-x11")
+                    crate::ui::theme::switch("ssh-form-x11", cx)
                         .checked(form.x11)
                         .on_click(cx.listener(|this, on: &bool, _w, cx| {
                             if let Some(f) = this.ssh_form_mut() {
@@ -2740,7 +2847,7 @@ impl Tty7App {
                 self.settings_row(
                     "Shell integration",
                     "Let the remote shell report prompts, exit codes and directory.",
-                    Switch::new("ssh-form-shell-integration")
+                    crate::ui::theme::switch("ssh-form-shell-integration", cx)
                         .checked(form.shell_integration)
                         .on_click(cx.listener(|this, on: &bool, _w, cx| {
                             if let Some(f) = this.ssh_form_mut() {
@@ -2763,7 +2870,7 @@ impl Tty7App {
                 self.settings_row(
                     "Skip banner",
                     "Suppress the server login banner.",
-                    Switch::new("ssh-form-banner")
+                    crate::ui::theme::switch("ssh-form-banner", cx)
                         .checked(form.skip_banner)
                         .on_click(cx.listener(|this, on: &bool, _w, cx| {
                             if let Some(f) = this.ssh_form_mut() {
@@ -2970,11 +3077,11 @@ impl Tty7App {
             None => return div().into_any_element(),
         };
 
-        let link_switch = Switch::new("term-link-url")
+        let link_switch = crate::ui::theme::switch("term-link-url", cx)
             .checked(link_url)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_link_url(*on, cx)))
             .into_any_element();
-        let ssh_loopback_switch = Switch::new("term-ssh-loopback-forward")
+        let ssh_loopback_switch = crate::ui::theme::switch("term-ssh-loopback-forward", cx)
             .checked(ssh_loopback_forward)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_ssh_loopback_forward(*on, cx)))
             .into_any_element();
@@ -2997,17 +3104,17 @@ impl Tty7App {
             },
         );
 
-        let focus_switch = Switch::new("term-focus-follows")
+        let focus_switch = crate::ui::theme::switch("term-focus-follows", cx)
             .checked(focus_follows)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_focus_follows_mouse(*on, cx)))
             .into_any_element();
-        let mouse_hide_switch = Switch::new("term-mouse-hide")
+        let mouse_hide_switch = crate::ui::theme::switch("term-mouse-hide", cx)
             .checked(mouse_hide)
             .on_click(
                 cx.listener(|this, on: &bool, _w, cx| this.set_mouse_hide_while_typing(*on, cx)),
             )
             .into_any_element();
-        let mouse_report_switch = Switch::new("term-mouse-report")
+        let mouse_report_switch = crate::ui::theme::switch("term-mouse-report", cx)
             .checked(mouse_reporting)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_mouse_reporting(*on, cx)))
             .into_any_element();
@@ -3093,7 +3200,7 @@ impl Tty7App {
             .child(self.section_header("Links", cx))
             .child(self.settings_row(
                 "Detect URLs",
-                "Underline links on hover and open them on ⌘-click.",
+                format!("Underline links on hover and open them on {LINK_MODIFIER_LABEL}-click."),
                 link_switch,
                 cx,
             ))
@@ -3105,9 +3212,12 @@ impl Tty7App {
             ))
             .child(self.settings_row(
                 "Open files with",
-                "Command run when ⌘-clicking a file link, instead of the default app. \
-                 Use {path}, {line}, {column}; a flag whose value is absent is dropped \
-                 (e.g. herdr edit {path} --line={line}). Empty uses the default app.",
+                format!(
+                    "Command run when {LINK_MODIFIER_LABEL}-clicking a file link, instead of \
+                     the default app. Use {{path}}, {{line}}, {{column}}; a flag whose value \
+                     is absent is dropped (e.g. herdr edit {{path}} --line={{line}}). Empty \
+                     uses the default app."
+                ),
                 link_file_command_control,
                 cx,
             ))
@@ -3132,30 +3242,30 @@ impl Tty7App {
         let copy_on_select = cfg.copy_on_select;
         let clip_trim = cfg.clipboard_trim_trailing_spaces;
 
-        let tab_completion_switch = Switch::new("term-tab-completion")
+        let tab_completion_switch = crate::ui::theme::switch("term-tab-completion", cx)
             .checked(tab_completion)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_tab_completion(*on, cx)))
             .into_any_element();
-        let history_search_switch = Switch::new("term-history-search")
+        let history_search_switch = crate::ui::theme::switch("term-history-search", cx)
             .checked(history_search)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_history_search(*on, cx)))
             .into_any_element();
-        let smart_select_switch = Switch::new("term-smart-select")
+        let smart_select_switch = crate::ui::theme::switch("term-smart-select", cx)
             .checked(smart_select)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_smart_select(*on, cx)))
             .into_any_element();
-        let copy_on_select_switch = Switch::new("term-copy-on-select")
+        let copy_on_select_switch = crate::ui::theme::switch("term-copy-on-select", cx)
             .checked(copy_on_select)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_copy_on_select(*on, cx)))
             .into_any_element();
-        let trim_switch = Switch::new("term-clip-trim")
+        let trim_switch = crate::ui::theme::switch("term-clip-trim", cx)
             .checked(clip_trim)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_clipboard_trim(*on, cx)))
             .into_any_element();
         // macOS only: the Option/special-character split this toggle resolves
         // doesn't exist on other platforms, where Alt always carries Meta.
         let option_alt_row = cfg!(target_os = "macos").then(|| {
-            let switch = Switch::new("term-option-as-alt")
+            let switch = crate::ui::theme::switch("term-option-as-alt", cx)
                 .checked(option_as_alt)
                 .on_click(
                     cx.listener(|this, on: &bool, _w, cx| this.set_macos_option_as_alt(*on, cx)),
@@ -3388,15 +3498,15 @@ impl Tty7App {
             },
         );
 
-        let restore_switch = Switch::new("wt-restore-session")
+        let restore_switch = crate::ui::theme::switch("wt-restore-session", cx)
             .checked(restore_session)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_restore_session(*on, cx)))
             .into_any_element();
-        let remember_window_switch = Switch::new("wt-remember-window")
+        let remember_window_switch = crate::ui::theme::switch("wt-remember-window", cx)
             .checked(remember_window_size)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_remember_window_size(*on, cx)))
             .into_any_element();
-        let tray_switch = Switch::new("wt-tray-icon")
+        let tray_switch = crate::ui::theme::switch("wt-tray-icon", cx)
             .checked(show_tray_icon)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_show_tray_icon(*on, cx)))
             .into_any_element();
@@ -3604,7 +3714,7 @@ impl Tty7App {
     /// the OS — one card per light/dark slot.
     fn render_theme_selection(&self, cx: &mut Context<Self>) -> AnyElement {
         let follow = cx.global::<Config>().theme_follow_system;
-        let follow_switch = Switch::new("theme-follow-system")
+        let follow_switch = crate::ui::theme::switch("theme-follow-system", cx)
             .checked(follow)
             .on_click(cx.listener(|this, on: &bool, window, cx| {
                 this.set_theme_follow_system(*on, window, cx)
@@ -3636,7 +3746,7 @@ impl Tty7App {
         let border = theme.border;
         let foreground = theme.foreground;
         let muted_fg = theme.muted_foreground;
-        let hover_bg = theme.secondary.opacity(0.5);
+        let hover_bg = gpui::rgb(cx.global::<presets::Surfaces>().window.hover);
         let surface = theme.secondary.opacity(0.28);
 
         let config = cx.global::<Config>();
@@ -3975,20 +4085,30 @@ impl Tty7App {
                 .child(tok)
         };
 
-        // A preset toggle button, highlighted when active.
-        let preset_button =
-            |id: &'static str, label: &'static str, value: &'static str, on: bool| {
-                Button::new(id).label(label).small().selected(on).on_click(
-                    cx.listener(move |this, _, _w, cx| this.set_keybinding_preset(value, cx)),
-                )
-            };
-        // A prefix choice button (tmux preset only).
-        let prefix_button =
-            |id: &'static str, label: &'static str, value: &'static str, on: bool| {
-                Button::new(id).label(label).small().selected(on).on_click(
-                    cx.listener(move |this, _, _w, cx| this.set_keybinding_prefix(value, cx)),
-                )
-            };
+        // Preset and prefix are each a one-of-two choice among visible siblings —
+        // a segmented control, and now built as one. They used to be loose
+        // `Button::selected` pairs, which put them on gpui-component's
+        // `tokens.button_active`: another field nothing set, so the "on" button
+        // wore a stock grey with no relation to the theme (issue #197's failure
+        // mode, in a different corner of the same page).
+        let preset_control = self.segmented(
+            "kb-preset",
+            &["Default", "tmux"],
+            usize::from(tmux),
+            cx,
+            |this, ix, _w, cx| {
+                this.set_keybinding_preset(if ix == 0 { "default" } else { "tmux" }, cx)
+            },
+        );
+        let prefix_control = self.segmented(
+            "kb-prefix",
+            &["Ctrl-B", "Ctrl-A"],
+            usize::from(prefix == "ctrl-a"),
+            cx,
+            |this, ix, _w, cx| {
+                this.set_keybinding_prefix(if ix == 0 { "ctrl-b" } else { "ctrl-a" }, cx)
+            },
+        );
 
         let preset_row = h_flex()
             .items_center()
@@ -4008,12 +4128,7 @@ impl Tty7App {
                         "tmux remaps pane/tab actions onto prefix sequences (e.g. Ctrl-B then C).",
                     )),
             )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .child(preset_button("preset-default", "Default", "default", !tmux))
-                    .child(preset_button("preset-tmux", "tmux", "tmux", tmux)),
-            );
+            .child(h_flex().flex_shrink_0().child(preset_control));
 
         let prefix_row = h_flex()
             .items_center()
@@ -4026,22 +4141,7 @@ impl Tty7App {
                     .text_color(foreground)
                     .child("Prefix"),
             )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .child(prefix_button(
-                        "prefix-ctrl-b",
-                        "Ctrl-B",
-                        "ctrl-b",
-                        prefix == "ctrl-b",
-                    ))
-                    .child(prefix_button(
-                        "prefix-ctrl-a",
-                        "Ctrl-A",
-                        "ctrl-a",
-                        prefix == "ctrl-a",
-                    )),
-            );
+            .child(h_flex().flex_shrink_0().child(prefix_control));
 
         let count = effective.len();
         let mut list = v_flex().mt_2();
@@ -4351,7 +4451,7 @@ impl Tty7App {
                             .gap_2()
                             .items_center()
                             .child(
-                                Switch::new("check-updates")
+                                crate::ui::theme::switch("check-updates", cx)
                                     .checked(check_for_updates)
                                     .on_click(cx.listener(|this, on: &bool, _w, cx| {
                                         this.set_check_for_updates(*on, cx)

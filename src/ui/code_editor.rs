@@ -801,7 +801,7 @@ impl Tty7App {
     /// every buffer that was ever opened. Sits on the title bar's line and matches
     /// its height, so the editor's top edge lines up with the panel's tab row and
     /// the rail's controls across the window.
-    fn render_editor_header(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_editor_header(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let active = self.tab_code().and_then(|c| c.active_file());
         let name = active.map(|f| f.label());
         let dirty = active.is_some_and(|f| f.dirty);
@@ -816,7 +816,10 @@ impl Tty7App {
         } else {
             crate::ui::app::TITLE_BAR_LEAD
         };
-        h_flex()
+        // The overlay covers the real title bar, so this row inherits its drag and
+        // zoom gestures — otherwise opening a file turns the top of the window into
+        // a strip that looks like the caption and can't move it.
+        crate::ui::app::title_bar_drag(h_flex().id("editor-header"))
             .flex_none()
             .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
             .items_center()
@@ -847,22 +850,27 @@ impl Tty7App {
                 )
             })
             .child(
-                crate::ui::tab_strip::chrome_tile_sized(
-                    // This header is the title bar's own height and sits flush
-                    // with it, so its one control is a full chrome tile — not the
-                    // half-size one it used to be, which read as a different
-                    // class of button on the same line.
-                    Button::new("editor-panel-close").icon(Icon::new(IconName::Close)),
-                    crate::ui::app::TILE_SIZE,
-                    crate::ui::app::TILE_GLYPH_LINE,
-                    false,
-                    cx,
-                )
-                .rounded_lg()
-                .tooltip("Back to Terminal (Esc)")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.toggle_code_panel(window, cx);
-                })),
+                // `occlude()` for the same reason the title bar's own tiles carry
+                // it: this row is a `WindowControlArea::Drag`, which on Windows is
+                // HTCAPTION, and the OS takes the press before gpui hit-tests.
+                div().occlude().flex_shrink_0().child(
+                    crate::ui::tab_strip::chrome_tile_sized(
+                        // This header is the title bar's own height and sits flush
+                        // with it, so its one control is a full chrome tile — not the
+                        // half-size one it used to be, which read as a different
+                        // class of button on the same line.
+                        Button::new("editor-panel-close").icon(Icon::new(IconName::Close)),
+                        crate::ui::app::TILE_SIZE,
+                        crate::ui::app::TILE_GLYPH_LINE,
+                        false,
+                        cx,
+                    )
+                    .rounded_lg()
+                    .tooltip("Back to Terminal (Esc)")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_code_panel(window, cx);
+                    })),
+                ),
             )
     }
 

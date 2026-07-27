@@ -1189,8 +1189,11 @@ impl TerminalElement {
             let button = ev.button;
             let clicks = ev.click_count;
             view.update(cx, |v, cx| {
-                // Cmd+click opens a URL under the cursor.
-                let link_modifier = mods.platform || v.link_modifier_down();
+                // Secondary+click (⌘ on macOS, Ctrl on Windows/Linux) opens a
+                // URL under the cursor. Not the raw platform key: that's Win/
+                // Super off macOS, which the OS mostly swallows — and every
+                // other terminal there opens links on Ctrl+click.
+                let link_modifier = mods.secondary() || v.link_modifier_down();
                 if link_modifier && button == MouseButton::Left && v.open_link_at(col, row, cx) {
                     return;
                 }
@@ -1244,7 +1247,7 @@ impl TerminalElement {
                         if !mods.shift {
                             v.mouse_motion(col, row, &mods);
                         }
-                        let include_files = mods.platform || v.link_modifier_down();
+                        let include_files = mods.secondary() || v.link_modifier_down();
                         v.hover_link_at(col, row, include_files, cx);
                     } else {
                         v.clear_hovered_link(cx);

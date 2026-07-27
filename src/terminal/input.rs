@@ -6,6 +6,10 @@ use alacritty_terminal::term::TermMode;
 use gpui::{App, Bounds, InputHandler, Pixels, UTF16Selection, Window};
 
 use super::view::TerminalView;
+// Only the macOS Option/Meta split reads config from this file; elsewhere the import
+// would be dead.
+#[cfg(target_os = "macos")]
+use crate::core::config::Config;
 
 /// The Kitty keyboard-protocol progressive-enhancement flags currently active in
 /// the terminal, distilled from `TermMode`. We read them straight off the client's
@@ -148,6 +152,30 @@ pub(super) fn defer_to_ime(ks: &gpui::Keystroke, kitty: KittyFlags) -> bool {
     ks.key_char
         .as_deref()
         .is_some_and(|ch| !ch.is_empty() && ch.chars().all(|c| c >= '\u{20}' && c != '\u{7f}'))
+}
+
+/// Whether an Option chord must be kept away from the IME so the Meta policy in
+/// [`reshape_option_keystroke`] can claim it.
+///
+/// macOS counts ⌥-chords as printable text — ⌥B composes `∫` — so while a CJK input
+/// source is active gpui routes them to the IME before the key handler ever runs. The
+/// IME commits the composed character and swallows the event, and Option-as-Meta
+/// silently does nothing (#177). This is the predicate
+/// [`TerminalInputHandler::prefers_ime_for_printable_keys`] answers `false` on.
+///
+/// Only ⌥ alone (optionally with Shift) counts: ⌘ chords are app shortcuts and Ctrl
+/// chords already bypass the IME upstream, and both keep their existing routing.
+///
+/// With the setting off the chord is text input and the IME is the right owner — it is
+/// what makes dead keys (⌥E then E → `é`) compose at all — so this returns `false` and
+/// nothing changes.
+///
+/// Compiled under `test` on every platform so CI covers the rule everywhere, not just
+/// on the macOS runner.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn meta_chord_bypasses_ime(ks: &gpui::Keystroke, option_as_alt: bool) -> bool {
+    let m = &ks.modifiers;
+    option_as_alt && m.alt && !m.platform && !m.control
 }
 
 /// Translate a GPUI keystroke into the bytes a PTY expects.
@@ -577,7 +605,23 @@ impl InputHandler for TerminalInputHandler {
         false
     }
 
-    fn prefers_ime_for_printable_keys(&mut self, window: &mut Window, cx: &mut App) -> bool {
+    // `keystroke` only feeds the macOS Option/Meta split; elsewhere Alt already carries
+    // Meta and never reaches an IME.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    fn prefers_ime_for_printable_keys(
+        &mut self,
+        keystroke: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        // An Option chord under Option-as-Meta belongs to `reshape_option_keystroke`,
+        // not the IME — see `meta_chord_bypasses_ime`. Answering per keystroke is why
+        // tty7 carries a gpui patch: upstream asks this once per view, with no key in
+        // hand, so it cannot say "IME for text, but not for this chord".
+        #[cfg(target_os = "macos")]
+        if meta_chord_bypasses_ime(keystroke, cx.global::<Config>().macos_option_as_alt) {
+            return false;
+        }
         // REPORT_ALL_KEYS_AS_ESC wants every key as `CSI <code>;<mods>[;<text>]u`,
         // which only `keystroke_to_bytes` produces — the IME path commits raw
         // UTF-8. Keep printable keys on the dispatch path so they get encoded,
@@ -619,7 +663,8 @@ impl InputHandler for TerminalInputHandler {
 #[cfg(test)]
 mod tests {
     use super::{
-        KittyFlags, defer_to_ime, keystroke_to_bytes, reshape_option_keystroke, tab_bytes,
+        KittyFlags, defer_to_ime, keystroke_to_bytes, meta_chord_bypasses_ime,
+        reshape_option_keystroke, tab_bytes,
     };
     use gpui::{Keystroke, Modifiers};
 
@@ -1170,6 +1215,61 @@ mod tests {
             reshaped_bytes(&option_b(), false, KittyFlags::default()),
             Some("∫".as_bytes().to_vec())
         );
+    }
+
+    /// The routing half of Option-as-Meta (#177): with a CJK input source active,
+    /// macOS hands ⌥-chords to the IME before the key handler runs, because ⌥B
+    /// composes printable text. The IME commits `∫` and eats the event, so the
+    /// reshape above never gets a say — unless the handler declines IME for exactly
+    /// these chords. Everything else keeps composing.
+    #[test]
+    fn meta_chords_skip_the_ime_only_when_option_is_meta() {
+        let alt = Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        // The bug: ⌥B with the setting on must reach `on_key_down`, not the IME.
+        assert!(meta_chord_bypasses_ime(&option_b(), true));
+        // Shift rides along — ⌥⇧B is still a Meta chord.
+        let alt_shift = Modifiers {
+            alt: true,
+            shift: true,
+            ..Default::default()
+        };
+        assert!(meta_chord_bypasses_ime(
+            &ks(alt_shift, "b", Some("ı")),
+            true
+        ));
+
+        // Setting off: ⌥ is text input, and the IME owns it — this is what makes
+        // dead keys (⌥E then E → `é`) compose.
+        assert!(!meta_chord_bypasses_ime(&option_b(), false));
+
+        // Plain text is never claimed, on either setting: CJK composition is the
+        // whole reason the handler prefers the IME in the first place.
+        assert!(!meta_chord_bypasses_ime(
+            &ks(Modifiers::default(), "n", Some("n")),
+            true
+        ));
+
+        // ⌘ chords are app shortcuts and ⌃ chords already bypass the IME upstream;
+        // both keep their existing routing rather than being claimed here.
+        let cmd_alt = Modifiers {
+            alt: true,
+            platform: true,
+            ..Default::default()
+        };
+        assert!(!meta_chord_bypasses_ime(&ks(cmd_alt, "b", None), true));
+        let ctrl_alt = Modifiers {
+            alt: true,
+            control: true,
+            ..Default::default()
+        };
+        assert!(!meta_chord_bypasses_ime(&ks(ctrl_alt, "b", None), true));
+
+        // Named keys carry the alt bit too and take the same route — Alt+Left must
+        // not be diverted into a composition either.
+        assert!(meta_chord_bypasses_ime(&ks(alt, "left", None), true));
     }
 
     #[test]

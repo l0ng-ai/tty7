@@ -17,12 +17,37 @@
 - **Tabs & splits** — always open in the current directory
 - **Repo-grouped sidebar** — the left tab sidebar groups rows under a header per git repository, non-repo tabs in a trailing *Scratch* section; branch switches and in-repo `cd`s never move a row (`sidebar_grouping` in `config.json`: `repo` default, `none` for a flat list)
 - **Command palette** <kbd>⌘ P</kbd> · scrollback search <kbd>⌘ F</kbd>
-- **⌘-click links** · desktop notifications · copy on select (opt-in, Settings → Terminal → Clipboard)
+- **⌘/Ctrl-click links** (⌘ on macOS, Ctrl on Windows/Linux) · desktop notifications · copy on select (opt-in, Settings → Terminal → Clipboard)
 - **Smart double-click selection** — double-click grabs the whole URL, file path, bracket/quote pair, or dictionary-segmented CJK word under the cursor; Shift-click extends a selection (toggle in Settings → Terminal → Mouse; word separators via `word_separators` in `config.json`)
 - **Eight themes, plus your own** — YAML seed themes with solid, gradient, or image backgrounds; iTerm2 `.itermcolors` import; in-app color editor with a background-image picker
 - **Sync with system** — Settings → Appearance; pick separate light and dark themes and tty7 follows the OS appearance live (`theme_follow_system`, `theme_preset_light` / `theme_preset_dark` in `config.json`)
 - **Window opacity & blur** — Settings → Appearance → Window; applies to every theme, *Follow theme* returns to the theme's own `opacity` / `blur`
 - **CJK / IME input**
+
+## Fonts
+
+- **Hack is bundled** — it ships inside the binary, so the default renders identically everywhere without relying on a system install
+- **Primary + ordered fallbacks** — `font_family` and `font_fallbacks` in `config.json`; optional `font_family_bold` / `font_family_italic` for distinct faces, and `font_features` to pass OpenType features through (contextual ligatures stay off unless you ask for them)
+- **Platform-aware defaults** — the fallback list names faces the host OS actually ships (PingFang SC / Apple Color Emoji on macOS, Microsoft YaHei / Segoe UI Emoji on Windows, Noto on Linux). Those stock names are appended to a hand-written list too, so a `config.json` written on another platform still resolves
+
+### CJK and the two-column grid
+
+A cell is one advance of the primary face, and a wide (CJK) character is pinned
+to exactly two of them. A CJK fallback therefore sits flush in its slot only if
+its ideographs advance **twice** the primary's Latin advance.
+
+Bundled Hack advances 0.60205em, so a two-column slot is 1.2041em — while every
+stock CJK face (Microsoft YaHei, PingFang SC, Noto Sans CJK) advances 1.0em.
+Those glyphs get left-aligned in the slot and the leftover ~0.2em lands as a gap
+on the right of every character.
+
+[Maple Mono NF CN](https://github.com/subframe7536/maple-font) is tried first on
+every platform for exactly this reason — 0.6em Latin, 1.2em CJK, an exact
+two-cell fit against Hack. It is referenced by name only, never bundled (~20MB
+per weight): install it and tty7 picks it up with no config change.
+
+For CJK set *tight* rather than merely even, change the primary face instead —
+one that advances 0.5em (Sarasa Mono SC, say) makes two columns exactly 1.0em.
 
 ## Coding agents
 
@@ -49,7 +74,7 @@ and SFTP without shelling out to `ssh`. There is no system-ssh compat mode.
 - **`~/.ssh/config` aliases** — type one to connect (resolved natively — common fields, best-effort — over russh), or import them as profiles in Settings
 - **GUI auth** — in-pane sheets for password, key passphrase, 2FA, and host-key confirmation (new vs. changed)
 - **Built-in SFTP** — a slide-in file panel: browse, upload / download, rename / delete / chmod, drag to Finder
-- **Port forwarding** — Local / Remote / Dynamic, preconfigured or added live, plus ⌘-click `localhost:PORT` to auto-forward
+- **Port forwarding** — Local / Remote / Dynamic, preconfigured or added live, plus ⌘/Ctrl-click `localhost:PORT` to auto-forward
 - **Jump hosts & proxies** — multi-hop via profile references or `ProxyJump`, ProxyCommand, SOCKS5 / HTTP
 
 | Entry point | Connects via |

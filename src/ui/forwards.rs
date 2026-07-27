@@ -240,6 +240,7 @@ impl Tty7App {
     ) -> Stateful<Div> {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let letter = match forward.kind {
             SshForwardKind::Local => "L",
             SshForwardKind::Remote => "R",
@@ -277,7 +278,7 @@ impl Tty7App {
             .py(px(3.))
             .rounded(px(5.))
             .cursor_pointer()
-            .hover(|s| s.bg(theme.sidebar_accent.opacity(0.55)))
+            .hover(|s| s.bg(gpui::rgb(sf.hover)))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.edit_managed_forward(forward_for_edit.clone(), window, cx)
             }))
@@ -357,6 +358,9 @@ impl Tty7App {
     fn forward_form(&self, pane_id: u64, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        // The form is inside the right panel, i.e. on the sunk rail — not on the
+        // settings sheet the segmented control otherwise assumes.
+        let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let kind = self.loopback_panel.mf_kind;
         let editing = self.loopback_panel.mf_editing.is_some();
         let selected = match kind {
@@ -393,7 +397,8 @@ impl Tty7App {
             .pt(px(6.))
             .pb(px(2.))
             .gap(px(5.))
-            .child(self.segmented(
+            .child(self.segmented_on(
+                sf,
                 "ssh-managed-forward-kind",
                 &["Local", "Remote", "Dynamic"],
                 selected,

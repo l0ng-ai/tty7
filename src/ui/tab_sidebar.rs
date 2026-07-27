@@ -13,16 +13,13 @@
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Axis, Bounds, Context, Div, FontWeight, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, SharedString, Stateful, Window,
-    WindowControlArea, canvas, deferred, div, ease_out_quint, linear_color_stop, linear_gradient,
-    prelude::*, px,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, SharedString, Stateful, Window, canvas,
+    deferred, div, ease_out_quint, linear_color_stop, linear_gradient, prelude::*, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenu, ContextMenuExt as _};
-use gpui_component::{
-    ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Sizable as _, h_flex, v_flex,
-};
+use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -77,6 +74,8 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let active = self.active;
+        // The rail is a sunk column, so its rows read the sidebar ladder.
+        let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         // While the bare ⌘/Ctrl hold is armed (see `ui::hints`), each of the
         // first nine rows swaps its close affordance for a ⌘N badge — same slot
         // and footprint as the chips, so the vertical list gets the identical
@@ -95,7 +94,8 @@ impl Tty7App {
             // An id + `overflow_y_scroll` makes the row column scroll on its own
             // when the tabs outgrow the window height, leaving the "+" footer
             // pinned (same pattern the settings panel uses). `track_scroll` lets
-            // `activate` pull the selected row into view.
+            // `activate` pull the selected row into view — and feeds the overlay
+            // scrollbar the wrapper below hangs over this column.
             .id("tab-sidebar-list")
             .track_scroll(&self.sidebar_scroll)
             .flex_1()
@@ -408,7 +408,7 @@ impl Tty7App {
                     })
                     .when(!is_active, |s| {
                         s.text_color(cx.theme().sidebar_foreground)
-                            .hover(|s| s.bg(cx.theme().sidebar_accent.opacity(0.5)))
+                            .hover(|s| s.bg(gpui::rgb(sf.hover)))
                     })
                     // Held: a light dimming so the row under your cursor reads
                     // as picked up. Not a lift — it stays in the rail's plane.
@@ -488,12 +488,13 @@ impl Tty7App {
                         // carries alpha; the inactive hover is a half-strength
                         // wash), so flatten them against `sidebar` to get the
                         // opaque colour the float must match.
-                        let backing = if is_active {
-                            cx.theme().sidebar.blend(cx.theme().sidebar_accent)
+                        // Both rungs are opaque ladder colours, so the float's
+                        // backing is just the rung itself — no flattening needed,
+                        // and no alpha to drift out of step with the row it copies.
+                        let backing: gpui::Hsla = if is_active {
+                            gpui::rgb(sf.selected).into()
                         } else {
-                            cx.theme()
-                                .sidebar
-                                .blend(cx.theme().sidebar_accent.opacity(0.5))
+                            gpui::rgb(sf.hover).into()
                         };
                         let mut fade_from = backing;
                         fade_from.a = 0.;
@@ -750,11 +751,35 @@ impl Tty7App {
         let controls = h_flex()
             .flex_shrink_0()
             .h(px(TITLE_BAR_HEIGHT))
+            // Same box as the real title bar this row stands in for, hairline
+            // included: gpui-component's `TitleBar` draws a `border_b_1` inside its
+            // own `TITLE_BAR_HEIGHT` (tty7 paints it transparent, but it still takes
+            // its pixel), so the bar centres its contents on 19.5 while an
+            // unbordered 40px row centres them on 20. Half a pixel is invisible on
+            // the line-art tiles, and *not* on the solid brand mark: collapsing the
+            // rail hands the mark from this row to the bar, and it visibly hopped up
+            // as it went. Reserve the same pixel here and the handover is still.
+            .border_b_1()
+            .border_color(cx.theme().transparent)
             .items_center()
             .justify_end()
             .gap(px(2.))
             // Glyph's ink, not hit box, on the content edge — see `TILE_PAD`.
             .pr(px(crate::ui::app::tile_trailing_inset()))
+            // The brand mark leads the row, on the rail's own content inset — the
+            // line the search magnifier and every row label below it start on, so
+            // it reads as the head of this column rather than a floating badge.
+            // The spacer is what keeps the controls pinned right once the row has
+            // a leading child (`justify_end` alone no longer does it).
+            .when_some(crate::ui::app::window_mark(), |row, mark| {
+                row.child(
+                    div()
+                        .flex_shrink_0()
+                        .pl(px(crate::ui::app::CONTENT_INSET))
+                        .child(mark),
+                )
+                .child(div().flex_1())
+            })
             // Both tiles are wrapped in an `occlude()` div, exactly like the
             // title-strip chrome. This row is a `WindowControlArea::Drag` (set
             // below), which on Windows maps to HTCAPTION — the OS claims the click
@@ -933,36 +958,19 @@ impl Tty7App {
                     //
                     // The real `TitleBar` — which carries the window's drag region
                     // — only spans the *right* column in this layout, so this strip
-                    // would be dead space you can't grab the window by. Make the
-                    // controls' own row act like the title bar it sits level with:
-                    // drag to move, double-click to zoom. Driven exactly like
-                    // `TitleBar` does it (and the settings overlay's stand-in
-                    // strip): a press arms a flag and the first *move* starts the
-                    // window move, so a plain click — and a double-click — still
-                    // lands intact, while the buttons on the right keep taking
-                    // their own clicks.
-                    .child({
-                        let should_move = Rc::new(Cell::new(false));
-                        controls
-                            .id("sidebar-titlebar-drag")
-                            .window_control_area(WindowControlArea::Drag)
-                            .on_mouse_down(MouseButton::Left, {
-                                let should_move = should_move.clone();
-                                move |_, _, _| should_move.set(true)
-                            })
-                            .on_mouse_up(MouseButton::Left, {
-                                let should_move = should_move.clone();
-                                move |_, _, _| should_move.set(false)
-                            })
-                            .on_mouse_move(move |_, window, _| {
-                                if should_move.replace(false) {
-                                    window.start_window_move();
-                                }
-                            })
-                            .on_double_click(|_, window, _| window.titlebar_double_click())
-                    })
+                    // would be dead space you can't grab the window by. `title_bar_drag`
+                    // makes the controls' row act like the bar it sits level with:
+                    // drag to move, double-click to zoom, while the buttons on the
+                    // right keep taking their own clicks (they're `occlude()`d).
+                    .child(crate::ui::app::title_bar_drag(
+                        controls.id("sidebar-titlebar-drag"),
+                    ))
                     .child(top_bar)
-                    .child(list),
+                    .child(crate::ui::scrollbar::with_vertical_scrollbar(
+                        "tab-sidebar-scrollbar",
+                        list,
+                        &self.sidebar_scroll,
+                    )),
             )
             .child(handle)
     }

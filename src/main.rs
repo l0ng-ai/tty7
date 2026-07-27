@@ -298,6 +298,17 @@ fn main() {
     // under this dir too, so the order matters).
     apply_config_dir_arg();
 
+    // Panics inside gpui's `extern "C"` input callbacks abort instead of
+    // unwinding, and the OS crash report then holds the abort rather than the
+    // panic — no message, no location. Record those to `crash.log` in the config
+    // dir. Installed here, right after the config dir resolves, so both the GUI
+    // and the daemon below are covered from their first line of real work.
+    crate::core::crash::install(if std::env::args().any(|a| a == "--daemon") {
+        "daemon"
+    } else {
+        "gui"
+    });
+
     // Daemon mode: when launched with `--daemon` we run the headless persistent
     // terminal server and never open a window. This is the backing process the GUI
     // auto-spawns and reconnects to; it owns all PTYs + child shells and outlives

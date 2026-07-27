@@ -7,6 +7,7 @@ use gpui::{
     App, Background, Hsla, Menu, MenuItem, OsAction, Pixels, Point, SystemMenuType, Window,
     WindowBackgroundAppearance, linear_color_stop, linear_gradient, point, px, rgb,
 };
+use gpui_component::scroll::ScrollbarShow;
 use gpui_component::{Theme, ThemeMode};
 
 use crate::core::actions::*;
@@ -373,7 +374,14 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
         sync_native_appearance(Some(theme.dark));
     }
     let m = theme.neutrals();
+    let surfaces = theme.surfaces();
+    let sem = theme.semantics();
     let active = theme.active_palette();
+    // Read before `Theme::global_mut` borrows `cx`. macOS reports the overlay /
+    // legacy scroller preference here; Windows reports the accessibility
+    // "always show scrollbars" setting (false by default) and Linux always
+    // false — which is exactly the platform split we want below.
+    let auto_hide_scrollbars = cx.should_auto_hide_scrollbars();
 
     // Never `Opaque`: on macOS 26 (Tahoe) flipping a window's opacity after
     // creation doesn't reach the compositor — the window keeps compositing
@@ -404,6 +412,13 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
         opacity,
         image: theme.image.clone(),
     });
+    // Publish the interaction-state ladders. Every hand-rolled control in the
+    // shell reads its resting/hover/selected fills and label colors from here
+    // rather than picking a `Theme` colour field that looks about right — which
+    // is how the same state ended up wearing four different greys (and one
+    // invisible one) across the app. See `presets::Surface`.
+    cx.set_global(surfaces.clone());
+    cx.set_global(presets::ActiveAccent(m.accent));
 
     let t = Theme::global_mut(cx);
     // The window base carries the theme's opacity so a translucent/blurred theme
@@ -430,15 +445,23 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // Context menus and dropdowns highlight the hovered/selected row from
     // `tokens.accent` (fill) + `accent_foreground` (text) — see gpui-component's
     // `MenuItemElement`. Left unset, that highlight falls back to the stock
-    // saturated accent, which snaps hard against this app's soft mix-based
-    // palette (the "生硬" hover). Point it at the same soft fill the command
-    // palette uses for its selected row (`list_active`, mix 0.17) so context
+    // saturated accent, which snaps hard against this app's soft palette (the
+    // "生硬" hover). Point it at the popover ladder's selected rung so context
     // menu, dropdown and palette share one hover language; keep the text at
     // `foreground` so it stays legible on the low-contrast fill instead of the
     // stock inverted accent text. The plain `accent`/`accent_foreground` fields
     // feed the same highlight in the input completion / code-action popovers, so
     // mirror both the fields and the tokens to keep every menu surface in step.
-    let accent_fill = rgb(m.list_active);
+    //
+    // NOTE the surface: menu rows paint on `popover`, not on the window
+    // background. This used to read the window ladder, which is why the menu
+    // highlight measured as little as 1.20:1 against the panel it actually sat on
+    // while nominally being the same fill that reads fine on the terminal ground.
+    //
+    // This does *not* mean "accent" — the field is gpui-component's name for a
+    // row highlight, and pointing the theme's real accent at it is what would
+    // give the saturated snap. `surfaces.popover.selected` says what it is.
+    let accent_fill = rgb(surfaces.popover.selected);
     let accent_text: Hsla = rgb(m.foreground).into();
     t.accent = accent_fill.into();
     t.accent_foreground = accent_text;
@@ -467,8 +490,169 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     t.tokens.button_primary_hover = primary_hover.into();
     t.tokens.button_primary_active = primary_active.into();
 
+    // Status colours. The last family that was still gpui-component's stock
+    // Tailwind (`red-400`, `yellow-400`, `green-400`) — a palette with no
+    // relationship to the active theme, used at 33 sites. On Dracula that put a
+    // `#f87171` delete button beside `#ff5555` terminal output: two reds, one
+    // window. On the light themes it was worse than inconsistent, at 2.45:1 —
+    // under even the non-text floor.
+    //
+    // They now come from each theme's *own* ANSI-16 (see `Theme::semantics`), so
+    // a danger marker and an error line of shell output are the same red.
+    //
+    // Each family gets three roles because the plain field and the tokens are
+    // read for different jobs: tty7's own sites use `Theme::danger` as a text /
+    // small-mark colour (a 7px status dot in the run list, a label), while
+    // gpui-component's buttons fill from `tokens.button_danger` and put
+    // `*_foreground` on top of that fill. One value cannot serve both.
+    // `ink` and `fill` each step one notch either side of themselves for
+    // hover/active — the same shape the primary family above uses.
+    let steps = |c: u32| {
+        (
+            Hsla::from(rgb(c)),
+            Hsla::from(rgb(presets::mix(c, m.background, 0.15))),
+            Hsla::from(rgb(presets::mix(c, m.foreground, 0.15))),
+        )
+    };
+
+    // ── Danger ──
+    let (ink, ink_hover, ink_active) = steps(sem.danger.ink);
+    let (fill, fill_hover, fill_active) = steps(sem.danger.fill);
+    let on_fill = Hsla::from(rgb(sem.danger.on_fill));
+    t.danger = ink;
+    t.danger_hover = ink_hover;
+    t.danger_active = ink_active;
+    t.danger_foreground = on_fill;
+    t.tokens.danger = fill.into();
+    t.tokens.danger_hover = fill_hover.into();
+    t.tokens.danger_active = fill_active.into();
+    t.tokens.danger_foreground = on_fill.into();
+    t.tokens.button_danger = fill.into();
+    t.tokens.button_danger_hover = fill_hover.into();
+    t.tokens.button_danger_active = fill_active.into();
+    t.tokens.button_danger_foreground = on_fill.into();
+
+    // ── Warning ──
+    let (ink, ink_hover, ink_active) = steps(sem.warning.ink);
+    let (fill, fill_hover, fill_active) = steps(sem.warning.fill);
+    let on_fill = Hsla::from(rgb(sem.warning.on_fill));
+    t.warning = ink;
+    t.warning_hover = ink_hover;
+    t.warning_active = ink_active;
+    t.warning_foreground = on_fill;
+    t.tokens.warning = fill.into();
+    t.tokens.warning_hover = fill_hover.into();
+    t.tokens.warning_active = fill_active.into();
+    t.tokens.warning_foreground = on_fill.into();
+    t.tokens.button_warning = fill.into();
+    t.tokens.button_warning_hover = fill_hover.into();
+    t.tokens.button_warning_active = fill_active.into();
+    t.tokens.button_warning_foreground = on_fill.into();
+
+    // ── Success ──
+    let (ink, ink_hover, ink_active) = steps(sem.success.ink);
+    let (fill, fill_hover, fill_active) = steps(sem.success.fill);
+    let on_fill = Hsla::from(rgb(sem.success.on_fill));
+    t.success = ink;
+    t.success_hover = ink_hover;
+    t.success_active = ink_active;
+    t.success_foreground = on_fill;
+    t.tokens.success = fill.into();
+    t.tokens.success_hover = fill_hover.into();
+    t.tokens.success_active = fill_active.into();
+    t.tokens.success_foreground = on_fill.into();
+    t.tokens.button_success = fill.into();
+    t.tokens.button_success_hover = fill_hover.into();
+    t.tokens.button_success_active = fill_active.into();
+    t.tokens.button_success_foreground = on_fill.into();
+
+    // ── Info ──
+    let (ink, ink_hover, ink_active) = steps(sem.info.ink);
+    let (fill, fill_hover, fill_active) = steps(sem.info.fill);
+    let on_fill = Hsla::from(rgb(sem.info.on_fill));
+    t.info = ink;
+    t.info_hover = ink_hover;
+    t.info_active = ink_active;
+    t.info_foreground = on_fill;
+    t.tokens.info = fill.into();
+    t.tokens.info_hover = fill_hover.into();
+    t.tokens.info_active = fill_active.into();
+    t.tokens.info_foreground = on_fill.into();
+    t.tokens.button_info = fill.into();
+    t.tokens.button_info_hover = fill_hover.into();
+    t.tokens.button_info_active = fill_active.into();
+    t.tokens.button_info_foreground = on_fill.into();
+
+    // Links. Unset, these resolve to near-white on dark themes and near-black on
+    // light ones — i.e. the body text colour, so a link in the Markdown preview
+    // (`ui::code_editor`, which renders through gpui-component's `TextView`)
+    // looked exactly like prose. The theme's own cyan is what a terminal user
+    // already reads as "this is a link".
+    t.link = rgb(sem.link.ink).into();
+    t.link_hover = rgb(presets::mix(sem.link.ink, m.foreground, 0.25)).into();
+    t.link_active = rgb(presets::mix(sem.link.ink, m.background, 0.20)).into();
+    t.tokens.link = Hsla::from(rgb(sem.link.ink)).into();
+    t.tokens.link_hover = Hsla::from(rgb(presets::mix(sem.link.ink, m.foreground, 0.25))).into();
+    t.tokens.link_active = Hsla::from(rgb(presets::mix(sem.link.ink, m.background, 0.20))).into();
+
+    // Switches. Three more fields nobody had set, and the reason the toggles read
+    // inverted on every dark theme:
+    //
+    // * `switch_thumb` falls back to `tokens.background` — also unset — so the
+    //   knob was gpui-component's stock near-black. On the (near-white) checked
+    //   track that is a dark knob on a light track, the opposite of every system
+    //   switch; on the dark unchecked track it disappeared entirely.
+    // * `switch` (the unchecked track) was the stock `#404040`, unrelated to the
+    //   theme.
+    //
+    // The knob takes the light end of the theme's own axis — it is a raised
+    // physical object, and both macOS modes render it near-white — and the
+    // component already draws it with `shadow_md`, which is what separates it from
+    // a light track rather than raw contrast. The unchecked track is the window
+    // ladder's `selected` rung: the same "this is filled" grey as everything else.
+    let knob = if presets::is_lighter(m.background, m.foreground) {
+        m.background
+    } else {
+        m.foreground
+    };
+    t.tokens.background = Hsla::from(rgb(m.background)).into();
+    t.tokens.switch_thumb = Hsla::from(rgb(knob)).into();
+    t.tokens.switch = Hsla::from(rgb(surfaces.window.selected)).into();
+
     t.caret = rgb(m.caret).into();
     t.selection = rgb(m.selection).into(); // text selection highlight
+
+    // Overlay scrollbars (right panel, file tree, tab rail — see
+    // `ui::scrollbar`). gpui-component's `Scrollbar` paints the thumb from
+    // `tokens.scrollbar_thumb{,_hover}` and the track from the plain
+    // `scrollbar` field; the stock values are fixed neutral greys per light/dark
+    // mode, so on a tinted theme the thumb reads as a foreign grey. Derive both
+    // from this theme's own foreground instead — the same background→foreground
+    // mix ladder the borders and chips use.
+    //
+    // The track stays fully transparent: the thumb floats over the content the
+    // way macOS overlay scrollbars do, and a filled channel would put a vertical
+    // slab down the edge of every panel.
+    let scrollbar_thumb: Hsla = rgb(presets::mix(m.background, m.foreground, 0.26)).into();
+    let scrollbar_thumb_hover: Hsla = rgb(presets::mix(m.background, m.foreground, 0.42)).into();
+    t.scrollbar = gpui::transparent_black();
+    t.scrollbar_thumb = scrollbar_thumb;
+    t.scrollbar_thumb_hover = scrollbar_thumb_hover;
+    t.tokens.scrollbar = gpui::transparent_black().into();
+    t.tokens.scrollbar_thumb = scrollbar_thumb.into();
+    t.tokens.scrollbar_thumb_hover = scrollbar_thumb_hover.into();
+
+    // Follow the platform: auto-hide (fade in on scroll, out when idle) where
+    // the OS uses overlay scrollbars — the macOS default — and stay permanently
+    // visible where it doesn't, which is Windows and Linux. gpui-component's own
+    // `sync_scrollbar_appearance` picks `Hover` for that second case, meaning the
+    // bar only appears once the pointer is within 16px of the panel edge; that's
+    // the "no scrollbar at all" report from issue #185 on Windows.
+    t.scrollbar_show = if auto_hide_scrollbars {
+        ScrollbarShow::Scrolling
+    } else {
+        ScrollbarShow::Always
+    };
 
     // Round every gpui-component widget (buttons, inputs, selects, switches,
     // segmented controls, menus) to match the shell's own hand-rolled chrome,
@@ -485,24 +669,73 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // the `sidebar*` color fields — so those must be set on `tokens` or the
     // override is a no-op and the column falls back to the stock surface.
     let sidebar_bg = rgb(m.sidebar);
-    let sidebar_sel = rgb(m.sidebar_sel);
+    let sidebar_sel = rgb(surfaces.sidebar.selected);
     t.sidebar = sidebar_bg.into();
     t.tokens.sidebar = Hsla::from(sidebar_bg).into();
     t.sidebar_border = rgb(m.border).into();
-    t.sidebar_foreground = rgb(m.sidebar_fg).into();
+    t.sidebar_foreground = rgb(surfaces.sidebar.text_resting).into();
     t.sidebar_accent = sidebar_sel.into();
     t.tokens.sidebar_accent = Hsla::from(sidebar_sel).into();
-    t.sidebar_accent_foreground = rgb(m.foreground).into();
+    t.sidebar_accent_foreground = rgb(surfaces.sidebar.text_selected).into();
 
     // Flatten gpui-component's list selection highlight (used by the command
     // palette) into a single soft fill — no blue ring, no accent tint — so it
     // matches this app's minimal aesthetic instead of the stock look. Keep
     // `active_highlight` on (the alternative path tints with the shared
     // `accent`), but make the ring colour equal the fill so the box disappears.
+    //
+    // The palette and its list paint on an elevated panel, so this is the popover
+    // ladder — same reasoning as `accent` above.
     t.list.active_highlight = true;
-    t.list_active = rgb(m.list_active).into();
-    t.list_active_border = rgb(m.list_active).into();
-    t.list_hover = rgb(m.list_hover).into();
+    t.list_active = rgb(surfaces.popover.selected).into();
+    t.list_active_border = rgb(surfaces.popover.selected).into();
+    t.list_hover = rgb(surfaces.popover.hover).into();
+
+    // ── Stock widgets that were still wearing gpui-component's defaults ──────
+    //
+    // Everything above overrides a field because someone noticed it looking
+    // off-theme. The fields *nobody noticed* are the actual hazard: they silently
+    // keep the stock value, which is a fixed grey with no relationship to the
+    // active theme, so whether a control reads is down to where that theme's
+    // background happens to land relative to a hardcoded `#2f2f2f`.
+    //
+    // `input` is how issue #197 happened. Outline buttons (and inputs, selects,
+    // switches) derive their resting *and* selected fills from it, so an unset
+    // `input` put the selected segment of every segmented control at 1.03:1
+    // against its neighbours on Dracula — and inverted the direction of the
+    // change between light and dark themes. Pointing it at the window ladder ties
+    // it to the theme; `Tty7App::segmented` no longer depends on this path at all
+    // (it paints the ladder itself), but every other stock control still does.
+    t.input = rgb(surfaces.window.selected).into();
+    t.tokens.input = Hsla::from(rgb(surfaces.window.selected)).into();
+
+    // …but `input` only reaches the *outline* path, which reads the field live.
+    // The plain (non-outline) button family is derived from `input` **once**,
+    // inside the `apply_config` that `Theme::change` ran above — i.e. from the
+    // stock `#2f2f2f`, before any of this function's overrides exist — and a
+    // snapshot never sees the fix. So a plain `Button` still hovered and pressed
+    // in that grey, and `Button::selected` (the terminal search bar's `Aa` / `.*`
+    // toggles, the last two in the app) filled from `tokens.secondary_active` the
+    // same way: on Dracula, ~1.03:1 against the surface behind it. That is issue
+    // #197 again, one snapshot removed from the field that fixed it.
+    //
+    // Only the *state* rungs move — `tokens.button` (the resting fill) is left
+    // alone, so a plain button keeps the flat look it has today and only its
+    // hover/pressed/selected join the ladder.
+    let button_hover: Hsla = rgb(surfaces.window.hover).into();
+    let button_active: Hsla = rgb(surfaces.window.selected).into();
+    t.tokens.button_hover = button_hover.into();
+    t.tokens.button_active = button_active.into();
+    t.tokens.secondary_hover = button_hover.into();
+    t.tokens.secondary_active = button_active.into();
+    t.tokens.button_secondary_hover = button_hover.into();
+    t.tokens.button_secondary_active = button_active.into();
+
+    // Focus rings: the one place the theme's *real* accent belongs. A ring is ink
+    // on the background at 1–2px, which is exactly the job `legible_accent`
+    // conditions the seed for; the stock `neutral-300` was both off-theme and
+    // indistinguishable from a border.
+    t.ring = rgb(m.accent).into();
 
     // `sync_native_appearance` above may have flipped the macOS app appearance,
     // which resets the traffic-light buttons to their default (higher) position.
@@ -514,6 +747,27 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     if let Some(window) = window.as_deref_mut() {
         window.set_traffic_light_position(traffic_light_position());
     }
+}
+
+/// A `Switch` wearing the theme's accent on its checked track.
+///
+/// Every switch in the app goes through here rather than through `Switch::new`
+/// directly. gpui-component defaults the checked track to `tokens.primary`, which
+/// tty7 tunes for *primary buttons* — a near-white on dark themes, deliberately,
+/// because a primary button is a light slab with dark text. As a switch track
+/// that same colour swallows the (near-white) knob, so the two uses genuinely
+/// need two colours and the component only offers a per-instance override.
+///
+/// The accent is the right one, and this is the one control in the app that gets
+/// it. On/off differ by *hue* here because they cannot differ by lightness: the
+/// knob has already claimed the light end of the axis, so a checked track that
+/// reads as "brighter" is a track the knob vanishes into. It is the same reason
+/// every system switch is coloured. `Neutrals::accent` is contrast-conditioned
+/// (see `presets::legible_accent`), so a seed as pale as the Light theme's
+/// `#00c2ff` still lands on a track a white knob can sit on.
+pub(crate) fn switch(id: impl Into<gpui::ElementId>, cx: &App) -> gpui_component::switch::Switch {
+    let accent = cx.global::<presets::ActiveAccent>().0;
+    gpui_component::switch::Switch::new(id).color(Hsla::from(rgb(accent)))
 }
 
 /// Apply `Config::mouse_hide_while_typing` to GPUI's cursor-hide policy: hide the

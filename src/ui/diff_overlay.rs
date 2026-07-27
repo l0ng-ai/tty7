@@ -327,7 +327,10 @@ impl Tty7App {
         } else {
             crate::ui::app::TITLE_BAR_LEAD
         };
-        h_flex()
+        // Standing in for the title bar means carrying its gestures too: the
+        // overlay covers the real bar, so without this the whole top of the window
+        // stops moving it while a diff is up.
+        crate::ui::app::title_bar_drag(h_flex().id("diff-overlay-header"))
             .flex_shrink_0()
             .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
             .pl(px(lead))
@@ -355,38 +358,42 @@ impl Tty7App {
             // click target back to the whole tree — otherwise the only way out
             // of a focused view would be to close and re-open the overlay.
             .when_some(focused_name(overlay), |bar, name| {
+                // Wrapped like every other control on a drag row — see the header's
+                // own note: HTCAPTION would otherwise swallow the click on Windows.
                 bar.child(
-                    h_flex()
-                        .id("diff-overlay-unfocus")
-                        .items_center()
-                        .gap_1()
-                        .px_1p5()
-                        .py_0p5()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(cx.theme().list_hover))
-                        .on_click(cx.listener(|this, _, _window, cx| {
-                            let active = this.active;
-                            if let Some(overlay) = this
-                                .tabs
-                                .get_mut(active)
-                                .and_then(|t| t.diff_overlay.as_mut())
-                            {
-                                overlay.focus = None;
-                                cx.notify();
-                            }
-                        }))
-                        .child(
-                            Icon::new(IconName::ChevronLeft)
-                                .small()
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_family(self.font_family.clone())
-                                .child(name),
-                        ),
+                    div().occlude().flex_shrink_0().child(
+                        h_flex()
+                            .id("diff-overlay-unfocus")
+                            .items_center()
+                            .gap_1()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(cx.theme().list_hover))
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                let active = this.active;
+                                if let Some(overlay) = this
+                                    .tabs
+                                    .get_mut(active)
+                                    .and_then(|t| t.diff_overlay.as_mut())
+                                {
+                                    overlay.focus = None;
+                                    cx.notify();
+                                }
+                            }))
+                            .child(
+                                Icon::new(IconName::ChevronLeft)
+                                    .small()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_family(self.font_family.clone())
+                                    .child(name),
+                            ),
+                    ),
                 )
             })
             .when(
@@ -438,21 +445,23 @@ impl Tty7App {
             )
             .child(div().flex_1())
             .child(
-                crate::ui::tab_strip::chrome_tile_sized(
-                    // Explicit tile, not `.small()`: this bar stands in for the
-                    // title bar while the overlay is up, so its close control is
-                    // the same tile the title bar's controls are.
-                    Button::new("diff-overlay-close").icon(Icon::new(IconName::Close)),
-                    crate::ui::app::TILE_SIZE,
-                    crate::ui::app::TILE_GLYPH_LINE,
-                    false,
-                    cx,
-                )
-                .rounded_lg()
-                .tooltip("Close Diff (Esc)")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.close_diff_overlay(window, cx);
-                })),
+                div().occlude().flex_shrink_0().child(
+                    crate::ui::tab_strip::chrome_tile_sized(
+                        // Explicit tile, not `.small()`: this bar stands in for the
+                        // title bar while the overlay is up, so its close control is
+                        // the same tile the title bar's controls are.
+                        Button::new("diff-overlay-close").icon(Icon::new(IconName::Close)),
+                        crate::ui::app::TILE_SIZE,
+                        crate::ui::app::TILE_GLYPH_LINE,
+                        false,
+                        cx,
+                    )
+                    .rounded_lg()
+                    .tooltip("Close Diff (Esc)")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.close_diff_overlay(window, cx);
+                    })),
+                ),
             )
     }
 

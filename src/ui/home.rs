@@ -297,8 +297,10 @@ impl Tty7App {
             )
         };
         // The established popup language: a solid 10px-radius panel with inset
-        // soft-grey pill highlights — no translucency, no saturated accent.
-        let hover_fill = cx.theme().accent.opacity(0.6);
+        // soft-grey pill highlights — no translucency, no saturated accent. The
+        // panel is a popover, so its rows read that ladder's hover rung; the 0.6
+        // alpha this replaces made the fill depend on whatever showed through.
+        let hover_fill = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().popover.hover);
 
         let mut panel = v_flex()
             .w(px(360.))

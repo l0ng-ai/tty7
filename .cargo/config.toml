@@ -3,3 +3,9 @@
 # config/session/history. Extra args pass through, e.g. `cargo dev -- --foo`.
 [alias]
 dev = "run -- --config-dir .tty7-dev"
+
+# The gpui fork lives in a fork of the Zed monorepo, and cargo's built-in libgit2
+# fetch reliably times out partway through a clone that size. The git CLI handles
+# it (resumable, packed transfer), and is present on every platform we build on.
+[net]
+git-fetch-with-cli = true

@@ -1120,11 +1120,12 @@ impl Tty7App {
         } else {
             self.file_tree.search_rows()
         };
-        v_flex()
+        let column = v_flex()
             .id("right-panel-tree-rows")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.right_panel.tree_scroll)
             .px_1()
             .pb_1()
             // Keyboard nav (arrows / enter / rename) followed the tree out of the
@@ -1136,8 +1137,12 @@ impl Tty7App {
             .children(
                 rows.iter()
                     .flat_map(|row| self.render_tree_row(row, window, cx)),
-            )
-            .into_any_element()
+            );
+        crate::ui::scrollbar::with_vertical_scrollbar(
+            "right-panel-tree-scrollbar",
+            column,
+            &self.right_panel.tree_scroll,
+        )
     }
 
     /// One row (plus, when an inline edit targets it, the edit input row).
@@ -1151,6 +1156,7 @@ impl Tty7App {
         let is_dir = row.entry.is_dir;
         let selected = self.tab_code().and_then(|c| c.selected.as_deref()) == Some(&*path);
         let muted = cx.theme().muted_foreground;
+        let sf = cx.global::<crate::ui::presets::Surfaces>().popover;
         // Unsaved edits used to be visible on the editor's file tabs; with those
         // gone the tree is the only place an open buffer is represented, so it has
         // to carry the dirty marker or unsaved work becomes invisible.
@@ -1202,11 +1208,15 @@ impl Tty7App {
             .py_1()
             .rounded(cx.theme().radius)
             .cursor_pointer()
-            // Soft inset-pill highlight on the content surface.
-            .when(selected, |d| d.bg(cx.theme().accent))
-            .when(!selected, |d| {
-                d.hover(|s| s.bg(cx.theme().accent.opacity(0.5)))
-            })
+            // Soft inset-pill highlight on the content surface. The tree paints on
+            // `popover` (see the container below), so this is that surface's
+            // ladder — read explicitly rather than through `Theme::accent`, which
+            // is gpui-component's name for a row highlight and says nothing about
+            // which surface it was anchored to. Hover was `accent.opacity(0.5)`; a
+            // ladder rung is a real colour, so it doesn't change meaning depending
+            // on what it lands on.
+            .when(selected, |d| d.bg(gpui::rgb(sf.selected)))
+            .when(!selected, |d| d.hover(|s| s.bg(gpui::rgb(sf.hover))))
             // Folders take the full foreground, files the muted tone — a neutral
             // weight difference, no hue, so the tree keeps the terminal's calm.
             .child(Icon::new(icon).xsmall().text_color(if is_dir {

@@ -32,6 +32,7 @@ use crate::ui::app::{
     CONTENT_INSET, TILE_GLYPH_SM, TILE_SIZE_SM, Tty7App, tile_trailing_inset,
     tile_trailing_inset_sm,
 };
+use crate::ui::scrollbar::with_vertical_scrollbar;
 
 /// Bounds for the panel's width, mirroring the rail's: a floor so the tree never
 /// becomes an ellipsis parade, and a ceiling as a fraction of the window so a
@@ -77,6 +78,13 @@ pub(crate) struct RightPanelState {
     /// already watching finishes connecting — and the loop reads this on each
     /// reschedule so it picks the change up on the next tick.
     pub(crate) procs_forwards: bool,
+    /// Scroll position of the shared body container (Info / Outline / Changes),
+    /// owned here rather than left to gpui's element-id state so the overlay
+    /// scrollbar has a handle to read the offset from and to drag.
+    pub(crate) scroll: gpui::ScrollHandle,
+    /// The Files tab's local tree scrolls in its own container (it carries the
+    /// tree's focus handle and key bindings), so it needs its own handle.
+    pub(crate) tree_scroll: gpui::ScrollHandle,
 }
 
 /// How often the Info tab re-queries processes and ports while it's open. Fast
@@ -465,18 +473,22 @@ impl Tty7App {
     /// The body's scrolling area, so every tab shares one scroll container and
     /// one content inset.
     fn panel_scroll(&self, inner: AnyElement, title: AnyElement) -> AnyElement {
+        let body = div()
+            .id("right-panel-body")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.right_panel.scroll)
+            .child(inner);
         v_flex()
             .flex_1()
             .min_h_0()
             .child(title)
-            .child(
-                div()
-                    .id("right-panel-body")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(inner),
-            )
+            .child(with_vertical_scrollbar(
+                "right-panel-body-scrollbar",
+                body,
+                &self.right_panel.scroll,
+            ))
             .into_any_element()
     }
 
@@ -950,6 +962,9 @@ impl Tty7App {
     /// Newest first because that's the end you came from: you scrolled past the
     /// thing you want, and the list should start where your attention is.
     fn render_panel_outline(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // This panel is a sunk rail (see the `sidebar` fill on its container), so
+        // its rows read the sidebar ladder.
+        let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let Some(leaf) = self
             .tabs
             .get(self.active)
@@ -1015,7 +1030,7 @@ impl Tty7App {
                     .py(px(3.))
                     .rounded(px(5.))
                     .cursor_pointer()
-                    .hover(|s| s.bg(cx.theme().sidebar_accent.opacity(0.55)))
+                    .hover(|s| s.bg(gpui::rgb(sf.hover)))
                     .on_click(cx.listener(move |_this, _, _window, cx| {
                         leaf.update(cx, |view, cx| {
                             view.scroll_to_mark(row, cx);
@@ -1062,6 +1077,7 @@ impl Tty7App {
     /// diff overlay's hunk cards, which need far more than 260px to be readable.
     /// Clicking a row opens the full overlay on that repo.
     fn render_panel_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let cwd = self
             .tabs
             .get(self.active)
@@ -1148,8 +1164,13 @@ impl Tty7App {
                             .py(px(3.))
                             .rounded(px(5.))
                             .cursor_pointer()
-                            .hover(|s| s.bg(cx.theme().sidebar_accent.opacity(0.55)))
-                            .when(selected, |s| s.bg(cx.theme().sidebar_accent))
+                            // The rail's own ladder. Hover used to be this fill at
+                            // 55% alpha, which on a light theme is a tint nobody
+                            // can see — the same mistake `chrome_tile_variant_for`
+                            // already documents having fixed in the title bar, made
+                            // again here because there was nothing to reuse.
+                            .hover(|s| s.bg(gpui::rgb(sf.hover)))
+                            .when(selected, |s| s.bg(gpui::rgb(sf.selected)))
                             .on_click({
                                 let cwd = cwd.clone();
                                 let path = path.clone();

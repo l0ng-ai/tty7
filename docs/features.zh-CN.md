@@ -24,6 +24,29 @@
 - **窗口透明与模糊** — 设置 → Appearance → Window；对所有主题生效，*Follow theme* 恢复主题自带的 `opacity` / `blur`
 - **CJK / 输入法输入**
 
+## 字体
+
+- **内置 Hack** —— 打包进二进制，默认配置在各平台渲染完全一致，不依赖系统安装
+- **主字体 + 有序 fallback** —— `config.json` 里的 `font_family` 和 `font_fallbacks`；可选 `font_family_bold` / `font_family_italic` 指定独立字面，`font_features` 透传 OpenType 特性（上下文连字默认关闭）
+- **默认列表按平台分支** —— fallback 只写宿主系统真正自带的字体（macOS 用 PingFang SC / Apple Color Emoji，Windows 用 Microsoft YaHei / Segoe UI Emoji，Linux 用 Noto）。这些名字也会追加到你手写的列表后面，所以在别的平台写出来的 `config.json` 一样能落地
+
+### 中文与两列网格
+
+一个格子等于主字体的一个 advance，宽字符（CJK）被钉死在正好两格上。所以中文
+fallback 只有在**汉字 advance 等于主字体西文 advance 的两倍**时，才能严丝合缝地
+填满自己的槽。
+
+内置 Hack 的 advance 是 0.60205em，两格就是 1.2041em —— 而系统自带的中文字体
+（Microsoft YaHei、PingFang SC、Noto Sans CJK）全都是 1.0em。这些字形在槽里左
+对齐，多出来的约 0.2em 就变成每个字右边的一道空隙。
+
+[Maple Mono NF CN](https://github.com/subframe7536/maple-font) 在所有平台都排在
+第一位正是因为这个 —— 西文 0.6em、中文 1.2em，对上 Hack 正好两格。它只按名字引
+用，不打包（每字重约 20MB）：装上即生效，不用改配置。
+
+想让中文排得**紧**而不只是均匀，要换的是主字体：选一个 advance 为 0.5em 的
+（比如 Sarasa Mono SC 更纱黑体等宽），两格就正好 1.0em。
+
 ## Coding agent
 
 tty7 能识别 pane 里跑着的第三方 coding agent（Claude Code、Codex、Gemini CLI、

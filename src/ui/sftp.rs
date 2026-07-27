@@ -115,6 +115,9 @@ pub(crate) struct SftpPanelState {
     editing_path_sub: Vec<Subscription>,
     /// Bumped on every (re)open so a stale poll loop exits.
     pub(crate) poll_gen: u64,
+    /// Scroll position of the remote listing, owned here so the Files tab's
+    /// overlay scrollbar has a handle to read and drag (see `ui::scrollbar`).
+    scroll: gpui::ScrollHandle,
     _subs: Vec<Subscription>,
 }
 
@@ -144,6 +147,7 @@ impl SftpPanelState {
             editing_path: None,
             editing_path_sub: Vec::new(),
             poll_gen: 0,
+            scroll: gpui::ScrollHandle::new(),
             _subs: vec![sub],
         }
     }
@@ -957,7 +961,11 @@ impl Tty7App {
             .child(breadcrumb)
             .child(filter)
             .children(form)
-            .child(list)
+            .child(crate::ui::scrollbar::with_vertical_scrollbar(
+                "sftp-list-scrollbar",
+                list,
+                &self.sftp_panel.scroll,
+            ))
             // FR-T5: a Finder drop uploads onto the current directory.
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
                 this.sftp_upload_paths(paths.paths().to_vec(), cx);
@@ -1204,6 +1212,7 @@ impl Tty7App {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.sftp_panel.scroll)
             .px(px(CONTENT_INSET - 6.))
             .pb(px(4.));
 
@@ -1253,6 +1262,8 @@ impl Tty7App {
     /// "the parent folder" and matches the rows below rather than a toolbar action.
     fn render_sftp_go_up_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let foreground = cx.theme().foreground;
+        // Matches the directory rows below it, which paint on the popover surface.
+        let sf = cx.global::<crate::ui::presets::Surfaces>().popover;
         h_flex()
             .id("sftp-go-up")
             .items_center()
@@ -1262,7 +1273,7 @@ impl Tty7App {
             .py_1()
             .rounded(cx.theme().radius)
             .cursor_pointer()
-            .hover(|s| s.bg(cx.theme().accent.opacity(0.5)))
+            .hover(|s| s.bg(gpui::rgb(sf.hover)))
             .child(
                 Icon::new(IconName::FolderOpen)
                     .xsmall()
@@ -1472,7 +1483,7 @@ impl Tty7App {
         let accent = cx.theme().accent;
         let border = cx.theme().border;
         let sidebar = cx.theme().sidebar;
-        let hover = cx.theme().sidebar_accent.opacity(0.4);
+        let hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().sidebar.hover);
         let expanded = self.sftp_panel.tray_expanded || history;
 
         // The summary line: how many are moving and how far along the run is, as

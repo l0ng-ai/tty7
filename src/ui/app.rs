@@ -9,7 +9,9 @@ use gpui_component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
 use gpui_component::slider::{SliderEvent, SliderState};
-use gpui_component::{ActiveTheme as _, IndexPath, TitleBar, WindowExt as _};
+use gpui_component::{
+    ActiveTheme as _, IndexPath, InteractiveElementExt as _, TitleBar, WindowExt as _,
+};
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -188,6 +190,93 @@ pub(crate) fn title_bar_hug_offset() -> f32 {
     } else {
         tile_trailing_inset() - TITLE_BAR_LEAD
     }
+}
+
+/// Edge of the brand mark that anchors the window's leading corner off macOS
+/// (see [`window_mark`]). Between a chrome tile's 32px hit box and its 13px
+/// glyph: the mark paints no hover capsule, so what has to sit level with the
+/// tiles beside it is its *ink* — and solid art reads heavier than line work at
+/// equal size, hence short of the tile box rather than matching it.
+pub(crate) const WINDOW_MARK_SIZE: f32 = 20.;
+
+/// The "duo" mark — the same art the app icon and the About page carry — drawn
+/// at the leading edge of the title-bar row, or `None` on macOS.
+///
+/// macOS owns that corner: the traffic lights sit there, and [`TITLE_BAR_LEAD`]
+/// reserves them 80px. Everywhere else it is empty. The row's contents are the
+/// rail's controls at its *right* end and the window chrome at the far side, so
+/// the window's leading corner — the slot Windows reads as the app's identity,
+/// filled by Explorer, VS Code and Zed alike — held nothing at all, which comes
+/// across as unfinished rather than restrained.
+///
+/// Drawn, never clicked. It is not a menu button, so it stays out of the tile
+/// rhythm (no hover capsule) and deliberately takes no `occlude()`: the row it
+/// lives in is a `WindowControlArea::Drag`, and letting the mark fall through to
+/// that keeps the strip grabbable instead of punching a dead 20px hole in it.
+/// Make a row that stands in for the title bar behave like one: drag it to move
+/// the window, double-click it to zoom.
+///
+/// Three rows do this. The rail's top zone sits level with the real bar but
+/// outside it (the bar only spans the column beside the rail), and the code and
+/// diff overlays each cover the bar with a header of their own drawn to its line.
+/// Without this they are all dead strips: 40px across the top of the window that
+/// look exactly like the caption and do nothing when you grab them.
+///
+/// Driven the way gpui-component's own `TitleBar` drives it — a press arms a
+/// flag and the first *move* starts the window move — so a plain click, and a
+/// double-click, still land intact. Note that on Windows the drag area maps to
+/// HTCAPTION and the OS claims the press before gpui hit-tests, so every button
+/// inside one of these rows needs an `occlude()` wrapper to get its clicks back.
+pub(crate) fn title_bar_drag(row: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
+    let should_move = Rc::new(Cell::new(false));
+    row.window_control_area(gpui::WindowControlArea::Drag)
+        .on_mouse_down(gpui::MouseButton::Left, {
+            let should_move = should_move.clone();
+            move |_, _, _| should_move.set(true)
+        })
+        .on_mouse_up(gpui::MouseButton::Left, {
+            let should_move = should_move.clone();
+            move |_, _, _| should_move.set(false)
+        })
+        .on_mouse_move(move |_, window, _| {
+            if should_move.replace(false) {
+                window.start_window_move();
+            }
+        })
+        .on_double_click(|_, window, _| {
+            // gpui only implements `titlebar_double_click` on macOS — the trait
+            // method is an empty default everywhere else, so on Linux this row
+            // swallowed the double-click and nothing zoomed. `zoom_window` is the
+            // maximise toggle there (x11 `_NET_WM_STATE_MAXIMIZED_*`, wayland
+            // `set_maximized`), and what gpui-component's own `TitleBar` calls on
+            // Linux for exactly this reason. Windows needs neither: the row is a
+            // drag area, which maps to HTCAPTION, and the OS has already restored
+            // or maximised the window before this could run.
+            if cfg!(target_os = "linux") {
+                window.zoom_window();
+            } else {
+                window.titlebar_double_click();
+            }
+        })
+}
+
+pub(crate) fn window_mark() -> Option<impl IntoElement> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    // Decoded once and shared: the title bar re-renders on every cursor blink,
+    // and building a fresh `Image` per frame would re-copy the PNG and miss
+    // gpui's image cache, which is keyed on the image's identity.
+    static LOGO: std::sync::OnceLock<Arc<gpui::Image>> = std::sync::OnceLock::new();
+    let logo = LOGO
+        .get_or_init(|| {
+            Arc::new(gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                include_bytes!("../../assets/logo@256.png").to_vec(),
+            ))
+        })
+        .clone();
+    Some(img(logo).size(px(WINDOW_MARK_SIZE)).flex_shrink_0())
 }
 
 /// One tab: a split-pane tree plus an optional user-assigned name. Settings is
@@ -543,7 +632,8 @@ pub struct Tty7App {
     pub(crate) right_panel_tab: RightPanelTab,
     pub(crate) sidebar_collapsed: bool,
     /// Scroll handle for the sidebar's row list, so activating a tab scrolls its
-    /// row into view.
+    /// row into view — and so the rail's overlay scrollbar has an offset to
+    /// track and drag (see [`crate::ui::scrollbar`]).
     pub(crate) sidebar_scroll: gpui::ScrollHandle,
     /// `Some` while a tab / group is being dragged to a new position, in either
     /// the strip or the rail: the frozen geometry the live preview reflow is
@@ -842,10 +932,16 @@ impl Tty7App {
             // First run (no session file): the very first terminal has no
             // predecessor to inherit from, so start in the app's current
             // directory (None → default behavior).
-            None => {
-                let first = new_terminal(font_size, None, None, None, window, cx);
-                (vec![Tab::new(Pane::leaf(first))], 0)
-            }
+            None => match new_terminal(font_size, None, None, None, window, cx) {
+                Ok(first) => (vec![Tab::new(Pane::leaf(first))], 0),
+                // The daemon we just tried to start isn't answering. A window
+                // with no tabs is a legal state (it shows the home page), and
+                // far better than taking the launch down over it.
+                Err(e) => {
+                    log::error!("first terminal failed to start: {e}");
+                    (Vec::new(), 0)
+                }
+            },
             // A saved session (with tabs, or an empty home-page state): rebuild it
             // the same way a daemon restart does.
             some => tabs_from_session(some, font_size, window, cx),
@@ -1269,7 +1365,13 @@ impl Tty7App {
             return;
         };
         let alive = alive_panes();
-        let pane = session_to_pane(&st.pane, &alive, self.font_size, window, cx);
+        let Some(pane) = session_to_pane(&st.pane, &alive, self.font_size, window, cx) else {
+            // Nothing came back (an unreachable daemon). Put the entry back so
+            // the tab is still reopenable once the daemon is up again.
+            window.push_notification("Could not reopen the tab: no terminal started", cx);
+            self.closed.push(st);
+            return;
+        };
         // Leaving the current tab for the reopened one; snapshot its focused
         // pane so switching back restores it (same as `activate`).
         self.remember_active_pane(window, cx);
@@ -2748,7 +2850,14 @@ impl Tty7App {
                 .focused_or_first(window, cx)
                 .and_then(|leaf| leaf.read(cx).local_cwd())
         });
-        let tab = new_terminal(self.font_size, cwd, None, shell, window, cx);
+        let tab = match new_terminal(self.font_size, cwd, None, shell, window, cx) {
+            Ok(view) => view,
+            Err(e) => {
+                log::error!("new tab spawn failed: {e}");
+                window.push_notification(format!("Could not open a terminal: {e}"), cx);
+                return;
+            }
+        };
         // Leaving the current tab for the new one; snapshot its focused pane
         // so switching back restores it (same as `activate`).
         self.remember_active_pane(window, cx);
@@ -2862,7 +2971,14 @@ impl Tty7App {
             }
         } else {
             let shell = target.read(cx).shell_spec();
-            new_terminal(self.font_size, cwd, None, shell, window, cx)
+            match new_terminal(self.font_size, cwd, None, shell, window, cx) {
+                Ok(view) => view,
+                Err(e) => {
+                    log::error!("split spawn failed: {e}");
+                    window.push_notification(format!("Could not split the pane: {e}"), cx);
+                    return;
+                }
+            }
         };
         if let Some(tab) = self.tabs.get_mut(self.active) {
             if tab.pane.split_leaf(&target, axis, new.clone()) {
@@ -3404,7 +3520,14 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let view = new_terminal(self.font_size, Some(wt.path), None, None, window, cx);
+        let view = match new_terminal(self.font_size, Some(wt.path), None, None, window, cx) {
+            Ok(view) => view,
+            Err(e) => {
+                log::error!("worktree tab spawn failed: {e}");
+                window.push_notification(format!("Could not open a terminal: {e}"), cx);
+                return;
+            }
+        };
         self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
@@ -5234,6 +5357,26 @@ impl Render for Tty7App {
         } else {
             (Some(title_bar), None)
         };
+        // And where the overlays hang. Normally on the terminal column, which they
+        // fill: the bar is that column's first child, so an `inset_0` overlay
+        // covers it and the overlay's own header row lands *on* the caption line —
+        // which is what both headers are drawn for (title-bar height, the bar's
+        // insets, a full-size chrome tile for their one control).
+        //
+        // With the bar hoisted, a column-anchored overlay starts 40px down and its
+        // header sits one row too low: level with the panel's tab row instead of
+        // with the caption. So it hangs on the row that owns the bar instead,
+        // inset from the right by the panel's width — covering the bar's band over
+        // the terminal column (which carries nothing there but the drag region, or
+        // the rail's controls while it's collapsed: exactly what an overlay covers
+        // with the panel closed) and stopping short of the panel, so the ─ ▢ ✕
+        // group and the corner chrome keep their own surface and their clicks.
+        let (column_overlays, hoisted_overlays) = if panel_below_title_bar {
+            (Vec::new(), overlays)
+        } else {
+            (overlays, Vec::new())
+        };
+        let panel_px = self.right_panel_px(window, cx);
         // The terminal column, and the anchor for both overlays: they fill it —
         // and, since the panel is a sibling rather than a child, stop short of the
         // panel for free. With the bar spanning above, they stop short of it too,
@@ -5247,7 +5390,7 @@ impl Render for Tty7App {
             .relative()
             .when_some(column_title_bar, |this, bar| this.child(bar))
             .child(body_area)
-            .children(overlays);
+            .children(column_overlays);
         let panel_row = div()
             .flex_1()
             .min_h_0()
@@ -5269,6 +5412,8 @@ impl Render for Tty7App {
                     .min_w_0()
                     .flex()
                     .flex_col()
+                    // The containing block for the hoisted overlays below.
+                    .relative()
                     .child(
                         // The bar's own band over the panel, painted in the panel's
                         // surface so the column still reads as one continuous
@@ -5301,6 +5446,19 @@ impl Render for Tty7App {
                             .child(bar),
                     )
                     .child(panel_row)
+                    // Last child, so they paint over both the bar and the column.
+                    // Each overlay is `absolute().inset_0()` against this wrapper,
+                    // which is the only thing that has to know where the panel
+                    // starts.
+                    .children(hoisted_overlays.into_iter().map(|overlay| {
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .bottom_0()
+                            .right(px(panel_px))
+                            .child(overlay)
+                    }))
                     .into_any_element(),
                 None => panel_row.into_any_element(),
             })
@@ -5729,7 +5887,12 @@ fn tabs_from_session(
     let alive = alive_panes();
     let mut tabs: Vec<Tab> = Vec::with_capacity(session.tabs.len());
     for st in &session.tabs {
-        let pane = session_to_pane(&st.pane, &alive, font_size, window, cx);
+        // A tab whose every leaf failed to come back has nothing to show; drop
+        // it rather than restore an empty frame (or, worse, abort the launch).
+        let Some(pane) = session_to_pane(&st.pane, &alive, font_size, window, cx) else {
+            log::error!("dropping a restored tab: no pane in it could be started");
+            continue;
+        };
         tabs.push(Tab {
             pane,
             name: st.name.clone(),
@@ -5743,8 +5906,9 @@ fn tabs_from_session(
             sidebar_group: std::cell::RefCell::new(st.sidebar_group.clone()),
         });
     }
-    // Clamp the saved active index into the rebuilt range.
-    let active = session.active.min(tabs.len() - 1);
+    // Clamp the saved active index into the rebuilt range (which can be empty
+    // when nothing restored).
+    let active = session.active.min(tabs.len().saturating_sub(1));
     (tabs, active)
 }
 
@@ -5752,13 +5916,17 @@ fn tabs_from_session(
 /// `pane_id` is still alive in the daemon re-`attach`es (process + scrollback
 /// intact); otherwise it spawns a fresh shell in the saved cwd. `alive` is the
 /// daemon's current pane set, computed once by the caller.
+///
+/// `None` when nothing under this node could be started (an unreachable
+/// daemon): restore drops what it can't rebuild instead of leaving `Empty`
+/// nodes — which every tree operation ignores — in a live tab.
 fn session_to_pane(
     sp: &SessionPane,
     alive: &std::collections::HashSet<u64>,
     font_size: f32,
     window: &mut Window,
     cx: &mut Context<Tty7App>,
-) -> Pane {
+) -> Option<Pane> {
     match sp {
         SessionPane::Leaf {
             cwd,
@@ -5779,7 +5947,7 @@ fn session_to_pane(
                 if let Some(spec) = ssh_spec.clone() {
                     let resolved = crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
                     match new_terminal_native(font_size, cwd.clone(), resolved, window, cx) {
-                        Ok(view) => return Pane::leaf(view),
+                        Ok(view) => return Some(Pane::leaf(view)),
                         // Keep restore alive: fall through to a local shell in
                         // this slot rather than aborting startup.
                         Err(e) => log::error!("restoring native SSH pane failed: {e}"),
@@ -5788,7 +5956,13 @@ fn session_to_pane(
             }
             // A shell pick isn't persisted in the session, so a stale pane that
             // must respawn comes back on the default shell.
-            let view = new_terminal(font_size, cwd.clone(), restore, None, window, cx);
+            let view = match new_terminal(font_size, cwd.clone(), restore, None, window, cx) {
+                Ok(view) => view,
+                Err(e) => {
+                    log::error!("restoring pane failed: {e}");
+                    return None;
+                }
+            };
             // A pane that could NOT re-attach lost its running agent with the
             // daemon; when we captured that agent's native session id, hand
             // the fresh shell its resume command so the conversation picks up
@@ -5802,20 +5976,32 @@ fn session_to_pane(
             {
                 view.read(cx).run_command_line(&cmd);
             }
-            Pane::leaf(view)
+            Some(Pane::leaf(view))
         }
         SessionPane::Split { axis, ratio, a, b } => {
             let axis = match axis {
                 SessionAxis::Horizontal => Axis::Horizontal,
                 SessionAxis::Vertical => Axis::Vertical,
             };
-            let a = session_to_pane(a, alive, font_size, window, cx);
-            let b = session_to_pane(b, alive, font_size, window, cx);
-            Pane::split_node(axis, *ratio, a, b)
+            // One side failing collapses the split onto the survivor, exactly
+            // as closing that pane by hand would.
+            match (
+                session_to_pane(a, alive, font_size, window, cx),
+                session_to_pane(b, alive, font_size, window, cx),
+            ) {
+                (Some(a), Some(b)) => Some(Pane::split_node(axis, *ratio, a, b)),
+                (Some(only), None) | (None, Some(only)) => Some(only),
+                (None, None) => None,
+            }
         }
     }
 }
 
+/// Build a shell-backed terminal view, wiring the per-pane subscriptions every
+/// pane needs. Fallible: the daemon can refuse the spawn (it died, it's
+/// wedged, the shell doesn't exist), and every caller here runs inside a gpui
+/// input callback, where a panic can't unwind and would abort the app instead
+/// of surfacing the failure. Report it, don't `expect` it.
 fn new_terminal(
     font_size: f32,
     working_directory: Option<std::path::PathBuf>,
@@ -5823,10 +6009,10 @@ fn new_terminal(
     shell: Option<ShellSpec>,
     window: &mut Window,
     cx: &mut Context<Tty7App>,
-) -> Entity<TerminalView> {
+) -> anyhow::Result<Entity<TerminalView>> {
+    let parts = TerminalView::spawn_shell_terminal(working_directory, restore_pane, shell)?;
     let view = cx.new(|cx| {
-        let mut view = TerminalView::new(working_directory, restore_pane, shell, window, cx)
-            .expect("failed to start terminal");
+        let mut view = TerminalView::from_shell_parts(parts, window, cx);
         // Inherit the current global font size so new panes match existing ones.
         view.font_size = px(font_size);
         view
@@ -5852,7 +6038,7 @@ fn new_terminal(
     )
     .detach();
     watch_pane_focus(&view, window, cx);
-    view
+    Ok(view)
 }
 
 /// Re-render the app whenever `view` takes focus. Nothing else does this: a

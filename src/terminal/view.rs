@@ -93,6 +93,18 @@ pub struct NativeSshParts {
     persist: Box<crate::daemon::protocol::NativeSshSpec>,
 }
 
+/// An established shell daemon pane (fresh spawn or re-attach), ready to be
+/// wrapped in a view: the output of the fallible
+/// [`TerminalView::spawn_shell_terminal`], consumed by the infallible
+/// [`TerminalView::from_shell_parts`].
+pub struct ShellParts {
+    terminal: RemoteTerminal,
+    pane_id: u64,
+    /// The explicit shell pick this pane was spawned with, if any; `None` for a
+    /// re-attached pane (the pick isn't persisted).
+    shell_spec: Option<ShellSpec>,
+}
+
 /// See `TerminalView::drag_scroll`.
 #[derive(Clone, Copy)]
 struct DragScroll {
@@ -784,36 +796,57 @@ fn transcode_to_png(bytes: &[u8], format: gpui::ImageFormat) -> Option<Vec<u8>> 
     Some(out)
 }
 
-/// The font fallback chain: the user's configured list with the bundled "Hack"
-/// pinned to the end. Hack ships inside the binary (`register_bundled_fonts`)
-/// and covers the symbols prompt themes lean on — `❯`, `➜`, box drawing, the
-/// sharp powerline wedges — with ink that fits a monospace advance. Without
-/// this anchor, a custom `font_family` that lacks one of those codepoints
-/// falls through the whole configured list into the OS cascade, which happily
-/// serves a proportional glyph wider than the cell that `paint_glyphs`'
-/// per-cell clip then truncates (issue #17's severed `➜`).
+/// The font fallback chain: the user's configured list, then this platform's
+/// stock faces, then the bundled "Hack" pinned to the end.
+///
+/// Hack ships inside the binary (`register_bundled_fonts`) and covers the
+/// symbols prompt themes lean on — `❯`, `➜`, box drawing, the sharp powerline
+/// wedges — with ink that fits a monospace advance. Without this anchor, a
+/// custom `font_family` that lacks one of those codepoints falls through the
+/// whole configured list into the OS cascade, which happily serves a
+/// proportional glyph wider than the cell that `paint_glyphs`' per-cell clip
+/// then truncates (issue #17's severed `➜`).
+///
+/// Hack carries no CJK at all (1548 codepoints mapped, zero ideographs), so on
+/// a chain that names only macOS faces every Chinese character falls through to
+/// the OS cascade too. [`platform_last_resort_fallbacks`] is appended for the
+/// same reason the Hack anchor exists — to keep the last word ours rather than
+/// the cascade's — and it repairs already-persisted configs, which a change to
+/// `Config::default` alone would never reach.
 fn fallback_chain(family: &str, configured: &[String]) -> Vec<String> {
     let mut chain = configured.to_vec();
-    if family != "Hack" && !chain.iter().any(|f| f == "Hack") {
-        chain.push("Hack".to_string());
+    let mut pin = |name: &str| {
+        if family != name && !chain.iter().any(|f| f == name) {
+            chain.push(name.to_string());
+        }
+    };
+    for name in crate::core::config::platform_last_resort_fallbacks() {
+        pin(name);
     }
+    pin("Hack");
     chain
 }
 
 impl TerminalView {
-    pub fn new(
+    /// The fallible half of a shell-backed view: establish the daemon pane
+    /// *before* the view is built, so a refused spawn (daemon down, spawn
+    /// error) comes back as an `Err` the caller can report. Splitting it out
+    /// matters beyond tidiness: the view is constructed inside `cx.new`, deep
+    /// under gpui's `extern "C"` input callbacks, where a panic can't unwind
+    /// and aborts the process instead. Mirrors
+    /// [`Self::spawn_native_ssh_terminal`].
+    ///
+    /// Provisional size; corrected on the first prepaint once we can measure.
+    /// The PTY lives in the daemon now. On session restore (`restore_pane`),
+    /// re-`attach` to the still-running pane so its process + scrollback come
+    /// back intact; otherwise `spawn` a fresh pane (with the caller's shell
+    /// pick, if any). The caller only passes a `restore_pane` it has already
+    /// confirmed alive, so we trust it here.
+    pub fn spawn_shell_terminal(
         working_directory: Option<std::path::PathBuf>,
         restore_pane: Option<u64>,
         shell: Option<ShellSpec>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> anyhow::Result<Self> {
-        // Provisional size; corrected on the first prepaint once we can measure.
-        // The PTY lives in the daemon now. On session restore (`restore_pane`),
-        // re-`attach` to the still-running pane so its process + scrollback come
-        // back intact; otherwise `spawn` a fresh pane (with the caller's shell
-        // pick, if any). The caller only passes a `restore_pane` it has already
-        // confirmed alive, so we trust it here.
+    ) -> anyhow::Result<ShellParts> {
         let (terminal, pane_id, shell_spec) = match restore_pane {
             Some(id) => (
                 RemoteTerminal::attach(TermSize::new(80, 24), 8, 17, id)?,
@@ -833,9 +866,23 @@ impl TerminalView {
                 (terminal, id, shell)
             }
         };
-        let mut view = Self::with_terminal(terminal, pane_id, window, cx);
-        view.shell_spec = shell_spec;
-        Ok(view)
+        Ok(ShellParts {
+            terminal,
+            pane_id,
+            shell_spec,
+        })
+    }
+
+    /// Wrap an established shell pane (from [`Self::spawn_shell_terminal`]) in
+    /// a view. Infallible by construction — see that function.
+    pub fn from_shell_parts(
+        parts: ShellParts,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut view = Self::with_terminal(parts.terminal, parts.pane_id, window, cx);
+        view.shell_spec = parts.shell_spec;
+        view
     }
 
     /// Spawn a native (russh) SSH pane for `spec` and build the view around it
@@ -1145,6 +1192,18 @@ impl TerminalView {
         cell_width: Pixels,
         line_height: Pixels,
     ) {
+        // A remembered hover cell describes the *old* geometry: after a resize
+        // its row may not exist any more, and the pointer sits over a different
+        // cell regardless. Forget it — the next mouse move records a fresh one.
+        // (`grid_line` also refuses a stale row, so this is about not underlining
+        // the wrong cell, not about safety.) The link that cell resolved to goes
+        // with it: it is held in grid coordinates the reflow just moved text
+        // under, so keeping it would underline whatever now sits there (and hold
+        // the pointing-hand cursor over it) until the pointer moves again.
+        if (cols, rows) != (self.terminal.size().cols, self.terminal.size().rows) {
+            self.last_hover_cell = None;
+            self.hovered_link = None;
+        }
         self.cell_width = cell_width;
         self.line_height = line_height;
         self.terminal.resize(
@@ -4328,6 +4387,23 @@ impl TerminalView {
         }
     }
 
+    /// The grid line a screen `row` currently maps to, or `None` when that row
+    /// is outside the grid.
+    ///
+    /// Mandatory before indexing: `Grid`'s `Index<Line>` only `debug_assert`s
+    /// the bound, so a release build walks off the storage and panics on the
+    /// slice check instead. A remembered cell goes stale whenever the grid
+    /// shrinks under it — split a pane, drag the window smaller — and the
+    /// callers here run inside gpui's `extern "C"` input callbacks, where that
+    /// panic can't unwind and aborts the process.
+    fn grid_line(
+        term: &alacritty_terminal::Term<crate::terminal::remote::EventProxy>,
+        row: usize,
+    ) -> Option<Line> {
+        let line = Line(row as i32 - term.grid().display_offset() as i32);
+        (line >= term.topmost_line() && line <= term.bottommost_line()).then_some(line)
+    }
+
     /// Open the link under the given cell, if any (OSC 8 hyperlink, plain URL or
     /// existing file or directory path detected in the row text). Returns true if one opened.
     pub fn open_link_at(&self, col: usize, row: usize, cx: &mut Context<Self>) -> bool {
@@ -4335,8 +4411,9 @@ impl TerminalView {
             return false;
         }
         let term = self.terminal.term.lock();
-        let display_offset = term.grid().display_offset() as i32;
-        let line = Line(row as i32 - display_offset);
+        let Some(line) = Self::grid_line(&term, row) else {
+            return false;
+        };
         let cols = term.columns();
         if col >= cols {
             return false;
@@ -4483,8 +4560,7 @@ impl TerminalView {
         include_loopback: bool,
     ) -> Option<HoveredLink> {
         let term = self.terminal.term.lock();
-        let display_offset = term.grid().display_offset() as i32;
-        let line = Line(row as i32 - display_offset);
+        let line = Self::grid_line(&term, row)?;
         let cols = term.columns();
         if col >= cols {
             return None;
@@ -6048,27 +6124,66 @@ mod tests {
         let configured = vec!["Menlo".to_string(), "Apple Color Emoji".to_string()];
 
         // A custom primary that may lack the prompt symbols → Hack appended.
-        assert_eq!(
-            fallback_chain("JetBrains Mono", &configured),
-            ["Menlo", "Apple Color Emoji", "Hack"]
-        );
+        let chain = fallback_chain("JetBrains Mono", &configured);
+        assert_eq!(chain[..2], ["Menlo", "Apple Color Emoji"]);
+        assert_eq!(chain.last().unwrap(), "Hack");
 
         // Hack as the primary face already covers everything it could add.
-        assert_eq!(
-            fallback_chain("Hack", &configured),
-            ["Menlo", "Apple Color Emoji"]
-        );
+        let chain = fallback_chain("Hack", &configured);
+        assert_eq!(chain[..2], ["Menlo", "Apple Color Emoji"]);
+        assert!(!chain.iter().any(|f| f == "Hack"));
 
         // A user who lists Hack explicitly keeps their chosen position.
         let with_hack = vec!["Hack".to_string(), "Menlo".to_string()];
-        assert_eq!(fallback_chain("SF Mono", &with_hack), ["Hack", "Menlo"]);
+        let chain = fallback_chain("SF Mono", &with_hack);
+        assert_eq!(chain[..2], ["Hack", "Menlo"]);
 
         // "Hack Nerd Font" is a different family — the bundled face still lands.
         assert_eq!(
-            fallback_chain("Hack Nerd Font", &[]),
-            ["Hack"],
+            fallback_chain("Hack Nerd Font", &[]).last().unwrap(),
+            "Hack",
             "a Hack-prefixed family name must not suppress the bundled anchor"
         );
+    }
+
+    /// Hack has no ideographs, so a chain naming only faces this OS lacks sends
+    /// every CJK glyph into the platform cascade — where a 1.0em face gets
+    /// left-aligned inside `element.rs`'s 1.2041em two-column slot. The stock
+    /// names have to be in the chain even for a config written before the fix.
+    #[test]
+    fn fallback_chain_appends_platform_stock_faces() {
+        let stock = crate::core::config::platform_last_resort_fallbacks();
+        assert!(!stock.is_empty(), "every platform needs a CJK last resort");
+
+        // The pre-fix default: macOS-only names, nothing Windows/Linux can match.
+        let legacy = vec![
+            "Menlo".to_string(),
+            "Hasklug Nerd Font Mono".to_string(),
+            "Maple Mono NF CN".to_string(),
+            "Apple Color Emoji".to_string(),
+        ];
+        let chain = fallback_chain("Hack", &legacy);
+        for name in stock {
+            assert!(
+                chain.iter().any(|f| f == name),
+                "{name} missing from repaired chain {chain:?}"
+            );
+        }
+
+        // The user's own order is never displaced — stock faces land behind it.
+        assert_eq!(chain[..legacy.len()], legacy[..]);
+
+        // Already-listed stock faces aren't duplicated.
+        let explicit = vec![stock[0].to_string()];
+        let chain = fallback_chain("Hack", &explicit);
+        assert_eq!(
+            chain.iter().filter(|f| *f == stock[0]).count(),
+            1,
+            "stock face duplicated in {chain:?}"
+        );
+
+        // A stock face chosen as the *primary* isn't re-added as its own fallback.
+        assert!(!fallback_chain(stock[0], &[]).iter().any(|f| f == stock[0]));
     }
 
     /// The wheel reaches the app only through the modes it negotiated: mouse
@@ -6742,6 +6857,60 @@ mod gpui_tests {
             TerminalView::with_terminal(terminal, 1, window, cx)
         });
         (window, daemon_side)
+    }
+
+    /// A hover cell remembered while the pane was tall names a row the grid no
+    /// longer has once the pane shrinks (a vertical split, a smaller window).
+    /// Resolving it must decline rather than index the grid — this path runs
+    /// from `ModifiersChanged` (the ⌘ of the very ⌘⇧D that split the pane), an
+    /// `extern "C"` callback where the panic can't unwind and aborts the app.
+    #[gpui::test]
+    fn a_stale_hover_row_does_not_index_the_shrunken_grid(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                // Hover the last row of the 24-row grid, then shrink to 8 rows.
+                view.hover_link_at(0, 23, true, cx);
+                view.terminal.resize(TermSize::new(80, 8), 8, 17);
+                // `set_grid_size` drops the stale cell in the real app; pin it
+                // here so the guard inside the lookup is what's under test.
+                view.last_hover_cell = Some((0, 23));
+                assert!(
+                    !view.refresh_link_hover(true, cx),
+                    "a row outside the grid can't hold a link"
+                );
+            })
+            .unwrap();
+    }
+
+    /// The other half of the fix: the pane that shrank forgets the hover it was
+    /// holding, rather than carrying a cell (and the underline it resolved) that
+    /// now names different text.
+    #[gpui::test]
+    fn a_resize_forgets_the_hovered_cell(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                // Pin a known geometry first — what the test window measured for
+                // itself is the element's business, and this is about the
+                // transition. Then hover the last row of those 24.
+                view.set_grid_size(80, 24, px(8.), px(17.));
+                view.hover_link_at(0, 23, true, cx);
+                assert_eq!(view.last_hover_cell, Some((0, 23)));
+                view.hovered_link = Some(HoveredLink {
+                    line: 23,
+                    start: 0,
+                    end: 3,
+                });
+                // The same geometry again changes nothing...
+                view.set_grid_size(80, 24, px(8.), px(17.));
+                assert_eq!(view.last_hover_cell, Some((0, 23)));
+                // ...but a split (or a window drag) that shrinks the pane does.
+                view.set_grid_size(80, 8, px(8.), px(17.));
+                assert!(view.last_hover_cell.is_none(), "the cell is stale");
+                assert!(view.hovered_link.is_none(), "so is the link it resolved");
+            })
+            .unwrap();
     }
 
     #[gpui::test]

@@ -15,6 +15,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (cleared the moment you activate the window), amber when an agent needs
   your input. Settings → Window grows a "Taskbar status dot" toggle
   (`taskbar_status_icon`, on by default). (#199)
+- **The window's leading corner carries the app's mark off macOS** — macOS fills
+  the top-left with the traffic lights; on Windows and Linux that corner was
+  empty, with everything the caption row holds (the rail's "+" and collapse, the
+  corner chrome, the window controls) pushed to a right edge. The "duo" mark now
+  heads the tab rail on its content inset, the line the search box and every row
+  label below it start on, and follows the rail's controls into the title strip
+  when the sidebar is collapsed — so the corner never falls back to nothing.
+  Drawn, never clicked: it takes no hover capsule and no hit box, leaving the
+  strip grabbable through it.
+
+### Fixed
+
+- **The editor and diff overlays keep their header on the caption line when the
+  detail panel is open** — off macOS the title bar is hoisted above
+  `[terminal | panel]` so the ─ ▢ ✕ group can reach the window's corner, which
+  left both overlays — anchored to the terminal column — starting 40px down.
+  Their headers are drawn to *be* the title bar while they're up (its height,
+  its insets, a full chrome tile for their one control), and instead landed a
+  row low, level with the panel's tab row. They now hang on the row that owns
+  the bar, inset by the panel's width, so the corner chrome keeps its surface
+  and its clicks.
+- **Those headers became real title bars** — dragging one now moves the window
+  and double-clicking zooms it. Both covered the caption row and neither did
+  either, with the panel open or closed, so opening a file turned the top of the
+  window into a 40px strip that looked exactly like a title bar and answered
+  nothing. Their controls (the ✕, the diff's back-to-all-files chip) are
+  `occlude()`d to keep taking clicks: a drag region on Windows is HTCAPTION, and
+  the OS claims the press before the app hit-tests.
+- **The rail's top zone lines up with the title bar to the pixel** — the bar
+  reserves a hairline inside its own height that the rail's stand-in row didn't,
+  so everything in that row sat half a pixel low. Invisible on the line-art
+  tiles; not on the mark, which visibly hopped as collapsing the rail handed it
+  over to the bar.
+- **CJK and emoji stop falling through to the OS on Windows and Linux** — the
+  default `font_fallbacks` named only faces that ship with macOS (Menlo, Apple
+  Color Emoji), so off macOS the entire chain matched nothing and every
+  ideograph and pictograph was resolved by the platform's own cascade instead.
+  The bundled Hack primary carries no CJK at all, so on Windows this was every
+  Chinese character in every pane. Defaults are now chosen per platform —
+  PingFang SC / Apple Color Emoji on macOS, Microsoft YaHei / Segoe UI Emoji on
+  Windows, Noto on Linux — and those stock names are appended to a
+  hand-written list as well, so a `config.json` that predates this change (or
+  was copied from another machine) is repaired at use time without being
+  rewritten. Maple Mono NF CN stays first on every platform: its 1.2em CJK
+  advance is the only exact fit for the two-column slot Hack's 0.60205em cell
+  produces, so a 1.0em stock face is left-aligned there with the remaining
+  ~0.2em showing as a gap on the right of each character.
 
 ## [26.7.4] - 2026-07-26
 

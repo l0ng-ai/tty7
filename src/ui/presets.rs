@@ -1,7 +1,7 @@
 //! The theme system: the serializable [`Theme`] seed model, the derived
-//! shell-chrome [`Neutrals`], the [`Themes`] registry, and the loaders that turn
-//! built-in tables, user YAML files, and imported iTerm2 schemes into concrete
-//! themes.
+//! shell-chrome [`Neutrals`], the interaction-state [`Surface`] ladders, the
+//! [`Themes`] registry, and the loaders that turn built-in tables, user YAML
+//! files, and imported iTerm2 schemes into concrete themes.
 //!
 //! A theme is a **minimal seed** — a background (solid or gradient), a
 //! foreground, one accent, an optional cursor/selection, and the ANSI-16
@@ -15,6 +15,14 @@
 //! in an iTerm2 `*.itermcolors` scheme, which the loader imports on the fly. A
 //! theme's light/dark brightness is *inferred* from its background luminance —
 //! there is no `dark` field to set.
+//!
+//! # Interaction state
+//!
+//! Resting / hover / selected / pressed are a **first-class part of the theme**,
+//! not something each widget re-derives. [`Theme::surface`] returns the state
+//! ladder for whatever surface a widget paints on, and every rung is derived to
+//! hit a *contrast ratio* against that surface rather than a fixed blend ratio —
+//! see [`state`] for why that distinction is the whole point.
 
 use std::path::PathBuf;
 
@@ -87,6 +95,10 @@ pub struct Theme {
 
 /// The shell-chrome palette derived from a theme's seed. Consumed by
 /// `apply_theme` to paint gpui-component's `Theme`.
+///
+/// These are the theme's *static* colors — the ones that mean the same thing
+/// wherever they appear. Anything that varies with interaction state lives in a
+/// [`Surface`] instead.
 #[derive(Debug, Clone)]
 pub struct Neutrals {
     pub background: u32,
@@ -99,11 +111,147 @@ pub struct Neutrals {
     pub caret: u32,
     pub selection: u32,
     pub sidebar: u32,
-    pub sidebar_sel: u32,
     pub sidebar_fg: u32,
-    pub list_active: u32,
-    pub list_hover: u32,
+    /// The seed accent, nudged until it can carry ink — see [`legible_accent`].
+    pub accent: u32,
 }
+
+/// One semantic colour in the three shapes the UI actually needs it in.
+///
+/// Splitting them is not ceremony: a red that is legible as *text* on the
+/// background is a different red from one that works as a filled button, and the
+/// text on that button is a third. Collapsing them is how a danger button ends up
+/// with unreadable text, or a warning label ends up below AA.
+#[derive(Debug, Clone, Copy)]
+pub struct Semantic {
+    /// Text (or a small solid mark) on the window background. WCAG AA, 4.5:1.
+    pub ink: u32,
+    /// A filled chip or button. The non-text floor, 3:1.
+    pub fill: u32,
+    /// Text on top of `fill`.
+    pub on_fill: u32,
+}
+
+/// The status palette, derived from the theme's **own ANSI-16** rather than from
+/// a fixed set of brand colours.
+///
+/// Every theme already ships a red, green, yellow and cyan — they are what the
+/// terminal in the same window paints with. Until this existed, gpui-component's
+/// stock Tailwind values (`red-400`, `yellow-400`, `green-400`) were used
+/// instead, which meant two unrelated reds on screen at once — `#ff5555` in the
+/// terminal and `#f87171` on the delete button, on Dracula — and, on the light
+/// themes, a danger colour at 2.45:1 that cleared no contrast floor at all.
+///
+/// Each is conditioned by [`legible_ink`], so a seed too pale or too dark for its
+/// role is deepened along its own hue rather than swapped for something foreign.
+#[derive(Debug, Clone)]
+pub struct Semantics {
+    pub danger: Semantic,
+    pub warning: Semantic,
+    pub success: Semantic,
+    pub info: Semantic,
+    /// Links. Distinct from `info` only in intent, but it is the field
+    /// gpui-component's markdown renderer reads, and left unset it resolves to
+    /// the body text colour — a link that looks exactly like prose.
+    pub link: Semantic,
+}
+
+/// The contrast targets that define how loud each interaction state reads.
+///
+/// **These four numbers are the app's only knobs for state prominence.** They
+/// exist because the alternative — a fixed `mix(bg, fg, t)` per state, which is
+/// what this file used to do — makes the *perceived* step depend on the theme.
+/// The old ladder (`hover` 0.09, `sidebar_sel` 0.12, `list_active` 0.17) put
+/// selected-vs-resting anywhere from 1.20:1 (Catppuccin Latte) to 1.47:1
+/// (Dracula), and the segmented control — which read gpui-component's stock
+/// `input` grey instead of the ladder at all — landed at **1.03:1 on Dracula**,
+/// i.e. invisible. See issue #197.
+///
+/// A ratio target removes the theme from the equation: every theme lands on the
+/// same perceived step, so tuning taste here retunes the whole app at once and
+/// no theme can be an outlier.
+///
+/// `SELECTED` is 1.70 because that is where the already-signed-off Dracula
+/// highlight sits (`mix(bg, fg, 0.17)` ≈ `#4b4d56`, 1.72:1) — the value the
+/// palette and menu look was tuned against. Anchoring *to* it keeps that look
+/// and pulls the light themes, which were as low as 1.20:1, up to match.
+pub mod state {
+    /// Pointer feedback. Deliberately a whisper: it answers the mouse without
+    /// competing with the selection it may be sitting next to.
+    pub const HOVER: f32 = 1.18;
+    /// The resting selection. Never the *only* signal — see [`super::Surface`].
+    pub const SELECTED: f32 = 1.70;
+    /// Held down. One step past selected so pressing a selected item still reads.
+    pub const PRESSED: f32 = 2.10;
+    /// Resting label text. 4.6:1 keeps a de-emphasised label at WCAG AA on every
+    /// theme; the fixed `mix(fg, bg, 0.42)` it replaces drifted with the seed.
+    pub const TEXT_RESTING: f32 = 4.6;
+}
+
+/// The interaction-state ladder for one painting surface: the fills for each
+/// state plus the paired label colors.
+///
+/// # Both channels, always
+///
+/// A fill alone does not communicate selection. The app learned this the hard
+/// way in three separate places — `tab_strip`'s active chip, `tab_strip`'s
+/// chrome tiles and the settings sidebar each grew a hand-written
+/// fill-plus-text-color pair, while every site that *hadn't* been hand-fixed
+/// (segmented controls, the SSH profile list) shipped a fill and nothing else
+/// and could not be read. So the text colors ride along in this struct: take a
+/// `Surface`, take both channels.
+///
+/// * **Fill** answers *which one* — it locates the selection in the row.
+/// * **Text** (`text_selected` + `FontWeight::MEDIUM` vs `text_resting`)
+///   answers *that this is it* — it survives a low-contrast fill, an oddly
+///   seeded imported theme, and a color-blind reader.
+///
+/// A keyboard-driven single cursor (the command palette, a context menu) can get
+/// away with the fill alone because the eye tracks the one thing that moves.
+/// A *static* choice among visible siblings cannot.
+#[derive(Debug, Clone, Copy)]
+pub struct Surface {
+    /// The surface itself — what a resting item paints on (i.e. no fill).
+    pub base: u32,
+    pub hover: u32,
+    pub selected: u32,
+    pub pressed: u32,
+    /// Label color for a resting/unselected item on this surface.
+    pub text_resting: u32,
+    /// Label color for the selected item. Pair it with `FontWeight::MEDIUM`.
+    pub text_selected: u32,
+}
+
+/// Every surface the shell actually paints interactive rows on, published as a
+/// GPUI global by `apply_theme` so a render pass can read the ladder without
+/// re-resolving (and cloning) the theme registry every frame.
+///
+/// Which surface a widget picks matters: a menu row sits on `popover`, not on
+/// the window background, and a ladder anchored to the wrong surface is exactly
+/// how the context-menu highlight ended up at 1.20:1 while claiming to be the
+/// same 0.17 mix that reads fine on the window.
+#[derive(Debug, Clone)]
+pub struct Surfaces {
+    /// The window background — settings sheets, panels, the terminal ground.
+    pub window: Surface,
+    /// The sunk sidebar rail.
+    pub sidebar: Surface,
+    /// Elevated surfaces: menus, dropdowns, the command palette.
+    pub popover: Surface,
+}
+
+impl Global for Surfaces {}
+
+/// The active theme's contrast-conditioned accent (see [`legible_accent`]),
+/// published so a render pass can reach it without cloning the theme registry.
+///
+/// Deliberately its own global rather than a field on [`Surfaces`]: the accent is
+/// not a surface, and it has exactly one job — ink that must be *noticed* (the
+/// caret, the focus ring, a switch's checked track). Every neutral fill in the
+/// app comes from a `Surface`; this is the one thing that doesn't.
+pub struct ActiveAccent(pub u32);
+
+impl Global for ActiveAccent {}
 
 impl Theme {
     /// The representative solid background color.
@@ -125,15 +273,87 @@ impl Theme {
             border: mix(bg, fg, 0.16),
             secondary: mix(bg, fg, 0.09),
             muted: mix(bg, fg, 0.06),
-            muted_foreground: mix(fg, bg, 0.42),
+            muted_foreground: dim(fg, bg, state::TEXT_RESTING),
             popover: mix(bg, fg, 0.05),
             caret: self.caret.unwrap_or(self.accent),
             selection: self.selection.unwrap_or_else(|| mix(bg, fg, 0.20)),
             sidebar: mix(bg, fg, 0.03),
-            sidebar_sel: mix(bg, fg, 0.12),
             sidebar_fg: mix(fg, bg, 0.28),
-            list_active: mix(bg, fg, 0.17),
-            list_hover: mix(bg, fg, 0.09),
+            accent: legible_accent(bg, self.accent),
+        }
+    }
+
+    /// The interaction-state ladder for content painted on `base`.
+    ///
+    /// Every rung blends `base` toward the (legibility-guaranteed) foreground
+    /// until it clears its [`state`] contrast target *against `base`* — so the
+    /// direction is "toward the text" by construction on light and dark themes
+    /// alike. The old fixed-mix ladder had no such guarantee: because the
+    /// segmented control's fill came from a stock grey rather than the theme,
+    /// selecting a segment made it *darker* than its siblings on light themes
+    /// and *lighter* on dark ones, by accident of where `#2f2f2f` happened to
+    /// fall.
+    pub fn surface(&self, base: u32) -> Surface {
+        let bg = self.background_color();
+        let fg = legible_foreground(bg, self.foreground);
+        let selected = raise(base, fg, state::SELECTED);
+        Surface {
+            base,
+            hover: raise(base, fg, state::HOVER),
+            selected,
+            pressed: raise(base, fg, state::PRESSED),
+            // Dimmed from the foreground until it is merely AA-readable on this
+            // surface, rather than a fixed blend — a resting label must stay
+            // legible on an imported theme nobody vetted, too.
+            text_resting: dim(fg, base, state::TEXT_RESTING),
+            // Measured against the *selected fill*, not the surface: that fill is
+            // the ground this particular label actually sits on. See `ink_on`.
+            text_selected: ink_on(selected, fg, state::TEXT_RESTING),
+        }
+    }
+
+    /// The status palette, built from this theme's own ANSI red/green/yellow/cyan.
+    ///
+    /// The normal (not bright) ANSI slots are the seeds: they are what the
+    /// terminal in the same window paints, so a danger marker and an error line
+    /// of shell output finally wear the same red. Where a slot is too pale or too
+    /// dark for a role, [`legible_ink`] deepens it along its own hue rather than
+    /// reaching for a colour the theme never declared.
+    pub fn semantics(&self) -> Semantics {
+        let bg = self.background_color();
+        let fg = legible_foreground(bg, self.foreground);
+        let ansi = |i: usize| -> u32 {
+            let (r, g, b) = self.ansi16[i];
+            (r as u32) << 16 | (g as u32) << 8 | b as u32
+        };
+        let build = |seed: u32| {
+            let fill = legible_ink(bg, seed, ACCENT_FLOOR);
+            Semantic {
+                ink: legible_ink(bg, seed, TEXT_FLOOR),
+                fill,
+                on_fill: ink_on(fill, fg, TEXT_FLOOR),
+            }
+        };
+        Semantics {
+            danger: build(ansi(1)),
+            success: build(ansi(2)),
+            warning: build(ansi(3)),
+            info: build(ansi(6)),
+            link: build(ansi(6)),
+        }
+    }
+
+    /// The ladders for all three surfaces the shell paints rows on.
+    pub fn surfaces(&self) -> Surfaces {
+        let m = self.neutrals();
+        let mut sidebar = self.surface(m.sidebar);
+        // The rail's resting label is a tuned value (a lighter 0.28 dim, so rows
+        // in a sunk column don't read as disabled), not the generic AA floor.
+        sidebar.text_resting = m.sidebar_fg;
+        Surfaces {
+            window: self.surface(m.background),
+            sidebar,
+            popover: self.surface(m.popover),
         }
     }
 
@@ -179,6 +399,109 @@ impl Theme {
     }
 }
 
+/// The shared bisection behind [`raise`] and [`dim`]: find the blend of `from`
+/// toward `toward` whose contrast against `from`-or-`toward` (whichever is the
+/// surface, passed as `against`) sits at `target`.
+///
+/// `against` must **not** sit strictly between the endpoints in luminance, or
+/// the ratio along the blend is V-shaped rather than monotone and a bisection
+/// would return an arbitrary one of the two answers. Every caller satisfies
+/// that: [`raise`] and [`dim`] pass one of the endpoints itself, and
+/// [`legible_accent`] passes the background, which an accent only reaches this
+/// code by being *close* to — while `fg` is guaranteed 4.5:1 away from it.
+fn bisect_contrast(from: u32, toward: u32, against: u32, target: f32) -> u32 {
+    // 12 halvings resolve t to ~0.0002 — far finer than an 8-bit channel step,
+    // so the result is exact in the only units that reach the screen.
+    const STEPS: u32 = 12;
+    let rising = contrast(toward, against) > contrast(from, against);
+    // Unreachable target (e.g. a 4.6:1 label floor on a surface whose own
+    // foreground only manages 4.5): clamp to the most extreme blend rather than
+    // returning something arbitrary from the middle of the range.
+    if rising && contrast(toward, against) <= target {
+        return toward;
+    }
+    if !rising && contrast(toward, against) >= target {
+        return toward;
+    }
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..STEPS {
+        let m = 0.5 * (lo + hi);
+        let reached = if rising {
+            contrast(mix(from, toward, m), against) >= target
+        } else {
+            contrast(mix(from, toward, m), against) <= target
+        };
+        if reached { hi = m } else { lo = m }
+    }
+    mix(from, toward, hi)
+}
+
+/// Lift a fill off `base` toward `toward` (always the foreground) until it
+/// clears `target` contrast against `base`.
+///
+/// This is the primitive that replaced fixed `mix(bg, fg, t)` state colors: the
+/// caller names the perceived step it wants and gets it on every theme, instead
+/// of naming a blend and getting whatever step that theme's seed implies.
+fn raise(base: u32, toward: u32, target: f32) -> u32 {
+    bisect_contrast(base, toward, base, target)
+}
+
+/// Dim `ink` toward `surface` until it sits *at* `target` contrast against
+/// `surface` — a de-emphasised label that is still guaranteed readable, rather
+/// than a fixed blend whose ratio drifts with the seed.
+fn dim(ink: u32, surface: u32, target: f32) -> u32 {
+    bisect_contrast(ink, surface, surface, target)
+}
+
+/// The label color for text sitting on `fill`: the theme's foreground when it
+/// still clears `target` there, otherwise that foreground pushed *past* itself
+/// (toward white on a dark fill, black on a light one) until it does.
+///
+/// This exists because the fill ladder and the text channel pull against each
+/// other. Raising a fill toward the foreground necessarily moves the ground
+/// closer to the label it carries, and on a theme whose foreground isn't an
+/// extreme — Catppuccin Latte's `#4c4f69` is only 7.4:1 on its own background —
+/// a 1.70:1 selected fill drags the selected label down to 4.14:1, *below* the
+/// resting labels around it. A selection whose text is harder to read than its
+/// neighbours' is not a selection.
+///
+/// Pushing along the fg→extreme axis rather than snapping to pure black/white
+/// keeps the theme's ink hue; Latte's selected label becomes a deeper version of
+/// the same blue-grey, not a foreign pure black.
+///
+/// Three tiers, in order of how much of the theme they preserve: the foreground
+/// itself, then the foreground deepened along its own side, then — only when that
+/// side simply cannot reach the target — the opposite extreme. That last tier is
+/// not hypothetical: the Light theme's danger fill is `#d1242f`, a mid-dark red
+/// against which even *pure black* tops out at 3.96:1. White text on a dark red
+/// button is the right answer there, and it is only reachable by looking the
+/// other way.
+fn ink_on(fill: u32, fg: u32, target: f32) -> u32 {
+    if contrast(fg, fill) >= target {
+        return fg;
+    }
+    // Push *away* from the fill along the axis the foreground already sits on —
+    // darker ink gets darker, lighter ink lighter. Choosing the extreme by the
+    // fill's own brightness instead is wrong at the midpoint: Latte's `#b8bac6`
+    // fill reads as "dark" to a `< 0.5` luminance test, which sends its already
+    // dark ink toward white and *lowers* the contrast it was called to raise.
+    let near = if relative_luminance(fg) < relative_luminance(fill) {
+        0x000000
+    } else {
+        0xffffff
+    };
+    let deepened = bisect_contrast(fg, near, fill, target);
+    if contrast(deepened, fill) >= target {
+        return deepened;
+    }
+    // The foreground's own side is exhausted. Take whichever extreme reads best.
+    if contrast(fill, 0xffffff) >= contrast(fill, 0x000000) {
+        0xffffff
+    } else {
+        0x000000
+    }
+}
+
 /// Blend `a` toward `b` by `t` (0.0 = all `a`, 1.0 = all `b`), per channel.
 pub(crate) fn mix(a: u32, b: u32, t: f32) -> u32 {
     let (ar, ag, ab) = (a >> 16 & 0xff, a >> 8 & 0xff, a & 0xff);
@@ -211,6 +534,15 @@ fn relative_luminance(c: u32) -> f32 {
     0.2126 * chan(c >> 16 & 0xff) + 0.7152 * chan(c >> 8 & 0xff) + 0.0722 * chan(c & 0xff)
 }
 
+/// The largest per-channel difference between two colors (0…255). A crude but
+/// hue-aware "are these the same colour" check — contrast alone can't tell red
+/// from green, since they can share a luminance.
+#[cfg(test)]
+fn channel_distance(a: u32, b: u32) -> u32 {
+    let d = |sh: u32| (a >> sh & 0xff).abs_diff(b >> sh & 0xff);
+    d(16).max(d(8)).max(d(0))
+}
+
 /// WCAG contrast ratio between two colors (1.0 … 21.0).
 fn contrast(a: u32, b: u32) -> f32 {
     let (l1, l2) = (relative_luminance(a), relative_luminance(b));
@@ -221,6 +553,63 @@ fn contrast(a: u32, b: u32) -> f32 {
 /// A theme is dark when its background is closer to black than white.
 fn is_dark(bg: u32) -> bool {
     relative_luminance(bg) < 0.5
+}
+
+/// Whether `a` is the lighter of two colors. Lets callers pick "the light end of
+/// this theme's axis" without caring which of background/foreground that is —
+/// e.g. a switch knob, which is near-white in both macOS appearances.
+pub(crate) fn is_lighter(a: u32, b: u32) -> bool {
+    relative_luminance(a) > relative_luminance(b)
+}
+
+/// The minimum contrast an accent must clear against the background before it is
+/// allowed to carry ink (a caret, a link, a focus ring). 3:1 is the WCAG
+/// large-text / non-text floor.
+const ACCENT_FLOOR: f32 = 3.0;
+
+/// The WCAG AA text floor. What a coloured *label* must clear on its ground.
+const TEXT_FLOOR: f32 = 4.5;
+
+/// Make a hued seed usable at `floor` against `bg`: keep it when it already
+/// clears, otherwise drive it *away from the background* — toward white on a dark
+/// theme, black on a light one — until it does.
+///
+/// This is why a seed colour can never be used raw. The bundled Light theme's
+/// accent `#00c2ff` manages 2.07:1 on white and the built-ins' accents span
+/// 2.07:1 to 8.43:1; the ANSI reds behind [`Semantics`] are just as uneven. Any
+/// unconditional use of one is a coin flip on some theme.
+///
+/// It drives toward black/white rather than toward the theme's foreground because
+/// the foreground is usually *tinted*, and blending into a tint destroys hue at
+/// exactly the moment hue matters most — when a seed is far from the floor and so
+/// has to travel far. On Rosé Pine Dawn, whose foreground is the purple-grey
+/// `#575279`, routing through it turned the ANSI red into `#9a5e7a` and the ANSI
+/// yellow into `#876a62`: two muddy mauves a user could not tell apart, which is
+/// no use at all for "did that fail or is it just a warning". Black and white are
+/// neutral, so the hue survives the trip.
+fn legible_ink(bg: u32, seed: u32, floor: f32) -> u32 {
+    if contrast(seed, bg) >= floor {
+        return seed;
+    }
+    // Whichever extreme the background is *further* from, exactly as
+    // [`legible_foreground`] picks it — not `is_dark`, whose 0.5 luminance
+    // threshold is the wrong question here. The two answers only diverge on a
+    // midtone background (luminance 0.18…0.5), where `is_dark` still says "dark"
+    // but black outreaches white: an imported scheme on a mid-grey ground would
+    // have been driven to pure white and clamped there *below* the floor, losing
+    // the hue and failing the job in one go. Every built-in is far enough from
+    // the midpoint that this picks what `is_dark` did.
+    let away = if contrast(0xffffff, bg) >= contrast(0x000000, bg) {
+        0xffffff
+    } else {
+        0x000000
+    };
+    bisect_contrast(seed, away, bg, floor)
+}
+
+/// The accent conditioned for ink (caret, focus ring, a switch's checked track).
+fn legible_accent(bg: u32, accent: u32) -> u32 {
+    legible_ink(bg, accent, ACCENT_FLOOR)
 }
 
 /// Guarantee a legible default text color: keep the authored `fg` if it clears
@@ -976,6 +1365,336 @@ mod tests {
                 to_fg > to_bg,
                 "{}: selection surface sits closer to the foreground",
                 t.id
+            );
+        }
+    }
+
+    /// Every surface's state ladder must be *strictly ordered and separable* on
+    /// every built-in — this is the regression guard for issue #197, where the
+    /// segmented control's selected fill sat 1.03:1 from its unselected siblings
+    /// on Dracula (and no better than 1.20:1 on any other bundled theme).
+    ///
+    /// The assertions are deliberately below the [`state`] targets: they pin the
+    /// *property* (a selection is distinguishable from resting and from hover on
+    /// every surface of every theme), not the current taste, so retuning the
+    /// constants doesn't force a test edit but abandoning the ladder does.
+    #[test]
+    fn state_ladder_is_separable_on_every_surface() {
+        for t in builtins() {
+            let s = t.surfaces();
+            for (name, sf) in [
+                ("window", s.window),
+                ("sidebar", s.sidebar),
+                ("popover", s.popover),
+            ] {
+                let sel_base = contrast(sf.selected, sf.base);
+                let sel_hover = contrast(sf.selected, sf.hover);
+                let hover_base = contrast(sf.hover, sf.base);
+                assert!(
+                    sel_base >= 1.6,
+                    "{}/{name}: selected is only {sel_base:.2}:1 from the surface",
+                    t.id
+                );
+                assert!(
+                    sel_hover >= 1.3,
+                    "{}/{name}: selected is only {sel_hover:.2}:1 from hover",
+                    t.id
+                );
+                assert!(
+                    hover_base >= 1.1,
+                    "{}/{name}: hover is only {hover_base:.2}:1 from the surface",
+                    t.id
+                );
+                assert!(
+                    contrast(sf.pressed, sf.base) > sel_base,
+                    "{}/{name}: pressed must read past selected",
+                    t.id
+                );
+            }
+        }
+    }
+
+    /// The whole point of a ratio target over a blend ratio: the *perceived* step
+    /// is the same on every theme. A fixed `mix` put selected-vs-resting between
+    /// 1.20:1 and 1.47:1 depending on the seed; these must all agree.
+    #[test]
+    fn state_ladder_is_theme_independent() {
+        let ratios: Vec<f32> = builtins()
+            .iter()
+            .map(|t| {
+                let w = t.surfaces().window;
+                contrast(w.selected, w.base)
+            })
+            .collect();
+        let (lo, hi) = ratios
+            .iter()
+            .fold((f32::MAX, 0.0f32), |(l, h), r| (l.min(*r), h.max(*r)));
+        assert!(
+            hi - lo < 0.05,
+            "selected step drifts across themes: {lo:.2}:1 … {hi:.2}:1"
+        );
+        assert!(
+            (lo - state::SELECTED).abs() < 0.05,
+            "selected step {lo:.2}:1 missed its {:.2}:1 target",
+            state::SELECTED
+        );
+    }
+
+    /// Anchoring `SELECTED` to 1.70 must leave the signed-off Dracula highlight
+    /// where it was — the value the palette/menu look was tuned against. This is
+    /// what makes the fix a no-op on the theme it was designed on and a lift for
+    /// everything else; if a retune moves Dracula, that was a taste decision and
+    /// wants to be a deliberate one.
+    #[test]
+    fn dracula_selection_matches_the_signed_off_grey() {
+        let dracula = builtins().into_iter().find(|t| t.id == "dracula").unwrap();
+        let bg = dracula.background_color();
+        let legacy = mix(bg, dracula.foreground, 0.17); // the old `list_active`
+        let now = dracula.surfaces().window.selected;
+        assert!(
+            contrast(now, legacy) < 1.05,
+            "Dracula's selection moved: {now:#08x} vs the tuned {legacy:#08x}"
+        );
+    }
+
+    /// A resting label must clear WCAG AA on the surface it sits on, for every
+    /// theme *and* every surface — a menu row's label sits on `popover`, not on
+    /// the window background, and the fixed dim it replaced was anchored to the
+    /// latter wherever it was used.
+    #[test]
+    fn resting_labels_stay_readable() {
+        for t in builtins() {
+            let s = t.surfaces();
+            for (name, sf) in [("window", s.window), ("popover", s.popover)] {
+                let ratio = contrast(sf.text_resting, sf.base);
+                assert!(
+                    ratio >= 4.5,
+                    "{}/{name}: resting label only {ratio:.2}:1",
+                    t.id
+                );
+            }
+        }
+    }
+
+    /// The text channel's two invariants, on every surface of every theme.
+    ///
+    /// 1. A selected label is readable **on its own fill** — never merely on the
+    ///    surface it would have sat on unselected. Getting this wrong is subtle:
+    ///    raising the fill toward the foreground eats the label's contrast, and
+    ///    Catppuccin Latte's selected label landed at 4.14:1 (below the 4.57:1 of
+    ///    the *resting* labels beside it) before `ink_on` existed.
+    /// 2. The two label colors differ enough to read as a step, so the channel
+    ///    still says something when the fill is washed out — a translucent
+    ///    window, a blurred background, an imported seed nobody vetted.
+    #[test]
+    fn label_channel_is_readable_and_stepped() {
+        for t in builtins() {
+            let s = t.surfaces();
+            for (name, sf) in [
+                ("window", s.window),
+                ("sidebar", s.sidebar),
+                ("popover", s.popover),
+            ] {
+                let on_fill = contrast(sf.text_selected, sf.selected);
+                assert!(
+                    on_fill >= 4.5,
+                    "{}/{name}: selected label only {on_fill:.2}:1 on its own fill",
+                    t.id
+                );
+                let step = contrast(sf.text_selected, sf.text_resting);
+                assert!(
+                    step >= 1.35,
+                    "{}/{name}: label step is only {step:.2}:1 — the channel says nothing",
+                    t.id
+                );
+            }
+        }
+    }
+
+    /// A switch's two tracks must both be distinguishable *from each other* and
+    /// from the surface, and the knob — one colour serving both states — has to
+    /// stay visible on each.
+    ///
+    /// The toggles shipped inverted on every dark theme (stock near-black knob on
+    /// a near-white checked track, and invisible on the unchecked one) because
+    /// `switch`, `switch_thumb` and `tokens.background` were all unset. This pins
+    /// the arrangement that replaced it: knob at the light end of the theme's
+    /// axis, unchecked track on the ladder, checked track on the accent.
+    ///
+    /// The knob-on-checked-track floor is 1.25, not 3 — a white knob on a
+    /// coloured track is separated by the component's `shadow_md`, exactly as it
+    /// is in macOS, and demanding raw contrast there would force every accent to
+    /// go dark.
+    #[test]
+    fn switch_tracks_and_knob_stay_legible() {
+        for t in builtins() {
+            let m = t.neutrals();
+            let unchecked = t.surfaces().window.selected;
+            let checked = m.accent;
+            let knob = if is_lighter(m.background, m.foreground) {
+                m.background
+            } else {
+                m.foreground
+            };
+            assert!(
+                contrast(knob, unchecked) >= 1.25,
+                "{}: knob {knob:#08x} lost on the unchecked track {unchecked:#08x}",
+                t.id
+            );
+            assert!(
+                contrast(knob, checked) >= 1.25,
+                "{}: knob {knob:#08x} lost on the checked track {checked:#08x}",
+                t.id
+            );
+            // The two states must not be near-identical greys, or the switch says
+            // nothing but the knob's position.
+            assert!(
+                contrast(checked, unchecked) >= 1.3,
+                "{}: checked and unchecked tracks are {:.2}:1 apart",
+                t.id,
+                contrast(checked, unchecked)
+            );
+        }
+    }
+
+    /// Status colours must clear their floors on every theme, and — the point of
+    /// deriving them from the theme's own ANSI-16 — must stay *recognisable* as
+    /// red / green / yellow rather than converging on the foreground.
+    ///
+    /// Before this, `danger` was gpui-component's stock `#f87171` on every theme:
+    /// 2.45:1 on Catppuccin Latte (under even the 3:1 non-text floor) and a
+    /// different red from the `#ff5555` the terminal beside it paints.
+    #[test]
+    fn semantic_colors_clear_their_floors() {
+        for t in builtins() {
+            let bg = t.background_color();
+            let s = t.semantics();
+            for (name, c) in [
+                ("danger", s.danger),
+                ("warning", s.warning),
+                ("success", s.success),
+                ("info", s.info),
+                ("link", s.link),
+            ] {
+                assert!(
+                    contrast(c.ink, bg) >= TEXT_FLOOR - 0.01,
+                    "{}/{name}: ink {:#08x} only {:.2}:1 on the background",
+                    t.id,
+                    c.ink,
+                    contrast(c.ink, bg)
+                );
+                assert!(
+                    contrast(c.fill, bg) >= ACCENT_FLOOR - 0.01,
+                    "{}/{name}: fill {:#08x} only {:.2}:1 on the background",
+                    t.id,
+                    c.fill,
+                    contrast(c.fill, bg)
+                );
+                assert!(
+                    contrast(c.on_fill, c.fill) >= TEXT_FLOOR - 0.01,
+                    "{}/{name}: text on its own fill is only {:.2}:1",
+                    t.id,
+                    contrast(c.on_fill, c.fill)
+                );
+            }
+            // Conditioning must not wash the hues into each other: a user has to
+            // be able to tell an error from a success without reading the label.
+            for (a, b, pair) in [
+                (s.danger.ink, s.success.ink, "danger/success"),
+                (s.danger.ink, s.warning.ink, "danger/warning"),
+                (s.success.ink, s.warning.ink, "success/warning"),
+            ] {
+                assert!(
+                    channel_distance(a, b) >= 40,
+                    "{}: {pair} collapsed to nearly the same colour ({a:#08x} vs {b:#08x})",
+                    t.id
+                );
+            }
+        }
+    }
+
+    /// Each status colour must stay recognisably its own theme's hue — that is
+    /// the whole reason for sourcing them from ANSI-16 rather than a brand set.
+    /// Where a seed already clears its floor it must pass through untouched.
+    #[test]
+    fn semantic_colors_keep_the_theme_hue() {
+        let dracula = builtins().into_iter().find(|t| t.id == "dracula").unwrap();
+        let ansi_red = {
+            let (r, g, b) = dracula.ansi16[1];
+            (r as u32) << 16 | (g as u32) << 8 | b as u32
+        };
+        assert_eq!(ansi_red, 0xff5555, "Dracula's ANSI red moved");
+        // 4.53:1 on Dracula's background — already over AA, so it is used as-is
+        // and the danger dot matches the terminal's own error output exactly.
+        assert_eq!(dracula.semantics().danger.ink, ansi_red);
+    }
+
+    /// Every theme's accent must be able to carry ink (caret, link, focus ring).
+    /// The bundled Light theme's raw `#00c2ff` manages 2.07:1 on white, which is
+    /// why this conditioning exists rather than using the seed directly.
+    #[test]
+    fn accents_are_conditioned_to_carry_ink() {
+        for t in builtins() {
+            let bg = t.background_color();
+            let a = t.neutrals().accent;
+            let ratio = contrast(a, bg);
+            assert!(
+                ratio >= ACCENT_FLOOR - 0.01,
+                "{}: accent {a:#08x} only {ratio:.2}:1 on the background",
+                t.id
+            );
+        }
+        // ...and a seed that already clears the floor is passed through untouched,
+        // so conditioning never dulls a theme that didn't need it.
+        let rose = builtins()
+            .into_iter()
+            .find(|t| t.id == "rose_pine")
+            .unwrap();
+        assert_eq!(rose.neutrals().accent, rose.accent);
+    }
+
+    /// `raise`/`dim` must land *just* past their targets from either direction,
+    /// and clamp rather than return a mid-range guess when one is unreachable.
+    ///
+    /// "Just past" is one 8-bit channel step, not zero: the tightest grey clearing
+    /// 2.0:1 on black is `#404040` at 2.025:1, because a channel step near there
+    /// moves the ratio by ~0.03. Anything tighter would be asserting sub-pixel
+    /// precision the framebuffer can't hold.
+    #[test]
+    fn contrast_bisection_hits_its_target() {
+        const SLACK: f32 = 0.05;
+        // Reachable, rising: a fill lifted off black.
+        let f = raise(0x000000, 0xffffff, 2.0);
+        assert!((2.0..2.0 + SLACK).contains(&contrast(f, 0x000000)));
+        // Reachable, rising: lifted off white — the direction flips, the API
+        // doesn't (this is what the old fixed-mix ladder got wrong per theme).
+        let f = raise(0xffffff, 0x000000, 2.0);
+        assert!((2.0..2.0 + SLACK).contains(&contrast(f, 0xffffff)));
+        // Reachable, falling: white ink dimmed to just above AA on black.
+        let d = dim(0xffffff, 0x000000, 4.5);
+        assert!((contrast(d, 0x000000) - 4.5).abs() < SLACK);
+        // Unreachable: nothing between these two clears 21:1, so clamp to the
+        // far endpoint instead of bisecting to something arbitrary.
+        assert_eq!(raise(0x000000, 0x808080, 21.0), 0x808080);
+    }
+
+    /// Conditioning has to take the extreme it can actually *reach*, which on a
+    /// midtone ground is not the one `is_dark`'s 0.5 luminance threshold names.
+    /// A mid-grey background is "dark" by that test, yet white tops out at
+    /// 3.95:1 on it while black manages 5.32:1 — so driving toward white would
+    /// clamp at pure white, below the floor and with the hue thrown away, in the
+    /// one case where a status colour most needs both. Reachable only for an
+    /// imported scheme; every built-in sits far enough from the midpoint that
+    /// this picks the same extreme `is_dark` did.
+    #[test]
+    fn semantic_conditioning_survives_a_midtone_background() {
+        let bg = 0x808080;
+        for seed in [0xff5555u32, 0x50fa7b, 0xf1fa8c, 0x8be9fd] {
+            let ink = legible_ink(bg, seed, TEXT_FLOOR);
+            assert!(
+                contrast(ink, bg) >= TEXT_FLOOR - 0.01,
+                "{seed:#08x} conditioned to {ink:#08x}, only {:.2}:1 on a midtone ground",
+                contrast(ink, bg)
             );
         }
     }

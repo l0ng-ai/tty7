@@ -503,6 +503,70 @@ pub struct ShellConfig {
     pub args: Vec<String>,
 }
 
+/// The default fallback chain for the platform we were built for.
+///
+/// Fallbacks are resolved by *family name* against installed fonts, so a list
+/// that reads well on one OS can miss entirely on another: every name in the
+/// original list (Menlo, Apple Color Emoji) shipped with macOS, which left
+/// Windows and Linux with a chain that matched nothing and fell straight
+/// through to the platform's own cascade.
+///
+/// That fall-through is not merely cosmetic. `element.rs` pins each wide cell
+/// to `2 × cell_width`, and with the bundled Hack primary a cell is 0.60205em,
+/// so a two-column slot is 1.2041em. The OS cascade serves a *1.0em* CJK face
+/// (Microsoft YaHei, PingFang, Noto Sans CJK), and `force_width` left-aligns —
+/// the ideograph hugs the left of its slot and dumps the whole 0.2em remainder
+/// on the right. Naming a 1.2em face first (Maple Mono NF CN: 0.6em Latin,
+/// 1.2em CJK — an exact two-cell fit) keeps the ink centered instead.
+///
+/// Maple is referenced by name only, never bundled — it is ~20MB per weight.
+/// Users who lack it land on the stock CJK face below, which still renders;
+/// it just carries the left-hugging tracking described above.
+pub fn default_font_fallbacks() -> Vec<String> {
+    let names: &[&str] = if cfg!(target_os = "macos") {
+        &[
+            "Menlo",
+            "Hasklug Nerd Font Mono",
+            "Maple Mono NF CN",
+            "PingFang SC",
+            "Apple Color Emoji",
+        ]
+    } else if cfg!(target_os = "windows") {
+        &[
+            "Maple Mono NF CN",
+            "Cascadia Mono",
+            "Microsoft YaHei",
+            "Segoe UI Emoji",
+        ]
+    } else {
+        &[
+            "Maple Mono NF CN",
+            "DejaVu Sans Mono",
+            "Noto Sans CJK SC",
+            "Noto Color Emoji",
+        ]
+    };
+    names.iter().map(|n| n.to_string()).collect()
+}
+
+/// Stock faces this platform is expected to ship, appended to whatever the user
+/// configured (see `terminal::view::fallback_chain`).
+///
+/// [`default_font_fallbacks`] only helps a *fresh* config. Anyone who already
+/// has a `config.json` carries the old macOS-only list forever, so the same
+/// repair has to happen at use time. Appending is safe by construction: a
+/// fallback is consulted only once everything ahead of it has missed, so these
+/// can never displace a face the user chose.
+pub fn platform_last_resort_fallbacks() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        &["PingFang SC", "Apple Color Emoji"]
+    } else if cfg!(target_os = "windows") {
+        &["Microsoft YaHei", "Segoe UI Emoji"]
+    } else {
+        &["Noto Sans CJK SC", "Noto Color Emoji"]
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         // These defaults match the values that used to be hardcoded in
@@ -512,14 +576,7 @@ impl Default for Config {
             // main.rs), so this default renders identically everywhere without
             // relying on a system install. Menlo stays as a safety net.
             font_family: "Hack".to_string(),
-            font_fallbacks: vec![
-                "Menlo".to_string(),
-                "Hasklug Nerd Font Mono".to_string(),
-                // CJK 兜底:Hack 不含中文,缺字时退到等宽中文字体。仅按名字
-                // 引用(不打包,该字体每字重 ~20MB),用户未安装则跳到下一项。
-                "Maple Mono NF CN".to_string(),
-                "Apple Color Emoji".to_string(),
-            ],
+            font_fallbacks: default_font_fallbacks(),
             font_family_bold: None,
             font_family_italic: None,
             font_features: None,
@@ -1275,6 +1332,42 @@ mod tests {
             serde_json::from_str(r#"{"keybinding_preset": "tmux", "prefix": "ctrl-a"}"#).unwrap();
         assert_eq!(cfg.keybinding_preset, "tmux");
         assert_eq!(cfg.prefix, "ctrl-a");
+    }
+
+    /// A fresh config must name a CJK face the *host* platform actually ships.
+    /// The pre-fix list was macOS-only, so Windows and Linux wrote a chain that
+    /// matched nothing and left every ideograph to the OS cascade.
+    #[test]
+    fn default_font_fallbacks_are_platform_appropriate() {
+        let defaults = default_font_fallbacks();
+        assert!(!defaults.is_empty());
+
+        for name in platform_last_resort_fallbacks() {
+            assert!(
+                defaults.iter().any(|f| f == name),
+                "default chain {defaults:?} omits stock face {name}"
+            );
+        }
+
+        // Maple Mono NF CN is the only face whose CJK advance (1.2em) is an exact
+        // two-cell fit against the bundled Hack primary, so it must be tried
+        // before the stock face on every platform.
+        let maple = defaults.iter().position(|f| f == "Maple Mono NF CN");
+        let maple = maple.expect("the exact-fit CJK face must stay in the chain");
+        for name in platform_last_resort_fallbacks() {
+            let stock = defaults.iter().position(|f| f == name).unwrap();
+            assert!(maple < stock, "{name} must not preempt Maple Mono NF CN");
+        }
+
+        // macOS-only names must not leak into the other platforms' defaults.
+        if !cfg!(target_os = "macos") {
+            for name in ["Menlo", "Apple Color Emoji"] {
+                assert!(
+                    !defaults.iter().any(|f| f == name),
+                    "{name} ships only with macOS"
+                );
+            }
+        }
     }
 
     #[test]

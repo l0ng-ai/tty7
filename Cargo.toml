@@ -325,3 +325,26 @@ alacritty_terminal = { opt-level = 3 }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# ---- gpui fork ------------------------------------------------------------
+# Our `tty7` branch (cut from the pinned upstream rev, one commit on top) carries
+# a single patch: `prefers_ime_for_printable_keys` takes the keystroke, so an
+# input handler can answer per key instead of per view. tty7 needs it for
+# Option-as-Meta — macOS routes ⌥-chords to the IME whenever a CJK input source
+# is active, and without the keystroke there is no way to decline just those
+# chords (see `terminal::input::prefers_ime_for_printable_keys`, issue #177).
+#
+# Patching by source rather than editing the `gpui`/`gpui_platform` pins above is
+# deliberate: `gpui-component` declares its own `gpui` from the upstream URL, and
+# a plain pin swap would put two incompatible copies of gpui in the tree. `[patch]`
+# rewrites the source for every dependent at once, so the fork's sibling crates
+# (`gpui_macos`, `gpui_web`, …) come along through their in-repo path deps.
+#
+# When bumping the upstream rev: rebase the fork's `tty7` branch onto the new rev,
+# push, then update the `rev` pins above — the branch here follows automatically.
+[patch."https://github.com/zed-industries/zed"]
+gpui = { git = "https://github.com/l0ng-ai/zed", branch = "tty7" }
+gpui_platform = { git = "https://github.com/l0ng-ai/zed", branch = "tty7" }
+gpui_macros = { git = "https://github.com/l0ng-ai/zed", branch = "tty7" }
+gpui_web = { git = "https://github.com/l0ng-ai/zed", branch = "tty7" }
+reqwest_client = { git = "https://github.com/l0ng-ai/zed", branch = "tty7" }

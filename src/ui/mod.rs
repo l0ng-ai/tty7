@@ -20,6 +20,7 @@ pub mod perf;
 pub mod presets;
 pub mod reorder;
 pub mod right_panel;
+pub mod scrollbar;
 pub mod settings;
 pub mod sftp;
 pub mod ssh_connect;

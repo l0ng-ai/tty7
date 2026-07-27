@@ -44,7 +44,7 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         let m = &ev.modifiers;
-        self.set_link_modifier(m.platform, cx);
+        self.set_link_modifier(m.secondary(), cx);
 
         // Mirror `on_key_down`'s chord test: reject the other platform-ish key
         // (⌃ on macOS, Win/Super elsewhere), Alt, and Shift, so only the bare
@@ -79,7 +79,8 @@ impl Tty7App {
         .detach();
     }
 
-    /// Push the platform-modifier state down to every pane's link tracking.
+    /// Push the secondary-modifier state (⌘ on macOS, Ctrl elsewhere — the
+    /// same key that opens a link on click) down to every pane's link tracking.
     /// Every tab, not just the active one: `on_modifiers_changed` only fires on
     /// the frontmost window state, so a background tab that saw "⌘ down" but
     /// never the matching release would keep a stale `true` — and a stale
