@@ -566,14 +566,20 @@ impl Tty7App {
             None => file.path.clone(),
         };
 
+        // Whether the body paints anything at all. `expanded` alone is not that
+        // question: a binary file or a pure rename has no hunks and is not
+        // truncated, so its body is empty and the header *is* the card. A
+        // truncated file with no parsable hunks still renders the notice.
+        let has_body = expanded && (!file.hunks.is_empty() || file.truncated);
+
         // The header paints a solid band flush into the card's corners, and the
         // card's `overflow_hidden` cannot round it — that clip is a square,
         // unantialiased scissor (issue #236, see `ui::rounding`). So the band
         // carries the radius: top two when a body follows it, all four when the
-        // card is collapsed and the header *is* the card.
+        // header is the card's only band.
         let header_corners = rounding::stack_corners(
             0,
-            if expanded { 2 } else { 1 },
+            if has_body { 2 } else { 1 },
             rounding::CARD_RADIUS,
             rounding::HAIRLINE,
         );
@@ -670,7 +676,7 @@ impl Tty7App {
             .overflow_hidden()
             .child(header);
 
-        if expanded {
+        if has_body {
             let mut body = v_flex().w_full();
             // Split every hunk up front so the *last* row is knowable: a diff
             // cell paints a tint, and the card's clip is square, so the row that

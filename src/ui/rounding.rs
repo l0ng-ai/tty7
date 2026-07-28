@@ -51,8 +51,10 @@ impl<T: Styled + Sized> RoundedCorners for T {}
 
 /// gpui's `rounded_lg`, resolved. The Tailwind scale is in `rems`, and every
 /// radius here has to do arithmetic against a `px` border width, so the tracks
-/// this module serves state their radius in pixels. tty7 never calls
-/// `set_rem_size`, so this is the same 8px `rounded_lg()` paints.
+/// this module serves state their radius in pixels. The rem size is whatever
+/// `gpui_component::Root::render` sets each frame from `Theme::font_size`, and
+/// tty7 never overrides that from gpui-component's default `px(16.)` — so this
+/// is the same 8px `rounded_lg()` paints.
 pub(crate) const TRACK_RADIUS: Pixels = px(8.);
 
 /// gpui's `rounded_md`, resolved — see [`TRACK_RADIUS`].
