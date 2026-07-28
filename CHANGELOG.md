@@ -19,10 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversation now: the tty7 extension reports Pi's session id, and the resume
   command is `pi --session <id>` (Pi's `--resume` is a boolean that only opens
   the interactive picker), with `--session` / `--session-id` / `--fork` /
-  `-r` / `-c` stripped off the replayed launch flags so the restored id wins. A
-  pane launched with `--no-session` is not resumed at all — that pane never
-  wrote a session to disk, and reopening one would override the choice to keep
-  it ephemeral. (#225)
+  `--resume` / `-r` / `--continue` / `-c` stripped off the replayed launch flags
+  so the restored id wins. A pane launched with `--no-session` is not resumed at
+  all — that pane never wrote a session to disk, and reopening one would
+  override the choice to keep it ephemeral. (#225)
 
 ## [26.7.6] - 2026-07-28
 
