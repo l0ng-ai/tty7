@@ -6201,18 +6201,10 @@ impl Render for TerminalView {
         // selected in either the grid or the prompt editor.
         let menu_focus = self.focus_handle.clone();
         let has_selection = self.any_selection();
-        // Fork rows: offered only for agents tty7 has a verified fork command
-        // for, labelled with that agent's own word for it ("Fork Session" /
-        // "Branch Session"). A *pane*-level ask is a spatial one, so this menu
-        // asks where the fork goes; the tab menu, which has no pane in hand,
-        // just opens a new tab (issue #211). Disabled — not hidden — until the
-        // session id is known, so the capability stays discoverable when the
-        // agent's hooks aren't installed; a remote pane can't fork at all,
-        // since the fork command would run against the *local* agent.
-        let fork_label = self.agent().and_then(|a| a.fork_label());
-        let can_fork = fork_label.is_some()
-            && self.remote_context().is_none()
-            && self.agent_session().is_some_and(|s| s.session_id.is_some());
+        // Read at menu-open time (see the fork block below), so the fork rows'
+        // enablement can't go stale between render and click — and so the
+        // render path doesn't pay for an `agent_session()` clone every frame.
+        let menu_view = cx.entity();
 
         div()
             .id("terminal-surface")
@@ -6343,6 +6335,22 @@ impl Render for TerminalView {
                 // handles, so the submenu carries the same `action_context` as
                 // the parent — a submenu is a menu of its own and does not
                 // inherit it.
+                //
+                // Offered only for agents tty7 has a verified fork command
+                // for, labelled with that agent's own word for it ("Fork
+                // Session" / "Branch Session"). A *pane*-level ask is a spatial
+                // one, so this menu asks where the fork goes; the tab menu,
+                // which has no pane in hand, just opens a new tab (issue #211).
+                // Disabled — not hidden — until the session id is known, so the
+                // capability stays discoverable when the agent's hooks aren't
+                // installed; a remote pane can't fork at all, since the fork
+                // command would run against the *local* agent.
+                let view = menu_view.read(cx);
+                let fork_label = view.agent().and_then(|a| a.fork_label());
+                let can_fork = fork_label.is_some()
+                    && view.remote_context().is_none()
+                    && view.agent_session().is_some_and(|s| s.session_id.is_some());
+
                 let menu = match fork_label {
                     Some(label) if can_fork => {
                         let focus = menu_focus.clone();
