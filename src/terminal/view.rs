@@ -6336,10 +6336,10 @@ impl Render for TerminalView {
                 // the parent — a submenu is a menu of its own and does not
                 // inherit it.
                 //
-                // Offered only for agents tty7 has a verified fork command
-                // for. A *pane*-level ask is a spatial
-                // one, so this menu asks where the fork goes; the tab menu,
-                // which has no pane in hand, just opens a new tab (issue #211).
+                // Offered only for agents tty7 has a verified fork command for.
+                // A *pane*-level ask is a spatial one, so this menu asks where
+                // the fork goes; the tab menu, which has no pane in hand, just
+                // opens a new tab (issue #211).
                 // Disabled — not hidden — until the session id is known, so the
                 // capability stays discoverable when the agent's hooks aren't
                 // installed; a remote pane can't fork at all, since the fork
