@@ -1032,6 +1032,14 @@ export const Tty7Presence = async ({{ $ }}) => {{
 /// extensions from per-directory `index.ts` files; this one forwards Pi's
 /// lifecycle events to the emitter. Inert outside tty7 (both the TS guard and
 /// the emitter check `TTY7`).
+///
+/// Every forwarded event carries Pi's own session id, read off the read-only
+/// session manager on the handler's context — that id is what
+/// [`crate::core::cli_agent::CLIAgent::resume_command`] feeds to `pi --session
+/// <id>` when a restored pane relaunches its conversation. The context is only
+/// reachable from a handler, so the load-time presence ping stays bare and
+/// `session_start` (fired for startup / new / resume / fork) is what actually
+/// reports the id, including when the user switches sessions mid-pane.
 fn pi_extension_ts() -> Option<String> {
     let exe = serde_json::to_string(&std::env::current_exe().ok()?.display().to_string()).ok()?;
     Some(format!(
@@ -1041,20 +1049,33 @@ import {{ spawnSync }} from "node:child_process";
 
 const EXE = {exe};
 
-function emit(event: string): void {{
+/** The slice of Pi's handler context we read — structural, so this bridge does
+ *  not depend on the context type staying exported. */
+type SessionCtx = {{ sessionManager?: {{ getSessionId?(): string | undefined }} }};
+
+function emit(event: string, ctx?: SessionCtx): void {{
   try {{
-    spawnSync(EXE, ["agent-hook", "pi", event], {{ stdio: ["ignore", "ignore", "ignore"] }});
+    let payload = "";
+    try {{
+      const id = ctx?.sessionManager?.getSessionId?.();
+      if (id) payload = JSON.stringify({{ session_id: id }});
+    }} catch {{}}
+    spawnSync(EXE, ["agent-hook", "pi", event], {{
+      input: payload,
+      stdio: ["pipe", "ignore", "ignore"],
+    }});
   }} catch {{}}
 }}
 
 export default function (pi: ExtensionAPI) {{
   if (!process.env["TTY7"]) return;
-  // Extension load = the agent is running in this pane; Pi has no separate
-  // session-start event.
+  // Extension load = the agent is running in this pane. No context here yet,
+  // so the id rides on session_start instead.
   emit("session-start");
-  pi.on("agent_start", () => emit("prompt-submit"));
-  pi.on("agent_end", () => emit("stop"));
-  pi.on("session_shutdown", () => emit("session-end"));
+  pi.on("session_start", (_event, ctx) => emit("session-start", ctx));
+  pi.on("agent_start", (_event, ctx) => emit("prompt-submit", ctx));
+  pi.on("agent_end", (_event, ctx) => emit("stop", ctx));
+  pi.on("session_shutdown", (_event, ctx) => emit("session-end", ctx));
 }}
 "#
     ))
@@ -1280,6 +1301,14 @@ mod tests {
         assert!(pi.contains("agent-hook pi"));
         assert!(pi.contains(&exe));
         assert!(pi.contains(r#"process.env["TTY7"]"#));
+        // Pi's session id is what `pi --session <id>` resumes with, and it only
+        // reaches tty7 if the bridge pipes a payload instead of ignoring stdin
+        // — which is how this integration shipped, silently costing Pi panes
+        // their resume.
+        assert!(pi.contains("getSessionId"));
+        assert!(pi.contains("session_id"));
+        assert!(pi.contains(r#"stdio: ["pipe", "ignore", "ignore"]"#));
+        assert!(pi.contains(r#"pi.on("session_start""#));
 
         let grok = grok_hooks_json().expect("grok content builds");
         let parsed: serde_json::Value = serde_json::from_str(&grok).expect("valid JSON");

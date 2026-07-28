@@ -214,6 +214,12 @@ impl CLIAgent {
             // Grok Build: `grok --resume <id-or-title>`; a UUID-shaped value
             // always takes the id path, which is what its hooks report.
             CLIAgent::Grok => Some(format!("grok{flags} --resume {session_id}")),
+            // Pi's `--resume`/`-r` is a *boolean* that opens the interactive
+            // session picker and `--continue`/`-c` just takes the newest
+            // session; the flag that targets one by id is `--session
+            // <path|id>` ("Use specific session file or partial UUID"). Its
+            // ids are uuidv7, so they clear the token gate above.
+            CLIAgent::Pi => Some(format!("pi{flags} --session {session_id}")),
             _ => None,
         }
     }
@@ -271,6 +277,23 @@ impl CLIAgent {
             // `--last` targets "the most recent session" and would contradict
             // the explicit id we inject.
             CLIAgent::Codex => &["--last"],
+            // Pi has five ways to pick a session and all of them fight the
+            // `--session <id>` we inject: `--session`/`--session-id` name a
+            // different one, `--fork` would branch instead of continue, the
+            // boolean `-r`/`-c` re-open the picker or the newest session, and
+            // `--no-session` turns saving off entirely. `--session-dir` is
+            // *not* here — it says where sessions live, so the id we inject
+            // needs it to still be there.
+            CLIAgent::Pi => &[
+                "--session",
+                "--session-id",
+                "--fork",
+                "--resume",
+                "-r",
+                "--continue",
+                "-c",
+                "--no-session",
+            ],
             // Beyond the session-targeting flags (`--load` is grok's hidden
             // alias for `--resume`; `--session-id` names a *new* session and
             // `--fork-session` would branch off the one we mean to continue),
@@ -383,9 +406,9 @@ impl CLIAgent {
             CLIAgent::Goose => "icons/agents/goose.svg",
             CLIAgent::Droid => "icons/agents/droid.svg",
             CLIAgent::Grok => "icons/agents/grok.svg",
+            CLIAgent::Pi => "icons/agents/pi.svg",
             // No brand mark bundled → generic robot glyph.
             CLIAgent::Aider
-            | CLIAgent::Pi
             | CLIAgent::Auggie
             | CLIAgent::Hermes
             | CLIAgent::Vibe
@@ -951,6 +974,32 @@ mod tests {
         assert_eq!(CLIAgent::Grok.accent_rgb(), 0x000000);
     }
 
+    /// The fallback robot glyph is a placeholder, not a resting state: an agent
+    /// may only sit on it while no mark is bundled, and a bundled mark may not
+    /// silently fall back off. Pinning the exact fallback set makes either
+    /// direction a deliberate edit here rather than something noticed in the UI.
+    #[test]
+    fn only_the_unbranded_agents_use_the_fallback_glyph() {
+        let fallback: Vec<&str> = CLIAgent::ALL
+            .into_iter()
+            .filter(|a| a.icon_path() == "icons/bot.svg")
+            .map(CLIAgent::slug)
+            .collect();
+        assert_eq!(
+            fallback,
+            ["aider", "auggie", "hermes", "vibe", "antigravity", "qwen"]
+        );
+        // Everything else names a bundled mark under the agents directory.
+        for a in CLIAgent::ALL {
+            let path = a.icon_path();
+            assert!(
+                path == "icons/bot.svg" || path == format!("icons/agents/{}.svg", a.slug()),
+                "{} points at an unexpected {path}",
+                a.display_name()
+            );
+        }
+    }
+
     #[test]
     fn detects_newer_agents_by_command() {
         for (cmd, agent) in [
@@ -1241,6 +1290,14 @@ mod tests {
             CLIAgent::Codex.resume_command("th_read.9", None).as_deref(),
             Some("codex resume th_read.9")
         );
+        // Pi targets a session by id through `--session`, not through its
+        // boolean `--resume` (which only opens the picker).
+        assert_eq!(
+            CLIAgent::Pi
+                .resume_command("0199c3f2-1b0e-7c3a-9f21-6d4b8e2a5c17", None)
+                .as_deref(),
+            Some("pi --session 0199c3f2-1b0e-7c3a-9f21-6d4b8e2a5c17")
+        );
         // No resume flag known → None.
         assert_eq!(CLIAgent::Aider.resume_command("abc", None), None);
         // An id carrying shell syntax is refused outright.
@@ -1361,6 +1418,49 @@ mod tests {
                 )
                 .as_deref(),
             Some("codex resume id-3 --yolo")
+        );
+        // Pi: mode flags replay, but every way of naming a *different* session
+        // is stripped so the injected id wins — including the boolean picker
+        // flags and `--no-session`, which would otherwise turn saving off.
+        assert_eq!(
+            CLIAgent::Pi
+                .resume_command("id-a", Some(&argv(&["pi", "--model", "opus"])))
+                .as_deref(),
+            Some("pi --model opus --session id-a")
+        );
+        assert_eq!(
+            CLIAgent::Pi
+                .resume_command(
+                    "id-b",
+                    Some(&argv(&[
+                        "pi",
+                        "--session",
+                        "old-id",
+                        "--no-session",
+                        "-c",
+                        "--model",
+                        "opus"
+                    ]))
+                )
+                .as_deref(),
+            Some("pi --model opus --session id-b")
+        );
+        // `--session-dir` says where sessions live — the injected id needs it,
+        // so it is deliberately *not* stripped.
+        assert_eq!(
+            CLIAgent::Pi
+                .resume_command(
+                    "id-c",
+                    Some(&argv(&[
+                        "pi",
+                        "--session-dir",
+                        "/w/.sessions",
+                        "--fork",
+                        "old"
+                    ]))
+                )
+                .as_deref(),
+            Some("pi --session-dir /w/.sessions --session id-c")
         );
         // No token names the agent (custom wrapper rule) → bare.
         assert_eq!(
