@@ -3729,24 +3729,28 @@ impl Tty7App {
     }
 
     /// What the tab's agent-session menu rows ("Fork Session" and "Copy Session
-    /// ID") need, or `None` when the tab's
-    /// label-driving pane runs no coding agent — then neither row is offered.
-    /// Reads the same leaf `tab_cwd` does, so all three rows agree on which
-    /// pane a tab-level action means.
+    /// ID") need, together with the pane they were read from, or `None` when
+    /// the tab's label-driving pane runs no coding agent — then neither row is
+    /// offered. Reads the same leaf `tab_cwd` does, so all three rows agree on
+    /// which pane a tab-level action means. The pane comes back with the state
+    /// because the fork row has to *act* on it: by click time the popup menu
+    /// holds focus and sits outside every terminal's focus path, so resolving
+    /// the pane again there would fall back to the tab's first leaf.
     pub(crate) fn tab_agent_session(
         &self,
         index: usize,
         window: &Window,
         cx: &App,
-    ) -> Option<TabAgentSession> {
+    ) -> Option<(Entity<TerminalView>, TabAgentSession)> {
         let leaf = self.tabs.get(index)?.pane.focused_or_first(window, cx)?;
         let view = leaf.read(cx);
         let agent = view.agent()?;
-        Some(TabAgentSession {
+        let session = TabAgentSession {
             fork_label: agent.fork_label(),
             session_id: view.agent_session().and_then(|s| s.session_id),
             remote: view.remote_context().is_some(),
-        })
+        };
+        Some((leaf, session))
     }
 
     /// "Copy Session ID": put the agent's native session id on the clipboard —
@@ -3760,14 +3764,24 @@ impl Tty7App {
     ) {
         if let Some(id) = self
             .tab_agent_session(index, window, cx)
-            .and_then(|s| s.session_id)
+            .and_then(|(_, s)| s.session_id)
         {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(id));
         }
     }
 
-    /// "Fork Session" (issue #211): branch the agent session in tab `index`'s
-    /// focused pane into a second, independent one, landing it per `placement`.
+    /// "Fork Session" (issue #211): branch the agent session running in
+    /// `source` — a leaf of tab `index` — into a second, independent one,
+    /// landing it per `placement`.
+    ///
+    /// The source pane is the caller's to resolve, because *when* it is
+    /// resolved differs by surface. The action paths (palette, menu bar,
+    /// keybinding, pane right-click menu) dispatch through the terminal's own
+    /// `action_context`, so the focused leaf read at dispatch time is the pane
+    /// the user is pointing at — [`fork_active_pane_session`](Self::fork_active_pane_session)
+    /// does that for them. The tab / sidebar context menu can't: by the time
+    /// its row is clicked the popup holds focus, so it captures the pane its
+    /// row was labelled for at menu-open time and hands it in here.
     ///
     /// The fork itself is entirely the agent's own — tty7 spawns a pane and
     /// types the agent's fork command into it (`codex fork <id>`, `claude
@@ -3783,17 +3797,11 @@ impl Tty7App {
     pub(crate) fn fork_agent_session(
         &mut self,
         index: usize,
+        source: Entity<TerminalView>,
         placement: ForkPlacement,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(source) = self
-            .tabs
-            .get(index)
-            .and_then(|t| t.pane.focused_or_first(window, cx))
-        else {
-            return;
-        };
         let Some(cmd) = self.agent_fork_command(&source, window, cx) else {
             return;
         };
@@ -3869,6 +3877,29 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Fork the active tab's focused pane (else its first) per `placement` —
+    /// every surface that dispatches an action rather than clicking a captured
+    /// menu row. Those all route through the terminal's `action_context`, so
+    /// the focused leaf resolved here is the pane the user is pointing at.
+    /// Silently a no-op for a tab with no terminal; every other reason a fork
+    /// can't run is a notification from
+    /// [`agent_fork_command`](Self::agent_fork_command).
+    pub(crate) fn fork_active_pane_session(
+        &mut self,
+        placement: ForkPlacement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.pane.focused_or_first(window, cx))
+        else {
+            return;
+        };
+        self.fork_agent_session(self.active, source, placement, window, cx);
+    }
+
     /// Fork the active tab's focused pane into a split beside it — the pane
     /// right-click menu's placement pick, and what a bound key means (the
     /// focused pane is the one the user is pointing at).
@@ -3879,12 +3910,7 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.fork_agent_session(
-            self.active,
-            ForkPlacement::Split { axis, before },
-            window,
-            cx,
-        );
+        self.fork_active_pane_session(ForkPlacement::Split { axis, before }, window, cx);
     }
 
     /// The fork command to type into a new pane for `source`'s agent session,
@@ -4407,9 +4433,7 @@ impl Tty7App {
             CloseTabsToTheRight => self.close_tabs_right_of(self.active, window, cx),
             CopyWorkingDirectory => self.copy_active_cwd(window, cx),
             MarkTabUnread => self.mark_tab_unread(self.active, cx),
-            ForkAgentSession => {
-                self.fork_agent_session(self.active, ForkPlacement::NewTab, window, cx)
-            }
+            ForkAgentSession => self.fork_active_pane_session(ForkPlacement::NewTab, window, cx),
             CopyAgentSessionId => self.copy_agent_session_id(self.active, window, cx),
             RenameWorkspace => self.start_workspace_rename(window, cx),
             OpenSettings => self.toggle_settings(window, cx),
@@ -6757,7 +6781,7 @@ impl Render for Tty7App {
             // opens a new tab; the four directional ones come from the pane
             // right-click menu, where the ask *was* spatial.
             .on_action(cx.listener(|this, _: &ForkAgentSession, window, cx| {
-                this.fork_agent_session(this.active, ForkPlacement::NewTab, window, cx)
+                this.fork_active_pane_session(ForkPlacement::NewTab, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ForkAgentSessionRight, window, cx| {
                 this.fork_focused_pane_session(Axis::Horizontal, false, window, cx)

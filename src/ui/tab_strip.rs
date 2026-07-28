@@ -1017,8 +1017,13 @@ impl Tty7App {
         // (issue #211). Offered only for agents tty7 has a verified fork command
         // for; disabled — not hidden — while the session id is still unknown, so
         // the capability stays discoverable when the hooks aren't installed.
+        // The pane comes back with the state and is captured by the row's
+        // closure, like `cwd` and `session_id` below: clicking the row focuses
+        // the popup, which lives outside every terminal's focus path, so
+        // resolving the source pane again at click time would fork the tab's
+        // *first* leaf rather than the one this row was labelled for.
         let agent_session = this.tab_agent_session(index, window, cx);
-        if let Some(session) = &agent_session
+        if let Some((source, session)) = &agent_session
             && let Some(label) = session.fork_label
         {
             // Open the block ourselves when the worktree row above didn't
@@ -1030,10 +1035,13 @@ impl Tty7App {
             let forkable = session.forkable();
             menu = menu.item(PopupMenuItem::new(label).disabled(!forkable).on_click({
                 let app = app.clone();
+                let source = source.clone();
                 move |_, window, cx| {
+                    let source = source.clone();
                     let _ = app.update(cx, |this, cx| {
                         this.fork_agent_session(
                             index,
+                            source,
                             crate::ui::app::ForkPlacement::NewTab,
                             window,
                             cx,
@@ -1084,7 +1092,7 @@ impl Tty7App {
         // (there is nothing agent-specific about an id) and disabled until one
         // has been reported. The id is read here at open time, so the row can't
         // copy a stale one.
-        if let Some(session_id) = agent_session.map(|s| s.session_id) {
+        if let Some(session_id) = agent_session.map(|(_, s)| s.session_id) {
             menu = menu.item(
                 PopupMenuItem::new("Copy Session ID")
                     .disabled(session_id.is_none())
