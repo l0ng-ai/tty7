@@ -7,21 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- **Dragging the window by a title bar worked only rarely with a trackpad** —
-  five rows that stand in for the caption (the tab rail's top zone, the settings
-  page's top strip, the detail panel's top zone, and the code and diff overlays'
-  headers) armed their window-drag with a flag that was rebuilt on every render.
-  Any repaint between the press and the first drag event threw the arm away, and
-  the press *itself* schedules one — these rows carry a double-click, which makes
-  gpui refresh the window on mouse-down — so the drag only survived if the first
-  move beat the next vsync: 16ms at 60Hz, 8ms on ProMotion. A mouse press nudges
-  the pointer and often won that race; a trackpad press is a finger pushing down
-  without translating, and almost never did. The terminal's cursor blink disarmed
-  it on its own even without a press. The arm now lives in element state, which
-  survives frames — where gpui-component's own `TitleBar` has always kept it,
-  which is why the ordinary caption strip was never affected. (#221)
+- **Pi is a first-class agent, not a fallback one** — Pi panes drew the generic
+  robot glyph every unbranded agent shares, so a Pi tab was indistinguishable
+  from an Aider or Qwen one in the sidebar, the tab chip and the tray menu. They
+  now carry their own avatar on the existing sky accent, status dot unchanged.
+  The mark is Pi's own, from pi.dev, rescaled to tty7's 24x24 icon grid — its
+  `prefers-color-scheme` stylesheet dropped, since these avatars are tinted by
+  the app. Restoring a Pi pane also resumes its conversation now: the tty7
+  extension reports Pi's session id, and the resume command is
+  `pi --session <id>` (Pi's `--resume` is a boolean that only opens the
+  interactive picker), with `--session` / `--session-id` / `--fork` /
+  `--resume` / `-r` / `--continue` / `-c` stripped off the replayed launch
+  flags so the restored id wins. A pane launched with `--no-session` is not
+  resumed at all — that pane never wrote a session to disk, and reopening one
+  would override the choice to keep it ephemeral. (#225)
 
 ### Changed
 
@@ -41,22 +42,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the 80px grab handle, so chips reach their minimum width and truncate a tab or
   two sooner. (#221)
 
-### Added
+### Fixed
 
-- **Pi is a first-class agent, not a fallback one** — Pi panes drew the generic
-  robot glyph every unbranded agent shares, so a Pi tab was indistinguishable
-  from an Aider or Qwen one in the sidebar, the tab chip and the tray menu. They
-  now carry their own avatar on the existing sky accent, status dot unchanged.
-  The mark is Pi's own, from pi.dev, rescaled to tty7's 24x24 icon grid — its
-  `prefers-color-scheme` stylesheet dropped, since these avatars are tinted by
-  the app. Restoring a Pi pane also resumes its conversation now: the tty7
-  extension reports Pi's session id, and the resume command is
-  `pi --session <id>` (Pi's `--resume` is a boolean that only opens the
-  interactive picker), with `--session` / `--session-id` / `--fork` /
-  `--resume` / `-r` / `--continue` / `-c` stripped off the replayed launch
-  flags so the restored id wins. A pane launched with `--no-session` is not
-  resumed at all — that pane never wrote a session to disk, and reopening one
-  would override the choice to keep it ephemeral. (#225)
+- **Dragging the window by a title bar worked only rarely with a trackpad** —
+  five rows that stand in for the caption (the tab rail's top zone, the settings
+  page's top strip, the detail panel's top zone, and the code and diff overlays'
+  headers) armed their window-drag with a flag that was rebuilt on every render.
+  Any repaint between the press and the first drag event threw the arm away, and
+  the press *itself* schedules one — these rows carry a double-click, which makes
+  gpui refresh the window on mouse-down — so the drag only survived if the first
+  move beat the next vsync: 16ms at 60Hz, 8ms on ProMotion. A mouse press nudges
+  the pointer and often won that race; a trackpad press is a finger pushing down
+  without translating, and almost never did. The terminal's cursor blink disarmed
+  it on its own even without a press. The arm now lives in element state, which
+  survives frames — where gpui-component's own `TitleBar` has always kept it,
+  which is why the ordinary caption strip was never affected. (#221)
 
 - **Fork an agent session** — branch a live agent conversation into a second,
   independent one, so a risky direction can be tried without losing the thread

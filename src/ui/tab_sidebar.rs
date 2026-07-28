@@ -789,12 +789,13 @@ impl Tty7App {
                         .pl(px(crate::ui::app::CONTENT_INSET))
                         .child(mark),
                 )
-                // The row's grab handle, and `min_w` so it stays one: a bare
-                // `flex_1` takes only leftover space, which is nothing once the
-                // rail is dragged narrow enough. Every header in the window has to
-                // stay grabbable — see `app::window_move_gesture`. (On macOS there
-                // is no mark and so no spacer: `justify_end` leaves the row's whole
-                // left half bare, which is the handle.)
+                // The row's grab handle, and `min_w` (`GRAB_HANDLE_W`) so it
+                // stays one whatever the row later gains: a bare `flex_1` takes
+                // only leftover space, and leftover space is what a wider child
+                // eats first. Every header in the window has to stay grabbable —
+                // see `app::window_move_gesture`. (On macOS there is no mark and
+                // so no spacer: `justify_end` leaves the row's whole left half
+                // bare, which is the handle.)
                 .child(div().flex_1().min_w(px(GRAB_HANDLE_W)))
             })
             // Both tiles are wrapped in an `occlude()` div, exactly like the

@@ -1164,14 +1164,9 @@ impl Tty7App {
             // region is buried. Restore it: a transparent strip across the top
             // band (the height the title bar reserved) that moves the window on
             // drag and zooms it on double-click, exactly like the title bar it
-            // stands in for. Driven the same way `TitleBar` does — a press arms a
-            // `should_move` flag and the first move calls `start_window_move`
-            // (deferring to an actual move keeps a plain click, and double-click,
-            // intact); the `WindowControlArea::Drag` tag covers the Windows path.
-            // `window_move_gesture` owns that arming, and keeps the flag in
-            // element state so a repaint between the press and the first move
-            // can't throw it away (#221) — the failure was worst here, because
-            // this strip *is* the whole top band with no immune caption beside it.
+            // stands in for. `window_move_gesture` owns the gesture and the
+            // reasoning behind it; the #221 failure was worst here, because this
+            // strip *is* the whole top band with no immune caption beside it.
             .child(
                 crate::ui::app::window_move_gesture(
                     div()

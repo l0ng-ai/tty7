@@ -283,6 +283,14 @@ pub(crate) struct WindowMoveArm {
 //    `flex-basis: 0` means it collapses to nothing the moment the row fills up.
 //    See `tab_strip::GRAB_HANDLE_W`.
 //
+// What the rule does *not* reach is a row that only reads like a header. Where
+// the press already means something else, it keeps that meaning, so these being
+// undraggable is a decision rather than a backlog: tab chips (a drag reorders
+// them), the SFTP breadcrumb (a navigation control), settings section and
+// disclosure headings (typography, and click-to-expand rows inside a scrolling
+// form), diff file-card headers (click-to-collapse rows inside a scroll list),
+// and the command palette (a transient modal over a dismiss-on-press scrim).
+//
 // One region satisfies the rule by adjacency rather than on its own, and that is
 // deliberate — not an oversight to tidy up later. The detail panel's macOS top
 // zone is every-child-occluded (four tab tiles plus the corner chrome) and that
