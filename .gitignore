@@ -4,6 +4,7 @@
 
 # Local dev-tool state — kept out of the repo but retained on disk.
 /CLAUDE.md
+/AGENTS.md
 /AUDIT.md
 .brooks-lint-history.json
 openwiki/.last-update.json
