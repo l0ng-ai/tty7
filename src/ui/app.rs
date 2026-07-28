@@ -5885,8 +5885,13 @@ impl Tty7App {
     /// the takeover so the user can undo it with a reset.
     fn assign_keybinding(&mut self, action: String, spec: String, cx: &mut Context<Self>) {
         // Find the current owner of this exact keystroke, if it isn't `action`.
+        // The extra chords installed alongside the table (an action can ship a
+        // second default it has no row for) count as owners too — miss them and
+        // the new binding would quietly take a chord off an action whose
+        // Settings row still advertises its first one.
         let displaced = crate::ui::keymap::effective_bindings(cx)
             .into_iter()
+            .chain(crate::ui::keymap::extra_bindings(cx))
             .find(|(a, k)| *k == spec && *a != action)
             .map(|(a, _)| a);
         let note = displaced.as_ref().map(|other| {
@@ -7775,6 +7780,28 @@ mod keybinding_gpui_tests {
         vcx.simulate_keystrokes("secondary-b");
         vcx.simulate_keystrokes("x");
         wait_for_binding(&mut vcx, "CloseActiveTab", "secondary-b x");
+    }
+
+    // Taking a chord an action holds only as an *extra* default (Alt+Enter, the
+    // second one Insert Newline ships without a table row of its own) displaces
+    // it like any other owner: the chord stops inserting newlines either way, so
+    // the unset has to be written and the takeover said out loud.
+    #[gpui::test]
+    fn recording_an_extra_default_chord_displaces_its_owner(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        begin_capture(&app, &mut vcx, "NewTab");
+        vcx.simulate_keystrokes("alt-enter");
+        wait_for_binding(&mut vcx, "NewTab", "alt-enter");
+        wait_for_binding(&mut vcx, "InsertNewline", "");
+
+        let note = app.update_in(&mut vcx, |app, _, _| {
+            app.active_settings().and_then(|s| s.rebinding_note.clone())
+        });
+        assert!(
+            note.as_deref()
+                .is_some_and(|n| n.contains("Insert Newline")),
+            "the takeover note must name the action that lost the chord (got {note:?})"
+        );
     }
 
     // Esc during capture cancels without touching config.

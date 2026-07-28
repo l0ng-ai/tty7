@@ -15,9 +15,11 @@ use crate::ui::theme::set_menus;
 /// The set of keystrokes currently installed for app actions, remembered so a
 /// later [`rebind`] can neutralize them with `NoAction` bindings instead of
 /// clearing the whole keymap (which would also wipe gpui-component's own input /
-/// list / menu bindings). Stored as a GPUI global.
+/// list / menu bindings). Each entry carries the key context its binding was
+/// installed in (see [`action_context`]) so the `NoAction` can be scoped the
+/// same way. Stored as a GPUI global.
 #[derive(Default)]
-struct BoundKeystrokes(Vec<String>);
+struct BoundKeystrokes(Vec<(String, Option<&'static str>)>);
 impl Global for BoundKeystrokes {}
 
 /// Install the application menu bar, keybindings, and global actions.
@@ -55,12 +57,19 @@ pub fn rebind(cx: &mut App) {
         .unwrap_or_default();
     let effective = effective_bindings(cx);
 
-    // Neutralize each old keystroke (global NoAction is enabled in every
-    // context, so it also suppresses the Terminal-scoped ClearScrollback).
+    // Neutralize each old keystroke with a `NoAction` in the same context its
+    // binding was installed in. The scope matters: GPUI's `binding_enabled`
+    // gives a *context-less* binding the maximum match depth (`contexts.len()`),
+    // so a global `NoAction` outranks every context-scoped binding on that
+    // chord — and a matched `NoAction` discards the rest of the matches — which
+    // would kill bindings we never installed (gpui-component's own Input-scoped
+    // `shift-enter` while the search field has focus). Scoped the same way, the
+    // `NoAction` still suppresses our own old binding: that one sits at the
+    // same depth with a lower index, and index breaks the tie.
     let mut bindings: Vec<KeyBinding> = previous
         .iter()
-        .filter(|k| keystroke_is_valid(k))
-        .map(|k| KeyBinding::new(k, NoAction {}, None))
+        .filter(|(k, _)| keystroke_is_valid(k))
+        .map(|(k, ctx)| KeyBinding::new(k, NoAction {}, *ctx))
         .collect();
     bindings.extend(action_bindings(&effective));
     cx.bind_keys(bindings);
@@ -113,6 +122,19 @@ fn extra_keystrokes(effective: &[(String, String)]) -> Vec<(&'static str, &'stat
     }
 }
 
+/// The extra `(action, keystroke)` pairs the current effective table installs
+/// beyond its one-row-per-action rows. [`effective_bindings`] stays one row per
+/// action because Settings renders from it, so anything that has to reason
+/// about which chords are actually *live* — conflict detection when the user
+/// records a shortcut — must consult this alongside it, or it would miss the
+/// extra chord and silently drop it.
+pub(crate) fn extra_bindings(cx: &App) -> Vec<(String, String)> {
+    extra_keystrokes(&effective_bindings(cx))
+        .into_iter()
+        .map(|(a, k)| (a.to_string(), k.to_string()))
+        .collect()
+}
+
 /// Build the `KeyBinding`s for an effective table, skipping unbound rows (empty
 /// keystroke) and any that fail validation.
 fn action_bindings(effective: &[(String, String)]) -> Vec<KeyBinding> {
@@ -138,15 +160,17 @@ fn action_bindings(effective: &[(String, String)]) -> Vec<KeyBinding> {
     bindings
 }
 
-/// The valid, non-empty keystrokes an effective table actually installs — the
-/// list [`rebind`] remembers so it can suppress them on the next change.
-fn bound_keystrokes(effective: &[(String, String)]) -> Vec<String> {
+/// The valid, non-empty keystrokes an effective table actually installs, each
+/// paired with the key context it is installed in — the list [`rebind`]
+/// remembers so it can suppress them, in that same context, on the next change.
+fn bound_keystrokes(effective: &[(String, String)]) -> Vec<(String, Option<&'static str>)> {
+    let extras = extra_keystrokes(effective);
     effective
         .iter()
-        .map(|(_, k)| k.as_str())
-        .chain(extra_keystrokes(effective).into_iter().map(|(_, k)| k))
-        .filter(|k| !k.is_empty() && keystroke_is_valid(k))
-        .map(str::to_string)
+        .map(|(a, k)| (a.as_str(), k.as_str()))
+        .chain(extras.iter().map(|(a, k)| (*a, *k)))
+        .filter(|(_, k)| !k.is_empty() && keystroke_is_valid(k))
+        .map(|(a, k)| (k.to_string(), action_context(a)))
         .collect()
 }
 
@@ -592,6 +616,24 @@ fn keystroke_is_valid(s: &str) -> bool {
     any
 }
 
+/// The key context an action's binding is installed in, or `None` for a global
+/// one. The single source of truth for that decision: [`make_binding`] builds
+/// the binding with it and [`bound_keystrokes`] records it, so the `NoAction`
+/// [`rebind`] later uses to retire a chord lands in the same scope as the
+/// binding it retires.
+///
+/// Terminal-scoped means the handler lives on the terminal surface, so the
+/// "Terminal" context keeps the chord inert on the settings / home pages
+/// instead of binding a dead global chord there.
+fn action_context(action: &str) -> Option<&'static str> {
+    match action {
+        "FindInTerminal" | "FindNext" | "FindPrevious" | "ClearScrollback" | "InsertNewline" => {
+            Some("Terminal")
+        }
+        _ => None,
+    }
+}
+
 /// Build a `KeyBinding` for a known action name + (already-validated) keystroke.
 /// Returns `None` for an unrecognized action name.
 fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
@@ -666,17 +708,13 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ShowRightPanelOutline" => KeyBinding::new(keystroke, ShowRightPanelOutline, None),
         "ShowRightPanelChanges" => KeyBinding::new(keystroke, ShowRightPanelChanges, None),
         "ShowRightPanelFiles" => KeyBinding::new(keystroke, ShowRightPanelFiles, None),
-        // Terminal-scoped (the handler lives on the terminal surface): the "Terminal"
-        // context keeps ⌘K inert in the settings tab / home page instead of binding a
-        // dead global chord there.
-        // Terminal-scoped like ClearScrollback: the handlers live on the terminal
-        // surface, so the "Terminal" context keeps these inert on the settings /
-        // home pages instead of binding a dead global chord there.
-        "FindInTerminal" => KeyBinding::new(keystroke, FindInTerminal, Some("Terminal")),
-        "FindNext" => KeyBinding::new(keystroke, FindNext, Some("Terminal")),
-        "FindPrevious" => KeyBinding::new(keystroke, FindPrevious, Some("Terminal")),
-        "ClearScrollback" => KeyBinding::new(keystroke, ClearScrollback, Some("Terminal")),
-        "InsertNewline" => KeyBinding::new(keystroke, InsertNewline, Some("Terminal")),
+        // Terminal-scoped — see `action_context`, which owns that decision so the
+        // context here and the one `rebind` neutralizes with can't drift apart.
+        "FindInTerminal" => KeyBinding::new(keystroke, FindInTerminal, action_context(action)),
+        "FindNext" => KeyBinding::new(keystroke, FindNext, action_context(action)),
+        "FindPrevious" => KeyBinding::new(keystroke, FindPrevious, action_context(action)),
+        "ClearScrollback" => KeyBinding::new(keystroke, ClearScrollback, action_context(action)),
+        "InsertNewline" => KeyBinding::new(keystroke, InsertNewline, action_context(action)),
         "OpenSettings" => KeyBinding::new(keystroke, OpenSettings, None),
         "ShowKeyboardShortcuts" => KeyBinding::new(keystroke, ShowKeyboardShortcuts, None),
         "About" => KeyBinding::new(keystroke, About, None),
@@ -812,7 +850,9 @@ mod tests {
             assert!(keystroke_is_valid(key), "{key} does not parse");
             assert!(make_binding("InsertNewline", key).is_some());
             assert!(
-                bound_keystrokes(&effective).iter().any(|k| k == key),
+                bound_keystrokes(&effective)
+                    .iter()
+                    .any(|(k, _)| k == key),
                 "{key} is not remembered as installed"
             );
         }
@@ -826,12 +866,65 @@ mod tests {
         // back after they deliberately moved the binding.
         let effective = vec![("InsertNewline".to_string(), "ctrl-o".to_string())];
         assert!(extra_keystrokes(&effective).is_empty());
-        assert_eq!(bound_keystrokes(&effective), vec!["ctrl-o".to_string()]);
+        assert_eq!(
+            bound_keystrokes(&effective),
+            vec![("ctrl-o".to_string(), Some("Terminal"))]
+        );
 
         // Unbinding it entirely (an empty override) installs nothing at all.
         let unbound = vec![("InsertNewline".to_string(), String::new())];
         assert!(extra_keystrokes(&unbound).is_empty());
         assert!(action_bindings(&unbound).is_empty());
+    }
+
+    #[test]
+    fn bound_keystrokes_remember_the_context_each_binding_was_installed_in() {
+        // `rebind` retires an old chord with a `NoAction`, and a context-less
+        // one gets GPUI's *maximum* match depth — it would outrank, and discard,
+        // deeper bindings on that chord that we never installed (gpui-component
+        // binds `shift-enter` in its own "Input" context, which is what steps to
+        // the previous match in the terminal's search field). So each remembered
+        // keystroke carries the scope its binding actually had.
+        let effective = vec![
+            ("InsertNewline".to_string(), "shift-enter".to_string()),
+            ("NewTab".to_string(), "secondary-t".to_string()),
+        ];
+        assert_eq!(
+            bound_keystrokes(&effective),
+            vec![
+                ("shift-enter".to_string(), Some("Terminal")),
+                ("secondary-t".to_string(), None),
+                // The extra chord is scoped by its action, like any other row.
+                ("alt-enter".to_string(), Some("Terminal")),
+            ]
+        );
+    }
+
+    #[test]
+    fn action_context_matches_the_scope_make_binding_installs() {
+        // The two must agree for every action, or `rebind` would neutralize a
+        // chord in a scope the binding never had — leaving the old binding live
+        // (too narrow) or shadowing unrelated ones (too wide).
+        let extra_actions = extra_keystrokes(
+            &default_bindings()
+                .into_iter()
+                .map(|(a, k)| (a.to_string(), k.to_string()))
+                .collect::<Vec<_>>(),
+        );
+        let actions = default_bindings()
+            .into_iter()
+            .map(|(a, _)| a)
+            .chain(extra_actions.into_iter().map(|(a, _)| a));
+        for action in actions {
+            let binding =
+                make_binding(action, "f13").unwrap_or_else(|| panic!("no arm for {action}"));
+            let installed = binding.predicate().map(|p| p.to_string());
+            assert_eq!(
+                installed.as_deref(),
+                action_context(action),
+                "{action} is installed in a different context than `action_context` reports"
+            );
+        }
     }
 
     #[test]

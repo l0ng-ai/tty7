@@ -8742,6 +8742,50 @@ mod gpui_tests {
             .unwrap();
     }
 
+    /// The check the tests above structurally can't make: with the *real* keymap
+    /// installed, both default chords have to actually reach the action. They
+    /// call `insert_newline_action` directly, so a wrong key context — or a
+    /// `NoAction` from a later `rebind` shadowing the chord — would leave every
+    /// one of them green while Shift+Enter silently submitted the line. This
+    /// drives the keystroke through GPUI's dispatch instead (#182).
+    #[gpui::test]
+    fn the_keymap_routes_both_newline_chords_to_the_action(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| crate::ui::keymap::init(cx));
+        prompt_ready(&window, cx, &mut daemon);
+        window
+            .update(cx, |view, window, cx| {
+                window.activate_window();
+                view.focus_handle.focus(window, cx);
+                view.commit_text("echo a", cx);
+            })
+            .unwrap();
+
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.simulate_keystrokes("shift-enter");
+        vcx.simulate_keystrokes("alt-enter");
+        window
+            .update(cx, |view, _, _| {
+                assert_eq!(
+                    view.cmd.text(),
+                    "echo a\n\n",
+                    "both chords dispatched InsertNewline instead of submitting"
+                );
+            })
+            .unwrap();
+
+        // And again after a rebind, which is when the suppression bindings go in:
+        // the `NoAction` retiring the old chord must not outrank the identical
+        // one being re-installed alongside it.
+        cx.update(|cx| crate::ui::keymap::rebind(cx));
+        vcx.simulate_keystrokes("shift-enter");
+        window
+            .update(cx, |view, _, _| {
+                assert_eq!(view.cmd.text(), "echo a\n\n\n", "the chord survives a rebind");
+            })
+            .unwrap();
+    }
+
     /// The Ctrl+R flow end-to-end at the editor dispatcher: Ctrl+R opens the
     /// search, typed text (the IME/commit path) edits the query with fuzzy
     /// matching, Enter loads the selection into the editor without running it.
