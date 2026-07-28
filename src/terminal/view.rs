@@ -6337,8 +6337,7 @@ impl Render for TerminalView {
                 // inherit it.
                 //
                 // Offered only for agents tty7 has a verified fork command
-                // for, labelled with that agent's own word for it ("Fork
-                // Session" / "Branch Session"). A *pane*-level ask is a spatial
+                // for. A *pane*-level ask is a spatial
                 // one, so this menu asks where the fork goes; the tab menu,
                 // which has no pane in hand, just opens a new tab (issue #211).
                 // Disabled — not hidden — until the session id is known, so the

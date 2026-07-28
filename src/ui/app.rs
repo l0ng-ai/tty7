@@ -730,8 +730,8 @@ pub(crate) enum ForkPlacement {
 /// menu-open time (like `tab_cwd`) so enablement can't go stale between render
 /// and click.
 pub(crate) struct TabAgentSession {
-    /// The agent's own word for forking, or `None` when tty7 has no verified
-    /// fork command for it — then no fork row is offered at all, rather than a
+    /// The fork row's label, or `None` when tty7 has no verified fork command
+    /// for this agent — then no fork row is offered at all, rather than a
     /// disabled one promising a capability that doesn't exist.
     pub(crate) fork_label: Option<&'static str>,
     /// The agent's native session id, absent until its hooks report one.
@@ -3728,8 +3728,8 @@ impl Tty7App {
         }
     }
 
-    /// What the tab's agent-session menu rows ("Fork Session" / "Branch
-    /// Session" and "Copy Session ID") need, or `None` when the tab's
+    /// What the tab's agent-session menu rows ("Fork Session" and "Copy Session
+    /// ID") need, or `None` when the tab's
     /// label-driving pane runs no coding agent — then neither row is offered.
     /// Reads the same leaf `tab_cwd` does, so all three rows agree on which
     /// pane a tab-level action means.

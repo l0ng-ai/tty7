@@ -265,15 +265,17 @@ impl CLIAgent {
         }
     }
 
-    /// The agent's own word for forking, for menu labels — otty's convention,
-    /// and the word a user hunting the menu will be looking for. `Some` exactly
-    /// when [`fork_command`](Self::fork_command) can build a command, so the UI
-    /// can use it as the single capability gate.
+    /// The menu label for forking this agent's session — one wording for every
+    /// agent, because every agent that has the capability calls it forking
+    /// (`codex fork`; `--fork-session` on Claude Code and Grok; `--fork` on
+    /// OpenCode). `Some` exactly when [`fork_command`](Self::fork_command) can
+    /// build a command, so the UI can use it as the single capability gate;
+    /// per-agent wording stays expressible here should one ever diverge.
     pub fn fork_label(self) -> Option<&'static str> {
         match self {
-            // Claude Code calls it branching.
-            CLIAgent::Claude => Some("Branch Session"),
-            CLIAgent::Codex | CLIAgent::Grok | CLIAgent::OpenCode => Some("Fork Session"),
+            CLIAgent::Claude | CLIAgent::Codex | CLIAgent::Grok | CLIAgent::OpenCode => {
+                Some("Fork Session")
+            }
             _ => None,
         }
     }

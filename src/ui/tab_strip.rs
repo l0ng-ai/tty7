@@ -1010,14 +1010,13 @@ impl Tty7App {
                 }));
         }
 
-        // Fork / Branch Session — the same kind of operation as New Worktree
-        // Tab (spin a parallel line of work off this one), so it sits in the
-        // same block. A *tab*-level ask carries no placement question, so it
-        // lands in a new tab; the pane right-click menu is where the split
-        // directions live (issue #211). Offered only for agents tty7 has a
-        // verified fork command for, labelled with that agent's own word for
-        // it; disabled — not hidden — while the session id is still unknown,
-        // so the capability stays discoverable when the hooks aren't installed.
+        // Fork Session — the same kind of operation as New Worktree Tab (spin a
+        // parallel line of work off this one), so it sits in the same block. A
+        // *tab*-level ask carries no placement question, so it lands in a new
+        // tab; the pane right-click menu is where the split directions live
+        // (issue #211). Offered only for agents tty7 has a verified fork command
+        // for; disabled — not hidden — while the session id is still unknown, so
+        // the capability stays discoverable when the hooks aren't installed.
         let agent_session = this.tab_agent_session(index, window, cx);
         if let Some(session) = &agent_session
             && let Some(label) = session.fork_label
