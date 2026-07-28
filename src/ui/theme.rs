@@ -11,7 +11,7 @@ use gpui_component::scroll::ScrollbarShow;
 use gpui_component::{Theme, ThemeMode};
 
 use crate::core::actions::*;
-use crate::core::config::Config;
+use crate::core::config::{Config, WindowBackdrop};
 use crate::terminal::view::{
     ClearScrollback, CopyText, CutText, FindInTerminal, FindNext, FindPrevious, PasteText,
     RedoEdit, SelectAll, UndoEdit,
@@ -319,17 +319,124 @@ pub(crate) fn effective_preset_id(cx: &App) -> String {
     }
 }
 
-/// The background appearance the window should be *created* with: Blurred when
-/// the effective theme wants blur, otherwise Transparent — never Opaque, so the
-/// opacity slider works live (see the comment in [`apply_theme`]).
+/// Default content-tint opacity used when a material has no explicit opacity.
+///
+/// DWM materials sit behind application content. If the root paints a fully
+/// opaque theme color, an enabled Mica or Acrylic backdrop remains invisible.
+/// A value of 0.82 preserves theme tint and text contrast while making the
+/// material immediately visible; the opacity slider can still override it.
+const SYSTEM_MATERIAL_OPACITY: f32 = 0.82;
+
+/// Return the effective opacity of the window's painted content.
+pub(crate) fn effective_window_opacity(cx: &App) -> f32 {
+    let config = cx.global::<Config>();
+    let theme = presets::by_id(cx, &effective_preset_id(cx));
+    config.window_opacity.or(theme.opacity).unwrap_or_else(|| {
+        if cfg!(target_os = "windows") && config.window_backdrop.is_material() {
+            SYSTEM_MATERIAL_OPACITY
+        } else {
+            1.0
+        }
+    })
+}
+
+/// Read and cache the Windows build number once per process. `RtlGetVersion` is
+/// unaffected by application-manifest compatibility declarations, making it a
+/// more reliable material-capability probe than `GetVersionEx`.
+#[cfg(target_os = "windows")]
+fn windows_build_number() -> u32 {
+    use std::sync::OnceLock;
+    use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
+    use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
+
+    static BUILD: OnceLock<u32> = OnceLock::new();
+    *BUILD.get_or_init(|| {
+        // SAFETY: `OSVERSIONINFOW` is plain C data. It is zero-initialized, its
+        // size field is populated as required by Win32, and an exclusive writable
+        // pointer is passed to a synchronous call that does not retain it.
+        let mut version: OSVERSIONINFOW = unsafe { std::mem::zeroed() };
+        version.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
+        let status = unsafe { RtlGetVersion(&mut version) };
+        if status >= 0 {
+            version.dwBuildNumber
+        } else {
+            // Use the most conservative capability when detection fails, which
+            // causes material resolution to fall back to plain transparency.
+            0
+        }
+    })
+}
+
+/// Resolve a user choice to a GPUI background supported by the Windows backend.
+///
+/// GPUI enables its Mica attributes from build 22621 and Acrylic from build
+/// 17763. Resolve the fallback chain here so an older system never receives a
+/// Mica request that the backend would silently ignore.
+fn windows_background_appearance(
+    backdrop: WindowBackdrop,
+    blur: bool,
+    build: u32,
+) -> WindowBackgroundAppearance {
+    match backdrop {
+        WindowBackdrop::Auto => {
+            if blur {
+                WindowBackgroundAppearance::Blurred
+            } else {
+                WindowBackgroundAppearance::Transparent
+            }
+        }
+        WindowBackdrop::Off => WindowBackgroundAppearance::Transparent,
+        WindowBackdrop::Acrylic => {
+            if build >= 17_763 {
+                WindowBackgroundAppearance::Blurred
+            } else {
+                WindowBackgroundAppearance::Transparent
+            }
+        }
+        WindowBackdrop::Mica | WindowBackdrop::MicaAlt if build < 17_763 => {
+            WindowBackgroundAppearance::Transparent
+        }
+        WindowBackdrop::Mica | WindowBackdrop::MicaAlt if build < 22_621 => {
+            WindowBackgroundAppearance::Blurred
+        }
+        WindowBackdrop::Mica => WindowBackgroundAppearance::MicaBackdrop,
+        WindowBackdrop::MicaAlt => WindowBackgroundAppearance::MicaAltBackdrop,
+    }
+}
+
+/// Resolve the background appearance shared by window creation and live updates.
+fn resolved_background_appearance(
+    backdrop: WindowBackdrop,
+    blur: bool,
+) -> WindowBackgroundAppearance {
+    #[cfg(target_os = "windows")]
+    {
+        windows_background_appearance(backdrop, blur, windows_build_number())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Windows-only material choices do not alter other platforms. macOS
+        // still maps Blurred to native vibrancy, while Linux delegates behavior
+        // to its active window backend.
+        let _ = backdrop;
+        if blur {
+            WindowBackgroundAppearance::Blurred
+        } else {
+            WindowBackgroundAppearance::Transparent
+        }
+    }
+}
+
+/// Background appearance used at window creation. This never returns Opaque,
+/// allowing both the opacity slider and system materials to update after the
+/// window is created (see [`apply_theme`]).
 pub(crate) fn background_appearance(cx: &App) -> WindowBackgroundAppearance {
     let config = cx.global::<Config>();
     let theme = presets::by_id(cx, &effective_preset_id(cx));
-    if config.window_blur.unwrap_or(theme.blur) {
-        WindowBackgroundAppearance::Blurred
-    } else {
-        WindowBackgroundAppearance::Transparent
-    }
+    resolved_background_appearance(
+        config.window_backdrop,
+        config.window_blur.unwrap_or(theme.blur),
+    )
 }
 
 /// Paint gpui-component's `Theme` from the active color theme (resolved by
@@ -364,8 +471,10 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // Window opacity / blur: the global config override wins when set (so a
     // chosen translucency survives theme switches); otherwise the theme's own
     // values apply. Only an opacity below 1.0 makes the window translucent.
-    let opacity = config.window_opacity.or(theme.opacity).filter(|o| *o < 1.0);
+    let opacity = effective_window_opacity(cx);
+    let opacity = (opacity < 1.0).then_some(opacity);
     let blur = config.window_blur.unwrap_or(theme.blur);
+    let backdrop = config.window_backdrop;
     // Force the native macOS chrome (traffic lights, system menus, scrollbars)
     // into the theme's own light/dark mode regardless of the OS setting —
     // only while *not* following the OS, where the chrome should track the
@@ -383,20 +492,13 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // false — which is exactly the platform split we want below.
     let auto_hide_scrollbars = cx.should_auto_hide_scrollbars();
 
-    // Never `Opaque`: on macOS 26 (Tahoe) flipping a window's opacity after
-    // creation doesn't reach the compositor — the window keeps compositing
-    // against black (verified empirically; the framebuffer alpha was correct
-    // but a red window behind never bled through). So the window is created
-    // non-opaque (see `background_appearance`, used by `main.rs`) and stays
-    // that way; a fully opaque theme simply paints alpha-1.0 content, which is
-    // visually identical. Only the Transparent↔Blurred flip happens here at
-    // runtime (it adds/removes an NSVisualEffectView, which does work live).
+    // Never switch back to Opaque: macOS 26 does not correctly notify the
+    // compositor when opacity changes after window creation. Keep the window
+    // non-opaque from birth and let fully opaque themes paint alpha 1 instead.
+    // Runtime updates only switch among Transparent, Blurred, and Windows Mica
+    // variants, all of which are supported by their live backend paths.
     if let Some(window) = window.as_deref_mut() {
-        let bg_appearance = if blur {
-            WindowBackgroundAppearance::Blurred
-        } else {
-            WindowBackgroundAppearance::Transparent
-        };
+        let bg_appearance = resolved_background_appearance(backdrop, blur);
         window.set_background_appearance(bg_appearance);
     }
 
@@ -446,7 +548,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // `tokens.accent` (fill) + `accent_foreground` (text) — see gpui-component's
     // `MenuItemElement`. Left unset, that highlight falls back to the stock
     // saturated accent, which snaps hard against this app's soft palette (the
-    // "生硬" hover). Point it at the popover ladder's selected rung so context
+    // harsh hover). Point it at the popover ladder's selected rung so context
     // menu, dropdown and palette share one hover language; keep the text at
     // `foreground` so it stays legible on the low-contrast fill instead of the
     // stock inverted accent text. The plain `accent`/`accent_foreground` fields
@@ -855,5 +957,52 @@ mod tests {
             cx.global_mut::<Config>().theme_follow_system = false;
             assert_eq!(effective_preset_id(cx), Config::default().theme_preset);
         });
+    }
+
+    #[test]
+    fn windows_backdrops_follow_the_expected_version_fallback_chain() {
+        // Windows 11 22H2 and later can use both Mica variants directly.
+        assert_eq!(
+            windows_background_appearance(WindowBackdrop::Mica, false, 22_621),
+            WindowBackgroundAppearance::MicaBackdrop
+        );
+        assert_eq!(
+            windows_background_appearance(WindowBackdrop::MicaAlt, false, 22_621),
+            WindowBackgroundAppearance::MicaAltBackdrop
+        );
+
+        // Earlier Windows 11 releases and Windows 10 1809+ fall back to Acrylic.
+        assert_eq!(
+            windows_background_appearance(WindowBackdrop::Mica, false, 22_000),
+            WindowBackgroundAppearance::Blurred
+        );
+        assert_eq!(
+            windows_background_appearance(WindowBackdrop::Acrylic, false, 17_763),
+            WindowBackgroundAppearance::Blurred
+        );
+
+        // Systems without Acrylic retain plain transparency and still render safely.
+        assert_eq!(
+            windows_background_appearance(WindowBackdrop::MicaAlt, false, 17_000),
+            WindowBackgroundAppearance::Transparent
+        );
+        assert_eq!(
+            windows_background_appearance(WindowBackdrop::Acrylic, false, 17_000),
+            WindowBackgroundAppearance::Transparent
+        );
+
+        // Auto follows the legacy blur value, while Off always disables materials.
+        assert_eq!(
+            windows_background_appearance(WindowBackdrop::Auto, true, 22_621),
+            WindowBackgroundAppearance::Blurred
+        );
+        assert_eq!(
+            windows_background_appearance(WindowBackdrop::Auto, false, 22_621),
+            WindowBackgroundAppearance::Transparent
+        );
+        assert_eq!(
+            windows_background_appearance(WindowBackdrop::Off, true, 22_621),
+            WindowBackgroundAppearance::Transparent
+        );
     }
 }

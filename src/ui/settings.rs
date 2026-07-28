@@ -29,7 +29,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::core::config::{
-    BellMode, Config, CursorStyle, NewTabPosition, NotifyMode, TabBarPosition,
+    BellMode, Config, CursorStyle, NewTabPosition, NotifyMode, TabBarPosition, WindowBackdrop,
 };
 use crate::core::keychain::CredentialRef;
 use crate::core::ssh_profile::{
@@ -141,8 +141,8 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Appearance,
-            title: "Blur",
-            keywords: "transparency translucent frosted vibrancy window background",
+            title: "Backdrop",
+            keywords: "transparency translucent frosted blur vibrancy window background mica acrylic 云母 亚克力",
         },
         SearchEntry {
             section: Appearance,
@@ -1523,12 +1523,11 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// Window section (Appearance): the global opacity slider and blur switch
-    /// that apply to every theme, then the inactive-pane dimming switch. The
-    /// first two are config *overrides* — until touched they follow the active
-    /// theme's own `opacity`/`blur`, and "Follow theme" clears them back to that
-    /// state; the dimming switch is a plain flag no theme carries a value for,
-    /// so it sits below that button and "Follow theme" leaves it alone.
+    /// Appearance's transparency section: global opacity, the platform backdrop,
+    /// and inactive-pane dimming. Windows exposes a system-material selector;
+    /// other platforms retain the blur switch. The appearance overrides return
+    /// to theme values or automatic material selection through "Follow theme".
+    /// Pane dimming is independent behavior with no theme field, so it is left alone.
     fn render_window_section(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(slider) = self
             .active_settings()
@@ -1537,8 +1536,11 @@ impl Tty7App {
             return div().into_any_element();
         };
         let config = cx.global::<Config>();
-        let overridden = config.window_opacity.is_some() || config.window_blur.is_some();
+        let overridden = config.window_opacity.is_some()
+            || config.window_blur.is_some()
+            || config.window_backdrop != WindowBackdrop::Auto;
         let dim_inactive_panes = config.dim_inactive_panes;
+        let window_backdrop = config.window_backdrop;
         let theme = presets::by_id(cx, &crate::ui::theme::effective_preset_id(cx));
         let opacity = Tty7App::effective_window_opacity(cx);
         let blur = cx.global::<Config>().window_blur.unwrap_or(theme.blur);
@@ -1556,12 +1558,54 @@ impl Tty7App {
                     .child(format!("{:.0}%", opacity * 100.)),
             )
             .into_any_element();
-        let blur_switch = crate::ui::theme::switch("window-blur", cx)
-            .checked(blur)
-            .on_click(
-                cx.listener(|this, on: &bool, window, cx| this.set_window_blur(*on, window, cx)),
+        // Expose DWM materials directly on Windows. Other platforms retain the
+        // existing blur switch so Windows-only concepts such as Mica do not leak
+        // into macOS vibrancy or Linux window-backend settings.
+        let (backdrop_label, backdrop_description, backdrop_control) = if cfg!(
+            target_os = "windows"
+        ) {
+            let selected = match window_backdrop {
+                WindowBackdrop::Auto => 0,
+                WindowBackdrop::Mica => 1,
+                WindowBackdrop::MicaAlt => 2,
+                WindowBackdrop::Acrylic => 3,
+                WindowBackdrop::Off => 4,
+            };
+            let control = self.segmented(
+                "window-backdrop",
+                &["Auto", "Mica", "Mica Alt", "Acrylic", "Off"],
+                selected,
+                cx,
+                |this, ix, window, cx| {
+                    let backdrop = match ix {
+                        0 => WindowBackdrop::Auto,
+                        1 => WindowBackdrop::Mica,
+                        2 => WindowBackdrop::MicaAlt,
+                        3 => WindowBackdrop::Acrylic,
+                        _ => WindowBackdrop::Off,
+                    };
+                    this.set_window_backdrop(backdrop, window, cx);
+                },
+            );
+            (
+                "Backdrop",
+                "Use a native Windows material. Unsupported Mica falls back to Acrylic, then transparency.",
+                control,
             )
-            .into_any_element();
+        } else {
+            let control =
+                crate::ui::theme::switch("window-blur", cx)
+                    .checked(blur)
+                    .on_click(cx.listener(|this, on: &bool, window, cx| {
+                        this.set_window_blur(*on, window, cx)
+                    }))
+                    .into_any_element();
+            (
+                "Blur",
+                "Blur whatever is behind a translucent window (macOS).",
+                control,
+            )
+        };
         let dim_switch = crate::ui::theme::switch("dim-inactive-panes", cx)
             .checked(dim_inactive_panes)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_dim_inactive_panes(*on, cx)))
@@ -1579,12 +1623,7 @@ impl Tty7App {
                 opacity_control,
                 cx,
             ))
-            .child(self.settings_row(
-                "Blur",
-                "Blur whatever is behind a translucent window (macOS).",
-                blur_switch,
-                cx,
-            ))
+            .child(self.settings_row(backdrop_label, backdrop_description, backdrop_control, cx))
             // Only offered while an override is active; otherwise the values
             // already follow the theme and the button would be a no-op.
             .when(overridden, |this| {

@@ -60,6 +60,13 @@ pub struct Config {
     pub window_opacity: Option<f32>,
     /// Global window-blur override. `None` follows the active theme's `blur`.
     pub window_blur: Option<bool>,
+    /// Native Windows system backdrop material. `Auto` preserves the previous
+    /// behavior by following `window_blur` or the active theme's `blur` value;
+    /// the other variants explicitly select Mica, Mica Alt, Acrylic, or disable
+    /// the system material. Non-Windows platforms ignore these material choices
+    /// and retain their existing blur behavior.
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub window_backdrop: WindowBackdrop,
     /// Fade unfocused panes in a split tab so the focused terminal reads as
     /// foreground. On by default; when off every pane renders at full opacity
     /// and only focus (cursor, etc.) distinguishes the active one.
@@ -418,6 +425,35 @@ pub enum StartupMode {
     Fullscreen,
 }
 
+/// Native system backdrop material used by a Windows window.
+///
+/// This enum records user intent rather than guaranteeing that a material is
+/// available. At application time, Mica falls back to Acrylic before Windows 11
+/// 22H2, then to plain transparency on older systems. This prevents an unsupported
+/// DWM attribute from leaving the window with a black or ineffective background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowBackdrop {
+    /// Preserve compatibility by following `window_blur` or the theme's `blur`.
+    #[default]
+    Auto,
+    /// The Windows 11 Mica material intended for a main window.
+    Mica,
+    /// The stronger Windows 11 Mica Alt material intended for tabbed windows.
+    MicaAlt,
+    /// The Acrylic blur material available since Windows 10 version 1809.
+    Acrylic,
+    /// Disable the system backdrop and retain plain alpha compositing only.
+    Off,
+}
+
+impl WindowBackdrop {
+    /// Whether this choice needs a translucent content tint to reveal the backdrop.
+    pub fn is_material(self) -> bool {
+        matches!(self, Self::Mica | Self::MicaAlt | Self::Acrylic)
+    }
+}
+
 /// The shape drawn for the block cursor (see [`Config::cursor_style`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -601,6 +637,7 @@ impl Default for Config {
             theme_preset_dark: "dark".to_string(),
             window_opacity: None,
             window_blur: None,
+            window_backdrop: WindowBackdrop::Auto,
             dim_inactive_panes: true,
             keybindings: HashMap::new(),
             keybinding_preset: default_preset(),
@@ -1133,6 +1170,26 @@ mod tests {
         assert!(back.theme_follow_system);
         assert_eq!(back.theme_preset_light, "one_light");
         assert_eq!(back.theme_preset_dark, "dracula");
+    }
+
+    #[test]
+    fn window_backdrop_defaults_round_trips_and_falls_back_leniently() {
+        // A legacy config without this field must preserve its theme and blur behavior.
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert_eq!(old.window_backdrop, WindowBackdrop::Auto);
+
+        // Kebab case is part of the public config contract, especially for Mica Alt.
+        let mica_alt: Config = serde_json::from_str(r#"{"window_backdrop":"mica-alt"}"#).unwrap();
+        assert_eq!(mica_alt.window_backdrop, WindowBackdrop::MicaAlt);
+        let json = serde_json::to_string(&mica_alt).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.window_backdrop, WindowBackdrop::MicaAlt);
+
+        // A typo in a hand-written config may reset this field, but not unrelated settings.
+        let invalid: Config =
+            serde_json::from_str(r#"{"font_size": 20.0, "window_backdrop":"glass"}"#).unwrap();
+        assert_eq!(invalid.font_size, 20.0);
+        assert_eq!(invalid.window_backdrop, WindowBackdrop::Auto);
     }
 
     #[test]

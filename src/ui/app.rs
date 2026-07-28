@@ -20,7 +20,7 @@ use std::sync::Arc;
 use crate::core::actions::*;
 use crate::core::config::{
     Config, CursorStyle as ConfigCursorStyle, NewTabPosition, RightPanelTab, ShellConfig,
-    TabBarPosition,
+    TabBarPosition, WindowBackdrop,
 };
 use crate::core::session::{
     Session, SessionAxis, SessionPane, SessionTab, WorkspaceId, WorkspaceStore,
@@ -1919,9 +1919,7 @@ impl Tty7App {
     /// The window opacity currently in effect: the global config override when
     /// set, else the active theme's own value, else fully opaque.
     pub(crate) fn effective_window_opacity(cx: &App) -> f32 {
-        let config = cx.global::<Config>();
-        let theme = crate::ui::presets::by_id(cx, &crate::ui::theme::effective_preset_id(cx));
-        config.window_opacity.or(theme.opacity).unwrap_or(1.0)
+        crate::ui::theme::effective_window_opacity(cx)
     }
 
     /// Set the global window-opacity override from the Appearance slider. Applies
@@ -1951,13 +1949,30 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Clear both window overrides so opacity/blur follow the active theme again
-    /// (the Appearance section's "Follow theme" action).
+    /// Set the native Windows backdrop material. The theme module resolves OS
+    /// support and fallbacks, so this handler only persists the user's intent
+    /// and reuses the existing live theme-application path.
+    pub(crate) fn set_window_backdrop(
+        &mut self,
+        backdrop: WindowBackdrop,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.global_mut::<Config>().window_backdrop = backdrop;
+        apply_theme(Some(window), cx);
+        cx.global::<Config>().save();
+        self.sync_window_opacity_slider(window, cx);
+        cx.notify();
+    }
+
+    /// Clear the opacity, blur, and Windows backdrop overrides so appearance
+    /// follows the active theme again (Appearance's "Follow theme" action).
     pub(crate) fn reset_window_overrides(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         {
             let config = cx.global_mut::<Config>();
             config.window_opacity = None;
             config.window_blur = None;
+            config.window_backdrop = WindowBackdrop::Auto;
         }
         apply_theme(Some(window), cx);
         cx.global::<Config>().save();
