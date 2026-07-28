@@ -22,10 +22,11 @@ use gpui_component::{
     ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Sizable as _, h_flex, v_flex,
 };
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::core::config::{Config, RightPanelTab};
 use crate::daemon::protocol::PaneProcs;
-use crate::terminal::git_diff::{self, DiffSnapshot};
+use crate::terminal::git_diff::DiffSnapshot;
 use crate::ui::app::{
     CONTENT_INSET, TILE_GLYPH_SM, TILE_SIZE_SM, Tty7App, tile_trailing_inset,
     tile_trailing_inset_sm,
@@ -61,10 +62,17 @@ pub(crate) struct RightPanelState {
     /// machines is two repositories.
     pub(crate) diff_cwd: Option<(crate::ui::host_ops::HostId, PathBuf)>,
     /// Last completed probe. `Some(None)` and `None` are different answers:
-    /// "probed, not a work tree" versus "never probed".
-    pub(crate) diff: Option<Option<DiffSnapshot>>,
-    /// A probe is in flight; keeps the render path from spawning a second one.
-    pub(crate) diff_loading: bool,
+    /// "probed, not a work tree" versus "never probed". Shared with the diff
+    /// overlay rather than a second copy of the same tree — see
+    /// [`Tty7App::spawn_shared_diff_probe`].
+    pub(crate) diff: Option<Option<Arc<DiffSnapshot>>>,
+    /// The machine-and-cwd this panel is waiting on a probe for; keeps the
+    /// render path from spawning a second one. A key rather than a flag because
+    /// the shared probe (see [`Tty7App::spawn_shared_diff_probe`]) lands per
+    /// repo: the panel has to know *which* answer clears its wait, or a probe
+    /// for the repo it just navigated away from would leave it stuck on
+    /// "Loading…".
+    pub(crate) diff_pending: Option<(crate::ui::host_ops::HostId, PathBuf)>,
     /// The pane `procs` describes, so a pane switch invalidates it rather than
     /// showing the previous pane's processes under the new pane's name.
     pub(crate) procs_pane: Option<u64>,
@@ -1171,8 +1179,8 @@ impl Tty7App {
         if self.right_panel.diff_cwd.as_ref() != Some(&key) {
             self.right_panel.diff_cwd = Some(key);
             self.right_panel.diff = None;
-            self.spawn_right_panel_diff(host.clone(), cwd.clone(), cx);
-        } else if self.right_panel.diff.is_none() && !self.right_panel.diff_loading {
+            self.spawn_right_panel_diff(cwd.clone(), cx);
+        } else if self.right_panel.diff.is_none() && self.right_panel.diff_pending.is_none() {
             // Nothing cached and nothing in flight: a probe for a previous cwd
             // landed after we had already moved on and dropped its result, so
             // no one is left to answer for this one. Without this the tab would
@@ -1316,33 +1324,24 @@ impl Tty7App {
         self.panel_scroll(inner, title)
     }
 
-    /// Off-thread `git diff` for the panel, mirroring the diff overlay's probe.
+    /// Off-thread `git diff` for the panel — the *same* probe the diff overlay
+    /// uses. This used to be its own `git_diff::probe` call keeping its own
+    /// `DiffSnapshot`, so a repo with both open generated, parsed and stored
+    /// its full diff twice (issue #239, finding 5). Now both go through
+    /// [`Tty7App::spawn_shared_diff_probe`], which dedupes by machine-and-cwd
+    /// and installs one `Arc` into whoever is watching — including this panel,
+    /// which is why there is no result handler left here.
     fn spawn_right_panel_diff(
         &mut self,
         host: crate::ui::host_ops::SharedHost,
         cwd: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        if self.right_panel.diff_loading {
+        if self.right_panel.diff_pending.is_some() {
             return;
         }
-        self.right_panel.diff_loading = true;
-        let key = (host.id(), cwd.clone());
-        crate::ui::host_ops::HostOps::run(
-            host,
-            cx,
-            move |h| git_diff::probe(h, &cwd),
-            move |app, result, cx| {
-                app.right_panel.diff_loading = false;
-                // Drop the result if the panel moved on to another repo — or
-                // another machine — while we flew; otherwise a slow probe would
-                // overwrite a newer one.
-                if app.right_panel.diff_cwd.as_ref() == Some(&key) {
-                    app.right_panel.diff = Some(result);
-                    cx.notify();
-                }
-            },
-        );
+        self.right_panel.diff_pending = Some((host.id(), cwd.clone()));
+        self.spawn_shared_diff_probe(host, cwd, cx);
     }
 
     /// Re-probe the Changes list when the shared status cache learned something
@@ -1357,7 +1356,7 @@ impl Tty7App {
     /// Comparing branch + totals first keeps the quiet case free, and re-probing
     /// in place leaves the rows on screen until the new snapshot lands.
     pub(crate) fn right_panel_refresh_changes(&mut self, cx: &mut Context<Self>) {
-        if self.right_panel.diff_loading {
+        if self.right_panel.diff_pending.is_some() {
             return;
         }
         let Some((id, cwd)) = self.right_panel.diff_cwd.clone() else {

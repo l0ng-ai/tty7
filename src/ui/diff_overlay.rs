@@ -17,9 +17,20 @@
 //! snapshot whose branch or counts disagree with what's shown — so a finishing
 //! command or agent turn refreshes the overlay through the exact trigger
 //! machinery the sidebar numbers already use.
+//!
+//! One probe, one snapshot, however many watchers: every tab's overlay and the
+//! Changes panel go through
+//! [`spawn_shared_diff_probe`](Tty7App::spawn_shared_diff_probe) and hold the
+//! result behind an `Arc`. The element tree, meanwhile, is *not* virtualized —
+//! so what keeps a big working tree from stalling the window is refusing to
+//! build the rows in the first place: past
+//! [`AUTO_COLLAPSE_TOTAL_LINES`](git_diff::AUTO_COLLAPSE_TOTAL_LINES) every
+//! file opens collapsed under a summary, and at most
+//! [`MAX_RENDERED_FILES`] cards are built at all.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gpui::{
     AnyElement, FocusHandle, FontWeight, KeyDownEvent, Pixels, Window, div, prelude::*, px,
@@ -28,7 +39,8 @@ use gpui_component::button::Button;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use crate::terminal::git_diff::{
-    self, AUTO_COLLAPSE_LINES, DiffSnapshot, FileDiff, FileStatus, LineKind,
+    self, AUTO_COLLAPSE_LINES, DiffSnapshot, FileDiff, FileStatus, LineKind, MAX_RENDERED_FILES,
+    Truncation,
 };
 use crate::ui::app::Tty7App;
 use crate::ui::rounding;
@@ -39,7 +51,11 @@ use crate::ui::rounding::RoundedCorners as _;
 pub(crate) enum DiffLoad {
     /// First probe still in flight.
     Loading,
-    Ready(DiffSnapshot),
+    /// A landed snapshot, shared rather than owned: one probe result reaches
+    /// every tab whose overlay watches this cwd *and* the Changes panel, and
+    /// the snapshot is a deep tree of owned strings — cloning it per holder on
+    /// the UI update path is exactly the cost issue #239 measured as a stall.
+    Ready(Arc<DiffSnapshot>),
     /// The probe came back "not a work tree" (repo deleted, dir gone).
     NotARepo,
 }
@@ -147,6 +163,18 @@ impl Tty7App {
             }
             None => {}
         }
+        // The Changes panel may already hold this very repo's snapshot — it is
+        // the same `git diff HEAD`. Opening on it makes the overlay paint
+        // immediately instead of flashing "Reading diff…" for a probe whose
+        // answer is already in the process, and costs an `Arc` bump. A refresh
+        // probe still flies below, so the seeded view is never the last word.
+        // Read here, before the `&mut` borrow of the tab.
+        let seed = match (&self.right_panel.diff_cwd, &self.right_panel.diff) {
+            (Some(panel_cwd), Some(Some(snap))) if *panel_cwd == cwd => {
+                DiffLoad::Ready(Arc::clone(snap))
+            }
+            _ => DiffLoad::Loading,
+        };
         // The overlay steals focus (it needs Esc); snapshot the active pane so
         // closing lands back on the same terminal — same discipline as Settings.
         self.remember_active_pane(window, cx);
@@ -158,7 +186,7 @@ impl Tty7App {
             host_id: host,
             cwd,
             focus_handle: focus_handle.clone(),
-            load: DiffLoad::Loading,
+            load: seed,
             loading: false,
             toggled: HashSet::new(),
             focus,
@@ -219,37 +247,89 @@ impl Tty7App {
             return;
         };
         overlay.loading = true;
+        self.spawn_shared_diff_probe(host, cwd, cx);
+    }
+
+    /// One `git diff HEAD` per repository, however many things are waiting on
+    /// it — where "repository" is the machine *and* the path, since the same
+    /// path on two hosts is two different work trees.
+    ///
+    /// The overlay and the Changes panel used to probe the same repository
+    /// independently and each keep its own `DiffSnapshot` — issue #239's fifth
+    /// finding. Deduping here means opening both costs one invocation and one
+    /// parse, and [`install_diff_snapshot`](Self::install_diff_snapshot) hands
+    /// the *same* `Arc` to both rather than a second copy.
+    ///
+    /// Callers still mark themselves as waiting first (the overlay's `loading`
+    /// flag, the panel's `diff_pending`): that's the "refreshing…" hint, and it
+    /// is cleared by whichever probe lands for this repo, not necessarily the
+    /// one the caller thought it started.
+    pub(crate) fn spawn_shared_diff_probe(
+        &mut self,
+        host: crate::ui::host_ops::SharedHost,
+        cwd: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (host.id(), cwd.clone());
+        if !self.diff_probes_inflight.insert(key.clone()) {
+            return; // someone is already asking this exact question
+        }
         let probe_cwd = cwd.clone();
         crate::ui::host_ops::HostOps::run(
             host,
             cx,
             move |h| git_diff::probe(h, &probe_cwd),
             move |app, result, cx| {
-                // Land on every tab whose overlay shows this repo on this
-                // machine — the spawning tab may no longer be active, and
-                // sibling tabs on the same repo are equally stale. A slot
-                // closed or swapped to another repo while we flew is skipped.
-                let mut landed = false;
-                for tab in app.tabs.iter_mut() {
-                    let Some(overlay) = tab
-                        .diff_overlay
-                        .as_mut()
-                        .filter(|o| o.cwd == cwd && o.host_id == id)
-                    else {
-                        continue;
-                    };
-                    overlay.loading = false;
-                    overlay.load = match &result {
-                        Some(snap) => DiffLoad::Ready(snap.clone()),
-                        None => DiffLoad::NotARepo,
-                    };
-                    landed = true;
-                }
-                if landed {
-                    cx.notify();
-                }
+                app.diff_probes_inflight.remove(&key);
+                app.install_diff_snapshot(key.0, &cwd, result.map(Arc::new), cx);
             },
         );
+    }
+
+    /// Hand a landed probe to everything watching `cwd`: every tab whose
+    /// overlay shows it (the spawning tab may no longer be active, and sibling
+    /// tabs on the same repo are equally stale) and the Changes panel when it
+    /// is on the same cwd. Slots that closed or swapped repos while the probe
+    /// flew are skipped.
+    fn install_diff_snapshot(
+        &mut self,
+        host: crate::ui::host_ops::HostId,
+        cwd: &Path,
+        snap: Option<Arc<DiffSnapshot>>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut landed = false;
+        for tab in self.tabs.iter_mut() {
+            let Some(overlay) = tab
+                .diff_overlay
+                .as_mut()
+                .filter(|o| o.cwd == cwd && o.host_id == host)
+            else {
+                continue;
+            };
+            overlay.loading = false;
+            // `Arc::clone`, not a deep copy of the file/hunk/line tree.
+            overlay.load = match &snap {
+                Some(snap) => DiffLoad::Ready(Arc::clone(snap)),
+                None => DiffLoad::NotARepo,
+            };
+            landed = true;
+        }
+        // The panel's wait is cleared by the answer it asked for, whoever
+        // actually ran it. `diff_cwd` is checked separately: the panel can have
+        // navigated to another repo — or another machine — since, in which case
+        // this result is stale and only the wait is over.
+        let key = (host, cwd.to_path_buf());
+        if self.right_panel.diff_pending.as_ref() == Some(&key) {
+            self.right_panel.diff_pending = None;
+            if self.right_panel.diff_cwd.as_ref() == Some(&key) {
+                self.right_panel.diff = Some(snap);
+            }
+            landed = true;
+        }
+        if landed {
+            cx.notify();
+        }
     }
 
     /// Re-probe the open overlay when the shared status cache learned
@@ -525,10 +605,24 @@ impl Tty7App {
         focused: Option<usize>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // An oversized tree opens fully collapsed: the file rows are still the
+        // useful part, and the bodies are what cost. A file the user opened by
+        // name is exempt — that's an explicit request for one body, not for the
+        // whole tree. See `DiffSnapshot::oversized`.
+        let oversized = focused.is_none() && snap.oversized();
         let mut list = v_flex().gap_3().p_4().w_full();
+        if oversized {
+            list = list.child(self.diff_oversized_notice(snap, cx));
+        }
+        // Hard ceiling on cards built at all: even collapsed, one card per file
+        // is one card per file, and the list is not virtualized.
+        let shown = snap.files.len().min(MAX_RENDERED_FILES);
         for (idx, file) in snap.files.iter().enumerate() {
             if focused.is_some_and(|f| f != idx) {
                 continue;
+            }
+            if focused.is_none() && idx >= shown {
+                break;
             }
             // A file opened by name was asked for explicitly — show its body
             // even when it's over the auto-collapse threshold. The header still
@@ -536,9 +630,24 @@ impl Tty7App {
             let expanded = if focused == Some(idx) {
                 !toggled.contains(&file.path)
             } else {
-                file_expanded(file, toggled)
+                file_expanded(file, toggled, oversized)
             };
             list = list.child(self.diff_file_card(idx, file, expanded, cx));
+        }
+        if focused.is_none() && snap.files.len() > shown {
+            let rest = snap.files.len() - shown;
+            list = list.child(
+                div()
+                    .w_full()
+                    .px_2p5()
+                    .py_1p5()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!(
+                        "… and {rest} more changed file{} — run `git diff` in the terminal to see them.",
+                        if rest == 1 { "" } else { "s" }
+                    )),
+            );
         }
         // Untracked files are a property of the tree, not of the focused file.
         if focused.is_none() && !snap.untracked.is_empty() {
@@ -553,6 +662,35 @@ impl Tty7App {
             .into_any_element()
     }
 
+    /// The banner an oversized diff leads with: says why every file is folded
+    /// shut and points at the two ways out (expand one file, or use the
+    /// terminal). Deliberately *above* the list rather than instead of it — the
+    /// file rows with their `+N −N` are the part that still reads fine at this
+    /// size.
+    fn diff_oversized_notice(&self, snap: &DiffSnapshot, cx: &Context<Self>) -> AnyElement {
+        let mut text = format!(
+            "This diff is too large to render efficiently ({} changed files, {} diff lines). \
+             Every file is collapsed — expand individual files, or run `git diff` in the terminal.",
+            snap.files.len(),
+            snap.retained_lines(),
+        );
+        if snap.budget_exhausted() {
+            text.push_str(" Some files' contents were dropped to keep tty7 responsive.");
+        }
+        div()
+            .w_full()
+            .px_2p5()
+            .py_2()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(text)
+            .into_any_element()
+    }
+
     /// One file's card: a clickable header row and, when expanded, the hunks.
     fn diff_file_card(
         &self,
@@ -562,8 +700,11 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Binary files and pure renames have no hunk body to reveal; their
-        // header is inert (no chevron, no click).
-        let expandable = !file.binary && !file.hunks.is_empty();
+        // header is inert (no chevron, no click). A file the repo-wide budget
+        // emptied *is* expandable even with no hunks — what it reveals is the
+        // note explaining why, which is otherwise unreachable.
+        let expandable =
+            !file.binary && (!file.hunks.is_empty() || file.truncated == Some(Truncation::Budget));
         let (glyph, glyph_color) = match file.status {
             FileStatus::Added => ("A", cx.theme().success),
             FileStatus::Modified => ("M", cx.theme().warning),
@@ -722,7 +863,21 @@ impl Tty7App {
                     body = body.child(self.diff_split_row(row, closing_row == Some((h, r)), cx));
                 }
             }
-            if file.truncated {
+            if let Some(reason) = file.truncated {
+                let note = match reason {
+                    Truncation::PerFile => format!(
+                        "Diff truncated at {} lines — run `git diff` in the terminal for the rest.",
+                        git_diff::MAX_LINES_PER_FILE
+                    ),
+                    // Naming the repo-wide budget matters: this file may be
+                    // three lines long, and "truncated" without a why reads as
+                    // tty7 having lost the change.
+                    Truncation::Budget => {
+                        "Body not loaded — this working tree is past tty7's diff budget. \
+                         Run `git diff` in the terminal for this file."
+                            .to_string()
+                    }
+                };
                 body = body.child(
                     div()
                         .w_full()
@@ -730,10 +885,7 @@ impl Tty7App {
                         .py_1()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(format!(
-                            "Diff truncated at {} lines — run `git diff` in the terminal for the rest.",
-                            git_diff::MAX_LINES_PER_FILE
-                        )),
+                        .child(note),
                 );
             }
             card = card.child(body);
@@ -888,8 +1040,15 @@ fn focused_name(overlay: &DiffOverlayState) -> Option<String> {
 
 /// Whether a file's body shows: small text diffs default open, big ones (and
 /// anything the user explicitly flipped) invert via the `toggled` set.
-fn file_expanded(file: &FileDiff, toggled: &HashSet<String>) -> bool {
-    let default_open = file.added + file.removed <= AUTO_COLLAPSE_LINES;
+///
+/// `collapse_all` is the repo-wide override: past
+/// [`AUTO_COLLAPSE_TOTAL_LINES`](git_diff::AUTO_COLLAPSE_TOTAL_LINES) nothing
+/// opens by default, because the per-file threshold can't see that forty
+/// innocent files are about to expand at once. The user's explicit toggles
+/// still win over it — that's the "expand individual files" the oversized
+/// notice promises.
+fn file_expanded(file: &FileDiff, toggled: &HashSet<String>, collapse_all: bool) -> bool {
+    let default_open = !collapse_all && file.added + file.removed <= AUTO_COLLAPSE_LINES;
     default_open != toggled.contains(&file.path)
 }
 
@@ -1033,5 +1192,171 @@ mod tests {
         let rows = split_hunk(&lines);
         assert_eq!(rows[0].right.as_ref().unwrap().text, "    indented");
         assert!(rows[0].left.is_none());
+    }
+
+    /// A file of `added` changed lines, small enough to open by default on its
+    /// own.
+    fn small_file(path: &str, added: u32) -> FileDiff {
+        FileDiff {
+            path: path.to_string(),
+            old_path: None,
+            status: FileStatus::Modified,
+            added,
+            removed: 0,
+            binary: false,
+            truncated: None,
+            hunks: vec![git_diff::Hunk {
+                header: "@@ -1,1 +1,1 @@".to_string(),
+                lines: (0..added)
+                    .map(|i| line(LineKind::Added, None, Some(i + 1), "x"))
+                    .collect(),
+            }],
+        }
+    }
+
+    /// The per-file threshold on its own: a small file opens, a big one doesn't,
+    /// and an explicit toggle inverts either. Unchanged behaviour — this is the
+    /// small-working-tree case that must feel identical.
+    #[test]
+    fn per_file_collapse_is_unchanged_below_the_repo_threshold() {
+        let small = small_file("small.rs", 10);
+        let big = small_file("big.rs", AUTO_COLLAPSE_LINES + 1);
+        let none = HashSet::new();
+        assert!(file_expanded(&small, &none, false));
+        assert!(!file_expanded(&big, &none, false));
+
+        let toggled: HashSet<String> = ["small.rs".to_string(), "big.rs".to_string()].into();
+        assert!(!file_expanded(&small, &toggled, false));
+        assert!(file_expanded(&big, &toggled, false));
+    }
+
+    /// The repo-wide override: past the total threshold nothing opens by
+    /// default, however small each file is — the case a per-file rule can't see
+    /// (issue #239, finding 4). An explicit toggle still wins, which is what
+    /// "expand individual files" in the oversized notice means.
+    #[test]
+    fn repo_wide_collapse_overrides_the_per_file_default() {
+        let small = small_file("small.rs", 10);
+        let none = HashSet::new();
+        assert!(file_expanded(&small, &none, false));
+        assert!(!file_expanded(&small, &none, true), "collapsed en masse");
+
+        let toggled: HashSet<String> = ["small.rs".to_string()].into();
+        assert!(
+            file_expanded(&small, &toggled, true),
+            "the user's own click still opens it"
+        );
+    }
+
+    /// Sixty files of forty lines each never trip the per-file threshold (each
+    /// is a tenth of it), yet would open 2400 diff rows at once. `oversized`
+    /// catches it on the line axis, and with everything collapsed the overlay
+    /// builds zero rows.
+    #[test]
+    fn many_medium_files_are_oversized_and_build_no_rows() {
+        let snap = DiffSnapshot {
+            files: (0..60)
+                .map(|i| small_file(&format!("f{i}.rs"), 40))
+                .collect(),
+            ..Default::default()
+        };
+        assert!(
+            snap.files.iter().all(|f| f.added <= AUTO_COLLAPSE_LINES),
+            "no single file is over the per-file threshold"
+        );
+        assert!(snap.oversized());
+
+        let none = HashSet::new();
+        let rows_expanded: usize = snap
+            .files
+            .iter()
+            .filter(|f| file_expanded(f, &none, false))
+            .flat_map(|f| &f.hunks)
+            .map(|h| split_hunk(&h.lines).len())
+            .sum();
+        let rows_collapsed: usize = snap
+            .files
+            .iter()
+            .filter(|f| file_expanded(f, &none, true))
+            .flat_map(|f| &f.hunks)
+            .map(|h| split_hunk(&h.lines).len())
+            .sum();
+        assert_eq!(rows_expanded, 2400, "what the old rule would have built");
+        assert_eq!(rows_collapsed, 0);
+    }
+
+    /// The other side of the same coin: a busy-but-ordinary afternoon — forty
+    /// files, a few lines each — is *not* oversized and opens expanded exactly
+    /// as it does today. The thresholds must not tax a normal working tree.
+    #[test]
+    fn an_ordinary_busy_tree_is_not_oversized() {
+        let snap = DiffSnapshot {
+            files: (0..40)
+                .map(|i| small_file(&format!("f{i}.rs"), 12))
+                .collect(),
+            ..Default::default()
+        };
+        assert!(!snap.oversized());
+        let none = HashSet::new();
+        assert!(snap.files.iter().all(|f| file_expanded(f, &none, false)));
+    }
+
+    /// However many files change, the overlay builds at most
+    /// [`MAX_RENDERED_FILES`] cards and says so.
+    #[test]
+    fn file_cards_are_capped() {
+        let snap = DiffSnapshot {
+            files: (0..MAX_RENDERED_FILES + 25)
+                .map(|i| small_file(&format!("f{i}.rs"), 1))
+                .collect(),
+            ..Default::default()
+        };
+        let shown = snap.files.len().min(MAX_RENDERED_FILES);
+        assert_eq!(shown, MAX_RENDERED_FILES);
+        assert_eq!(
+            snap.files.len() - shown,
+            25,
+            "the tail gets one summary line"
+        );
+    }
+
+    /// Measurement harness for issue #239, finding 2 — run with
+    /// `cargo test -- --ignored --nocapture bench_snapshot_share`.
+    #[test]
+    #[ignore = "measurement, not an assertion"]
+    fn bench_snapshot_share() {
+        use std::time::Instant;
+
+        // Two sizes: what v26.7.5 would have held for a big agent session
+        // (300 files × 300 lines, no repo-wide budget), and what this build
+        // retains for the same tree once the budget applies.
+        for (label, files, per_file) in [
+            ("unbudgeted (v26.7.5 shape)", 300, 300),
+            ("budgeted (this build retains)", 300, 67),
+        ] {
+            let snap = Arc::new(DiffSnapshot {
+                files: (0..files)
+                    .map(|i| small_file(&format!("f{i}.rs"), per_file))
+                    .collect(),
+                ..Default::default()
+            });
+            let lines: usize = snap.retained_lines();
+
+            let t = Instant::now();
+            for _ in 0..10 {
+                let _deep = (*snap).clone();
+            }
+            let deep = t.elapsed() / 10;
+
+            let t = Instant::now();
+            for _ in 0..100 {
+                let _shared = Arc::clone(&snap);
+            }
+            let shared = t.elapsed() / 100;
+            println!(
+                "{label}: {files} files / {lines} lines — deep clone {deep:?} vs \
+                 Arc::clone {shared:?}, per holder on the UI thread"
+            );
+        }
     }
 }

@@ -245,19 +245,22 @@ impl Tty7App {
                 // a change never disturbs the title; grouping keys on the repo
                 // root only, so a branch switch never relocates the row either
                 // (see `Tab::sidebar_group`). The diff counts are a quiet
-                // green/red readout and double as the diff-overlay toggle: click
-                // them to peek another session's changes in an overlay without
-                // activating this row's tab. The cwd they probe is the same one
-                // the status resolved through, so overlay and counts always
-                // describe the same repo.
-                let git_cwd = tab.pane.focused_or_first(window, cx).and_then(|leaf| {
-                    let view = leaf.read(cx);
-                    let cwd = view.git_status_cwd()?.to_path_buf();
-                    // The id, not the host: opening the overlay needs no live
-                    // connection — a disconnected machine's last diff is still
-                    // worth showing, and the re-probe resolves the id itself.
-                    Some((view.host_id(), cwd))
-                });
+                // green/red readout and, unless `sidebar_diff_preview` is off,
+                // double as the diff-overlay toggle: click them to peek another
+                // session's changes in an overlay without activating this row's
+                // tab. The cwd they probe is the same one the status resolved
+                // through, so overlay and counts always describe the same repo.
+                let git_cwd = diff_click_cwd(
+                    cx.global::<Config>(),
+                    tab.pane.focused_or_first(window, cx).and_then(|leaf| {
+                        let view = leaf.read(cx);
+                        let cwd = view.git_status_cwd()?.to_path_buf();
+                        // The id, not the host: opening the overlay needs no live
+                        // connection — a disconnected machine's last diff is still
+                        // worth showing, and the re-probe resolves the id itself.
+                        Some((view.host_id(), cwd))
+                    }),
+                );
                 let git_line = tab.git_status(Some(window), cx).map(|g| {
                     let mut line = h_flex()
                         .id(("sidebar-git", i))
@@ -1285,12 +1288,59 @@ fn group_names(roots: &[&PathBuf]) -> Vec<String> {
     }
 }
 
+/// The machine-and-cwd a sidebar row's `+N −N` counts should open the diff
+/// overlay for, or `None` when they're a plain readout. Generic over the
+/// payload so it stays indifferent to what identifies a repo — that pair grew a
+/// `HostId` when panes learned to live on other machines, and this gate did not
+/// need to know.
+///
+/// One value drives both halves of the interaction: the render path hangs the
+/// pointer cursor *and* the `toggle_diff_overlay` mouse handler off the same
+/// `when_some`, so a `None` here provably removes both and the press falls
+/// through to the row's own activate handler like any other part of the label.
+/// The branch and the counts themselves don't consult this — turning the
+/// preview off must not cost you the readout (issue #239).
+fn diff_click_cwd<T>(cfg: &Config, target: Option<T>) -> Option<T> {
+    cfg.sidebar_diff_preview.then_some(target).flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    /// With the preview on (the default) the counts carry the repo's cwd, which
+    /// is what gives them the pointer cursor and the `toggle_diff_overlay`
+    /// handler; with it off they carry nothing and neither is attached.
+    #[test]
+    fn diff_preview_setting_gates_the_click_target() {
+        let mut cfg = Config::default();
+        assert!(cfg.sidebar_diff_preview, "default is today's behaviour");
+        assert_eq!(
+            diff_click_cwd(&cfg, Some(p("/w/repo"))),
+            Some(p("/w/repo")),
+            "enabled: the counts are a click target"
+        );
+
+        cfg.sidebar_diff_preview = false;
+        assert_eq!(
+            diff_click_cwd(&cfg, Some(p("/w/repo"))),
+            None,
+            "disabled: no cwd, so no cursor and no toggle_diff_overlay"
+        );
+    }
+
+    /// A pane outside a git work tree has no cwd to open either way — the
+    /// setting doesn't invent one.
+    #[test]
+    fn diff_click_target_needs_a_repo_either_way() {
+        let mut cfg = Config::default();
+        assert_eq!(diff_click_cwd(&cfg, None), None);
+        cfg.sidebar_diff_preview = false;
+        assert_eq!(diff_click_cwd(&cfg, None), None);
     }
 
     /// Groups appear in first-appearance order with Scratch pinned last, and

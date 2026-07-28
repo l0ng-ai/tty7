@@ -285,6 +285,16 @@ pub struct Config {
     /// (`repo`, the default), or one flat list (`none`).
     #[serde(default, deserialize_with = "de_lenient")]
     pub sidebar_grouping: SidebarGrouping,
+    /// Whether clicking a sidebar row's `+N −N` working-tree counts opens the
+    /// diff overlay. Off leaves the branch and the counts exactly as they are —
+    /// they are a readout worth having on their own — and only takes away the
+    /// click target and its pointer cursor, so the press falls through to
+    /// ordinary tab activation. On by default: the overlay is the reason the
+    /// counts are there for most people, and the large-diff cost it used to
+    /// carry is now bounded by the diff parser's budgets. This is the escape
+    /// hatch for anyone who wants the numbers without the viewer.
+    #[serde(default = "default_true")]
+    pub sidebar_diff_preview: bool,
     /// When to post a desktop notification after a long foreground command
     /// finishes.
     #[serde(default, deserialize_with = "de_lenient")]
@@ -751,6 +761,8 @@ impl Default for Config {
             right_panel_width: default_right_panel_width(),
             right_panel_tab: RightPanelTab::Info,
             sidebar_grouping: SidebarGrouping::Repo,
+            // Today's behaviour, unchanged: the counts open the overlay.
+            sidebar_diff_preview: true,
             notify_on_command_finish: NotifyMode::Unfocused,
             // Opt-out, not opt-in: a stale terminal that never tells you it's
             // outdated is the status quo we're fixing. One cheap GET at startup.
@@ -1194,6 +1206,27 @@ mod tests {
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(back.ssh_warn_on_close);
         assert_eq!(back.ssh_profile_frecency.get(&id).unwrap().count, 4);
+    }
+
+    /// The sidebar diff preview is opt-*out*: a config written before the switch
+    /// existed keeps today's clickable counts, and turning it off survives a
+    /// write/read cycle of `config.json` (issue #239).
+    #[test]
+    fn sidebar_diff_preview_defaults_on_and_round_trips() {
+        assert!(Config::default().sidebar_diff_preview);
+
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert!(
+            old.sidebar_diff_preview,
+            "absent key means today's behaviour"
+        );
+
+        let off: Config = serde_json::from_str(r#"{"sidebar_diff_preview": false}"#).unwrap();
+        assert!(!off.sidebar_diff_preview);
+        let json = serde_json::to_string(&off).unwrap();
+        assert!(json.contains("\"sidebar_diff_preview\":false"), "persisted");
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert!(!back.sidebar_diff_preview);
     }
 
     /// Opt-*out*, unlike most flags here: a config written before this setting

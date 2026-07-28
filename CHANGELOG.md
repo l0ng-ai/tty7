@@ -58,6 +58,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session" means: paste it into `codex resume`, a bug report, or another tool.
   (#211)
 
+- **Sidebar diff preview is optional** — clicking a sidebar row's `+N −N`
+  working-tree counts opens the diff overlay, which is the point of them for
+  most people but not for everyone. Settings → Window & Tabs → *Open diff
+  preview from sidebar counts* turns the click off (`sidebar_diff_preview` in
+  `config.json`, on by default). Off, the branch and the counts stay exactly
+  where they are and read exactly the same; they simply stop being their own
+  click target, so the press falls through to ordinary tab activation like any
+  other part of the row. (#239)
+
 ### Changed
 
 - **The prompt editor's soft newline is now a rebindable action** — `Shift+Enter`
@@ -96,6 +105,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lie. It now measures the group it is reserving for, ~121px of fixed chrome plus
   the 80px grab handle, so chips reach their minimum width and truncate a tab or
   two sooner. (#221)
+
+- **Large working-tree diffs no longer stall the window** — the diff overlay
+  had four costs that all scaled with the size of the tree rather than with
+  what it could show, and issue #239's source-level analysis found each of
+  them. Measured on a 300-file, 90 000-line, 4.5 MB working-tree diff:
+
+  - The full `git diff HEAD` was read into one `String` before parsing began.
+    It is now streamed off the pipe a line at a time, so peak transient memory
+    is the longest line — 4 552 060 bytes resident → 50 bytes — at a cost of
+    ~1.7× the parse CPU (3.97 ms → 6.76 ms) on the background thread, where it
+    never touches a frame.
+  - The parsed snapshot was deep-cloned onto every tab's overlay *on the UI
+    update path*. It is now shared behind an `Arc`: 2.41 ms of main-thread
+    copying per holder → 11 ns.
+  - The per-file 2000-line cap bounded one pathological file but not the sum,
+    so two hundred ordinary files could retain 90 000 `DiffLine`s. A repo-wide
+    budget now caps retained lines and files-with-hunks — 90 000 lines / 6.2 MiB
+    of line text → 20 000 lines / 1.2 MiB — while `+N −N` keeps counting the
+    whole diff, so the numbers stay exact and the overlay doesn't re-probe in a
+    loop chasing a total it can no longer reach.
+  - The 400-line auto-collapse rule was per-file, so sixty forty-line files all
+    opened at once (2400 side-by-side rows, none of them individually large).
+    Past a repo-wide total the overlay now opens with every file collapsed —
+    zero rows built — leads with a summary saying the diff is too large to
+    render efficiently, and points at expanding individual files or `git diff`
+    in the terminal.
+
+- **One `git diff` per repository, not two** — the Changes panel and the diff
+  overlay each ran their own full-diff probe and kept their own snapshot of the
+  same repository. They now share one probe and one snapshot, so opening both
+  costs one shell-out and one parse, and opening the overlay while the panel is
+  already showing that repo paints immediately instead of re-probing. (#239)
 
 ### Fixed
 

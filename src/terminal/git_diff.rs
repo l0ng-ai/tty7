@@ -10,6 +10,14 @@
 //! previous snapshot (or a loading state) until a probe lands. Asking the pane's
 //! host rather than this machine is also what makes the overlay work at all for
 //! a pane whose repository lives somewhere else.
+//!
+//! And never trusted to be *small*, either. `git diff HEAD` is the one git read
+//! in this app whose output scales with the working tree rather than with what
+//! the UI can show, so the parser retains at most [`MAX_LINES_PER_FILE`] per
+//! file and [`MAX_TOTAL_LINES`] / [`MAX_FILES_WITH_HUNKS`] across the
+//! repository. The `+`/`−` counts deliberately escape all of it: they are
+//! compared against `git diff --numstat` to decide whether the overlay is
+//! stale, so a capped total would disagree forever and re-probe in a loop.
 
 use std::path::{Path, PathBuf};
 
@@ -22,9 +30,53 @@ use crate::ui::host_ops::Host;
 /// tree. Generous enough that real hand-written changes never hit it.
 pub const MAX_LINES_PER_FILE: usize = 2000;
 
+/// Repo-wide cap on retained diff lines. [`MAX_LINES_PER_FILE`] bounds one
+/// pathological file; this bounds the *sum*, which is the shape a working tree
+/// full of agent edits actually takes — two hundred files of three hundred
+/// lines each never trip the per-file cap yet retain 60k `DiffLine`s, each an
+/// owned `String`. Past this the parser keeps counting `+`/`−` (the header
+/// numbers must stay honest — see the note in [`parse_unified`]) but stops
+/// retaining line text.
+pub const MAX_TOTAL_LINES: usize = 20_000;
+
+/// Repo-wide cap on how many files keep their hunks. A branch that renames a
+/// vendored tree can list thousands of files whose diffs are each tiny; every
+/// one of them still costs a `Vec<Hunk>`. Files past this keep their header row
+/// (path, status, counts) and lose only the body.
+pub const MAX_FILES_WITH_HUNKS: usize = 500;
+
 /// A file's added+removed size at which the overlay collapses it by default
 /// (GitHub's "Load diff" treatment) — the user can still expand it by click.
 pub const AUTO_COLLAPSE_LINES: u32 = 400;
+
+/// Repo-wide counterpart to [`AUTO_COLLAPSE_LINES`]: once the snapshot's
+/// *retained* lines exceed this, every file starts collapsed and the overlay
+/// leads with the oversized-diff summary. Two differences from the per-file
+/// threshold matter here — this counts context lines too (they are rendered,
+/// so they are what costs), and it is a sum, so many medium files add up the
+/// way one big file does.
+pub const AUTO_COLLAPSE_TOTAL_LINES: usize = 2_000;
+
+/// The same idea by file count. Set well clear of a busy-but-ordinary tree —
+/// forty changed files of a few lines each is a normal afternoon and must still
+/// open expanded — because rows, not cards, are what actually cost: this axis
+/// only catches the tree so wide that a card per file is itself the problem.
+pub const AUTO_COLLAPSE_TOTAL_FILES: usize = 100;
+
+/// Hard ceiling on file cards the overlay builds at all. Past this the list is
+/// cut and a "… and N more" line stands in for the tail, so the element tree
+/// stays bounded no matter what the working tree looks like.
+pub const MAX_RENDERED_FILES: usize = 300;
+
+/// Why a file's hunks stop short of its real diff.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Truncation {
+    /// This one file exceeded [`MAX_LINES_PER_FILE`].
+    PerFile,
+    /// The repo-wide budget ([`MAX_TOTAL_LINES`] / [`MAX_FILES_WITH_HUNKS`])
+    /// ran out — the file itself may be small.
+    Budget,
+}
 
 /// One parsed `git diff HEAD` for a repo, plus the untracked files `diff`
 /// itself can't see. This is the overlay's whole model.
@@ -47,10 +99,46 @@ impl DiffSnapshot {
     /// Total added/removed line counts across all files — the overlay's
     /// header numbers, matching the sidebar's `+N −N` by construction (both
     /// sum per-file counts of the same `HEAD` diff).
+    ///
+    /// Deliberately *not* affected by any truncation: the parser keeps counting
+    /// past every cap, because this number is compared against the status
+    /// cache's `git diff --numstat` totals to decide whether the overlay is
+    /// stale. A capped total would never match, and the overlay would re-probe
+    /// in a loop.
     pub fn totals(&self) -> (u32, u32) {
         self.files
             .iter()
             .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed))
+    }
+
+    /// Diff lines actually kept, summed over every file. This — not
+    /// [`totals`](Self::totals) — is what the overlay would have to build rows
+    /// for if every file were expanded, so it's what the render-side thresholds
+    /// compare against. Cheap: one `len()` per hunk, not per line.
+    pub fn retained_lines(&self) -> usize {
+        self.files
+            .iter()
+            .flat_map(|f| &f.hunks)
+            .map(|h| h.lines.len())
+            .sum()
+    }
+
+    /// Whether this diff is too big to open expanded: every file starts
+    /// collapsed and the overlay leads with the "too large to render
+    /// efficiently" summary. Not a refusal — individual files still expand by
+    /// click, which is the escape hatch the summary points at.
+    pub fn oversized(&self) -> bool {
+        self.files.len() > AUTO_COLLAPSE_TOTAL_FILES
+            || self.retained_lines() > AUTO_COLLAPSE_TOTAL_LINES
+    }
+
+    /// Whether the repo-wide budget dropped hunks that a smaller diff would
+    /// have kept — the overlay says so, so a missing body reads as a cap rather
+    /// than as tty7 losing the change.
+    pub fn budget_exhausted(&self) -> bool {
+        self.files
+            .iter()
+            .any(|f| f.truncated == Some(Truncation::Budget))
     }
 }
 
@@ -76,9 +164,10 @@ pub struct FileDiff {
     pub removed: u32,
     /// Binary file — no hunks, the header row says "binary" instead.
     pub binary: bool,
-    /// Hunk parsing stopped at [`MAX_LINES_PER_FILE`]; the overlay appends a
-    /// "truncated" footer under the last hunk.
-    pub truncated: bool,
+    /// Hunk parsing stopped short of the file's real diff, and why; the overlay
+    /// appends a "truncated" footer under the last hunk. `None` means the body
+    /// is complete.
+    pub truncated: Option<Truncation>,
     pub hunks: Vec<Hunk>,
 }
 
@@ -152,117 +241,174 @@ pub fn probe(host: &dyn Host, cwd: &Path) -> Option<DiffSnapshot> {
 /// construction: unrecognized metadata lines between the `diff --git` header
 /// and the first hunk (modes, index, similarity) are simply skipped, so a git
 /// version printing extra headers degrades to "fewer facts", never a panic.
+///
+/// The whole-string form the tests drive the parser through; [`probe`] streams
+/// the same [`DiffParser`] line by line off git's stdout instead, so no caller
+/// in the app ever holds the full diff as one `String`.
+#[cfg(test)]
 pub fn parse_unified(out: &str) -> Vec<FileDiff> {
-    let mut files: Vec<FileDiff> = Vec::new();
-    // Line-number counters for the hunk currently being filled.
-    let (mut old_no, mut new_no) = (0u32, 0u32);
-    // Lines consumed by the current file's hunks, for the per-file cap.
-    let mut file_lines = 0usize;
-
+    let mut parser = DiffParser::default();
     for line in out.lines() {
+        parser.push_line(line);
+    }
+    parser.finish()
+}
+
+/// The unified-diff parser as an incremental state machine, so `git diff`'s
+/// output can be consumed a line at a time off a pipe rather than buffered
+/// whole. Enforces both the per-file and the repo-wide retention budgets; see
+/// [`MAX_LINES_PER_FILE`] and [`MAX_TOTAL_LINES`].
+#[derive(Default)]
+pub struct DiffParser {
+    files: Vec<FileDiff>,
+    /// Line-number counters for the hunk currently being filled.
+    old_no: u32,
+    new_no: u32,
+    /// Lines consumed by the current file's hunks, for the per-file cap.
+    file_lines: usize,
+    /// Lines retained across every file so far, for the repo-wide cap.
+    total_lines: usize,
+    /// Files that actually kept at least one hunk, for the repo-wide file cap.
+    /// Counted at the first `@@`, not at the file header: a pure rename or a
+    /// binary blob has no body and must not spend the budget on nothing.
+    files_with_hunks: usize,
+    /// Whether the last `@@` header opened a body we're still inside. Tracked
+    /// explicitly rather than inferred from "the file has hunks": a file the
+    /// budget truncated never gets a `Hunk` pushed, but its lines still have to
+    /// be *counted*, and a removed line whose own text starts with `--- ` must
+    /// not be mistaken for the file header it looks like.
+    in_hunk: bool,
+}
+
+impl DiffParser {
+    /// Feed one line of `git diff` output (no trailing newline).
+    pub fn push_line(&mut self, line: &str) {
         if let Some(rest) = line.strip_prefix("diff --git ") {
             let (old_p, new_p) = parse_git_header_paths(rest);
-            files.push(FileDiff {
+            self.files.push(FileDiff {
                 path: new_p.clone(),
                 old_path: (old_p != new_p).then_some(old_p),
                 status: FileStatus::Modified,
                 added: 0,
                 removed: 0,
                 binary: false,
-                truncated: false,
+                truncated: None,
                 hunks: Vec::new(),
             });
-            file_lines = 0;
-            continue;
+            self.file_lines = 0;
+            self.in_hunk = false;
+            return;
         }
-        let Some(file) = files.last_mut() else {
-            continue; // preamble before any header (shouldn't happen)
+        let Some(file) = self.files.last_mut() else {
+            return; // preamble before any header (shouldn't happen)
         };
         // ── File-level metadata between the header and the first hunk ──────
         if line.starts_with("new file mode") {
             file.status = FileStatus::Added;
-            continue;
+            return;
         }
         if line.starts_with("deleted file mode") {
             file.status = FileStatus::Deleted;
-            continue;
+            return;
         }
         if line.starts_with("rename from ") {
             file.status = FileStatus::Renamed;
-            continue;
+            return;
         }
         if line.starts_with("Binary files ") || line.starts_with("GIT binary patch") {
             file.binary = true;
-            continue;
+            return;
         }
         // `--- a/x` / `+++ b/x` repeat what the header said; `rename to`,
         // `index`, modes and similarity scores add nothing we render. But only
         // skip them *outside* hunk bodies — a removed line legitimately starts
         // with `--- ` inside one.
-        if file.hunks.is_empty()
+        if !self.in_hunk
             && (line.starts_with("--- ") || line.starts_with("+++ ") || !is_hunk_line(line))
             && !line.starts_with("@@")
         {
-            continue;
+            return;
         }
         // ── Hunks ───────────────────────────────────────────────────────────
         if line.starts_with("@@") {
-            if file.truncated {
-                continue; // past the cap: swallow the rest of this file
+            // A truncated file still enters the body — its lines have to be
+            // counted — it just doesn't get a `Hunk` to keep them in.
+            self.in_hunk = true;
+            if file.truncated.is_some() {
+                return;
+            }
+            // The repo-wide budget is charged here rather than at the file
+            // header, so a file with no body at all (a pure rename, a binary
+            // blob) neither consumes the file budget nor gets flagged as
+            // truncated for a body it never had.
+            let first_hunk = file.hunks.is_empty();
+            if (first_hunk && self.files_with_hunks >= MAX_FILES_WITH_HUNKS)
+                || self.total_lines >= MAX_TOTAL_LINES
+            {
+                file.truncated = Some(Truncation::Budget);
+                return;
+            }
+            if first_hunk {
+                self.files_with_hunks += 1;
             }
             let (o, n) = parse_hunk_starts(line).unwrap_or((0, 0));
-            old_no = o;
-            new_no = n;
+            self.old_no = o;
+            self.new_no = n;
             file.hunks.push(Hunk {
                 header: line.to_string(),
                 lines: Vec::new(),
             });
-            continue;
+            return;
         }
-        if file.hunks.is_empty() {
-            continue; // stray content outside any hunk
+        if !self.in_hunk {
+            return; // stray content outside any hunk
         }
         let (kind, text) = match line.as_bytes().first() {
             Some(b'+') => (LineKind::Added, &line[1..]),
             Some(b'-') => (LineKind::Removed, &line[1..]),
             Some(b' ') => (LineKind::Context, &line[1..]),
             // `\ No newline at end of file` and anything else: not a diff line.
-            _ => continue,
+            _ => return,
         };
-        // Count added/removed *before* the truncation gate: the cap is about
-        // element volume, but the header numbers must stay honest, so lines
-        // past the cap still count even though they're never kept.
+        // Count added/removed *before* the truncation gate: the caps are about
+        // element volume, but the header numbers must stay honest (they are
+        // compared against `--numstat` to detect staleness), so lines past a cap
+        // still count even though they're never kept.
         match kind {
             LineKind::Added => file.added += 1,
             LineKind::Removed => file.removed += 1,
             LineKind::Context => {}
         }
-        if file.truncated {
-            continue;
+        if file.truncated.is_some() {
+            return;
         }
-        file_lines += 1;
-        if file_lines > MAX_LINES_PER_FILE {
-            file.truncated = true;
-            continue;
+        self.file_lines += 1;
+        if self.file_lines > MAX_LINES_PER_FILE {
+            file.truncated = Some(Truncation::PerFile);
+            return;
+        }
+        if self.total_lines >= MAX_TOTAL_LINES {
+            file.truncated = Some(Truncation::Budget);
+            return;
         }
         let Some(hunk) = file.hunks.last_mut() else {
-            continue;
+            return;
         };
         let (o, n) = match kind {
             LineKind::Added => {
-                let n = new_no;
-                new_no += 1;
+                let n = self.new_no;
+                self.new_no += 1;
                 (None, Some(n))
             }
             LineKind::Removed => {
-                let o = old_no;
-                old_no += 1;
+                let o = self.old_no;
+                self.old_no += 1;
                 (Some(o), None)
             }
             LineKind::Context => {
-                let (o, n) = (old_no, new_no);
-                old_no += 1;
-                new_no += 1;
+                let (o, n) = (self.old_no, self.new_no);
+                self.old_no += 1;
+                self.new_no += 1;
                 (Some(o), Some(n))
             }
         };
@@ -272,10 +418,15 @@ pub fn parse_unified(out: &str) -> Vec<FileDiff> {
             new_no: n,
             text: text.to_string(),
         });
+        self.total_lines += 1;
     }
-    // A truncated file still counts +/− for its whole diff (the loop above
-    // keeps counting past the cap), so totals stay consistent with numstat.
-    files
+
+    /// The parsed files. A truncated file still counts +/− for its whole diff
+    /// (the parser keeps counting past every cap), so totals stay consistent
+    /// with `--numstat`.
+    pub fn finish(self) -> Vec<FileDiff> {
+        self.files
+    }
 }
 
 /// Whether a line can only belong to a hunk body (`+`/`-`/space/`\` lead).
@@ -486,7 +637,7 @@ index 1111111..2222222 100644
             out.push_str(&format!("+line {i}\n"));
         }
         let files = parse_unified(&out);
-        assert!(files[0].truncated);
+        assert_eq!(files[0].truncated, Some(Truncation::PerFile));
         assert_eq!(files[0].added, 3000);
         let kept: usize = files[0].hunks.iter().map(|h| h.lines.len()).sum();
         assert_eq!(kept, MAX_LINES_PER_FILE);
@@ -519,5 +670,224 @@ index 1..2 100644
             ..Default::default()
         };
         assert_eq!(snap.totals(), (4, 2));
+    }
+
+    /// Build `files` synthetic modified files of `lines_each` added lines —
+    /// the "many medium files" shape the per-file cap alone can't bound.
+    fn many_files(files: usize, lines_each: usize) -> String {
+        let mut out = String::new();
+        for f in 0..files {
+            out.push_str(&format!(
+                "diff --git a/f{f}.rs b/f{f}.rs\nindex 1..2 100644\n--- a/f{f}.rs\n+++ b/f{f}.rs\n@@ -0,0 +1,{lines_each} @@\n"
+            ));
+            for i in 0..lines_each {
+                out.push_str(&format!("+file {f} line {i}\n"));
+            }
+        }
+        out
+    }
+
+    /// The repo-wide budget bounds retained lines even when no single file is
+    /// anywhere near [`MAX_LINES_PER_FILE`] — the case the reporter of #239
+    /// called out as the one the per-file cap misses.
+    #[test]
+    fn repo_wide_budget_caps_retained_lines() {
+        // 300 files × 300 lines = 90k lines, none of which trips the 2000-line
+        // per-file cap.
+        let files = parse_unified(&many_files(300, 300));
+        assert_eq!(files.len(), 300, "every file keeps its header row");
+        let retained: usize = files
+            .iter()
+            .flat_map(|f| &f.hunks)
+            .map(|h| h.lines.len())
+            .sum();
+        assert!(
+            retained <= MAX_TOTAL_LINES,
+            "retained {retained} lines, budget is {MAX_TOTAL_LINES}"
+        );
+        assert!(
+            files
+                .iter()
+                .any(|f| f.truncated == Some(Truncation::Budget))
+        );
+    }
+
+    /// Budget or no budget, the +/− totals must stay exact: they are compared
+    /// against `git diff --numstat` to decide whether the overlay is stale, and
+    /// a short count would make every comparison disagree and re-probe forever.
+    #[test]
+    fn repo_wide_budget_keeps_totals_exact() {
+        let snap = DiffSnapshot {
+            files: parse_unified(&many_files(300, 300)),
+            ..Default::default()
+        };
+        assert_eq!(snap.totals(), (90_000, 0));
+        assert!(snap.budget_exhausted());
+    }
+
+    /// The file cap keeps a rename-the-world diff from allocating a `Vec<Hunk>`
+    /// per file, while every file still lists its path and counts.
+    #[test]
+    fn repo_wide_budget_caps_files_with_hunks() {
+        // One line each: far under the line budget, so only the file cap can
+        // stop this.
+        let files = parse_unified(&many_files(MAX_FILES_WITH_HUNKS + 50, 1));
+        assert_eq!(files.len(), MAX_FILES_WITH_HUNKS + 50);
+        let with_hunks = files.iter().filter(|f| !f.hunks.is_empty()).count();
+        assert_eq!(with_hunks, MAX_FILES_WITH_HUNKS);
+        // The tail still counts, so totals stay honest.
+        assert_eq!(
+            files.iter().map(|f| f.added).sum::<u32>(),
+            (MAX_FILES_WITH_HUNKS + 50) as u32
+        );
+        assert_eq!(files.last().unwrap().truncated, Some(Truncation::Budget));
+    }
+
+    /// A small diff is untouched by the budget — the setting-enabled,
+    /// small-working-tree case must behave exactly as before.
+    #[test]
+    fn small_diff_is_not_truncated() {
+        let snap = DiffSnapshot {
+            files: parse_unified(SAMPLE),
+            ..Default::default()
+        };
+        assert!(snap.files.iter().all(|f| f.truncated.is_none()));
+        assert!(!snap.oversized());
+        assert!(!snap.budget_exhausted());
+    }
+
+    /// `oversized` trips on either axis: many files, or many retained lines.
+    #[test]
+    fn oversized_trips_on_files_or_lines() {
+        let by_files = DiffSnapshot {
+            files: parse_unified(&many_files(AUTO_COLLAPSE_TOTAL_FILES + 1, 1)),
+            ..Default::default()
+        };
+        assert!(by_files.oversized());
+
+        // Few files, but past the line threshold.
+        let by_lines = DiffSnapshot {
+            files: parse_unified(&many_files(2, AUTO_COLLAPSE_TOTAL_LINES)),
+            ..Default::default()
+        };
+        assert!(by_lines.files.len() <= AUTO_COLLAPSE_TOTAL_FILES);
+        assert!(by_lines.retained_lines() > AUTO_COLLAPSE_TOTAL_LINES);
+        assert!(by_lines.oversized());
+    }
+
+    /// Even a budget-truncated file keeps a removed line whose *content* starts
+    /// with `--- ` out of the metadata skip — that line still has to count.
+    #[test]
+    fn truncated_file_counts_dash_prefixed_content() {
+        let mut out = many_files(MAX_FILES_WITH_HUNKS, 1);
+        out.push_str(
+            "diff --git a/late.md b/late.md\nindex 1..2 100644\n--- a/late.md\n+++ b/late.md\n@@ -1,2 +1,1 @@\n keep\n--- a heading rule\n",
+        );
+        let files = parse_unified(&out);
+        let late = files.last().unwrap();
+        assert_eq!(late.path, "late.md");
+        assert_eq!(late.truncated, Some(Truncation::Budget));
+        assert!(late.hunks.is_empty(), "no body kept past the file cap");
+        assert_eq!((late.added, late.removed), (0, 1), "but the line counts");
+    }
+
+    /// Measurement harness for issue #239 finding 1 — run with
+    /// `cargo test --release -- --ignored --nocapture bench_stream_vs_buffer`.
+    ///
+    /// Stands in for `Command::output()` vs [`git_status::git_lines`] with a
+    /// file on disk, so the two paths differ only in whether the whole diff is
+    /// materialised as one `String` before parsing starts.
+    #[test]
+    #[ignore = "measurement, not an assertion"]
+    fn bench_stream_vs_buffer() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::time::Instant;
+
+        let path = std::env::temp_dir().join("tty7-diff-bench.patch");
+        {
+            let mut f = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+            // ~90k changed lines over 300 files — a big but not absurd agent
+            // session's working tree.
+            for file in 0..300 {
+                write!(
+                    f,
+                    "diff --git a/f{file}.rs b/f{file}.rs\nindex 1..2 100644\n--- a/f{file}.rs\n+++ b/f{file}.rs\n@@ -0,0 +1,300 @@\n"
+                )
+                .unwrap();
+                for i in 0..300 {
+                    writeln!(f, "+file {file} line {i} of a fairly typical source line").unwrap();
+                }
+            }
+        }
+        let size = std::fs::metadata(&path).unwrap().len();
+
+        let t = Instant::now();
+        let buffered = std::fs::read_to_string(&path).unwrap();
+        let read = t.elapsed();
+        let t = Instant::now();
+        let a = parse_unified(&buffered);
+        println!(
+            "buffered: read {size} bytes in {read:?} (all resident), parse {:?}, {} files",
+            t.elapsed(),
+            a.len()
+        );
+        drop(buffered);
+
+        let t = Instant::now();
+        let mut parser = DiffParser::default();
+        // Same capacity `git_lines` uses.
+        let mut reader = BufReader::with_capacity(64 * 1024, std::fs::File::open(&path).unwrap());
+        let mut buf = Vec::new();
+        let mut longest = 0usize;
+        loop {
+            buf.clear();
+            if reader.read_until(b'\n', &mut buf).unwrap() == 0 {
+                break;
+            }
+            while buf.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
+                buf.pop();
+            }
+            longest = longest.max(buf.len());
+            parser.push_line(&String::from_utf8_lossy(&buf));
+        }
+        let b = parser.finish();
+        println!(
+            "streamed: read+parse {:?}, {} files, peak transient buffer {longest} bytes \
+             (vs {size} buffered)",
+            t.elapsed(),
+            b.len()
+        );
+        assert_eq!(a.len(), b.len());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Measurement harness for issue #239, not a correctness gate — run with
+    /// `cargo test -- --ignored --nocapture bench_parse_budget`.
+    #[test]
+    #[ignore = "measurement, not an assertion"]
+    fn bench_parse_budget() {
+        use std::time::Instant;
+        let out = many_files(300, 300);
+        println!("input: {} bytes, 300 files × 300 lines", out.len());
+        let t = Instant::now();
+        let files = parse_unified(&out);
+        let elapsed = t.elapsed();
+        let retained: usize = files
+            .iter()
+            .flat_map(|f| &f.hunks)
+            .map(|h| h.lines.len())
+            .sum();
+        let bytes: usize = files
+            .iter()
+            .flat_map(|f| &f.hunks)
+            .flat_map(|h| &h.lines)
+            .map(|l| l.text.capacity() + std::mem::size_of::<DiffLine>())
+            .sum();
+        println!(
+            "parse {elapsed:?} → {retained} retained lines, ~{} KiB of DiffLine text \
+             (unbudgeted would be 90000 lines / ~{} KiB)",
+            bytes / 1024,
+            90_000 * (24 + std::mem::size_of::<DiffLine>()) / 1024,
+        );
     }
 }

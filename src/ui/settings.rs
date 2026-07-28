@@ -382,6 +382,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: WindowTabs,
+            title: "Open diff preview from sidebar counts",
+            keywords: "diff overlay preview sidebar counts git changes click branch lines",
+        },
+        SearchEntry {
+            section: WindowTabs,
             title: "Notify on command finish",
             keywords: "notification alert done osc desktop banner long command",
         },
@@ -4458,6 +4463,7 @@ impl Tty7App {
             TabBarPosition::Top => 0,
             TabBarPosition::Left => 1,
         };
+        let sidebar_diff_preview = cfg.sidebar_diff_preview;
         let sidebar_grouping_idx = match cfg.sidebar_grouping {
             crate::core::config::SidebarGrouping::Repo => 0,
             crate::core::config::SidebarGrouping::None => 1,
@@ -4568,6 +4574,10 @@ impl Tty7App {
                 this.set_tab_bar_position(pos, cx);
             },
         );
+        let sidebar_diff_switch = crate::ui::theme::switch("wt-sidebar-diff-preview", cx)
+            .checked(sidebar_diff_preview)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_sidebar_diff_preview(*on, cx)))
+            .into_any_element();
         let sidebar_grouping_radio = self.segmented(
             "wt-sidebar-grouping",
             &["By repo", "Flat"],
@@ -4643,6 +4653,16 @@ impl Tty7App {
                 "Group sidebar tabs under a header per git repository, with non-repo tabs \
                  in a Scratch section. Only applies to the left sidebar.",
                 sidebar_grouping_radio,
+                cx,
+            ))
+            // Phrased around what *stays*: the worry this row answers is "will
+            // turning it off cost me the branch and the numbers", and the
+            // answer is no — only the click goes.
+            .child(self.settings_row(
+                "Open diff preview from sidebar counts",
+                "Click a row's +N −N to open the working-tree diff in an overlay. Off keeps the \
+                 branch and the counts on the row and just stops them being clickable.",
+                sidebar_diff_switch,
                 cx,
             ))
             .child(self.section_rule(cx))

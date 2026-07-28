@@ -734,6 +734,14 @@ pub struct Tty7App {
     pub(crate) sftp_panel: crate::ui::sftp::SftpPanelState,
     /// Right detail panel (info / changes / files) docked beside the terminal.
     pub(crate) right_panel: crate::ui::right_panel::RightPanelState,
+    /// Repositories with a `git diff HEAD` probe in flight, keyed by machine
+    /// *and* working directory — the same path on two hosts is two different
+    /// work trees. One probe answers everyone: the diff overlay on any number of
+    /// tabs and the Changes panel all read the same result, instead of each
+    /// running its own copy of the same invocation and parse. See
+    /// [`Tty7App::spawn_shared_diff_probe`](crate::ui::app::Tty7App::spawn_shared_diff_probe).
+    pub(crate) diff_probes_inflight:
+        std::collections::HashSet<(crate::ui::host_ops::HostId, std::path::PathBuf)>,
     /// Local project file tree (left column of the body).
     pub(crate) file_tree: crate::ui::file_tree::FileTreeState,
     /// Code-editor panel (right column of the body).
@@ -1207,6 +1215,7 @@ impl Tty7App {
             },
             sftp_panel,
             right_panel: Default::default(),
+            diff_probes_inflight: Default::default(),
             file_tree,
             editor,
             sidebar_width: Rc::new(Cell::new(sidebar_width)),
@@ -2848,6 +2857,14 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         self.update_config(cx, |cfg| cfg.sidebar_grouping = grouping);
+    }
+
+    /// Set whether the sidebar's `+N −N` counts open the diff overlay
+    /// (Settings → Window & Tabs). The counts themselves are unaffected either
+    /// way — this only governs the click. Persists the choice; the sidebar
+    /// re-derives from the `Config` global on the next render.
+    pub(crate) fn set_sidebar_diff_preview(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.sidebar_diff_preview = on);
     }
 
     /// `ToggleTabSidebar`: flip the tab bar between the horizontal title-bar strip
