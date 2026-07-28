@@ -125,6 +125,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     of line text → 20 000 lines / 1.2 MiB — while `+N −N` keeps counting the
     whole diff, so the numbers stay exact and the overlay doesn't re-probe in a
     loop chasing a total it can no longer reach.
+  - The untracked list escaped all of the above: `git ls-files --others` reports
+    every path not yet ignored, and one un-ignored `node_modules` reached the
+    overlay as tens of thousands of rows without touching the diff at all. It is
+    now streamed and capped like the diff, counts toward the oversized
+    threshold, and renders a bounded number of rows — while the count shown
+    stays the true total, so a capped list never reads as files having vanished.
   - The 400-line auto-collapse rule was per-file, so sixty forty-line files all
     opened at once (2400 side-by-side rows, none of them individually large).
     Past a repo-wide total the overlay now opens with every file collapsed —

@@ -1192,7 +1192,7 @@ impl Tty7App {
         // so the diff borrow ends before `panel_title` takes `&mut cx`.
         let count = match &self.right_panel.diff {
             Some(Some(snap)) => {
-                let n = snap.files.len() + snap.untracked.len();
+                let n = snap.files.len() + snap.untracked_count();
                 (n > 0).then(|| n.to_string())
             }
             _ => None,
@@ -1219,7 +1219,11 @@ impl Tty7App {
                     .iter()
                     .map(|f| (f.path.clone(), f.added, f.removed))
                     .collect();
-                let untracked = snap.untracked.clone();
+                // The count, not the paths: this used to clone every untracked
+                // path String on every frame of this panel, on the UI thread,
+                // for two `len()`/`is_empty()` reads — the same cost class the
+                // `Arc` switch removed from the probe path.
+                let untracked = snap.untracked_count();
                 let focused = self.diff_overlay_focus(host.id(), &cwd).map(str::to_string);
                 // Rows inset themselves rather than the list, so the hover and
                 // selected capsules bleed a little past the text into the same
@@ -1298,7 +1302,7 @@ impl Tty7App {
                             }),
                     );
                 }
-                if !untracked.is_empty() {
+                if untracked > 0 {
                     list = list.child(
                         h_flex()
                             .items_center()
@@ -1314,7 +1318,7 @@ impl Tty7App {
                                 div()
                                     .text_size(px(11.5))
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(format!("{} untracked", untracked.len())),
+                                    .child(format!("{untracked} untracked")),
                             ),
                     );
                 }

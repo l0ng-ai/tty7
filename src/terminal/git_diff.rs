@@ -65,8 +65,17 @@ pub const AUTO_COLLAPSE_TOTAL_FILES: usize = 100;
 
 /// Hard ceiling on file cards the overlay builds at all. Past this the list is
 /// cut and a "… and N more" line stands in for the tail, so the element tree
-/// stays bounded no matter what the working tree looks like.
+/// stays bounded no matter what the working tree looks like. Also bounds the
+/// untracked section, which is the same one-row-per-path shape.
 pub const MAX_RENDERED_FILES: usize = 300;
+
+/// Repo-wide cap on retained untracked paths. `git ls-files --others` answers
+/// with the whole tree of anything not yet ignored — a fresh clone before
+/// `node_modules` / `target` / `.venv` reach `.gitignore` reports tens of
+/// thousands of paths — and every one of them is an owned `String` here and a
+/// row in the overlay. The count stays exact past the cap
+/// ([`DiffSnapshot::untracked_total`]); only the retained list is bounded.
+pub const MAX_UNTRACKED: usize = 500;
 
 /// Why a file's hunks stop short of its real diff.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -92,7 +101,17 @@ pub struct DiffSnapshot {
     /// `git diff HEAD` has no blob to diff them against, and agents create
     /// files constantly — hiding them would make the overlay look like it
     /// lost work.
+    ///
+    /// Capped at [`MAX_UNTRACKED`]; [`untracked_count`](Self::untracked_count)
+    /// is the honest total.
     pub untracked: Vec<String>,
+    /// How many untracked paths `git ls-files --others` actually reported,
+    /// which is not `untracked.len()` once the cap bites. Same discipline as
+    /// [`totals`](Self::totals): what we *retain* is budgeted, what we *report*
+    /// stays exact, because a count that shrank with the budget would read as
+    /// files having disappeared. Read it through
+    /// [`untracked_count`](Self::untracked_count).
+    pub untracked_total: usize,
 }
 
 impl DiffSnapshot {
@@ -123,12 +142,28 @@ impl DiffSnapshot {
             .sum()
     }
 
+    /// The true number of untracked paths, whether or not the retained list was
+    /// capped. Falls back to the retained length so a snapshot built by hand
+    /// (tests, `..Default::default()`) can't under-report — the fallback is
+    /// never wrong, since `untracked_total` is only ever ≥ `untracked.len()`.
+    pub fn untracked_count(&self) -> usize {
+        self.untracked_total.max(self.untracked.len())
+    }
+
     /// Whether this diff is too big to open expanded: every file starts
     /// collapsed and the overlay leads with the "too large to render
     /// efficiently" summary. Not a refusal — individual files still expand by
     /// click, which is the escape hatch the summary points at.
+    ///
+    /// Untracked paths count toward the file axis because they cost the same
+    /// thing a collapsed file card costs — one row each, in the same
+    /// non-virtualized list. A tree with an un-ignored `node_modules` is the
+    /// exact stall this is here to prevent, and it reaches the overlay through
+    /// `ls-files`, not through the diff. The summary names whichever axis
+    /// tripped, so a big untracked list never reads as a claim that the *diff*
+    /// is big.
     pub fn oversized(&self) -> bool {
-        self.files.len() > AUTO_COLLAPSE_TOTAL_FILES
+        self.files.len() + self.untracked_count() > AUTO_COLLAPSE_TOTAL_FILES
             || self.retained_lines() > AUTO_COLLAPSE_TOTAL_LINES
     }
 
@@ -221,19 +256,37 @@ pub fn probe(host: &dyn Host, cwd: &Path) -> Option<DiffSnapshot> {
     .map(|out| parse_unified(&out))
     .unwrap_or_default();
     // `--full-name` pins paths to the repo root regardless of which
-    // subdirectory the pane sits in, matching the diff's path space.
-    let untracked = git_status::git(
+    // subdirectory the pane sits in, matching the diff's path space. Capped for
+    // the same reason the diff is: `--others` walks everything not yet ignored,
+    // so one un-ignored dependency directory answers with tens of thousands of
+    // paths.
+    let mut untracked: Vec<String> = Vec::new();
+    let mut untracked_total = 0usize;
+    let ok = git_status::git(
         host,
         cwd,
         &["ls-files", "--others", "--exclude-standard", "--full-name"],
     )
-    .map(|out| out.lines().map(str::to_string).collect())
-    .unwrap_or_default();
+    .map(|out| {
+        for line in out.lines() {
+            untracked_total += 1;
+            if untracked.len() < MAX_UNTRACKED {
+                untracked.push(line.to_string());
+            }
+        }
+    });
+    if ok.is_none() {
+        // A failed listing is "we don't know", not "there are none" — same
+        // shape as the diff above.
+        untracked.clear();
+        untracked_total = 0;
+    }
     Some(DiffSnapshot {
         root,
         branch,
         files,
         untracked,
+        untracked_total,
     })
 }
 
@@ -789,6 +842,33 @@ index 1..2 100644
         assert_eq!(late.truncated, Some(Truncation::Budget));
         assert!(late.hunks.is_empty(), "no body kept past the file cap");
         assert_eq!((late.added, late.removed), (0, 1), "but the line counts");
+    }
+
+    /// The untracked cap keeps the retained list bounded while the reported
+    /// count stays exact — the same split the diff side already makes between
+    /// what is retained and what is counted.
+    #[test]
+    fn untracked_is_capped_but_counted() {
+        // What `probe` builds while streaming `ls-files --others`.
+        let mut untracked: Vec<String> = Vec::new();
+        let mut untracked_total = 0usize;
+        for i in 0..(MAX_UNTRACKED * 3) {
+            untracked_total += 1;
+            if untracked.len() < MAX_UNTRACKED {
+                untracked.push(format!("node_modules/p{i}/index.js"));
+            }
+        }
+        let snap = DiffSnapshot {
+            untracked,
+            untracked_total,
+            ..Default::default()
+        };
+        assert_eq!(snap.untracked.len(), MAX_UNTRACKED, "retention is bounded");
+        assert_eq!(
+            snap.untracked_count(),
+            MAX_UNTRACKED * 3,
+            "the count is not"
+        );
     }
 
     /// Measurement harness for issue #239 finding 1 — run with
