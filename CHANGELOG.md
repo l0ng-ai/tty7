@@ -39,8 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Where the fork lands follows where you asked from: right-click a **pane** and
   it asks for a split placement (Right / Left / Down / Up), since a pane-level
   ask is a spatial one; right-click a **tab** or a sidebar row and it opens in a
-  new tab, with no placement question. Both are also reachable from the command
-  palette, the File menu, and Settings → Keybindings.
+  new tab, with no placement question. The command palette and the File menu
+  carry the new-tab form only — a placement pick means nothing without a pane in
+  hand — while all five, the four directions included, are bindable in
+  Settings → Keybindings.
 
   A fork needs the session id the agent's hooks report, so the row disables
   itself — rather than disappearing — until one arrives, and a remote pane can't
