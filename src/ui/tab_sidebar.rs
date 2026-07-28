@@ -950,9 +950,17 @@ impl Tty7App {
         // The draggable handle at the right edge: a comfortable invisible hit-area
         // centered over the border, holding a 1px line that brightens on hover /
         // drag (the border stays visible underneath when idle).
+        //
+        // `occlude()` because it runs the rail's full height, which means its top
+        // 40px lie over the rail's title-bar stand-in — a `WindowControlArea::Drag`
+        // row. Without it gpui's hit test still reports that row hovered under the
+        // handle, so a press there arms the window move *as well as* the resize and
+        // the first drag moves the window instead (and on Windows HTCAPTION claims
+        // the press outright). See [`crate::ui::app::window_move_gesture`].
         let handle_active = self.sidebar_dragging.get();
         let handle = div()
             .group("sidebar-resize")
+            .occlude()
             .absolute()
             .top_0()
             .right(px(-(RESIZE_HANDLE_WIDTH / 2.)))

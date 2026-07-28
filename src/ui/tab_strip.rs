@@ -1208,10 +1208,16 @@ impl Tty7App {
         // chrome's right inset and shove it into the window corner) and cap the
         // chip row at the remainder.
         //
-        // The corner is either the free-standing chrome group (trailing inset +
-        // the panel tile + its 2px gap + the app-menu tile, ~71px) or, off macOS
-        // with the panel open, the wider band the chrome is laid out inside; three
-        // `CHIP_GAP`s and the "+" tile sit between it and the chips.
+        // The corner is either the free-standing chrome group (trailing pad + the
+        // panel tile + its 2px gap + the app-menu tile: 71px on macOS, 70px
+        // elsewhere) or, off macOS with the panel open, the wider band the chrome
+        // is laid out inside; three `CHIP_GAP`s and the "+" tile sit between it and
+        // the chips — 121px / 120px of fixed chrome all told.
+        //
+        // The trailing pad is not `tile_trailing_inset()` on every platform:
+        // `window_chrome` follows it with `pr_1` off macOS, and gpui's padding
+        // setters *assign* rather than accumulate, so the later 4px replaces the
+        // 5px rather than adding to it.
         //
         // This used to be a flat 100px, a leftover from when the corner held a
         // 30px "+" and a 30px "⋯", and it was never revisited as the group's
@@ -1220,7 +1226,12 @@ impl Tty7App {
         // grab handle (see `GRAB_HANDLE_W`), was the first thing to pay for it.
         // Measure the group instead of quoting a number at it.
         let corner_w = chrome_band_w.unwrap_or_else(|| {
-            tile_trailing_inset() + crate::ui::app::TILE_SIZE + 2. + crate::ui::app::TILE_SIZE
+            let trailing_pad = if cfg!(target_os = "macos") {
+                tile_trailing_inset()
+            } else {
+                4.
+            };
+            trailing_pad + crate::ui::app::TILE_SIZE + 2. + crate::ui::app::TILE_SIZE
         });
         let fixed_w = 3. * CHIP_GAP + crate::ui::app::TILE_SIZE + corner_w;
         let chips_avail = (strip_w - px(fixed_w + GRAB_HANDLE_W)).max(px(80.));

@@ -34,9 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   minimum, so it collapsed to exactly 0px once the tab chips saturated the row —
   around 7-8 tabs on a 1440px window — leaving nothing to grab but three 6px
   gaps and a hairline above and below the chips. The chip row's fixed-chrome
-  reserve is corrected to match, from a stale 100px (sized when the corner held a
-  30px "+" and a 30px "⋯") to the ~137px the corner actually occupies, so chips
-  reach their minimum width and truncate a tab or two sooner. (#221)
+  reserve is corrected to match: it was a flat 100px, sized when the corner held
+  a 30px "+" and a 30px "⋯", and was never raised when the workspace chip
+  absorbed the "⋯" menu in #169/#188 — so the row's width budget was ~20px of a
+  lie. It now measures the group it is reserving for, ~121px of fixed chrome plus
+  the 80px grab handle, so chips reach their minimum width and truncate a tab or
+  two sooner. (#221)
 
 ### Added
 

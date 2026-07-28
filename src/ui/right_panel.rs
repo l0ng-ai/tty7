@@ -334,9 +334,15 @@ impl Tty7App {
         .size_full()
         .into_any_element();
 
+        // `occlude()` for the same reason as the rail's handle (`tab_sidebar`):
+        // it spans the panel's full height, so its top band lies over a
+        // `WindowControlArea::Drag` row — the macOS top zone, and `panel_title`
+        // below it — and a non-blocking hitbox lets a press arm that row's window
+        // move alongside the resize.
         let active = self.right_panel_dragging.get();
         let handle = div()
             .group("right-panel-resize")
+            .occlude()
             .absolute()
             .top_0()
             .left(px(-(RESIZE_HANDLE_WIDTH / 2.)))

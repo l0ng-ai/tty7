@@ -7687,6 +7687,46 @@ mod window_drag_tests {
         }
     }
 
+    /// A resize handle's geometry over a stand-in title bar. The two real
+    /// handles (`tab_sidebar`, `right_panel`) are absolute, 8px wide, `h_full`
+    /// and centred on a panel edge, so their top band lies over a
+    /// `WindowControlArea::Drag` row; standing either of them up needs a whole
+    /// `Tty7App` window, so this reproduces the geometry instead. `occluded`
+    /// mirrors the real handles; `false` is the control that shows the harness
+    /// detects the hijack when the blocking hitbox is missing.
+    struct HandleOverRow {
+        occluded: bool,
+    }
+    impl Render for HandleOverRow {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let handle = div()
+                .absolute()
+                .top_0()
+                .left(px(296.))
+                .w(px(8.))
+                .h_full()
+                .cursor_col_resize()
+                // What each real handle does on press: arm its own drag and ask
+                // for a repaint.
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.refresh());
+            let handle = if self.occluded {
+                handle.occlude()
+            } else {
+                handle
+            };
+            div()
+                .relative()
+                .size_full()
+                .child(super::title_bar_drag(
+                    div().id("stand-in-title-bar").w_full().h(px(40.)),
+                    "stand-in-title-bar",
+                    window,
+                    cx,
+                ))
+                .child(handle)
+        }
+    }
+
     /// The pattern `title_bar_drag` used to carry: a `should_move` cell built
     /// inside `render`, so every frame hands the next one a fresh, zeroed cell.
     /// Kept as a control — it is what makes the assertions above it meaningful,
@@ -7822,6 +7862,32 @@ mod window_drag_tests {
             window.dispatch_event(moved(drifted(ON_ROW), false), cx);
         });
         vcx.run_until_parked();
+    }
+
+    /// A panel resize handle must keep its drag. Its hit area runs the panel's
+    /// full height, so the top 40px sit on a stand-in caption row — and gpui's
+    /// hit test walks *past* a non-blocking hitbox, so without `occlude()` the
+    /// press arms the row's window move as well as the resize, and the first
+    /// drag event moves the window instead of resizing the panel. A durable arm
+    /// makes that reliable rather than a race: the handle's own `window.refresh()`
+    /// used to destroy the per-frame cell before the move could land.
+    #[gpui::test]
+    fn a_press_on_a_resize_handle_does_not_move_the_window(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| HandleOverRow { occluded: true });
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        press_repaint_move(&mut vcx, ON_ROW);
+    }
+
+    /// The control for the test above: the same geometry with a plain hitbox
+    /// hands the press to both the handle and the caption row underneath, and
+    /// the window moves. If this stops panicking, the test above is passing for
+    /// some reason other than the `occlude()` it exists to pin.
+    #[gpui::test]
+    #[should_panic(expected = "not implemented")]
+    fn a_handle_without_a_blocking_hitbox_hands_the_press_to_the_row(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| HandleOverRow { occluded: false });
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        press_repaint_move(&mut vcx, ON_ROW);
     }
 
     /// Two stand-in rows on screen at once — the rail's top zone plus an overlay
