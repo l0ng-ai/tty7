@@ -107,9 +107,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two sooner. (#221)
 
 - **Large working-tree diffs no longer stall the window** — the diff overlay
-  had four costs that all scaled with the size of the tree rather than with
-  what it could show, and issue #239's source-level analysis found each of
-  them. Measured on a 300-file, 90 000-line, 4.5 MB working-tree diff:
+  had five costs that all scaled with the size of the tree rather than with
+  what it could show. Four were named by issue #239's source-level analysis;
+  the fifth, the untracked list, turned up while fixing those. Measured on a
+  300-file, 90 000-line, 4.5 MB working-tree diff:
 
   - The full `git diff HEAD` was read into one `String` before parsing began.
     It is now streamed off the pipe a line at a time, so peak transient memory

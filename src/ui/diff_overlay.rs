@@ -1,8 +1,13 @@
 //! The working-tree diff overlay: a read-only, GitHub-style side-by-side diff
 //! that covers the terminal area when the user clicks a sidebar row's git line
-//! (`⎇ branch +N −N`). A scrolling column of per-file cards with collapsible
-//! hunk bodies — old on the left, new on the right — plus an untracked-files
-//! section `git diff` itself can't show.
+//! (`⎇ branch +N −N`) or a Changes-panel row. A scrolling column of per-file
+//! cards with collapsible hunk bodies — old on the left, new on the right —
+//! plus an untracked-files section `git diff` itself can't show.
+//!
+//! The sidebar half of that is opt-out: everything below assumes the git line
+//! is a click target, which it is unless
+//! [`sidebar_diff_preview`](crate::core::config::Config::sidebar_diff_preview)
+//! is off. The panel row is not gated.
 //!
 //! Deliberately a *lens*, not a git client: no staging, no discard. The
 //! terminal keeps running underneath (the overlay covers

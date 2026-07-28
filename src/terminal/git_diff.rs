@@ -1,7 +1,7 @@
 //! The full working-tree diff behind the sidebar's `+N −N` counts: `git diff
 //! HEAD` parsed into files → hunks → lines, for the read-only diff overlay
-//! (see [`crate::ui::diff_overlay`]) that covers the terminal when the user
-//! clicks a tab row's git line.
+//! (see [`crate::ui::diff_overlay`], which owns how it is opened) that covers
+//! the terminal.
 //!
 //! Same discipline as [`git_status`](crate::terminal::git_status): every
 //! invocation goes through the shared [`git_status::git`] helper — so it runs
