@@ -339,11 +339,17 @@ mod tests {
         assert_ne!(normal.data, attention.data);
     }
 
-    /// The avatar renders for a branded agent, an unbranded (bot-fallback)
-    /// agent, and with/without the status dot.
+    /// Every avatar renders, with and without the status dot. Run over the
+    /// whole roster rather than one branded and one fallback agent, because
+    /// this is the only test that puts the bundled SVGs through resvg: the
+    /// asset-source test next door proves the bytes resolve, not that they
+    /// parse into visible geometry. Vendor marks arrive in whatever shape the
+    /// vendor publishes — stylesheets, nested groups, features usvg quietly
+    /// drops — and a mark that parses to nothing shows up as a bare accent
+    /// disc, which nothing else here would catch.
     #[test]
     fn agent_avatar_renders_brand_and_fallback() {
-        for agent in [CLIAgent::Claude, CLIAgent::Qwen] {
+        for agent in CLIAgent::ALL {
             let idle = agent_avatar(agent, AgentStatus::Idle).unwrap();
             let waiting = agent_avatar(agent, AgentStatus::Waiting).unwrap();
             assert_eq!((idle.width(), idle.height()), (32, 32));
@@ -351,6 +357,22 @@ mod tests {
             assert_eq!(idle.pixel(0, 0).unwrap().alpha(), 0);
             // …and the center is covered (disc + glyph).
             assert!(idle.pixel(16, 16).unwrap().alpha() > 0);
+            // The glyph actually drew something. The disc under it is a flat
+            // accent fill, so every opaque pixel shares one colour unless the
+            // white mark landed on top — one colour means resvg handed back an
+            // empty canvas, which is what a silently-unsupported SVG feature
+            // looks like from here.
+            let shades: std::collections::HashSet<_> = idle
+                .pixels()
+                .iter()
+                .filter(|p| p.alpha() == 0xFF)
+                .map(|p| (p.red(), p.green(), p.blue()))
+                .collect();
+            assert!(
+                shades.len() > 1,
+                "{} rendered as a bare disc — its glyph drew nothing",
+                agent.display_name()
+            );
             // The status dot changes the bottom-right corner.
             assert_ne!(idle.data(), waiting.data());
         }

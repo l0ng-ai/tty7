@@ -185,10 +185,11 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         // silhouette, so this is lobehub/lobe-icons' square transcription (MIT),
         // drawn for exactly this avatar use. Its notice rides in the SVG.
         "icons/agents/grok.svg" => include_bytes!("../../assets/icons/agents/grok.svg"),
-        // The one mark that isn't a vendor's at all: Pi ships no symbol to
-        // transcribe, so this is tty7's own geometric Greek pi, cut to the same
-        // 24x24 grid and stroke weight as the rest of the row. The letter is not
-        // a trademark, so nothing is borrowed here.
+        // Pi's own mark, from pi.dev — the one file that arrives with theme
+        // logic attached (`logo-auto.svg` carries a `prefers-color-scheme`
+        // style block). The geometry is kept as published and rescaled to the
+        // 24x24 grid; the CSS is dropped, since these avatars are tinted by the
+        // app and no other mark here brings a stylesheet. Details in the SVG.
         "icons/agents/pi.svg" => include_bytes!("../../assets/icons/agents/pi.svg"),
         _ => return None,
     };

@@ -13,9 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   robot glyph every unbranded agent shares, so a Pi tab was indistinguishable
   from an Aider or Qwen one in the sidebar, the tab chip and the tray menu. They
   now carry their own avatar on the existing sky accent, status dot unchanged.
-  Pi ships no symbol to transcribe, so the mark is tty7's own geometric Greek
-  pi, cut to the same 24x24 grid and stroke weight as the bundled brand marks —
-  nothing trademarked is vendored in. Restoring a Pi pane also resumes its
+  The mark is Pi's own, from pi.dev, rescaled to the same 24x24 grid as the
+  other bundled brand marks — its `prefers-color-scheme` stylesheet dropped,
+  since these avatars are tinted by the app. Restoring a Pi pane also resumes its
   conversation now: the tty7 extension reports Pi's session id, and the resume
   command is `pi --session <id>` (Pi's `--resume` is a boolean that only opens
   the interactive picker), with `--session` / `--session-id` / `--fork` /
