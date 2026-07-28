@@ -393,6 +393,12 @@ impl<K: Eq + Hash + Clone> InFlight<K> {
         self.in_flight.contains(key)
     }
 
+    /// The keys with a request outstanding, for callers that have to reason
+    /// about the set rather than about one key.
+    pub fn pending_keys(&self) -> impl Iterator<Item = &K> {
+        self.in_flight.iter()
+    }
+
     /// How many requests are outstanding.
     pub fn len(&self) -> usize {
         self.in_flight.len()

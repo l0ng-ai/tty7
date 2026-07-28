@@ -6121,6 +6121,65 @@ impl Tty7App {
     }
 }
 
+/// A per-thread count of how many times the window has drawn, for the
+/// render-idle tests (issue #243).
+///
+/// A window that has settled draws once and stops. Anything that notifies from
+/// the paint path turns that into an unbounded loop — the window never reaches
+/// render idle, and on a compositor that presents every frame the panel visibly
+/// flickers. The seam is testable headlessly because gpui's test build redraws
+/// dirty windows inside `flush_effects`: a paint that notifies simply keeps that
+/// loop running, so counting draws across a quiet interval answers the question
+/// without a real window.
+///
+/// The limit of that: `window.request_animation_frame()` does not drive frames
+/// under the test platform. It registers a next-frame callback that only a real
+/// platform window's frame callback drains, so `cx.notify()` is the only thing
+/// this counts. A repaint loop driven by an animation frame would run right past
+/// this probe and needs a different instrument.
+///
+/// Thread-local rather than a global: `#[gpui::test]` cases run in parallel on
+/// their own threads, and gpui drives each one's foreground work on the thread
+/// that owns its `TestAppContext`.
+#[cfg(test)]
+pub(crate) mod render_probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        static DRAWS: Cell<u64> = const { Cell::new(0) };
+        /// When set, the draw that exceeds it panics instead of spinning. A
+        /// repaint loop lives entirely inside one `flush_effects` call, so
+        /// without this a regression hangs the suite rather than failing it.
+        static BUDGET: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    /// One window draw. Called from [`Tty7App::render`].
+    pub(crate) fn record() {
+        let n = DRAWS.get() + 1;
+        DRAWS.set(n);
+        if let Some(budget) = BUDGET.get()
+            && n > budget
+        {
+            BUDGET.set(None);
+            panic!(
+                "the window drew more than {budget} frames without input: it never reached \
+                 render idle (issue #243)"
+            );
+        }
+    }
+
+    /// Start counting from zero, failing the test if `budget` draws pass.
+    pub(crate) fn arm(budget: u64) {
+        DRAWS.set(0);
+        BUDGET.set(Some(budget));
+    }
+
+    /// Draws since [`arm`].
+    pub(crate) fn draws() -> u64 {
+        DRAWS.get()
+    }
+}
+
 impl Tty7App {
     /// Design §10's status strip, on a window that has tabs.
     ///
@@ -6334,6 +6393,15 @@ impl ForwardRoute {
 
 impl Render for Tty7App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        render_probe::record();
+        // `TTY7_PROFILE`: time the whole window build and, via the aggregated
+        // call rate, expose whether it is rebuilding on real changes or in a
+        // notify loop. A settled window should report no calls at all; anything
+        // above zero on a window nobody is touching is the shape of issue #243,
+        // and this is how a report of it can be checked on the machine that sees
+        // it rather than inferred from the code.
+        let prof = crate::ui::perf::enabled().then(std::time::Instant::now);
         // A live drag-reorder commits when the drag *ends*, which in gpui means
         // the mouse was released (nothing else clears an active drag): the first
         // frame without one retires the preview and applies the order it was
@@ -6654,333 +6722,323 @@ impl Render for Tty7App {
                 .child(self.render_settings(window, cx))
         });
 
-        div()
-            .id("tty7-root")
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(window_bg)
-            .text_color(cx.theme().foreground)
-            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
-            .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
-            .on_action(cx.listener(|this, _: &SelectWorkspace1, window, cx| {
-                this.select_workspace_slot(0, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SelectWorkspace2, window, cx| {
-                this.select_workspace_slot(1, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SelectWorkspace3, window, cx| {
-                this.select_workspace_slot(2, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SelectWorkspace4, window, cx| {
-                this.select_workspace_slot(3, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SelectWorkspace5, window, cx| {
-                this.select_workspace_slot(4, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SelectWorkspace6, window, cx| {
-                this.select_workspace_slot(5, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SelectWorkspace7, window, cx| {
-                this.select_workspace_slot(6, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SelectWorkspace8, window, cx| {
-                this.select_workspace_slot(7, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SelectWorkspace9, window, cx| {
-                this.select_workspace_slot(8, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &RenameWorkspace, window, cx| {
-                this.start_workspace_rename(window, cx)
-            }))
-            .on_action(
-                cx.listener(|this, _: &ToggleSwitcher, window, cx| {
+        let root =
+            div()
+                .id("tty7-root")
+                .size_full()
+                .flex()
+                .flex_col()
+                .bg(window_bg)
+                .text_color(cx.theme().foreground)
+                .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
+                .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
+                .on_action(cx.listener(|this, _: &SelectWorkspace1, window, cx| {
+                    this.select_workspace_slot(0, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SelectWorkspace2, window, cx| {
+                    this.select_workspace_slot(1, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SelectWorkspace3, window, cx| {
+                    this.select_workspace_slot(2, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SelectWorkspace4, window, cx| {
+                    this.select_workspace_slot(3, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SelectWorkspace5, window, cx| {
+                    this.select_workspace_slot(4, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SelectWorkspace6, window, cx| {
+                    this.select_workspace_slot(5, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SelectWorkspace7, window, cx| {
+                    this.select_workspace_slot(6, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SelectWorkspace8, window, cx| {
+                    this.select_workspace_slot(7, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SelectWorkspace9, window, cx| {
+                    this.select_workspace_slot(8, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &RenameWorkspace, window, cx| {
+                    this.start_workspace_rename(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| {
                     this.toggle_switcher(window, cx)
-                }),
-            )
-            .on_action(cx.listener(|this, _: &StopWorkspace, window, cx| {
-                let id = this.workspace;
-                this.stop_workspace(id, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &DeleteWorkspace, window, cx| {
-                let id = this.workspace;
-                this.delete_workspace(id, window, cx);
-            }))
-            .on_action(cx.listener(|_this, _: &NewWorkspace, _window, cx| {
-                // A fresh workspace, not a copy of this one: the daemon gives
-                // each pane a single subscriber, so a second window onto the
-                // same panes would steal this window's output.
-                crate::ui::windows::open(cx, None);
-            }))
-            .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
-                // With focus in the editor panel, ⌘W closes the active file
-                // tab instead of the terminal pane/tab.
-                if !this.editor_close_active_if_focused(window, cx) {
-                    this.close_pane(window, cx)
-                }
-            }))
-            .on_action(cx.listener(|this, _: &SplitRight, window, cx| {
-                this.split(Axis::Horizontal, window, cx)
-            }))
-            .on_action(
-                cx.listener(|this, _: &SplitDown, window, cx| {
+                }))
+                .on_action(cx.listener(|this, _: &StopWorkspace, window, cx| {
+                    let id = this.workspace;
+                    this.stop_workspace(id, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &DeleteWorkspace, window, cx| {
+                    let id = this.workspace;
+                    this.delete_workspace(id, window, cx);
+                }))
+                .on_action(cx.listener(|_this, _: &NewWorkspace, _window, cx| {
+                    // A fresh workspace, not a copy of this one: the daemon gives
+                    // each pane a single subscriber, so a second window onto the
+                    // same panes would steal this window's output.
+                    crate::ui::windows::open(cx, None);
+                }))
+                .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
+                    // With focus in the editor panel, ⌘W closes the active file
+                    // tab instead of the terminal pane/tab.
+                    if !this.editor_close_active_if_focused(window, cx) {
+                        this.close_pane(window, cx)
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &SplitRight, window, cx| {
+                    this.split(Axis::Horizontal, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SplitDown, window, cx| {
                     this.split(Axis::Vertical, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &FocusNextPane, window, cx| {
+                }))
+                .on_action(cx.listener(|this, _: &FocusNextPane, window, cx| {
                     this.cycle_pane(true, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &FocusPrevPane, window, cx| {
+                }))
+                .on_action(cx.listener(|this, _: &FocusPrevPane, window, cx| {
                     this.cycle_pane(false, window, cx)
-                }),
-            )
-            .on_action(cx.listener(|this, _: &FocusPaneLeft, window, cx| {
-                this.focus_pane_dir(Dir::Left, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &FocusPaneRight, window, cx| {
-                this.focus_pane_dir(Dir::Right, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &FocusPaneUp, window, cx| {
-                this.focus_pane_dir(Dir::Up, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &FocusPaneDown, window, cx| {
-                this.focus_pane_dir(Dir::Down, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ResizePaneLeft, window, cx| {
-                this.resize_pane(Dir::Left, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ResizePaneRight, window, cx| {
-                this.resize_pane(Dir::Right, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ResizePaneUp, window, cx| {
-                this.resize_pane(Dir::Up, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ResizePaneDown, window, cx| {
-                this.resize_pane(Dir::Down, window, cx)
-            }))
-            .on_action(
-                cx.listener(|this, _: &SwapPaneNext, window, cx| this.swap_pane(true, window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &SwapPanePrev, window, cx| this.swap_pane(false, window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(true, window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &PrevTab, window, cx| this.cycle_tab(false, window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab1, window, cx| {
-                    this.activate_visual(0, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab2, window, cx| {
-                    this.activate_visual(1, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab3, window, cx| {
-                    this.activate_visual(2, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab4, window, cx| {
-                    this.activate_visual(3, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab5, window, cx| {
-                    this.activate_visual(4, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab6, window, cx| {
-                    this.activate_visual(5, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab7, window, cx| {
-                    this.activate_visual(6, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab8, window, cx| {
-                    this.activate_visual(7, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab9, window, cx| {
-                    this.activate_visual(8, window, cx)
-                }),
-            )
-            .on_action(cx.listener(|this, _: &IncreaseFontSize, _window, cx| {
-                this.change_font_size(FONT_SIZE_STEP, cx)
-            }))
-            .on_action(cx.listener(|this, _: &DecreaseFontSize, _window, cx| {
-                this.change_font_size(-FONT_SIZE_STEP, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ResetFontSize, _window, cx| this.reset_font_size(cx)))
-            .on_action(
-                cx.listener(|this, _: &TogglePalette, window, cx| this.toggle_palette(window, cx)),
-            )
-            .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| {
-                this.reopen_closed_tab(window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ToggleMaximizePane, window, cx| {
-                this.toggle_maximize(window, cx)
-            }))
-            .on_action(
-                cx.listener(|_, _: &ToggleFullscreen, window, _cx| window.toggle_fullscreen()),
-            )
-            .on_action(
-                cx.listener(|this, _: &ToggleTabSidebar, _window, cx| this.toggle_tab_sidebar(cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &ToggleLeftPanel, _window, cx| this.toggle_left_panel(cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &ToggleRightPanel, _window, cx| this.toggle_right_panel(cx)),
-            )
-            .on_action(cx.listener(|this, _: &ShowRightPanelInfo, _window, cx| {
-                this.set_right_panel_tab(crate::core::config::RightPanelTab::Info, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ShowRightPanelOutline, _window, cx| {
-                this.set_right_panel_tab(crate::core::config::RightPanelTab::Outline, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ShowRightPanelChanges, _window, cx| {
-                this.set_right_panel_tab(crate::core::config::RightPanelTab::Changes, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ShowRightPanelFiles, _window, cx| {
-                this.set_right_panel_tab(crate::core::config::RightPanelTab::Files, cx)
-            }))
-            .on_action(
-                cx.listener(|this, _: &OpenSettings, window, cx| this.toggle_settings(window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &RestartDaemon, window, cx| this.restart_daemon(window, cx)),
-            )
-            .on_action(cx.listener(|this, _: &ToggleSftp, window, cx| this.toggle_sftp(window, cx)))
-            .on_action(cx.listener(|this, _: &ShowSshForwards, window, cx| {
-                this.show_ssh_forwards(window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ToggleCodePanel, window, cx| {
-                this.toggle_code_panel(window, cx)
-            }))
-            .on_action(
-                cx.listener(|this, _: &EditorSave, window, cx| this.editor_save_active(window, cx)),
-            )
-            // Quit lives on the same element-tree action path as every other Cmd
-            // shortcut above, so a focused terminal routes `cmd-q` here rather
-            // than relying solely on the global handler (which the keystroke
-            // doesn't reach while focus is deep in the terminal view).
-            .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
-            .on_action(cx.listener(|this, _: &OpenSshProfiles, window, cx| {
-                this.open_settings_section(SettingsSection::Ssh, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &RestartSshSession, window, cx| {
-                this.restart_ssh_session(window, cx)
-            }))
-            // Tab operations that used to be reachable only by right-clicking a
-            // chip. Each targets the active tab, so the menu bar / palette /
-            // keyboard all mean "this tab" without a click to say which.
-            .on_action(cx.listener(|this, _: &RenameTab, window, cx| {
-                this.start_rename(this.active, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &NewWorktreeTab, window, cx| {
-                this.new_worktree_tab(this.active, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &CloseOtherTabs, window, cx| {
-                this.close_other_tabs(this.active, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &CloseTabsToTheRight, window, cx| {
-                this.close_tabs_right_of(this.active, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &CopyWorkingDirectory, window, cx| {
-                this.copy_active_cwd(window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &MarkTabUnread, _window, cx| {
-                this.mark_tab_unread(this.active, cx)
-            }))
-            // Fork: the bare action has no pane the user pointed at, so it
-            // opens a new tab; the four directional ones come from the pane
-            // right-click menu, where the ask *was* spatial.
-            .on_action(cx.listener(|this, _: &ForkAgentSession, window, cx| {
-                this.fork_active_pane_session(ForkPlacement::NewTab, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ForkAgentSessionRight, window, cx| {
-                this.fork_focused_pane_session(Axis::Horizontal, false, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ForkAgentSessionLeft, window, cx| {
-                this.fork_focused_pane_session(Axis::Horizontal, true, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ForkAgentSessionDown, window, cx| {
-                this.fork_focused_pane_session(Axis::Vertical, false, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ForkAgentSessionUp, window, cx| {
-                this.fork_focused_pane_session(Axis::Vertical, true, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &CopyAgentSessionId, window, cx| {
-                this.copy_agent_session_id(this.active, window, cx)
-            }))
-            // Settings destinations that deserve their own way in: Help →
-            // Keyboard Shortcuts and the App menu's About both used to require
-            // opening Settings and then hunting for the section.
-            .on_action(cx.listener(|this, _: &ShowKeyboardShortcuts, window, cx| {
-                this.open_settings_section(SettingsSection::Keybindings, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &About, window, cx| {
-                this.open_settings_section(SettingsSection::About, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
-                this.check_for_updates_now(window, cx)
-            }))
-            // Standard macOS App / Window menu items. gpui exposes the platform
-            // calls but ships no actions for them.
-            .on_action(cx.listener(|_, _: &HideApp, _window, cx| cx.hide()))
-            .on_action(cx.listener(|_, _: &HideOthers, _window, cx| cx.hide_other_apps()))
-            .on_action(cx.listener(|_, _: &ShowAll, _window, cx| cx.unhide_other_apps()))
-            .on_action(cx.listener(|_, _: &MinimizeWindow, window, _cx| window.minimize_window()))
-            .on_action(cx.listener(|_, _: &ZoomWindow, window, _cx| window.zoom_window()))
-            // Help destinations. Opened in the default browser; a failure here is
-            // not worth interrupting the user over, so it is logged, not toasted.
-            .on_action(cx.listener(|_, _: &OpenDocumentation, _window, cx| cx.open_url(DOCS_URL)))
-            .on_action(cx.listener(|_, _: &OpenDiscord, _window, cx| cx.open_url(DISCORD_URL)))
-            .on_action(cx.listener(|_, _: &ReportIssue, _window, cx| cx.open_url(ISSUES_URL)))
-            // The theme's background image, composited over the background fill
-            // at its own opacity and under all content. Absolute, so it doesn't
-            // participate in the flex column; the wrapper clips the Cover
-            // overflow (gpui's `img` paints the fitted bounds unclipped).
-            .when_some(bg_image, |this, image| {
-                this.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .overflow_hidden()
-                        .opacity(image.opacity)
-                        .child(
-                            img(image.path)
-                                .size_full()
-                                .object_fit(gpui::ObjectFit::Cover),
-                        ),
+                }))
+                .on_action(cx.listener(|this, _: &FocusPaneLeft, window, cx| {
+                    this.focus_pane_dir(Dir::Left, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &FocusPaneRight, window, cx| {
+                    this.focus_pane_dir(Dir::Right, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &FocusPaneUp, window, cx| {
+                    this.focus_pane_dir(Dir::Up, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &FocusPaneDown, window, cx| {
+                    this.focus_pane_dir(Dir::Down, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ResizePaneLeft, window, cx| {
+                    this.resize_pane(Dir::Left, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ResizePaneRight, window, cx| {
+                    this.resize_pane(Dir::Right, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ResizePaneUp, window, cx| {
+                    this.resize_pane(Dir::Up, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ResizePaneDown, window, cx| {
+                    this.resize_pane(Dir::Down, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SwapPaneNext, window, cx| {
+                    this.swap_pane(true, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SwapPanePrev, window, cx| {
+                    this.swap_pane(false, window, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(true, window, cx)),
                 )
-            })
-            .child(main_layout)
-            // Settings overlay, above the tabs/terminal when open.
-            .when_some(settings_overlay, |this, overlay| this.child(overlay))
-            // The workspace switcher, in the same layer as the palette: they
-            // answer two different questions and are never open at once.
-            .children(self.render_switcher(cx))
-            // Command palette overlay, layered above everything when open.
-            .when_some(self.palette.clone(), |this, palette| this.child(palette))
-            // Toast layer for `window.push_notification` (worktree/SSH errors).
-            // gpui-component's Root only *stores* the list; the root view must
-            // render the layer — without this child every toast was invisible.
-            .children(gpui_component::Root::render_notification_layer(window, cx))
+                .on_action(
+                    cx.listener(|this, _: &PrevTab, window, cx| this.cycle_tab(false, window, cx)),
+                )
+                .on_action(cx.listener(|this, _: &ActivateTab1, window, cx| {
+                    this.activate_visual(0, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTab2, window, cx| {
+                    this.activate_visual(1, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTab3, window, cx| {
+                    this.activate_visual(2, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTab4, window, cx| {
+                    this.activate_visual(3, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTab5, window, cx| {
+                    this.activate_visual(4, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTab6, window, cx| {
+                    this.activate_visual(5, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTab7, window, cx| {
+                    this.activate_visual(6, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTab8, window, cx| {
+                    this.activate_visual(7, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTab9, window, cx| {
+                    this.activate_visual(8, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &IncreaseFontSize, _window, cx| {
+                    this.change_font_size(FONT_SIZE_STEP, cx)
+                }))
+                .on_action(cx.listener(|this, _: &DecreaseFontSize, _window, cx| {
+                    this.change_font_size(-FONT_SIZE_STEP, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &ResetFontSize, _window, cx| this.reset_font_size(cx)),
+                )
+                .on_action(cx.listener(|this, _: &TogglePalette, window, cx| {
+                    this.toggle_palette(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| {
+                    this.reopen_closed_tab(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ToggleMaximizePane, window, cx| {
+                    this.toggle_maximize(window, cx)
+                }))
+                .on_action(
+                    cx.listener(|_, _: &ToggleFullscreen, window, _cx| window.toggle_fullscreen()),
+                )
+                .on_action(cx.listener(|this, _: &ToggleTabSidebar, _window, cx| {
+                    this.toggle_tab_sidebar(cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &ToggleLeftPanel, _window, cx| {
+                        this.toggle_left_panel(cx)
+                    }),
+                )
+                .on_action(cx.listener(|this, _: &ToggleRightPanel, _window, cx| {
+                    this.toggle_right_panel(cx)
+                }))
+                .on_action(cx.listener(|this, _: &ShowRightPanelInfo, _window, cx| {
+                    this.set_right_panel_tab(crate::core::config::RightPanelTab::Info, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ShowRightPanelOutline, _window, cx| {
+                    this.set_right_panel_tab(crate::core::config::RightPanelTab::Outline, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ShowRightPanelChanges, _window, cx| {
+                    this.set_right_panel_tab(crate::core::config::RightPanelTab::Changes, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ShowRightPanelFiles, _window, cx| {
+                    this.set_right_panel_tab(crate::core::config::RightPanelTab::Files, cx)
+                }))
+                .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                    this.toggle_settings(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &RestartDaemon, window, cx| {
+                    this.restart_daemon(window, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &ToggleSftp, window, cx| this.toggle_sftp(window, cx)),
+                )
+                .on_action(cx.listener(|this, _: &ShowSshForwards, window, cx| {
+                    this.show_ssh_forwards(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ToggleCodePanel, window, cx| {
+                    this.toggle_code_panel(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &EditorSave, window, cx| {
+                    this.editor_save_active(window, cx)
+                }))
+                // Quit lives on the same element-tree action path as every other Cmd
+                // shortcut above, so a focused terminal routes `cmd-q` here rather
+                // than relying solely on the global handler (which the keystroke
+                // doesn't reach while focus is deep in the terminal view).
+                .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
+                .on_action(cx.listener(|this, _: &OpenSshProfiles, window, cx| {
+                    this.open_settings_section(SettingsSection::Ssh, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &RestartSshSession, window, cx| {
+                    this.restart_ssh_session(window, cx)
+                }))
+                // Tab operations that used to be reachable only by right-clicking a
+                // chip. Each targets the active tab, so the menu bar / palette /
+                // keyboard all mean "this tab" without a click to say which.
+                .on_action(cx.listener(|this, _: &RenameTab, window, cx| {
+                    this.start_rename(this.active, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &NewWorktreeTab, window, cx| {
+                    this.new_worktree_tab(this.active, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &CloseOtherTabs, window, cx| {
+                    this.close_other_tabs(this.active, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &CloseTabsToTheRight, window, cx| {
+                    this.close_tabs_right_of(this.active, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &CopyWorkingDirectory, window, cx| {
+                    this.copy_active_cwd(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &MarkTabUnread, _window, cx| {
+                    this.mark_tab_unread(this.active, cx)
+                }))
+                // Fork: the bare action has no pane the user pointed at, so it
+                // opens a new tab; the four directional ones come from the pane
+                // right-click menu, where the ask *was* spatial.
+                .on_action(cx.listener(|this, _: &ForkAgentSession, window, cx| {
+                    this.fork_active_pane_session(ForkPlacement::NewTab, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ForkAgentSessionRight, window, cx| {
+                    this.fork_focused_pane_session(Axis::Horizontal, false, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ForkAgentSessionLeft, window, cx| {
+                    this.fork_focused_pane_session(Axis::Horizontal, true, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ForkAgentSessionDown, window, cx| {
+                    this.fork_focused_pane_session(Axis::Vertical, false, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ForkAgentSessionUp, window, cx| {
+                    this.fork_focused_pane_session(Axis::Vertical, true, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &CopyAgentSessionId, window, cx| {
+                    this.copy_agent_session_id(this.active, window, cx)
+                }))
+                // Settings destinations that deserve their own way in: Help →
+                // Keyboard Shortcuts and the App menu's About both used to require
+                // opening Settings and then hunting for the section.
+                .on_action(cx.listener(|this, _: &ShowKeyboardShortcuts, window, cx| {
+                    this.open_settings_section(SettingsSection::Keybindings, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &About, window, cx| {
+                    this.open_settings_section(SettingsSection::About, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
+                    this.check_for_updates_now(window, cx)
+                }))
+                // Standard macOS App / Window menu items. gpui exposes the platform
+                // calls but ships no actions for them.
+                .on_action(cx.listener(|_, _: &HideApp, _window, cx| cx.hide()))
+                .on_action(cx.listener(|_, _: &HideOthers, _window, cx| cx.hide_other_apps()))
+                .on_action(cx.listener(|_, _: &ShowAll, _window, cx| cx.unhide_other_apps()))
+                .on_action(
+                    cx.listener(|_, _: &MinimizeWindow, window, _cx| window.minimize_window()),
+                )
+                .on_action(cx.listener(|_, _: &ZoomWindow, window, _cx| window.zoom_window()))
+                // Help destinations. Opened in the default browser; a failure here is
+                // not worth interrupting the user over, so it is logged, not toasted.
+                .on_action(
+                    cx.listener(|_, _: &OpenDocumentation, _window, cx| cx.open_url(DOCS_URL)),
+                )
+                .on_action(cx.listener(|_, _: &OpenDiscord, _window, cx| cx.open_url(DISCORD_URL)))
+                .on_action(cx.listener(|_, _: &ReportIssue, _window, cx| cx.open_url(ISSUES_URL)))
+                // The theme's background image, composited over the background fill
+                // at its own opacity and under all content. Absolute, so it doesn't
+                // participate in the flex column; the wrapper clips the Cover
+                // overflow (gpui's `img` paints the fitted bounds unclipped).
+                .when_some(bg_image, |this, image| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .overflow_hidden()
+                            .opacity(image.opacity)
+                            .child(
+                                img(image.path)
+                                    .size_full()
+                                    .object_fit(gpui::ObjectFit::Cover),
+                            ),
+                    )
+                })
+                .child(main_layout)
+                // Settings overlay, above the tabs/terminal when open.
+                .when_some(settings_overlay, |this, overlay| this.child(overlay))
+                // The workspace switcher, in the same layer as the palette: they
+                // answer two different questions and are never open at once.
+                .children(self.render_switcher(cx))
+                // Command palette overlay, layered above everything when open.
+                .when_some(self.palette.clone(), |this, palette| this.child(palette))
+                // Toast layer for `window.push_notification` (worktree/SSH errors).
+                // gpui-component's Root only *stores* the list; the root view must
+                // render the layer — without this child every toast was invisible.
+                .children(gpui_component::Root::render_notification_layer(window, cx));
+
+        if let Some(start) = prof {
+            crate::ui::perf::record("window", start.elapsed());
+        }
+        root
     }
 }
 
@@ -8066,22 +8124,22 @@ mod tests {
     }
 }
 
+/// The shared headless App + Window the UI-level gpui tests drive.
 #[cfg(test)]
-mod keybinding_gpui_tests {
+pub(crate) mod test_window {
     use crate::core::config::Config;
     use crate::core::session::Session;
     use crate::ui::app::Tty7App;
-    use crate::ui::settings::SettingsSection;
     use gpui::{AppContext, Entity, TestAppContext, VisualTestContext};
 
-    fn harness(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
-        // Every keybinding edit below goes through `update_config`, which ends in
-        // `Config::save()` — a *full* overwrite of `config.json` at whatever path
-        // the config dir resolves to. Unpinned, that is the developer's real
-        // `~/.config/tty7/config.json`, so running these tests silently reset the
-        // user's entire config to `Config::default()` plus the shortcut recorded
-        // here. The test-only `Config::save` now panics rather than allow that;
-        // pin a scratch dir so it doesn't have to.
+    pub(crate) fn harness(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
+        // Every keybinding edit a caller makes goes through `update_config`,
+        // which ends in `Config::save()` — a *full* overwrite of `config.json`
+        // at whatever path the config dir resolves to. Unpinned, that is the
+        // developer's real `~/.config/tty7/config.json`, so running those tests
+        // silently reset the user's entire config to `Config::default()` plus
+        // the shortcut recorded there. The test-only `Config::save` now panics
+        // rather than allow that; pin a scratch dir so it doesn't have to.
         crate::core::config::pin_test_config_dir();
 
         // The pause-to-commit is a real `smol::Timer` (off the deterministic
@@ -8118,6 +8176,52 @@ mod keybinding_gpui_tests {
         let vcx = VisualTestContext::from_window(window.into(), cx);
         (app, vcx)
     }
+
+    /// [`harness`] plus one open tab, for the tests that need the window to have
+    /// something to show. The pane is a [`quiet_test_pane`], and the returned
+    /// stream must stay alive for as long as it: dropping it closes the socket
+    /// and the pane retires.
+    ///
+    /// Cursor blink is turned off here. It is a real 530ms `cx.notify()` on a
+    /// focused pane and would otherwise be the only thing the render-idle
+    /// measurements ever counted.
+    #[cfg(unix)]
+    pub(crate) fn harness_with_pane(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Tty7App>,
+        VisualTestContext,
+        std::os::unix::net::UnixStream,
+    ) {
+        use crate::terminal::view::quiet_test_pane;
+        use crate::ui::pane::{Pane, PaneSlot};
+
+        let (app, mut vcx) = harness(cx);
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.cursor_blink = false;
+            cx.set_global(cfg);
+        });
+        let stream = app.update_in(&mut vcx, |app, window, cx| {
+            let (view, stream) = quiet_test_pane(1, window, cx);
+            app.tabs
+                .push(super::Tab::new(Pane::leaf(PaneSlot::Ready(view))));
+            app.active = 0;
+            cx.notify();
+            stream
+        });
+        vcx.background_executor.run_until_parked();
+        (app, vcx, stream)
+    }
+}
+
+#[cfg(test)]
+mod keybinding_gpui_tests {
+    use super::test_window::harness;
+    use crate::core::config::Config;
+    use crate::ui::app::Tty7App;
+    use crate::ui::settings::SettingsSection;
+    use gpui::{Entity, TestAppContext, VisualTestContext};
 
     /// Open Settings → Keybindings and begin capturing `action`.
     fn begin_capture(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, action: &str) {

@@ -130,6 +130,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   survives frames — where gpui-component's own `TitleBar` has always kept it,
   which is why the ordinary caption strip was never affected. (#221)
 
+- **An idle window stays idle when the file tree is watching a busy tree** —
+  the file tree watches its root recursively, so it hears about every write
+  underneath: `.git` internals, build output, everything under `node_modules`.
+  Each of those batches repainted the whole window, several times a second,
+  including the overwhelming majority naming a directory the tree has never
+  listed and does not display. A window with nothing new to draw never reached
+  render idle, which is what issue #243 reports in its title. A batch now
+  repaints only when it reaches a listing the tree actually holds *and* the
+  re-read comes back different — so a file being rewritten in a directory on
+  screen costs nothing, and the re-read is issued from the watcher callback
+  rather than by asking for a paint in order to get one. `.gitignore` edits keep
+  their whole-cache refresh, but only when the file governs a directory the tree
+  is showing or loading: the one an `npm install` unpacks into each package
+  under `node_modules` reaches nothing on screen and now costs nothing.
+  Real changes still arrive exactly as fast.
+
+  Measured headlessly by counting window draws, before and after: five writes
+  under an unlisted directory cost 5 frames and now cost 0; five rewrites of a
+  file in a displayed directory cost 10 and now cost 0; five `.gitignore` writes
+  under `node_modules` cost 10 and now cost 0.
+
+  The other half of that report — the Files panel flickering — was fixed
+  independently by "keep file-tree listings on screen while they refresh", which
+  landed first and is the mechanism the panel now uses. This is only the frames.
+  Note the redraw behaviour is platform-independent and is what those numbers
+  are about; the reporter's ~15% CPU figure, and whether their flicker also
+  involved something in the Wayland presentation path, were not reproducible on
+  macOS and are not claimed to be confirmed. (#243)
+
 ## [26.7.6] - 2026-07-28
 
 ### Added
