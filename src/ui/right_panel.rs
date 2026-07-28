@@ -15,15 +15,13 @@
 //! sidebar row does, Changes probes the same `git_diff` the diff overlay does, and
 //! Files renders the same rows as the code panel's tree.
 
-use gpui::{AnyElement, Context, MouseButton, Window, WindowControlArea, div, prelude::*, px};
+use gpui::{AnyElement, Context, Window, div, prelude::*, px};
 use gpui_component::button::Button;
 use gpui_component::input::Input;
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Sizable as _, h_flex, v_flex,
 };
-use std::cell::Cell;
 use std::path::PathBuf;
-use std::rc::Rc;
 
 use crate::core::config::{Config, RightPanelTab};
 use crate::daemon::protocol::PaneProcs;
@@ -219,8 +217,7 @@ impl Tty7App {
                 // move into the section header instead (`panel_title`), which is a
                 // row the panel was drawing anyway.
                 .children(cfg!(target_os = "macos").then(|| {
-                    let should_move = Rc::new(Cell::new(false));
-                    h_flex()
+                    let row = h_flex()
                         .id("right-panel-titlebar-drag")
                         .flex_none()
                         .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
@@ -232,42 +229,36 @@ impl Tty7App {
                         // its centre line identical; without it the glyphs jump
                         // down a physical pixel the moment the panel opens.
                         .border_b_1()
-                        .border_color(cx.theme().transparent)
-                        // The top zone sits level with the real `TitleBar`, but the
-                        // bar only spans the terminal column — so, exactly like the
-                        // rail's top strip (`tab_sidebar`), make this one act like
-                        // the title bar it aligns with: drag to move, double-click
-                        // to zoom. A press arms a flag and the first *move* starts
-                        // the window move, so a plain click on a tab — and a
-                        // double-click — still lands intact; the tabs and corner
-                        // chrome take their own.
-                        .window_control_area(WindowControlArea::Drag)
-                        .on_mouse_down(MouseButton::Left, {
-                            let should_move = should_move.clone();
-                            move |_, _, _| should_move.set(true)
-                        })
-                        .on_mouse_up(MouseButton::Left, {
-                            let should_move = should_move.clone();
-                            move |_, _, _| should_move.set(false)
-                        })
-                        .on_mouse_move(move |_, window, _| {
-                            if should_move.replace(false) {
-                                window.start_window_move();
-                            }
-                        })
-                        .on_double_click(|_, window, _| window.titlebar_double_click())
-                        .items_center()
-                        .gap(px(2.))
-                        // Chrome scale, like the corner controls this row ends
-                        // with (`right_panel_tabs`): the leading inset lines the
-                        // *glyph* up on `CONTENT_INSET`, so it subtracts the
-                        // 32px tile's own padding rather than a 24px one's.
-                        .pl(px(tile_trailing_inset()))
-                        .children(self.right_panel_tabs(cx))
-                        .child(div().flex_1())
-                        // The panel is what reaches the window's right edge while
-                        // it's open, so it carries the corner chrome.
-                        .child(self.window_chrome(window, cx))
+                        .border_color(cx.theme().transparent);
+                    // The top zone sits level with the real `TitleBar`, but the
+                    // bar only spans the terminal column — so, exactly like the
+                    // rail's top strip (`tab_sidebar`), make this one act like
+                    // the title bar it aligns with: drag to move, double-click
+                    // to zoom. A press arms a flag and the first *move* starts
+                    // the window move, so a plain click on a tab — and a
+                    // double-click — still lands intact; the tabs and corner
+                    // chrome take their own. `window_move_gesture` holds that
+                    // flag in element state, so a repaint between the press and
+                    // the first move can't disarm it (#221).
+                    crate::ui::app::window_move_gesture(
+                        row,
+                        "right-panel-titlebar-drag",
+                        window,
+                        cx,
+                    )
+                    .on_double_click(|_, window, _| window.titlebar_double_click())
+                    .items_center()
+                    .gap(px(2.))
+                    // Chrome scale, like the corner controls this row ends with
+                    // (`right_panel_tabs`): the leading inset lines the *glyph*
+                    // up on `CONTENT_INSET`, so it subtracts the 32px tile's own
+                    // padding rather than a 24px one's.
+                    .pl(px(tile_trailing_inset()))
+                    .children(self.right_panel_tabs(cx))
+                    .child(div().flex_1())
+                    // The panel is what reaches the window's right edge while
+                    // it's open, so it carries the corner chrome.
+                    .child(self.window_chrome(window, cx))
                 }))
                 .child(body)
                 // The transfers footer is a sibling of the body, not part of any
@@ -398,11 +389,22 @@ impl Tty7App {
     /// line of content. The counts it used to carry move into the tab tooltips.
     /// A tab that has its own control still gets the row, because that control
     /// has nowhere else to go.
+    ///
+    /// When it *does* draw, it is grabbable, like every header in the window (see
+    /// [`crate::ui::app::window_move_gesture`]): it sits above the panel's scroll
+    /// container, not inside it, so a drag here has nothing else to mean. The
+    /// label and its count take no hit box, so the row stays grabbable straight
+    /// through them however long the text gets — the same rule the "duo" mark
+    /// established in #202. Anything in `trailing` is a control and must carry
+    /// its own `occlude()`, or Windows' HTCAPTION eats its clicks. The gesture is
+    /// armed *after* the empty-row early return, so the macOS zero-height case
+    /// never becomes an invisible drag area.
     pub(crate) fn panel_title(
         &self,
         text: &str,
         count: Option<String>,
         trailing: Option<AnyElement>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let tabs = (!cfg!(target_os = "macos")).then(|| self.right_panel_tabs(cx));
@@ -410,8 +412,13 @@ impl Tty7App {
         if tabs.is_none() && !has_trailing {
             return div().flex_none().into_any_element();
         }
-        h_flex()
-            .flex_none()
+        let row = crate::ui::app::window_move_gesture(
+            h_flex().id("panel-title"),
+            "panel-title-drag",
+            window,
+            cx,
+        );
+        row.flex_none()
             // Tall enough to seat the chrome-scale tiles when it carries them;
             // otherwise the compact label line it has always been.
             .h(px(if tabs.is_some() {
@@ -558,7 +565,7 @@ impl Tty7App {
     /// row comes from an accessor the sidebar already uses, so the panel can
     /// never disagree with the row that spawned it.
     fn render_panel_info(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let title = self.panel_title("Info", None, None, cx);
+        let title = self.panel_title("Info", None, None, window, cx);
         let mut rows: Vec<(&'static str, String)> = Vec::new();
         // Held aside from `rows` because they're not key/value lines: the actions
         // hang off the cwd, and the two lists get their own sub-headers below.
@@ -1015,7 +1022,7 @@ impl Tty7App {
             .get(self.active)
             .and_then(|t| t.detail_pane(window, cx))
         else {
-            let title = self.panel_title("Outline", None, None, cx);
+            let title = self.panel_title("Outline", None, None, window, cx);
             return self.panel_scroll(
                 self.panel_empty(
                     "No active session.",
@@ -1032,7 +1039,7 @@ impl Tty7App {
             // Two very different causes, one honest sentence: nothing has run
             // yet, or this shell never reported OSC 133 (no integration, a bare
             // `sh`, a nested PTY that eats the marks).
-            let title = self.panel_title("Outline", None, None, cx);
+            let title = self.panel_title("Outline", None, None, window, cx);
             return self.panel_scroll(
                 self.panel_empty(
                     "No commands recorded for this pane.",
@@ -1042,7 +1049,7 @@ impl Tty7App {
                 title,
             );
         }
-        let title = self.panel_title("Outline", Some(count.to_string()), None, cx);
+        let title = self.panel_title("Outline", Some(count.to_string()), None, window, cx);
 
         let mono = cx.theme().mono_font_family.clone();
         let mut list = v_flex().px(px(CONTENT_INSET - 4.)).py(px(2.)).gap(px(1.));
@@ -1140,7 +1147,7 @@ impl Tty7App {
             });
 
         let Some((host, cwd)) = target else {
-            let title = self.panel_title("Changes", None, None, cx);
+            let title = self.panel_title("Changes", None, None, window, cx);
             return self.panel_scroll(
                 self.panel_empty(
                     "No working directory.",
@@ -1176,7 +1183,7 @@ impl Tty7App {
             }
             _ => None,
         };
-        let title = self.panel_title("Changes", count, None, cx);
+        let title = self.panel_title("Changes", count, None, window, cx);
         let mono = cx.theme().mono_font_family.clone();
 
         let inner = match &self.right_panel.diff {
@@ -1393,7 +1400,7 @@ impl Tty7App {
         // No header control: the tree's one view option (dotfiles) is a
         // right-click away in the tree itself (`file_tree::dotfiles_menu_item`),
         // which is where you are when you want it.
-        let title = self.panel_title("Files", None, None, cx);
+        let title = self.panel_title("Files", None, None, window, cx);
         let search = self.panel_search(&self.file_search.clone(), cx);
         let rows = self.render_file_tree_rows(window, cx);
         v_flex()

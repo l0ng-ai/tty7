@@ -1207,7 +1207,7 @@ impl Tty7App {
             .flex_1()
             .min_w_0()
             .h_full()
-            .child(self.render_editor_header(cx))
+            .child(self.render_editor_header(window, cx))
             .when_some(conflict_banner, |this, b| this.child(b))
             .child(div().flex_1().min_h_0().child(body));
 
@@ -1250,7 +1250,11 @@ impl Tty7App {
     /// every buffer that was ever opened. Sits on the title bar's line and matches
     /// its height, so the editor's top edge lines up with the panel's tab row and
     /// the rail's controls across the window.
-    fn render_editor_header(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    fn render_editor_header(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let active = self.tab_code().and_then(|c| c.active_file());
         let name = active.map(|f| f.label());
         let dirty = active.is_some_and(|f| f.dirty);
@@ -1268,7 +1272,7 @@ impl Tty7App {
         // The overlay covers the real title bar, so this row inherits its drag and
         // zoom gestures — otherwise opening a file turns the top of the window into
         // a strip that looks like the caption and can't move it.
-        crate::ui::app::title_bar_drag(h_flex().id("editor-header"))
+        crate::ui::app::title_bar_drag(h_flex().id("editor-header"), "editor-header", window, cx)
             .flex_none()
             .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
             .items_center()

@@ -1066,11 +1066,11 @@ impl Tty7App {
     pub(crate) fn render_panel_sftp(
         &mut self,
         host: String,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let controls = self.sftp_controls(cx);
-        let title = self.panel_title("Files", Some(host), Some(controls), cx);
+        let title = self.panel_title("Files", Some(host), Some(controls), window, cx);
         let breadcrumb = self.render_sftp_breadcrumb(cx);
         // The shared panel search box, plus the one behaviour the old SFTP header
         // had that the local tree's doesn't: Esc clears the filter rather than
@@ -1125,14 +1125,20 @@ impl Tty7App {
             .items_center()
             .gap(px(2.))
             .child(
-                tile(
-                    Button::new("panel-sftp-refresh")
-                        .icon(Icon::empty().path("icons/refresh.svg").size(px(13.))),
-                    false,
-                    cx,
-                )
-                .tooltip("Refresh")
-                .on_click(cx.listener(|this, _, _w, cx| this.sftp_refresh(cx))),
+                // `occlude()` like the `⋯` beside it: `panel_title` is a
+                // `WindowControlArea::Drag` now (every header in the window is),
+                // which on Windows maps to HTCAPTION — the OS claims the press
+                // before gpui hit-tests, so a bare button never fires its click.
+                div().occlude().child(
+                    tile(
+                        Button::new("panel-sftp-refresh")
+                            .icon(Icon::empty().path("icons/refresh.svg").size(px(13.))),
+                        false,
+                        cx,
+                    )
+                    .tooltip("Refresh")
+                    .on_click(cx.listener(|this, _, _w, cx| this.sftp_refresh(cx))),
+                ),
             )
             .child(
                 div().occlude().child(

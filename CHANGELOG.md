@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dragging the window by a title bar worked only rarely with a trackpad** —
+  five rows that stand in for the caption (the tab rail's top zone, the settings
+  page's top strip, the detail panel's top zone, and the code and diff overlays'
+  headers) armed their window-drag with a flag that was rebuilt on every render.
+  Any repaint between the press and the first drag event threw the arm away, and
+  the press *itself* schedules one — these rows carry a double-click, which makes
+  gpui refresh the window on mouse-down — so the drag only survived if the first
+  move beat the next vsync: 16ms at 60Hz, 8ms on ProMotion. A mouse press nudges
+  the pointer and often won that race; a trackpad press is a finger pushing down
+  without translating, and almost never did. The terminal's cursor blink disarmed
+  it on its own even without a press. The arm now lives in element state, which
+  survives frames — where gpui-component's own `TitleBar` has always kept it,
+  which is why the ordinary caption strip was never affected. (#221)
+
+### Changed
+
+- **Every header in the window moves it now** — grabbing the window by a header
+  is a property of the whole app rather than a per-surface feature, so you never
+  have to learn which rows happen to be draggable. The detail panel's section
+  title (Info / Outline / Changes / Files, and the remote Files header) joins the
+  caption rows that already were. In horizontal-tab mode the strip also keeps a
+  bare 80px slice of caption for grabbing: its spacer was a flexible one with no
+  minimum, so it collapsed to exactly 0px once the tab chips saturated the row —
+  around 7-8 tabs on a 1440px window — leaving nothing to grab but three 6px
+  gaps and a hairline above and below the chips. The chip row's fixed-chrome
+  reserve is corrected to match, from a stale 100px (sized when the corner held a
+  30px "+" and a 30px "⋯") to the ~137px the corner actually occupies, so chips
+  reach their minimum width and truncate a tab or two sooner. (#221)
+
 ### Added
 
 - **Pi is a first-class agent, not a fallback one** — Pi panes drew the generic

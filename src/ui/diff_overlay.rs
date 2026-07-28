@@ -288,7 +288,11 @@ impl Tty7App {
     /// The overlay element, or `None` when closed. Mounted as the topmost
     /// absolute child of the body area — it covers the terminal but not the
     /// sidebar or title strip.
-    pub(crate) fn render_diff_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn render_diff_overlay(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let overlay = self.tabs.get(self.active)?.diff_overlay.as_ref()?;
 
         let content = match &overlay.load {
@@ -302,7 +306,7 @@ impl Tty7App {
             }
         };
 
-        let header = self.diff_header(overlay, cx);
+        let header = self.diff_header(overlay, window, cx);
 
         Some(
             v_flex()
@@ -338,6 +342,7 @@ impl Tty7App {
     fn diff_header(
         &self,
         overlay: &DiffOverlayState,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let (branch, files, untracked, added, removed) = match &overlay.load {
@@ -359,8 +364,13 @@ impl Tty7App {
         // Standing in for the title bar means carrying its gestures too: the
         // overlay covers the real bar, so without this the whole top of the window
         // stops moving it while a diff is up.
-        crate::ui::app::title_bar_drag(h_flex().id("diff-overlay-header"))
-            .flex_shrink_0()
+        let row = crate::ui::app::title_bar_drag(
+            h_flex().id("diff-overlay-header"),
+            "diff-overlay-header",
+            window,
+            cx,
+        );
+        row.flex_shrink_0()
             .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
             .pl(px(lead))
             // Trailing tile aligns on its glyph's ink, like every corner control.

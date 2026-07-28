@@ -7,8 +7,8 @@
 
 use gpui::{
     AnyElement, App, Context, Div, Entity, FontWeight, Image, ImageFormat, KeyDownEvent,
-    MouseButton, SharedString, Stateful, Subscription, Window, WindowControlArea, div, img,
-    prelude::*, px, relative, rgb,
+    MouseButton, SharedString, Stateful, Subscription, Window, div, img, prelude::*, px, relative,
+    rgb,
 };
 use gpui_component::InteractiveElementExt as _;
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -23,8 +23,6 @@ use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex,
     v_flex,
 };
-use std::cell::Cell;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use uuid::Uuid;
@@ -914,7 +912,11 @@ fn seed_input(
 impl Tty7App {
     /// Build the settings tab body: a fixed left sidebar (section nav) beside a
     /// scrollable content area for the selected section. Esc closes the tab.
-    pub(crate) fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn render_settings(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         // Copy the palette out (Hsla is Copy) so this borrow doesn't outlive into
         // `render_settings_search_results` below, which needs `cx` mutably.
         let theme = cx.theme();
@@ -1166,31 +1168,25 @@ impl Tty7App {
             // `should_move` flag and the first move calls `start_window_move`
             // (deferring to an actual move keeps a plain click, and double-click,
             // intact); the `WindowControlArea::Drag` tag covers the Windows path.
-            .child({
-                let should_move = Rc::new(Cell::new(false));
-                div()
-                    .id("settings-titlebar-drag")
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .right_0()
-                    .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
-                    .window_control_area(WindowControlArea::Drag)
-                    .on_mouse_down(MouseButton::Left, {
-                        let should_move = should_move.clone();
-                        move |_, _, _| should_move.set(true)
-                    })
-                    .on_mouse_up(MouseButton::Left, {
-                        let should_move = should_move.clone();
-                        move |_, _, _| should_move.set(false)
-                    })
-                    .on_mouse_move(move |_, window, _| {
-                        if should_move.replace(false) {
-                            window.start_window_move();
-                        }
-                    })
-                    .on_double_click(|_, window, _| window.titlebar_double_click())
-            })
+            // `window_move_gesture` owns that arming, and keeps the flag in
+            // element state so a repaint between the press and the first move
+            // can't throw it away (#221) — the failure was worst here, because
+            // this strip *is* the whole top band with no immune caption beside it.
+            .child(
+                crate::ui::app::window_move_gesture(
+                    div()
+                        .id("settings-titlebar-drag")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(crate::ui::app::TITLE_BAR_HEIGHT)),
+                    "settings-titlebar-drag",
+                    window,
+                    cx,
+                )
+                .on_double_click(|_, window, _| window.titlebar_double_click()),
+            )
             .when(show_theme_panel, |r| r.child(self.render_theme_panel(cx)))
             // Close affordance at the page's top-right corner (Esc and Cmd+, also
             // close) — the intuitive "close this page" spot, and clear of the

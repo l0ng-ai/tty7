@@ -226,37 +226,145 @@ pub(crate) const WINDOW_MARK_SIZE: f32 = 20.;
 /// double-click, still land intact. Note that on Windows the drag area maps to
 /// HTCAPTION and the OS claims the press before gpui hit-tests, so every button
 /// inside one of these rows needs an `occlude()` wrapper to get its clicks back.
-pub(crate) fn title_bar_drag(row: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
-    let should_move = Rc::new(Cell::new(false));
+///
+/// `key` must be unique among the stand-in rows that can be on screen together
+/// — see [`window_move_gesture`], which owns the arming and explains why.
+pub(crate) fn title_bar_drag(
+    row: gpui::Stateful<gpui::Div>,
+    key: &'static str,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) -> gpui::Stateful<gpui::Div> {
+    window_move_gesture(row, key, window, cx).on_double_click(|_, window, _| {
+        // gpui only implements `titlebar_double_click` on macOS — the trait
+        // method is an empty default everywhere else, so on Linux this row
+        // swallowed the double-click and nothing zoomed. `zoom_window` is the
+        // maximise toggle there (x11 `_NET_WM_STATE_MAXIMIZED_*`, wayland
+        // `set_maximized`), and what gpui-component's own `TitleBar` calls on
+        // Linux for exactly this reason. Windows needs neither: the row is a
+        // drag area, which maps to HTCAPTION, and the OS has already restored
+        // or maximised the window before this could run.
+        if cfg!(target_os = "linux") {
+            window.zoom_window();
+        } else {
+            window.titlebar_double_click();
+        }
+    })
+}
+
+/// The armed flag behind [`window_move_gesture`]. A single bool, but *where* it
+/// lives is the whole point — see there.
+pub(crate) struct WindowMoveArm {
+    should_move: bool,
+}
+
+// ── Every header in tty7 is draggable ────────────────────────────────────────
+//
+// A standing rule, not a per-surface feature: a user should never have to learn
+// which of this window's headers happen to move it. Any row that reads as a
+// header, caption or title — the caption strip, the rail's and the detail
+// panel's top zones, an overlay's header, the panel's section title — moves the
+// window when you drag it. New headers are expected to arrive that way.
+//
+// Three things that takes, in the order they bite:
+//
+// 1. **Arm it with [`window_move_gesture`]**, never a fresh `Rc<Cell>` per
+//    render. That function's doc explains why (#221).
+// 2. **Non-controls take no hit box.** Anything drawn inside a header that is not
+//    an interactive control — a label, a count, a brand mark, an icon — gets no
+//    `.id()` and no `occlude()`, so the drag falls straight through it and the
+//    row stays grabbable however long its text runs. This is the rule #202
+//    established for the "duo" mark. Its converse binds too: anything that *is* a
+//    control needs an `occlude()` wrapper, or Windows' HTCAPTION claims the press
+//    before gpui hit-tests and the button never fires.
+// 3. **A flexible spacer needs a minimum.** Where a header's contents *do* take
+//    hit boxes by design — the tab strip, whose chips are draggable for reorder —
+//    the bare spacer beside them is the only grab region there is, and
+//    `flex-basis: 0` means it collapses to nothing the moment the row fills up.
+//    See `tab_strip::GRAB_HANDLE_W`.
+//
+// One region satisfies the rule by adjacency rather than on its own, and that is
+// deliberate — not an oversight to tidy up later. The detail panel's macOS top
+// zone is every-child-occluded (four tab tiles plus the corner chrome) and that
+// fixed footprint comes to 214px against a `right_panel::MIN_WIDTH` of 216, so
+// at the panel's floor its spacer is a couple of pixels — a handle only on
+// paper. It keeps a real one anyway: the panel's section title
+// (`right_panel::panel_title`) is draggable and sits immediately below it.
+// Raising `MIN_WIDTH` far enough to seat a grabbable spacer would trade a real
+// capability — narrowing the panel — for a handle the user already has a few
+// pixels lower, so the floor stays where it is and the row keeps all its
+// controls.
+
+/// Arm-on-press / move-on-first-move window dragging for a row that stands in
+/// for the title bar. [`title_bar_drag`] is this plus the double-click-to-zoom
+/// half; the settings page and the detail panel's top zone take this alone
+/// because their double-click differs.
+///
+/// **The arm has to outlive the frame it was set in (#221).** This used to hold
+/// `should_move` in an `Rc<Cell<bool>>` built inside the render function, which
+/// meant every repaint handed the *next* frame's listeners a fresh, zeroed cell
+/// while the press had written to the old one. Any redraw between the press and
+/// the first drag event silently disarmed the hold — and the press itself
+/// schedules one, because `on_double_click` makes gpui call `window.refresh()`
+/// on mouse-down. So a drag only survived if the first move beat the next vsync:
+/// ≤16ms at 60Hz, ≤8ms on ProMotion. A mouse press nudges the pointer and often
+/// wins that race; a trackpad press is a finger pushing down without translating
+/// and almost never does, which is exactly the "success rate is very low, and
+/// only with the trackpad" the issue reported. The terminal's cursor blink
+/// (`cx.notify()` every 530ms) disarms it on its own even without a press.
+///
+/// `window.use_keyed_state` puts the flag in gpui element state instead, which
+/// survives across frames — the same place gpui-component's own `TitleBar` keeps
+/// it, which is why the ordinary caption strip never had this bug. Keyed rather
+/// than `use_state` because one builder serves several call sites: `use_state`
+/// derives its id from the *caller's* `CodeLocation`, so two of these rows on
+/// screen at once (the rail's top zone plus the code overlay's header is a real
+/// combination) would share one arm. `key` must therefore be unique among the
+/// rows that can coexist.
+///
+/// Releasing outside the row disarms too. With a per-frame cell that never
+/// mattered — the flag died with the frame regardless — but a flag that persists
+/// would otherwise stay armed after a press that wandered off the row, and then
+/// start a window move on a later *hover* over it.
+pub(crate) fn window_move_gesture(
+    row: gpui::Stateful<gpui::Div>,
+    key: &'static str,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) -> gpui::Stateful<gpui::Div> {
+    let arm = window.use_keyed_state(key, cx, |_, _| WindowMoveArm { should_move: false });
     row.window_control_area(gpui::WindowControlArea::Drag)
-        .on_mouse_down(gpui::MouseButton::Left, {
-            let should_move = should_move.clone();
-            move |_, _, _| should_move.set(true)
-        })
-        .on_mouse_up(gpui::MouseButton::Left, {
-            let should_move = should_move.clone();
-            move |_, _, _| should_move.set(false)
-        })
-        .on_mouse_move(move |_, window, _| {
-            if should_move.replace(false) {
-                window.start_window_move();
-            }
-        })
-        .on_double_click(|_, window, _| {
-            // gpui only implements `titlebar_double_click` on macOS — the trait
-            // method is an empty default everywhere else, so on Linux this row
-            // swallowed the double-click and nothing zoomed. `zoom_window` is the
-            // maximise toggle there (x11 `_NET_WM_STATE_MAXIMIZED_*`, wayland
-            // `set_maximized`), and what gpui-component's own `TitleBar` calls on
-            // Linux for exactly this reason. Windows needs neither: the row is a
-            // drag area, which maps to HTCAPTION, and the OS has already restored
-            // or maximised the window before this could run.
-            if cfg!(target_os = "linux") {
-                window.zoom_window();
-            } else {
-                window.titlebar_double_click();
-            }
-        })
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            window.listener_for(&arm, |arm, _: &gpui::MouseDownEvent, _, _| {
+                arm.should_move = true;
+            }),
+        )
+        .on_mouse_down_out(
+            window.listener_for(&arm, |arm, _: &gpui::MouseDownEvent, _, _| {
+                arm.should_move = false;
+            }),
+        )
+        .on_mouse_up(
+            gpui::MouseButton::Left,
+            window.listener_for(&arm, |arm, _: &gpui::MouseUpEvent, _, _| {
+                arm.should_move = false;
+            }),
+        )
+        .on_mouse_up_out(
+            gpui::MouseButton::Left,
+            window.listener_for(&arm, |arm, _: &gpui::MouseUpEvent, _, _| {
+                arm.should_move = false;
+            }),
+        )
+        .on_mouse_move(
+            window.listener_for(&arm, |arm, _: &gpui::MouseMoveEvent, window, _| {
+                if arm.should_move {
+                    arm.should_move = false;
+                    window.start_window_move();
+                }
+            }),
+        )
 }
 
 pub(crate) fn window_mark() -> Option<impl IntoElement> {
@@ -6340,7 +6448,7 @@ impl Render for Tty7App {
         // the rail and the right panel (both are siblings), which is the point:
         // the sidebar's git lines stay clickable to switch repo, and the
         // Changes list stays put so you can walk down it file by file.
-        let diff_overlay = self.render_diff_overlay(cx);
+        let diff_overlay = self.render_diff_overlay(window, cx);
 
         // Code panel: an immersive overlay ([file tree | editor], IDE-style)
         // covering the title strip *and* the terminal — the whole column right
@@ -6527,7 +6635,7 @@ impl Render for Tty7App {
                 // the root's paint — deliberate: the overlay must occlude the
                 // terminal behind it to stay readable.
                 .bg(window_bg)
-                .child(self.render_settings(cx))
+                .child(self.render_settings(window, cx))
         });
 
         div()
@@ -7546,6 +7654,217 @@ fn apply_ssh_o_option(
         _ => {}
     }
     Ok(())
+}
+
+/// The window-drag gesture behind every stand-in title bar, exercised against
+/// the real [`title_bar_drag`] rather than a replica of it.
+///
+/// `PlatformWindow::start_window_move` is `unimplemented!()` on gpui's test
+/// platform, which makes a panic a reliable "the window would have started
+/// moving" detector — hence the `#[should_panic]` on the tests that assert a
+/// drag *does* start. The tests that assert one does *not* start simply return.
+#[cfg(test)]
+mod window_drag_tests {
+    use gpui::{
+        Context, InteractiveElement as _, IntoElement, Modifiers, MouseButton, MouseDownEvent,
+        MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, PlatformInput, Point, Render,
+        Styled as _, TestAppContext, VisualTestContext, Window, div, point, px,
+    };
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// A minimal window whose whole surface is one real `title_bar_drag` row, so
+    /// nothing else in the tree can explain a result.
+    struct Host;
+    impl Render for Host {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(super::title_bar_drag(
+                div().id("stand-in-title-bar").w_full().h(px(40.)),
+                "stand-in-title-bar",
+                window,
+                cx,
+            ))
+        }
+    }
+
+    /// The pattern `title_bar_drag` used to carry: a `should_move` cell built
+    /// inside `render`, so every frame hands the next one a fresh, zeroed cell.
+    /// Kept as a control — it is what makes the assertions above it meaningful,
+    /// by showing the harness detects the bug when the bug is present.
+    struct PerFrameCellHost;
+    impl Render for PerFrameCellHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let should_move = Rc::new(Cell::new(false));
+            div().size_full().child(
+                div()
+                    .id("per-frame-cell")
+                    .w_full()
+                    .h(px(40.))
+                    .on_mouse_down(MouseButton::Left, {
+                        let should_move = should_move.clone();
+                        move |_, _, _| should_move.set(true)
+                    })
+                    .on_mouse_move(move |_, window, _| {
+                        if should_move.replace(false) {
+                            window.start_window_move();
+                        }
+                    }),
+            )
+        }
+    }
+
+    fn down(at: Point<Pixels>) -> PlatformInput {
+        PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        })
+    }
+
+    fn up(at: Point<Pixels>) -> PlatformInput {
+        PlatformInput::MouseUp(MouseUpEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        })
+    }
+
+    fn moved(at: Point<Pixels>, held: bool) -> PlatformInput {
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: at,
+            pressed_button: held.then_some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        })
+    }
+
+    const ON_ROW: Point<Pixels> = Point {
+        x: px(300.),
+        y: px(20.),
+    };
+
+    fn drifted(at: Point<Pixels>) -> Point<Pixels> {
+        point(at.x + px(12.), at.y + px(3.))
+    }
+
+    /// Press, let the window redraw — in production the next vsync — then move.
+    fn press_repaint_move(vcx: &mut VisualTestContext, at: Point<Pixels>) {
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(at, false), cx);
+            window.dispatch_event(down(at), cx);
+        });
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(drifted(at), true), cx);
+        });
+        vcx.run_until_parked();
+    }
+
+    /// **The regression this file exists for (#221).** A repaint between the
+    /// press and the first drag event must not disarm the hold. It used to: the
+    /// arm lived in an `Rc<Cell<bool>>` rebuilt by every `render`, and the press
+    /// itself schedules a repaint (the row's `on_double_click` makes gpui call
+    /// `window.refresh()` on mouse-down), so a trackpad press — which starts
+    /// sliding tens of milliseconds later, well past the next vsync — almost
+    /// never survived to reach `start_window_move`.
+    #[gpui::test]
+    #[should_panic(expected = "not implemented")]
+    fn the_arm_survives_a_repaint_between_press_and_move(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| Host);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        press_repaint_move(&mut vcx, ON_ROW);
+    }
+
+    /// The control for the test above: with the old per-frame cell, the identical
+    /// event sequence loses the arm and never reaches `start_window_move`. If this
+    /// one ever starts panicking, the harness has stopped being able to tell the
+    /// bug from the fix and the test above proves nothing.
+    #[gpui::test]
+    fn a_per_frame_cell_loses_the_arm_to_the_same_repaint(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| PerFrameCellHost);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        press_repaint_move(&mut vcx, ON_ROW);
+    }
+
+    /// The gesture still defers to an actual move, which is what keeps a plain
+    /// click — and the double-click that zooms the window — intact.
+    #[gpui::test]
+    fn a_press_alone_does_not_move_the_window(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| Host);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(ON_ROW, false), cx);
+            window.dispatch_event(down(ON_ROW), cx);
+            window.dispatch_event(up(ON_ROW), cx);
+        });
+        vcx.run_until_parked();
+    }
+
+    /// The other half of giving the arm a longer life: it now has to be *cleared*
+    /// explicitly. A press that is released and then followed by a plain hover
+    /// must not start a window move — with the old per-frame cell the frame
+    /// boundary did this for free.
+    #[gpui::test]
+    fn a_release_disarms_so_a_later_hover_does_not_drag(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| Host);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(ON_ROW, false), cx);
+            window.dispatch_event(down(ON_ROW), cx);
+            window.dispatch_event(up(ON_ROW), cx);
+        });
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(drifted(ON_ROW), false), cx);
+        });
+        vcx.run_until_parked();
+    }
+
+    /// Two stand-in rows on screen at once — the rail's top zone plus an overlay
+    /// header is a real combination — must not share one arm. This is why the
+    /// builder takes an explicit `key` instead of `window.use_state`, whose id
+    /// comes from the *caller's* `CodeLocation` and would be identical for both.
+    #[gpui::test]
+    fn two_rows_on_screen_keep_separate_arms(cx: &mut TestAppContext) {
+        struct TwoRows;
+        impl Render for TwoRows {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .child(super::title_bar_drag(
+                        div().id("row-a").w_full().h(px(40.)),
+                        "row-a",
+                        window,
+                        cx,
+                    ))
+                    .child(super::title_bar_drag(
+                        div().id("row-b").w_full().h(px(40.)),
+                        "row-b",
+                        window,
+                        cx,
+                    ))
+            }
+        }
+
+        let window = cx.add_window(|_, _| TwoRows);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        // Arm the upper row, then hover the lower one without a button held.
+        // A shared arm would fire here; separate arms leave the lower row cold.
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(point(px(300.), px(20.)), false), cx);
+            window.dispatch_event(down(point(px(300.), px(20.))), cx);
+        });
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(point(px(312.), px(60.)), false), cx);
+        });
+        vcx.run_until_parked();
+    }
 }
 
 #[cfg(test)]

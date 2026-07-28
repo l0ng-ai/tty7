@@ -35,6 +35,13 @@ use crate::ui::tab_strip::{DragTab, REORDER_SLIDE_MS};
 /// Minimum sidebar width, and the maximum as a fraction of the window width, so
 /// a resize drag can't collapse the rail or let it swallow the terminal.
 const MIN_SIDEBAR_WIDTH: f32 = 180.;
+
+/// The bare slice of the rail's top zone kept clear for grabbing the window by,
+/// the same guarantee [`crate::ui::tab_strip::GRAB_HANDLE_W`] makes for the
+/// horizontal strip. Smaller than that one because this row is never crowded:
+/// it holds the brand mark and two tiles, and the rail's own floor
+/// ([`MIN_SIDEBAR_WIDTH`]) leaves ~70px of slack even at its narrowest.
+const GRAB_HANDLE_W: f32 = 48.;
 const MAX_SIDEBAR_WIDTH_RATIO: f32 = 0.5;
 
 /// Width (px) of the draggable resize handle's invisible hit-area, centered on
@@ -70,7 +77,7 @@ impl Tty7App {
     /// there's no empty state to render.
     pub(crate) fn tab_sidebar(
         &self,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let active = self.active;
@@ -782,7 +789,13 @@ impl Tty7App {
                         .pl(px(crate::ui::app::CONTENT_INSET))
                         .child(mark),
                 )
-                .child(div().flex_1())
+                // The row's grab handle, and `min_w` so it stays one: a bare
+                // `flex_1` takes only leftover space, which is nothing once the
+                // rail is dragged narrow enough. Every header in the window has to
+                // stay grabbable — see `app::window_move_gesture`. (On macOS there
+                // is no mark and so no spacer: `justify_end` leaves the row's whole
+                // left half bare, which is the handle.)
+                .child(div().flex_1().min_w(px(GRAB_HANDLE_W)))
             })
             // Both tiles are wrapped in an `occlude()` div, exactly like the
             // title-strip chrome. This row is a `WindowControlArea::Drag` (set
@@ -996,6 +1009,9 @@ impl Tty7App {
                     // right keep taking their own clicks (they're `occlude()`d).
                     .child(crate::ui::app::title_bar_drag(
                         controls.id("sidebar-titlebar-drag"),
+                        "sidebar-titlebar-drag",
+                        window,
+                        cx,
                     ))
                     .child(workspace_head)
                     .child(top_bar)
