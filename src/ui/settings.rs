@@ -5723,3 +5723,82 @@ mod tests {
         assert_eq!(parse_host_port("host").unwrap().port, 0);
     }
 }
+
+#[cfg(test)]
+mod gpui_tests {
+    use super::SettingsSection;
+    use crate::core::config::Config;
+    use crate::core::session::Session;
+    use crate::ui::app::Tty7App;
+    use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
+
+    fn harness(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+        });
+        // Wrapped in a `Root` like `main.rs` does — the gpui-component widgets on
+        // the settings sheet reach for it on the window.
+        let window = cx.add_window(|window, cx| {
+            let app =
+                cx.new(|cx| Tty7App::with_session(None, Some(Session::default()), window, cx));
+            gpui_component::Root::new(app, window, cx)
+        });
+        cx.background_executor.run_until_parked();
+        let app = window
+            .update(cx, |root, _, _| {
+                root.view()
+                    .clone()
+                    .downcast::<Tty7App>()
+                    .unwrap_or_else(|_| panic!("window root wraps a Tty7App"))
+            })
+            .unwrap();
+        let vcx = VisualTestContext::from_window(window.into(), cx);
+        (app, vcx)
+    }
+
+    /// Appearance is where issue #236's controls live: the cursor-shape segmented
+    /// track, the −/value/+ steppers and the theme picker's flush previews all
+    /// compute their own corner radii now (`ui::rounding`) instead of leaning on
+    /// `overflow_hidden`, and the stepper's glyph boxes were re-laid-out to
+    /// `h_full` so those radii land on the track's content box.
+    ///
+    /// gpui's test platform lays out and paints but never rasterizes, so this
+    /// cannot assert what the corners *look* like. What it can do is put the page
+    /// through a real layout and paint pass — twice, at two widths, so the tracks
+    /// are measured more than once — which is the cheapest seam that catches a
+    /// panic or a broken constraint in that arithmetic before a human ever sees
+    /// the window.
+    #[gpui::test]
+    fn appearance_section_lays_out_with_its_rounded_controls(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Appearance, window, cx);
+        });
+
+        vcx.simulate_resize(size(px(1100.), px(800.)));
+        vcx.run_until_parked();
+
+        // The flush-mounted theme previews only render with the picker docked
+        // open, so the page has to be paint-tested in both states to reach every
+        // site this change touched.
+        app.update_in(&mut vcx, |app, _, cx| {
+            if let Some(s) = app.active_settings_mut() {
+                s.theme_panel_open = true;
+            }
+            cx.notify();
+        });
+        // Narrow enough that the theme list re-measures against a different
+        // available width than the pass above.
+        vcx.simulate_resize(size(px(720.), px(560.)));
+        vcx.run_until_parked();
+
+        let section = vcx.update(|_, cx| app.read(cx).active_settings().map(|s| s.section));
+        assert!(
+            matches!(section, Some(SettingsSection::Appearance)),
+            "the panel should still be on Appearance after two paint passes",
+        );
+    }
+}

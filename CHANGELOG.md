@@ -1312,7 +1312,7 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
-[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v26.7.6...HEAD
 [0.10.0]: https://github.com/l0ng-ai/tty7/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/l0ng-ai/tty7/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/l0ng-ai/tty7/compare/v0.7.0...v0.8.0
