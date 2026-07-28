@@ -7,7 +7,9 @@ use gpui::{App, Global, KeyBinding, Keystroke, NoAction};
 
 use crate::core::actions::*;
 use crate::core::config::Config;
-use crate::terminal::view::{ClearScrollback, FindInTerminal, FindNext, FindPrevious};
+use crate::terminal::view::{
+    ClearScrollback, FindInTerminal, FindNext, FindPrevious, InsertNewline,
+};
 use crate::ui::theme::set_menus;
 
 /// The set of keystrokes currently installed for app actions, remembered so a
@@ -74,10 +76,44 @@ pub fn rebind(cx: &mut App) {
     set_menus(cx);
 }
 
+/// `InsertNewline`'s primary default: Windows Terminal's chord for a soft
+/// newline in the prompt editor, and the one the table in [`default_bindings`]
+/// carries.
+const INSERT_NEWLINE_DEFAULT: &str = "shift-enter";
+
+/// `InsertNewline`'s second default: iTerm2's chord for the same gesture. Both
+/// have inserted a newline since the multi-line editor landed, and both must
+/// keep doing so — but a binding spec can't express alternatives (whitespace in
+/// a spec means a *sequence*, `ctrl-b n`-style), and the effective table holds
+/// exactly one keystroke per action. So this chord is installed alongside the
+/// table's, and only while `InsertNewline` still sits on its primary default:
+/// rebinding the action in Settings or `config.json` retires both old chords,
+/// which is what a user who moves the binding expects.
+const INSERT_NEWLINE_ALT_DEFAULT: &str = "alt-enter";
+
+/// The extra keystroke an effective table installs beyond its one-per-action
+/// rows — today only [`INSERT_NEWLINE_ALT_DEFAULT`]. `None` once the action has
+/// been rebound off its default.
+fn extra_keystrokes(effective: &[(String, String)]) -> Vec<(&'static str, &'static str)> {
+    let on_default = effective
+        .iter()
+        .any(|(a, k)| a == "InsertNewline" && k == INSERT_NEWLINE_DEFAULT);
+    if on_default {
+        vec![("InsertNewline", INSERT_NEWLINE_ALT_DEFAULT)]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Build the `KeyBinding`s for an effective table, skipping unbound rows (empty
 /// keystroke) and any that fail validation.
 fn action_bindings(effective: &[(String, String)]) -> Vec<KeyBinding> {
     let mut bindings = Vec::new();
+    for (action, key) in extra_keystrokes(effective) {
+        if let Some(b) = make_binding(action, key) {
+            bindings.push(b);
+        }
+    }
     for (action, key) in effective {
         if key.is_empty() {
             continue; // an action with no assigned key
@@ -99,8 +135,10 @@ fn action_bindings(effective: &[(String, String)]) -> Vec<KeyBinding> {
 fn bound_keystrokes(effective: &[(String, String)]) -> Vec<String> {
     effective
         .iter()
-        .filter(|(_, k)| !k.is_empty() && keystroke_is_valid(k))
-        .map(|(_, k)| k.clone())
+        .map(|(_, k)| k.as_str())
+        .chain(extra_keystrokes(effective).into_iter().map(|(_, k)| k))
+        .filter(|k| !k.is_empty() && keystroke_is_valid(k))
+        .map(str::to_string)
         .collect()
 }
 
@@ -243,6 +281,11 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         ),
         // Like Terminal.app / iTerm2 / Ghostty ⌘K: wipe the screen + scrollback.
         ("ClearScrollback", "secondary-k"),
+        // Soft newline in the prompt editor: author a multi-line command without
+        // submitting it. Shift+Enter is Windows Terminal's chord and the primary
+        // default; Alt+Enter (iTerm2's) is installed alongside it — see
+        // `INSERT_NEWLINE_ALT_DEFAULT` for why it can't live in this table.
+        ("InsertNewline", INSERT_NEWLINE_DEFAULT),
         ("OpenSettings", "secondary-,"),
         // Help → Keyboard Shortcuts, on the ⌘/ that editors and browsers use for
         // "show me the shortcuts". Off macOS `secondary-/` is Ctrl+/, which some
@@ -625,6 +668,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "FindNext" => KeyBinding::new(keystroke, FindNext, Some("Terminal")),
         "FindPrevious" => KeyBinding::new(keystroke, FindPrevious, Some("Terminal")),
         "ClearScrollback" => KeyBinding::new(keystroke, ClearScrollback, Some("Terminal")),
+        "InsertNewline" => KeyBinding::new(keystroke, InsertNewline, Some("Terminal")),
         "OpenSettings" => KeyBinding::new(keystroke, OpenSettings, None),
         "ShowKeyboardShortcuts" => KeyBinding::new(keystroke, ShowKeyboardShortcuts, None),
         "About" => KeyBinding::new(keystroke, About, None),
@@ -731,6 +775,74 @@ mod tests {
                 make_binding(&action, &key).is_some(),
                 "tmux preset action {action} has no make_binding arm"
             );
+        }
+    }
+
+    #[test]
+    fn insert_newline_ships_both_default_chords() {
+        // Shift+Enter and Alt+Enter have both inserted a soft newline since the
+        // multi-line editor landed; exposing the gesture as an action must not
+        // cost either one. Shift+Enter is the table row, Alt+Enter the extra.
+        let effective: Vec<(String, String)> = default_bindings()
+            .into_iter()
+            .map(|(a, k)| (a.to_string(), k.to_string()))
+            .collect();
+        assert_eq!(
+            effective
+                .iter()
+                .find(|(a, _)| a == "InsertNewline")
+                .map(|(_, k)| k.as_str()),
+            Some("shift-enter")
+        );
+        assert_eq!(
+            extra_keystrokes(&effective),
+            vec![("InsertNewline", "alt-enter")]
+        );
+        // Both are real, installable bindings, and both are remembered so a
+        // later `rebind` can neutralize them.
+        for key in ["shift-enter", "alt-enter"] {
+            assert!(keystroke_is_valid(key), "{key} does not parse");
+            assert!(make_binding("InsertNewline", key).is_some());
+            assert!(
+                bound_keystrokes(&effective).iter().any(|k| k == key),
+                "{key} is not remembered as installed"
+            );
+        }
+        assert_eq!(key_tokens("shift-enter"), vec![SHIFT, "⏎"]);
+    }
+
+    #[test]
+    fn rebinding_insert_newline_retires_both_default_chords() {
+        // Move the action off its default and the second chord goes with it —
+        // otherwise Alt+Enter would keep inserting newlines behind the user's
+        // back after they deliberately moved the binding.
+        let effective = vec![("InsertNewline".to_string(), "ctrl-o".to_string())];
+        assert!(extra_keystrokes(&effective).is_empty());
+        assert_eq!(bound_keystrokes(&effective), vec!["ctrl-o".to_string()]);
+
+        // Unbinding it entirely (an empty override) installs nothing at all.
+        let unbound = vec![("InsertNewline".to_string(), String::new())];
+        assert!(extra_keystrokes(&unbound).is_empty());
+        assert!(action_bindings(&unbound).is_empty());
+    }
+
+    #[test]
+    fn secondary_enter_chords_are_distinct_from_insert_newline() {
+        // The window bindings the reporter called out (#182) must stay put:
+        // ⌘⏎ / ⌘⇧⏎ are different keystrokes from the bare ⇧⏎ and ⌥⏎.
+        let defaults = default_bindings();
+        let key_of = |action: &str| {
+            defaults
+                .iter()
+                .find(|(a, _)| *a == action)
+                .map(|(_, k)| *k)
+                .unwrap()
+        };
+        assert_eq!(key_of("ToggleFullscreen"), "secondary-enter");
+        assert_eq!(key_of("ToggleMaximizePane"), "secondary-shift-enter");
+        for window_chord in ["secondary-enter", "secondary-shift-enter"] {
+            assert_ne!(window_chord, INSERT_NEWLINE_DEFAULT);
+            assert_ne!(window_chord, INSERT_NEWLINE_ALT_DEFAULT);
         }
     }
 

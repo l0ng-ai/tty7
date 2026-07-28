@@ -50,6 +50,11 @@ const GRID_PAD_Y: f32 = 4.;
 // context-menu row, and the Edit-menu item all dispatch the same action, so the
 // three can't drift (they did — the context menu's Paste used to skip the
 // image-paste branch that ⌘V had).
+//
+// `InsertNewline` is the exception to the "menu" part: it has no menu row (you
+// do not reach for a menu mid-word), and exists so the prompt editor's soft
+// newline is a *bindable* action rather than a hardcoded chord — see
+// `insert_newline_action`.
 actions!(
     terminal,
     [
@@ -62,7 +67,8 @@ actions!(
         FindInTerminal,
         FindNext,
         FindPrevious,
-        ClearScrollback
+        ClearScrollback,
+        InsertNewline
     ]
 );
 
@@ -2403,14 +2409,11 @@ impl TerminalView {
 
         match key {
             "enter" => {
-                // Shift+Enter / Opt+Enter inserts a newline to author (or extend)
-                // a multi-line command; a plain Enter submits the whole buffer.
-                if (m.shift || m.alt) && !m.control && !m.platform {
-                    self.cmd.insert_str("\n");
-                    self.history_nav = None;
-                    cx.notify();
-                    return;
-                }
+                // Any Enter that reaches here submits. The soft newline that
+                // Shift+Enter / Opt+Enter authors is not handled inline: it is
+                // the `InsertNewline` action, dispatched by the keymap before
+                // the key ever reaches this dispatcher, so the chord can be
+                // rebound like every other action (#182).
                 self.submit_command(cx);
                 return;
             }
@@ -3976,6 +3979,30 @@ impl TerminalView {
             self.typeahead.observe(RawInput::Text(&net), alt);
             cx.notify();
         }
+    }
+
+    /// The `InsertNewline` action: insert a literal newline at the caret so the
+    /// user can author (or extend) a multi-line command, which plain Enter then
+    /// submits whole. Bound to Shift+Enter and Alt+Enter by default.
+    ///
+    /// Only the local command editor answers this. When the editor isn't holding
+    /// the line — a foreground application owns the screen, the search field has
+    /// focus — or when another local widget has claimed the keyboard (completion
+    /// picker, reverse search), we `propagate` instead, so the chord takes the
+    /// exact path it took before this action existed: on to `on_key_down`, and
+    /// from there to the widget or out to the application as raw bytes.
+    fn insert_newline_action(&mut self, cx: &mut Context<Self>) {
+        if !self.input_active() || self.completion.is_some() || self.reverse_search.is_some() {
+            cx.propagate();
+            return;
+        }
+        // A key pressed while scrolled up must edit the line the viewport is
+        // showing, the way every editor key does (see `handle_editor_key`).
+        self.jump_to_prompt();
+        self.cursor_visible = true;
+        self.cmd.insert_str("\n");
+        self.history_nav = None;
+        cx.notify();
     }
 
     /// readline's accept-line, as the editor means it: with a completion
@@ -6272,6 +6299,12 @@ impl Render for TerminalView {
                 this.step_match(Direction::Left, cx);
             }))
             .on_action(cx.listener(|this, _: &ClearScrollback, _w, cx| this.clear_scrollback(cx)))
+            // Soft newline in the prompt editor (Shift+Enter / Alt+Enter by
+            // default). Propagates when the editor isn't holding the line, so a
+            // foreground application still sees the chord unchanged.
+            .on_action(cx.listener(|this, _: &InsertNewline, _w, cx| {
+                this.insert_newline_action(cx);
+            }))
             // Tab / Shift-Tab are claimed here (in the "Terminal" key context) so
             // they reach the shell instead of triggering Root's focus navigation.
             // Tab → HT (0x09); Shift-Tab → CSI Z (back-tab), the standard sequence.
@@ -8558,6 +8591,74 @@ mod gpui_tests {
                     view.integration_notice.is_none(),
                     "the notice is one-shot per pane"
                 );
+            })
+            .unwrap();
+    }
+
+    /// The `InsertNewline` action puts a literal newline at the caret and leaves
+    /// the line unsubmitted; a plain Enter then ships the whole multi-line
+    /// buffer. Behaviour that used to be hardcoded on Shift+Enter (#182).
+    #[gpui::test]
+    fn insert_newline_action_extends_the_line_and_enter_submits_it(cx: &mut TestAppContext) {
+        // `submit_command` defers a history-file record; pin the config dir to
+        // the shared test scratch so nothing touches the real user history.
+        let dir = std::env::temp_dir().join(format!("tty7-covtest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        crate::core::config::set_config_dir(dir);
+
+        let (window, mut daemon) = harness(cx);
+        // A prompt report engages the editor, so `input_active()` is true.
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        for _ in 0..200 {
+            if window
+                .update(cx, |view, _, _| view.terminal.at_prompt())
+                .unwrap()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, _, cx| {
+                assert!(view.input_active(), "the editor owns an idle prompt");
+                view.commit_text("echo a", cx);
+                view.insert_newline_action(cx);
+                view.commit_text("echo b", cx);
+                assert_eq!(view.cmd.text(), "echo a\necho b");
+
+                view.handle_editor_key(&key("enter"), cx);
+                assert!(view.cmd.is_empty(), "Enter submits the whole buffer");
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            // Submit sends each buffer line as a carriage return, the way a
+            // pasted multi-line command already goes out.
+            Some(b"echo a\recho b\r".to_vec()),
+            "the multi-line command reaches the PTY in one submit"
+        );
+    }
+
+    /// The action is the prompt editor's alone: with a foreground application on
+    /// the alternate screen it declines, so the chord takes its old path out to
+    /// the application instead of editing a line that isn't there.
+    #[gpui::test]
+    fn insert_newline_action_declines_when_the_editor_is_not_live(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.cmd.set("keep me");
+                view.terminal.exited = true; // simplest input_active() = false
+                assert!(!view.input_active());
+                view.insert_newline_action(cx);
+                assert_eq!(view.cmd.text(), "keep me", "no newline inserted");
             })
             .unwrap();
     }
