@@ -850,9 +850,7 @@ mod tests {
             assert!(keystroke_is_valid(key), "{key} does not parse");
             assert!(make_binding("InsertNewline", key).is_some());
             assert!(
-                bound_keystrokes(&effective)
-                    .iter()
-                    .any(|(k, _)| k == key),
+                bound_keystrokes(&effective).iter().any(|(k, _)| k == key),
                 "{key} is not remembered as installed"
             );
         }

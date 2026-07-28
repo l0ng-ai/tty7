@@ -10,7 +10,7 @@
 - **Fuzzy history search** — <kbd>⌃ R</kbd> shows what you ran, where, and whether it failed; turn it off (Settings → Terminal → Keyboard, or `history_search` in `config.json`) and <kbd>⌃ R</kbd> goes to your shell instead, so an fzf / percol binding keeps working
 - **History from day one** — your existing shell history works as-is and carries across sessions
 - **Line editing** — click to place the caret, mouse selection, word motion, undo
-- **Multi-line editing** — wrapped and multi-line commands edit in place; the grid shifts to keep the caret visible
+- **Multi-line editing** — wrapped and multi-line commands edit in place; the grid shifts to keep the caret visible. <kbd>⇧ ⏎</kbd> · <kbd>⌥ ⏎</kbd> insert a newline instead of submitting (rebindable as `InsertNewline`); a plain <kbd>⏎</kbd> submits the whole buffer
 
 ## In the window
 

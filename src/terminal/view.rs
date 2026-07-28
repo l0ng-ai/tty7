@@ -8781,7 +8781,11 @@ mod gpui_tests {
         vcx.simulate_keystrokes("shift-enter");
         window
             .update(cx, |view, _, _| {
-                assert_eq!(view.cmd.text(), "echo a\n\n\n", "the chord survives a rebind");
+                assert_eq!(
+                    view.cmd.text(),
+                    "echo a\n\n\n",
+                    "the chord survives a rebind"
+                );
             })
             .unwrap();
     }
