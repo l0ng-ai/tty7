@@ -1102,14 +1102,18 @@ fn file_expanded(file: &FileDiff, expanded: &HashMap<String, bool>, collapse_all
 /// contributes, so the banner never claims the *diff* is big when what is
 /// actually big is an un-ignored untracked tree.
 ///
-/// Whether hunks were dropped is answered by
-/// [`budget_exhausted`](DiffSnapshot::budget_exhausted) and never by comparing
-/// the retained count against `added + removed`. Those two numbers are scoped
-/// differently — retained counts the context lines that get rendered too,
-/// `added + removed` doesn't — so on a diff of many small hunks the retained
-/// figure is the *larger* of the two, and a `loaded < total` test reads a
-/// budget-truncated tree as complete while the file cards below it say "body
-/// not loaded". `budget_exhausted` is the parser's own answer to the question.
+/// Whether hunks were dropped is answered by the parser's own per-file
+/// [`Truncation`] flags, never by comparing the retained count against
+/// `added + removed`. Those two numbers are scoped differently — retained
+/// counts the context lines that get rendered too, `added + removed` doesn't —
+/// so on a diff of many small hunks the retained figure is the *larger* of the
+/// two and a `loaded < total` test reads a truncated tree as complete, while
+/// the file cards below it say "body not loaded". The comparison has produced a
+/// wrong answer on each axis it was ever asked about; it decides nothing here.
+///
+/// Both axes are named, and they compose: one file can hit the per-file cap in
+/// the same snapshot where the repo-wide budget emptied another, and the banner
+/// has to account for a body the reader can see is missing either way.
 ///
 /// The changed-line figure stays [`totals`](DiffSnapshot::totals) exactly, so
 /// the banner agrees with the `+N −N` in the header directly above it; the
@@ -1124,17 +1128,23 @@ fn oversized_summary(snap: &DiffSnapshot) -> String {
     let (added, removed) = snap.totals();
     let total_lines = (added + removed) as usize;
     let loaded = snap.retained_lines();
-    parts.push(if snap.budget_exhausted() {
-        format!(
-            "{total_lines} changed lines, {loaded} diff rows loaded before tty7's budget ran out"
-        )
-    } else if loaded < total_lines {
-        // Not the budget, so it's the per-file cap: every retained hunk carries
-        // its context lines, so `loaded` can only fall short of the changed-line
-        // count when some file's body stopped early.
-        format!("{loaded} of {total_lines} diff lines loaded")
-    } else {
-        format!("{total_lines} diff lines")
+    let budget = snap.budget_exhausted();
+    let per_file = snap
+        .files
+        .iter()
+        .any(|f| f.truncated == Some(Truncation::PerFile));
+    parts.push(match (budget, per_file) {
+        (false, false) => format!("{total_lines} diff lines"),
+        _ => {
+            let cap = match (budget, per_file) {
+                (true, true) => "tty7's budget and the per-file cap",
+                (true, false) => "tty7's budget",
+                _ => "the per-file cap",
+            };
+            format!(
+                "{total_lines} changed lines, {loaded} diff rows loaded before {cap} cut the rest"
+            )
+        }
     });
     if snap.untracked_count() > 0 {
         parts.push(format!("{} untracked", snap.untracked_count()));
@@ -1299,6 +1309,30 @@ mod tests {
                 header: "@@ -1,1 +1,1 @@".to_string(),
                 lines: (0..added)
                     .map(|i| line(LineKind::Added, None, Some(i + 1), "x"))
+                    .collect(),
+            }],
+        }
+    }
+
+    /// A file whose body is mostly context: one changed line under six context
+    /// lines, so `retained_lines` counts seven where `+N −N` counts one. A tree
+    /// of these is the shape where the retained figure *exceeds* the changed
+    /// one, which is where a `loaded < total` comparison reads truncation
+    /// backwards.
+    fn context_heavy_file(path: &str) -> FileDiff {
+        FileDiff {
+            path: path.to_string(),
+            old_path: None,
+            status: FileStatus::Modified,
+            added: 1,
+            removed: 0,
+            binary: false,
+            truncated: None,
+            hunks: vec![git_diff::Hunk {
+                header: "@@ -1,7 +1,7 @@".to_string(),
+                lines: (0..6)
+                    .map(|i| line(LineKind::Context, Some(i + 1), Some(i + 1), "ctx"))
+                    .chain(std::iter::once(line(LineKind::Added, None, Some(7), "x")))
                     .collect(),
             }],
         }
@@ -1499,25 +1533,8 @@ mod tests {
     /// [`Truncation::Budget`], whatever the diff's shape.
     #[test]
     fn the_banner_names_the_budget_when_context_outweighs_the_changes() {
-        let hunk = git_diff::Hunk {
-            header: "@@ -1,7 +1,7 @@".to_string(),
-            lines: (0..6)
-                .map(|i| line(LineKind::Context, Some(i + 1), Some(i + 1), "ctx"))
-                .chain(std::iter::once(line(LineKind::Added, None, Some(7), "x")))
-                .collect(),
-        };
-        let one_line_file = |path: &str| FileDiff {
-            path: path.to_string(),
-            old_path: None,
-            status: FileStatus::Modified,
-            added: 1,
-            removed: 0,
-            binary: false,
-            truncated: None,
-            hunks: vec![hunk.clone()],
-        };
         let files: Vec<FileDiff> = (0..200)
-            .map(|i| one_line_file(&format!("f{i}.rs")))
+            .map(|i| context_heavy_file(&format!("f{i}.rs")))
             .collect();
 
         // Same tree, one file whose body the repo-wide budget dropped.
@@ -1525,7 +1542,7 @@ mod tests {
         truncated.push(FileDiff {
             hunks: vec![],
             truncated: Some(Truncation::Budget),
-            ..one_line_file("dropped.rs")
+            ..context_heavy_file("dropped.rs")
         });
         let snap = DiffSnapshot {
             files: truncated,
@@ -1553,6 +1570,72 @@ mod tests {
         };
         assert!(!whole.budget_exhausted());
         assert!(!oversized_summary(&whole).contains("budget"));
+    }
+
+    /// The sibling axis, blind in exactly the same place: one file cut at
+    /// [`MAX_LINES_PER_FILE`](git_diff::MAX_LINES_PER_FILE) inside a
+    /// context-heavy tree. `loaded < total_lines` is false here — the context
+    /// lines of every other file more than cover the cut one — so the branch
+    /// that used to carry this clause stayed silent while that file's own card
+    /// read "Diff truncated at 2000 lines". Both axes now come from the
+    /// parser's flags, and a snapshot carrying both must name both.
+    #[test]
+    fn the_banner_names_the_per_file_cap_when_context_outweighs_the_changes() {
+        let files: Vec<FileDiff> = (0..200)
+            .map(|i| context_heavy_file(&format!("f{i}.rs")))
+            .collect();
+
+        let mut cut = files.clone();
+        cut.push(FileDiff {
+            truncated: Some(Truncation::PerFile),
+            ..context_heavy_file("huge.rs")
+        });
+        let snap = DiffSnapshot {
+            files: cut,
+            ..Default::default()
+        };
+        let (added, removed) = snap.totals();
+        let total = (added + removed) as usize;
+        assert!(
+            snap.retained_lines() > total,
+            "the shape the comparison reads backwards"
+        );
+        assert!(
+            !snap.budget_exhausted(),
+            "the budget axis is not what fired"
+        );
+
+        let summary = oversized_summary(&snap);
+        assert!(summary.contains("per-file cap"), "{summary}");
+        assert!(
+            summary.contains(&format!("{total} changed lines")),
+            "the exact `+N −N` from the header, not the retained count: {summary}"
+        );
+
+        // Nothing cut, nothing claimed.
+        let whole = DiffSnapshot {
+            files: files.clone(),
+            ..Default::default()
+        };
+        assert!(!oversized_summary(&whole).contains("per-file"));
+
+        // Both kinds in one snapshot: neither clause may mask the other.
+        let mut both = files;
+        both.push(FileDiff {
+            truncated: Some(Truncation::PerFile),
+            ..context_heavy_file("huge.rs")
+        });
+        both.push(FileDiff {
+            hunks: vec![],
+            truncated: Some(Truncation::Budget),
+            ..context_heavy_file("dropped.rs")
+        });
+        let summary = oversized_summary(&DiffSnapshot {
+            files: both,
+            ..Default::default()
+        });
+        assert!(summary.contains("budget"), "{summary}");
+        assert!(summary.contains("per-file cap"), "{summary}");
     }
 
     /// Measurement harness for issue #239, finding 2 — run with
