@@ -183,6 +183,11 @@ impl CLIAgent {
         {
             return None;
         }
+        // A pane the user launched as deliberately ephemeral has nothing on
+        // disk to come back to, whatever id the agent reported.
+        if launch_argv.is_some_and(|argv| self.opts_out_of_sessions(argv)) {
+            return None;
+        }
         // The user's launch flags, pre-joined with a leading space so they
         // splice into the format strings below; empty when none survive.
         let flags = launch_argv
@@ -222,6 +227,22 @@ impl CLIAgent {
             CLIAgent::Pi => Some(format!("pi{flags} --session {session_id}")),
             _ => None,
         }
+    }
+
+    /// Whether `argv` launched the agent with session persistence turned off,
+    /// which makes the pane unresumable: nothing was written to disk, so a
+    /// replayed id would point at a session file that never existed *and*
+    /// would quietly undo the user's opt-out. Distinct from the stale flags in
+    /// [`Self::replay_flags`], which name a different session and merely have
+    /// to lose to the injected id.
+    fn opts_out_of_sessions(self, argv: &[String]) -> bool {
+        let ephemeral: &[&str] = match self {
+            // Pi still mints an in-memory session id under `--no-session` — it
+            // only skips the write — so tty7 does observe an id to replay.
+            CLIAgent::Pi => &["--no-session"],
+            _ => &[],
+        };
+        argv.iter().any(|t| ephemeral.contains(&t.as_str()))
     }
 
     /// The launch-flag tail of `argv` worth replaying on a resume command, or
@@ -277,13 +298,14 @@ impl CLIAgent {
             // `--last` targets "the most recent session" and would contradict
             // the explicit id we inject.
             CLIAgent::Codex => &["--last"],
-            // Pi has five ways to pick a session and all of them fight the
-            // `--session <id>` we inject: `--session`/`--session-id` name a
-            // different one, `--fork` would branch instead of continue, the
-            // boolean `-r`/`-c` re-open the picker or the newest session, and
-            // `--no-session` turns saving off entirely. `--session-dir` is
-            // *not* here — it says where sessions live, so the id we inject
-            // needs it to still be there.
+            // Pi's ways of picking a session all fight the `--session <id>` we
+            // inject: `--session`/`--session-id` name a different one,
+            // `--fork` would branch instead of continue, and the boolean
+            // `-r`/`-c` re-open the picker or the newest session.
+            // `--session-dir` is *not* here — it says where sessions live, so
+            // the id we inject needs it to still be there. `--no-session` is
+            // not here either: it isn't stale, it means there is nothing to
+            // resume at all (see [`Self::opts_out_of_sessions`]).
             CLIAgent::Pi => &[
                 "--session",
                 "--session-id",
@@ -292,7 +314,6 @@ impl CLIAgent {
                 "-r",
                 "--continue",
                 "-c",
-                "--no-session",
             ],
             // Beyond the session-targeting flags (`--load` is grok's hidden
             // alias for `--resume`; `--session-id` names a *new* session and
@@ -1421,7 +1442,7 @@ mod tests {
         );
         // Pi: mode flags replay, but every way of naming a *different* session
         // is stripped so the injected id wins — including the boolean picker
-        // flags and `--no-session`, which would otherwise turn saving off.
+        // flags.
         assert_eq!(
             CLIAgent::Pi
                 .resume_command("id-a", Some(&argv(&["pi", "--model", "opus"])))
@@ -1436,7 +1457,8 @@ mod tests {
                         "pi",
                         "--session",
                         "old-id",
-                        "--no-session",
+                        "--fork",
+                        "old",
                         "-c",
                         "--model",
                         "opus"
@@ -1444,6 +1466,16 @@ mod tests {
                 )
                 .as_deref(),
             Some("pi --model opus --session id-b")
+        );
+        // `--no-session` is the user asking for an ephemeral pane: Pi mints an
+        // id but never writes the file, so resuming it would open an empty
+        // session *and* override the opt-out — no resume command at all.
+        assert_eq!(
+            CLIAgent::Pi.resume_command(
+                "id-x",
+                Some(&argv(&["pi", "--no-session", "--model", "opus"]))
+            ),
+            None
         );
         // `--session-dir` says where sessions live — the injected id needs it,
         // so it is deliberately *not* stripped.

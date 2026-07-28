@@ -1060,10 +1060,14 @@ function emit(event: string, ctx?: SessionCtx): void {{
       const id = ctx?.sessionManager?.getSessionId?.();
       if (id) payload = JSON.stringify({{ session_id: id }});
     }} catch {{}}
-    spawnSync(EXE, ["agent-hook", "pi", event], {{
-      input: payload,
-      stdio: ["pipe", "ignore", "ignore"],
-    }});
+    const args = ["agent-hook", "pi", event];
+    // Nothing to send → leave stdin closed rather than handing the emitter a
+    // pipe it has to read to EOF.
+    if (payload) {{
+      spawnSync(EXE, args, {{ input: payload, stdio: ["pipe", "ignore", "ignore"] }});
+    }} else {{
+      spawnSync(EXE, args, {{ stdio: ["ignore", "ignore", "ignore"] }});
+    }}
   }} catch {{}}
 }}
 
@@ -1072,10 +1076,15 @@ export default function (pi: ExtensionAPI) {{
   // Extension load = the agent is running in this pane. No context here yet,
   // so the id rides on session_start instead.
   emit("session-start");
-  pi.on("session_start", (_event, ctx) => emit("session-start", ctx));
   pi.on("agent_start", (_event, ctx) => emit("prompt-submit", ctx));
   pi.on("agent_end", (_event, ctx) => emit("stop", ctx));
   pi.on("session_shutdown", (_event, ctx) => emit("session-end", ctx));
+  // Last, and guarded: the three above already worked, so a Pi build that
+  // rejects this event name must not take them — or the whole extension —
+  // down with it.
+  try {{
+    pi.on("session_start", (_event, ctx) => emit("session-start", ctx));
+  }} catch {{}}
 }}
 "#
     ))
