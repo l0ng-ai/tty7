@@ -70,7 +70,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Keybindings and can be rebound like anything else, and rebinding it retires
   both defaults. Only the prompt editor answers it; with a full-screen program on
   the pane the chord reaches the application exactly as before. `⌘⏎` fullscreen
-  and `⌘⇧⏎` pane zoom are untouched. (#182)
+  and `⌘⇧⏎` pane zoom are untouched.
+
+  Two smaller behaviour changes come with it, both aligning on what other
+  terminals do. With a completion menu open, the newline chords now insert a
+  newline and close the menu instead of accepting the highlighted candidate —
+  plain `Enter` remains the key that accepts it. And `Shift+Alt+Enter`, which
+  the old modifier test caught by accident, now submits like any other `Enter`:
+  keybindings match modifiers exactly, and no terminal treats that three-key
+  chord as a newline. (#182)
 
 ### Fixed
 

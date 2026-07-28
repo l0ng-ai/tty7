@@ -89,6 +89,14 @@ const INSERT_NEWLINE_DEFAULT: &str = "shift-enter";
 /// table's, and only while `InsertNewline` still sits on its primary default:
 /// rebinding the action in Settings or `config.json` retires both old chords,
 /// which is what a user who moves the binding expects.
+///
+/// Only these two. GPUI matches a binding on exact modifier equality
+/// (`Keystroke::should_match`), so Shift+Alt+Enter — which the old hardcoded
+/// `(m.shift || m.alt)` test happened to catch — maps to no action and submits
+/// like any other Enter. That matches the reference: Warp's key table is a
+/// `(ctrl, alt, shift, key)` tuple whose newline arms are exactly Shift+Enter,
+/// Alt+Enter and Ctrl+J, so its `(false, true, true, "enter")` falls through
+/// too, and its GUI compares whole keystrokes for equality just as gpui does.
 const INSERT_NEWLINE_ALT_DEFAULT: &str = "alt-enter";
 
 /// The extra keystroke an effective table installs beyond its one-per-action
@@ -843,6 +851,13 @@ mod tests {
         for window_chord in ["secondary-enter", "secondary-shift-enter"] {
             assert_ne!(window_chord, INSERT_NEWLINE_DEFAULT);
             assert_ne!(window_chord, INSERT_NEWLINE_ALT_DEFAULT);
+        }
+        // Modifier matching is exact, so the three-key chord is nobody's: it
+        // inserts nothing and submits, as it does in Warp. Spelled out here so
+        // a future reader doesn't "restore" it as a missing default.
+        for chord in [INSERT_NEWLINE_DEFAULT, INSERT_NEWLINE_ALT_DEFAULT] {
+            assert_ne!(chord, "shift-alt-enter");
+            assert_ne!(chord, "alt-shift-enter");
         }
     }
 
