@@ -24,6 +24,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resumed at all — that pane never wrote a session to disk, and reopening one
   would override the choice to keep it ephemeral. (#225)
 
+- **Fork an agent session** — branch a live agent conversation into a second,
+  independent one, so a risky direction can be tried without losing the thread
+  that got you there. tty7 shells the agent's *own* fork command rather than
+  touching its transcript files: `codex fork <id>`, `claude --resume <id>
+  --fork-session`, `opencode --session <id> --fork`, `grok --resume <id>
+  --fork-session` — every one checked against the installed CLI's own help.
+  Agents with no fork tty7 could verify simply don't offer the action, rather
+  than getting a row that can only produce a usage error. The command carries
+  the pane's original launch flags exactly as session restore does, and sheds
+  the stale session-targeting ones so a fork of a fork can't branch twice or
+  replay an old id as a prompt.
+
+  Where the fork lands follows where you asked from: right-click a **pane** and
+  it asks for a split placement (Right / Left / Down / Up), since a pane-level
+  ask is a spatial one; right-click a **tab** or a sidebar row and it opens in a
+  new tab, with no placement question. Both are also reachable from the command
+  palette, the File menu, and Settings → Keybindings.
+
+  A fork needs the session id the agent's hooks report, so the row disables
+  itself — rather than disappearing — until one arrives, and a remote pane can't
+  fork at all (the command would run against the *local* agent). Forking while a
+  turn is in flight is allowed but says so: agents fork from the persisted
+  transcript, so the turn you're watching won't be in the copy. The parent is
+  never modified either way. (#211)
+
+- **Copy Session ID** — the agent's native session id on the clipboard, beside
+  *Copy Working Directory* in the tab / sidebar context menu, the palette and
+  the File menu. Codex has no copy-or-duplicate subcommand — forking *is* how
+  you duplicate a conversation there — so copying the id is what "copy the
+  session" means: paste it into `codex resume`, a bug report, or another tool.
+  (#211)
+
 ## [26.7.6] - 2026-07-28
 
 ### Added

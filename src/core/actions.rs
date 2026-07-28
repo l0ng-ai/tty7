@@ -52,6 +52,22 @@ actions!(
         CloseTabsToTheRight,
         CopyWorkingDirectory,
         MarkTabUnread,
+        // Branch the coding-agent session running in this tab into a second,
+        // independent one by shelling the agent's own fork command (issue
+        // #211). Placement follows where the user asked from: the bare action —
+        // menu bar, palette, a bound key — and the tab context menu open a new
+        // tab, while the pane right-click menu offers the four split directions
+        // below, since a pane-level ask is a spatial one.
+        ForkAgentSession,
+        ForkAgentSessionRight,
+        ForkAgentSessionLeft,
+        ForkAgentSessionDown,
+        ForkAgentSessionUp,
+        // Put the agent's *native* session id on the clipboard, beside "Copy
+        // Working Directory". Codex has no copy/duplicate subcommand, so
+        // "copy the session" means copying its id — paste it into `codex
+        // resume`, a bug report, or another tool.
+        CopyAgentSessionId,
         SplitRight,
         SplitDown,
         FocusNextPane,

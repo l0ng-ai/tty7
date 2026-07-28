@@ -12,7 +12,7 @@ use gpui::{
     Window, actions, div, prelude::*, px,
 };
 use gpui_component::kbd::Kbd;
-use gpui_component::menu::ContextMenuExt;
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, IconName, WindowExt as _, h_flex};
 
 use super::TermSize;
@@ -26,7 +26,8 @@ use super::reverse_search::{self, ReverseSearch};
 use super::search::{LinkTarget, SearchState};
 use super::typeahead::{RawInput, Typeahead};
 use crate::core::actions::{
-    CloseActiveTab, NewTab, SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
+    CloseActiveTab, ForkAgentSessionDown, ForkAgentSessionLeft, ForkAgentSessionRight,
+    ForkAgentSessionUp, NewTab, SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
 };
 use crate::core::config::{BellMode, Config, NotifyMode};
 use crate::daemon::protocol::{RemoteContext, ShellSpec};
@@ -6200,6 +6201,18 @@ impl Render for TerminalView {
         // selected in either the grid or the prompt editor.
         let menu_focus = self.focus_handle.clone();
         let has_selection = self.any_selection();
+        // Fork rows: offered only for agents tty7 has a verified fork command
+        // for, labelled with that agent's own word for it ("Fork Session" /
+        // "Branch Session"). A *pane*-level ask is a spatial one, so this menu
+        // asks where the fork goes; the tab menu, which has no pane in hand,
+        // just opens a new tab (issue #211). Disabled — not hidden — until the
+        // session id is known, so the capability stays discoverable when the
+        // agent's hooks aren't installed; a remote pane can't fork at all,
+        // since the fork command would run against the *local* agent.
+        let fork_label = self.agent().and_then(|a| a.fork_label());
+        let can_fork = fork_label.is_some()
+            && self.remote_context().is_none()
+            && self.agent_session().is_some_and(|s| s.session_id.is_some());
 
         div()
             .id("terminal-surface")
@@ -6284,7 +6297,7 @@ impl Render for TerminalView {
             .children(reverse_search_menu)
             .children(integration_notice)
             // Right-click context menu (gpui-component PopupMenu).
-            .context_menu(move |menu, _window, _cx| {
+            .context_menu(move |menu, window, cx| {
                 // Default (26px) rows: with the flat full-bleed highlight (no
                 // floating pill, no inter-row gap) they read dense, not airy, and
                 // match the command palette's row height. A fixed min-width keeps
@@ -6296,7 +6309,8 @@ impl Render for TerminalView {
                 // We render the hint ourselves via `menu_row_with_hint` to keep the
                 // whole menu consistent, rather than register real bindings (which
                 // would risk the Ctrl+C SIGINT fall-through on Windows/Linux).
-                menu.min_w(px(220.))
+                let menu = menu
+                    .min_w(px(220.))
                     .action_context(menu_focus.clone())
                     .menu_element_with_disabled(
                         Box::new(CopyText),
@@ -6323,8 +6337,36 @@ impl Render for TerminalView {
                     // auto-render its shortcut hint (correct per platform) like the
                     // items below, instead of a hand-rolled mac-only one.
                     .menu("Find…", Box::new(FindInTerminal))
-                    .menu("Clear", Box::new(ClearScrollback))
-                    .separator()
+                    .menu("Clear", Box::new(ClearScrollback));
+
+                // The fork block. Its rows dispatch actions that `Tty7App`
+                // handles, so the submenu carries the same `action_context` as
+                // the parent — a submenu is a menu of its own and does not
+                // inherit it.
+                let menu = match fork_label {
+                    Some(label) if can_fork => {
+                        let focus = menu_focus.clone();
+                        menu.separator()
+                            .submenu(label, window, cx, move |submenu, _window, _cx| {
+                                submenu
+                                    .action_context(focus.clone())
+                                    .menu("Split Right", Box::new(ForkAgentSessionRight))
+                                    .menu("Split Left", Box::new(ForkAgentSessionLeft))
+                                    .menu("Split Down", Box::new(ForkAgentSessionDown))
+                                    .menu("Split Up", Box::new(ForkAgentSessionUp))
+                            })
+                    }
+                    // Forkable agent, but nothing to fork *from* yet (no
+                    // session id) or the wrong machine (a remote pane). A flat
+                    // disabled row rather than an empty submenu: there is no
+                    // placement to pick when the fork itself can't run.
+                    Some(label) => menu
+                        .separator()
+                        .item(PopupMenuItem::new(label).disabled(true)),
+                    None => menu,
+                };
+
+                menu.separator()
                     .menu("Split Right", Box::new(SplitRight))
                     .menu("Split Down", Box::new(SplitDown))
                     .menu("Maximize Pane", Box::new(ToggleMaximizePane))

@@ -710,6 +710,45 @@ pub(crate) enum SshCloseKind {
     Pane,
 }
 
+/// Where a forked agent session lands. The placement is not a preference but a
+/// consequence of *where the user asked from* (issue #211): a pane-level ask is
+/// spatial, so the pane menu offers the four directions; a tab-level ask is
+/// not, so the tab menu — and the bare action behind the palette / menu bar —
+/// opens a new tab with no placement question.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ForkPlacement {
+    NewTab,
+    /// Split the source pane along `axis`, the fork taking the second slot —
+    /// or the first when `before`, which is Split Left / Split Up.
+    Split {
+        axis: Axis,
+        before: bool,
+    },
+}
+
+/// What the agent-session menu rows need to know about a tab, read at
+/// menu-open time (like `tab_cwd`) so enablement can't go stale between render
+/// and click.
+pub(crate) struct TabAgentSession {
+    /// The agent's own word for forking, or `None` when tty7 has no verified
+    /// fork command for it — then no fork row is offered at all, rather than a
+    /// disabled one promising a capability that doesn't exist.
+    pub(crate) fork_label: Option<&'static str>,
+    /// The agent's native session id, absent until its hooks report one.
+    pub(crate) session_id: Option<String>,
+    /// A remote pane. Forking shells a *local* agent binary, which would branch
+    /// the wrong machine's session, so the row disables there.
+    pub(crate) remote: bool,
+}
+
+impl TabAgentSession {
+    /// Whether a fork can actually run right now: the agent has a fork command,
+    /// tty7 has seen its session id, and the pane is local.
+    pub(crate) fn forkable(&self) -> bool {
+        self.fork_label.is_some() && self.session_id.is_some() && !self.remote
+    }
+}
+
 impl Tty7App {
     /// A window on `id`'s workspace — reopening one from the picker — or on a
     /// fresh workspace when `id` is `None` (New Workspace) or names a workspace
@@ -3176,7 +3215,10 @@ impl Tty7App {
             }
         };
         if let Some(tab) = self.tabs.get_mut(self.active) {
-            if tab.pane.split_leaf(target.entity_id(), axis, new.clone()) {
+            if tab
+                .pane
+                .split_leaf(target.entity_id(), axis, false, new.clone())
+            {
                 self.maximized = None;
                 self.focus_leaf(&new, window, cx);
                 self.save_session(cx);
@@ -3686,6 +3728,217 @@ impl Tty7App {
         }
     }
 
+    /// What the tab's agent-session menu rows ("Fork Session" / "Branch
+    /// Session" and "Copy Session ID") need, or `None` when the tab's
+    /// label-driving pane runs no coding agent — then neither row is offered.
+    /// Reads the same leaf `tab_cwd` does, so all three rows agree on which
+    /// pane a tab-level action means.
+    pub(crate) fn tab_agent_session(
+        &self,
+        index: usize,
+        window: &Window,
+        cx: &App,
+    ) -> Option<TabAgentSession> {
+        let leaf = self.tabs.get(index)?.pane.focused_or_first(window, cx)?;
+        let view = leaf.read(cx);
+        let agent = view.agent()?;
+        Some(TabAgentSession {
+            fork_label: agent.fork_label(),
+            session_id: view.agent_session().and_then(|s| s.session_id),
+            remote: view.remote_context().is_some(),
+        })
+    }
+
+    /// "Copy Session ID": put the agent's native session id on the clipboard —
+    /// the id `codex resume` / `claude --resume` take. A no-op when no agent
+    /// has reported one, which is also when the menu row renders disabled.
+    pub(crate) fn copy_agent_session_id(
+        &mut self,
+        index: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = self
+            .tab_agent_session(index, window, cx)
+            .and_then(|s| s.session_id)
+        {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(id));
+        }
+    }
+
+    /// "Fork Session" (issue #211): branch the agent session in tab `index`'s
+    /// focused pane into a second, independent one, landing it per `placement`.
+    ///
+    /// The fork itself is entirely the agent's own — tty7 spawns a pane and
+    /// types the agent's fork command into it (`codex fork <id>`, `claude
+    /// --resume <id> --fork-session`, …), exactly as session restore types a
+    /// resume command. tty7 never reads or writes the agent's transcript files,
+    /// so a change to their on-disk format costs at most a visible shell error
+    /// in the new pane.
+    ///
+    /// Every reason a fork can't happen surfaces as a notification rather than
+    /// a silent no-op: the menu rows disable themselves for the same reasons,
+    /// but the action is also reachable from the palette, the menu bar and a
+    /// bound key, where there is no row to grey out.
+    pub(crate) fn fork_agent_session(
+        &mut self,
+        index: usize,
+        placement: ForkPlacement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = self
+            .tabs
+            .get(index)
+            .and_then(|t| t.pane.focused_or_first(window, cx))
+        else {
+            return;
+        };
+        let Some(cmd) = self.agent_fork_command(&source, window, cx) else {
+            return;
+        };
+
+        // A split acts on the *active* tab's focused pane, so bring the
+        // right-clicked tab forward first — a no-op when it already is, and the
+        // same order the context menu's own Split rows use. Done before the
+        // terminal is created, since constructing one steals focus.
+        if matches!(placement, ForkPlacement::Split { .. }) {
+            self.activate(index, window, cx);
+        }
+
+        // The fork inherits the source pane's directory and shell pick, like
+        // every other tty7 spawn. Deliberately *not* passed to the agent as a
+        // `--cd`: Codex has its own resume/fork cwd preference and this must
+        // not override the setting the user chose there.
+        let (cwd, shell) = {
+            let view = source.read(cx);
+            (view.local_cwd(), view.shell_spec())
+        };
+        let new = match new_terminal(
+            self.window_workspace(cx),
+            self.font_size,
+            cwd,
+            None,
+            shell,
+            window,
+            cx,
+        ) {
+            Ok(view) => view,
+            Err(e) => {
+                log::error!("fork spawn failed: {e}");
+                window.push_notification(format!("Could not open a terminal: {e}"), cx);
+                return;
+            }
+        };
+        // Same hand-off session restore uses: the bytes queue in the PTY until
+        // the (still starting) shell reads them.
+        //
+        // A slot that is still connecting has no terminal to hand the command
+        // to. Forking gates on a *local* pane, so this is unreachable in
+        // practice — but say so rather than placing a pane that silently never
+        // forks.
+        let Some(terminal) = new.terminal() else {
+            log::error!("fork spawn produced a pane that is still connecting");
+            window.push_notification("Could not fork: the pane is still connecting", cx);
+            return;
+        };
+        terminal.read(cx).run_command_line(&cmd);
+
+        match placement {
+            ForkPlacement::NewTab => {
+                self.remember_active_pane(window, cx);
+                self.maximized = None;
+                let insert_at = self.new_tab_insert_at(cx);
+                self.tabs.insert(insert_at, Tab::new(Pane::leaf(new)));
+                self.active = insert_at;
+                self.focus_active(window, cx);
+            }
+            ForkPlacement::Split { axis, before } => {
+                let placed = self.tabs.get_mut(index).is_some_and(|tab| {
+                    tab.pane
+                        .split_leaf(source.entity_id(), axis, before, new.clone())
+                });
+                if !placed {
+                    return;
+                }
+                self.maximized = None;
+                self.focus_leaf(&new, window, cx);
+            }
+        }
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Fork the active tab's focused pane into a split beside it — the pane
+    /// right-click menu's placement pick, and what a bound key means (the
+    /// focused pane is the one the user is pointing at).
+    pub(crate) fn fork_focused_pane_session(
+        &mut self,
+        axis: Axis,
+        before: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fork_agent_session(
+            self.active,
+            ForkPlacement::Split { axis, before },
+            window,
+            cx,
+        );
+    }
+
+    /// The fork command to type into a new pane for `source`'s agent session,
+    /// or `None` after telling the user why there isn't one.
+    fn agent_fork_command(
+        &self,
+        source: &Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        use crate::core::cli_agent::AgentStatus;
+        let view = source.read(cx);
+        let (agent, session, remote) = (view.agent(), view.agent_session(), view.remote_context());
+        let Some(agent) = agent else {
+            window.push_notification("This pane isn't running a coding agent", cx);
+            return None;
+        };
+        let name = agent.display_name();
+        if agent.fork_label().is_none() {
+            window.push_notification(format!("tty7 has no fork command for {name}"), cx);
+            return None;
+        }
+        if remote.is_some() {
+            window.push_notification(
+                format!("{name} sessions can only be forked from a local pane"),
+                cx,
+            );
+            return None;
+        }
+        let session = session.unwrap_or_default();
+        let Some(id) = session.session_id.as_deref() else {
+            window.push_notification(
+                format!("tty7 hasn't seen a {name} session id in this pane — install its hooks in Settings → Agents"),
+                cx,
+            );
+            return None;
+        };
+        let Some(cmd) = agent.fork_command(id, session.launch_argv.as_deref()) else {
+            window.push_notification(format!("{name}'s session id isn't a plain token"), cx);
+            return None;
+        };
+        // Agents fork from the *persisted* transcript, so a turn still in
+        // flight is simply absent from the fork (Codex documents that an
+        // in-progress turn cannot even be a fork point). Harmless — the parent
+        // is untouched — but the user must not have to discover it.
+        if session.status == AgentStatus::Working {
+            window.push_notification(
+                format!("{name} is mid-turn — the fork won't include the turn in flight"),
+                cx,
+            );
+        }
+        Some(cmd)
+    }
+
     /// An explicit "check now", from the App menu or the tray. Forced, so it
     /// works even with the startup check turned off — "I asked" outranks "don't
     /// ask on my behalf" — and it opens About, where the result lands.
@@ -4154,6 +4407,10 @@ impl Tty7App {
             CloseTabsToTheRight => self.close_tabs_right_of(self.active, window, cx),
             CopyWorkingDirectory => self.copy_active_cwd(window, cx),
             MarkTabUnread => self.mark_tab_unread(self.active, cx),
+            ForkAgentSession => {
+                self.fork_agent_session(self.active, ForkPlacement::NewTab, window, cx)
+            }
+            CopyAgentSessionId => self.copy_agent_session_id(self.active, window, cx),
             RenameWorkspace => self.start_workspace_rename(window, cx),
             OpenSettings => self.toggle_settings(window, cx),
             ShowKeyboardShortcuts => {
@@ -6496,6 +6753,27 @@ impl Render for Tty7App {
             .on_action(cx.listener(|this, _: &MarkTabUnread, _window, cx| {
                 this.mark_tab_unread(this.active, cx)
             }))
+            // Fork: the bare action has no pane the user pointed at, so it
+            // opens a new tab; the four directional ones come from the pane
+            // right-click menu, where the ask *was* spatial.
+            .on_action(cx.listener(|this, _: &ForkAgentSession, window, cx| {
+                this.fork_agent_session(this.active, ForkPlacement::NewTab, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ForkAgentSessionRight, window, cx| {
+                this.fork_focused_pane_session(Axis::Horizontal, false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ForkAgentSessionLeft, window, cx| {
+                this.fork_focused_pane_session(Axis::Horizontal, true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ForkAgentSessionDown, window, cx| {
+                this.fork_focused_pane_session(Axis::Vertical, false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ForkAgentSessionUp, window, cx| {
+                this.fork_focused_pane_session(Axis::Vertical, true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CopyAgentSessionId, window, cx| {
+                this.copy_agent_session_id(this.active, window, cx)
+            }))
             // Settings destinations that deserve their own way in: Help →
             // Keyboard Shortcuts and the App menu's About both used to require
             // opening Settings and then hunting for the section.
@@ -7243,7 +7521,10 @@ fn apply_ssh_o_option(
 
 #[cfg(test)]
 mod tests {
-    use super::{leaf_shares_the_window_daemon, parse_ssh_connect_input, parse_ssh_option_words};
+    use super::{
+        TabAgentSession, leaf_shares_the_window_daemon, parse_ssh_connect_input,
+        parse_ssh_option_words,
+    };
 
     /// A remote window's saved layout can hold a native-SSH pane, whose russh
     /// session runs in *this* client's daemon rather than the machine's. Its
@@ -7260,6 +7541,32 @@ mod tests {
         assert!(leaf_shares_the_window_daemon(true, false));
         assert!(leaf_shares_the_window_daemon(false, true));
         assert!(leaf_shares_the_window_daemon(false, false));
+    }
+
+    // The single gate every fork surface consults. All three conditions have to
+    // hold: an agent with a verified fork command, a session id the hooks have
+    // reported, and a local pane — a remote one would shell the *local* agent
+    // and branch the wrong machine's session.
+    #[test]
+    fn a_fork_needs_a_command_an_id_and_a_local_pane() {
+        let session = |fork_label, session_id: Option<&str>, remote| TabAgentSession {
+            fork_label,
+            session_id: session_id.map(str::to_string),
+            remote,
+        };
+        assert!(session(Some("Fork Session"), Some("abc"), false).forkable());
+        assert!(
+            !session(None, Some("abc"), false).forkable(),
+            "an agent with no fork command is never forkable"
+        );
+        assert!(
+            !session(Some("Fork Session"), None, false).forkable(),
+            "no session id yet — the hooks haven't reported one"
+        );
+        assert!(
+            !session(Some("Fork Session"), Some("abc"), true).forkable(),
+            "a remote pane would fork the wrong machine's session"
+        );
     }
 
     #[test]

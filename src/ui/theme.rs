@@ -72,6 +72,8 @@ pub(crate) fn set_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Rename Tab…", RenameTab),
             MenuItem::action("Copy Working Directory", CopyWorkingDirectory),
+            MenuItem::action("Copy Session ID", CopyAgentSessionId),
+            MenuItem::action("Fork Session", ForkAgentSession),
             MenuItem::separator(),
             MenuItem::action("Close Pane / Tab", CloseActiveTab),
             MenuItem::action("Close Other Tabs", CloseOtherTabs),

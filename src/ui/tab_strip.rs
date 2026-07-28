@@ -1010,6 +1010,40 @@ impl Tty7App {
                 }));
         }
 
+        // Fork / Branch Session — the same kind of operation as New Worktree
+        // Tab (spin a parallel line of work off this one), so it sits in the
+        // same block. A *tab*-level ask carries no placement question, so it
+        // lands in a new tab; the pane right-click menu is where the split
+        // directions live (issue #211). Offered only for agents tty7 has a
+        // verified fork command for, labelled with that agent's own word for
+        // it; disabled — not hidden — while the session id is still unknown,
+        // so the capability stays discoverable when the hooks aren't installed.
+        let agent_session = this.tab_agent_session(index, window, cx);
+        if let Some(session) = &agent_session
+            && let Some(label) = session.fork_label
+        {
+            // Open the block ourselves when the worktree row above didn't
+            // (this tab's cwd isn't in a repo), so the row never glues onto
+            // "Mark as Unread".
+            if !in_repo {
+                menu = menu.separator();
+            }
+            let forkable = session.forkable();
+            menu = menu.item(PopupMenuItem::new(label).disabled(!forkable).on_click({
+                let app = app.clone();
+                move |_, window, cx| {
+                    let _ = app.update(cx, |this, cx| {
+                        this.fork_agent_session(
+                            index,
+                            crate::ui::app::ForkPlacement::NewTab,
+                            window,
+                            cx,
+                        )
+                    });
+                }
+            }));
+        }
+
         // Splits act on the right-clicked tab: activate it first (a no-op when
         // it already is), then split its focused pane — one code path with the
         // keyboard actions.
@@ -1045,6 +1079,23 @@ impl Tty7App {
                     }
                 }),
         );
+
+        // Copy Session ID, beside Copy Working Directory — the agent's own
+        // native id, the one its `--resume` takes. Offered for every agent tab
+        // (there is nothing agent-specific about an id) and disabled until one
+        // has been reported. The id is read here at open time, so the row can't
+        // copy a stale one.
+        if let Some(session_id) = agent_session.map(|s| s.session_id) {
+            menu = menu.item(
+                PopupMenuItem::new("Copy Session ID")
+                    .disabled(session_id.is_none())
+                    .on_click(move |_, _window, cx| {
+                        if let Some(id) = session_id.as_ref() {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(id.clone()));
+                        }
+                    }),
+            );
+        }
 
         menu.separator()
             .item(PopupMenuItem::new("Close Tab").on_click({

@@ -225,21 +225,31 @@ impl<L: Clone> Pane<L> {
     }
 
     /// Split the first leaf matching `is_target` along `axis`, inserting `new`
-    /// as the second child. Returns whether a matching leaf was found.
-    fn split_leaf_where(&mut self, is_target: &impl Fn(&L) -> bool, axis: Axis, new: L) -> bool {
+    /// as the second child — or as the *first* when `before`, which is what
+    /// puts a pane to the left of / above its source rather than right of /
+    /// below it. Returns whether a matching leaf was found.
+    fn split_leaf_where(
+        &mut self,
+        is_target: &impl Fn(&L) -> bool,
+        axis: Axis,
+        before: bool,
+        new: L,
+    ) -> bool {
         match self {
             Pane::Leaf(v) => {
                 if is_target(v) {
-                    let old = v.clone();
-                    *self = Pane::split_node(axis, 0.5, Pane::Leaf(old), Pane::Leaf(new));
+                    let old = Pane::Leaf(v.clone());
+                    let new = Pane::Leaf(new);
+                    let (a, b) = if before { (new, old) } else { (old, new) };
+                    *self = Pane::split_node(axis, 0.5, a, b);
                     true
                 } else {
                     false
                 }
             }
             Pane::Split { a, b, .. } => {
-                a.split_leaf_where(is_target, axis, new.clone())
-                    || b.split_leaf_where(is_target, axis, new)
+                a.split_leaf_where(is_target, axis, before, new.clone())
+                    || b.split_leaf_where(is_target, axis, before, new)
             }
             Pane::Empty => false,
         }
@@ -568,11 +578,19 @@ impl Pane<PaneSlot> {
             .position(|l| l.entity_id() == focused.entity_id())
     }
 
-    /// Split a specific leaf (matched by entity identity) along `axis`, inserting
-    /// `new` as the second child. The target must be captured *before* creating
-    /// `new`, since constructing a terminal steals window focus.
-    pub fn split_leaf(&mut self, target: gpui::EntityId, axis: Axis, new: PaneSlot) -> bool {
-        self.split_leaf_where(&|v| v.entity_id() == target, axis, new)
+    /// Split a specific leaf (matched by entity identity) along `axis`,
+    /// inserting `new` as the second child — or the first when `before`, which
+    /// is how "Split Left" / "Split Up" differ from their opposites. The target
+    /// must be captured *before* creating `new`, since constructing a terminal
+    /// steals window focus.
+    pub fn split_leaf(
+        &mut self,
+        target: gpui::EntityId,
+        axis: Axis,
+        before: bool,
+        new: PaneSlot,
+    ) -> bool {
+        self.split_leaf_where(&|v| v.entity_id() == target, axis, before, new)
     }
 
     /// Replace the leaf with entity id `target` with `new`, preserving the tree
@@ -818,7 +836,7 @@ mod tests {
     /// the target was found.
     fn split(pane: &mut TestPane, target: u32, axis: Axis, new: u32) {
         assert!(
-            pane.split_leaf_where(&is(target), axis, new),
+            pane.split_leaf_where(&is(target), axis, false, new),
             "split target {target} not found"
         );
     }
@@ -828,7 +846,7 @@ mod tests {
     #[test]
     fn split_leaf_replaces_target_with_split_keeping_original_first() {
         let mut pane = TestPane::leaf(0);
-        assert!(pane.split_leaf_where(&is(0), Axis::Horizontal, 1));
+        assert!(pane.split_leaf_where(&is(0), Axis::Horizontal, false, 1));
         match &pane {
             Pane::Split {
                 axis, a, b, ratio, ..
@@ -839,6 +857,32 @@ mod tests {
                 assert!(matches!(**b, Pane::Leaf(1)));
             }
             _ => panic!("split_leaf should replace the leaf with a Split node"),
+        }
+        assert_well_formed(&pane);
+    }
+
+    // `before` is what makes "Split Left" / "Split Up" differ from their
+    // opposites: same axis, the new pane just takes the first slot. Only the
+    // targeted leaf moves — its siblings keep their order.
+    #[test]
+    fn split_leaf_before_puts_the_new_pane_first() {
+        // [0 | 1] -> split 1 horizontally with 2, before -> [0 | [2 | 1]]
+        let mut pane = TestPane::leaf(0);
+        split(&mut pane, 0, Axis::Horizontal, 1);
+        assert!(pane.split_leaf_where(&is(1), Axis::Horizontal, true, 2));
+        assert_eq!(pane.leaves(), vec![0, 2, 1]);
+        match &pane {
+            Pane::Split { a, b, .. } => {
+                assert!(matches!(**a, Pane::Leaf(0)), "sibling must not move");
+                match &**b {
+                    Pane::Split { a, b, .. } => {
+                        assert!(matches!(**a, Pane::Leaf(2)));
+                        assert!(matches!(**b, Pane::Leaf(1)));
+                    }
+                    _ => panic!("targeted leaf should have become a nested split"),
+                }
+            }
+            _ => panic!("root should still be the original horizontal split"),
         }
         assert_well_formed(&pane);
     }
@@ -879,7 +923,7 @@ mod tests {
     fn split_leaf_reports_missing_target_without_changing_tree() {
         let mut pane = TestPane::leaf(0);
         split(&mut pane, 0, Axis::Horizontal, 1);
-        assert!(!pane.split_leaf_where(&is(99), Axis::Vertical, 2));
+        assert!(!pane.split_leaf_where(&is(99), Axis::Vertical, false, 2));
         assert_eq!(pane.leaves(), vec![0, 1]);
         assert_well_formed(&pane);
     }
@@ -1149,7 +1193,7 @@ mod tests {
         let mut pane: TestPane = Pane::Empty;
         assert!(pane.leaves().is_empty());
         assert_eq!(pane.first_leaf(), None);
-        assert!(!pane.split_leaf_where(&is(0), Axis::Horizontal, 1));
+        assert!(!pane.split_leaf_where(&is(0), Axis::Horizontal, false, 1));
         assert!(matches!(
             pane.close_leaf_where(&is(0)),
             CloseOutcome::NotFound

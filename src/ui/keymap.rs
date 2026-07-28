@@ -126,6 +126,15 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         ("CloseTabsToTheRight", ""),
         ("CopyWorkingDirectory", ""),
         ("MarkTabUnread", ""),
+        // Fork: the bare action opens a new tab; the four directional ones are
+        // the pane right-click menu's placement pick, bindable here for anyone
+        // who wants a chord straight to one direction.
+        ("ForkAgentSession", ""),
+        ("ForkAgentSessionRight", ""),
+        ("ForkAgentSessionLeft", ""),
+        ("ForkAgentSessionDown", ""),
+        ("ForkAgentSessionUp", ""),
+        ("CopyAgentSessionId", ""),
         // No default chord on purpose: this is the one action that kills running
         // sessions, and it must not sit one slip away from ⌘W. Reachable from
         // the Shell menu and the palette; bindable in Settings for anyone who
@@ -549,6 +558,12 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "CloseTabsToTheRight" => KeyBinding::new(keystroke, CloseTabsToTheRight, None),
         "CopyWorkingDirectory" => KeyBinding::new(keystroke, CopyWorkingDirectory, None),
         "MarkTabUnread" => KeyBinding::new(keystroke, MarkTabUnread, None),
+        "ForkAgentSession" => KeyBinding::new(keystroke, ForkAgentSession, None),
+        "ForkAgentSessionRight" => KeyBinding::new(keystroke, ForkAgentSessionRight, None),
+        "ForkAgentSessionLeft" => KeyBinding::new(keystroke, ForkAgentSessionLeft, None),
+        "ForkAgentSessionDown" => KeyBinding::new(keystroke, ForkAgentSessionDown, None),
+        "ForkAgentSessionUp" => KeyBinding::new(keystroke, ForkAgentSessionUp, None),
+        "CopyAgentSessionId" => KeyBinding::new(keystroke, CopyAgentSessionId, None),
         "SplitRight" => KeyBinding::new(keystroke, SplitRight, None),
         "SplitDown" => KeyBinding::new(keystroke, SplitDown, None),
         "FocusNextPane" => KeyBinding::new(keystroke, FocusNextPane, None),

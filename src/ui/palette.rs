@@ -76,6 +76,11 @@ pub enum CommandKind {
     CloseTabsToTheRight,
     CopyWorkingDirectory,
     MarkTabUnread,
+    /// Branch this tab's agent session into a second, independent one, opened
+    /// in a new tab. The pane right-click menu offers the split placements;
+    /// the palette has no pane in hand, so it takes the tab-level meaning.
+    ForkAgentSession,
+    CopyAgentSessionId,
     ResetFontSize,
     NextPane,
     PrevPane,
@@ -194,6 +199,8 @@ impl CommandKind {
             CloseTabsToTheRight => "close-tabs-right",
             CopyWorkingDirectory => "copy-cwd",
             MarkTabUnread => "mark-tab-unread",
+            ForkAgentSession => "fork-agent-session",
+            CopyAgentSessionId => "copy-agent-session-id",
             ResetFontSize => "reset-font-size",
             NextPane => "next-pane",
             PrevPane => "prev-pane",
@@ -294,6 +301,8 @@ impl CommandKind {
             CloseTabsToTheRight => "CloseTabsToTheRight",
             CopyWorkingDirectory => "CopyWorkingDirectory",
             MarkTabUnread => "MarkTabUnread",
+            ForkAgentSession => "ForkAgentSession",
+            CopyAgentSessionId => "CopyAgentSessionId",
             ResetFontSize => "ResetFontSize",
             NextPane => "FocusNextPane",
             PrevPane => "FocusPrevPane",
@@ -505,6 +514,10 @@ impl Command {
             Command::new("Next Tab", NextTab),
             Command::new("Previous Tab", PrevTab),
             Command::new("Copy Working Directory", CopyWorkingDirectory),
+            Command::new("Copy Session ID", CopyAgentSessionId)
+                .with_subtitle("the coding agent's own session id"),
+            Command::new("Fork Session", ForkAgentSession)
+                .with_subtitle("branch this agent session into a new tab"),
             Command::new("Mark Tab as Unread", MarkTabUnread),
             Command::new("Close Pane / Tab", ClosePane),
             Command::new("Close Other Tabs", CloseOtherTabs),

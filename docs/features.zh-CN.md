@@ -57,6 +57,8 @@ Aider、Amp、OpenCode 等约 17 个）并在其外围加功能 —— 绝不包
 - **通知** —— agent 卡在等你批准的那一刻弹 "needs your permission…"，每轮结束弹 "finished after Ns"，遵循你的通知策略
 - **一眼看分支** —— 侧栏每行显示该 pane 的 git 分支和工作区改动（`+N −M`），`cd` 或命令跑完时自动刷新
 - **会话恢复** —— 重启后无法重连的 pane 会自动续上 agent 对话，并带上原始启动 flags（`claude --dangerously-skip-permissions --resume …`；`restore_agent_sessions`，默认开启）
+- **Fork 会话** —— 直接调 agent 自己的 fork 命令（`codex fork <id>`、`claude --resume <id> --fork-session`，OpenCode 和 Grok Build 同样支持），把当前对话分叉成一个独立会话；原会话原封不动，两边各自往下走。在 pane 上右键可选择分屏位置，在标签 / 侧栏行上右键则直接开新标签。需要先装好该 agent 的 hooks（fork 认的是 hooks 上报的 session id）；另外 fork 会整份复制对话历史，反复 fork 会在 agent 自己的会话目录里占掉不少磁盘
+- **复制 Session ID** —— 把 agent 的原生 session id 复制到剪贴板，就在 *Copy Working Directory* 旁边，方便粘进 `codex resume`、bug 报告或别的工具
 - **上下文回填** —— 面板命令把当前选区或仓库 `git diff` 打包成 prompt 直接喂给正在跑的 agent
 - **托盘图标** —— 系统托盘 / 菜单栏常驻图标，任何 agent 等你输入时立即切换为提醒态；菜单列出所有 agent pane（品牌头像 + 状态点，点击直达）、可切换通知策略，并在保留会话的普通退出之外提供 *Quit and Stop Daemon*（`show_tray_icon`，默认开启）
 

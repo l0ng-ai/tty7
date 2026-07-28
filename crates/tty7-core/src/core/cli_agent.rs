@@ -173,33 +173,14 @@ impl CLIAgent {
         session_id: &str,
         launch_argv: Option<&[String]>,
     ) -> Option<String> {
-        // Ids come from the agent's own events, but they still land on a shell
-        // command line — refuse anything that isn't a plain token so a
-        // malicious/corrupt id can't smuggle shell syntax.
-        if session_id.is_empty()
-            || !session_id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
-        {
-            return None;
-        }
         // A pane the user launched as deliberately ephemeral has nothing on
-        // disk to come back to, whatever id the agent reported.
+        // disk to come back to, whatever id the agent reported. Resume-only:
+        // no agent that opts out of sessions has a fork command today, so
+        // hoisting this into the shared helper would only add a dead branch.
         if launch_argv.is_some_and(|argv| self.opts_out_of_sessions(argv)) {
             return None;
         }
-        // The user's launch flags, pre-joined with a leading space so they
-        // splice into the format strings below; empty when none survive.
-        let flags = launch_argv
-            .and_then(|argv| self.replay_flags(argv))
-            .map(|flags| {
-                flags.iter().fold(String::new(), |mut s, f| {
-                    s.push(' ');
-                    s.push_str(f);
-                    s
-                })
-            })
-            .unwrap_or_default();
+        let flags = self.session_command_flags(session_id, launch_argv)?;
         match self {
             CLIAgent::Claude => Some(format!("claude{flags} --resume {session_id}")),
             // Codex resumes via a subcommand that accepts the interactive
@@ -245,6 +226,89 @@ impl CLIAgent {
         argv.iter().any(|t| ephemeral.contains(&t.as_str()))
     }
 
+    /// The shell command that *forks* a previous session of this agent — one
+    /// that branches the transcript into a fresh session id, leaving the
+    /// original untouched so both can be continued independently. `None` for
+    /// agents tty7 has no verified fork command for; those must not be offered
+    /// the action at all rather than shown a command that fails in the pane.
+    ///
+    /// Shares [`resume_command`](Self::resume_command)'s id validation and
+    /// launch-flag replay verbatim: every agent below takes the same option set
+    /// on its fork path as on its resume path, so there is no second table to
+    /// keep in step.
+    ///
+    /// Deliberately *not* wired into session restore. Restoring a forked pane
+    /// after a tty7 restart must **continue** that fork (its own id resumes),
+    /// not fork it again — see `ui::app`'s restore path, which calls
+    /// `resume_command` for every pane including forks.
+    pub fn fork_command(self, session_id: &str, launch_argv: Option<&[String]>) -> Option<String> {
+        let flags = self.session_command_flags(session_id, launch_argv)?;
+        match self {
+            // `codex fork [OPTIONS] [SESSION_ID]` — a first-class subcommand
+            // taking the same options as `codex resume`. It mints a new thread
+            // id, writes a new rollout recording `forked_from_id`, and leaves
+            // the parent's bytes untouched.
+            CLIAgent::Codex => Some(format!("codex fork {session_id}{flags}")),
+            // `--fork-session` is a modifier on the resume, not a mode of its
+            // own: it makes the resumed conversation take a new session id.
+            CLIAgent::Claude => Some(format!(
+                "claude{flags} --resume {session_id} --fork-session"
+            )),
+            CLIAgent::Grok => Some(format!("grok{flags} --resume {session_id} --fork-session")),
+            // opencode's `--fork` likewise only means anything alongside
+            // `--session`/`--continue`.
+            CLIAgent::OpenCode => Some(format!("opencode{flags} --session {session_id} --fork")),
+            // Everything else: no fork flag we could verify from the CLI's own
+            // help, so tty7 claims none. Guessing a flag shape here would
+            // surface a menu row that only ever produces a usage error.
+            _ => None,
+        }
+    }
+
+    /// The agent's own word for forking, for menu labels — otty's convention,
+    /// and the word a user hunting the menu will be looking for. `Some` exactly
+    /// when [`fork_command`](Self::fork_command) can build a command, so the UI
+    /// can use it as the single capability gate.
+    pub fn fork_label(self) -> Option<&'static str> {
+        match self {
+            // Claude Code calls it branching.
+            CLIAgent::Claude => Some("Branch Session"),
+            CLIAgent::Codex | CLIAgent::Grok | CLIAgent::OpenCode => Some("Fork Session"),
+            _ => None,
+        }
+    }
+
+    /// The launch-flag tail replayed onto a resume/fork command, pre-joined
+    /// with a leading space so it splices straight into the format strings, and
+    /// empty when no flags survive. `None` rejects the whole command: ids come
+    /// from the agent's own events but still land on a shell command line, so
+    /// anything that isn't a plain token could smuggle shell syntax.
+    fn session_command_flags(
+        self,
+        session_id: &str,
+        launch_argv: Option<&[String]>,
+    ) -> Option<String> {
+        if session_id.is_empty()
+            || !session_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+        {
+            return None;
+        }
+        Some(
+            launch_argv
+                .and_then(|argv| self.replay_flags(argv))
+                .map(|flags| {
+                    flags.iter().fold(String::new(), |mut s, f| {
+                        s.push(' ');
+                        s.push_str(f);
+                        s
+                    })
+                })
+                .unwrap_or_default(),
+        )
+    }
+
     /// The launch-flag tail of `argv` worth replaying on a resume command, or
     /// `None` to resume bare. Deliberately conservative: anything ambiguous
     /// falls back to no flags rather than a corrupted command line.
@@ -271,9 +335,10 @@ impl CLIAgent {
         let named = argv.iter().position(|t| names_self(t))?;
         let mut tail: Vec<&str> = argv[named + 1..].iter().map(String::as_str).collect();
 
-        // A relaunched `codex resume <old-id>`: drop the subcommand and its id
-        // so they don't replay as a positional prompt.
-        if self == CLIAgent::Codex && tail.first() == Some(&"resume") {
+        // A relaunched `codex resume <old-id>` — or `codex fork <old-id>`, which
+        // is what a forked pane's argv looks like: drop the subcommand and its
+        // id so they don't replay as a positional prompt.
+        if self == CLIAgent::Codex && matches!(tail.first(), Some(&"resume") | Some(&"fork")) {
             tail.remove(0);
             if tail.first().is_some_and(|t| !t.starts_with('-')) {
                 tail.remove(0);
@@ -284,6 +349,10 @@ impl CLIAgent {
         // stripped together with one following non-flag value token (harmless
         // for the value-less ones — anything trailing them is positional).
         let stale: &[&str] = match self {
+            // `--fork-session` / `--fork` are session-targeting too: left in
+            // place they would branch again on every relaunch (and double up on
+            // a fork of a fork). Both resume and fork re-add them from the
+            // table when they are what the user actually asked for.
             CLIAgent::Claude => &[
                 "--resume",
                 "-r",
@@ -291,10 +360,11 @@ impl CLIAgent {
                 "-c",
                 "--session-id",
                 "--from-pr",
+                "--fork-session",
             ],
             CLIAgent::Gemini | CLIAgent::Cursor => &["--resume", "-r"],
             CLIAgent::Copilot => &["--resume", "-r", "--continue", "-c"],
-            CLIAgent::OpenCode => &["--session", "-s", "--continue", "-c"],
+            CLIAgent::OpenCode => &["--session", "-s", "--continue", "-c", "--fork"],
             // `--last` targets "the most recent session" and would contradict
             // the explicit id we inject.
             CLIAgent::Codex => &["--last"],
@@ -1560,6 +1630,159 @@ mod tests {
                 )
                 .as_deref(),
             Some("grok --yolo --resume g-3")
+        );
+    }
+
+    #[test]
+    fn fork_commands_cover_exactly_the_agents_with_a_verified_fork() {
+        // Each command below was checked against the installed CLI's own
+        // `--help`; anything unverified stays `None` so the UI never offers a
+        // row that can only produce a usage error.
+        assert_eq!(
+            CLIAgent::Codex.fork_command("abc-123", None).as_deref(),
+            Some("codex fork abc-123")
+        );
+        assert_eq!(
+            CLIAgent::Claude.fork_command("abc-123", None).as_deref(),
+            Some("claude --resume abc-123 --fork-session")
+        );
+        assert_eq!(
+            CLIAgent::Grok.fork_command("g-1", None).as_deref(),
+            Some("grok --resume g-1 --fork-session")
+        );
+        assert_eq!(
+            CLIAgent::OpenCode.fork_command("s-1", None).as_deref(),
+            Some("opencode --session s-1 --fork")
+        );
+
+        // Not forkable: resumable but with no fork flag (Gemini, Copilot,
+        // Cursor, Amp), and agents tty7 can't even resume.
+        for agent in [
+            CLIAgent::Gemini,
+            CLIAgent::Copilot,
+            CLIAgent::Cursor,
+            CLIAgent::Amp,
+            CLIAgent::Aider,
+            CLIAgent::Qwen,
+        ] {
+            assert_eq!(
+                agent.fork_command("abc", None),
+                None,
+                "{} must not claim a fork command",
+                agent.slug()
+            );
+        }
+
+        // `fork_label` is the UI's capability gate, so it must agree with
+        // `fork_command` for every agent — no menu row without a command, and
+        // no command the menu can't name.
+        for agent in CLIAgent::ALL {
+            assert_eq!(
+                agent.fork_label().is_some(),
+                agent.fork_command("abc", None).is_some(),
+                "{}: fork_label and fork_command disagree",
+                agent.slug()
+            );
+        }
+    }
+
+    #[test]
+    fn fork_commands_are_shell_safe() {
+        // Same id gate as resume: an id carrying shell syntax is refused
+        // outright rather than escaped, because it reaches a command line.
+        for id in ["abc; rm -rf /", "$(boom)", "", "a b"] {
+            assert_eq!(
+                CLIAgent::Codex.fork_command(id, None),
+                None,
+                "codex accepted a non-token id: {id:?}"
+            );
+            assert_eq!(CLIAgent::Claude.fork_command(id, None), None);
+        }
+    }
+
+    #[test]
+    fn fork_carries_launch_flags_and_sheds_stale_session_targeting() {
+        let argv = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        // The user's mode flags ride onto the fork exactly as onto a resume.
+        assert_eq!(
+            CLIAgent::Codex
+                .fork_command("id-1", Some(&argv(&["codex", "--yolo"])))
+                .as_deref(),
+            Some("codex fork id-1 --yolo")
+        );
+        assert_eq!(
+            CLIAgent::Claude
+                .fork_command(
+                    "abc",
+                    Some(&argv(&["claude", "--dangerously-skip-permissions"]))
+                )
+                .as_deref(),
+            Some("claude --dangerously-skip-permissions --resume abc --fork-session")
+        );
+
+        // Fork of a fork: the pane's own argv is a fork command, so the stale
+        // subcommand + id (codex) and the stale `--fork-session` / `--fork`
+        // modifier (claude, grok, opencode) must not replay.
+        assert_eq!(
+            CLIAgent::Codex
+                .fork_command("id-2", Some(&argv(&["codex", "fork", "id-1", "--yolo"])))
+                .as_deref(),
+            Some("codex fork id-2 --yolo")
+        );
+        assert_eq!(
+            CLIAgent::Claude
+                .fork_command(
+                    "new",
+                    Some(&argv(&["claude", "--resume", "old", "--fork-session"]))
+                )
+                .as_deref(),
+            Some("claude --resume new --fork-session")
+        );
+        assert_eq!(
+            CLIAgent::Grok
+                .fork_command(
+                    "g-2",
+                    Some(&argv(&["grok", "--resume", "g-1", "--fork-session"]))
+                )
+                .as_deref(),
+            Some("grok --resume g-2 --fork-session")
+        );
+        assert_eq!(
+            CLIAgent::OpenCode
+                .fork_command(
+                    "s-2",
+                    Some(&argv(&["opencode", "--session", "s-1", "--fork"]))
+                )
+                .as_deref(),
+            Some("opencode --session s-2 --fork")
+        );
+
+        // Restoring a forked pane must *continue* it, not fork it again: the
+        // resume command built from a fork's own argv carries no fork flag.
+        assert_eq!(
+            CLIAgent::Codex
+                .resume_command("id-2", Some(&argv(&["codex", "fork", "id-1", "--yolo"])))
+                .as_deref(),
+            Some("codex resume id-2 --yolo")
+        );
+        assert_eq!(
+            CLIAgent::Claude
+                .resume_command(
+                    "new",
+                    Some(&argv(&["claude", "--resume", "old", "--fork-session"]))
+                )
+                .as_deref(),
+            Some("claude --resume new")
+        );
+        assert_eq!(
+            CLIAgent::OpenCode
+                .resume_command(
+                    "s-2",
+                    Some(&argv(&["opencode", "--session", "s-1", "--fork"]))
+                )
+                .as_deref(),
+            Some("opencode --session s-2")
         );
     }
 
