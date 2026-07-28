@@ -78,7 +78,8 @@ pub enum CommandKind {
     MarkTabUnread,
     /// Branch this tab's agent session into a second, independent one, opened
     /// in a new tab. The pane right-click menu offers the split placements;
-    /// the palette has no pane in hand, so it takes the tab-level meaning.
+    /// the palette's ask isn't a spatial one, so it takes the tab-level
+    /// meaning.
     ForkAgentSession,
     CopyAgentSessionId,
     ResetFontSize,
