@@ -204,7 +204,8 @@ impl CLIAgent {
             // session picker and `--continue`/`-c` just takes the newest
             // session; the flag that targets one by id is `--session
             // <path|id>` ("Use specific session file or partial UUID"). Its
-            // ids are uuidv7, so they clear the token gate above.
+            // ids are uuidv7, so they clear `session_command_flags`' token
+            // gate.
             CLIAgent::Pi => Some(format!("pi{flags} --session {session_id}")),
             _ => None,
         }
