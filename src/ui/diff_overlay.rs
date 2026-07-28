@@ -686,39 +686,10 @@ impl Tty7App {
     /// file rows with their `+N −N` are the part that still reads fine at this
     /// size.
     fn diff_oversized_notice(&self, snap: &DiffSnapshot, cx: &Context<Self>) -> AnyElement {
-        // Name every axis that contributes, so the banner never claims the diff
-        // is big when what is actually big is an un-ignored untracked tree.
-        let mut parts = vec![format!(
-            "{} changed file{}",
-            snap.files.len(),
-            if snap.files.len() == 1 { "" } else { "s" }
-        )];
-        // Loaded-of-total, not the retained count alone: past the repo-wide
-        // budget `retained_lines` is what we kept, and printing that as "diff
-        // lines" contradicted the exact `+N −N` in the header directly above —
-        // 20 000 against 90 000 on a big tree, with nothing to reconcile them.
-        let (added, removed) = snap.totals();
-        let total_lines = (added + removed) as usize;
-        let loaded = snap.retained_lines();
-        parts.push(if loaded < total_lines {
-            // Say which cap ate the difference. "20000 of 90000 loaded" on its
-            // own leaves the user guessing whether the rest is merely collapsed
-            // (one click away) or was never read (it isn't).
-            if snap.budget_exhausted() {
-                format!("{loaded} of {total_lines} diff lines loaded, the rest past tty7's budget")
-            } else {
-                format!("{loaded} of {total_lines} diff lines loaded")
-            }
-        } else {
-            format!("{total_lines} diff lines")
-        });
-        if snap.untracked_count() > 0 {
-            parts.push(format!("{} untracked", snap.untracked_count()));
-        }
         let text = format!(
             "This working tree is too large to render efficiently ({}). Every file is \
              collapsed — expand individual files, or run `git diff` in the terminal.",
-            parts.join(", "),
+            oversized_summary(snap),
         );
         div()
             .w_full()
@@ -1127,6 +1098,50 @@ fn file_expanded(file: &FileDiff, expanded: &HashMap<String, bool>, collapse_all
     !collapse_all && file.added + file.removed <= AUTO_COLLAPSE_LINES
 }
 
+/// The parenthetical inside the oversized banner: one clause per axis that
+/// contributes, so the banner never claims the *diff* is big when what is
+/// actually big is an un-ignored untracked tree.
+///
+/// Whether hunks were dropped is answered by
+/// [`budget_exhausted`](DiffSnapshot::budget_exhausted) and never by comparing
+/// the retained count against `added + removed`. Those two numbers are scoped
+/// differently — retained counts the context lines that get rendered too,
+/// `added + removed` doesn't — so on a diff of many small hunks the retained
+/// figure is the *larger* of the two, and a `loaded < total` test reads a
+/// budget-truncated tree as complete while the file cards below it say "body
+/// not loaded". `budget_exhausted` is the parser's own answer to the question.
+///
+/// The changed-line figure stays [`totals`](DiffSnapshot::totals) exactly, so
+/// the banner agrees with the `+N −N` in the header directly above it; the
+/// retained figure is named as rendered rows rather than joined to it by "of",
+/// because it is not a fraction of it.
+fn oversized_summary(snap: &DiffSnapshot) -> String {
+    let mut parts = vec![format!(
+        "{} changed file{}",
+        snap.files.len(),
+        if snap.files.len() == 1 { "" } else { "s" }
+    )];
+    let (added, removed) = snap.totals();
+    let total_lines = (added + removed) as usize;
+    let loaded = snap.retained_lines();
+    parts.push(if snap.budget_exhausted() {
+        format!(
+            "{total_lines} changed lines, {loaded} diff rows loaded before tty7's budget ran out"
+        )
+    } else if loaded < total_lines {
+        // Not the budget, so it's the per-file cap: every retained hunk carries
+        // its context lines, so `loaded` can only fall short of the changed-line
+        // count when some file's body stopped early.
+        format!("{loaded} of {total_lines} diff lines loaded")
+    } else {
+        format!("{total_lines} diff lines")
+    });
+    if snap.untracked_count() > 0 {
+        parts.push(format!("{} untracked", snap.untracked_count()));
+    }
+    parts.join(", ")
+}
+
 /// Which column a split cell belongs to — picks the marker and tint.
 #[derive(Clone, Copy)]
 enum Side {
@@ -1473,6 +1488,71 @@ mod tests {
             25,
             "the tail gets one summary line"
         );
+    }
+
+    /// The shape the old `loaded < total_lines` test could not see: many
+    /// one-line hunks, each carrying its context. Retained lines count context
+    /// and `+N −N` does not, so here the retained figure is the *larger* of the
+    /// two — a budget-truncated tree that the comparison read as complete,
+    /// leaving the banner silent while the file cards below it said "body not
+    /// loaded". The banner must name the budget whenever any file carries
+    /// [`Truncation::Budget`], whatever the diff's shape.
+    #[test]
+    fn the_banner_names_the_budget_when_context_outweighs_the_changes() {
+        let hunk = git_diff::Hunk {
+            header: "@@ -1,7 +1,7 @@".to_string(),
+            lines: (0..6)
+                .map(|i| line(LineKind::Context, Some(i + 1), Some(i + 1), "ctx"))
+                .chain(std::iter::once(line(LineKind::Added, None, Some(7), "x")))
+                .collect(),
+        };
+        let one_line_file = |path: &str| FileDiff {
+            path: path.to_string(),
+            old_path: None,
+            status: FileStatus::Modified,
+            added: 1,
+            removed: 0,
+            binary: false,
+            truncated: None,
+            hunks: vec![hunk.clone()],
+        };
+        let files: Vec<FileDiff> = (0..200)
+            .map(|i| one_line_file(&format!("f{i}.rs")))
+            .collect();
+
+        // Same tree, one file whose body the repo-wide budget dropped.
+        let mut truncated = files.clone();
+        truncated.push(FileDiff {
+            hunks: vec![],
+            truncated: Some(Truncation::Budget),
+            ..one_line_file("dropped.rs")
+        });
+        let snap = DiffSnapshot {
+            files: truncated,
+            ..Default::default()
+        };
+        let (added, removed) = snap.totals();
+        let total = (added + removed) as usize;
+        assert!(
+            snap.retained_lines() > total,
+            "the context lines outweigh the changed ones — the shape that slipped through"
+        );
+        assert!(snap.budget_exhausted());
+
+        let summary = oversized_summary(&snap);
+        assert!(summary.contains("budget"), "{summary}");
+        assert!(
+            summary.contains(&format!("{total} changed lines")),
+            "the exact `+N −N` from the header, not the retained count: {summary}"
+        );
+
+        // The same shape with nothing dropped must not claim a truncation.
+        let whole = DiffSnapshot {
+            files,
+            ..Default::default()
+        };
+        assert!(!whole.budget_exhausted());
+        assert!(!oversized_summary(&whole).contains("budget"));
     }
 
     /// Measurement harness for issue #239, finding 2 — run with

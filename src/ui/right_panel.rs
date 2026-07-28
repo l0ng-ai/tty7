@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use crate::core::config::{Config, RightPanelTab};
 use crate::daemon::protocol::PaneProcs;
-use crate::terminal::git_diff::DiffSnapshot;
+use crate::terminal::git_diff::{DiffSnapshot, MAX_RENDERED_FILES};
 use crate::ui::app::{
     CONTENT_INSET, TILE_GLYPH_SM, TILE_SIZE_SM, Tty7App, tile_trailing_inset,
     tile_trailing_inset_sm,
@@ -1142,6 +1142,13 @@ impl Tty7App {
     /// The working-tree diff as a compact file list — path plus `+N −M` — not the
     /// diff overlay's hunk cards, which need far more than 260px to be readable.
     /// Clicking a row opens the full overlay on that repo.
+    ///
+    /// Bounded the same way the overlay is
+    /// ([`MAX_RENDERED_FILES`](crate::terminal::git_diff::MAX_RENDERED_FILES),
+    /// one constant so the two views agree): the rows are not virtualized, so a
+    /// working tree with thousands of changed files is one row per file rebuilt
+    /// on the UI thread every frame — the stall issue #239 is about, reached
+    /// through this panel instead of the overlay.
     fn render_panel_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         // The pane's own host, and the cwd it resolved its git line through —
@@ -1214,22 +1221,35 @@ impl Tty7App {
                     cx,
                 ),
             Some(Some(snap)) => {
-                let files: Vec<(String, u32, u32)> = snap
-                    .files
-                    .iter()
-                    .map(|f| (f.path.clone(), f.added, f.removed))
-                    .collect();
+                // A refcount bump, not a copy of the file list: the loop below
+                // needs the borrow on `self.right_panel` to be over before
+                // `cx.listener` hands it back, which used to mean collecting
+                // every `(path, +N, −N)` into a Vec on every frame of this
+                // panel, on the UI thread. Sharing the snapshot made that a
+                // deep clone of the whole diff for nothing.
+                let snap = Arc::clone(snap);
                 // The count, not the paths: this used to clone every untracked
                 // path String on every frame of this panel, on the UI thread,
                 // for two `len()`/`is_empty()` reads — the same cost class the
                 // `Arc` switch removed from the probe path.
                 let untracked = snap.untracked_count();
                 let focused = self.diff_overlay_focus(host.id(), &cwd).map(str::to_string);
+                // The overlay's ceiling, deliberately the same number: this list
+                // is not virtualized either, so a whole-repo reformat means one
+                // row per changed file built from scratch every frame. The tally
+                // in the header above still counts every file — capping what is
+                // *rendered* must not change what is *reported*, the same rule
+                // `untracked_count` and `DiffSnapshot::totals` follow.
+                let shown = snap.files.len().min(MAX_RENDERED_FILES);
                 // Rows inset themselves rather than the list, so the hover and
                 // selected capsules bleed a little past the text into the same
                 // 12px gutter the tab rail's rows use.
                 let mut list = v_flex().px(px(CONTENT_INSET - 4.)).py(px(2.)).gap(px(1.));
-                for (path, added, removed) in files {
+                for file in snap.files.iter().take(shown) {
+                    // Owned per *rendered* row — bounded by `shown` — because the
+                    // element id and the click listener both outlive this frame.
+                    let path = file.path.clone();
+                    let (added, removed) = (file.added, file.removed);
                     let selected = focused.as_deref() == Some(path.as_str());
                     list = list.child(
                         h_flex()
@@ -1300,6 +1320,23 @@ impl Tty7App {
                                         .child(format!("−{removed}")),
                                 )
                             }),
+                    );
+                }
+                // The tail the cap cut, the way the overlay's file list and its
+                // untracked section already report theirs — a truncated list
+                // that says nothing reads as files having vanished.
+                if snap.files.len() > shown {
+                    let rest = snap.files.len() - shown;
+                    list = list.child(
+                        div()
+                            .px(px(4.))
+                            .py(px(3.))
+                            .text_size(px(11.5))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "… and {rest} more changed file{} — run `git diff` to see them.",
+                                if rest == 1 { "" } else { "s" }
+                            )),
                     );
                 }
                 if untracked > 0 {
