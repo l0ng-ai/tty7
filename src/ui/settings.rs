@@ -42,6 +42,8 @@ use crate::ui::app::{
 };
 use crate::ui::host_ops::HostId;
 use crate::ui::presets;
+use crate::ui::rounding;
+use crate::ui::rounding::RoundedCorners as _;
 
 /// Which section of the settings panel is currently selected in the sidebar.
 /// Sections are named for the *object* being configured (the appearance, the
@@ -1385,10 +1387,11 @@ impl Tty7App {
         // forward rules) can carry an id derived from their index.
         let id: SharedString = id.into();
         let on_pick = std::rc::Rc::new(on_pick);
+        let count = options.len();
         h_flex()
             .id(gpui::ElementId::Name(id.clone()))
             .h(px(24.))
-            .rounded_lg()
+            .rounded(rounding::TRACK_RADIUS)
             .border_1()
             .border_color(border)
             // The track paints its own ground rather than letting the sheet show
@@ -1397,12 +1400,21 @@ impl Tty7App {
             // leaves its ground to whatever it happens to be composited over is
             // the shape of the bug this whole change is about.
             .bg(gpui::rgb(sf.base))
-            // One track, clipped so the end segments' fills follow its rounding
-            // instead of squaring off the corners they sit in.
+            // A backstop for content overflow, and nothing more. This used to be
+            // what shaped the end segments' fills to the track's rounding, and it
+            // cannot do that: gpui's overflow mask is a square, unantialiased
+            // scissor (issue #236, see `ui::rounding`). The segments carry their
+            // own radii below.
             .overflow_hidden()
             .children(options.iter().enumerate().map(|(i, label)| {
                 let active = i == selected;
                 let on_pick = on_pick.clone();
+                // The two end segments cap the track, so their fills have to draw
+                // the corner themselves — one border-width tighter than the
+                // track's own radius, so the arc nests inside the border instead
+                // of bulging past it into the square clip.
+                let corners =
+                    rounding::segment_corners(i, count, rounding::TRACK_RADIUS, rounding::HAIRLINE);
                 h_flex()
                     // A per-segment id keeps each one unique across the several
                     // segmented controls on the page.
@@ -1413,6 +1425,7 @@ impl Tty7App {
                     .px_2p5()
                     .text_sm()
                     .cursor_pointer()
+                    .rounded_corners(corners)
                     // Hairlines *between* segments only — the track already owns
                     // its outer edge, and a border on the first segment would
                     // double it.
@@ -1471,16 +1484,32 @@ impl Tty7App {
                     .any(|(tag, value)| tag == "liga" && *value != 0)
         });
 
-        // Unified −/value/+ stepper plus a quiet Reset.
-        let step = move |id: &'static str, glyph: &'static str, divider: bool| {
-            div()
+        // Unified −/value/+ stepper plus a quiet Reset. `slot` is the glyph's
+        // place in the three-slot track (−│value│+): it draws the internal
+        // hairline, and — because a hover fill in an end slot would otherwise
+        // square off the track's corner (issue #236) — the corner radii.
+        //
+        // `h_full` rather than `py_1` is load-bearing for that second job. A
+        // padded, auto-height glyph box measures 31px (14px text × gpui's φ line
+        // height, plus 8px of padding) against a 22px content box, so the track's
+        // `items_center` centres it and `overflow_hidden` crops the overhang —
+        // the fill still reaches the corner, but the box's own rounded corner is
+        // 4½px outside the visible strip, where it does nothing. Pinning the box
+        // to the track's content height puts the arc back where the corner is.
+        let step = move |id: &'static str, glyph: &'static str, slot: usize| {
+            let corners =
+                rounding::segment_corners(slot, 3, rounding::TRACK_RADIUS, rounding::HAIRLINE);
+            h_flex()
                 .id(id)
+                .items_center()
+                .justify_center()
+                .h_full()
                 .px_2p5()
-                .py_1()
                 .text_sm()
                 .cursor_pointer()
                 .text_color(foreground)
-                .when(divider, |s| s.border_l_1().border_color(border))
+                .when(slot > 0, |s| s.border_l_1().border_color(border))
+                .rounded_corners(corners)
                 .hover(|h| h.bg(hover_bg))
                 .child(glyph)
         };
@@ -1503,10 +1532,13 @@ impl Tty7App {
                         h_flex()
                             .items_center()
                             .h(control_h)
-                            .rounded_lg()
+                            .rounded(rounding::TRACK_RADIUS)
                             .bg(stepper_bg)
                             .border_1()
                             .border_color(border)
+                            // Overflow backstop only — `step` rounds its own
+                            // corners, because this clip is square (see
+                            // `ui::rounding`).
                             .overflow_hidden()
                             .child(dec)
                             .child(
@@ -1527,11 +1559,11 @@ impl Tty7App {
                     .into_any_element()
             };
         let font_size_control = stepper_row(
-            step("font-dec", "−", false).on_click(
+            step("font-dec", "−", 0).on_click(
                 cx.listener(|this, _, _w, cx| this.change_font_size(-FONT_SIZE_STEP, cx)),
             ),
             format!("{:.0}", font_size),
-            step("font-inc", "+", true)
+            step("font-inc", "+", 2)
                 .on_click(cx.listener(|this, _, _w, cx| this.change_font_size(FONT_SIZE_STEP, cx))),
             Button::new("font-reset")
                 .label("Reset")
@@ -1542,11 +1574,11 @@ impl Tty7App {
 
         let line_height = self.line_height;
         let line_height_control = stepper_row(
-            step("lh-dec", "−", false).on_click(
+            step("lh-dec", "−", 0).on_click(
                 cx.listener(|this, _, _w, cx| this.change_line_height(-LINE_HEIGHT_STEP, cx)),
             ),
             format!("{:.2}", line_height),
-            step("lh-inc", "+", true).on_click(
+            step("lh-inc", "+", 2).on_click(
                 cx.listener(|this, _, _w, cx| this.change_line_height(LINE_HEIGHT_STEP, cx)),
             ),
             Button::new("lh-reset")
@@ -4940,7 +4972,15 @@ impl Tty7App {
             }
             let id = p.id.clone();
             let is_active = active_id == id;
-            let preview = self.theme_preview(&p);
+            // Here the preview sits *flush* inside the card's border (the
+            // "Current theme" card pads it, so it keeps its own 8px there). Flush
+            // means its corner has to nest one hairline inside the card's, or it
+            // bulges past the border into the square overflow clip — the corner
+            // then reads as a hard step instead of an arc (issue #236).
+            let preview = self.theme_preview(&p).rounded(rounding::inner_radius(
+                rounding::TRACK_RADIUS,
+                rounding::HAIRLINE,
+            ));
             let click_id = id.clone();
             list = list.child(
                 v_flex()
@@ -4954,7 +4994,7 @@ impl Tty7App {
                         // the search box above is sized explicitly.
                         div()
                             .w(px(268.))
-                            .rounded_lg()
+                            .rounded(rounding::TRACK_RADIUS)
                             .overflow_hidden()
                             .border_1()
                             .border_color(if is_active {

@@ -31,6 +31,7 @@ pub mod remote_connect;
 pub mod remote_workspace;
 pub mod reorder;
 pub mod right_panel;
+pub mod rounding;
 pub mod scrollbar;
 pub mod settings;
 pub mod sftp;

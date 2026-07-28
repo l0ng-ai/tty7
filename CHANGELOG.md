@@ -58,6 +58,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session" means: paste it into `codex resume`, a bug report, or another tool.
   (#211)
 
+### Fixed
+
+- **Rounded UI controls no longer square off their corners**
+  ([#236](https://github.com/l0ng-ai/tty7/issues/236)) — the cursor-shape
+  toggles (Block / Bar / Underline) are the clearest case: the selected
+  segment's fill filled the whole corner of the track it caps, with the track's
+  own anti-aliased border arc floating *inside* that square. The controls were
+  relying on `overflow_hidden` to shape those fills to the track's rounding, and
+  it cannot: gpui's overflow mask is an axis-aligned rectangle with no corner
+  radii, tested per fragment as a hard discard, so it can only ever cut a square
+  and never anti-aliases the cut. A container's own corners come from the quad
+  shader's distance field instead, which is why a plain card looked smooth while
+  anything with a filled child in the corner did not. Every such fill now
+  carries its own radius, inset one border-width so it nests inside the border
+  rather than bulging past it: the segmented controls, the −/value/+ steppers'
+  hover fills, the theme picker's flush previews, and the diff overlay's card
+  headers and closing rows. Most visible at a device pixel ratio of 1, where the
+  hard clip edge is a whole physical pixel wide.
+
 ## [26.7.6] - 2026-07-28
 
 ### Added

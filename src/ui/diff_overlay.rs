@@ -21,7 +21,9 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use gpui::{AnyElement, FocusHandle, FontWeight, KeyDownEvent, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, FocusHandle, FontWeight, KeyDownEvent, Pixels, Window, div, prelude::*, px,
+};
 use gpui_component::button::Button;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
@@ -29,6 +31,8 @@ use crate::terminal::git_diff::{
     self, AUTO_COLLAPSE_LINES, DiffSnapshot, FileDiff, FileStatus, LineKind,
 };
 use crate::ui::app::Tty7App;
+use crate::ui::rounding;
+use crate::ui::rounding::RoundedCorners as _;
 
 /// What the overlay currently shows: probing, a parsed snapshot, or the
 /// answer that the cwd stopped being a repo.
@@ -562,6 +566,17 @@ impl Tty7App {
             None => file.path.clone(),
         };
 
+        // The header paints a solid band flush into the card's corners, and the
+        // card's `overflow_hidden` cannot round it — that clip is a square,
+        // unantialiased scissor (issue #236, see `ui::rounding`). So the band
+        // carries the radius: top two when a body follows it, all four when the
+        // card is collapsed and the header *is* the card.
+        let header_corners = rounding::stack_corners(
+            0,
+            if expanded { 2 } else { 1 },
+            rounding::CARD_RADIUS,
+            rounding::HAIRLINE,
+        );
         let mut header = h_flex()
             .id(("diff-file-header", idx))
             .w_full()
@@ -569,6 +584,7 @@ impl Tty7App {
             .gap_2()
             .px_2p5()
             .py_1p5()
+            .rounded_corners(header_corners)
             .bg(cx.theme().secondary)
             .when(expandable, |h| {
                 let path = file.path.clone();
@@ -649,13 +665,31 @@ impl Tty7App {
             .w_full()
             .border_1()
             .border_color(cx.theme().border)
-            .rounded_md()
+            .rounded(rounding::CARD_RADIUS)
+            // Overflow backstop only; the bands inside round themselves.
             .overflow_hidden()
             .child(header);
 
         if expanded {
             let mut body = v_flex().w_full();
-            for hunk in &file.hunks {
+            // Split every hunk up front so the *last* row is knowable: a diff
+            // cell paints a tint, and the card's clip is square, so the row that
+            // ends the card has to draw the bottom corners itself. A truncation
+            // notice (no fill of its own) takes that job away again.
+            let hunks: Vec<_> = file
+                .hunks
+                .iter()
+                .map(|hunk| (hunk, split_hunk(&hunk.lines)))
+                .collect();
+            let closing_row = if file.truncated {
+                None
+            } else {
+                hunks
+                    .iter()
+                    .rposition(|(_, rows)| !rows.is_empty())
+                    .map(|h| (h, hunks[h].1.len() - 1))
+            };
+            for (h, (hunk, rows)) in hunks.iter().enumerate() {
                 body = body.child(
                     div()
                         .w_full()
@@ -668,8 +702,8 @@ impl Tty7App {
                         .truncate()
                         .child(hunk.header.clone()),
                 );
-                for row in split_hunk(&hunk.lines) {
-                    body = body.child(self.diff_split_row(&row, cx));
+                for (r, row) in rows.iter().enumerate() {
+                    body = body.child(self.diff_split_row(row, closing_row == Some((h, r)), cx));
                 }
             }
             if file.truncated {
@@ -694,7 +728,16 @@ impl Tty7App {
     /// One side-by-side row: the old (left) and new (right) cells with a hairline
     /// splitter between them. A `None` cell — no counterpart on that side —
     /// paints a muted placeholder so a pure add/remove reads as one column empty.
-    fn diff_split_row(&self, row: &SplitRow, cx: &Context<Self>) -> AnyElement {
+    ///
+    /// `closes_card` marks the row that sits on the card's bottom edge; its two
+    /// outer cells then round their outer bottom corner, since the card's clip
+    /// cannot do it for them (see `ui::rounding`).
+    fn diff_split_row(&self, row: &SplitRow, closes_card: bool, cx: &Context<Self>) -> AnyElement {
+        let radius = if closes_card {
+            rounding::inner_radius(rounding::CARD_RADIUS, rounding::HAIRLINE)
+        } else {
+            px(0.)
+        };
         h_flex()
             .w_full()
             // Fixed row height so blank diff lines don't collapse.
@@ -702,21 +745,30 @@ impl Tty7App {
             .items_stretch()
             .text_xs()
             .font_family(self.font_family.clone())
-            .child(self.diff_split_cell(row.left.as_ref(), Side::Old, cx))
+            .child(self.diff_split_cell(row.left.as_ref(), Side::Old, radius, cx))
             .child(div().flex_shrink_0().w(px(1.)).bg(cx.theme().border))
-            .child(self.diff_split_cell(row.right.as_ref(), Side::New, cx))
+            .child(self.diff_split_cell(row.right.as_ref(), Side::New, radius, cx))
             .into_any_element()
     }
 
     /// One half of a split row: a right-aligned line-number gutter, then the
     /// marker and text in the terminal font, tinted green/red when changed.
+    ///
+    /// `outer_radius` rounds the cell's own outer bottom corner — non-zero only
+    /// on the row that closes the card, whose tint would otherwise square that
+    /// corner off (see `ui::rounding`).
     fn diff_split_cell(
         &self,
         cell: Option<&SplitCell>,
         side: Side,
+        outer_radius: Pixels,
         cx: &Context<Self>,
     ) -> AnyElement {
         let base = h_flex().flex_1().min_w_0().h_full().items_center();
+        let base = match side {
+            Side::Old => base.rounded_bl(outer_radius),
+            Side::New => base.rounded_br(outer_radius),
+        };
         let Some(cell) = cell else {
             return base.bg(cx.theme().muted.opacity(0.3)).into_any_element();
         };
@@ -749,17 +801,27 @@ impl Tty7App {
     /// has no blob to diff a never-added file against, but hiding them would
     /// read as lost work (agents create files constantly).
     fn diff_untracked_section(&self, untracked: &[String], cx: &Context<Self>) -> AnyElement {
+        // Same filled-band-in-a-rounded-card shape as `diff_file_card`, so the
+        // header owns the corners it sits in. The rows below it paint no fill,
+        // which is why only the top pair is ever non-zero here.
+        let header_corners = rounding::stack_corners(
+            0,
+            if untracked.is_empty() { 1 } else { 2 },
+            rounding::CARD_RADIUS,
+            rounding::HAIRLINE,
+        );
         let mut section = v_flex()
             .w_full()
             .border_1()
             .border_color(cx.theme().border)
-            .rounded_md()
+            .rounded(rounding::CARD_RADIUS)
             .overflow_hidden()
             .child(
                 div()
                     .w_full()
                     .px_2p5()
                     .py_1p5()
+                    .rounded_corners(header_corners)
                     .bg(cx.theme().secondary)
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
