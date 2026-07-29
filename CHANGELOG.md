@@ -163,6 +163,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   involved something in the Wayland presentation path, were not reproducible on
   macOS and are not claimed to be confirmed. (#243)
 
+- **Return no longer confirms the file tree's delete prompt** — it was the only
+  destructive prompt in tty7 with the destructive action first, and on macOS
+  (NSAlert) and Windows (TaskDialog) the first button is the Return-key
+  default, so pressing Return deleted — recursive folder deletion included. The
+  buttons now put the safe option first, matching every other destructive
+  prompt, with Escape still cancelling. Linux uses gpui's click-only fallback
+  dialog, so the swap only reorders the buttons there.
+
+- **"Finder" is no longer named on Linux and Windows** — the file-tree context
+  menu and the SFTP job list's reveal tooltip hardcoded Finder-flavoured
+  labels on every platform; only the Info row's button was conditional. All
+  three sites now share that one conditional, so the action reads "Reveal in
+  Finder" on macOS and "Open Folder" everywhere else. On macOS the SFTP
+  tooltip's "Show in Finder" becomes "Reveal in Finder" too, retiring a third
+  name for the same action.
+
+- **Grok Build turns up in settings search** — the agent renders a Settings →
+  Agents row but had no search-index entry, so searching could never surface
+  it. The other five agent entries had drifted from what their rows actually
+  say ("Claude Code hooks" for a row titled "Claude Code"), as had "Option
+  acts as Meta" from the rendered "Option (⌥) acts as Meta"; the index titles
+  now match the rows, the mechanism words (hooks / plugin / extension) stay
+  behind as search keywords, and a test derives the Agents index from the
+  agent list so a future agent can't ship unsearchable.
+
 ## [26.7.6] - 2026-07-28
 
 ### Added

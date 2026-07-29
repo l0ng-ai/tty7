@@ -5652,10 +5652,9 @@ mod tests {
     fn agent_rows_are_in_the_search_index() {
         for agent in crate::core::agent_hooks::HookAgent::ALL {
             assert!(
-                settings_search_entries()
-                    .iter()
-                    .any(|e| e.section == SettingsSection::Agents
-                        && e.title == agent.display_name()),
+                settings_search_entries().iter().any(
+                    |e| e.section == SettingsSection::Agents && e.title == agent.display_name()
+                ),
                 "no Agents index entry titled {:?}",
                 agent.display_name()
             );
