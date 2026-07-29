@@ -44,8 +44,8 @@ use gpui_component::button::Button;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use crate::terminal::git_diff::{
-    self, AUTO_COLLAPSE_LINES, DiffSnapshot, FileDiff, FileStatus, LineKind, MAX_RENDERED_FILES,
-    Truncation,
+    self, AUTO_COLLAPSE_LINES, DiffSnapshot, DiffStats, FileDiff, FileStatus, LineKind,
+    MAX_RENDERED_FILES, Truncation,
 };
 use crate::ui::app::Tty7App;
 use crate::ui::rounding;
@@ -286,8 +286,17 @@ impl Tty7App {
     ) {
         let key = (host.id(), cwd.clone());
         if !self.diff_probes_inflight.insert(key.clone()) {
-            return; // someone is already asking this exact question
+            // Someone is already asking this exact question — but they asked it
+            // *earlier*, and the answer in flight describes the tree as it was
+            // then. This caller only got here because something changed since,
+            // so folding it into that request would hand it a snapshot already
+            // known to be stale and leave nothing to trigger another look: the
+            // overlay's own re-check is gated on `loading`, which the landing
+            // clears. Remember to ask again instead.
+            self.diff_probes_restale.insert(key);
+            return;
         }
+        let host_for_retry = host.clone();
         let probe_cwd = cwd.clone();
         crate::ui::host_ops::HostOps::run(
             host,
@@ -296,6 +305,13 @@ impl Tty7App {
             move |app, result, cx| {
                 app.diff_probes_inflight.remove(&key);
                 app.install_diff_snapshot(key.0, &cwd, result.map(Arc::new), cx);
+                // Re-ask for whoever was folded in above. Cleared first, so the
+                // fresh probe starts with a clean slate and a request that
+                // arrives while *it* flies marks the flag again — this converges
+                // rather than looping, because a quiet tree never sets it.
+                if app.diff_probes_restale.remove(&(key.0, cwd.clone())) {
+                    app.spawn_shared_diff_probe(host_for_retry, cwd, cx);
+                }
             },
         );
     }
@@ -628,14 +644,18 @@ impl Tty7App {
         focused: Option<usize>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // One walk for every whole-snapshot number this render needs, rather
+        // than one walk per question over a file list whose length is the size
+        // of the working tree — see `DiffSnapshot::stats`.
+        let stats = snap.stats();
         // An oversized tree opens fully collapsed: the file rows are still the
         // useful part, and the bodies are what cost. A file the user opened by
         // name is exempt — that's an explicit request for one body, not for the
         // whole tree. See `DiffSnapshot::oversized`.
-        let oversized = focused.is_none() && snap.oversized();
+        let oversized = focused.is_none() && stats.oversized;
         let mut list = v_flex().gap_3().p_4().w_full();
         if oversized {
-            list = list.child(self.diff_oversized_notice(snap, cx));
+            list = list.child(self.diff_oversized_notice(snap, &stats, cx));
         }
         // Hard ceiling on cards built at all: even collapsed, one card per file
         // is one card per file, and the list is not virtualized.
@@ -690,11 +710,16 @@ impl Tty7App {
     /// terminal). Deliberately *above* the list rather than instead of it — the
     /// file rows with their `+N −N` are the part that still reads fine at this
     /// size.
-    fn diff_oversized_notice(&self, snap: &DiffSnapshot, cx: &Context<Self>) -> AnyElement {
+    fn diff_oversized_notice(
+        &self,
+        snap: &DiffSnapshot,
+        stats: &DiffStats,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let text = format!(
             "This working tree is too large to render efficiently ({}). Every file is \
              collapsed — expand individual files, or run `git diff` in the terminal.",
-            oversized_summary(snap),
+            oversized_summary(snap, stats),
         );
         div()
             .w_full()
@@ -1124,20 +1149,17 @@ fn file_expanded(file: &FileDiff, expanded: &HashMap<String, bool>, collapse_all
 /// the banner agrees with the `+N −N` in the header directly above it; the
 /// retained figure is named as rendered rows rather than joined to it by "of",
 /// because it is not a fraction of it.
-fn oversized_summary(snap: &DiffSnapshot) -> String {
+fn oversized_summary(snap: &DiffSnapshot, stats: &DiffStats) -> String {
     let mut parts = vec![format!(
         "{} changed file{}",
         snap.files.len(),
         if snap.files.len() == 1 { "" } else { "s" }
     )];
-    let (added, removed) = snap.totals();
+    let (added, removed) = stats.totals;
     let total_lines = (added + removed) as usize;
-    let loaded = snap.retained_lines();
-    let budget = snap.budget_exhausted();
-    let per_file = snap
-        .files
-        .iter()
-        .any(|f| f.truncated == Some(Truncation::PerFile));
+    let loaded = stats.retained_lines;
+    let budget = stats.budget_exhausted;
+    let per_file = stats.per_file_truncated;
     parts.push(match (budget, per_file) {
         (false, false) => format!("{total_lines} diff lines"),
         _ => {
@@ -1151,8 +1173,8 @@ fn oversized_summary(snap: &DiffSnapshot) -> String {
             )
         }
     });
-    if snap.untracked_count() > 0 {
-        parts.push(format!("{} untracked", snap.untracked_count()));
+    if stats.untracked_count > 0 {
+        parts.push(format!("{} untracked", stats.untracked_count));
     }
     parts.join(", ")
 }
@@ -1348,6 +1370,13 @@ mod tests {
         pairs.into_iter().map(|(p, v)| (p.to_string(), v)).collect()
     }
 
+    /// The banner text for a snapshot, deriving its stats the way the render
+    /// path does — so these tests exercise the same numbers the overlay shows
+    /// rather than a hand-assembled set.
+    fn banner(snap: &DiffSnapshot) -> String {
+        oversized_summary(snap, &snap.stats())
+    }
+
     /// The per-file threshold on its own: a small file opens, a big one doesn't,
     /// and an explicit choice overrides either. Unchanged behaviour — this is
     /// the small-working-tree case that must feel identical.
@@ -1424,7 +1453,7 @@ mod tests {
             snap.files.iter().all(|f| f.added <= AUTO_COLLAPSE_LINES),
             "no single file is over the per-file threshold"
         );
-        assert!(snap.oversized());
+        assert!(snap.stats().oversized);
 
         let none = HashMap::new();
         let rows_expanded: usize = snap
@@ -1456,7 +1485,7 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
-        assert!(!snap.oversized());
+        assert!(!snap.stats().oversized);
         let none = HashMap::new();
         assert!(snap.files.iter().all(|f| file_expanded(f, &none, false)));
     }
@@ -1475,9 +1504,12 @@ mod tests {
             untracked_total: 40_000,
             ..Default::default()
         };
-        assert!(snap.retained_lines() < git_diff::AUTO_COLLAPSE_TOTAL_LINES);
+        assert!(snap.stats().retained_lines < git_diff::AUTO_COLLAPSE_TOTAL_LINES);
         assert!(snap.files.len() < git_diff::AUTO_COLLAPSE_TOTAL_FILES);
-        assert!(snap.oversized(), "the untracked list alone must trip it");
+        assert!(
+            snap.stats().oversized,
+            "the untracked list alone must trip it"
+        );
     }
 
     /// The untracked section builds at most [`MAX_RENDERED_FILES`] rows while
@@ -1556,12 +1588,12 @@ mod tests {
         let (added, removed) = snap.totals();
         let total = (added + removed) as usize;
         assert!(
-            snap.retained_lines() > total,
+            snap.stats().retained_lines > total,
             "the context lines outweigh the changed ones — the shape that slipped through"
         );
-        assert!(snap.budget_exhausted());
+        assert!(snap.stats().budget_exhausted);
 
-        let summary = oversized_summary(&snap);
+        let summary = banner(&snap);
         assert!(summary.contains("budget"), "{summary}");
         assert!(
             summary.contains(&format!("{total} changed lines")),
@@ -1573,8 +1605,8 @@ mod tests {
             files,
             ..Default::default()
         };
-        assert!(!whole.budget_exhausted());
-        assert!(!oversized_summary(&whole).contains("budget"));
+        assert!(!whole.stats().budget_exhausted);
+        assert!(!banner(&whole).contains("budget"));
     }
 
     /// The sibling axis, blind in exactly the same place: one file cut at
@@ -1602,15 +1634,15 @@ mod tests {
         let (added, removed) = snap.totals();
         let total = (added + removed) as usize;
         assert!(
-            snap.retained_lines() > total,
+            snap.stats().retained_lines > total,
             "the shape the comparison reads backwards"
         );
         assert!(
-            !snap.budget_exhausted(),
+            !snap.stats().budget_exhausted,
             "the budget axis is not what fired"
         );
 
-        let summary = oversized_summary(&snap);
+        let summary = banner(&snap);
         assert!(summary.contains("per-file cap"), "{summary}");
         assert!(
             summary.contains(&format!("{total} changed lines")),
@@ -1622,7 +1654,7 @@ mod tests {
             files: files.clone(),
             ..Default::default()
         };
-        assert!(!oversized_summary(&whole).contains("per-file"));
+        assert!(!banner(&whole).contains("per-file"));
 
         // Both kinds in one snapshot: neither clause may mask the other.
         let mut both = files;
@@ -1635,7 +1667,7 @@ mod tests {
             truncated: Some(Truncation::Budget),
             ..context_heavy_file("dropped.rs")
         });
-        let summary = oversized_summary(&DiffSnapshot {
+        let summary = banner(&DiffSnapshot {
             files: both,
             ..Default::default()
         });
@@ -1663,7 +1695,7 @@ mod tests {
                     .collect(),
                 ..Default::default()
             });
-            let lines: usize = snap.retained_lines();
+            let lines: usize = snap.stats().retained_lines;
 
             let t = Instant::now();
             for _ in 0..10 {

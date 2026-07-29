@@ -132,18 +132,6 @@ impl DiffSnapshot {
             .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed))
     }
 
-    /// Diff lines actually kept, summed over every file. This — not
-    /// [`totals`](Self::totals) — is what the overlay would have to build rows
-    /// for if every file were expanded, so it's what the render-side thresholds
-    /// compare against. Cheap: one `len()` per hunk, not per line.
-    pub fn retained_lines(&self) -> usize {
-        self.files
-            .iter()
-            .flat_map(|f| &f.hunks)
-            .map(|h| h.lines.len())
-            .sum()
-    }
-
     /// The true number of untracked paths, whether or not the retained list was
     /// capped. Falls back to the retained length so a snapshot built by hand
     /// (tests, `..Default::default()`) can't under-report — the fallback is
@@ -152,10 +140,71 @@ impl DiffSnapshot {
         self.untracked_total.max(self.untracked.len())
     }
 
-    /// Whether this diff is too big to open expanded: every file starts
-    /// collapsed and the overlay leads with the "too large to render
-    /// efficiently" summary. Not a refusal — individual files still expand by
-    /// click, which is the escape hatch the summary points at.
+    /// Every whole-snapshot number the render path needs, in one pass.
+    ///
+    /// The overlay asks six questions of a landed snapshot — is it oversized,
+    /// what are the totals, how many lines were retained, did the budget fire,
+    /// did the per-file cap fire, how many untracked — and it asks them while
+    /// building the element tree, so they run on the UI thread on every render.
+    /// `files` is deliberately *not* capped (only hunks are, by
+    /// [`MAX_FILES_WITH_HUNKS`]), so answering them one accessor at a time is
+    /// six walks over a list whose length is the size of the working tree, on
+    /// exactly the tree this whole module exists to keep responsive. Hence one
+    /// walk answering all of them, and no per-question accessors to drift from
+    /// it.
+    ///
+    /// Computed rather than cached in the struct on purpose: the snapshot is
+    /// `PartialEq` and built by hand all over the tests with
+    /// `..Default::default()`, and a stored count would silently read as zero
+    /// for every one of them.
+    pub fn stats(&self) -> DiffStats {
+        let mut added = 0u32;
+        let mut removed = 0u32;
+        let mut retained_lines = 0usize;
+        let mut budget_exhausted = false;
+        let mut per_file_truncated = false;
+        for file in &self.files {
+            added += file.added;
+            removed += file.removed;
+            retained_lines += file.hunks.iter().map(|h| h.lines.len()).sum::<usize>();
+            match file.truncated {
+                Some(Truncation::Budget) => budget_exhausted = true,
+                Some(Truncation::PerFile) => per_file_truncated = true,
+                None => {}
+            }
+        }
+        let untracked_count = self.untracked_count();
+        DiffStats {
+            totals: (added, removed),
+            retained_lines,
+            untracked_count,
+            oversized: self.files.len() + untracked_count > AUTO_COLLAPSE_TOTAL_FILES
+                || retained_lines > AUTO_COLLAPSE_TOTAL_LINES,
+            budget_exhausted,
+            per_file_truncated,
+        }
+    }
+}
+
+/// Everything [`DiffSnapshot::stats`] answers in one walk. See that method for
+/// why the render path wants them together.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct DiffStats {
+    /// `(added, removed)` — exact, never affected by truncation. See
+    /// [`DiffSnapshot::totals`].
+    pub totals: (u32, u32),
+    /// Diff lines actually kept, summed over every file. This — not
+    /// [`totals`](Self::totals) — is what the overlay would have to build rows
+    /// for if every file were expanded, so it's what the render-side thresholds
+    /// compare against. Counted one `len()` per hunk, not per line.
+    pub retained_lines: usize,
+    /// True untracked count, cap or no cap. See
+    /// [`DiffSnapshot::untracked_count`].
+    pub untracked_count: usize,
+    /// Too big to open expanded: every file starts collapsed and the overlay
+    /// leads with the "too large to render efficiently" summary. Not a refusal —
+    /// individual files still expand by click, which is the escape hatch the
+    /// summary points at.
     ///
     /// Untracked paths count toward the file axis because they cost the same
     /// thing a collapsed file card costs — one row each, in the same
@@ -164,19 +213,14 @@ impl DiffSnapshot {
     /// `ls-files`, not through the diff. The summary names whichever axis
     /// tripped, so a big untracked list never reads as a claim that the *diff*
     /// is big.
-    pub fn oversized(&self) -> bool {
-        self.files.len() + self.untracked_count() > AUTO_COLLAPSE_TOTAL_FILES
-            || self.retained_lines() > AUTO_COLLAPSE_TOTAL_LINES
-    }
-
-    /// Whether the repo-wide budget dropped hunks that a smaller diff would
-    /// have kept — the overlay says so, so a missing body reads as a cap rather
-    /// than as tty7 losing the change.
-    pub fn budget_exhausted(&self) -> bool {
-        self.files
-            .iter()
-            .any(|f| f.truncated == Some(Truncation::Budget))
-    }
+    pub oversized: bool,
+    /// The repo-wide budget dropped hunks that a smaller diff would have kept —
+    /// the overlay says so, so a missing body reads as a cap rather than as tty7
+    /// losing the change.
+    pub budget_exhausted: bool,
+    /// Any file was cut at [`MAX_LINES_PER_FILE`] — the sibling axis, which the
+    /// oversized banner has to name separately because the two compose.
+    pub per_file_truncated: bool,
 }
 
 /// How a file changed vs `HEAD` — drives the status glyph in its header row.
@@ -785,7 +829,7 @@ index 1..2 100644
             ..Default::default()
         };
         assert_eq!(snap.totals(), (90_000, 0));
-        assert!(snap.budget_exhausted());
+        assert!(snap.stats().budget_exhausted);
     }
 
     /// The file cap keeps a rename-the-world diff from allocating a `Vec<Hunk>`
@@ -815,8 +859,8 @@ index 1..2 100644
             ..Default::default()
         };
         assert!(snap.files.iter().all(|f| f.truncated.is_none()));
-        assert!(!snap.oversized());
-        assert!(!snap.budget_exhausted());
+        assert!(!snap.stats().oversized);
+        assert!(!snap.stats().budget_exhausted);
     }
 
     /// `oversized` trips on either axis: many files, or many retained lines.
@@ -826,7 +870,7 @@ index 1..2 100644
             files: parse_unified(&many_files(AUTO_COLLAPSE_TOTAL_FILES + 1, 1)),
             ..Default::default()
         };
-        assert!(by_files.oversized());
+        assert!(by_files.stats().oversized);
 
         // Few files, but past the line threshold.
         let by_lines = DiffSnapshot {
@@ -834,8 +878,8 @@ index 1..2 100644
             ..Default::default()
         };
         assert!(by_lines.files.len() <= AUTO_COLLAPSE_TOTAL_FILES);
-        assert!(by_lines.retained_lines() > AUTO_COLLAPSE_TOTAL_LINES);
-        assert!(by_lines.oversized());
+        assert!(by_lines.stats().retained_lines > AUTO_COLLAPSE_TOTAL_LINES);
+        assert!(by_lines.stats().oversized);
     }
 
     /// Even a budget-truncated file keeps a removed line whose *content* starts
