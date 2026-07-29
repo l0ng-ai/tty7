@@ -81,7 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Ports need no forwarding (WSL shares `localhost`, so ⌘-clicking a dev server's
   URL just works), and files move over the same `Host` calls every remote
-  workspace uses, or through `\\wsl$` directly.
+  workspace uses, or through `\\wsl$` directly. (#253)
 
 - **Copy Session ID** — the agent's native session id on the clipboard, beside
   *Copy Working Directory* in the tab / sidebar context menu, the palette and
