@@ -46,6 +46,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use crate::core::machine::{self, MachineStore};
 use crate::core::workspace_store::{Attachment, SubscriberId, Subscription, WorkspaceStore};
 use crate::daemon::control::{
     CONTROL_VERSION, ControlClientMsg, ControlEvent, ControlHello, ControlHelloOk, ControlReply,
@@ -82,6 +83,19 @@ pub const MAX_QUEUED: usize = 1024;
 /// `WorkspacePut` into unbounded memory.
 pub const WORKSPACE_EVENT_QUEUE: usize = 64;
 
+/// `Layout` deltas one connection will let queue before it starts dropping.
+///
+/// Unlike a `WorkspaceChanged` push, a delta is *not* self-superseding — a
+/// dropped one leaves the peer's picture of the tree wrong until its next full
+/// pull. The cap is still right, for the same reason as the watch caps: a peer
+/// that has stopped reading its socket must not turn another client's edit
+/// into unbounded server memory. What makes the drop survivable is that such a
+/// peer is already inside [`crate::daemon::control::KEEPALIVE_DEAD_AFTER`] of
+/// losing the link, and every reconnect begins with a full pull that
+/// resynchronizes it; a merely *slow* peer would have to fall a thousand
+/// edits behind to lose one.
+pub const LAYOUT_EVENT_QUEUE: usize = 1024;
+
 // ---------------------------------------------------------------------------
 // Entry points
 // ---------------------------------------------------------------------------
@@ -101,6 +115,14 @@ pub struct Services {
     /// request with "this server does not serve the workspace store" — the same
     /// answer a build from before M5 gives.
     pub workspaces: Option<Arc<WorkspaceStore>>,
+    /// The machine's own workspace *tree* — the daemon-owned structure the
+    /// semantic operations edit, replacing the opaque record store above.
+    /// Carried separately while the two schemes coexist: clients that still
+    /// speak whole-record `Put` keep working against `workspaces`, and the
+    /// `machine-tree` capability bit is advertised only when this is here.
+    /// `None` answers every tree verb with "this server does not serve the
+    /// machine tree".
+    pub machine: Option<Arc<MachineStore>>,
     /// Who currently holds each workspace, and how to reach them. Shared across
     /// every connection this server accepts — that sharing *is* the takeover:
     /// two connections can only displace each other if they are looking at one
@@ -118,8 +140,17 @@ impl Services {
     pub fn with_workspaces(store: Arc<WorkspaceStore>) -> Services {
         Services {
             workspaces: Some(store),
+            machine: None,
             attachments: Arc::new(AttachRegistry::default()),
         }
+    }
+
+    /// `self`, also serving the machine tree. Builder-shaped because the tree
+    /// rides alongside whatever else the server carries — a store, or nothing
+    /// but host RPC — rather than replacing it.
+    pub fn and_machine(mut self, store: Arc<MachineStore>) -> Services {
+        self.machine = Some(store);
+        self
     }
 }
 
@@ -394,6 +425,10 @@ where
     // Subscribed before the first request is read, so a change another client
     // makes while this one is still listing cannot slip through the gap.
     let workspace_sub = subscribe_workspaces(&services, &sink);
+    // Same rule, and the same gap, for the machine tree's deltas: a full pull
+    // issued after this point can race a delta (the client tolerates that),
+    // but an edit can never fall between subscription and first read.
+    let machine_sub = subscribe_machine(&services, &sink);
 
     let conn = Arc::new(Conn {
         host,
@@ -405,6 +440,8 @@ where
         pool: Pool::new(),
         workspaces: services.workspaces.clone(),
         workspace_origin: workspace_sub.as_ref().map(Subscription::id),
+        machine: services.machine.clone(),
+        machine_origin: machine_sub.as_ref().map(machine::Subscription::id),
         attachments: Arc::clone(&services.attachments),
         id: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
         holder: Holder {
@@ -440,6 +477,7 @@ where
         .clear();
     conn.release_all_workspaces();
     drop(workspace_sub);
+    drop(machine_sub);
     sink.retire();
     let _ = shutdown.shutdown_link();
 
@@ -502,6 +540,9 @@ fn handshake<R: Read>(
     ];
     if services.workspaces.is_some() {
         features.push(feature::WORKSPACE_STORE.to_string());
+    }
+    if services.machine.is_some() {
+        features.push(feature::MACHINE_TREE.to_string());
     }
 
     sink.send(&ControlServerMsg::HelloOk(ControlHelloOk {
@@ -887,6 +928,154 @@ fn run_request(
             detach_workspace(conn, &id)?;
             (ReplyOk::Unit, Vec::new())
         }
+
+        // ----- machine tree --------------------------------------------------
+        // Each arm is a thin translation: the store validates, mutates,
+        // persists and broadcasts (with this connection's origin excluded),
+        // and its refusals cross the wire as the client-visible errors they
+        // already are.
+        ControlRequest::MachineGet => (
+            ReplyOk::MachineTree(Box::new(conn.machine()?.machine())),
+            Vec::new(),
+        ),
+        ControlRequest::WorkspaceTree { workspace } => (
+            ReplyOk::WorkspaceTree(Box::new(conn.machine()?.workspace(workspace)?)),
+            Vec::new(),
+        ),
+        ControlRequest::WorkspaceCreate { name } => (
+            ReplyOk::WorkspaceTree(Box::new(
+                conn.machine()?
+                    .workspace_create(name, conn.machine_origin)?,
+            )),
+            Vec::new(),
+        ),
+        ControlRequest::WorkspaceRename { workspace, name } => {
+            conn.machine()?
+                .workspace_rename(workspace, name, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::WorkspaceRemove { workspace } => {
+            let store = conn.machine()?;
+            let panes = {
+                // Same discipline as `WorkspaceDelete` above: the attach
+                // registry forgets the workspace under the handover lock, or a
+                // stale dedicated entry would one day close an innocent link.
+                let _handover = conn.attachments.handover();
+                let panes = store.workspace_delete(workspace, conn.machine_origin)?;
+                conn.attachments.forget_workspace(&workspace.to_string());
+                panes
+            };
+            (ReplyOk::Panes(panes), Vec::new())
+        }
+        ControlRequest::WorkspaceTouch { workspace } => {
+            conn.machine()?
+                .workspace_touch(workspace, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::WorkspaceSetActiveTab { workspace, tab } => {
+            conn.machine()?
+                .workspace_set_active_tab(workspace, tab, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::TabCreate {
+            workspace,
+            at,
+            pane,
+        } => (
+            ReplyOk::TabTree(Box::new(conn.machine()?.tab_create(
+                workspace,
+                at.map(clamp_usize),
+                pane,
+                conn.machine_origin,
+            )?)),
+            Vec::new(),
+        ),
+        ControlRequest::TabClose { workspace, tab } => (
+            ReplyOk::Panes(
+                conn.machine()?
+                    .tab_close(workspace, tab, conn.machine_origin)?,
+            ),
+            Vec::new(),
+        ),
+        ControlRequest::TabRename {
+            workspace,
+            tab,
+            name,
+        } => {
+            conn.machine()?
+                .tab_rename(workspace, tab, name, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::TabMove { workspace, tab, to } => {
+            conn.machine()?
+                .tab_move(workspace, tab, clamp_usize(to), conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::TabSetGroup {
+            workspace,
+            tab,
+            group,
+        } => {
+            conn.machine()?
+                .tab_set_group(workspace, tab, group, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::PaneSplit {
+            workspace,
+            pane,
+            axis,
+            ratio,
+            new,
+            first,
+        } => {
+            conn.machine()?.pane_split(
+                workspace,
+                pane,
+                axis,
+                ratio,
+                new,
+                first,
+                conn.machine_origin,
+            )?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::PaneClose { workspace, pane } => (
+            ReplyOk::Panes(
+                conn.machine()?
+                    .pane_close(workspace, pane, conn.machine_origin)?,
+            ),
+            Vec::new(),
+        ),
+        ControlRequest::PaneSetRatio {
+            workspace,
+            tab,
+            path,
+            ratio,
+        } => {
+            conn.machine()?
+                .pane_set_ratio(workspace, tab, path, ratio, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::PaneMove {
+            workspace,
+            pane,
+            to,
+            axis,
+            first,
+        } => {
+            conn.machine()?
+                .pane_move(workspace, pane, to, axis, first, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::PaneReplace {
+            workspace,
+            old,
+            new,
+        } => {
+            conn.machine()?
+                .pane_replace(workspace, old, new, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
     })
 }
 
@@ -932,6 +1121,12 @@ struct Conn {
     /// This connection's subscriber id, so its own writes do not come back to
     /// it as `WorkspaceChanged` pushes. `None` when there is no store.
     workspace_origin: Option<SubscriberId>,
+    /// The machine's workspace tree, when this server serves it.
+    machine: Option<Arc<MachineStore>>,
+    /// This connection's tree-subscriber id — the same origin-exclusion role
+    /// `workspace_origin` plays for the record store, so a tree operation's
+    /// own `Layout` delta never comes back to its writer.
+    machine_origin: Option<machine::SubscriberId>,
     /// Shared with every other connection this server accepts — see
     /// [`AttachRegistry`].
     attachments: Arc<AttachRegistry>,
@@ -952,6 +1147,15 @@ impl Conn {
         self.workspaces
             .as_ref()
             .ok_or_else(|| io::Error::other("this server does not serve the workspace store"))
+    }
+
+    /// The machine tree, or the refusal a server not carrying one answers.
+    /// The client's cue is the `machine-tree` capability bit; this is the
+    /// answer for one that asked anyway.
+    fn machine(&self) -> io::Result<&Arc<MachineStore>> {
+        self.machine
+            .as_ref()
+            .ok_or_else(|| io::Error::other("this server does not serve the machine tree"))
     }
 
     /// Give up every workspace this connection still holds, at teardown.
@@ -1143,6 +1347,47 @@ fn subscribe_workspaces(services: &Services, sink: &Arc<Sink>) -> Option<Subscri
     }));
     spawn_workspace_forwarder(rx, Arc::clone(sink));
     Some(subscription)
+}
+
+/// Subscribe this connection to the machine tree's deltas, if there is one.
+///
+/// The same two-hop shape as [`subscribe_workspaces`], for the same reason:
+/// the store's callback runs on the writing connection's thread, so it only
+/// enqueues, and a peer that has stopped reading stalls nothing but its own
+/// forwarder. The queue-full case is documented on [`LAYOUT_EVENT_QUEUE`].
+fn subscribe_machine(services: &Services, sink: &Arc<Sink>) -> Option<machine::Subscription> {
+    let store = services.machine.as_ref()?;
+    let (tx, rx) = smol::channel::bounded::<(String, machine::LayoutDelta)>(LAYOUT_EVENT_QUEUE);
+    let subscription = store.subscribe(Arc::new(
+        move |workspace: &str, delta: &machine::LayoutDelta| {
+            if tx.try_send((workspace.to_string(), delta.clone())).is_err() {
+                log::warn!("dropping a layout delta for a peer {LAYOUT_EVENT_QUEUE} deltas behind");
+            }
+        },
+    ));
+    spawn_layout_forwarder(rx, Arc::clone(sink));
+    Some(subscription)
+}
+
+/// Relay tree deltas to the peer as `Layout` pushes. Ends on its own when the
+/// subscription is dropped, exactly like [`spawn_workspace_forwarder`].
+fn spawn_layout_forwarder(
+    rx: smol::channel::Receiver<(String, machine::LayoutDelta)>,
+    sink: Arc<Sink>,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("tty7-control-layout".into())
+        .spawn(move || {
+            while let Ok((workspace, delta)) = rx.recv_blocking() {
+                let event = ControlEvent::Layout { workspace, delta };
+                if sink.send(&ControlServerMsg::Event(event)).is_err() {
+                    return;
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        log::warn!("could not start the layout forwarder: {e}");
+    }
 }
 
 /// Relay workspace changes to the peer as `WorkspaceChanged` pushes.

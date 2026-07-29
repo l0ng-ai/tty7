@@ -155,8 +155,9 @@ pub fn run_daemon() -> anyhow::Result<()> {
 /// clients see the same "does not serve the workspace store" answer a server
 /// without one has always given.
 pub fn control_services() -> crate::host::server::Services {
+    use crate::core::machine::MachineStore;
     use crate::core::workspace_store::WorkspaceStore;
-    match WorkspaceStore::shared() {
+    let services = match WorkspaceStore::shared() {
         Ok(store) => {
             log::info!("workspace store at {}", store.path().display());
             crate::host::server::Services::with_workspaces(store)
@@ -164,6 +165,20 @@ pub fn control_services() -> crate::host::server::Services {
         Err(e) => {
             log::warn!("no workspace store ({e}); serving files and panes only");
             crate::host::server::Services::none()
+        }
+    };
+    // The machine tree rides alongside the record store while clients migrate
+    // from whole-record `Put` to the semantic operations; both resolve their
+    // file under the same data directory, so a machine that can hold one can
+    // hold the other.
+    match MachineStore::shared() {
+        Ok(machine) => {
+            log::info!("machine tree at {}", machine.path().display());
+            services.and_machine(machine)
+        }
+        Err(e) => {
+            log::warn!("no machine tree ({e}); its verbs stay unserved");
+            services
         }
     }
 }

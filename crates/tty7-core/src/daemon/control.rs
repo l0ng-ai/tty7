@@ -188,6 +188,15 @@ pub mod feature {
     pub const HOST_RPC: &str = "host-rpc";
     /// Serves the `Workspace*` requests.
     pub const WORKSPACE_STORE: &str = "workspace-store";
+    /// Serves the machine-owned workspace tree: the `MachineGet` /
+    /// `WorkspaceTree` pulls, the semantic tree operations, and the
+    /// [`super::ControlEvent::Layout`] pushes. Advertised only when the server
+    /// actually carries a [`crate::core::machine::MachineStore`], so a client
+    /// learns from the handshake whether the tree verbs are worth a round
+    /// trip. Distinct from [`WORKSPACE_STORE`], which is the retired
+    /// opaque-record scheme this one replaces — the two coexist while clients
+    /// migrate.
+    pub const MACHINE_TREE: &str = "machine-tree";
     /// Can be launched as `--stdio` and bridge its own stdin/stdout to the
     /// machine-local socket (the fallback when `AllowStreamLocalForwarding` is
     /// off, the only option under WSL, and how the CI end-to-end test runs).
@@ -209,6 +218,13 @@ pub use crate::host::{Entry, MTime, Meta, Output, SearchHit};
 // the wire, not a wire-only copy of it.
 pub use crate::core::shells::{DetectedShell, ShellInventory};
 
+// And for the machine tree: the daemon's own tree types are the wire types, so
+// a schema drift between the store and the dialect is a compile error rather
+// than a silent mistranslation. `WorkspaceId` rides along because every tree
+// verb addresses a workspace by it.
+pub use crate::core::machine::{Axis, LayoutDelta, Machine, PaneSeed, Side, Tab, TabId};
+pub use crate::core::session::WorkspaceId;
+
 // ---------------------------------------------------------------------------
 // Requests
 // ---------------------------------------------------------------------------
@@ -220,7 +236,8 @@ pub use crate::core::shells::{DetectedShell, ShellInventory};
 /// are routinely different operating systems. Remote paths are UTF-8 POSIX; a
 /// non-UTF-8 name on the server is returned lossily by `ReadDir`, matching what
 /// the file tree already does locally with `to_string_lossy`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+// Not `Eq`: the machine-tree verbs carry split ratios, and `f32` has no `Eq`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlRequest {
     // ----- liveness ---------------------------------------------------------
@@ -363,6 +380,117 @@ pub enum ControlRequest {
     WorkspaceDetach {
         id: String,
     },
+
+    // ----- machine tree (the daemon-owned structure) ------------------------
+    // The semantic replacement for the opaque `Workspace*` record verbs above:
+    // instead of a whole-record `Put` (last-writer-wins the moment two clients
+    // write), each operation names its edit, the server validates it against
+    // the tree it owns, and everyone else hears an incremental
+    // [`ControlEvent::Layout`]. Positions cross as `u64` for the same reason
+    // `Search`'s limits do: a 32-bit server clamps rather than wraps.
+    /// The whole tree — every workspace, tab and pane record on the machine.
+    /// The full pull a client starts from before applying deltas.
+    MachineGet,
+    /// One workspace of the tree, whole. `NotFound` when the machine has no
+    /// such workspace; also the re-pull a client falls back to when it cannot
+    /// apply a delta.
+    WorkspaceTree {
+        workspace: WorkspaceId,
+    },
+    /// Create an empty workspace; its first tab arrives as its own operation.
+    /// Answers the newborn [`ReplyOk::WorkspaceTree`], so the writer learns
+    /// the minted id from the reply rather than from an echo it never gets.
+    WorkspaceCreate {
+        name: Option<String>,
+    },
+    WorkspaceRename {
+        workspace: WorkspaceId,
+        name: Option<String>,
+    },
+    /// Forget a tree workspace and everything under it. Named `Remove` because
+    /// `WorkspaceDelete` above is taken by the retired record store's verb.
+    WorkspaceRemove {
+        workspace: WorkspaceId,
+    },
+    /// Stamp a workspace as just-focused, for pickers ordered by recency.
+    WorkspaceTouch {
+        workspace: WorkspaceId,
+    },
+    WorkspaceSetActiveTab {
+        workspace: WorkspaceId,
+        tab: TabId,
+    },
+    /// Create a tab holding `pane` at position `at` (clamped; `None` appends).
+    /// `pane` is the seed for a pane the client already spawned over the pane
+    /// protocol — PTYs come from there, the tree only adopts them.
+    TabCreate {
+        workspace: WorkspaceId,
+        at: Option<u64>,
+        pane: PaneSeed,
+    },
+    /// Close a tab. Answers [`ReplyOk::Panes`]: the pane ids that left the
+    /// tree, for the caller to kill — the tree does bookkeeping, not process
+    /// teardown.
+    TabClose {
+        workspace: WorkspaceId,
+        tab: TabId,
+    },
+    TabRename {
+        workspace: WorkspaceId,
+        tab: TabId,
+        name: Option<String>,
+    },
+    TabMove {
+        workspace: WorkspaceId,
+        tab: TabId,
+        to: u64,
+    },
+    /// Record the tab's sidebar repo group, as resolved by the client.
+    TabSetGroup {
+        workspace: WorkspaceId,
+        tab: TabId,
+        group: Option<String>,
+    },
+    /// Split the leaf holding `pane`; `new` seeds the freshly-spawned second
+    /// pane, `first` puts it on the upper/left side.
+    PaneSplit {
+        workspace: WorkspaceId,
+        pane: u64,
+        axis: Axis,
+        ratio: f32,
+        new: PaneSeed,
+        first: bool,
+    },
+    /// Close one pane, collapsing its split (or the whole tab when it was the
+    /// last pane). Answers [`ReplyOk::Panes`] like `TabClose`.
+    PaneClose {
+        workspace: WorkspaceId,
+        pane: u64,
+    },
+    /// Move a split's divider. `path` addresses the split from the tab root,
+    /// and a path the tree no longer has refuses rather than guessing.
+    PaneSetRatio {
+        workspace: WorkspaceId,
+        tab: TabId,
+        path: Vec<Side>,
+        ratio: f32,
+    },
+    /// tmux's `move-pane`: take `pane` out of where it is and re-split it next
+    /// to `to`, dissolving the source tab if that emptied it.
+    PaneMove {
+        workspace: WorkspaceId,
+        pane: u64,
+        to: u64,
+        axis: Axis,
+        first: bool,
+    },
+    /// The revival: rebind the leaf holding dead pane `old` to freshly-spawned
+    /// successor `new`, spending the old registry record.
+    PaneReplace {
+        workspace: WorkspaceId,
+        old: u64,
+        new: PaneSeed,
+    },
 }
 
 impl ControlRequest {
@@ -405,6 +533,26 @@ impl ControlRequest {
             // be wedged — the push is `try`-shaped on the server, so this only
             // has to cover a slow link, not a slow client.
             WorkspaceAttach { .. } | WorkspaceDetach { .. } => Duration::from_secs(10),
+            // Tree operations are a locked mutation plus one small file write,
+            // so the budget is the record verbs': it covers a slow disk, not
+            // slow work.
+            MachineGet
+            | WorkspaceTree { .. }
+            | WorkspaceCreate { .. }
+            | WorkspaceRename { .. }
+            | WorkspaceRemove { .. }
+            | WorkspaceTouch { .. }
+            | WorkspaceSetActiveTab { .. }
+            | TabCreate { .. }
+            | TabClose { .. }
+            | TabRename { .. }
+            | TabMove { .. }
+            | TabSetGroup { .. }
+            | PaneSplit { .. }
+            | PaneClose { .. }
+            | PaneSetRatio { .. }
+            | PaneMove { .. }
+            | PaneReplace { .. } => Duration::from_secs(10),
         }
     }
 
@@ -425,7 +573,7 @@ impl ControlRequest {
 // ---------------------------------------------------------------------------
 
 /// A reply to one request: the operation's value, or why it couldn't run.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ControlReply {
     #[serde(rename = "ok")]
     Ok(ReplyOk),
@@ -446,7 +594,7 @@ impl ControlReply {
 /// The successful half of a reply. One variant per result *shape*, not per
 /// request — several requests answer `Unit`, and `Stat` and `WriteFile` both
 /// answer `Meta`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplyOk {
     Unit,
@@ -474,6 +622,17 @@ pub enum ReplyOk {
     Attached {
         took_over_from: Option<String>,
     },
+    /// [`ControlRequest::MachineGet`]: the machine's whole tree. Boxed for the
+    /// same reason the tree replies below are: `ReplyOk` values live on the
+    /// dispatch stack, and the common replies must not pay for the big ones.
+    MachineTree(Box<Machine>),
+    /// One workspace of the tree ([`ControlRequest::WorkspaceTree`] /
+    /// [`ControlRequest::WorkspaceCreate`]).
+    WorkspaceTree(Box<crate::core::machine::Workspace>),
+    /// The tab an operation created ([`ControlRequest::TabCreate`]).
+    TabTree(Box<Tab>),
+    /// Pane ids an operation removed from the tree, for the caller to kill.
+    Panes(Vec<u64>),
 }
 
 /// An operation that could not be performed.
@@ -580,7 +739,7 @@ impl WireErrorKind {
 // ---------------------------------------------------------------------------
 
 /// An unsolicited server push, carried on [`kind::EVENT`] with `req_id == 0`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlEvent {
     /// Filesystem changes, coalesced and deduplicated by the server over a
@@ -617,6 +776,19 @@ pub enum ControlEvent {
     },
     WorkspaceChanged {
         id: String,
+    },
+    /// One incremental change to one tree workspace on this machine — the
+    /// push half of the machine-tree verbs. The writer never receives its own
+    /// operation back (origin exclusion, so an optimistically-applied edit is
+    /// not applied twice); every other client applies the delta to its live
+    /// window or, when it cannot, re-pulls the workspace with
+    /// [`ControlRequest::WorkspaceTree`].
+    ///
+    /// `workspace` is the [`WorkspaceId`] rendered as a string, matching how
+    /// `Preempted` and `WorkspaceChanged` name theirs.
+    Layout {
+        workspace: String,
+        delta: LayoutDelta,
     },
 }
 
@@ -826,7 +998,7 @@ fn require_nonzero(req_id: u64, what: &str) -> io::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// A control frame travelling client → server.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ControlClientMsg {
     Hello(ControlHello),
     Request {
@@ -933,7 +1105,7 @@ impl ControlClientMsg {
 }
 
 /// A control frame travelling server → client.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ControlServerMsg {
     HelloOk(ControlHelloOk),
     Response {
@@ -1065,7 +1237,7 @@ pub const CLOSE_GRACE: Duration = Duration::from_millis(500);
 
 /// A reply as the caller receives it: the value, plus the blob if the frame
 /// carried one.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ControlResponse {
     pub reply: ReplyOk,
     pub blob: Vec<u8>,
