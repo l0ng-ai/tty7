@@ -951,7 +951,7 @@ pub fn default_config_dir() -> Option<PathBuf> {
 }
 
 /// Resolve a file under the config directory (no `dirs` dep). Shared by every
-/// config-dir file (`config.json`, `session.json`, `history`).
+/// config-dir file (`config.json`, `views.json`, `history`).
 pub fn config_path(file: &str) -> Option<PathBuf> {
     Some(config_dir()?.join(file))
 }

@@ -423,7 +423,7 @@ fn main() {
             // Workspace" and the workspace picker need the identical path).
             //
             // Deliberately one window, not one per workspace that was open at
-            // quit: see `Workspaces::workspace_to_restore` for why, and
+            // quit: see `WindowViews::workspace_to_restore` for why, and
             // `WorkspaceStore::restore_one` for what happens to the others (they
             // are detached, not forgotten — panes keep running and the switcher
             // lists them). Quitting with every window closed — or a first run —

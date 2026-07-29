@@ -239,7 +239,7 @@ impl RemoteTarget {
     ///
     /// The host is lowercased here *and* in [`connection_key`](Self::connection_key)
     /// — here so two equal targets compare equal, there so a hand-edited
-    /// `session.json` with `Box.Local` still derives the same id as `box.local`.
+    /// `views.json` with `Box.Local` still derives the same id as `box.local`.
     pub fn direct(user: impl Into<String>, host: impl Into<String>, port: u16) -> RemoteTarget {
         RemoteTarget::Direct {
             user: user.into(),
