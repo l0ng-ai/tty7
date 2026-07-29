@@ -162,6 +162,11 @@ impl LocalLink {
                             cx,
                             tty7_core::host::HostId::LOCAL,
                         );
+                        // …and re-runs every local window's sync: a window
+                        // built while this link was still dialing is parked
+                        // `Unprimed { dirty }` with nothing else scheduled to
+                        // wake it (see `tree_sync::on_link_up`).
+                        crate::ui::tree_sync::on_link_up(cx, tty7_core::host::HostId::LOCAL);
                     }
                     Err(e) => {
                         // The next tick schedules the following attempt off

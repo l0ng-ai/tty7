@@ -852,6 +852,28 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
     }
 }
 
+/// A control link to `host` just came up (or came back): re-run the sync for
+/// every window bound to that machine.
+///
+/// This is the retry [`start_prime`]'s unreachable arm leaves behind. A window
+/// built while the link was still dialing parks as `Unprimed { dirty }`, and
+/// the only other thing that re-enters [`sync_window`] is the *next*
+/// structural change — on a first launch that may never come, and a quit
+/// before it comes loses the window's layout (the machine never heard of it).
+/// The link supervisor calling this on connect is what turns "the reconnect
+/// gets there first" from a hope into a mechanism. Harmless for windows that
+/// are already synced: their diff is empty and queues nothing.
+pub(crate) fn on_link_up(cx: &mut App, host: HostId) {
+    for (workspace, app) in crate::ui::windows::WindowRegistry::open_windows(cx) {
+        if WorkspaceStore::host_of(cx, workspace) != host {
+            continue;
+        }
+        if let Some(app) = app.upgrade() {
+            app.update(cx, |app, cx| sync_window(app, cx));
+        }
+    }
+}
+
 /// Whether `client_ws`'s window has seen its machine's tree (or was declared
 /// authoritative). The gate for destructive acts an *empty* window licenses —
 /// a window whose hydration has not answered is empty because it is waiting,
