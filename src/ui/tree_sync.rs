@@ -838,7 +838,14 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
             };
             let ops = diff(machine_ws, mirror, &desired, desired_active, scope, &held);
             if !ops.is_empty() {
+                let (tabs, active) = (mirror.tabs.clone(), mirror.active);
                 state.queue.extend(ops);
+                // Origin exclusion means this client never hears these ops
+                // back, so the machine-wide mirror learns them here.
+                let host = WorkspaceStore::host_of(cx, client_ws);
+                crate::ui::machine_mirror::MachineMirrors::note_synced_workspace(
+                    cx, host, machine_ws, tabs, active,
+                );
                 pump(cx, client_ws);
             }
         }
@@ -931,6 +938,9 @@ pub(crate) fn fire_workspace_op(
     let host = WorkspaceStore::host_of(cx, client_ws);
     let machine_ws = tree_workspace_id(cx, client_ws);
     let request = op(machine_ws);
+    // The op will not echo back to this client (origin exclusion), so the
+    // machine-wide mirror folds it in here.
+    crate::ui::machine_mirror::MachineMirrors::note_workspace_op(cx, host, &request);
     let Some(client) = control_for(cx, host) else {
         log::debug!("no control link to send {request:?}; the machine keeps its copy");
         return;
@@ -1014,22 +1024,14 @@ fn finish_prime(cx: &mut App, client_ws: WorkspaceId, outcome: io::Result<WsMirr
         return;
     };
     let was_dirty = matches!(state.sync, SyncPhase::Unprimed { dirty: true, .. });
-    match outcome {
+    let landed = match outcome {
         Ok(mirror) => {
             // An empty tree has nothing an uninformed window could wrongly
             // prune, so priming against one is as good as having seen it.
             state.informed |= mirror.tabs.is_empty();
+            let landed = (mirror.tabs.clone(), mirror.active);
             state.sync = SyncPhase::Primed(mirror);
-            if !was_dirty {
-                return;
-            }
-            // The window changed while the pull was in flight; diff it now.
-            let Some(app) = crate::ui::windows::WindowRegistry::app_for(cx, client_ws)
-                .and_then(|app| app.upgrade())
-            else {
-                return;
-            };
-            app.update(cx, |app, cx| sync_window(app, cx));
+            landed
         }
         Err(e) => {
             log::warn!("could not pull the tree for workspace {client_ws}: {e}");
@@ -1037,8 +1039,26 @@ fn finish_prime(cx: &mut App, client_ws: WorkspaceId, outcome: io::Result<WsMirr
                 dirty: was_dirty,
                 priming: false,
             };
+            return;
         }
+    };
+    // The pull may have created the workspace on the machine, which this
+    // client (the writer) hears no delta for.
+    let host = WorkspaceStore::host_of(cx, client_ws);
+    let machine_ws = tree_workspace_id(cx, client_ws);
+    crate::ui::machine_mirror::MachineMirrors::note_synced_workspace(
+        cx, host, machine_ws, landed.0, landed.1,
+    );
+    if !was_dirty {
+        return;
     }
+    // The window changed while the pull was in flight; diff it now.
+    let Some(app) =
+        crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|app| app.upgrade())
+    else {
+        return;
+    };
+    app.update(cx, |app, cx| sync_window(app, cx));
 }
 
 /// Send everything queued, in order, one batch in flight at a time.
@@ -1267,30 +1287,33 @@ fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
 /// The blocking half: the whole machine (the tree plus the pane registry —
 /// `WorkspaceTree` alone answers structure without the pane facts revival
 /// needs), reduced to this workspace's mirror and session. A machine that has
-/// no such workspace gets it created, empty.
+/// no such workspace gets it created, empty. The machine rides along whole so
+/// the caller can refresh the machine-wide mirror off a pull it already paid
+/// for.
 fn pull_workspace(
     client: &ControlClient,
     machine_ws: WorkspaceId,
     name: Option<String>,
-) -> io::Result<(WsMirror, Session)> {
+) -> io::Result<(Machine, WsMirror, Session)> {
     let machine: Machine = match client.call(ControlRequest::MachineGet)? {
         ReplyOk::MachineTree(m) => *m,
         other => return Err(io::Error::other(format!("MachineGet answered {other:?}"))),
     };
     match machine.workspaces.iter().find(|w| w.id == machine_ws) {
-        Some(ws) => Ok((
-            WsMirror {
+        Some(ws) => {
+            let mirror = WsMirror {
                 tabs: ws.tabs.clone(),
                 active: ws.active_tab,
-            },
-            session_from_tree(ws, &machine.panes),
-        )),
+            };
+            let session = session_from_tree(ws, &machine.panes);
+            Ok((machine, mirror, session))
+        }
         None => {
             client.call(ControlRequest::WorkspaceCreate {
                 name,
                 workspace: Some(machine_ws),
             })?;
-            Ok((WsMirror::default(), Session::default()))
+            Ok((machine, WsMirror::default(), Session::default()))
         }
     }
 }
@@ -1299,9 +1322,9 @@ fn finish_hydration(
     cx: &mut App,
     client_ws: WorkspaceId,
     adopt: Adopt,
-    outcome: io::Result<(WsMirror, Session)>,
+    outcome: io::Result<(Machine, WsMirror, Session)>,
 ) {
-    let (mirror, session) = match outcome {
+    let (machine, mirror, session) = match outcome {
         Ok(pulled) => pulled,
         Err(e) => {
             log::warn!("could not hydrate workspace {client_ws} from its machine: {e}");
@@ -1313,6 +1336,9 @@ fn finish_hydration(
             return;
         }
     };
+    // The pull is a whole `MachineGet`; the machine-wide mirror gets it free.
+    let host = WorkspaceStore::host_of(cx, client_ws);
+    crate::ui::machine_mirror::MachineMirrors::install(cx, host, machine);
     let was_dirty = {
         // `get_mut`, never `entry` — same reason as `finish_prime`.
         let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
@@ -1396,6 +1422,10 @@ fn finish_hydration(
 /// window whose state has drifted — falls back to a full re-pull of the
 /// workspace and a rebuild, the same recovery every other failure uses.
 pub(crate) fn on_layout_delta(cx: &mut App, host: HostId, key: &str, delta: LayoutDelta) {
+    // The machine-wide mirror hears every delta, windowed workspace or not —
+    // it is what the picker and the menus read about workspaces no window
+    // shows.
+    crate::ui::machine_mirror::MachineMirrors::apply_delta(cx, host, key, &delta);
     // The event names the machine's workspace id; translate to the client's.
     let client_ws = if host.is_local() {
         key.parse::<WorkspaceId>().ok()

@@ -3149,8 +3149,8 @@ impl Tty7App {
     pub(crate) fn sync_window_title(&self, window: &mut Window, cx: &App) {
         let title = WorkspaceStore::all(cx)
             .get(self.workspace)
-            .filter(|w| !w.session.tabs.is_empty())
-            .map(|w| w.display_name())
+            .filter(|w| crate::ui::machine_mirror::pane_count(cx, w).unwrap_or(0) > 0)
+            .and_then(|w| crate::ui::machine_mirror::display_name(cx, w))
             .unwrap_or_else(|| "tty7".to_string());
         if *self.window_title.borrow() == title {
             return;
@@ -4444,10 +4444,8 @@ impl Tty7App {
     /// Turn the title-bar workspace chip into a text field, seeded with the
     /// current name. Committing on Enter or blur mirrors the tab rename.
     pub(crate) fn start_workspace_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = WorkspaceStore::all(cx)
-            .get(self.workspace)
-            .map(|w| w.display_name())
-            .unwrap_or_default();
+        let current =
+            crate::ui::machine_mirror::display_name_for(cx, self.workspace).unwrap_or_default();
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
         input.update(cx, |state, cx| state.focus(window, cx));
         let subs = vec![cx.subscribe_in(

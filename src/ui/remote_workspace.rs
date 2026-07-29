@@ -1313,6 +1313,9 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
             if became {
                 changed = true;
                 log::info!("link to {target} is attached");
+                // A fresh link means whatever the mirror held is history; the
+                // full pull re-bases it before deltas resume advancing it.
+                crate::ui::machine_mirror::MachineMirrors::refresh(cx, host);
             }
             continue;
         }

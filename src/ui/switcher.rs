@@ -341,11 +341,14 @@ impl Tty7App {
                 });
                 groups[slot].rows.push(Row {
                     id: w.id,
-                    name: w.display_name(),
-                    path: w
-                        .dominant_repo()
-                        .or_else(|| w.first_cwd())
-                        .map(|p| crate::ui::home::display_path(&p))
+                    // Both read the machine's mirror — the tree owns the
+                    // layout these used to be derived from. A machine not
+                    // pulled yet (launch's first frames; an unreached remote)
+                    // renders the not-knowing rather than a stale guess.
+                    name: crate::ui::machine_mirror::display_name(app, w)
+                        .unwrap_or_else(|| "Untitled".to_string()),
+                    path: crate::ui::machine_mirror::subject_path(app, w)
+                        .map(|p| crate::ui::home::display_path(std::path::Path::new(&p)))
                         .unwrap_or_default(),
                     when: crate::ui::home::relative_time(now, w.last_active),
                     live: crate::terminal::pane_liveness::liveness_of(app, w),
@@ -558,10 +561,7 @@ impl Tty7App {
     /// window's *current* workspace, because the field it opens is the chip. A
     /// list needs to rename the row that was aimed at, so it gets its own.
     fn switcher_rename(&mut self, id: WorkspaceId, window: &mut Window, cx: &mut Context<Self>) {
-        let current = WorkspaceStore::all(cx)
-            .get(id)
-            .map(|w| w.display_name())
-            .unwrap_or_default();
+        let current = crate::ui::machine_mirror::display_name_for(cx, id).unwrap_or_default();
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
         input.update(cx, |state, cx| state.focus(window, cx));
         let sub = cx.subscribe_in(

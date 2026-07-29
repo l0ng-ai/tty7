@@ -23,6 +23,7 @@ pub mod host_ops;
 pub mod host_registry;
 pub mod keymap;
 pub mod local_link;
+pub mod machine_mirror;
 pub mod palette;
 pub mod pane;
 pub mod pending_pane;

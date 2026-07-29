@@ -235,7 +235,17 @@ impl PaneLivenessCache {
 /// host and the ids both come off the same [`Workspace`].
 pub fn liveness_of(cx: &App, workspace: &Workspace) -> Liveness {
     let host = workspace.host_id();
-    let ids = workspace.pane_ids();
+    // The ids live in the machine's tree; its mirror is where they are read.
+    // A machine not pulled yet is exactly the "could not check" state — except
+    // locally, where the pull lands within a frame and `Unknown` is never
+    // shown (see the module docs).
+    let Some(ids) = crate::ui::machine_mirror::pane_ids(cx, workspace) else {
+        return if host.is_local() {
+            Liveness::Stopped
+        } else {
+            Liveness::Unknown
+        };
+    };
     match cx.try_global::<PaneLivenessCache>() {
         Some(cache) => cache.liveness(host, &ids),
         // Before the app has installed the global. Asked of an empty cache
@@ -269,7 +279,7 @@ pub fn sweep(cx: &mut App) {
         if targets.iter().any(|(seen, _)| *seen == host) {
             continue;
         }
-        if w.pane_ids().is_empty() {
+        if crate::ui::machine_mirror::pane_ids(cx, w).is_none_or(|ids| ids.is_empty()) {
             continue;
         }
         targets.push((host, w.id));

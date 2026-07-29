@@ -304,6 +304,11 @@ pub struct PaneCountQuery {
 }
 
 /// Read the inputs for [`live_pane_count`]. Cheap; UI thread only.
+///
+/// `None` when the workspace's machine has never been pulled this session —
+/// the ids to count live only in its tree, and a prompt about to state "N
+/// running sessions will be ended" must say it could not ask rather than
+/// count against a guess.
 pub fn pane_count_query(cx: &App, workspace: WorkspaceId) -> Option<PaneCountQuery> {
     let ws = WorkspaceStore::all(cx).get(workspace)?;
     Some(PaneCountQuery {
@@ -312,7 +317,7 @@ pub fn pane_count_query(cx: &App, workspace: WorkspaceId) -> Option<PaneCountQue
         // whichever *local* panes happen to hold those numbers and put a "3
         // running sessions will be ended" warning on a workspace that has none.
         route: crate::ui::remote_workspace::pane_route_for(cx, workspace),
-        claimed: ws.pane_ids(),
+        claimed: crate::ui::machine_mirror::pane_ids(cx, ws)?,
     })
 }
 
@@ -406,9 +411,7 @@ fn confirm_destructive(
     verb: &'static str,
     act: fn(&mut App, WorkspaceId),
 ) {
-    let name = WorkspaceStore::all(cx)
-        .get(workspace)
-        .map(|w| w.display_name())
+    let name = crate::ui::machine_mirror::display_name_for(cx, workspace)
         .unwrap_or_else(|| "this workspace".to_string());
     let query = pane_count_query(cx, workspace);
     let handle = window.window_handle();
@@ -489,7 +492,7 @@ fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId) {
         .unwrap_or(crate::ui::host_ops::HostId::LOCAL);
     let ids = WorkspaceStore::all(cx)
         .get(workspace)
-        .map(|ws| ws.pane_ids())
+        .and_then(|ws| crate::ui::machine_mirror::pane_ids(cx, ws))
         .unwrap_or_default();
     if !ids.is_empty() {
         // Off the UI thread: each of these dials `route`, and on a remote

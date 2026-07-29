@@ -442,9 +442,7 @@ impl Tty7App {
         // sweep is rate-limited, and past that gate each machine is only asked
         // once its own TTL has run out.
         crate::terminal::pane_liveness::sweep(cx);
-        let current = crate::core::session::WorkspaceStore::all(cx)
-            .get(self.workspace)
-            .map(|w| w.display_name())
+        let current = crate::ui::machine_mirror::display_name_for(cx, self.workspace)
             .unwrap_or_else(|| "tty7".to_string());
         // First character, uppercased — the whole point is a glyph that is
         // recognisably *this* workspace at a glance across windows.

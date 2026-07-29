@@ -458,53 +458,13 @@ pub fn rows_from_machine(machine: &tty7_core::core::machine::Machine) -> Vec<Rem
         .iter()
         .map(|ws| RemoteWorkspaceRow {
             id: ws.id,
-            name: tree_display_name(ws, &machine.panes),
+            name: crate::ui::machine_mirror::display_name_of(ws, &machine.panes),
             panes: ws.tabs.iter().map(|t| t.root.pane_ids().len()).sum(),
             last_active: ws.last_active,
         })
         .collect();
     rows.sort_by_key(|row| std::cmp::Reverse(row.last_active));
     rows
-}
-
-/// A tree workspace's picker label: the user-set name, else the repository
-/// most of its tabs live in, else the first pane's directory, else a generic
-/// fallback — `Workspace::display_name`'s rules, read off the tree.
-fn tree_display_name(
-    ws: &tty7_core::core::machine::Workspace,
-    panes: &[tty7_core::core::machine::PaneRecord],
-) -> String {
-    if let Some(name) = ws.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-        return name.to_string();
-    }
-    // The repo group most tabs belong to, ties toward the earliest tab.
-    let mut counts: Vec<(&str, usize)> = Vec::new();
-    for group in ws.tabs.iter().filter_map(|t| t.sidebar_group.as_deref()) {
-        match counts.iter_mut().find(|(g, _)| *g == group) {
-            Some((_, n)) => *n += 1,
-            None => counts.push((group, 1)),
-        }
-    }
-    let dominant = counts.into_iter().max_by_key(|(_, n)| *n).map(|(g, _)| g);
-    let first_cwd = ws
-        .tabs
-        .iter()
-        .flat_map(|t| t.root.pane_ids())
-        .find_map(|id| {
-            panes
-                .iter()
-                .find(|p| p.id == id)
-                .and_then(|p| p.cwd.as_deref())
-        });
-    dominant
-        .or(first_cwd)
-        .and_then(|path| {
-            std::path::Path::new(path)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-        })
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "Untitled".to_string())
 }
 
 // ---------------------------------------------------------------------------

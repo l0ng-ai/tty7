@@ -157,6 +157,12 @@ impl LocalLink {
                         link.client = Some(client);
                         link.backoff.reset();
                         link.next_attempt = None;
+                        // Every fresh link starts with a full pull — deltas
+                        // only advance a mirror that has a base to advance.
+                        crate::ui::machine_mirror::MachineMirrors::refresh(
+                            cx,
+                            tty7_core::host::HostId::LOCAL,
+                        );
                     }
                     Err(e) => {
                         // The next tick schedules the following attempt off
