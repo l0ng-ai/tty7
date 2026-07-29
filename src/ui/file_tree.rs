@@ -1065,13 +1065,28 @@ impl Tty7App {
     /// Whether the tree column is actually being drawn, for the work that only
     /// a visible tree can have a result for.
     ///
-    /// The same pair of conditions [`render_right_panel`](Self::render_right_panel)
-    /// reaches the Files body through, read from the same fields, so the two
-    /// cannot drift into disagreeing about it. Deliberately not
-    /// consulting the tab's `code.visible`: the tree left the code overlay for
-    /// the panel, and the overlay draws the editor only.
+    /// Three conditions, because the Files tab does not always draw the local
+    /// tree. An open panel on that tab reaches
+    /// [`render_panel_files`](Self::render_panel_files), which hands the column
+    /// to the SFTP browser instead whenever the tab's detail pane is a connected
+    /// native-SSH one — the local tree is not drawn at all then, and re-reading
+    /// its listings is the same waste as re-reading them for a closed panel.
+    /// `open_pane_id` is the fact that branch leaves behind, so reading it here
+    /// is reading the decision itself rather than re-deriving it (which would
+    /// need a `Window` this callback has not got).
+    ///
+    /// It lags by one paint: the batch arriving between switching to such a pane
+    /// and the paint that opens the browser still counts as on screen. That
+    /// direction is the safe one — a single extra re-read, versus a tree that
+    /// stops refreshing while somebody is looking at it.
+    ///
+    /// Deliberately not consulting the tab's `code.visible`: the tree left the
+    /// code overlay for the panel, and the overlay draws the editor only (see
+    /// `render_code_overlay`).
     pub(crate) fn file_tree_on_screen(&self, cx: &App) -> bool {
-        self.right_panel_open(cx) && self.right_panel_tab == RightPanelTab::Files
+        self.right_panel_open(cx)
+            && self.right_panel_tab == RightPanelTab::Files
+            && self.sftp_panel.open_pane_id.is_none()
     }
 
     /// Watcher callback (debounced): mark the affected listings for a refresh
@@ -3140,6 +3155,63 @@ mod render_idle_gpui_tests {
                 .count()
         });
         assert_eq!(left, 0, "the marked listing was re-read on reopening");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The Files tab is open and the local tree is still not drawn: the SFTP
+    /// browser has the column, because the tab's detail pane is a connected
+    /// native-SSH one.
+    ///
+    /// Driven through `sftp_panel.open_pane_id` rather than through a real SSH
+    /// pane, which this harness cannot stand up — that field *is* what
+    /// `render_panel_files` branches on, set by `sftp_sync_pane` on the paint
+    /// that opens the browser, so it is the state the predicate has to read.
+    /// Everything happens inside one `update` because a paint would run
+    /// `sftp_sync_pane` against this window's local pane and close the browser
+    /// again, which is correct behaviour and would undo the setup.
+    #[gpui::test]
+    fn the_sftp_browser_holding_the_column_counts_as_not_drawn(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("sftp-column");
+        for n in 0..12 {
+            std::fs::write(root.join(format!("file{n:02}.rs")), "").unwrap();
+        }
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+        let path = root.join("file00.rs");
+        std::fs::write(&path, "changed").unwrap();
+
+        let (on_screen, in_flight, marked) = app.update_in(&mut vcx, |app, _, cx| {
+            app.sftp_panel.open_pane_id = Some(7);
+            let on_screen = app.file_tree_on_screen(cx);
+            app.file_tree_apply_fs_events(HostId::LOCAL, &HashSet::from([path.clone()]), cx);
+            (
+                on_screen,
+                app.file_tree.loads.len(),
+                app.file_tree
+                    .stale
+                    .iter()
+                    .filter(|(_, dir)| dir.starts_with(&root))
+                    .count(),
+            )
+        });
+        assert!(!on_screen, "the SFTP browser has the column, not the tree");
+        assert_eq!(in_flight, 0, "so nothing was asked of the host");
+        assert!(marked > 0, "but the change was recorded");
+
+        // The mark is picked up once the tree has the column back.
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.sftp_panel.open_pane_id = None;
+            cx.notify();
+        });
+        settle(&app, &mut vcx, &root);
+        let left = app.update_in(&mut vcx, |app, _, _| {
+            app.file_tree
+                .stale
+                .iter()
+                .filter(|(_, dir)| dir.starts_with(&root))
+                .count()
+        });
+        assert_eq!(left, 0, "the marked listing was re-read once it came back");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

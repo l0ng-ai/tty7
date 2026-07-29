@@ -1,5 +1,7 @@
-//! The code panel: a full-body overlay of `[file tree | editor]` that covers
-//! the terminal, settings-overlay style.
+//! The code panel: a full-body editor overlay that covers the terminal,
+//! settings-overlay style. It stops short of the right panel rather than
+//! covering it, so the file tree there stays beside the editor — the tree used
+//! to be this overlay's own left column and is not any more.
 //!
 //! A lightweight "look at / touch up code without leaving the terminal"
 //! editor, not a full IDE. The text engine is `gpui_component::input::
@@ -8,8 +10,8 @@
 //! auto-indent, undo/redo and an in-buffer search/replace bar. This module
 //! owns everything around that engine: the open-file set and tab strip, dirty
 //! tracking and save, external-modification reload (via `notify`), the
-//! unsaved-close confirmation, and the overlay chrome itself (the file-tree
-//! column comes from `ui::file_tree`).
+//! unsaved-close confirmation, and the overlay chrome itself. The file tree is
+//! `ui::file_tree`'s, drawn by the right panel's Files tab.
 //!
 //! Deliberately *not* an IDE: there is no language-server integration, and
 //! adding one is not a wanted feature. Opening a `.rs` file silently spawning
