@@ -267,7 +267,7 @@ pub struct SshConnection {
     remote_forwards: RemoteForwardTable,
     alive: AtomicBool,
     /// How this host's `tty7-server` is reached — probed once, then reused by
-    /// every remote workspace stream on this connection (design §7.1).
+    /// every remote workspace stream on this connection.
     ///
     /// Per *connection*, not per channel: deciding costs a round trip (an `exec`
     /// to read the remote's environment, and on a host with
@@ -356,7 +356,7 @@ impl SshConnection {
     }
 
     /// Open a `direct-streamlocal@openssh.com` channel to `socket_path` on the
-    /// remote — the preferred way into a remote `tty7-server` (design §7.1).
+    /// remote — the preferred way into a remote `tty7-server`.
     ///
     /// The remote's sshd connects the channel to that Unix socket itself, so the
     /// far end sees an ordinary local connection and needs no extra process. The

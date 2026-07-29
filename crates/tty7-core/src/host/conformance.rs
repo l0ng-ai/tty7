@@ -118,6 +118,8 @@ macro_rules! for_each_host_case {
             search_skips_ignored_dirs,
             search_respects_limit,
             search_respects_max_dirs,
+            // machine inventory
+            shells_are_named_and_have_a_default,
             // watch
             watch_reports_create_and_delete,
             watch_is_non_recursive,
@@ -1039,6 +1041,40 @@ pub fn search_respects_max_dirs(h: &dyn Host, sb: &dyn Sandbox) {
         .search(&[sandbox.to_path_buf()], "needle", 100, 2000, false)
         .unwrap();
     assert_eq!(hit_names(&hits), vec!["needle.txt"]);
+}
+
+// ---------------------------------------------------------------------------
+// machine inventory
+// ---------------------------------------------------------------------------
+
+/// Every row of the new-tab dropdown is launchable and labelled, and the menu
+/// knows which one is the default.
+///
+/// Deliberately not "the list is non-empty": a host with no shell registered
+/// anywhere is a strange machine, not a broken `Host` implementation. What the
+/// dropdown cannot survive is a blank row, a row with nothing to spawn, or two
+/// rows with the same name — the dedupe the local probe does is part of the
+/// contract, not an implementation detail of `/etc/shells` parsing.
+pub fn shells_are_named_and_have_a_default(h: &dyn Host, _sb: &dyn Sandbox) {
+    let inv = h.shells().expect("a host can list its shells");
+    assert!(
+        !inv.default_name.trim().is_empty(),
+        "no default shell name to tag the menu with"
+    );
+    let mut seen = std::collections::HashSet::new();
+    for shell in &inv.shells {
+        assert!(!shell.label.trim().is_empty(), "a shell row with no label");
+        assert!(
+            !shell.program.trim().is_empty(),
+            "shell {:?} has nothing to spawn",
+            shell.label
+        );
+        assert!(
+            seen.insert(shell.label.clone()),
+            "{:?} is listed twice",
+            shell.label
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

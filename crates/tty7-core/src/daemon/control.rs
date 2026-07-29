@@ -71,7 +71,7 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, SyncSender, sync_channel};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -82,7 +82,44 @@ use super::protocol::{MAX_FRAME, read_frame, write_frame};
 /// independent of [`crate::daemon::protocol::PROTOCOL_VERSION`]: the pane
 /// protocol and the control dialect evolve on separate clocks, and a remote
 /// `tty7-server` speaks control without necessarily serving panes at all.
-pub const CONTROL_VERSION: u32 = 1;
+///
+/// Bump this when a new [`ControlRequest`] / [`ReplyOk`] variant lands. That is
+/// stricter than the pane protocol's rule, and deliberately so: these enums have
+/// no `#[serde(other)]` fallback either, but the consequence here is worse —
+/// [`crate::daemon::install`] decides whether to *upgrade the remote binary* by
+/// comparing dialect numbers, so a capability that doesn't move the number is a
+/// capability the far machine never gets. A [`feature`] string is the right
+/// answer only for something two current servers can genuinely disagree about
+/// (the workspace store, which depends on how the server was started); "this
+/// build knows the request and older ones don't" is what the number is for.
+///
+/// ## History
+///
+/// - **v2** — [`ControlRequest::Shells`], which backs a remote window's new-tab
+///   dropdown. Not a `feature` string: every server from this build on answers
+///   it, so the only thing a capability bit would have bought is that a machine
+///   running an older server keeps running it forever, silently serving an empty
+///   menu. The bump makes `RemoteProtocol::serves` refuse to adopt that server
+///   and install this build's instead, which is the actual fix.
+/// - **v1** — the dialect at the time remote workspaces landed.
+pub const CONTROL_VERSION: u32 = 2;
+
+/// This process's identity as a control server, minted once on first use.
+///
+/// Answers "am I still talking to the same server?" — the question no other
+/// field in [`ControlHelloOk`] can answer, because `build` and both version
+/// numbers survive a restart unchanged (the remote's binary is replaced in
+/// place, keeping its name). A client that reconnects and sees a different value
+/// here *knows* every `pane_id` it holds names a pane in a process that no
+/// longer exists.
+///
+/// Per **process**, not per connection: a server serves many connections and
+/// they must all report the same instance, or the client would read every new
+/// connection as a restart.
+pub fn server_instance() -> &'static str {
+    static INSTANCE: OnceLock<String> = OnceLock::new();
+    INSTANCE.get_or_init(|| uuid::Uuid::new_v4().to_string())
+}
 
 /// Paths coalesced into one [`ControlEvent::Watch`] window before the server
 /// gives up on precision and sends [`ControlEvent::WatchOverflow`] instead,
@@ -223,6 +260,10 @@ pub mod feature {
 // mistranslation rather than a compile error.
 pub use crate::host::{Entry, MTime, Meta, Output, SearchHit};
 
+// Same rule for the machine's shell inventory: the dropdown's own type crosses
+// the wire, not a wire-only copy of it.
+pub use crate::core::shells::{DetectedShell, ShellInventory};
+
 // ---------------------------------------------------------------------------
 // Requests
 // ---------------------------------------------------------------------------
@@ -341,6 +382,12 @@ pub enum ControlRequest {
         args: Vec<String>,
     },
 
+    // ----- machine inventory -------------------------------------------------
+    /// The shells installed on the server, for the new-tab dropdown of a window
+    /// bound to it. Answered by every server speaking [`CONTROL_VERSION`] ≥ 2;
+    /// an older one is replaced rather than asked (see there).
+    Shells,
+
     // ----- watch ------------------------------------------------------------
     /// Open a subscription; the server answers with a [`ReplyOk::WatchId`].
     WatchOpen {
@@ -368,7 +415,7 @@ pub enum ControlRequest {
         id: String,
     },
 
-    // ----- attachment (M6's takeover, design §10) ---------------------------
+    // ----- attachment (M6's takeover) ---------------------------------------
     /// Claim a workspace for this connection's session, taking it over from
     /// whoever held it. The server answers
     /// [`ReplyOk::Attached`] and pushes [`ControlEvent::Preempted`] to the
@@ -401,7 +448,7 @@ impl ControlRequest {
     /// conservative timeout would make the fast paths feel broken; a single
     /// aggressive one would break the slow paths.
     ///
-    /// A timeout **never drops the connection** (§6.8): the request fails with
+    /// A timeout **never drops the connection**: the request fails with
     /// `TimedOut`, a [`kind::CANCEL`] goes out, and every other in-flight
     /// request is untouched.
     pub fn deadline(&self) -> Duration {
@@ -420,7 +467,14 @@ impl ControlRequest {
             CreateFileNew { .. } | CreateDir { .. } | Rename { .. } | Remove { .. } => {
                 Duration::from_secs(10)
             }
+            // `GitStream`'s deadline covers only its *acceptance* — the reply is
+            // immediate and the data arrives as pushes, which have their own
+            // idle timeout (see `GIT_STREAM_IDLE_TIMEOUT`).
             Git { .. } | GitStream { .. } | Search { .. } => Duration::from_secs(20),
+            // Filesystem probes on Unix, but on Windows the WSL enumeration
+            // spawns `wsl.exe -l -q`, which is slow enough to deserve the same
+            // budget as git.
+            Shells => Duration::from_secs(20),
             WorkspaceList | WorkspaceGet { .. } | WorkspacePut { .. } | WorkspaceDelete { .. } => {
                 Duration::from_secs(10)
             }
@@ -486,11 +540,13 @@ pub enum ReplyOk {
     Hits(Vec<SearchHit>),
     Output(Output),
     WatchId(u64),
+    /// [`ControlRequest::Shells`]: what that machine can launch.
+    Shells(ShellInventory),
     /// The workspace store's payload (M5).
     Json(serde_json::Value),
     /// [`ControlRequest::WorkspaceAttach`] succeeded. `took_over_from` names the
     /// machine whose session was displaced, so the client that *did* the taking
-    /// can say so — design §10 only specifies the notice going the other way,
+    /// can say so — only the notice going the other way is specified,
     /// but a takeover the new client cannot see is one the user cannot explain.
     Attached {
         took_over_from: Option<String>,
@@ -657,7 +713,7 @@ pub enum ControlEvent {
         pane_id: u64,
         json: serde_json::Value,
     },
-    /// Design §10's takeover: someone else attached to `workspace`, so this
+    /// The takeover: someone else attached to `workspace`, so this
     /// session no longer holds it.
     ///
     /// **`workspace` is not redundant.** One control connection carries a whole
@@ -764,6 +820,23 @@ pub struct ControlHelloOk {
     /// Capability bits; see [`feature`].
     #[serde(default)]
     pub features: Vec<String>,
+    /// Which *process* answered — see [`server_instance`].
+    ///
+    /// The one field here that changes without anything else changing. `build`
+    /// is the same across a restart, and so are both version numbers, so before
+    /// this a client that came back to a machine had no way to tell "the link
+    /// blinked" from "the server is a different process now and every pane it
+    /// held is gone". That question decides whether a reconnect re-attaches or
+    /// rebuilds, and guessing it wrong either throws away live shells or leaves
+    /// dead ones on screen.
+    ///
+    /// `#[serde(default)]` for the same reason every other added field has it,
+    /// though nothing can currently send an empty one: control v2 is the floor
+    /// and this landed with it. An empty value therefore means *unknown*, never
+    /// "a server that restarted" — a client that cannot tell must not act as if
+    /// it could.
+    #[serde(default)]
+    pub instance: String,
 }
 
 impl ControlHelloOk {
@@ -1125,7 +1198,7 @@ pub type EventSink = Box<dyn Fn(ControlEvent) + Send + Sync + 'static>;
 /// `shutdown`, a child process has `kill`, an SSH channel has `close` — hence
 /// this one-method abstraction rather than a bound on the stream type.
 ///
-/// **Note for the server side** (contract §7.4's `Duplex`): the same problem
+/// **Note for the server side** (the `Duplex`): the same problem
 /// exists there in mirror image, so `Duplex` will want the same capability.
 /// Aligning is a matter of `Duplex` either requiring `LinkShutdown` as a
 /// supertrait or exposing an equivalent method; this trait is deliberately
@@ -1359,7 +1432,7 @@ impl ControlClient {
     /// Issue a request and block until its reply, `deadline` elapses, or the
     /// link drops.
     ///
-    /// Blocking is deliberate (contract §1): `Host` is a blocking, object-safe
+    /// Blocking is deliberate: `Host` is a blocking, object-safe
     /// trait, and every caller is already on a background thread. Blocking here
     /// blocks exactly one of them.
     pub fn call(&self, req: ControlRequest) -> io::Result<ReplyOk> {
@@ -1722,6 +1795,7 @@ mod tests {
                 separator: '/',
                 home: "/home/me".into(),
                 features: Vec::new(),
+                instance: "test-instance".into(),
             },
             shutdown: None,
             reader_done: Mutex::new(false),
@@ -2021,6 +2095,28 @@ mod tests {
         }
     }
 
+    /// One id for the whole process. A per-connection id would make every
+    /// reconnect look like a restart, which is the failure this whole mechanism
+    /// exists to avoid — in the *expensive* direction, since the client answers
+    /// a restart by rebuilding the window.
+    #[test]
+    fn the_server_instance_is_one_value_per_process() {
+        let first = server_instance();
+        assert!(!first.is_empty(), "an empty instance means \"unknown\"");
+        assert_eq!(first, server_instance());
+    }
+
+    /// A client on an older v2 build decodes a hello that has no `instance` as
+    /// "unknown" rather than failing the whole handshake.
+    #[test]
+    fn a_hello_without_an_instance_still_decodes() {
+        let json = r#"{"control_version":2,"protocol_version":3,"build":"26.7.6",
+                       "separator":"/","home":"/home/me"}"#;
+        let ok: ControlHelloOk = serde_json::from_str(json).expect("decodes without instance");
+        assert_eq!(ok.instance, "");
+        assert!(ok.features.is_empty());
+    }
+
     fn hello_ok() -> ControlHelloOk {
         ControlHelloOk {
             control_version: CONTROL_VERSION,
@@ -2029,6 +2125,7 @@ mod tests {
             separator: '/',
             home: "/home/me".into(),
             features: vec![feature::CONTROL.into(), feature::HOST_RPC.into()],
+            instance: "test-instance".into(),
         }
     }
 

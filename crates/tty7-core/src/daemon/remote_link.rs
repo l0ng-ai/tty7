@@ -104,8 +104,7 @@ impl RemoteLink {
         Ok(RemoteLink::LocalStdio(spawn_stdio(program, args)?))
     }
 
-    /// Spawn `wsl.exe -d <distro> -- <server> --stdio` and take its stdio
-    /// (design §7.3).
+    /// Spawn `wsl.exe -d <distro> -- <server> --stdio` and take its stdio.
     ///
     /// `server` is an **absolute path inside the distribution**, not a bare
     /// name: `wsl.exe` runs the command without a login shell, so the `PATH`
@@ -235,7 +234,7 @@ pub const DEFAULT_REMOTE_SERVER_CMD: &str = "tty7-server --stdio";
 const MAX_SOCKET_PATH_BYTES: usize = 100;
 
 /// How this connection reaches the remote `tty7-server` — decided once per SSH
-/// connection and cached there (design §7.1), never re-decided per channel.
+/// connection and cached there, never re-decided per channel.
 ///
 /// Probing per channel would put a failed `direct-streamlocal` open in front of
 /// every pane on a host whose admin turned `AllowStreamLocalForwarding` off,
@@ -363,7 +362,7 @@ impl RemoteEnv {
 /// bridge that resolves the path in the process that binds it.
 ///
 /// Paths are joined as POSIX strings, never `PathBuf`: on a Windows client
-/// `PathBuf::join("/home/me", "tty7")` yields `/home/me\tty7` (contract §4.3).
+/// `PathBuf::join("/home/me", "tty7")` yields `/home/me\tty7`.
 pub fn remote_control_socket(env: &RemoteEnv) -> Option<String> {
     if let Some(explicit) = env.control_sock.as_deref().filter(|s| !s.is_empty()) {
         return Some(explicit.to_string());

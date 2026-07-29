@@ -90,6 +90,22 @@ pub struct AuthPromptReady;
 
 impl gpui::EventEmitter<AuthPromptReady> for TerminalView {}
 
+/// The pane's coding agent reported a different native session id than the one
+/// the saved layout knows about — it started a conversation, or replaced the
+/// one it had. `Tty7App` subscribes (see `new_terminal`) and re-saves.
+///
+/// # Why an event and not just "it's read at save time"
+///
+/// The id arrives asynchronously, on the agent's own hooks, long after
+/// everything that *structurally* changes a window. Nothing else was making the
+/// window save in between, so whether the id reached `session.json` came down
+/// to whether the user happened to open a tab, split a pane or move focus
+/// afterwards. That is what made resume-after-End-Sessions work sometimes and
+/// not others: the layout on file simply had no agent in it.
+pub struct AgentSessionChanged;
+
+impl gpui::EventEmitter<AgentSessionChanged> for TerminalView {}
+
 /// An established native-SSH daemon pane, ready to be wrapped in a view: the
 /// output of the fallible [`TerminalView::spawn_native_ssh_terminal`], consumed
 /// by the infallible [`TerminalView::from_native_ssh_parts`].
@@ -125,6 +141,16 @@ pub struct ShellParts {
     /// Readable for the same reason as `pane_id` above: killing an orphaned
     /// pane has to dial the machine it actually landed on.
     pub(crate) workspace: Option<crate::terminal::PaneWorkspace>,
+    /// Whether this is the pane the caller asked to re-attach to, or a fresh
+    /// one spawned because that id was gone. A restored pane is still running
+    /// whatever it was running; a respawned one is a bare shell in the same
+    /// directory, which is the case a saved coding-agent session has to be
+    /// resumed into.
+    pub(crate) restored: bool,
+    /// The workspace whose window created this pane — see
+    /// [`TerminalView::owner_workspace`]. Rides here for the same
+    /// cannot-disagree reason as `workspace` above.
+    pub(crate) owner: Option<crate::core::session::WorkspaceId>,
 }
 
 /// See `TerminalView::drag_scroll`.
@@ -174,7 +200,7 @@ pub struct TerminalView {
     /// through [`host`](Self::host) at use time means a reconnect is picked up
     /// by the next probe with nothing to notify.
     host_id: crate::ui::host_ops::HostId,
-    /// The remote workspace this pane belongs to, when it is one (design §15).
+    /// The remote workspace this pane belongs to, when it is one.
     ///
     /// `None` — the case today, until the M5 window/workspace binding calls
     /// [`set_workspace`](Self::set_workspace) — means a local pane or an SSH
@@ -195,6 +221,23 @@ pub struct TerminalView {
     /// panes. In-memory only (not persisted) — held so splits of this pane
     /// inherit the same shell.
     shell_spec: Option<ShellSpec>,
+    /// The workspace whose window created this view (spawn or re-attach).
+    /// `None` only for views built through paths that predate the field (tests,
+    /// native SSH). `Tty7App::save_session` compares it against the workspace
+    /// it is about to record under and shouts on a mismatch — a window whose
+    /// tabs and identity have come apart is exactly the corruption that once
+    /// copied one workspace's layout into another's record, and it must be
+    /// caught at the write, not discovered at the next restart.
+    owner_workspace: Option<crate::core::session::WorkspaceId>,
+    /// Whether this view re-attached to the pane its caller asked for, rather
+    /// than getting a fresh shell because that pane was gone — [`ShellParts`]'s
+    /// `restored`, kept because restore has to act on it *after* the view is
+    /// built.
+    ///
+    /// `false` for every view that was never restoring anything (a new tab, a
+    /// split, a test), which is the same answer those callers already got from
+    /// "there was no pane id to come back to".
+    restored: bool,
     /// The native-SSH spec this pane was spawned with, **secrets stripped**
     /// ([`NativeSshSpec::without_secrets`]). `None` for local shells (and a
     /// foreground `ssh` typed in one). Persisted into the session so a *dead*
@@ -321,6 +364,14 @@ pub struct TerminalView {
     /// waiting, working → done) fire exactly one notification each and repaint
     /// the status dot.
     last_agent_status: Option<crate::core::cli_agent::AgentStatus>,
+    /// The agent identity that is worth *persisting* — the native session id and
+    /// the argv it was launched with — as last seen. Compared on every poll so a
+    /// change raises [`AgentSessionChanged`] and the layout on file catches up.
+    ///
+    /// Deliberately not the agent chip itself: that can blip for a moment when
+    /// the agent shells out, and a blip here would mean a save (and, on a remote
+    /// workspace, a push) for nothing. The session id does not blip.
+    last_agent_session: (Option<String>, Option<Vec<String>>),
     /// When the current rich turn entered `Working`, for the "finished after
     /// Ns" copy on its `Done` notification.
     agent_turn_started: Option<std::time::Instant>,
@@ -510,7 +561,7 @@ enum LoopbackOpen {
 }
 
 /// How a ⌘/Ctrl-clicked URL should be opened, decided before anything is done
-/// about it (design §15).
+/// about it.
 ///
 /// Split out as a pure decision so the branch a pane takes is testable without a
 /// daemon, a connection, or a browser — the three things this feature otherwise
@@ -521,7 +572,7 @@ pub(super) enum LoopbackPlan {
     /// machine: hand the URL to the OS unchanged.
     Direct,
     /// A remote whose `localhost` *is* the client's — WSL shares the network
-    /// namespace with its Windows host (design §15's exception). No forward is
+    /// namespace with its Windows host (the exception). No forward is
     /// built; the original URL already resolves. Wired now so M8 only has to
     /// start constructing `RemoteTarget::Wsl`.
     NoForwardNeeded,
@@ -998,8 +1049,18 @@ impl TerminalView {
     /// The PTY lives in the daemon now. On session restore (`restore_pane`),
     /// re-`attach` to the still-running pane so its process + scrollback come
     /// back intact; otherwise `spawn` a fresh pane (with the caller's shell
-    /// pick, if any). The caller only passes a `restore_pane` it has already
-    /// confirmed alive, so we trust it here.
+    /// pick, if any).
+    ///
+    /// **A `restore_pane` that is gone falls back to a fresh pane** rather than
+    /// failing. Callers do check first, but neither check is a guarantee: a
+    /// local one asks the daemon and can be raced by the pane exiting, and a
+    /// remote one cannot afford to ask at all (`alive_panes_on` is a blocking
+    /// round trip and the UI thread is where it would run) — trying the attach
+    /// *is* the question there. Either way an id that no longer exists is the
+    /// ordinary state of a workspace whose sessions were ended, and the answer
+    /// to it is the same as for a session written before the daemon existed: a
+    /// fresh shell in the saved cwd. `restored` says which happened, because
+    /// what the caller does next differs — see [`ShellParts`].
     ///
     /// **`workspace: None` is the local path, unchanged down to the byte** —
     /// [`PaneRoute::for_workspace`] answers `Local`, and `Local` is a bare
@@ -1015,16 +1076,24 @@ impl TerminalView {
         working_directory: Option<std::path::PathBuf>,
         restore_pane: Option<u64>,
         shell: Option<ShellSpec>,
+        owner: Option<crate::core::session::WorkspaceId>,
     ) -> anyhow::Result<ShellParts> {
         let route = crate::terminal::PaneRoute::for_workspace(workspace.as_ref());
-        let (terminal, pane_id, shell_spec) = match restore_pane {
-            Some(id) => (
-                RemoteTerminal::attach_on(&route, TermSize::new(80, 24), 8, 17, id)?,
-                id,
+        let attached = match restore_pane {
+            Some(id) => match RemoteTerminal::attach_on(&route, TermSize::new(80, 24), 8, 17, id) {
                 // An attached pane keeps whatever shell it already runs; the
                 // pick that spawned it (if any) isn't persisted.
-                None,
-            ),
+                Ok(terminal) => Some((terminal, id, None)),
+                Err(e) => {
+                    log::info!("pane {id} is gone on its machine ({e:#}); spawning fresh");
+                    None
+                }
+            },
+            None => None,
+        };
+        let restored = attached.is_some();
+        let (terminal, pane_id, shell_spec) = match attached {
+            Some(parts) => parts,
             None => {
                 let (terminal, id) = RemoteTerminal::spawn_on(
                     &route,
@@ -1033,6 +1102,7 @@ impl TerminalView {
                     17,
                     working_directory,
                     shell.clone(),
+                    owner.map(|id| id.to_string()),
                 )?;
                 (terminal, id, shell)
             }
@@ -1042,6 +1112,8 @@ impl TerminalView {
             pane_id,
             shell_spec,
             workspace,
+            restored,
+            owner,
         })
     }
 
@@ -1054,8 +1126,23 @@ impl TerminalView {
     ) -> Self {
         let mut view = Self::with_terminal(parts.terminal, parts.pane_id, window, cx);
         view.shell_spec = parts.shell_spec;
+        view.owner_workspace = parts.owner;
+        view.restored = parts.restored;
         view.set_workspace(parts.workspace);
         view
+    }
+
+    /// Whether this pane came back as the one it was asked to re-attach to.
+    /// `false` means a fresh shell — see the field, and
+    /// [`ShellParts::restored`].
+    pub(crate) fn restored(&self) -> bool {
+        self.restored
+    }
+
+    /// The workspace whose window created this pane, or `None` when the
+    /// creating path predates the field. See the field for what reads it.
+    pub fn owner_workspace(&self) -> Option<crate::core::session::WorkspaceId> {
+        self.owner_workspace
     }
 
     /// Spawn a native (russh) SSH pane for `spec` and build the view around it
@@ -1293,6 +1380,8 @@ impl TerminalView {
             workspace: None,
             pane_id,
             shell_spec: None,
+            owner_workspace: None,
+            restored: false,
             ssh_spec: None,
             focus_handle,
             font,
@@ -1328,6 +1417,12 @@ impl TerminalView {
             running_title: String::new(),
             running_agent: None,
             last_agent_status: None,
+            // Empty rather than seeded from the saved layout: a pane that comes
+            // back attached to a running agent then reports the id it already
+            // had, which reads as a change and saves once. Harmless, and the
+            // alternative — trusting the record — would skip the save that
+            // fixes a record which is *wrong*.
+            last_agent_session: (None, None),
             agent_turn_started: None,
             agent_was_rich: false,
             agent_result_unread: false,
@@ -1431,7 +1526,7 @@ impl TerminalView {
     ///   - **`remote_context`** — the pane's *own* process is elsewhere (a pane
     ///     tty7 dialled over SSH, a `wsl.exe` pane, a foreground `ssh`). The
     ///     daemon reports it, having watched the process.
-    ///   - **`host_id`** — the pane belongs to a **remote workspace** (§15).
+    ///   - **`host_id`** — the pane belongs to a **remote workspace**.
     ///     Nothing about the pane itself is remote *from its own daemon's point
     ///     of view*: `tty7-server` on the far machine spawned an ordinary local
     ///     shell and reports `remote_context: None`, exactly as a local daemon
@@ -1450,7 +1545,7 @@ impl TerminalView {
     /// what "+", a split, and the persisted session hand the new shell.
     ///
     /// Deliberately **not** [`local_cwd`](Self::local_cwd), and the difference
-    /// is the whole point. A window shows one machine (§3), so a sibling lands
+    /// is the whole point. A window shows one machine, so a sibling lands
     /// on the machine this pane's shell already runs on: for a remote-workspace
     /// pane that is the far box, where `/home/me/proj` is exactly right and
     /// withholding it would open every new tab at `$HOME` instead.
@@ -1484,7 +1579,7 @@ impl TerminalView {
     }
 
     /// The remote workspace this pane belongs to, if any — what its port
-    /// forwards are owned by and whose SSH connection its SFTP rides (§15).
+    /// forwards are owned by and whose SSH connection its SFTP rides.
     pub fn workspace(&self) -> Option<&crate::terminal::PaneWorkspace> {
         self.workspace.as_ref()
     }
@@ -1527,7 +1622,7 @@ impl TerminalView {
         crate::terminal::PaneRoute::for_workspace(self.workspace.as_ref())
     }
 
-    /// Design §10's read-only degrade, as the keyboard sees it.
+    /// The read-only degrade, as the keyboard sees it.
     ///
     /// **A local pane always answers `true`** — it has no connection to lose,
     /// and `workspace()` is `None` for it, so this is a field test and not a
@@ -1550,7 +1645,7 @@ impl TerminalView {
 
     /// Everything a reconnect needs to know about this pane, read on the UI
     /// thread before the blocking half runs off it: which pane, and at what
-    /// geometry to bring it back (design §10: "以新客户端的尺寸 Resize").
+    /// geometry to bring it back ("以新客户端的尺寸 Resize").
     ///
     /// The geometry is *this* client's current one, not the one the pane was
     /// recorded at — a laptop that reconnects to a workspace it left on a
@@ -1589,7 +1684,7 @@ impl TerminalView {
 
     /// Let go of this pane's link without ending the pane.
     ///
-    /// Design §10's takeover: another client attached, so this one stops being
+    /// The takeover: another client attached, so this one stops being
     /// the workspace's session. The pane stays on screen, read-only, exactly as
     /// a dropped link leaves it — what must *not* happen is this client going on
     /// holding a stream to a workspace somebody else is now typing in.
@@ -1791,7 +1886,7 @@ impl TerminalView {
                 // read the same and the wording is unchanged; for a remote
                 // workspace they are opposite facts, and "process exited" on a
                 // pane whose shell is still running on the far machine is the
-                // one claim design §10's degrade must not make — the whole
+                // one claim the degrade must not make — the whole
                 // promise is that the work is still there when the link returns.
                 self.title = if self.workspace().is_some() && !self.terminal.child_exited() {
                     "tty7 — disconnected".to_string()
@@ -1881,7 +1976,7 @@ impl TerminalView {
         // early return is unchanged — a local pane's link only dies when its
         // daemon does.
         //
-        // For a remote-workspace pane they are not. Design §10's read-only
+        // For a remote-workspace pane they are not. The read-only
         // degrade is precisely the case where the link is gone and the shell is
         // not: that window must keep scrolling, selecting, copying and
         // searching, and every one of those runs below this line. What must not
@@ -1980,12 +2075,12 @@ impl TerminalView {
             return;
         }
 
-        // Design §10's read-only degrade, placed **here and not at the top of
+        // The read-only degrade, placed **here and not at the top of
         // this function**.
         //
         // Everything above is the window's own keyboard, not the machine's:
         // ⌘F opens the search bar, ⌘A selects, ⌘C copies, ⌘1-9 switches tabs.
-        // §10 promises every one of those keeps working while the link is
+        // Every one of those keeps working while the link is
         // down — "能滚历史、能选能复制、能 ⌘F 搜索" — and a gate at the top of
         // `on_key_down` would silently take them all away, turning a read-only
         // window into an inert one. (⌘V is not an exception that needs handling
@@ -3563,6 +3658,18 @@ impl TerminalView {
             self.agent_was_rich = false;
         }
 
+        // Ahead of the status early-return below, because this does not move
+        // with the status: an id appears when the agent's hooks first report a
+        // conversation, which is a moment the status has no opinion about.
+        let identity = (
+            session.as_ref().and_then(|s| s.session_id.clone()),
+            session.as_ref().and_then(|s| s.launch_argv.clone()),
+        );
+        if identity != self.last_agent_session {
+            self.last_agent_session = identity;
+            cx.emit(AgentSessionChanged);
+        }
+
         let status = session.as_ref().map(|s| s.status);
         if status == self.last_agent_status {
             return false;
@@ -4618,7 +4725,7 @@ impl TerminalView {
     /// Two shapes qualify, and they are found by different signals:
     ///   - a **native-SSH pane** — tty7 dialled it, so `remote_context` says so
     ///     and the daemon holds the authenticated connection under its pane id;
-    ///   - a **remote-workspace pane** (§15) — its `tty7-server` reports it as
+    ///   - a **remote-workspace pane** — its `tty7-server` reports it as
     ///     an ordinary local pane (it *is* one, over there), so `remote_context`
     ///     is `None` and only this side's `workspace` binding reveals it. The
     ///     connection is the workspace's, not the pane's.
@@ -5376,7 +5483,7 @@ impl TerminalView {
             return LoopbackOpen::NotLoopback;
         };
         // WSL shares the Windows host's `localhost`, so the URL already points at
-        // the right place — building a forward would be pure overhead (design §15).
+        // the right place — building a forward would be pure overhead.
         if matches!(plan, LoopbackPlan::NoForwardNeeded) {
             return LoopbackOpen::NotLoopback;
         }
@@ -7026,7 +7133,7 @@ mod tests {
     use gpui_component::IconName;
     use std::path::{Path, PathBuf};
 
-    // ── ⌘-click `localhost:PORT` routing (design §15) ────────────────────────
+    // ── ⌘-click `localhost:PORT` routing ────────────────────────
 
     use crate::core::session::{RemoteTarget, WorkspaceId};
     use crate::daemon::protocol::RemoteKind;
@@ -7088,7 +7195,7 @@ mod tests {
         );
     }
 
-    /// **The WSL exception (design §15).** WSL shares `localhost` with its
+    /// **The WSL exception.** WSL shares `localhost` with its
     /// Windows host, so the URL already resolves — building a forward would be
     /// pure overhead. Wired now; M8 supplies the target.
     #[test]
@@ -8060,6 +8167,77 @@ mod gpui_tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         panic!("the prompt report never reached the view");
+    }
+
+    /// **A session id the agent reports raises [`AgentSessionChanged`], and it
+    /// does so without the status moving.** That is the whole point: the id
+    /// arrives on the agent's hooks, minutes after anything structural happened
+    /// to the window, and nothing else was going to make the layout save. A
+    /// record with no session id in it is a workspace that cannot resume, which
+    /// is what made resume-after-End-Sessions look intermittent.
+    ///
+    /// The second poll must stay quiet — a save (and, on a remote workspace, a
+    /// push to the machine) per repaint would be a different bug.
+    #[gpui::test]
+    fn a_reported_session_id_asks_the_window_to_save(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::{AgentSessionState, AgentStatus};
+
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        let saves = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let view = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+        {
+            let saves = saves.clone();
+            cx.update(|cx| {
+                cx.subscribe(&view, move |_, _: &AgentSessionChanged, _| {
+                    saves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+                .detach();
+            });
+        }
+
+        // The hooks report a conversation. `status` is `Idle` before and after,
+        // so a poll keyed only on the status would never notice.
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status: AgentStatus::Idle,
+            message: None,
+            session_id: Some("sid-abc".into()),
+            launch_argv: Some(vec!["claude".into()]),
+            rich: true,
+            cwd: None,
+            activity: 0,
+        }))
+        .encode(&mut daemon)
+        .unwrap();
+        for _ in 0..200 {
+            if window
+                .update(cx, |view, _, _| view.terminal.agent_session().is_some())
+                .unwrap()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, _, cx| view.poll_agent_status(false, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            saves.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the id has to reach the layout on file"
+        );
+
+        window
+            .update(cx, |view, _, cx| view.poll_agent_status(false, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            saves.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an unchanged session must not re-save on every poll"
+        );
     }
 
     /// A hover cell remembered while the pane was tall names a row the grid no
@@ -9506,7 +9684,7 @@ mod gpui_tests {
         assert_eq!(next_input(&mut daemon), b"ping".to_vec());
     }
 
-    // ── Design §10's read-only degrade, at the five keystroke entry points ───
+    // ── The read-only degrade, at the five keystroke entry points ───
 
     /// Install a store holding one remote workspace with no connection, and
     /// bind `view` to it. `RemoteLinks` has never heard of the machine, so
@@ -9546,7 +9724,7 @@ mod gpui_tests {
         id
     }
 
-    /// Design §10: a window that is not attached **still shows, scrolls,
+    /// A window that is not attached **still shows, scrolls,
     /// selects and searches — but typing goes nowhere**, and nothing is
     /// buffered for later (D6).
     ///
@@ -9575,7 +9753,7 @@ mod gpui_tests {
         );
     }
 
-    /// The rest of design §10's degrade, and the half a gate at the top of
+    /// The rest of the degrade, and the half a gate at the top of
     /// `on_key_down` would silently destroy: **a read-only window is not an
     /// inert one.**
     ///
@@ -9732,7 +9910,7 @@ mod gpui_tests {
         assert_eq!(next_input(&mut daemon), b"z".to_vec());
     }
 
-    // ── Design §10's reconnect: the pane relink ──────────────────────────────
+    // ── The reconnect: the pane relink ──────────────────────────────
 
     /// The pane half of a reconnect swaps the socket **in place**: same `Term`,
     /// same event channel, same shared signals — because the view's event pump
@@ -9800,7 +9978,7 @@ mod gpui_tests {
             "the mirror must be reset before the daemon replays onto it"
         );
 
-        // Design §10's last step: resize to *this* client's geometry.
+        // The last step: resize to *this* client's geometry.
         let resize = loop {
             match ClientMsg::read(&mut new_daemon).expect("the new socket is live") {
                 ClientMsg::Resize(win) => break win,

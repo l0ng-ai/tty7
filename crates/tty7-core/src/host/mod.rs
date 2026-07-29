@@ -12,8 +12,8 @@
 //!
 //! # Blocking on purpose
 //!
-//! Every method blocks. That is a decision, not an oversight
-//! (`docs/2026-07-27-remote-workspace-impl-contract.md` §1): the trait has to be
+//! Every method blocks. That is a decision, not an oversight: the trait
+//! has to be
 //! object-safe because the whole tree holds `Arc<dyn Host>`, the server side
 //! serves these same calls from a blocking thread pool, and a GPUI
 //! `&mut Context<T>` cannot be held across an `.await` anyway — so making the
@@ -45,6 +45,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::thread::ThreadId;
+
+pub use crate::core::shells::ShellInventory;
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -460,7 +462,7 @@ pub trait Host: Send + Sync + 'static {
     /// conflict prompt. The post-write metadata is the write's own answer, so
     /// it closes the window by construction. It is also one round trip instead
     /// of two on every remote save; the control reply already carried it
-    /// (contract §6.4), so nothing on the wire moved.
+    ///, so nothing on the wire moved.
     ///
     /// Callers that genuinely don't want it write `.map(|_| ())`.
     fn write_file(&self, p: &Path, bytes: &[u8]) -> io::Result<Meta>;
@@ -538,6 +540,18 @@ pub trait Host: Send + Sync + 'static {
         split.finish(&mut *on_line);
         Ok(out.status)
     }
+
+    // ----- machine inventory -----------------------------------------------
+
+    /// The shells this host can launch, plus which one a plain new tab lands
+    /// on — the new-tab dropdown's menu.
+    ///
+    /// On the trait rather than beside `detect_shells` because a window bound to
+    /// a remote workspace opens its tabs *over there*: a picker built from this
+    /// computer's `/etc/shells` offers paths that don't exist on the machine the
+    /// spawn actually reaches. Probing is not free (Windows enumerates WSL by
+    /// spawning `wsl.exe`), so callers ask once per machine, not per menu open.
+    fn shells(&self) -> io::Result<ShellInventory>;
 
     // ----- watching --------------------------------------------------------
 

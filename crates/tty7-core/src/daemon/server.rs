@@ -252,7 +252,12 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
 
     let first = ClientMsg::from_frame(first_kind, first_payload)?;
     match first {
-        ClientMsg::Spawn { cwd, size, shell } => {
+        ClientMsg::Spawn {
+            cwd,
+            size,
+            shell,
+            owner,
+        } => {
             let id = registry.alloc_id();
             // Reclaim a pane whose child exits while *detached* (nobody attached,
             // so no connection's detach path will ever drop it): remove it from
@@ -272,7 +277,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                         .ok();
                 }
             };
-            let pane = match DaemonPane::spawn(id, cwd, size, shell, on_dead) {
+            let pane = match DaemonPane::spawn(id, cwd, size, shell, owner, on_dead) {
                 Ok(p) => p,
                 Err(e) => {
                     // Report the failure to the client and close.
@@ -540,7 +545,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
 
         // A remote workspace has no pane here to address, so its forwards and
         // SFTP go through one envelope that names the connection instead
-        // (design §15). The whole answer — including every failure — is built by
+        //. The whole answer — including every failure — is built by
         // `ssh::workspace::handle`, so this arm stays a pipe.
         ClientMsg::OnWorkspace(req) => {
             let mut w = write_stream;

@@ -98,7 +98,7 @@ pub(crate) struct RightPanelState {
     /// runs, or `None` when the pane on screen has nothing to forward over.
     ///
     /// A route rather than a `bool` because a remote workspace's forwards belong
-    /// to the *workspace*, not the pane (design §15): the pane id alone cannot
+    /// to the *workspace*, not the pane: the pane id alone cannot
     /// say which of the two owners to ask, and the reschedule below re-reads
     /// this rather than carrying the decision forward.
     pub(crate) procs_forwards: Option<crate::ui::app::ForwardRoute>,
@@ -602,17 +602,20 @@ impl Tty7App {
                     rows.push(("cwd", compact_path(&cwd)));
                     cwd_for_actions = Some(cwd);
                 }
-                let shell = view.shell_spec().map(|s| s.program.clone());
-                rows.push((
-                    "shell",
-                    crate::core::shells::default_shell_name(shell.as_deref()),
-                ));
+                // A pane that named no shell took its machine's default — which
+                // for a remote workspace is the *far* machine's, not this
+                // computer's `$SHELL`.
+                let shell = match view.shell_spec().map(|s| s.program.clone()) {
+                    Some(program) => crate::core::shells::default_shell_name(Some(&program)),
+                    None => self.default_shell_label(cx),
+                };
+                rows.push(("shell", shell));
                 if let Some(ssh) = view.ssh_spec() {
                     rows.push(("ssh", ssh.host.clone()));
                 }
                 // Two ways a pane has something to forward over: it *is* an
                 // SSH session, or it belongs to a remote workspace, whose
-                // forwards run on the workspace's own connection (design §15).
+                // forwards run on the workspace's own connection.
                 // The second arm is empty in this build — nothing binds a pane
                 // to a workspace yet — which is deliberate: the band stays
                 // empty rather than offering an add that would have nowhere to
@@ -714,11 +717,7 @@ impl Tty7App {
     /// clipboard. An "open in $EDITOR" button would need a picker, a stored
     /// choice and a settings page to change it; that's a feature, not a row.
     fn cwd_actions(&self, cwd: PathBuf, cx: &mut Context<Self>) -> AnyElement {
-        let reveal_label = if cfg!(target_os = "macos") {
-            "Reveal in Finder"
-        } else {
-            "Open Folder"
-        };
+        let reveal_label = reveal_label();
         h_flex()
             .gap(px(2.))
             .px(px(tile_trailing_inset_sm()))
@@ -1515,6 +1514,18 @@ pub(crate) fn info_chip(
         .text_color(fg)
         .child(text.to_string())
         .into_any_element()
+}
+
+/// The label for revealing a path in the OS file manager: only macOS has a
+/// "Finder", so everywhere else it's the generic "Open Folder". Shared by the
+/// Info row, the file-tree context menu and the SFTP job list so the action
+/// carries one name per platform.
+pub fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Reveal in Finder"
+    } else {
+        "Open Folder"
+    }
 }
 
 /// The one-word status the Info row shows next to the agent's name.

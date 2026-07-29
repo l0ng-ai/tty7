@@ -29,8 +29,8 @@ use notify::{RecursiveMode, Watcher};
 use crate::core::git;
 use crate::core::gitignore::GitignoreChain;
 use crate::host::{
-    Entry, Host, HostId, MTime, Meta, Output, SearchHit, SharedHost, WatchHandle, WatchSub,
-    guard_off_ui,
+    Entry, Host, HostId, MTime, Meta, Output, SearchHit, SharedHost, ShellInventory, WatchHandle,
+    WatchSub, guard_off_ui,
 };
 
 /// How long changes are collected before a batch is delivered. Matched exactly
@@ -345,6 +345,11 @@ impl Host for LocalHost {
         })?;
         split.finish(&mut *on_line);
         Ok(code)
+    }
+
+    fn shells(&self) -> io::Result<ShellInventory> {
+        guard_off_ui();
+        Ok(crate::core::shells::inventory())
     }
 
     fn watch(&self, dirs: &[PathBuf]) -> io::Result<WatchSub> {

@@ -167,7 +167,7 @@ jobs:
           if-no-files-found: error
 
   # Mirrors release.yml's server-musl job; keep the two in sync when editing.
-  # Nightly carries the server binaries too so the remote-install path (§12) can
+  # Nightly carries the server binaries too so the remote-install path can
   # be exercised against the rolling channel instead of waiting for a tag.
   server-musl:
     needs: plan
@@ -272,7 +272,7 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # Same contract as release.yml — see docs/remote-server-assets.md. Written
+      # Same contract as release.yml — see `install::asset`. Written
       # into dist/ before the upload below so it ships as an asset like any
       # other, and so the prune step at the end sees it as current.
       - name: Generate checksums.txt

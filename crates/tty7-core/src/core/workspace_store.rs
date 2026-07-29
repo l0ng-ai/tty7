@@ -1,4 +1,4 @@
-//! The **remote** side of design §10's storage split: the machine's own
+//! The **remote** side of the storage split: the machine's own
 //! `~/.local/share/tty7/workspaces.json`, and the one writer to it.
 //!
 //! # Which half of the split this is
@@ -17,7 +17,7 @@
 //! [`Workspace`](crate::core::session::Workspace). The server is a store, not a
 //! participant: the client owns the schema, and a client newer than the server
 //! it is talking to is the *normal* case (the server is installed once and then
-//! left alone for months, §12's auto-install notwithstanding). Parsing here
+//! left alone for months, auto-install notwithstanding). Parsing here
 //! would mean a field the server has never heard of is dropped on the next
 //! write — silent data loss whose only symptom is a setting that will not
 //! stick.
@@ -96,7 +96,7 @@ const MAX_ID_BYTES: usize = 128;
 
 /// Who is currently attached to a workspace.
 ///
-/// **Data only.** Design §10's takeover — push `Preempted { by }` to the old
+/// **Data only.** The takeover — push `Preempted { by }` to the old
 /// session, close its streams, offer a [抢回] button — is M6's, and none of it
 /// is here. What is here is the record that machinery needs to exist before it
 /// can be written: the random token that tells two connections from the same
@@ -643,7 +643,7 @@ fn quarantine(path: &Path) {
 /// |---|---|---|
 /// | 1 | `$TTY7_DATA_DIR` | Explicit wins; how tests and a second server get their own file |
 /// | 2 | `$XDG_DATA_HOME/tty7` | The location the design names, spelled the way XDG spells it |
-/// | 3 | `$HOME/.local/share/tty7` | No `XDG_DATA_HOME` — the literal path in design §10 |
+/// | 3 | `$HOME/.local/share/tty7` | No `XDG_DATA_HOME` — the literal fallback path |
 ///
 /// Deliberately **not** under the config dir. `session.json` there is the
 /// *client's* view state, and a box that is both someone's laptop and someone

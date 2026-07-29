@@ -7,7 +7,7 @@
 //! `tty7-server` must agree on byte for byte.
 //!
 //! **This crate must never depend on gpui.** That is the invariant the split
-//! exists to enforce (see `docs/2026-07-27-remote-workspace-design.md` §11);
+//! exists to enforce;
 //! `cargo tree -p tty7-core | grep gpui` must stay empty. Where a type genuinely
 //! needs a gpui shape — `Config` as a `Global`, `WindowState` as a `Bounds`,
 //! `FontFeatures` — the data lives here and the GUI crate adds the gpui-facing

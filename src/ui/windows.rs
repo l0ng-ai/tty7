@@ -457,6 +457,21 @@ fn confirm_destructive(
 /// Callers confirm first unless [`live_pane_count`] answered zero; with nothing
 /// running there is nothing to lose.
 pub fn stop_workspace(cx: &mut App, workspace: WorkspaceId) {
+    stop_workspace_keeping(cx, workspace, ClearedLayout::Push);
+}
+
+/// What to do with the record once its panes are dead.
+#[derive(Clone, Copy, PartialEq)]
+enum ClearedLayout {
+    /// Send it to the machine that owns it — the workspace is going to be
+    /// reopened, and it must not reopen claiming panes that no longer exist.
+    Push,
+    /// Leave it alone: the caller is about to delete the record outright, and a
+    /// push racing that delete could put the workspace back on the machine.
+    Discard,
+}
+
+fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId, cleared: ClearedLayout) {
     // A remote workspace's panes live on the remote server, and its pane ids are
     // *that* daemon's. Sending them here would not fail — it would succeed
     // against whatever local panes happen to hold those numbers, killing a
@@ -496,7 +511,7 @@ pub fn stop_workspace(cx: &mut App, workspace: WorkspaceId) {
             cache.invalidate(host)
         });
     }
-    // Design §15: a remote workspace's port forwards are owned by the
+    // A remote workspace's port forwards are owned by the
     // *workspace*, not by its panes, so nothing else ends them. Done before the
     // window closes, because the route to the daemon is read off a live pane.
     if let Some(app) = WindowRegistry::app_for(cx, workspace)
@@ -509,7 +524,54 @@ pub fn stop_workspace(cx: &mut App, workspace: WorkspaceId) {
     // half-finished action.
     close_window_for(cx, workspace);
     WorkspaceStore::close_window(cx, workspace);
+    // Last, and after the window is gone so nothing records the old layout back
+    // over it: the ids we just killed are dead by our own hand, and a record
+    // that still claims them reopens into panes that cannot be attached to.
+    // Locally that is invisible (`alive_panes_on` asks the daemon and gets the
+    // same answer); on a remote workspace nobody asks, so the stale id is the
+    // whole difference between reopening onto fresh shells with the agent
+    // conversation resumed and reopening onto `tty7 — disconnected`.
+    forget_killed_panes(cx, workspace, cleared);
     refresh_menu(cx);
+}
+
+/// Drop `workspace`'s pane ids, and tell the machine that owns the record.
+///
+/// The push is not optional for a remote workspace that is being kept: design
+/// The remote's `workspaces.json` is the authority, so reopening pulls
+/// its copy over the client's ([`WorkspaceStore::apply_remote`]) and a
+/// local-only edit would be undone by the next open — which is the open this
+/// exists for.
+fn forget_killed_panes(cx: &mut App, workspace: WorkspaceId, cleared: ClearedLayout) {
+    if !WorkspaceStore::forget_pane_ids(cx, workspace) {
+        return;
+    }
+    if cleared == ClearedLayout::Discard {
+        return;
+    }
+    let Some((host, key, record)) = WorkspaceStore::remote_payload(cx, workspace) else {
+        return;
+    };
+    let Some(connection) = crate::ui::remote_workspace::connection_for(cx, workspace) else {
+        // Not connected, so the panes were not killed either — `kill_pane_on`
+        // needs the same route. The client's copy is still worth clearing: it
+        // is what a reconnect pushes back up.
+        log::info!(
+            "ended sessions on {} without reaching it; the cleared layout goes up on reconnect",
+            host.target
+        );
+        return;
+    };
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(e) = crate::ui::remote_connect::put_remote_layout(&connection, key, record) {
+                log::warn!(
+                    "could not tell {} its workspace's panes are gone: {e}",
+                    host.target
+                );
+            }
+        })
+        .detach();
 }
 
 /// Delete a workspace outright: stop it, then forget it entirely. Irreversible
@@ -519,13 +581,16 @@ pub fn delete_workspace(cx: &mut App, workspace: WorkspaceId) {
     // still on file. Doing this after `WorkspaceStore::remove` would leave the
     // record stranded on the remote with no way left to name it.
     delete_on_remote(cx, workspace);
-    stop_workspace(cx, workspace);
+    // …and the stop that follows must not push the emptied layout back up: the
+    // delete above is in flight on a background task, and a push landing after
+    // it would recreate the record it just removed.
+    stop_workspace_keeping(cx, workspace, ClearedLayout::Discard);
     WorkspaceStore::remove(cx, workspace);
     release_unused_hosts(cx);
     refresh_menu(cx);
 }
 
-/// Forget a remote workspace on the machine that owns it (design §10: the
+/// Forget a remote workspace on the machine that owns it (the
 /// remote's `workspaces.json` is the authority, so deleting only the client's
 /// pointer would leave the workspace there and reappear on the next connect).
 ///
@@ -606,6 +671,20 @@ fn close_window_for(cx: &mut App, workspace: WorkspaceId) {
 /// `window.json` fallback, then a centred default — each cascaded so it does
 /// not land exactly on an existing window.
 fn window_options(cx: &mut App, workspace: Option<WorkspaceId>) -> WindowOptions {
+    // X11 needs the icon on the native window itself for taskbars and window
+    // switchers. Wayland resolves the same application identity through the
+    // desktop entry when tty7 is packaged.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    static APP_ICON: std::sync::LazyLock<Option<std::sync::Arc<image::RgbaImage>>> =
+        std::sync::LazyLock::new(|| {
+            image::load_from_memory(include_bytes!("../../assets/app-icon.png"))
+                .ok()
+                // The source asset is 1024×1024, but _NET_WM_ICON ships raw
+                // pixels to the X server per window (~4 MB at full size) and
+                // taskbars want at most 256px anyway.
+                .map(|image| std::sync::Arc::new(image.thumbnail(256, 256).into_rgba8()))
+        });
+
     let remember = cx.global::<Config>().remember_window_size;
     let remembered = remember
         .then(|| {
@@ -645,6 +724,9 @@ fn window_options(cx: &mut App, workspace: Option<WorkspaceId>) -> WindowOptions
 
     WindowOptions {
         window_bounds: Some(window_bounds),
+        app_id: Some("tty7".to_owned()),
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        icon: APP_ICON.as_ref().cloned(),
         // Start from the component defaults but nudge the traffic lights down
         // so they stay vertically centred in our taller (40px) title bar — see
         // `TitleBar::new().h(..)` in `app.rs`. `apply_theme` re-pins the same

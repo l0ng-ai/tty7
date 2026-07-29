@@ -2,11 +2,10 @@
 //! release tag → download URL, and the remote paths a server binary lives at.
 //!
 //! Everything here is a total function of its arguments — no network, no SFTP, no
-//! clock — which is the point: [`docs/remote-server-assets.md`] is a *literal*
-//! contract with the release workflow, and a contract is only worth having if
-//! both sides can be tested without standing up the other one.
-//!
-//! [`docs/remote-server-assets.md`]: ../../../../../docs/remote-server-assets.md
+//! clock — which is the point: the asset naming here is a *literal* contract
+//! with the release workflow (`.github/workflows/release.yml`), and a contract
+//! is only worth having if both sides can be tested without standing up the
+//! other one.
 
 use std::fmt;
 
@@ -19,14 +18,13 @@ pub const CHECKSUMS_ASSET: &str = "checksums.txt";
 
 /// Where release assets are downloaded from. The tag and asset name are appended
 /// (`{RELEASE_BASE}/{tag}/{asset}`); HTTPS to github.com is the trust anchor for
-/// the checksum file itself (§16).
+/// the checksum file itself.
 pub const RELEASE_BASE: &str = "https://github.com/l0ng-ai/tty7/releases/download";
 
 /// The `XDG_DATA_HOME`-shaped directory tty7 owns on a remote machine, relative
 /// to `$HOME`. Split into components because the installer has to `mkdir` each
 /// level (SFTP has no `mkdir -p`) and because joining is `/`-only regardless of
-/// the *client's* OS — a Windows client must not produce `.local\share`
-/// (contract §4.3).
+/// the *client's* OS — a Windows client must not produce `.local\share`.
 pub const INSTALL_DIR_COMPONENTS: [&str; 4] = [".local", "share", "tty7", "bin"];
 
 /// Why a machine cannot be served a `tty7-server`.
@@ -89,7 +87,7 @@ impl std::error::Error for UnsupportedTarget {}
 /// that dies with `Exec format error` at first exec — an error with no visible
 /// connection to the architecture detection that caused it, on a machine the user
 /// may not be able to inspect. An unknown machine string is a clean, explainable
-/// refusal that names itself (`docs/remote-server-assets.md`).
+/// refusal that names itself.
 ///
 /// `amd64` / `arm64` are accepted alongside the values Linux actually reports
 /// because some container images and BSD-flavoured userlands normalise to them.
@@ -154,7 +152,7 @@ pub fn download_url(tag: &str, asset: &str) -> String {
 ///
 /// Built with explicit `/` joins from an absolute `$HOME` the remote resolved for
 /// us (SFTP does not expand `~`, and `PathBuf::join` would emit `\` on a Windows
-/// client — contract §4.3).
+/// client).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemotePaths {
     /// `$HOME/.local/share/tty7/bin`.
@@ -199,6 +197,26 @@ pub fn binary_name(version: &str) -> String {
     format!("tty7-server-{version}")
 }
 
+/// [`RemotePaths`] pointing at a binary that is **already on the machine**,
+/// found rather than named — the server a connect adopted because it speaks our
+/// dialects (`Installer::adoptable_running_server`).
+///
+/// `binary` is the path as the remote reported it, verbatim: it is what the
+/// transport must connect to, and rebuilding it from a version parsed out of the
+/// filename would turn a binary installed somewhere unexpected into a path that
+/// does not exist.
+///
+/// `temp` and `dir_chain` still describe *our* install location, because that is
+/// where a later install would write. Nothing writes anything on the adoption
+/// path, so they are unused there; keeping them well-formed means a caller that
+/// falls back to installing does not need a second `RemotePaths`.
+pub fn remote_paths_for_binary(home: &str, binary: &str) -> RemotePaths {
+    let version = version_from_path(binary);
+    let mut paths = remote_paths(home, version.as_deref().unwrap_or("unknown"));
+    paths.binary = binary.to_string();
+    paths
+}
+
 /// The version encoded in an installed binary's *path*, if it is one of ours.
 ///
 /// This is how the running daemon's build is identified without asking it: the
@@ -220,7 +238,7 @@ mod tests {
     use super::*;
 
     /// The contract's mapping table, row for row. This test *is* the client half
-    /// of `docs/remote-server-assets.md`: if the release workflow ever renames an
+    /// of the asset naming contract: if the release workflow ever renames an
     /// asset, this is where the two sides stop agreeing.
     #[test]
     fn uname_maps_to_the_published_assets() {

@@ -1,5 +1,5 @@
 //! WSL — a distribution on *this* machine as a remote workspace host
-//! (design §7.3, §12 and decision D9).
+//! (decision D9).
 //!
 //! ## Why WSL is its own transport instead of "just another SSH host"
 //!
@@ -615,7 +615,7 @@ impl RemoteOps for WslRemoteOps {
     ///
     /// **Through `wsl.exe -- tee <path>`, not through a `\\wsl$\<distro>\…` UNC
     /// path**, and this is the one design decision in this file that had a real
-    /// alternative. Design §12 names the UNC path; it is the worse of the two:
+    /// alternative. The UNC path is the worse of the two:
     ///
     /// | | `\\wsl$` UNC write | `tee` over stdio |
     /// |---|---|---|
@@ -677,7 +677,7 @@ impl RemoteOps for WslRemoteOps {
 }
 
 // ---------------------------------------------------------------------------
-// The bundled binary (design §12: WSL does not download).
+// The bundled binary (WSL does not download).
 // ---------------------------------------------------------------------------
 
 /// Overrides where the bundled Linux server binaries are looked for. Exists so
@@ -723,7 +723,8 @@ pub fn bundled_search_dirs(exe: Option<&Path>, override_dir: Option<&Path>) -> V
 
 /// The Linux `tty7-server` this client shipped with.
 ///
-/// Design §12: "WSL 的安装不走下载 —— 直接把客户端自带的 Linux 二进制拷过去".
+/// A WSL install never downloads: the client's own bundled Linux binary is
+/// copied across instead.
 /// The version question answers itself, because the bundled binary was built
 /// from the same workspace version as the client asking for it; there is no tag
 /// to resolve and no manifest to verify against.
@@ -984,7 +985,7 @@ mod tests {
         ));
     }
 
-    /// Design §7.3's command line, spelled out. This is the exact argv the
+    /// The WSL command line, spelled out. This is the exact argv the
     /// transport is specified to produce, and it has never been run — so the
     /// string is pinned here instead.
     #[test]
@@ -1033,7 +1034,7 @@ mod tests {
     }
 
     /// The label a WSL host is prompted about, recorded under, and keyed by has
-    /// to be the one `RemoteTarget` already defined (contract §4.2) — these are
+    /// to be the one `RemoteTarget` already defined — these are
     /// compared as strings in the mismatch registry and in log lines a user is
     /// meant to correlate.
     #[test]
@@ -1485,7 +1486,7 @@ mod tests {
 
     /// The bundled source loads bytes and reports where they came from, and its
     /// absence is a *named* failure rather than a silent fall back to a
-    /// download — which is the whole point of §12's WSL exception.
+    /// download — which is the whole point of the WSL exception.
     #[test]
     fn a_missing_bundled_binary_names_every_place_it_looked() {
         let tmp = std::env::temp_dir().join(format!("tty7-wsl-src-{}", std::process::id()));
@@ -1768,8 +1769,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Declining writes nothing. Same rule as SSH — §12's "往别人机器上写二进制
-    /// 值得问一次" applies to a distribution too, because it is still a
+    /// Declining writes nothing. Same rule as SSH — writing a binary onto a
+    /// machine is worth asking about once, and a distribution is still a
     /// filesystem the user owns and did not ask us to touch.
     #[test]
     fn declining_writes_nothing_into_the_distribution() {

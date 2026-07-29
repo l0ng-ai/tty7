@@ -33,6 +33,12 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 /// buffering it in memory before finding out is not a good trade.
 const MAX_ASSET_BYTES: u64 = 128 * 1024 * 1024;
 
+/// How much body to take per read, and therefore how often progress is
+/// reported: ~130 updates over a 8 MB asset. Large enough that the syscall
+/// overhead stays irrelevant, small enough that a bar moves smoothly rather
+/// than in visible jumps.
+const READ_CHUNK: usize = 64 * 1024;
+
 /// Downloads release assets over HTTPS.
 pub struct HttpsFetcher {
     agent: ureq::Agent,
@@ -52,6 +58,14 @@ impl Default for HttpsFetcher {
 
 impl AssetFetcher for HttpsFetcher {
     fn get(&self, url: &str) -> Result<Vec<u8>, String> {
+        self.get_with_progress(url, &|_, _| {})
+    }
+
+    fn get_with_progress(
+        &self,
+        url: &str,
+        on_progress: &dyn Fn(u64, Option<u64>),
+    ) -> Result<Vec<u8>, String> {
         let response = self
             .agent
             .get(url)
@@ -73,16 +87,36 @@ impl AssetFetcher for HttpsFetcher {
             return Err(format!("{url} returned HTTP {status}"));
         }
 
+        // Only a hint: it is what the *server* claims, so it sizes the
+        // allocation and the progress bar but never the ceiling check below.
+        let declared = response
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n <= MAX_ASSET_BYTES);
+
         let mut body = response.into_body();
-        let mut bytes = Vec::new();
-        body.as_reader()
-            .take(MAX_ASSET_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| describe(url, &e.to_string()))?;
-        if bytes.len() as u64 > MAX_ASSET_BYTES {
-            return Err(format!(
-                "{url} is larger than the {MAX_ASSET_BYTES} byte ceiling for a release asset"
-            ));
+        // `take` still caps the read, so a lying (or absent) Content-Length
+        // cannot make this buffer more than the ceiling — one byte over is
+        // enough to detect it, which is why the limit is `+ 1`.
+        let mut reader = body.as_reader().take(MAX_ASSET_BYTES + 1);
+        let mut bytes = Vec::with_capacity(declared.unwrap_or(0) as usize);
+        let mut buf = vec![0u8; READ_CHUNK];
+        loop {
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| describe(url, &e.to_string()))?;
+            if n == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buf[..n]);
+            if bytes.len() as u64 > MAX_ASSET_BYTES {
+                return Err(format!(
+                    "{url} is larger than the {MAX_ASSET_BYTES} byte ceiling for a release asset"
+                ));
+            }
+            on_progress(bytes.len() as u64, declared);
         }
         Ok(bytes)
     }
@@ -130,7 +164,7 @@ mod tests {
     ///   of nothing. Asserting real content is what catches that.
     /// - **The TLS trust anchor works.** ureq's webpki roots must accept
     ///   github.com's chain; that HTTPS connection *is* the security model here
-    ///   (§16 — `checksums.txt` is not separately signed).
+    ///   (`checksums.txt` is not separately signed).
     ///
     /// Deliberately a small file rather than a release asset: assets are ~20 MB
     /// and this is a correctness check, not a bandwidth test.

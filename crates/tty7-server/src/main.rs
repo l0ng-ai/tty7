@@ -1,7 +1,7 @@
 //! `tty7-server` — the tty7 session daemon with no GUI attached.
 //!
-//! This is the binary that runs on the machine a *remote* workspace lives on
-//! (see `docs/2026-07-27-remote-workspace-design.md`). It runs the same
+//! This is the binary that runs on the machine a *remote* workspace lives on.
+//! It runs the same
 //! `daemon::server` the local GUI auto-spawns, plus the control listener that
 //! backs a remote `Host`; the only difference from the GUI's daemon is that
 //! nothing on this side ever opens a window, which is why the code it needs had
@@ -64,6 +64,7 @@ OPTIONS:
       --pane                Forward to the machine's *pane* socket instead
       --control-sock <p>    Use <p> as the control socket instead of the default
     --config-dir <dir>    Use <dir> for the socket, config and session files
+    --protocol            Print the dialects this binary speaks, as JSON
     -V, --version         Print the version and exit
     -h, --help            Print this help and exit
 ";
@@ -85,6 +86,22 @@ fn main() -> ExitCode {
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("tty7-server {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+    // Before the config dir, the crash handler and the logger, like `--version`:
+    // a client asking what this binary speaks must not touch the machine's
+    // state, and must answer even on a box where the config dir is unwritable.
+    //
+    // One line of JSON on stdout, because the reader is a client parsing SSH
+    // output rather than a person (`install::RemoteProtocol::parse`).
+    if args
+        .iter()
+        .any(|a| a == tty7_core::daemon::install::PROTOCOL_FLAG)
+    {
+        println!(
+            "{}",
+            tty7_core::daemon::install::RemoteProtocol::of_this_build().to_line()
+        );
         return ExitCode::SUCCESS;
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -213,7 +230,7 @@ fn run_stdio(args: &[String]) -> io::Result<()> {
                     // `persist` writes the whole document: the second to save
                     // silently drops the first's changes. Their attachment
                     // registries would be separate too, which makes design
-                    // §10's takeover a no-op between them — both clients would
+                    // the takeover a no-op between them — both clients would
                     // hold the same workspace and neither would be told.
                     //
                     // Not attempted when the caller named a socket: starting a
@@ -299,8 +316,8 @@ fn bridge_panes() -> io::Result<()> {
 /// server, in both directions, until either side stops.
 ///
 /// Deliberately dumb: it parses nothing. The version handshake this stream
-/// carries is between the *client* and the server at the far end (contract
-/// §6.9), and a bridge that understood the frames would be a third opinion about
+/// carries is between the *client* and the server at the far end, and a bridge
+/// that understood the frames would be a third opinion about
 /// the protocol version, which is exactly the coupling the design forbids.
 #[cfg(unix)]
 fn bridge(upstream: std::os::unix::net::UnixStream) -> io::Result<()> {
@@ -322,7 +339,7 @@ fn bridge(upstream: std::os::unix::net::UnixStream) -> io::Result<()> {
     // up" into a bridge that never exits and, worse, never closes its stdout, so
     // the client at the far end waits forever for an EOF that is sitting in this
     // process. Returning lets the process exit, which closes stdout, which is
-    // the signal the client is actually waiting for. Design §10's takeover is
+    // the signal the client is actually waiting for. The takeover is
     // the case that made this visible: the server closes the displaced session's
     // link, and that has to reach the client through this bridge.
     let feeder_socket = upstream.try_clone()?;
@@ -363,7 +380,7 @@ fn bridge(upstream: std::os::unix::net::UnixStream) -> io::Result<()> {
 /// What this machine offers over a control connection, beyond its filesystem.
 ///
 /// The workspace store is the reason this binary exists on a remote box at all:
-/// design §10 puts the workspace list, the tab/pane tree and each pane's cwd on
+/// the workspace list, the tab/pane tree and each pane's cwd live on
 /// **the machine the panes run on**, so that connecting from a different laptop
 /// shows the same thing. The client's `session.json` keeps only its own view
 /// state.

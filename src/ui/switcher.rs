@@ -48,9 +48,10 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_f
 use tty7_core::core::session::{RemoteTarget, WorkspaceId};
 
 use crate::core::session::WorkspaceStore;
+use crate::daemon::install::InstallPhase;
 use crate::terminal::pane_liveness::Liveness;
 use crate::ui::app::Tty7App;
-use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow};
+use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow, human_bytes};
 use crate::ui::remote_workspace::ConnectFlow;
 
 /// Card width — the command palette's, to the pixel.
@@ -115,6 +116,11 @@ const ROW_PAD: f32 = 8.0;
 /// is what 52px bought.)
 const WHEN_W: f32 = 96.0;
 
+/// Height of the install bar's track. Thin on purpose: it is a thing to glance
+/// at while waiting, not a control, and anything taller starts to compete with
+/// the workspace rows under it for the eye.
+const PROGRESS_H: f32 = 3.0;
+
 /// What a machine's connection is doing, as far as this panel is concerned.
 ///
 /// Deliberately coarser than
@@ -131,7 +137,7 @@ enum Link {
     /// A connect is in flight right now.
     Connecting,
     /// The last attempt failed. A resting state, not a transient one: design
-    /// §17 says a failure always stays put and offers the next move, so the
+    /// A failure always stays put and offers the next move, so the
     /// reason rides along on the group (see [`Group::error`]).
     Failed,
     /// No connection. **Not an error** — the rows below it are what this client
@@ -162,6 +168,12 @@ struct Group {
     /// Why the last connect failed, shown under the header until the user acts
     /// on it.
     error: Option<String>,
+    /// How far this machine's first install has got, while one is running.
+    ///
+    /// Shares the header's under-slot with [`error`](Self::error) and cannot
+    /// collide with it: a connect is either still installing or has already
+    /// failed.
+    installing: Option<InstallPhase>,
     rows: Vec<Row>,
 }
 
@@ -322,6 +334,7 @@ impl Tty7App {
                         link: Link::Offline,
                         home: None,
                         error: None,
+                        installing: None,
                         rows: Vec::new(),
                     });
                     groups.len() - 1
@@ -351,7 +364,7 @@ impl Tty7App {
         // looks like nothing happened: the connect runs, succeeds, and has
         // nowhere to land — groups came only from workspaces this client had
         // records for, and a machine that has never been used has none. That is
-        // also precisely the machine whose "New Workspace" row the user needs.
+        // also precisely the machine the user is about to make a workspace on.
         for target in self.pending_machines() {
             let key = target.to_string();
             if index.contains_key(&key) {
@@ -366,6 +379,7 @@ impl Tty7App {
                 link: Link::Offline,
                 home: None,
                 error: None,
+                installing: None,
                 rows: Vec::new(),
             });
         }
@@ -385,6 +399,7 @@ impl Tty7App {
                     link: Link::Offline,
                     home: None,
                     error: None,
+                    installing: None,
                     rows: Vec::new(),
                 },
             );
@@ -425,6 +440,12 @@ impl Tty7App {
                 group.error = Some(error.clone());
             }
             let id = target.host_id();
+            // Only while *this* window is the one connecting. Another window's
+            // install is its own business, and a bar under a row this panel is
+            // not driving would have no "Try Again" to turn into.
+            if group.link == Link::Connecting {
+                group.installing = remote_connect::install_progress_for(id);
+            }
             // Read app-wide, not from this window's snapshot: any window's
             // connect, and every reconnect, records the machine's `$HOME` — and
             // that row is the only way to make a workspace on a machine, so it
@@ -578,6 +599,29 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Stop holding a connection to a machine.
+    ///
+    /// The panel stays open and the machine keeps its group: its workspaces are
+    /// still there, still listed from what this client remembers, and the header
+    /// now reads "not connected" — clicking it connects again. Windows showing
+    /// them stay open and go read-only; see [`RemoteLinks::disconnect`] for why
+    /// this closes nothing.
+    fn switcher_disconnect(&mut self, target: &RemoteTarget, cx: &mut Context<Self>) {
+        crate::ui::remote_workspace::RemoteLinks::disconnect(cx, target.host_id());
+        // A finished connect flow for this machine described an attempt that has
+        // just been undone; leaving it would keep painting a stale error (or a
+        // success) over the group that no longer holds.
+        if self
+            .connect
+            .as_ref()
+            .and_then(ConnectFlow::choice)
+            .is_some_and(|c| &c.target == target)
+        {
+            self.connect = None;
+        }
+        cx.notify();
+    }
+
     /// Make a workspace on a machine. Local goes through the ordinary
     /// `NewWorkspace` path; a remote one lands in *that machine's* `$HOME`.
     fn switcher_new(&mut self, group: &GroupRef, window: &mut Window, cx: &mut Context<Self>) {
@@ -717,7 +761,7 @@ impl Tty7App {
     /// The one row the panel keeps below the fold — adding a machine it does not
     /// know about yet — and the one gesture nothing else advertises.
     ///
-    /// Deliberately *not* an "add host" form. Design §2 is that a machine is
+    /// Deliberately *not* an "add host" form. A machine is
     /// configured once and remote workspaces reuse whatever is already set up,
     /// so this points at where that lives instead of growing a second place to
     /// do it.
@@ -819,7 +863,10 @@ impl Tty7App {
 
         let mut block = v_flex().gap(px(1.));
         block = block.child(self.render_group_header(group, expanded, cx));
-        // §17: a failure is a resting state — it stays on screen with its reason
+        if let Some(phase) = group.installing {
+            block = block.child(self.render_install_progress(phase, cx));
+        }
+        // A failure is a resting state — it stays on screen with its reason
         // in full and its next move one click away, rather than reverting the
         // panel and leaving the user to guess between VPN, keys and the box.
         if let Some(error) = group.error.as_ref() {
@@ -867,20 +914,87 @@ impl Tty7App {
                     ),
             );
         }
-        if expanded {
+        // A machine with no workspaces on it renders as its header alone. There
+        // used to be a "New Workspace" row to fill the space; it lives in the
+        // header's `⋯` now, so an empty group has nothing under it and must not
+        // draw an indent block (and a guide rail) around nothing.
+        if expanded && !rows.is_empty() {
             let mut kids = v_flex().gap(px(1.));
             for row in rows {
                 kids = kids.child(self.render_row(group, row, cx));
             }
-            // "New Workspace" needs a directory it is not making up, and only a
-            // handshake can supply the remote's. A connected machine always has
-            // one; this computer needs none.
-            if query.is_empty() && (group.target.is_none() || group.home.is_some()) {
-                kids = kids.child(self.render_new_row(group, cx));
-            }
             block = block.child(self.indent(group, kids, cx));
         }
         Some(block.into_any_element())
+    }
+
+    /// The bar under a machine that is being installed onto for the first time.
+    ///
+    /// Sits in the same slot as the failure box, indented and inset to the same
+    /// numbers, because it is the same kind of thing: a sentence about this
+    /// machine's connect that outlives a single frame. The two can never both be
+    /// present — a connect is either still running or has already failed — so
+    /// the slot needs no arbitration.
+    ///
+    /// No border, unlike the failure box. A failure is a thing to act on and
+    /// earns an outline; this is a thing to wait through, and a box around it
+    /// would give a routine 20 seconds the weight of an error.
+    fn render_install_progress(
+        &self,
+        phase: InstallPhase,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        // The same warning colour the header's dot and "installing…" already
+        // use, so the row and the bar read as one state and not two.
+        let accent = theme.warning;
+        let (verb, done, total) = match phase {
+            InstallPhase::Downloading { done, total } => ("Downloading", done, total),
+            InstallPhase::Uploading { done, total } => ("Copying", done, Some(total)),
+        };
+        // An unknown total (no Content-Length) still gets a line of text and a
+        // bar — just an empty one. A bar that guessed at a fraction would be
+        // lying, and one that vanished would read as the install having stopped.
+        let fraction = phase.fraction().unwrap_or(0.0);
+        let caption = match total {
+            Some(total) => format!(
+                "{verb} tty7's server… {} / {}",
+                human_bytes(done),
+                human_bytes(total)
+            ),
+            None => format!("{verb} tty7's server… {}", human_bytes(done)),
+        };
+
+        v_flex()
+            .gap(px(6.))
+            .ml(px(KID_INDENT))
+            .mr(px(4.))
+            .mb(px(2.))
+            .px(px(10.))
+            .py(px(8.))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(caption),
+            )
+            .child(
+                // Track and fill are one element inside another rather than a
+                // gauge widget: the panel has no other progress indicator to be
+                // consistent with, and 3px of rounded div needs no abstraction.
+                div()
+                    .w_full()
+                    .h(px(PROGRESS_H))
+                    .rounded_full()
+                    .bg(theme.border)
+                    .child(
+                        div()
+                            .h_full()
+                            .w(gpui::relative(fraction))
+                            .rounded_full()
+                            .bg(accent),
+                    ),
+            )
     }
 
     /// A machine's rows, set in from its own row — and, on a *remote* machine,
@@ -904,8 +1018,8 @@ impl Tty7App {
                         .top(px(0.))
                         // Stops short of the last row's baseline rather than
                         // running to the edge: a line that ends level with the
-                        // final "New Workspace" glyph reads as enclosing the
-                        // block, one that runs past it reads as unfinished.
+                        // final row's glyph reads as enclosing the block, one
+                        // that runs past it reads as unfinished.
                         .bottom(px(ROW_H / 2.))
                         .w(px(1.))
                         .bg(rail),
@@ -928,6 +1042,10 @@ impl Tty7App {
         );
         let hover = hover_fill(cx);
         let gref = GroupRef::of(group);
+        let menu_ref = gref.clone();
+        let ctx_ref = gref.clone();
+        let app = cx.entity().downgrade();
+        let app2 = app.clone();
 
         // A machine wears the shape of what it is, which is the only thing on
         // the row that says "somewhere else" before a word of it is read. Both
@@ -945,6 +1063,12 @@ impl Tty7App {
         let (dot, word): (Option<gpui::Hsla>, Option<&'static str>) = match group.link {
             Link::Local => (None, None),
             Link::Connected => (Some(gpui::rgb(crate::ui::tab_strip::LIVE_DOT).into()), None),
+            // "installing…" while bytes are moving: the bar underneath says how
+            // far along, and a header still reading "connecting…" over it would
+            // describe a step that finished a while ago.
+            Link::Connecting if group.installing.is_some() => {
+                (Some(theme.warning), Some("installing…"))
+            }
             Link::Connecting => (Some(theme.warning), Some("connecting…")),
             Link::Failed => (Some(theme.danger), Some("couldn't connect")),
             Link::Offline => (
@@ -1022,6 +1146,33 @@ impl Tty7App {
                         .child(format!("{}", group.rows.len())),
                 )
             })
+            // The machine's own actions, in the same `⋯` its rows use — but
+            // always on, where a row's appears on hover. Two reasons it earns
+            // the pixels a row's does not: there are a handful of machines and
+            // dozens of rows, so a permanent glyph here is one mark and not a
+            // column of them; and since "New Workspace" stopped being a row this
+            // is the *only* way to reach it, where a row's menu only duplicates
+            // what clicking the row already does.
+            //
+            // Without the `stop_propagation` the press underneath reaches the
+            // header and folds the machine away behind its own menu.
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        Button::new(gpui::SharedString::from(format!(
+                            "switcher-host-more:{}",
+                            group.key
+                        )))
+                        .icon(IconName::Ellipsis)
+                        .ghost()
+                        .xsmall()
+                        .dropdown_menu(move |menu, _window, _cx| {
+                            group_menu(menu, &menu_ref, app.clone())
+                        }),
+                    ),
+            )
             .child(
                 Icon::new(if expanded {
                     IconName::ChevronDown
@@ -1034,6 +1185,8 @@ impl Tty7App {
             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                 this.switcher_toggle_host(&gref, cx)
             }))
+            // Right-click reaches the same menu, exactly as a row's does.
+            .context_menu(move |menu, _window, _cx| group_menu(menu, &ctx_ref, app2.clone()))
     }
 
     fn render_row(&self, group: &Group, row: &Row, cx: &mut Context<Self>) -> AnyElement {
@@ -1181,53 +1334,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    fn render_new_row(&self, group: &Group, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let (muted, dim) = (theme.muted_foreground, theme.muted_foreground.opacity(0.7));
-        let hover = hover_fill(cx);
-        let gref = GroupRef::of(group);
-        // The directory rides in the age column rather than inside the label.
-        // It still has to be *there* — on a Mac connected to a Linux box, `~` is
-        // `/home/them`, and a row that did not say so would only reveal it at
-        // the first `pwd` — but "New Workspace in /home/thomas" as one long
-        // sentence made the shortest row in the panel the widest.
-        let home = group
-            .home
-            .as_ref()
-            .map(|h| crate::ui::home::display_path(h));
-        h_flex()
-            .id(gpui::SharedString::from(format!(
-                "switcher-new:{}",
-                group.key
-            )))
-            .items_center()
-            .gap(px(8.))
-            .h(px(ROW_H))
-            .px(px(ROW_PAD))
-            .rounded(px(6.))
-            .cursor_pointer()
-            .hover(move |r| r.bg(hover))
-            .text_sm()
-            .text_color(muted)
-            // A narrower column than a machine's, so the `+` centres on the
-            // monograms above it rather than 3px to their right.
-            .child(glyph_col(
-                ROW_AVATAR,
-                Icon::new(IconName::Plus).size(px(ICON)).text_color(dim),
-            ))
-            .child(div().flex_shrink_0().child("New Workspace"))
-            .child(div().flex_1())
-            .children(home.map(|h| {
-                div()
-                    .flex_shrink_0()
-                    .truncate()
-                    .text_xs()
-                    .text_color(dim)
-                    .child(h)
-            }))
-            .on_click(cx.listener(move |this, _, window, cx| this.switcher_new(&gref, window, cx)))
-    }
-
     /// The machines with nothing on them yet, folded into one row.
     fn render_other_hosts(
         &self,
@@ -1355,7 +1461,7 @@ impl Group {
     /// it names that this client has no record of becomes an extra row marked
     /// for adoption. Rows this client *does* have are left alone: their local
     /// record carries window geometry and the `open` flag, which are this
-    /// client's business and not the remote's (design §10's storage split).
+    /// client's business and not the remote's (the storage split).
     fn merge(&mut self, remote: &[RemoteWorkspaceRow], now: u64) {
         if self.target.is_none() {
             return;
@@ -1425,6 +1531,49 @@ impl RowRef {
             },
         }
     }
+}
+
+/// A machine's second-tier actions.
+///
+/// "New Workspace" lives here rather than in a row of its own under every
+/// machine. It was the one line in the panel that was not a workspace, it
+/// repeated once per machine, and on a client with four boxes it pushed the
+/// thing the panel is *for* — the list — a quarter of a card further down.
+///
+/// The `⋯` is also where a machine's own verbs belong now there is more than
+/// one of them: expanding a machine already means "connect", so its inverse
+/// needed somewhere to be said, and it is not a row either.
+fn group_menu(
+    menu: gpui_component::menu::PopupMenu,
+    group: &GroupRef,
+    app: gpui::WeakEntity<Tty7App>,
+) -> gpui_component::menu::PopupMenu {
+    let (a1, a2) = (app.clone(), app);
+    let gref = group.clone();
+    // A remote machine can only be given a workspace once a handshake has said
+    // where its `$HOME` is — `~` guessed from this client would be the wrong
+    // directory on the wrong computer. This one needs no handshake.
+    let can_create = group.target.is_none() || group.home.is_some();
+    let menu = menu.item(
+        PopupMenuItem::new("New Workspace")
+            .disabled(!can_create)
+            .on_click(move |_, window, cx| {
+                let _ = a1.update(cx, |this, cx| this.switcher_new(&gref, window, cx));
+            }),
+    );
+    let Some(target) = group.target.clone() else {
+        // This computer. There is no connection to drop, and "Disconnect"
+        // greyed out under every local group would only invite the question.
+        return menu;
+    };
+    let connected = group.link == Link::Connected;
+    menu.separator().item(
+        PopupMenuItem::new("Disconnect")
+            .disabled(!connected)
+            .on_click(move |_, _window, cx| {
+                let _ = a2.update(cx, |this, cx| this.switcher_disconnect(&target, cx));
+            }),
+    )
 }
 
 /// A row's second-tier actions.
@@ -1501,8 +1650,8 @@ fn hover_fill(cx: &App) -> gpui::Rgba {
 /// Every icon in the panel goes through this, which is the whole point: the old
 /// layout let each row start its own glyph wherever its padding happened to
 /// land, so nothing shared a vertical axis. A machine's column is [`GUTTER`];
-/// the rows underneath use [`ROW_AVATAR`], so a `+` lands on the monograms
-/// above it rather than beside them.
+/// the rows underneath use the narrower [`ROW_AVATAR`], so their monograms
+/// share one axis of their own rather than sitting 3px off the machines'.
 fn glyph_col(w: f32, child: impl IntoElement) -> impl IntoElement {
     div()
         .w(px(w))

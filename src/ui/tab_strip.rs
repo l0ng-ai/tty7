@@ -21,7 +21,7 @@ use crate::core::actions::{
     SelectWorkspace5, SelectWorkspace6, SelectWorkspace7, SelectWorkspace8, SelectWorkspace9,
     TogglePalette,
 };
-use crate::core::config::{Config, RightPanelTab};
+use crate::core::config::RightPanelTab;
 use crate::daemon::protocol::ShellSpec;
 use crate::ui::app::{TILE_GLYPH, TILE_GLYPH_LINE, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
 use crate::ui::hints::tab_badge_label;
@@ -882,10 +882,10 @@ impl Tty7App {
         }
     }
 
-    /// Attach the "new tab" shell picker to a button: the configured default
-    /// shell leads the menu (tagged `default`), followed by every shell detected
-    /// on this machine; clicking one opens a tab on that shell. Extracted so the
-    /// title-bar strip's "+" and the vertical [`tab_sidebar`] share one menu
+    /// Attach the "new tab" shell picker to a button: the default shell leads
+    /// the menu (tagged `default`), followed by every shell found on **this
+    /// window's machine**; clicking one opens a tab on that shell. Extracted so
+    /// the title-bar strip's "+" and the vertical [`tab_sidebar`] share one menu
     /// definition rather than duplicating the shell iteration.
     ///
     /// [`tab_sidebar`]: crate::ui::tab_sidebar
@@ -894,13 +894,8 @@ impl Tty7App {
         button: Button,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
-        let shells = self.detected_shells.clone();
-        let default_name = crate::core::shells::default_shell_name(
-            cx.global::<Config>()
-                .shell
-                .as_ref()
-                .map(|s| s.program.as_str()),
-        );
+        let shells = self.shells.shells.clone();
+        let default_name = self.default_shell_label(cx);
         let app = cx.entity().downgrade();
         button.dropdown_menu(move |menu, _window, _cx| {
             let mut menu = menu.min_w(px(220.));

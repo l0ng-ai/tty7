@@ -155,7 +155,16 @@ impl RemoteOps for SshRemoteOps {
     }
 
     fn put(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
-        SftpManager::global().put_bytes(&self.conn, path, bytes)
+        SftpManager::global().put_bytes(&self.conn, path, bytes, &|_| {})
+    }
+
+    fn put_with_progress(
+        &self,
+        path: &str,
+        bytes: &[u8],
+        on_progress: &(dyn Fn(u64) + Send + Sync),
+    ) -> Result<(), String> {
+        SftpManager::global().put_bytes(&self.conn, path, bytes, on_progress)
     }
 
     fn rename(&self, from: &str, to: &str) -> Result<(), String> {
@@ -255,7 +264,7 @@ mod tests {
         }
     }
 
-    /// And must not swallow the failures §17 requires to be reported: a full
+    /// And must not swallow the failures that have to be reported: a full
     /// disk or a read-only home has to surface as an error with a path, never as
     /// "the file isn't there, go ahead and install".
     #[test]

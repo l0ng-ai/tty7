@@ -52,7 +52,7 @@ use crate::daemon::protocol::{
 
 use super::{ConnectionKey, SshConnection, SshManager};
 
-/// Chunk size for streaming reads/writes (matches the Tabby reference, §6).
+/// Chunk size for streaming reads/writes (matches the Tabby reference).
 const CHUNK: usize = 256 * 1024;
 
 /// How long a finished job's final progress lingers for the GUI to observe before
@@ -388,11 +388,20 @@ impl SftpManager {
     /// server that runs out of disk reports it on the write or the close, and
     /// swallowing that would leave a truncated file for the caller to chmod and
     /// rename into place as though it were whole.
+    /// `on_progress` is called with the running total after each chunk lands.
+    /// It runs on the SSH runtime between writes, so it must not block — the
+    /// installer's sink just stores the number.
+    ///
+    /// Counted after `write_all` rather than before, so the figure is bytes the
+    /// transport has accepted rather than bytes we intend to send. It still
+    /// reaches `len` before `flush`/`shutdown` have confirmed anything, which is
+    /// why a full bar is not the installer's success signal — the `Ok` is.
     pub fn put_bytes(
         &self,
         conn: &Arc<SshConnection>,
         path: &str,
         bytes: &[u8],
+        on_progress: &(dyn Fn(u64) + Send + Sync),
     ) -> Result<(), String> {
         SshManager::global().handle().block_on(async {
             self.with_session(conn, |sftp| async move {
@@ -401,8 +410,11 @@ impl SftpManager {
                     .open_with_flags(path.to_string(), flags)
                     .await
                     .map_err(|e| format!("{e}"))?;
+                let mut written = 0u64;
                 for chunk in bytes.chunks(CHUNK) {
                     file.write_all(chunk).await.map_err(|e| format!("{e}"))?;
+                    written += chunk.len() as u64;
+                    on_progress(written);
                 }
                 file.flush().await.map_err(|e| format!("{e}"))?;
                 file.shutdown().await.map_err(|e| format!("{e}"))?;

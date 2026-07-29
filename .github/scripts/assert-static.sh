@@ -3,8 +3,8 @@
 # Fail unless the binary is a fully static ELF — no dynamic loader, no shared
 # library dependencies.
 #
-# This is the mechanical guard behind D10 (docs/2026-07-27-remote-workspace-design.md):
-# one `tty7-server` binary is pushed to arbitrary remote machines and must run
+# This is the mechanical guard behind decision D10: one `tty7-server` binary
+# is pushed to arbitrary remote machines and must run
 # there regardless of what libc, and what *version* of it, that machine has. A
 # build that silently picked up a dynamic dependency would still pass a
 # compile-only CI job and then fail on the first old box a user connects to —

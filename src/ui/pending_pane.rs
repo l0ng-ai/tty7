@@ -55,6 +55,28 @@ pub struct PendingSpawn {
     pub working_directory: Option<std::path::PathBuf>,
     pub restore_pane: Option<u64>,
     pub shell: Option<ShellSpec>,
+    /// The coding agent this leaf was last seen running, its native session id
+    /// and the argv it was launched with — carried verbatim from the saved
+    /// session.
+    ///
+    /// Two jobs, both of which need the *fields* rather than a precomputed
+    /// resume line:
+    ///
+    /// 1. If `restore_pane` turns out to be gone, `land_pane` builds the
+    ///    `--resume` command from them. Whether it is needed is only known on
+    ///    the machine, one round trip away.
+    /// 2. A save that happens while this pane is still connecting writes them
+    ///    straight back out ([`pane_to_session`](crate::ui::app)). Without
+    ///    that, every such save silently erased the agent from the record —
+    ///    and a workspace whose sessions were then ended had nothing left to
+    ///    resume *from*, which is what made the resume look intermittent.
+    pub agent: Option<crate::core::cli_agent::CLIAgent>,
+    pub agent_session_id: Option<String>,
+    pub agent_launch_argv: Option<Vec<String>>,
+    /// The workspace this pane is being created for — carried so the spawn that
+    /// finally lands (and any retry) names the same owner the synchronous local
+    /// path would have.
+    pub owner: Option<crate::core::session::WorkspaceId>,
     /// Inherited by the terminal this becomes, so a pane that arrives late
     /// still matches the ones already on screen.
     pub font_size: f32,
@@ -64,7 +86,7 @@ pub struct PendingSpawn {
 pub enum PendingState {
     Connecting,
     /// The attempt failed, with the reason as the user should read it. A
-    /// resting state (design §17): the slot keeps its place in the layout and
+    /// resting state: the slot keeps its place in the layout and
     /// offers the next move rather than collapsing the split under the user.
     Failed(SharedString),
 }
@@ -167,7 +189,7 @@ impl Render for PendingPane {
                         .text_color(theme.foreground)
                         .child(format!("Couldn't reach {}", self.machine)),
                 )
-                // The hop that gave up, in full. §17: a failure says which of
+                // The hop that gave up, in full: a failure says which of
                 // "the daemon isn't running", "that machine refused us" and
                 // "the server over there is too old" it was, because they want
                 // completely different things from the user.

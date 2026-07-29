@@ -20,7 +20,7 @@
 //! connection alive exactly like `ssh -N`.
 //!
 //! There are two owners, because tty7 has two unrelated features that both open
-//! forwards (design §2):
+//! forwards:
 //!
 //! | | SSH pane ("连一下") | remote workspace ("在上面开发") |
 //! |---|---|---|
@@ -410,7 +410,7 @@ impl SshForwardRegistry {
         self.teardown_owned(&ForwardOwner::Pane(pane_id)).await;
     }
 
-    // ---- Workspace-owned forwards (remote workspaces, design §15) -----------
+    // ---- Workspace-owned forwards (remote workspaces) ----------------------
 
     /// [`establish`](Self::establish) for a remote workspace. `view_pane` is only
     /// stamped into the returned row for the GUI's per-pane list; ownership — and
@@ -718,7 +718,7 @@ impl SshForwardRegistry {
     }
 
     /// [`ensure_loopback`](Self::ensure_loopback) for a remote workspace: the
-    /// ⌘-clicked `localhost:PORT` in a remote-workspace pane (design §15).
+    /// ⌘-clicked `localhost:PORT` in a remote-workspace pane.
     ///
     /// The forward is owned by the workspace, so clicking the link in one pane
     /// and then closing that pane leaves the browser tab working.
@@ -890,7 +890,7 @@ impl SshManager {
     }
 
     /// Ensure the on-demand loopback forward behind a ⌘-clicked `localhost:PORT`
-    /// in a remote-workspace pane (design §15).
+    /// in a remote-workspace pane.
     pub fn ensure_workspace_loopback(
         &self,
         workspace: WorkspaceId,
@@ -1233,7 +1233,7 @@ mod tests {
         );
     }
 
-    /// **Remote-workspace ownership (design §15).** The panes of a remote
+    /// **Remote-workspace ownership.** The panes of a remote
     /// workspace are transient — a tab closed, a pane respawned after a reconnect
     /// — so a forward the user ⌘-clicked into existence must outlive them. Only
     /// closing the *workspace* collects it.

@@ -9553,6 +9553,7 @@ dependencies = [
  "ksni",
  "libc",
  "log",
+ "memchr",
  "notify 8.2.0",
  "notify-rust",
  "objc2 0.6.4",

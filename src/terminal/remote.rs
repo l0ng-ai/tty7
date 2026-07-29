@@ -138,7 +138,7 @@ struct ReaderSignals {
 }
 
 /// The remote workspace a pane belongs to, and how the local daemon reaches its
-/// machine (design §15).
+/// machine.
 ///
 /// A pane of a remote workspace runs on the *remote* `tty7-server`, so nothing
 /// about it is addressable here by `pane_id`. This is what a pane carries
@@ -166,7 +166,7 @@ pub struct PaneWorkspace {
 
 impl PaneWorkspace {
     /// Whether this workspace shares `localhost` with the client, so a
-    /// `localhost:PORT` link resolves without any forward (design §15's WSL
+    /// `localhost:PORT` link resolves without any forward (the WSL
     /// exception).
     pub fn shares_localhost(&self) -> bool {
         matches!(self.target, crate::core::session::RemoteTarget::Wsl { .. })
@@ -222,7 +222,7 @@ impl PaneWorkspace {
 /// the window showing it, and this is the whole of how it says so. The transport
 /// underneath is identical either way — the same local socket, the same
 /// `try_clone`, the same reader thread — because the local daemon forwards a
-/// routed connection byte for byte (design §6).
+/// routed connection byte for byte.
 #[derive(Clone, Debug, Default)]
 pub enum PaneRoute {
     /// This machine's daemon. Every pane before remote workspaces existed, and
@@ -398,7 +398,7 @@ impl RemoteTerminal {
         cwd: Option<PathBuf>,
         shell: Option<ShellSpec>,
     ) -> anyhow::Result<(Self, u64)> {
-        Self::spawn_on(&PaneRoute::Local, size, cell_w, cell_h, cwd, shell)
+        Self::spawn_on(&PaneRoute::Local, size, cell_w, cell_h, cwd, shell, None)
     }
 
     /// [`spawn`](Self::spawn) onto a particular machine.
@@ -409,6 +409,11 @@ impl RemoteTerminal {
     /// What it deliberately does *not* do is restart anything on the far side; a
     /// remote daemon that is missing or mismatched is `install`'s business, and
     /// it has already run by the time the ack arrives.
+    /// `owner` is the workspace the pane will belong to. It only ever reaches
+    /// the wire for a **local** spawn against a daemon that advertises
+    /// `pane-owner` — the gate lives in [`spawn_once`](Self::spawn_once), so
+    /// the retry legs (which may talk to a *different*, freshly started
+    /// daemon) re-decide it per attempt.
     pub fn spawn_on(
         route: &PaneRoute,
         size: TermSize,
@@ -416,10 +421,12 @@ impl RemoteTerminal {
         cell_h: u16,
         cwd: Option<PathBuf>,
         shell: Option<ShellSpec>,
+        owner: Option<String>,
     ) -> anyhow::Result<(Self, u64)> {
         let retry_cwd = cwd.clone();
         let retry_shell = shell.clone();
-        match Self::spawn_once(route, size, cell_w, cell_h, cwd, shell) {
+        let retry_owner = owner.clone();
+        match Self::spawn_once(route, size, cell_w, cell_h, cwd, shell, owner) {
             Ok(term) => Ok(term),
             Err(first_err) if daemon_not_listening(&first_err) => {
                 // Nothing is on the socket: the daemon died (crash, OOM, a stray
@@ -431,13 +438,12 @@ impl RemoteTerminal {
                         "daemon not running ({first_err}); starting one failed: {start_err}"
                     ));
                 }
-                Self::spawn_once(route, size, cell_w, cell_h, retry_cwd, retry_shell).map_err(
-                    |second_err| {
+                Self::spawn_once(route, size, cell_w, cell_h, retry_cwd, retry_shell, retry_owner)
+                    .map_err(|second_err| {
                         anyhow::anyhow!(
                             "daemon not running ({first_err}); started one but Spawn still failed: {second_err}"
                         )
-                    },
-                )
+                    })
             }
             // **Local panes only.** On a routed pane the connection this reads
             // as "disconnected" belongs to the *remote* — the local daemon is
@@ -458,7 +464,7 @@ impl RemoteTerminal {
                         "daemon disconnected before Spawn reply ({first_err}); restart failed: {restart_err}"
                     ));
                 }
-                Self::spawn_once(route, size, cell_w, cell_h, retry_cwd, retry_shell).map_err(|second_err| {
+                Self::spawn_once(route, size, cell_w, cell_h, retry_cwd, retry_shell, retry_owner).map_err(|second_err| {
                     anyhow::anyhow!(
                         "daemon disconnected before Spawn reply ({first_err}); restarted daemon but Spawn still failed: {second_err}"
                     )
@@ -475,9 +481,21 @@ impl RemoteTerminal {
         cell_h: u16,
         cwd: Option<PathBuf>,
         shell: Option<ShellSpec>,
+        owner: Option<String>,
     ) -> anyhow::Result<(Self, u64)> {
         let mut stream = connect_routed(route)?;
         let win = win_size(size, cell_w, cell_h);
+
+        // An owner only goes on the wire when this daemon is known to read the
+        // `SPAWN_OWNED` frame — an older one drops the connection over the
+        // unknown kind. Local only for now: a routed spawn's capability set is
+        // the *remote* server's, which nothing here has interrogated.
+        let owner = owner.filter(|_| {
+            route.is_local()
+                && crate::daemon::spawn::local_daemon_supports(
+                    crate::daemon::protocol::FEATURE_PANE_OWNER,
+                )
+        });
 
         // Ask the daemon to create the pane, then read its assigned id back. The
         // very next frames on this connection are this pane's Snapshot + Output,
@@ -486,6 +504,7 @@ impl RemoteTerminal {
             cwd,
             size: win,
             shell,
+            owner,
         }
         .encode(&mut stream)?;
         let pane_id = match DaemonMsg::read(&mut stream)? {
@@ -527,16 +546,17 @@ impl RemoteTerminal {
         let mut stream = connect_routed(route)?;
         let win = win_size(size, cell_w, cell_h);
 
-        // Unlike Spawn there's no synchronous reply to wait for here: the Snapshot
-        // arrives as the first framed message and is handled uniformly by the
-        // reader thread (advance + Wakeup), so the screen rebuilds asynchronously.
         ClientMsg::Attach { pane_id, size: win }.encode(&mut stream)?;
-        let mut term = Self::from_stream(stream, size)?;
+        // Far enough into the reply to know whether the pane is still there.
+        // Everything read here is handed to the reader thread rather than
+        // consumed: a successful attach's first frame is part of the replay.
+        let buffered = attach_reply_prefix(&mut stream, pane_id, attach_reply_wait(route))?;
+        let mut term = Self::from_stream_with(stream, size, buffered)?;
         term.route = route.clone();
         Ok(term)
     }
 
-    // ── Design §10's pane half of a reconnect ────────────────────────────────
+    // ── The pane half of a reconnect ────────────────────────────────
     //
     // For one pane: **reopen the channel, `Attach`, take the replay, resize to
     // this client's geometry.** It happens *in place* — the same `Term`, the
@@ -578,7 +598,7 @@ impl RemoteTerminal {
     /// start. Advancing that onto a grid that still holds the pre-disconnect
     /// screen would append a second copy of everything. So the mirror is reset
     /// and the machine's own record becomes the whole truth — which is also the
-    /// honest presentation of the replay boundary (design §10): the ring holds
+    /// honest presentation of the replay boundary: the ring holds
     /// 8 MiB, a pane that outran it comes back with the daemon's current grid
     /// and **the middle is genuinely gone**. Nothing here interpolates it, and
     /// nothing upstream may imply it will fill in later.
@@ -626,6 +646,12 @@ impl RemoteTerminal {
             self.term.clone(),
             self.proxy.clone(),
             read_half,
+            // Nothing pre-read: unlike `attach_on`, a relink does not classify
+            // the reply. A pane that is gone leaves this one disconnected on
+            // purpose — the supervisor's retry is the answer here, and spawning
+            // a fresh shell into a pane the user is still looking at would
+            // discard the screen it is showing.
+            Vec::new(),
             ReaderSignals {
                 cwd: self.cwd.clone(),
                 shell: self.shell_state.clone(),
@@ -646,7 +672,7 @@ impl RemoteTerminal {
         }
         self.reader_thread = Some(reader);
         self.route = route.clone();
-        // Design §10's last step: "以新客户端的尺寸 Resize". `Attach` carries a
+        // The last step: "以新客户端的尺寸 Resize". `Attach` carries a
         // size but deliberately does not resize the PTY, so the geometry only
         // becomes real when this frame lands — and `synced_size = false` is what
         // lets it through when the size happens to equal the last one.
@@ -658,6 +684,18 @@ impl RemoteTerminal {
     /// Shared tail of `spawn`/`attach`: build the local `Term`, split the socket
     /// into read/write halves, and launch the reader thread.
     pub(super) fn from_stream(stream: Stream, size: TermSize) -> anyhow::Result<Self> {
+        Self::from_stream_with(stream, size, Vec::new())
+    }
+
+    /// [`from_stream`](Self::from_stream) for a caller that has already read
+    /// part of the stream. `buffered` is where the reader thread starts, ahead
+    /// of anything still on the socket — `attach_reply_prefix` reads far enough
+    /// to classify the reply, and those bytes are the front of the replay.
+    pub(super) fn from_stream_with(
+        stream: Stream,
+        size: TermSize,
+        buffered: Vec<u8>,
+    ) -> anyhow::Result<Self> {
         // Two independent handles to the same connection: the reader thread owns
         // the read half, the UI thread writes through the (mutex-guarded) write
         // half. Reads and writes are independent directions, so this is safe.
@@ -696,6 +734,7 @@ impl RemoteTerminal {
             term.clone(),
             proxy.clone(),
             read_half,
+            buffered,
             ReaderSignals {
                 cwd: cwd.clone(),
                 shell: shell_state.clone(),
@@ -744,7 +783,7 @@ impl RemoteTerminal {
 
     /// Close this pane's link, leaving the pane running on its machine.
     ///
-    /// The same two frames `Drop` sends, without dropping: design §10's
+    /// The same two frames `Drop` sends, without dropping: the
     /// takeover needs the client to *stop being attached* while the view stays
     /// on screen in its read-only state.
     pub fn detach_link(&mut self) {
@@ -754,7 +793,7 @@ impl RemoteTerminal {
         }
         // The reader observes the close and runs its own teardown, so the pane
         // lands in exactly the state a dropped network link leaves it in — which
-        // is the state design §10 wants after a takeover, reached by the code
+        // is the state wanted after a takeover, reached by the code
         // path that is already exercised every time a connection fails.
         if let Some(handle) = self.reader_thread.take() {
             let _ = handle.join();
@@ -783,6 +822,9 @@ impl RemoteTerminal {
         term: Arc<FairMutex<Term<EventProxy>>>,
         proxy: EventProxy,
         read_half: Stream,
+        // Bytes already off the socket (see `from_stream_with`), which the loop
+        // resumes from before its first read.
+        buffered: Vec<u8>,
         signals: ReaderSignals,
     ) -> JoinHandle<()> {
         std::thread::Builder::new()
@@ -842,7 +884,7 @@ impl RemoteTerminal {
                 // applied history, and the next pair's Size (ultimately the
                 // final pair, which carries the PTY's current geometry)
                 // restores the recorded width before more bytes advance.
-                let mut pending: Vec<u8> = Vec::new();
+                let mut pending: Vec<u8> = buffered;
                 let mut pending_size: Option<WinSize> = None;
                 // Sized to the daemon writer's coalesced-frame cap so one large
                 // Output frame lands in a few reads instead of dozens.
@@ -1798,7 +1840,7 @@ impl RemoteTerminal {
         query(pane_id).unwrap_or_default()
     }
 
-    // ── Remote workspaces (design §15) ───────────────────────────────────────
+    // ── Remote workspaces ───────────────────────────────────────
 
     /// Send one workspace-scoped request and return the daemon's reply.
     ///
@@ -1918,6 +1960,139 @@ fn daemon_not_listening(err: &anyhow::Error) -> bool {
             )
         })
     })
+}
+
+/// How long to wait for the daemon's first frame after an `Attach` before
+/// giving up on *classifying* the reply. Not a deadline on the attach — only on
+/// being able to tell "this pane is gone" from "this pane has not said anything
+/// yet" — so lapsing costs nothing but the old behaviour. The connection is
+/// already open by the time the wait starts (the SSH setup happened inside
+/// `connect_routed`), so what is being waited on is one round trip.
+///
+/// **The two routes are not the same wait.** A remote attach runs on a
+/// background thread and answers over an SSH channel, so it can afford to be
+/// patient. A local one is on the UI thread — `ui::pending_pane` explains why
+/// that path stayed synchronous — where the ceiling is a window freeze, and a
+/// local daemon that has not answered in two seconds is not about to.
+fn attach_reply_wait(route: &PaneRoute) -> std::time::Duration {
+    match route.is_local() {
+        true => std::time::Duration::from_secs(2),
+        false => std::time::Duration::from_secs(15),
+    }
+}
+
+/// Read the head of an `Attach` reply, turning "no such pane" into an `Err`, and
+/// hand back whatever was read so the reader thread starts from it.
+///
+/// # Why this exists
+///
+/// `Attach` has no synchronous reply, so for a long time the client's attach
+/// could not fail: it wrote the frame and returned `Ok`, and a pane id that was
+/// gone showed up much later as the reader thread hitting EOF — which the view
+/// paints as `tty7 — disconnected` and deliberately does *not* close, because
+/// on a remote workspace a dropped link and a dead pane look the same from
+/// there. So the ordinary case of "that pane isn't there any more" landed the
+/// user in the failure state meant for "your machine is unreachable", and
+/// `start_pane_spawn`'s fall back to a fresh pane — the whole reason a stale id
+/// is survivable — never ran.
+///
+/// The daemon does answer, it just answers out of band: `Error` on a miss
+/// (`daemon::server`), `Size` + `Snapshot` on a hit. Classifying on the **kind
+/// byte** rather than the decoded message is what keeps this cheap — the header
+/// is 5 bytes and the snapshot behind it can be megabytes.
+///
+/// Two non-answers are deliberately *not* failures, because neither is evidence
+/// the pane is gone and both used to work:
+///
+/// | | |
+/// |---|---|
+/// | The read times out | The pane is quiet. Return what we have and let the reader carry on |
+/// | Anything but `Error` arrives | It is the replay. Same |
+fn attach_reply_prefix(
+    stream: &mut Stream,
+    pane_id: u64,
+    wait: std::time::Duration,
+) -> anyhow::Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    let _ = stream.set_read_timeout(Some(wait));
+    let mut buffered: Vec<u8> = Vec::new();
+    let mut scratch = [0u8; 4096];
+    let mut kind = None;
+    while kind.is_none() {
+        match stream.read(&mut scratch) {
+            Ok(0) => {
+                // The daemon hung up without saying anything. Only a `Kill`
+                // racing this attach gets here, and the answer is the same one
+                // the `Error` frame carries: this pane is not attachable.
+                let _ = stream.set_read_timeout(None);
+                return Err(anyhow::anyhow!(
+                    "the daemon closed the connection without answering Attach for pane {pane_id}"
+                ));
+            }
+            Ok(n) => buffered.extend_from_slice(&scratch[..n]),
+            // A timeout leaves the partial frame in `buffered`, where the
+            // reader thread resumes it — `take_frame` is written for exactly
+            // this.
+            Err(e) if would_block(&e) => break,
+            Err(e) => {
+                let _ = stream.set_read_timeout(None);
+                return Err(anyhow::Error::new(e).context(format!(
+                    "reading the daemon's answer to Attach for pane {pane_id}"
+                )));
+            }
+        }
+        kind = crate::daemon::protocol::peek_frame_kind(&buffered);
+    }
+    let _ = stream.set_read_timeout(None);
+    if !kind.is_some_and(crate::daemon::protocol::is_error_kind) {
+        return Ok(buffered);
+    }
+    // An `Error` payload is small and its text is the daemon's own wording for
+    // what went wrong, so it is worth finishing the frame to quote it.
+    let message = read_error_frame(stream, &mut buffered, wait)
+        .unwrap_or_else(|| format!("no such pane {pane_id}"));
+    Err(anyhow::anyhow!("daemon refused Attach: {message}"))
+}
+
+/// Finish decoding an `Error` frame whose header has already landed in `buffered`.
+/// `None` when the rest never arrives — the caller has a serviceable fallback
+/// message and no reason to wait around for a better one.
+fn read_error_frame(
+    stream: &mut Stream,
+    buffered: &mut Vec<u8>,
+    wait: std::time::Duration,
+) -> Option<String> {
+    use std::io::Read as _;
+
+    let _ = stream.set_read_timeout(Some(wait));
+    let mut scratch = [0u8; 1024];
+    let message = loop {
+        match crate::daemon::protocol::take_frame(buffered) {
+            Ok(Some(frame)) => match DaemonMsg::from_frame(frame.0, frame.1) {
+                Ok(DaemonMsg::Error(message)) => break Some(message),
+                _ => break None,
+            },
+            Ok(None) => match stream.read(&mut scratch) {
+                Ok(0) => break None,
+                Ok(n) => buffered.extend_from_slice(&scratch[..n]),
+                Err(_) => break None,
+            },
+            Err(_) => break None,
+        }
+    };
+    let _ = stream.set_read_timeout(None);
+    message
+}
+
+/// Whether a read failed because its timeout lapsed rather than because the
+/// connection broke. The two platforms disagree on which kind a lapsed
+/// `SO_RCVTIMEO` produces, so both count.
+fn would_block(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
 }
 
 fn daemon_disconnected_before_spawn_reply(err: &anyhow::Error) -> bool {
@@ -2253,7 +2428,7 @@ mod tests {
     }
 
     /// WSL routes by distro and carries no spec, because there is no connection
-    /// to name (design §7.3).
+    /// to name.
     #[test]
     fn a_wsl_workspace_routes_by_distro() {
         let ws = PaneWorkspace {
@@ -2498,6 +2673,110 @@ mod tests {
         let eof: anyhow::Error =
             std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "closed").into();
         assert!(!daemon_not_listening(&eof));
+    }
+
+    // -----------------------------------------------------------------------
+    // Attach: telling "that pane is gone" from "that pane is quiet".
+    // -----------------------------------------------------------------------
+
+    /// **A pane that is gone makes the attach fail.** The regression this
+    /// exists for: `Attach` has no synchronous reply, so the client used to
+    /// return `Ok` unconditionally and the daemon's `Error` frame was read much
+    /// later by the reader thread, which has no arm for it — the socket then
+    /// closed and the pane landed in the *link is down* state (`tty7 —
+    /// disconnected`, kept on screen, never respawned) instead of falling back
+    /// to a fresh shell in `start_pane_spawn`. Ending a workspace's sessions
+    /// and reopening it hit exactly this.
+    #[test]
+    fn an_attach_to_a_missing_pane_is_an_error_not_a_disconnect() {
+        let (mut client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        DaemonMsg::Error("no such pane 7".to_string())
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+
+        let err = attach_reply_prefix(&mut client_side, 7, attach_reply_wait(&PaneRoute::Local))
+            .expect_err("a missing pane must fail");
+        assert!(
+            format!("{err:#}").contains("no such pane 7"),
+            "the daemon's own wording is what names which pane went: {err:#}"
+        );
+    }
+
+    /// A daemon that hangs up without answering is the same answer by other
+    /// means — a `Kill` racing the attach closes the connection.
+    #[test]
+    fn an_attach_the_daemon_hangs_up_on_is_an_error() {
+        let (mut client_side, daemon_side) = UnixStream::pair().unwrap();
+        drop(daemon_side);
+        assert!(
+            attach_reply_prefix(&mut client_side, 7, attach_reply_wait(&PaneRoute::Local)).is_err()
+        );
+    }
+
+    /// **A local attach's wait is bounded by the UI, not by the network.** It
+    /// runs synchronously on the UI thread (`ui::pending_pane` explains why),
+    /// so the wait for the daemon's first frame is a possible window freeze;
+    /// the remote one is on a background thread and can be patient. Equal
+    /// numbers here would mean a wedged local daemon freezing restore for
+    /// fifteen seconds per pane.
+    #[test]
+    fn a_local_attach_does_not_wait_as_long_as_a_remote_one() {
+        let local = attach_reply_wait(&PaneRoute::Local);
+        let remote = attach_reply_wait(&PaneRoute::for_workspace(Some(&ssh_workspace())));
+        assert!(local < remote, "{local:?} must be the shorter wait");
+        assert!(
+            local <= std::time::Duration::from_secs(2),
+            "the UI thread is holding still for this"
+        );
+    }
+
+    /// **The bytes read to classify the reply are not consumed.** A successful
+    /// attach's first frame is the head of the replay, so anything the check
+    /// pulled off the socket has to reach the reader thread — losing it would
+    /// mean reopening a workspace to a screen missing its first segment.
+    #[test]
+    fn a_live_attach_hands_its_replay_bytes_to_the_reader() {
+        crate::core::config::pin_test_config_dir();
+        let (mut client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        DaemonMsg::Snapshot(b"hello".to_vec())
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+
+        let buffered =
+            attach_reply_prefix(&mut client_side, 7, attach_reply_wait(&PaneRoute::Local))
+                .expect("a live pane attaches");
+        assert!(
+            !buffered.is_empty(),
+            "the classification read the Snapshot frame; it must come back"
+        );
+        let term =
+            RemoteTerminal::from_stream_with(client_side, TermSize::new(80, 24), buffered).unwrap();
+
+        let mut got = String::new();
+        for _ in 0..200 {
+            {
+                let t = term.term.lock();
+                let grid = t.grid();
+                got.clear();
+                for col in 0..5usize {
+                    got.push(
+                        grid[alacritty_terminal::index::Line(0)]
+                            [alacritty_terminal::index::Column(col)]
+                        .c,
+                    );
+                }
+            }
+            if got == "hello" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            got, "hello",
+            "the pre-read replay must still reach the grid"
+        );
     }
 
     /// Without a real daemon, drive the reader path directly: a `UnixStream::pair`

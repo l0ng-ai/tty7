@@ -68,9 +68,16 @@ pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// - **v1** — the dialect at the time versioning landed.
 pub const PROTOCOL_VERSION: u32 = 3;
 
+/// Capability string for [`DaemonVersion::features`]: this daemon records
+/// which workspace each pane was spawned for and reports it in `List`'s
+/// [`PaneInfo::owner`], and it understands the [`kind::SPAWN_OWNED`] frame. A
+/// client must check for this before sending an owned spawn — the frame kind
+/// is unknown to older daemons, which drop the connection over it.
+pub const FEATURE_PANE_OWNER: &str = "pane-owner";
+
 /// Reply to `ClientMsg::Version`: the protocol dialect the daemon speaks, plus
-/// its crate version for logs/diagnostics. Only `protocol` and `features` drive
-/// decisions.
+/// its crate version for logs/diagnostics. Only `protocol`, `features` and
+/// `instance` drive decisions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonVersion {
     pub protocol: u32,
@@ -86,6 +93,15 @@ pub struct DaemonVersion {
     /// every user whose daemon happens to predate it.
     #[serde(default)]
     pub features: Vec<String>,
+    /// Identity of this daemon *process*, minted once at startup. Pane ids are
+    /// only meaningful within one daemon process — after a restart the numbers
+    /// start over from 1 and land on unrelated shells — so a client that
+    /// persists pane ids records this next to them and treats a mismatch as
+    /// "every saved id is stale" (see `Workspace::daemon_instance`). Empty for
+    /// daemons that predate the field; the remote `tty7-server` announces the
+    /// same identity through its control hello.
+    #[serde(default)]
+    pub instance: String,
 }
 
 impl DaemonVersion {
@@ -101,7 +117,11 @@ impl DaemonVersion {
             // control dialect is served by `tty7-server`, which advertises
             // `control` / `host-rpc` itself; claiming them here would make the
             // GUI open a control connection this process cannot answer.
-            features: Vec::new(),
+            //
+            // `pane-owner` *is* a pane-protocol capability, so every process
+            // serving panes from this build advertises it.
+            features: vec![FEATURE_PANE_OWNER.to_string()],
+            instance: process_instance().to_string(),
         }
     }
 
@@ -109,6 +129,13 @@ impl DaemonVersion {
     pub fn has_feature(&self, name: &str) -> bool {
         self.features.iter().any(|f| f == name)
     }
+}
+
+/// This process's pane-daemon identity: a uuid minted on first use and stable
+/// for the process lifetime. See [`DaemonVersion::instance`] for why it exists.
+pub fn process_instance() -> &'static str {
+    static INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    INSTANCE.get_or_init(|| uuid::Uuid::new_v4().to_string())
 }
 
 /// Terminal geometry shared by spawn/attach/resize. Cell pixel size travels too
@@ -186,6 +213,14 @@ pub struct PaneInfo {
     /// False once the child has exited but the pane lingers (so a client can
     /// still read its final scrollback).
     pub alive: bool,
+    /// The workspace this pane was spawned for (a `WorkspaceId` uuid, as a
+    /// string), when the spawning client said ([`ClientMsg::Spawn`]'s `owner`).
+    /// `None` for panes spawned by older clients or through the legacy spawn
+    /// kinds. Restore uses this to refuse re-attaching a pane to a workspace
+    /// that never owned it — the failure mode where one workspace's saved ids
+    /// silently pick up another's shells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 /// A pane whose filesystem is not the host's — either a remote session, or a
@@ -236,7 +271,7 @@ pub struct LoopbackForwardRequest {
 }
 
 // ---------------------------------------------------------------------------
-// Workspace-scoped control requests (design §15, M7).
+// Workspace-scoped control requests (M7).
 //
 // A *remote workspace* has no pane on this daemon: its panes live on the remote
 // `tty7-server`, and the only thing this side owns is the `SshConnection` the
@@ -906,6 +941,12 @@ pub enum ClientMsg {
         cwd: Option<PathBuf>,
         size: WinSize,
         shell: Option<ShellSpec>,
+        /// The workspace this pane will belong to (a `WorkspaceId` uuid, as a
+        /// string). Rides the [`kind::SPAWN_OWNED`] frame, which only a daemon
+        /// advertising [`FEATURE_PANE_OWNER`] understands — callers leave this
+        /// `None` for older daemons and the spawn goes out on the legacy kinds,
+        /// byte-for-byte as before.
+        owner: Option<String>,
     },
     /// Bind this connection to an existing pane and (re)size it. The daemon
     /// replies with a `Snapshot` then live `Output`.
@@ -991,7 +1032,7 @@ pub enum ClientMsg {
     /// every pane, forever, to feed a view that's usually closed.
     QueryProcs { pane_id: u64 },
     /// A control request scoped to a **remote workspace's** SSH connection
-    /// instead of a pane's (design §15). See [`WorkspaceRequest`].
+    /// instead of a pane's. See [`WorkspaceRequest`].
     OnWorkspace(Box<WorkspaceRequest>),
     /// Ask which protocol version the daemon speaks (control connection); the
     /// daemon replies `Version`. A daemon that predates versioning doesn't know
@@ -1138,10 +1179,19 @@ mod kind {
     // here because this module is private and the router must not become a
     // reason to open it — but the number is spent either way.
     /// `OnWorkspace` — a control request on a remote workspace's SSH connection
-    /// (design §15). 52 is the next number clear of every range above, of the
+    ///. 52 is the next number clear of every range above, of the
     /// router's 51, and of the retired 13; the contract's control connection
     /// reserves 60-63, which this stays below.
     pub const ON_WORKSPACE: u8 = 52;
+    /// `Spawn` carrying a [`super::OwnedSpawn`] **struct** payload — the spawn
+    /// that also names the workspace owning the pane. A brand-new kind for the
+    /// same reason `SPAWN_SHELL` was one: the legacy spawn payloads are
+    /// positional tuples an old daemon cannot grow, so a client only sends this
+    /// to a daemon advertising [`super::FEATURE_PANE_OWNER`] and falls back to
+    /// the legacy kinds otherwise. The struct payload is the lesson learned —
+    /// any further spawn field rides this kind with `#[serde(default)]`, no new
+    /// number needed. 53 stays below the control connection's 60-63 reserve.
+    pub const SPAWN_OWNED: u8 = 53;
 
     // Daemon -> client
     pub const SPAWNED: u8 = 1;
@@ -1216,6 +1266,25 @@ pub fn read_frame<R: Read>(r: &mut R) -> io::Result<(u8, Vec<u8>)> {
     Ok((kind[0], payload))
 }
 
+/// The kind byte of the frame at the front of `buf`, once its 5-byte header has
+/// arrived — the payload need not have.
+///
+/// For the one caller that has to classify a reply *before* paying for it: the
+/// client's `Attach` is answered either by a tiny `Error` or by a `Size` +
+/// `Snapshot` replay that can run to megabytes, and waiting for the whole first
+/// frame to tell them apart would stall every successful attach behind its own
+/// scrollback.
+pub fn peek_frame_kind(buf: &[u8]) -> Option<u8> {
+    (buf.len() >= 5).then(|| buf[4])
+}
+
+/// Whether `kind` is the [`DaemonMsg::Error`] frame. The kind bytes themselves
+/// stay private — this is the one classification a client makes without
+/// decoding, and naming it keeps the numbering in one file.
+pub fn is_error_kind(kind: u8) -> bool {
+    kind == kind::ERROR
+}
+
 /// Extract one complete frame from the front of `buf`, if fully buffered — the
 /// resumable counterpart of [`read_frame`] for callers that read the stream
 /// with timeouts (the client reader enforces the DEC 2026 synchronized-update
@@ -1254,6 +1323,19 @@ fn from_json<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> io::Result<T> {
     serde_json::from_slice(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// The [`kind::SPAWN_OWNED`] payload — a struct, not a tuple, so the *next*
+/// spawn field is a `#[serde(default)]` line here instead of a new frame kind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OwnedSpawn {
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    size: WinSize,
+    #[serde(default)]
+    shell: Option<ShellSpec>,
+    #[serde(default)]
+    owner: Option<String>,
+}
+
 impl ClientMsg {
     /// Encode and write this message as one frame.
     pub fn encode<W: Write>(&self, w: &mut W) -> io::Result<()> {
@@ -1265,12 +1347,31 @@ impl ClientMsg {
                 cwd,
                 size,
                 shell: None,
+                owner: None,
             } => write_frame(w, kind::SPAWN, &to_json(&(cwd, size))?),
             ClientMsg::Spawn {
                 cwd,
                 size,
                 shell: shell @ Some(_),
+                owner: None,
             } => write_frame(w, kind::SPAWN_SHELL, &to_json(&(cwd, size, shell))?),
+            // An owner present means the caller checked FEATURE_PANE_OWNER —
+            // this frame kind is unknown to daemons without it.
+            ClientMsg::Spawn {
+                cwd,
+                size,
+                shell,
+                owner: owner @ Some(_),
+            } => write_frame(
+                w,
+                kind::SPAWN_OWNED,
+                &to_json(&OwnedSpawn {
+                    cwd: cwd.clone(),
+                    size: *size,
+                    shell: shell.clone(),
+                    owner: owner.clone(),
+                })?,
+            ),
             ClientMsg::Attach { pane_id, size } => {
                 write_frame(w, kind::ATTACH, &to_json(&(pane_id, size))?)
             }
@@ -1340,11 +1441,31 @@ impl ClientMsg {
                     cwd,
                     size,
                     shell: None,
+                    owner: None,
                 }
             }
             kind::SPAWN_SHELL => {
                 let (cwd, size, shell) = from_json(&payload)?;
-                ClientMsg::Spawn { cwd, size, shell }
+                ClientMsg::Spawn {
+                    cwd,
+                    size,
+                    shell,
+                    owner: None,
+                }
+            }
+            kind::SPAWN_OWNED => {
+                let OwnedSpawn {
+                    cwd,
+                    size,
+                    shell,
+                    owner,
+                } = from_json(&payload)?;
+                ClientMsg::Spawn {
+                    cwd,
+                    size,
+                    shell,
+                    owner,
+                }
             }
             kind::ATTACH => {
                 let (pane_id, size) = from_json(&payload)?;
@@ -1575,6 +1696,7 @@ mod tests {
                 cwd: Some(PathBuf::from("/work")),
                 size: SIZE,
                 shell: None,
+                owner: None,
             },
             ClientMsg::Resize(SIZE),
             ClientMsg::Input(vec![b'l', b's', b'\r']),
@@ -1630,11 +1752,13 @@ mod tests {
                 cwd: Some(PathBuf::from("/tmp/x")),
                 size: SIZE,
                 shell: None,
+                owner: None,
             },
             ClientMsg::Spawn {
                 cwd: None,
                 size: SIZE,
                 shell: None,
+                owner: None,
             },
             ClientMsg::Spawn {
                 cwd: Some(PathBuf::from("/tmp/x")),
@@ -1644,6 +1768,13 @@ mod tests {
                     args: vec!["--distribution".into(), "Ubuntu".into()],
                     args_are_tty7_defaults: true,
                 }),
+                owner: None,
+            },
+            ClientMsg::Spawn {
+                cwd: Some(PathBuf::from("/tmp/x")),
+                size: SIZE,
+                shell: None,
+                owner: Some("bda10e44-02de-44a0-8412-ec1cda2b5f5b".into()),
             },
             ClientMsg::Attach {
                 pane_id: 42,
@@ -1771,12 +1902,22 @@ mod tests {
             },
             DaemonMsg::Exited { code: Some(0) },
             DaemonMsg::Exited { code: None },
-            DaemonMsg::PaneList(vec![PaneInfo {
-                pane_id: 3,
-                cwd: Some(PathBuf::from("/x")),
-                title: "zsh".into(),
-                alive: true,
-            }]),
+            DaemonMsg::PaneList(vec![
+                PaneInfo {
+                    pane_id: 3,
+                    cwd: Some(PathBuf::from("/x")),
+                    title: "zsh".into(),
+                    alive: true,
+                    owner: None,
+                },
+                PaneInfo {
+                    pane_id: 4,
+                    cwd: None,
+                    title: String::new(),
+                    alive: true,
+                    owner: Some("ffe038d0-9ad6-40c0-815d-1fcc43c17ec0".into()),
+                },
+            ]),
             DaemonMsg::RemoteContext(Some(RemoteContext {
                 kind: RemoteKind::Ssh,
                 argv: vec!["ssh".into(), "-p".into(), "2222".into(), "dev".into()],
@@ -1899,11 +2040,13 @@ mod tests {
                 protocol: PROTOCOL_VERSION,
                 build: "0.15.0".into(),
                 features: vec!["control".into(), "host-rpc".into()],
+                instance: "inst-a".into(),
             }),
             DaemonMsg::Version(DaemonVersion {
                 protocol: PROTOCOL_VERSION,
                 build: "0.15.0".into(),
                 features: Vec::new(),
+                instance: String::new(),
             }),
             DaemonMsg::Error("nope".into()),
         ];
@@ -1929,6 +2072,7 @@ mod tests {
             cwd: Some(PathBuf::from("/work")),
             size: SIZE,
             shell: None,
+            owner: None,
         };
         let mut buf = Vec::new();
         msg.encode(&mut buf).unwrap();
@@ -1949,6 +2093,7 @@ mod tests {
                 cwd: Some(PathBuf::from("/old")),
                 size: SIZE,
                 shell: None,
+                owner: None,
             }
         );
     }
@@ -1967,6 +2112,7 @@ mod tests {
             cwd: Some(PathBuf::from("/work")),
             size: SIZE,
             shell: Some(shell.clone()),
+            owner: None,
         };
         let mut buf = Vec::new();
         msg.encode(&mut buf).unwrap();
@@ -1979,8 +2125,72 @@ mod tests {
                 cwd: Some(PathBuf::from("/work")),
                 size: SIZE,
                 shell: Some(shell),
+                owner: None,
             }
         );
+    }
+
+    /// An owned spawn rides the `SPAWN_OWNED` frame — never a legacy kind,
+    /// whose tuple payloads cannot carry the field — and round-trips with the
+    /// shell pick intact. The compat direction is the caller's contract:
+    /// `owner` is only ever set for a daemon advertising `pane-owner`, so the
+    /// legacy kinds stay byte-for-byte what old daemons expect (locked by
+    /// `default_spawn_stays_wire_compatible_with_old_daemons` above).
+    #[test]
+    fn owned_spawn_uses_the_owned_kind_and_round_trips() {
+        let msg = ClientMsg::Spawn {
+            cwd: Some(PathBuf::from("/work")),
+            size: SIZE,
+            shell: Some(ShellSpec {
+                program: "fish".into(),
+                args: vec!["-l".into()],
+                args_are_tty7_defaults: false,
+            }),
+            owner: Some("bda10e44-02de-44a0-8412-ec1cda2b5f5b".into()),
+        };
+        let mut buf = Vec::new();
+        msg.encode(&mut buf).unwrap();
+        let (k, payload) = read_frame(&mut std::io::Cursor::new(&buf)).unwrap();
+        assert_eq!(k, kind::SPAWN_OWNED);
+        assert_eq!(ClientMsg::from_frame(k, payload).unwrap(), msg);
+    }
+
+    /// The `SPAWN_OWNED` payload is a struct with defaults, so a frame from a
+    /// *newer* client — more fields, or fewer — still decodes. This is the
+    /// property that makes it the last spawn kind ever needed.
+    #[test]
+    fn owned_spawn_payload_tolerates_unknown_and_missing_fields() {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "size": {"cols": 80, "rows": 24, "cell_w": 8, "cell_h": 17},
+            "some_future_field": true,
+        }))
+        .unwrap();
+        let decoded = ClientMsg::from_frame(kind::SPAWN_OWNED, payload).unwrap();
+        assert_eq!(
+            decoded,
+            ClientMsg::Spawn {
+                cwd: None,
+                size: WinSize {
+                    cols: 80,
+                    rows: 24,
+                    cell_w: 8,
+                    cell_h: 17
+                },
+                shell: None,
+                owner: None,
+            }
+        );
+    }
+
+    /// A `PaneInfo` from an old daemon has no `owner` key and decodes to
+    /// `None` — the "attachable by anyone" reading every pane had before the
+    /// field existed.
+    #[test]
+    fn pane_info_owner_defaults_for_old_daemons() {
+        let old = serde_json::json!({"pane_id": 3, "title": "zsh", "alive": true});
+        let info: PaneInfo = serde_json::from_value(old).unwrap();
+        assert_eq!(info.owner, None);
+        assert!(info.alive);
     }
 
     /// An empty-payload binary frame (e.g. an `Input([])`) still round-trips and

@@ -1,6 +1,6 @@
 //! The install flow, driven end to end against an in-memory remote.
 //!
-//! Contract §18 asks for four things by name — `uname` parsing, version path
+//! Four things are asked for by name — `uname` parsing, version path
 //! construction, atomic replacement, and the sha256 failure path — and none of
 //! them may touch the network. The first two are unit-tested in
 //! [`super::asset`] and [`super::checksums`]; the last two need the *whole*
@@ -64,6 +64,10 @@ struct FakeRemote {
     /// Whether launching actually starts the fake daemon (false models a binary
     /// that dies on exec).
     launch_works: bool,
+    /// What each binary answers to `--protocol`, by path. A path that is absent
+    /// models a server too old to know the flag: the probe fails, and the
+    /// installer falls back to having no opinion.
+    speaks: Mutex<HashMap<String, RemoteProtocol>>,
 }
 
 impl FakeRemote {
@@ -85,7 +89,14 @@ impl FakeRemote {
             daemon_running: Mutex::new(false),
             running_exe: Mutex::new(None),
             launch_works: true,
+            speaks: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Teach the binary at `exe` to answer `--protocol` with `spoken`.
+    fn speaking(self, exe: &str, spoken: RemoteProtocol) -> Self {
+        self.speaks.lock().unwrap().insert(exe.to_string(), spoken);
+        self
     }
 
     /// A machine tty7 has installed on before (so consent is not re-asked).
@@ -151,6 +162,19 @@ impl RemoteOps for FakeRemote {
         };
         if cmd == "uname -sm" {
             return ok(&self.uname);
+        }
+        if let Some(exe) = cmd.strip_suffix(&format!(" {PROTOCOL_FLAG}")) {
+            let exe = exe.trim_matches('\'');
+            return match self.speaks.lock().unwrap().get(exe) {
+                Some(spoken) => ok(&serde_json::to_string(spoken).unwrap()),
+                // What a server older than the flag does: usage on stderr, and
+                // a non-zero status.
+                None => Ok(ExecOutput {
+                    status: Some(1),
+                    stdout: String::new(),
+                    stderr: "tty7-server: nothing to do without --daemon or --stdio".into(),
+                }),
+            };
         }
         if cmd == RUNNING_EXE_COMMAND {
             let exe = self.running_exe.lock().unwrap().clone().unwrap_or_default();
@@ -485,7 +509,7 @@ fn the_final_path_is_only_ever_reached_by_renaming_a_ready_temp() {
 }
 
 /// The directory chain is created outermost-first (SFTP has no `mkdir -p`) and
-/// the directory that holds the binaries ends up 0700 (§16).
+/// the directory that holds the binaries ends up 0700.
 #[test]
 fn the_install_directory_is_created_in_order_and_locked_down() {
     let remote = FakeRemote::new();
@@ -516,7 +540,7 @@ fn the_install_directory_is_created_in_order_and_locked_down() {
 }
 
 // ---------------------------------------------------------------------------
-// sha256 (§16, §17) — the failure path §18 names.
+// sha256 — the failure path.
 // ---------------------------------------------------------------------------
 
 /// **A checksum mismatch aborts and writes nothing.** Not a retry, not an
@@ -578,10 +602,10 @@ fn a_release_missing_our_asset_aborts() {
 }
 
 // ---------------------------------------------------------------------------
-// Consent (§12).
+// Consent.
 // ---------------------------------------------------------------------------
 
-/// The prompt has to carry everything §12 asks it to say: which path, how big,
+/// The prompt has to carry everything it must say: which path, how big,
 /// and where the bytes came from.
 #[test]
 fn the_confirmation_states_path_size_and_origin() {
@@ -725,7 +749,7 @@ fn a_present_but_unexecutable_binary_is_reinstalled() {
 }
 
 // ---------------------------------------------------------------------------
-// Refusals and write failures (§17).
+// Refusals and write failures.
 // ---------------------------------------------------------------------------
 
 /// An architecture we do not publish for is refused before anything is
@@ -758,7 +782,7 @@ fn an_unsupported_machine_is_refused_before_any_work() {
 }
 
 /// **A failed remote write reports the path and the server's reason, and is not
-/// retried anywhere else** (§17). A full disk must not become "let me try
+/// retried anywhere else**. A full disk must not become "let me try
 /// /tmp".
 #[test]
 fn a_failed_write_names_the_path_and_does_not_fall_back() {
@@ -1161,4 +1185,490 @@ fn the_published_path_is_absolute_and_version_qualified() {
         report.paths.binary, BINARY,
         "this is the string `ensure_remote_server` hands the transport"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Progress (an 8 MB first install must not look like a hang).
+// ---------------------------------------------------------------------------
+
+/// Records every report in order, which is what makes "monotonic" and "reaches
+/// the total" testable — neither is a property of any single report.
+#[derive(Default)]
+struct Reports(Mutex<Vec<(String, InstallPhase)>>);
+
+impl InstallProgress for Reports {
+    fn report(&self, host: &str, phase: InstallPhase) {
+        self.0.lock().unwrap().push((host.to_string(), phase));
+    }
+}
+
+impl Reports {
+    fn all(&self) -> Vec<(String, InstallPhase)> {
+        self.0.lock().unwrap().clone()
+    }
+
+    fn phases(&self) -> Vec<InstallPhase> {
+        self.all().into_iter().map(|(_, phase)| phase).collect()
+    }
+}
+
+/// A release whose asset arrives in pieces, like a real HTTP body.
+struct ChunkedRelease {
+    inner: FakeRelease,
+    chunks: usize,
+}
+
+impl AssetFetcher for ChunkedRelease {
+    fn get(&self, url: &str) -> Result<Vec<u8>, String> {
+        self.inner.get(url)
+    }
+
+    fn get_with_progress(
+        &self,
+        url: &str,
+        on_progress: &dyn Fn(u64, Option<u64>),
+    ) -> Result<Vec<u8>, String> {
+        let bytes = self.inner.get(url)?;
+        let total = bytes.len() as u64;
+        let step = total.div_ceil(self.chunks as u64).max(1);
+        let mut done = 0;
+        while done < total {
+            done = (done + step).min(total);
+            on_progress(done, Some(total));
+        }
+        Ok(bytes)
+    }
+}
+
+/// **Both halves of the wait are reported, and each one finishes.**
+///
+/// The download and the upload are separate network hops of the same ~8 MB, and
+/// a bar that covered only one of them would sit at 100% through the other —
+/// which is the exact failure this exists to prevent.
+#[test]
+fn an_install_reports_both_transfers_to_completion() {
+    let remote = FakeRemote::new();
+    let release = ChunkedRelease {
+        inner: FakeRelease::new(),
+        chunks: 4,
+    };
+    let user = FakeUser::approving();
+    let reports = Arc::new(Reports::default());
+
+    let report = with_install_progress(reports.clone(), || {
+        Installer::new(&remote, &release, &user, "me@build-box:22")
+            .with_version(VERSION)
+            .with_timeouts(Duration::from_millis(200), Duration::from_millis(10))
+            .run()
+    })
+    .expect("install");
+    assert!(report.installed, "the fake remote started empty");
+
+    let total = SERVER_BYTES.len() as u64;
+    let phases = reports.phases();
+
+    let downloads: Vec<(u64, Option<u64>)> = phases
+        .iter()
+        .filter_map(|p| match p {
+            InstallPhase::Downloading { done, total } => Some((*done, *total)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        downloads.len() > 1,
+        "a chunked body should report more than once: {downloads:?}"
+    );
+    assert_eq!(
+        downloads.last().map(|(done, _)| *done),
+        Some(total),
+        "the download's last report is the whole asset"
+    );
+    assert!(
+        downloads.windows(2).all(|w| w[0].0 <= w[1].0),
+        "a bar that goes backwards reads as a restart: {downloads:?}"
+    );
+
+    let uploads: Vec<u64> = phases
+        .iter()
+        .filter_map(|p| match p {
+            InstallPhase::Uploading { done, .. } => Some(*done),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        uploads.last(),
+        Some(&total),
+        "the upload reaches the byte count the consent prompt quoted"
+    );
+
+    // Order matters: the client cannot push bytes it has not fetched, and a UI
+    // that saw them interleaved would have to decide which one to draw.
+    let first_upload = phases
+        .iter()
+        .position(|p| matches!(p, InstallPhase::Uploading { .. }))
+        .expect("an upload");
+    let last_download = phases
+        .iter()
+        .rposition(|p| matches!(p, InstallPhase::Downloading { .. }))
+        .expect("a download");
+    assert!(
+        last_download < first_upload,
+        "downloading finishes before uploading starts: {phases:?}"
+    );
+}
+
+/// **Every report names the machine it is about.**
+///
+/// The GUI keys its progress slots by machine, so a report that arrived with the
+/// wrong label — or an empty one — would paint one box's bytes under another's
+/// name while both were installing.
+#[test]
+fn every_report_carries_the_host() {
+    let remote = FakeRemote::new();
+    let release = ChunkedRelease {
+        inner: FakeRelease::new(),
+        chunks: 3,
+    };
+    let user = FakeUser::approving();
+    let reports = Arc::new(Reports::default());
+
+    with_install_progress(reports.clone(), || {
+        Installer::new(&remote, &release, &user, "me@build-box:22")
+            .with_version(VERSION)
+            .with_timeouts(Duration::from_millis(200), Duration::from_millis(10))
+            .run()
+    })
+    .expect("install");
+
+    let hosts: Vec<String> = reports.all().into_iter().map(|(host, _)| host).collect();
+    assert!(!hosts.is_empty(), "the install reported something");
+    assert!(
+        hosts.iter().all(|h| h == "me@build-box:22"),
+        "one install, one machine: {hosts:?}"
+    );
+}
+
+/// **An install that is already present reports nothing.**
+///
+/// The common path — a machine tty7 has installed to before — does no transfer
+/// at all, and a bar that flashed on every connect would train the user to
+/// ignore it on the one connect where it means something.
+#[test]
+fn a_present_binary_reports_no_progress() {
+    let remote = FakeRemote::new().with_previous_install(VERSION);
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+    let reports = Arc::new(Reports::default());
+
+    let report = with_install_progress(reports.clone(), || {
+        installer(&remote, &release, &user, "me@build-box:22").run()
+    })
+    .expect("install");
+
+    assert!(!report.installed, "nothing was written");
+    assert!(
+        reports.phases().is_empty(),
+        "nothing transferred, so nothing to show: {:?}",
+        reports.phases()
+    );
+}
+
+/// **The scoped sink outranks the global one, and is put back afterwards.**
+///
+/// Same contract as `with_install_confirm`, and it matters for the same reason:
+/// in the daemon each routed connection has its own client, and a global would
+/// send one machine's byte counts to the other machine's window.
+#[test]
+fn a_scoped_progress_sink_outranks_the_global_one() {
+    let scoped = Arc::new(Reports::default());
+    let phase = InstallPhase::Uploading { done: 1, total: 2 };
+
+    install_progress().report("before", phase);
+    with_install_progress(scoped.clone(), || {
+        install_progress().report("inside", phase);
+    });
+    install_progress().report("after", phase);
+
+    let seen: Vec<String> = scoped.all().into_iter().map(|(host, _)| host).collect();
+    assert_eq!(
+        seen,
+        vec!["inside".to_string()],
+        "only the reports raised inside the scope land in it"
+    );
+}
+
+/// **`fraction` is safe to hand straight to a layout.**
+///
+/// It feeds a width, so anything outside `0.0..=1.0` draws a bar that overflows
+/// its track or inverts it. A zero or absent total is the interesting case: it
+/// means "unknown", not "zero percent", and the caller has to be able to tell.
+#[test]
+fn a_fraction_is_either_absent_or_in_range() {
+    assert_eq!(
+        InstallPhase::Downloading {
+            done: 0,
+            total: None
+        }
+        .fraction(),
+        None,
+        "no Content-Length means no fraction to draw"
+    );
+    assert_eq!(
+        InstallPhase::Uploading { done: 5, total: 0 }.fraction(),
+        None,
+        "a zero total is unknown, not complete"
+    );
+    assert_eq!(
+        InstallPhase::Uploading {
+            done: 50,
+            total: 100
+        }
+        .fraction(),
+        Some(0.5)
+    );
+    assert_eq!(
+        InstallPhase::Uploading {
+            done: 200,
+            total: 100
+        }
+        .fraction(),
+        Some(1.0),
+        "an over-count is clamped rather than overflowing the track"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Dialects, not build strings.
+// ---------------------------------------------------------------------------
+
+/// What this client speaks, which is what a remote has to match.
+fn ours() -> RemoteProtocol {
+    RemoteProtocol {
+        build: VERSION.to_string(),
+        ..RemoteProtocol::of_this_build()
+    }
+}
+
+const OTHER_BUILD: &str = "26.7.9-nightly.20260801";
+const OTHER_EXE: &str = "/home/me/.local/share/tty7/bin/tty7-server-26.7.9-nightly.20260801";
+
+/// **A newer server this client can talk to is adopted, not overwritten.**
+///
+/// The scene from the field: a `26.7.6` client meets a machine already serving
+/// `26.7.7-nightly`, both speaking the same dialects. Before this, the client
+/// stat'ed for its *own* version, missed, uploaded 8 MB nobody needed, and then
+/// asked the user to choose between keeping their sessions and restarting a
+/// server that was working fine.
+#[test]
+fn a_compatible_running_server_is_reused_without_installing() {
+    let remote = FakeRemote::new().serving(OTHER_EXE).speaking(
+        OTHER_EXE,
+        RemoteProtocol {
+            build: OTHER_BUILD.to_string(),
+            ..ours()
+        },
+    );
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let report = installer(&remote, &release, &user, "me@build-box:22")
+        .run()
+        .expect("connect");
+
+    assert!(
+        !report.installed,
+        "nothing needed writing: {:?}",
+        remote.writes()
+    );
+    assert!(
+        report.reused.is_some(),
+        "the running server was adopted deliberately, and the report says so"
+    );
+    assert_eq!(
+        report.paths.binary, OTHER_EXE,
+        "the transport must connect to the binary that is actually serving"
+    );
+    assert!(
+        report.mismatch.is_none(),
+        "same dialects, so there is nothing to ask the user about"
+    );
+    assert!(
+        remote.writes().is_empty(),
+        "not one byte written to a machine that needed nothing: {:?}",
+        remote.writes()
+    );
+    assert!(
+        release.fetched().is_empty(),
+        "and nothing downloaded either: {:?}",
+        release.fetched()
+    );
+}
+
+/// **A server speaking a different dialect is still installed over.**
+///
+/// The other half of the same judgement — adoption is not a blanket "reuse
+/// whatever is there". A control dialect we cannot speak is exactly what the
+/// prompt exists for.
+#[test]
+fn an_incompatible_running_server_is_not_adopted() {
+    let remote = FakeRemote::new().serving(OTHER_EXE).speaking(
+        OTHER_EXE,
+        RemoteProtocol {
+            build: OTHER_BUILD.to_string(),
+            control: ours().control + 1,
+            ..ours()
+        },
+    );
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let report = installer(&remote, &release, &user, "me@build-box:22")
+        .run()
+        .expect("connect");
+
+    assert!(report.installed, "a dialect we cannot speak means install");
+    assert!(report.reused.is_none());
+    assert_eq!(
+        report.paths.binary, BINARY,
+        "and the transport uses the one we just installed"
+    );
+    assert!(
+        report.mismatch.is_some(),
+        "the user still has a choice to make about the daemon that is running"
+    );
+}
+
+/// **The pane dialect counts too, not just the control one.**
+///
+/// A remote workspace uses both: control for the workspace, the pane protocol
+/// for every terminal in it. Matching one and not the other would open the
+/// workspace and then fail on the first pane.
+#[test]
+fn a_matching_control_dialect_is_not_enough_on_its_own() {
+    let remote = FakeRemote::new().serving(OTHER_EXE).speaking(
+        OTHER_EXE,
+        RemoteProtocol {
+            build: OTHER_BUILD.to_string(),
+            protocol: ours().protocol + 1,
+            ..ours()
+        },
+    );
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let report = installer(&remote, &release, &user, "me@build-box:22")
+        .run()
+        .expect("connect");
+
+    assert!(
+        report.installed,
+        "the control versions agreed, but panes would not have worked"
+    );
+    assert!(report.reused.is_none());
+}
+
+/// **A server too old to answer `--protocol` is handled exactly as before.**
+///
+/// It predates the flag, so it exits non-zero; we learn nothing, and "nothing
+/// learnt" has to keep meaning "install ours and let the user decide", never
+/// "assume it is fine".
+#[test]
+fn a_server_that_cannot_be_probed_is_installed_over() {
+    // `.serving` without `.speaking`: the probe fails.
+    let remote = FakeRemote::new().serving(OTHER_EXE);
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let report = installer(&remote, &release, &user, "me@build-box:22")
+        .run()
+        .expect("connect");
+
+    assert!(report.installed, "no answer means no adoption");
+    assert!(report.reused.is_none());
+    assert!(
+        report.mismatch.is_some(),
+        "an unprobeable different build is exactly when the prompt is honest"
+    );
+}
+
+/// **Our own version already installed still short-circuits everything.**
+///
+/// The fast path must not have grown a probe: a machine we have installed on
+/// before should cost a `stat` and nothing more.
+#[test]
+fn the_matching_version_still_costs_no_probe() {
+    let remote = FakeRemote::new()
+        .with_previous_install(VERSION)
+        .serving(BINARY);
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let report = installer(&remote, &release, &user, "me@build-box:22")
+        .run()
+        .expect("connect");
+
+    assert!(!report.installed);
+    assert!(report.reused.is_none(), "adoption is for *other* builds");
+    assert!(
+        !remote
+            .journal()
+            .iter()
+            .any(|j| matches!(j, Journal::Exec(cmd) if cmd.ends_with(PROTOCOL_FLAG))),
+        "nothing to ask: the running exe is the path we wanted: {:?}",
+        remote.journal()
+    );
+}
+
+/// **`serves` is symmetric in neither direction by accident — it is equality.**
+///
+/// Written down because "newer can serve older" is the tempting wrong rule, and
+/// the failure it produces (a wire error mid-session, long after the connect)
+/// is far worse than the prompt it avoids.
+#[test]
+fn only_identical_dialects_serve() {
+    let base = ours();
+    assert!(base.serves(&base));
+    assert!(
+        base.serves(&RemoteProtocol {
+            build: "some other build entirely".to_string(),
+            ..base.clone()
+        }),
+        "the build string decides nothing"
+    );
+    assert!(
+        !base.serves(&RemoteProtocol {
+            control: base.control + 1,
+            ..base.clone()
+        }),
+        "a newer client is not automatically served by an older server"
+    );
+    assert!(
+        !RemoteProtocol {
+            control: base.control + 1,
+            ..base.clone()
+        }
+        .serves(&base),
+        "nor the other way round"
+    );
+}
+
+/// **The probe's output survives a chatty login shell.**
+///
+/// `.bashrc` on a shared box prints banners, `direnv` prints exports, and all of
+/// it lands on the same stdout the JSON does.
+#[test]
+fn a_noisy_shell_does_not_break_the_probe() {
+    let spoken = ours();
+    let json = serde_json::to_string(&spoken).unwrap();
+
+    assert_eq!(RemoteProtocol::parse(&json), Some(spoken.clone()));
+    assert_eq!(
+        RemoteProtocol::parse(&format!(
+            "Welcome to build-box!\nLast login: today\n{json}\n"
+        )),
+        Some(spoken),
+        "the answer is the last line, because the server prints it at exit"
+    );
+    assert_eq!(RemoteProtocol::parse(""), None);
+    assert_eq!(RemoteProtocol::parse("not json at all"), None);
 }

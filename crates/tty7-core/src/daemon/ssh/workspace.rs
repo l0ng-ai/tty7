@@ -1,6 +1,6 @@
-//! Workspace-scoped control requests (design §15, M7).
+//! Workspace-scoped control requests (M7).
 //!
-//! A *remote workspace* (design §2, "在上面开发") has no pane on this daemon: its
+//! A *remote workspace* has no pane on this daemon: its
 //! panes live on the remote `tty7-server` and reach it through a routed byte
 //! pipe. What this side owns is the [`SshConnection`] that pipe rides — the same
 //! connection an SSH pane to that host would have used, deduplicated by

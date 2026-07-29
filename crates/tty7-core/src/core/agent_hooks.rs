@@ -1513,6 +1513,9 @@ mod tests {
         fn git(&self, cwd: &Path, args: &[&str]) -> io::Result<crate::host::Output> {
             self.0.git(cwd, args)
         }
+        fn shells(&self) -> io::Result<crate::host::ShellInventory> {
+            self.0.shells()
+        }
         fn watch(&self, dirs: &[PathBuf]) -> io::Result<crate::host::WatchSub> {
             self.0.watch(dirs)
         }

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# Contract §10.6 — the GUI must not touch the filesystem or git directly.
+# The GUI must not touch the filesystem or git directly.
 #
 # Once a workspace can live on a remote machine, a path held by `ui::` or
 # `terminal::` is not necessarily a path on *this* box, and `std::path`'s
-# fs-backed APIs quietly answer for the wrong machine (contract §4.3):
+# fs-backed APIs quietly answer for the wrong machine:
 # `canonicalize` walks the local filesystem, `is_absolute` says `false` for
 # `/home/me` on Windows, `read_dir` lists the client's disk. Everything that may
 # be looking at a workspace path has to go through `ui::host_ops` / the `Host`
@@ -151,7 +151,7 @@ if [ "$violations" -ne 0 ]; then
     cat >&2 <<'EOF'
 
 --------------------------------------------------------------------------------
-Contract §10.6: the GUI reached the filesystem/git directly.
+The GUI reached the filesystem/git directly.
 
 A path in `ui::` or `terminal::` may belong to a remote workspace, where these
 calls answer for the wrong machine. Route it through `ui::host_ops` / `Host`

@@ -22,9 +22,9 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
-  # Contract §10.6: `ui::` and `terminal::` must not reach the filesystem or git
+  # `ui::` and `terminal::` must not reach the filesystem or git
   # directly, because once a workspace can be remote those calls answer for the
-  # wrong machine (§4.3). The allowlist of genuinely-local paths lives in the
+  # wrong machine. The allowlist of genuinely-local paths lives in the
   # script, next to the reason each one is exempt.
   #
   # A standalone job on purpose, and one that must stay *non-required*: main's
@@ -34,7 +34,7 @@ jobs:
   # `server-musl` below. Cheap enough (a checkout and a grep) that it does not
   # need caching or a toolchain.
   host-boundary:
-    name: host boundary (§10.6)
+    name: host boundary
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -94,7 +94,7 @@ jobs:
         run: cargo test --locked --target ${{ matrix.target }}
 
   # Static musl builds of the headless server binary that remote workspaces push
-  # onto the far machine (docs/2026-07-27-remote-workspace-design.md, D10/§12).
+  # onto the far machine (decision D10).
   # One binary has to run on any distro without regard to the target's glibc
   # version, so it is linked fully static against musl rather than built per
   # distro. Compile-only — this job publishes nothing; release.yml and
@@ -103,8 +103,7 @@ jobs:
   # Deliberately a *separate* job rather than two more rows in the `build` matrix
   # above: those three `build & test (<target>)` names are main's required
   # checks, and reshaping that matrix would wedge branch protection on every open
-  # PR. Keep this job non-required until it has a few weeks of green — see
-  # docs/remote-server-assets.md.
+  # PR. Keep this job non-required until it has a few weeks of green.
   server-musl:
     name: tty7-server musl (${{ matrix.target }})
     runs-on: ubuntu-latest
@@ -153,7 +152,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # The crate split (§11) lands separately; until `tty7-server` exists as a
+      # The crate split lands separately; until `tty7-server` exists as a
       # workspace member this job has nothing to build. Skip cleanly rather than
       # fail, so the workflow can land before the split and simply start working
       # once it arrives. `--no-deps` keeps this to a manifest parse — no
@@ -167,7 +166,7 @@ jobs:
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::tty7-server is not a workspace member yet (crate split, design §11 / M1) — nothing to build"
+            echo "::notice::tty7-server is not a workspace member yet (crate split, M1) — nothing to build"
           fi
 
       # `-p tty7-server` addresses the package by name, so this survives whatever

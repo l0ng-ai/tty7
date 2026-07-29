@@ -11,7 +11,7 @@
 //!
 //! | | Why an in-process socket pair would not do |
 //! |---|---|
-//! | The record is on **the server's** disk | The whole storage split (design §10) is "the machine is the authority". A store in the test's own address space proves nothing about that |
+//! | The record is on **the server's** disk | The whole storage split is "the machine is the authority". A store in the test's own address space proves nothing about that |
 //! | `workspace-store` is advertised only when served | The capability bit is built from what the *binary* wires up, and that wiring lives in `main.rs` |
 //! | A change reaches the **other** connection | Two clients, one server process, one file — the configuration the user actually has when their laptop and their desktop are both connected |
 //!
@@ -387,7 +387,7 @@ fn a_change_from_one_client_reaches_the_other() {
     assert_eq!(store.len(), 0);
 }
 
-/// **Design §10's takeover, across two real processes.**
+/// **The takeover, across two real processes.**
 ///
 /// The same two-client shape as the change-notification test, and for the same
 /// reason: a takeover is by definition something one connection does to
@@ -427,7 +427,7 @@ fn a_later_client_takes_the_workspace_and_the_first_is_cut_off() {
     // The displaced client is told which workspace it lost and to whom.
     laptop.expect_preempted("w", "desktop");
     // …and then its link is closed, because this connection existed for that
-    // workspace. Design §10: "关闭它的流".
+    // workspace: the server closes its stream.
     let deadline = Instant::now() + Duration::from_secs(10);
     while laptop.control.is_connected() {
         assert!(
@@ -499,7 +499,7 @@ fn bridged(sock: &Path, token: &str) -> Client {
 }
 
 /// [`bridged`], naming the client machine and, optionally, the workspace this
-/// connection is opened *for* — the hello field design §10's takeover keys on.
+/// connection is opened *for* — the hello field the takeover keys on.
 fn bridged_for(sock: &Path, token: &str, hostname: &str, workspace: Option<&str>) -> Client {
     let hello = ControlHello {
         control_version: tty7_core::daemon::control::CONTROL_VERSION,
