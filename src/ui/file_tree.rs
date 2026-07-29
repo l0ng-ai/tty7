@@ -1,5 +1,5 @@
-//! Local project file tree (the code overlay's left column — see
-//! `code_editor::render_code_overlay` for the panel that hosts it).
+//! Local project file tree (the right panel's Files tab — see
+//! `right_panel::render_panel_files` for the column that hosts it).
 //!
 //! Modelled on Warp's Project Explorer: lazily-loaded directories, gitignore
 //! awareness (ignored entries render dimmed, not hidden), a filesystem watcher
@@ -13,6 +13,14 @@
 //! same tree work against this machine or a remote one. Listings are cached per
 //! `(host, directory)` and invalidated by watcher events, so a huge repo only
 //! ever pays for the directories actually expanded.
+//!
+//! The watch is scoped the same way: **non-recursive**, over the roots plus the
+//! expanded directories and nothing else — see
+//! [`FileTreeState::sync_watch`]. So `target/`, `node_modules` and the inside of
+//! `.git` produce no events at all unless the user has expanded them, and what
+//! does arrive names a directory the tree is displaying. Anything reasoning
+//! about "what the watcher reports" starts there, not from a recursive walk of
+//! the root.
 //!
 //! **Nothing here touches the filesystem directly.** Every read, every write and
 //! every `git` invocation goes through [`HostOps`], which runs the blocking
@@ -28,6 +36,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::core::config::RightPanelTab;
 use crate::ui::app::Tty7App;
 use crate::ui::host_ops::{ByHost, HostId, HostOps, InFlight, SharedHost, WatchSub};
 use crate::ui::host_registry::HostRegistry;
@@ -686,13 +695,14 @@ impl FileTreeState {
     ///
     /// The listing stays until its replacement lands — see [`FileTreeState::stale`].
     ///
-    /// The return value is what lets the window go idle (issue #243). The
-    /// watcher is recursive over the root, so it reports every write underneath,
-    /// and nearly all of them name a directory the tree has never listed and
-    /// does not show — `.git` internals, build output, `node_modules`. There is
-    /// nothing to re-read and nothing to redraw for those, and saying so is the
-    /// difference between a window that settles and one that repaints every
-    /// [`REFRESH_DEBOUNCE`] for as long as anything is being written.
+    /// The return value is what keeps a batch that reached nothing from
+    /// repainting (issue #243). The subscription is non-recursive over the
+    /// roots plus the expanded directories (see
+    /// [`sync_watch`](FileTreeState::sync_watch)), so nearly everything that
+    /// arrives *does* name a directory the tree holds — but not all of it: a
+    /// watched directory whose listing never landed (a read that failed, a root
+    /// removed underneath) is neither cached nor pending, and relisting for it
+    /// buys a round trip and a frame for rows that are not on screen.
     fn invalidate_dir(&mut self, host: HostId, dir: &Path) -> bool {
         let key: DirKey = (host, dir.to_path_buf());
         let cached = self.children.get(host, dir).is_some();
@@ -708,10 +718,15 @@ impl FileTreeState {
     ///
     /// A `.gitignore` at `D/.gitignore` governs `D` and everything below it and
     /// nowhere else, so it matters only when some directory the tree caches or
-    /// is loading sits under `D`. Without this test an `npm install` writing
-    /// `.gitignore` files all over `node_modules` — or one under any unlisted
-    /// build directory — took the whole-cache branch and repainted the window,
-    /// once per batch, which is the residual of the very symptom #243 is about.
+    /// is loading sits under `D`. A correctness guard on the branch, not a
+    /// throughput one: [`invalidate_all`](FileTreeState::invalidate_all) marks
+    /// *every* cached listing and restarts the search, and taking that for a
+    /// file that cannot govern anything the tree holds is work with no possible
+    /// visible result. A non-recursive watch makes such a batch rare — the
+    /// `.gitignore` has to be a direct child of a watched directory to arrive at
+    /// all — but "rare" is not "never": a watched directory whose own listing
+    /// failed holds nothing, and neither does one still in flight when the
+    /// deeper cache is empty.
     ///
     /// The test is complete as well as safe: any directory whose matchers could
     /// be cached is an ancestor of a directory that was successfully listed, and
@@ -759,9 +774,17 @@ impl FileTreeState {
     /// switch, or on a panel toggle. So this makes the next such derivation
     /// correct rather than relocating a root under a tab that is already open —
     /// which is also what the synchronous version it replaced did.
-    fn invalidate_repo_roots(&mut self) {
+    ///
+    /// Returns whether anything was actually forgotten. Nothing here re-resolves
+    /// what it drops: [`file_tree_refresh_roots`](Tty7App::file_tree_refresh_roots)
+    /// does, and it only runs from a paint. So a caller that has cleared this
+    /// cache still owes the window a frame, whatever else its batch did or did
+    /// not reach (issue #243).
+    fn invalidate_repo_roots(&mut self) -> bool {
+        let had = !self.repo_roots.is_empty() || !self.repo_root_loads.is_empty();
         self.repo_roots.clear();
         self.repo_root_loads.invalidate_all();
+        had
     }
 
     /// Show `op`'s result in `dir`'s cached listing before the host has
@@ -1039,19 +1062,40 @@ impl Tty7App {
         );
     }
 
+    /// Whether the tree column is actually being drawn, for the work that only
+    /// a visible tree can have a result for.
+    ///
+    /// The same pair of conditions [`render_right_panel`](Self::render_right_panel)
+    /// reaches the Files body through, read from the same fields, so the two
+    /// cannot drift into disagreeing about it. Deliberately not
+    /// consulting the tab's `code.visible`: the tree left the code overlay for
+    /// the panel, and the overlay draws the editor only.
+    pub(crate) fn file_tree_on_screen(&self, cx: &App) -> bool {
+        self.right_panel_open(cx) && self.right_panel_tab == RightPanelTab::Files
+    }
+
     /// Watcher callback (debounced): mark the affected listings for a refresh
     /// and re-read them. A `.gitignore` change resets ignore state wholesale —
     /// its patterns can affect any depth below it.
     ///
     /// See [`event_can_change_a_row`] for what is deliberately ignored here.
     ///
-    /// Notably this does **not** repaint (issue #243). The watcher is recursive
-    /// over the root, so on any tree being worked in it fires every
-    /// [`REFRESH_DEBOUNCE`] for writes into `.git`, `target/` or `node_modules`
-    /// that the tree neither caches nor shows, and a `cx.notify()` here was a
-    /// full-window redraw for each of them — the tree asking to be redrawn
-    /// before it knew whether it had anything new to draw. The re-read's own
-    /// landing repaints, and only when the listing came back different.
+    /// Notably this no longer repaints for its own sake (issue #243). The
+    /// subscription is non-recursive over the roots plus the expanded
+    /// directories — see [`sync_watch`](FileTreeState::sync_watch) — so what
+    /// arrives is a change in a directory the tree is *displaying*, and a file's
+    /// contents being rewritten arrives exactly as loudly as an entry appearing
+    /// or disappearing. An editor saving on every keystroke, a build writing its
+    /// log next to the sources, a formatter rewriting the file in place: each of
+    /// those was a full-window redraw every [`REFRESH_DEBOUNCE`], the tree
+    /// asking to be drawn before it knew whether it had anything new to draw.
+    /// The re-read's own landing repaints instead, and only when the listing
+    /// came back different.
+    ///
+    /// Two things still repaint on the event itself: the whole-cache
+    /// `.gitignore` branch, whose re-walk only a paint performs, and a batch
+    /// that moved a repository root. Both are gated on the tree being on screen,
+    /// because both exist to get a paint that would do nothing while it is not.
     pub(crate) fn file_tree_apply_fs_events(
         &mut self,
         host: HostId,
@@ -1068,15 +1112,27 @@ impl Tty7App {
             "fs events on host {host:?}: {:?}",
             paths.iter().take(8).collect::<Vec<_>>()
         );
+        // Whether anything below can act on this batch at all. The tree draws in
+        // one place — the right panel's Files tab — and every effect this
+        // function has is either a paint of that column or a listing read to
+        // fill it. With the panel closed the subscription stays open (it is
+        // derived from every tab's roots and expansion, which outlive the
+        // panel), so without this check a build writing into a watched directory
+        // buys a `read_dir` per marked directory, per batch, for a column nobody
+        // can see — a network round trip each, on a remote workspace. The marks
+        // are what carry the change across: they stay, and the first paint after
+        // the panel comes back re-reads them.
+        let on_screen = self.file_tree_on_screen(cx);
         // A `.git` coming or going moves a repository root, which is the one
         // thing the cached root derivation cannot notice by itself.
+        let mut roots_moved = false;
         if paths.iter().any(|p| {
             p.file_name().is_some_and(|n| n == ".git")
                 || p.parent()
                     .and_then(Path::file_name)
                     .is_some_and(|n| n == ".git")
         }) {
-            self.file_tree.invalidate_repo_roots();
+            roots_moved = self.file_tree.invalidate_repo_roots();
         }
         // The caches are shared across tabs, so invalidate unconditionally —
         // a hidden tab's stale listing would otherwise survive until reopened.
@@ -1088,19 +1144,31 @@ impl Tty7App {
             // its own watcher; what is left for us is the listings that carry
             // the `ignored` flags those matchers produced.
             self.file_tree.invalidate_all();
-            // The one case that repaints on the event itself: `invalidate_all`
-            // restarts the search, and only a paint re-walks it.
-            cx.notify();
+            // Repaints on the event itself: `invalidate_all` restarts the
+            // search, and only a paint re-walks it. `SearchState::restart`
+            // clears `pending`, so a panel that is closed here re-walks on the
+            // paint that reopens it instead.
+            if on_screen {
+                cx.notify();
+            }
         } else {
             let mut touched = false;
             for dir in dirs_to_relist(paths, self.file_tree.show_hidden) {
                 touched |= self.file_tree.invalidate_dir(host, dir);
             }
+            // A batch that moved a repository root owes the window a frame
+            // whatever else it reached: `file_tree_refresh_roots` is what
+            // re-resolves the cache just cleared, and it only runs from a paint.
+            // Nothing else here would ask for one — `.git` is a dot-file, so
+            // under the default `show_hidden: false` it never survives
+            // `dirs_to_relist`, and a batch naming nothing but `.git` leaves
+            // `touched` false and returns just below.
+            if roots_moved && on_screen {
+                cx.notify();
+            }
             if !touched {
                 // Nothing the tree holds was reached, so there is nothing to
-                // re-read and nothing to redraw. This is the overwhelming
-                // majority of what a recursive watch over a working tree
-                // reports.
+                // re-read and nothing more to redraw.
                 return;
             }
             // Deliberately *not* restarting the search here. Its results are
@@ -1109,8 +1177,9 @@ impl Tty7App {
             // the walk outright: this callback fires roughly every
             // `REFRESH_DEBOUNCE`, and a restart bumps the generation that the
             // walk re-checks after waiting `SEARCH_DEBOUNCE`, so under any
-            // sustained churn (a build writing into `target/`, which the
-            // watcher reports because it knows nothing about gitignore) every
+            // sustained churn (a build writing into a directory somebody has
+            // expanded — the watch follows the expansion set and knows nothing
+            // about gitignore) every
             // walk bows out before it ever reads a directory and the list stays
             // empty forever. A snapshot that's a few seconds old until the next
             // keystroke is the better failure.
@@ -1118,8 +1187,11 @@ impl Tty7App {
             // Re-read what was marked, here rather than on the next paint.
             // Waiting for one would mean notifying to *get* one, which is the
             // full-window redraw per event batch this function's doc comment is
-            // about. Only while the tree is still pointed at the machine the
-            // events came from.
+            // about. Only while the tree is on screen, and only while it is
+            // still pointed at the machine the events came from.
+            if !on_screen {
+                return;
+            }
             let Some(shared) = self.active_host(cx) else {
                 return;
             };
@@ -1578,13 +1650,15 @@ enum TreeWrite {
 // ---------------------------------------------------------------------------
 
 impl Tty7App {
-    /// The file-tree column: the code overlay's left side (the overlay
-    /// renders the divider and the editor to its right).
-    /// Just the scrolling rows of the tree — no header, no fixed width, no
-    /// surface of its own — so a host that already has those (the right detail
-    /// panel) can drop the tree into its own column. Shares every bit of state
-    /// with [`render_file_tree_column`]: same roots, same expand set, same
-    /// click-to-open, so the panel and the code overlay are two views of one tree.
+    /// The file-tree column: just the scrolling rows of the tree — no header, no
+    /// fixed width, no surface of its own — because the one thing that draws it
+    /// already has those. That is the right panel's Files tab, and only it: the
+    /// tree left the code overlay, which now draws the editor alone.
+    ///
+    /// The single draw site is why [`file_tree_on_screen`](Self::file_tree_on_screen)
+    /// is one pair of conditions, and why everything this function does per
+    /// paint — re-rooting, moving the watched set, requesting listings — stops
+    /// happening the moment the panel closes.
     pub(crate) fn render_file_tree_rows(
         &mut self,
         window: &mut Window,
@@ -2499,6 +2573,13 @@ mod tests {
 /// [`render_probe`](crate::ui::app::render_probe) counts exactly the frames the
 /// app asked for — the one claim in the issue that is platform-independent, and
 /// answerable without the reporter's Wayland session.
+///
+/// What the live watch can actually deliver bounds what any of this can claim.
+/// The subscription is non-recursive over the roots plus the expanded
+/// directories, so the reachable case is a change *in a directory on screen* —
+/// that is the one measured. Three cases here feed [`fs_event`] a path the live
+/// subscription would drop before batching it; each is labelled a guard on the
+/// predicate it exercises, and none of them is evidence of a symptom.
 #[cfg(all(test, unix))]
 mod render_idle_gpui_tests {
     use super::*;
@@ -2610,7 +2691,12 @@ mod render_idle_gpui_tests {
         })
     }
 
-    /// Hand the app one debounced watcher batch, exactly as the watcher does.
+    /// Hand the app one debounced batch at the seam the watcher delivers to.
+    ///
+    /// The seam, not the watcher: this bypasses `WatchedDirs::translate`, so a
+    /// caller can synthesise a path the live subscription would never deliver.
+    /// The cases that do are labelled as guards on a predicate rather than as
+    /// symptoms, and say so.
     fn fs_event(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, path: &Path) {
         app.update_in(vcx, |app, _, cx| {
             app.file_tree_apply_fs_events(HostId::LOCAL, &HashSet::from([path.to_path_buf()]), cx);
@@ -2716,11 +2802,20 @@ mod render_idle_gpui_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The window never went idle because the watcher is recursive over the
-    /// root: writes into `target/`, `node_modules/` or `.git/` all arrive here,
-    /// and every one of them repainted a window that had nothing new to draw.
+    /// A guard on the `!touched` early return, **not** a symptom.
+    ///
+    /// Read the event below for what it is: `root/target/debug/artifact0.o`,
+    /// whose parent is neither a root nor an expanded directory. The live watch
+    /// cannot deliver it — it is non-recursive over roots ∪ expanded, and
+    /// `WatchedDirs::translate` drops anything whose parent is not in that set
+    /// before it is ever batched. So this measures no bug that can occur today.
+    /// What it holds down is the predicate: `invalidate_dir` answering "nothing
+    /// here" must stay a silent return, because that answer is also what a
+    /// watched directory with no landed listing gives, and because expanding
+    /// the watched set (or restoring a recursive watch) would make this exact
+    /// path live again.
     #[gpui::test]
-    fn a_change_the_tree_does_not_display_costs_no_frames(cx: &mut TestAppContext) {
+    fn an_event_reaching_no_cached_listing_costs_no_frames(cx: &mut TestAppContext) {
         let _serial = serial();
         let root = scratch("unlisted");
         for n in 0..12 {
@@ -2742,9 +2837,15 @@ mod render_idle_gpui_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The same for a directory the tree *is* showing, when what changed is a
-    /// file's contents rather than the entries. A build writing a log into a
-    /// listed directory reports as loudly as one creating a file there.
+    /// The reachable case, and the one issue #243 is actually about on this
+    /// base: a directory the tree *is* showing, where what changed is a file's
+    /// contents rather than the set of entries.
+    ///
+    /// The displayed directories are exactly the watched ones, so this event is
+    /// delivered — a formatter rewriting the file, an editor saving on every
+    /// keystroke, a build dropping its log next to the sources. Each one cost a
+    /// full-window redraw, twice over: once for the `cx.notify()` in the event
+    /// handler and once for the landing of the relist it bought.
     #[gpui::test]
     fn rewriting_a_file_in_a_displayed_directory_costs_no_frames(cx: &mut TestAppContext) {
         let _serial = serial();
@@ -2800,12 +2901,18 @@ mod render_idle_gpui_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `.gitignore` takes the whole-cache branch, so it must be scoped to the
-    /// tree as well: an `npm install` writing them all over `node_modules`
-    /// otherwise repaints the window once per batch, which is the residual of
-    /// the very symptom this fixes.
+    /// A guard on [`FileTreeState::gitignore_reaches_tree`], **not** a symptom.
+    ///
+    /// Same caveat as `an_event_reaching_no_cached_listing_costs_no_frames`:
+    /// `root/node_modules/pkg0/.gitignore` sits under a directory nobody
+    /// expanded, so the live non-recursive watch never delivers it and the
+    /// `npm install` story this test used to tell cannot happen here. It is kept
+    /// because the branch it guards is the expensive one — `invalidate_all`
+    /// marks every cached listing and restarts the search — and the predicate
+    /// deciding when to take it deserves a test that a refactor cannot quietly
+    /// invert.
     #[gpui::test]
-    fn a_gitignore_under_an_unlisted_directory_costs_no_frames(cx: &mut TestAppContext) {
+    fn a_gitignore_that_governs_nothing_cached_costs_no_frames(cx: &mut TestAppContext) {
         let _serial = serial();
         let root = scratch("gitignore-unlisted");
         std::fs::write(root.join("main.rs"), "").unwrap();
@@ -2871,9 +2978,14 @@ mod render_idle_gpui_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The stale marks are keyed by path and the watcher names paths without
-    /// limit — every object a build drops into `target/`. Recording one for
-    /// something the tree does not track would grow that set forever.
+    /// A guard on `stale` staying bounded, **not** a symptom.
+    ///
+    /// The `target/debug/*.o` events below are again ones the live watch cannot
+    /// deliver. What the test defends is that `stale` is keyed by path and the
+    /// handler is fed paths it does not choose: marking one for a directory the
+    /// tree does not hold would let that set grow without limit, and the only
+    /// thing standing between it and that is `invalidate_dir` inserting solely
+    /// where `children` already has an entry.
     #[gpui::test]
     fn untracked_paths_leave_no_bookkeeping_behind(cx: &mut TestAppContext) {
         let _serial = serial();
@@ -2895,6 +3007,139 @@ mod render_idle_gpui_tests {
                 .count()
         });
         assert_eq!(marks, 0, "nothing the tree holds was reached");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The one batch that reaches nothing and must still draw: a `.git`
+    /// appearing or disappearing in a watched directory.
+    ///
+    /// `invalidate_repo_roots` empties the cwd → repository-root cache, and the
+    /// only thing that fills it again is `file_tree_refresh_roots`, which runs
+    /// from a paint. Meanwhile `.git` is a dot-file, so it never survives
+    /// `dirs_to_relist` under the default `show_hidden: false` and the batch
+    /// lands on the "reached nothing" return — which, unguarded, would leave the
+    /// cache cleared with nothing to resolve it and the tree showing the old
+    /// root until an unrelated event bought a frame.
+    #[gpui::test]
+    fn a_moved_repository_root_still_gets_its_frame(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("repo-root");
+        std::fs::write(root.join("main.rs"), "").unwrap();
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+        assert!(
+            app.update_in(&mut vcx, |app, _, _| !app.file_tree.repo_roots.is_empty()),
+            "the panel resolved its pane's root, so there is a cache to clear"
+        );
+
+        // Come to rest first, so the frame counted below is the event's own and
+        // not one still owed from settling — the same reason `draws_while_idle`
+        // measures its second interval rather than its first.
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_secs(3));
+        vcx.background_executor.run_until_parked();
+        render_probe::arm(BUDGET);
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_secs(3));
+        vcx.background_executor.run_until_parked();
+        assert_eq!(render_probe::draws(), 0, "the window is at rest");
+
+        fs_event(&app, &mut vcx, &root.join(".git"));
+        vcx.background_executor.run_until_parked();
+        assert!(
+            render_probe::draws() > 0,
+            "clearing the root cache asked for the paint that re-resolves it"
+        );
+
+        // The paint re-requests the root, and the host answers off the
+        // deterministic executor, so this waits on wall-clock like `settle`
+        // does rather than on a single `run_until_parked`.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            vcx.background_executor.run_until_parked();
+            if app.update_in(&mut vcx, |app, _, _| !app.file_tree.repo_roots.is_empty()) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the cleared root cache was never re-resolved"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        settle(&app, &mut vcx, &root);
+        assert_eq!(
+            app.update_in(&mut vcx, |app, _, _| app
+                .tab_code()
+                .map(|c| c.roots.clone())
+                .unwrap_or_default()),
+            vec![root.clone()],
+            "the tree is still rooted where it belongs"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A closed panel asks the host for nothing.
+    ///
+    /// The subscription outlives the panel — `file_tree_sync_watch` derives it
+    /// from every tab's roots and expansion, which persist — so events keep
+    /// arriving for a column nobody can see. Re-reading for them is a `read_dir`
+    /// per marked directory per batch, which on a remote workspace is that many
+    /// network round trips. The marks are what carry the change across instead.
+    #[gpui::test]
+    fn a_closed_panel_does_no_filesystem_work(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("closed-panel");
+        for n in 0..12 {
+            std::fs::write(root.join(format!("file{n:02}.rs")), "").unwrap();
+        }
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.right_panel_visible = false;
+            cx.notify();
+        });
+        vcx.background_executor.run_until_parked();
+
+        let path = root.join("file00.rs");
+        std::fs::write(&path, "changed").unwrap();
+        fs_event(&app, &mut vcx, &path);
+        // Long enough for a re-read to have been issued *and* landed. The host
+        // answers off the deterministic executor, so a single `run_until_parked`
+        // would leave "no work was done" and "the work has not come back yet"
+        // indistinguishable; after this, an unwanted re-read shows up as the
+        // mark below having cleared itself.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < until {
+            vcx.background_executor.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let (in_flight, marked) = app.update_in(&mut vcx, |app, _, _| {
+            (
+                app.file_tree.loads.len(),
+                app.file_tree
+                    .stale
+                    .iter()
+                    .filter(|(_, dir)| dir.starts_with(&root))
+                    .count(),
+            )
+        });
+        assert_eq!(in_flight, 0, "nothing was asked of the host");
+        assert!(marked > 0, "but the change was recorded");
+
+        // And it is picked up by the first paint after the panel comes back,
+        // which is what a mark is for.
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.right_panel_visible = true;
+            cx.notify();
+        });
+        settle(&app, &mut vcx, &root);
+        let left = app.update_in(&mut vcx, |app, _, _| {
+            app.file_tree
+                .stale
+                .iter()
+                .filter(|(_, dir)| dir.starts_with(&root))
+                .count()
+        });
+        assert_eq!(left, 0, "the marked listing was re-read on reopening");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -146,16 +146,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under `node_modules` reaches nothing on screen and now costs nothing.
   Real changes still arrive exactly as fast.
 
-  Measured headlessly by counting window draws, before and after: five writes
-  under an unlisted directory cost 5 frames and now cost 0; five rewrites of a
-  file in a displayed directory cost 10 and now cost 0; five `.gitignore` writes
-  under `node_modules` cost 10 and now cost 0.
+- **An idle window stays idle while a file in the Files panel is being written**
+  — the tree watches its roots plus every directory you have expanded, so what
+  it hears about is a change in a directory it is *displaying*, and a file's
+  contents being rewritten reports exactly as loudly as a file appearing. A
+  formatter rewriting in place, an editor saving on every keystroke, a build
+  dropping its log next to the sources: each of those repainted the whole
+  window, twice over, for as long as it went on. A window with nothing new to
+  draw never reached render idle, which is what issue #243 reports in its title.
+  A batch now repaints only when the re-read comes back different from what is
+  already on screen, and that re-read is issued from the watcher callback rather
+  than by asking for a paint in order to get one. A closed Files panel does no
+  work at all: the change is recorded and picked up on reopening. Real changes
+  still arrive exactly as fast.
+
+  Measured headlessly by counting window draws, before and after: five rewrites
+  of a file in a displayed directory cost 10 frames and now cost 0.
+
+  `.gitignore` edits keep their whole-cache refresh, now taken only when the file
+  can actually govern a directory the tree holds. That one is a correctness guard
+  on the most expensive branch here rather than a measurable saving — the watch
+  is non-recursive, so a `.gitignore` has to sit directly in a displayed
+  directory to arrive in the first place.
 
   The other half of that report — the Files panel flickering — was fixed
   independently by "keep file-tree listings on screen while they refresh", which
   landed first and is the mechanism the panel now uses. This is only the frames.
-  Note the redraw behaviour is platform-independent and is what those numbers
-  are about; the reporter's ~15% CPU figure, and whether their flicker also
+  Note the redraw behaviour is platform-independent and is what that number is
+  about; the reporter's ~15% CPU figure, and whether their flicker also
   involved something in the Wayland presentation path, were not reproducible on
   macOS and are not claimed to be confirmed. (#243)
 
