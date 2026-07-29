@@ -1,10 +1,9 @@
 //! The machine-owned workspace tree, end to end against a real `tty7-server`
 //! child process.
 //!
-//! Same shape and the same reasoning as `workspace_store.rs`, one architecture
-//! over: the client is the shipped `ControlClient`, the wire is the control
-//! dialect over real pipes, and the server is the shipped binary owning its
-//! tree in a file. What the process boundary buys here specifically:
+//! The client is the shipped `ControlClient`, the wire is the control dialect
+//! over real pipes, and the server is the shipped binary owning its tree in a
+//! file. What the process boundary buys here specifically:
 //!
 //! | | Why an in-process store would not do |
 //! |---|---|
@@ -330,7 +329,7 @@ fn an_operation_from_one_client_reaches_the_other_as_a_delta() {
             server::serve_listener_with(
                 listener,
                 LocalHost::new(),
-                server::Services::none().and_machine(machine),
+                server::Services::with_machine(machine),
             )
         });
     }
@@ -427,7 +426,7 @@ fn attachment_rides_the_tree_when_no_record_store_is_served() {
             server::serve_listener_with(
                 listener,
                 LocalHost::new(),
-                server::Services::none().and_machine(machine),
+                server::Services::with_machine(machine),
             )
         });
     }

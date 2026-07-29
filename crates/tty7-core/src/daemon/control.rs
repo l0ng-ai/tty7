@@ -90,7 +90,7 @@ use super::protocol::{MAX_FRAME, read_frame, write_frame};
 /// comparing dialect numbers, so a capability that doesn't move the number is a
 /// capability the far machine never gets. A [`feature`] string is the right
 /// answer only for something two current servers can genuinely disagree about
-/// (the workspace store, which depends on how the server was started); "this
+/// (the machine tree, which depends on how the server was started); "this
 /// build knows the request and older ones don't" is what the number is for.
 ///
 /// ## History
@@ -184,18 +184,19 @@ pub mod feature {
     pub const CONTROL: &str = "control";
     /// Serves [`super::ControlRequest`]'s filesystem and git methods — i.e. can
     /// back a remote `Host`. Distinct from [`CONTROL`] because a peer could
-    /// speak the dialect while exposing only the workspace store.
+    /// speak the dialect while exposing only the workspace tree.
     pub const HOST_RPC: &str = "host-rpc";
-    /// Serves the `Workspace*` requests.
-    pub const WORKSPACE_STORE: &str = "workspace-store";
+    // `"workspace-store"` is a burned name: it advertised the retired
+    // opaque-record scheme (verbs `workspace_list` / `workspace_get` /
+    // `workspace_put` / `workspace_delete`, event `workspace_changed`), all of
+    // which are burned with it. Never re-advertise or re-mint any of them with
+    // a different meaning.
     /// Serves the machine-owned workspace tree: the `MachineGet` /
     /// `WorkspaceTree` pulls, the semantic tree operations, and the
     /// [`super::ControlEvent::Layout`] pushes. Advertised only when the server
     /// actually carries a [`crate::core::machine::MachineStore`], so a client
     /// learns from the handshake whether the tree verbs are worth a round
-    /// trip. Distinct from [`WORKSPACE_STORE`], which is the retired
-    /// opaque-record scheme this one replaces — the two coexist while clients
-    /// migrate.
+    /// trip.
     pub const MACHINE_TREE: &str = "machine-tree";
     /// Can be launched as `--stdio` and bridge its own stdin/stdout to the
     /// machine-local socket (the fallback when `AllowStreamLocalForwarding` is
@@ -345,18 +346,10 @@ pub enum ControlRequest {
         id: u64,
     },
 
-    // ----- workspace store (M5; the slots exist, the server doesn't yet) -----
-    WorkspaceList,
-    WorkspaceGet {
-        id: String,
-    },
-    WorkspacePut {
-        id: String,
-        json: serde_json::Value,
-    },
-    WorkspaceDelete {
-        id: String,
-    },
+    // The opaque record store's verbs — `workspace_list` / `workspace_get` /
+    // `workspace_put` / `workspace_delete` — lived here until the machine tree
+    // below replaced them. Their serde names are burned (see `feature`); do
+    // not re-mint them with a different meaning.
 
     // ----- attachment (M6's takeover) ---------------------------------------
     /// Claim a workspace for this connection's session, taking it over from
@@ -382,10 +375,10 @@ pub enum ControlRequest {
     },
 
     // ----- machine tree (the daemon-owned structure) ------------------------
-    // The semantic replacement for the opaque `Workspace*` record verbs above:
-    // instead of a whole-record `Put` (last-writer-wins the moment two clients
-    // write), each operation names its edit, the server validates it against
-    // the tree it owns, and everyone else hears an incremental
+    // The semantic replacement for the retired opaque record verbs: instead of
+    // a whole-record `Put` (last-writer-wins the moment two clients write),
+    // each operation names its edit, the server validates it against the tree
+    // it owns, and everyone else hears an incremental
     // [`ControlEvent::Layout`]. Positions cross as `u64` for the same reason
     // `Search`'s limits do: a 32-bit server clamps rather than wraps.
     /// The whole tree — every workspace, tab and pane record on the machine.
@@ -412,7 +405,8 @@ pub enum ControlRequest {
         name: Option<String>,
     },
     /// Forget a tree workspace and everything under it. Named `Remove` because
-    /// `WorkspaceDelete` above is taken by the retired record store's verb.
+    /// `WorkspaceDelete` was the retired record store's verb, and its serde
+    /// name stays burned.
     WorkspaceRemove {
         workspace: WorkspaceId,
     },
@@ -534,16 +528,12 @@ impl ControlRequest {
             // spawns `wsl.exe -l -q`, which is slow enough to deserve the same
             // budget as git.
             Shells => Duration::from_secs(20),
-            WorkspaceList | WorkspaceGet { .. } | WorkspacePut { .. } | WorkspaceDelete { .. } => {
-                Duration::from_secs(10)
-            }
             // An attach is bookkeeping plus at most one push to a peer that may
             // be wedged — the push is `try`-shaped on the server, so this only
             // has to cover a slow link, not a slow client.
             WorkspaceAttach { .. } | WorkspaceDetach { .. } => Duration::from_secs(10),
             // Tree operations are a locked mutation plus one small file write,
-            // so the budget is the record verbs': it covers a slow disk, not
-            // slow work.
+            // so the budget covers a slow disk, not slow work.
             MachineGet
             | WorkspaceTree { .. }
             | WorkspaceCreate { .. }
@@ -621,8 +611,6 @@ pub enum ReplyOk {
     WatchId(u64),
     /// [`ControlRequest::Shells`]: what that machine can launch.
     Shells(ShellInventory),
-    /// The workspace store's payload (M5).
-    Json(serde_json::Value),
     /// [`ControlRequest::WorkspaceAttach`] succeeded. `took_over_from` names the
     /// machine whose session was displaced, so the client that *did* the taking
     /// can say so — only the notice going the other way is specified,
@@ -782,9 +770,8 @@ pub enum ControlEvent {
         workspace: String,
         by: String,
     },
-    WorkspaceChanged {
-        id: String,
-    },
+    // `workspace_changed` was the retired record store's change notice; its
+    // serde name is burned along with the record verbs.
     /// One incremental change to one tree workspace on this machine — the
     /// push half of the machine-tree verbs. The writer never receives its own
     /// operation back (origin exclusion, so an optimistically-applied edit is
@@ -793,7 +780,7 @@ pub enum ControlEvent {
     /// [`ControlRequest::WorkspaceTree`].
     ///
     /// `workspace` is the [`WorkspaceId`] rendered as a string, matching how
-    /// `Preempted` and `WorkspaceChanged` name theirs.
+    /// `Preempted` names its.
     Layout {
         workspace: String,
         delta: LayoutDelta,
@@ -805,7 +792,7 @@ pub enum ControlEvent {
 /// [`RemoteHost`](crate::host::remote::RemoteHost) routes `Watch` and
 /// `WatchOverflow` into the subscription that asked for them, because those
 /// belong to a caller that is still holding a `WatchSub`. The rest —
-/// `Preempted`, `PaneExited`, `AgentStatus`, `WorkspaceChanged` — are about a
+/// `Preempted`, `PaneExited`, `AgentStatus`, `Layout` — are about a
 /// *window*, and the host layer has no window.
 ///
 /// A process-wide observer rather than a parameter on `connect_with` because
@@ -2001,13 +1988,6 @@ mod tests {
                 dirs: vec!["/home/me/proj".into(), "/home/me/proj/src".into()],
             },
             ControlRequest::WatchClose { id: 7 },
-            ControlRequest::WorkspaceList,
-            ControlRequest::WorkspaceGet { id: "w1".into() },
-            ControlRequest::WorkspacePut {
-                id: "w1".into(),
-                json: serde_json::json!({ "tabs": [1, 2, 3] }),
-            },
-            ControlRequest::WorkspaceDelete { id: "w1".into() },
         ]
     }
 
@@ -2054,7 +2034,6 @@ mod tests {
                 stderr: vec![0x00, 0xff, 0xfe, b'\n'],
             })),
             ControlReply::Ok(ReplyOk::WatchId(42)),
-            ControlReply::Ok(ReplyOk::Json(serde_json::json!({ "a": [1, null] }))),
             ControlReply::Err(WireError::new(WireErrorKind::NotFound, "no such file")),
             ControlReply::Err(WireError::new(
                 WireErrorKind::PermissionDenied,
@@ -2102,7 +2081,6 @@ mod tests {
                 workspace: "w1".into(),
                 by: "other-laptop".into(),
             },
-            ControlEvent::WorkspaceChanged { id: "w1".into() },
         ]
     }
 
@@ -2712,16 +2690,6 @@ mod tests {
                 },
                 s(20),
             ),
-            (R::WorkspaceList, s(10)),
-            (R::WorkspaceGet { id: "w".into() }, s(10)),
-            (
-                R::WorkspacePut {
-                    id: "w".into(),
-                    json: serde_json::Value::Null,
-                },
-                s(10),
-            ),
-            (R::WorkspaceDelete { id: "w".into() }, s(10)),
         ];
         assert_eq!(
             cases.len(),
@@ -2760,7 +2728,9 @@ mod tests {
                 assert_eq!(ok.home, "/home/me");
                 assert!(ok.has_feature(feature::CONTROL));
                 assert!(ok.has_feature(feature::HOST_RPC));
-                assert!(!ok.has_feature(feature::WORKSPACE_STORE));
+                // The retired record store's bit is a burned name and must
+                // never come back.
+                assert!(!ok.has_feature("workspace-store"));
             }
             other => panic!("expected HelloOk, got {other:?}"),
         }

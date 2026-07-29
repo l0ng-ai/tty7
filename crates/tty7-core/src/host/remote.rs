@@ -162,7 +162,7 @@ impl RemoteHost {
     }
 
     /// The underlying connection, for callers that need to speak control
-    /// directly (the workspace store, once it exists).
+    /// directly (the machine-tree verbs).
     pub fn client(&self) -> &Arc<ControlClient> {
         &self.client
     }

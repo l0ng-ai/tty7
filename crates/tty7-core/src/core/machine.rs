@@ -2,9 +2,10 @@
 //!
 //! # What this replaces, and why
 //!
-//! [`crate::core::workspace_store`] is the previous design: an *opaque* record
-//! store, where the client owned the schema and the server filed JSON blobs it
-//! never read. That shape was right when there was exactly one writer (the GUI)
+//! The previous design (`core::workspace_store`, since deleted) was an
+//! *opaque* record store, where the client owned the schema and the server
+//! filed JSON blobs it never read. That shape was right when there was
+//! exactly one writer (the GUI)
 //! and the server's only job was to make a laptop's layout visible from a
 //! desktop. It stops being right the moment two clients — a GUI and a CLI, or
 //! two GUIs — write concurrently: whole-record `Put` is last-writer-wins, and
@@ -69,17 +70,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::cli_agent::CLIAgent;
 use crate::core::session::WorkspaceId;
-use crate::core::workspace_store::Attachment;
 use crate::daemon::protocol::NativeSshSpec;
 
-/// The file's name under the data directory ([`crate::core::workspace_store::DATA_DIR_ENV`]
-/// resolves where that is).
+/// The file's name under the data directory ([`DATA_DIR_ENV`] resolves where
+/// that is).
 ///
-/// Deliberately **not** `workspaces.json`: that file's document is the retired
-/// opaque-record store, whose reader quarantines anything it cannot parse. A
-/// build downgraded across this refactor must find its old file untouched, and
-/// this build's tree must not be "repaired" away by the old reader.
+/// Deliberately **not** `workspaces.json`: that name belonged to the retired
+/// opaque-record store, whose reader quarantined anything it could not parse.
+/// A build downgraded across that refactor must find its old file untouched,
+/// and this build's tree must not be "repaired" away by the old reader.
 pub const MACHINE_FILE: &str = "machine.json";
+
+/// Overrides where the machine's data directory lives. Set by tests and by a
+/// second server on a shared box — the same escape hatch
+/// [`CONTROL_SOCK_ENV`](crate::host::server::CONTROL_SOCK_ENV) is for the
+/// socket.
+pub const DATA_DIR_ENV: &str = "TTY7_DATA_DIR";
 
 /// Ceiling on workspaces, carried over from the old store: a client looping on
 /// "create workspace" should hit a named error rather than grow the file until
@@ -154,6 +160,41 @@ pub struct Machine {
     /// panes live here exactly once — see the module header.
     #[serde(default)]
     pub panes: Vec<PaneRecord>,
+}
+
+/// Who is currently attached to a workspace.
+///
+/// **Data only.** The takeover behaviour — push `Preempted { by }` to the old
+/// session, close its streams, offer a take-back button — lives in the control
+/// server. What is here is the record that machinery needs to exist before it
+/// can be written: the random token that tells two connections from the same
+/// client apart, and the hostname that fills in "already open on <host>". Both
+/// arrive in the [`ControlHello`](crate::daemon::control::ControlHello).
+///
+/// **Never persisted** (the field carrying it is `#[serde(skip)]`): an
+/// attachment describes a live connection; after a server restart there are
+/// none, and a stale one on disk would report a takeover against a client
+/// that no longer exists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attachment {
+    /// The client's per-session random token, from `ControlHello::client_token`.
+    pub token: String,
+    /// The client machine's hostname, shown to the user in the preempted
+    /// window's status bar.
+    pub hostname: String,
+    /// Unix seconds when the attach happened.
+    pub since: u64,
+}
+
+impl Attachment {
+    /// An attachment stamped now.
+    pub fn new(token: impl Into<String>, hostname: impl Into<String>) -> Attachment {
+        Attachment {
+            token: token.into(),
+            hostname: hostname.into(),
+            since: unix_now(),
+        }
+    }
 }
 
 /// One workspace: a named group of tabs. The unit a window shows and a client
@@ -1471,11 +1512,44 @@ fn quarantine(path: &Path) {
     }
 }
 
-/// `<data-dir>/machine.json` — beside the old store's `workspaces.json`, under
-/// the same directory resolution ([`crate::core::workspace_store`] documents
-/// the order).
+/// `<data-dir>/machine.json`.
+///
+/// | Order | Directory | Why |
+/// |---|---|---|
+/// | 1 | `$TTY7_DATA_DIR` | Explicit wins; how tests and a second server get their own file |
+/// | 2 | `$XDG_DATA_HOME/tty7` | The location the design names, spelled the way XDG spells it |
+/// | 3 | `$HOME/.local/share/tty7` | No `XDG_DATA_HOME` — the literal fallback path |
+///
+/// Deliberately **not** under the config dir. `views.json` there is the
+/// *client's* view state, and a box that is both someone's laptop and someone
+/// else's remote must keep the two files apart or one role would overwrite the
+/// other's idea of which workspaces exist.
 pub fn default_machine_path() -> io::Result<PathBuf> {
-    crate::core::workspace_store::default_store_path().map(|p| p.with_file_name(MACHINE_FILE))
+    Ok(data_dir()?.join(MACHINE_FILE))
+}
+
+fn data_dir() -> io::Result<PathBuf> {
+    if let Some(explicit) = std::env::var_os(DATA_DIR_ENV).filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(explicit));
+    }
+    #[cfg(not(windows))]
+    let base = env_dir("XDG_DATA_HOME")
+        .or_else(|| env_dir("HOME").map(|h| h.join(".local").join("share")));
+    #[cfg(windows)]
+    let base = env_dir("LOCALAPPDATA")
+        .or_else(|| env_dir("USERPROFILE").map(|h| h.join(".local").join("share")));
+
+    base.map(|b| b.join("tty7")).ok_or_else(|| {
+        io::Error::other(format!(
+            "no home directory to place {MACHINE_FILE} in; set {DATA_DIR_ENV}"
+        ))
+    })
+}
+
+fn env_dir(key: &str) -> Option<PathBuf> {
+    std::env::var_os(key)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }
 
 fn unix_now() -> u64 {
@@ -2113,6 +2187,34 @@ mod tests {
             MachineStore::open(dir.path().join(MACHINE_FILE)).attachment(ws),
             None
         );
+    }
+
+    /// An attachment is a field of its workspace, so deleting the workspace
+    /// takes it along — there is no table it could go stale in. The retired
+    /// record store kept a separate attachment list and had to clear it by
+    /// hand; this pins the structural guarantee that replaced that code.
+    #[test]
+    fn an_attachment_dies_with_its_workspace() {
+        let (store, _dir, ws, _tab) = store_with_tab();
+        store.attach(ws, Attachment::new("tok", "laptop"));
+        assert!(store.attachment(ws).is_some());
+        store.workspace_delete(ws, None).unwrap();
+        assert_eq!(store.attachment(ws), None);
+    }
+
+    /// The default path ends at the documented file under the data directory —
+    /// the resolution the retired record store defined and the tree inherited.
+    #[test]
+    fn the_default_path_ends_at_the_documented_file() {
+        match default_machine_path() {
+            Ok(path) => assert_eq!(
+                path.file_name().and_then(|n| n.to_str()),
+                Some(MACHINE_FILE)
+            ),
+            // No home at all (a bare CI container): the error names the
+            // escape hatch rather than being a mystery.
+            Err(e) => assert!(e.to_string().contains(DATA_DIR_ENV)),
+        }
     }
 
     // ── Corruption ─────────────────────────────────────────────────────────

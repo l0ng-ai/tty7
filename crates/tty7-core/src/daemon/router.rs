@@ -142,7 +142,7 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(240);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RouteChannel {
-    /// Host RPC, the workspace store, event pushes — `daemon::control`.
+    /// Host RPC, the machine tree, event pushes — `daemon::control`.
     #[default]
     Control,
     /// One pane: `Spawn`/`Attach`/`Input`/`Output` — `daemon::protocol`.

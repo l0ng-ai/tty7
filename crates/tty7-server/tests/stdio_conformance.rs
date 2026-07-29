@@ -93,7 +93,7 @@ fn stdio_host() -> (SharedHost, TempSandbox) {
         // bridge to *that* would be testing their machine's state instead of
         // this build.
         .args(["--stdio", "--serve"])
-        // The server opens its workspace store at startup. None of these cases
+        // The server opens its machine tree at startup. None of these cases
         // touch it, but pointing it at the sandbox keeps forty-six child
         // processes off the developer's real `~/.local/share/tty7`.
         .env("TTY7_DATA_DIR", sandbox.path())

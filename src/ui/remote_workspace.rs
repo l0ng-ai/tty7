@@ -1,7 +1,7 @@
 //! The window's half of "Connect to Host".
 //!
 //! [`ui::remote_connect`](crate::ui::remote_connect) is the plumbing — SSH
-//! specs, routed control connections, the remote workspace store. This is the
+//! specs, routed control connections, the remote machine's tree. This is the
 //! part that lives on a window: the state the home page renders, the steps that
 //! move between those states, and the guards that keep a window on one machine.
 //!
@@ -1440,10 +1440,6 @@ pub(crate) fn drain_events(cx: &mut gpui::App) {
                 release_panes(cx, id);
                 cx.refresh_windows();
             }
-            // The retired record store's change notice. Nothing writes those
-            // records any more; the tree's Layout deltas below carry the same
-            // news with the change itself.
-            ControlEvent::WorkspaceChanged { .. } => {}
             // Another writer edited a workspace tree this client shows: apply
             // the delta to the mirror and the live window (or re-pull the
             // workspace when it will not apply cleanly).
@@ -1545,7 +1541,7 @@ fn launch_attempt(cx: &mut gpui::App, host: HostId, target: RemoteTarget) {
                             log::info!("took workspace {key} back from {who}");
                         }
                         Ok(_) => {}
-                        // A machine that has no workspace store (an older
+                        // A machine that has no machine tree (an older
                         // server) still serves files; the workspace is usable,
                         // it simply cannot be claimed exclusively.
                         Err(e) => log::warn!("could not attach to workspace {key}: {e}"),
@@ -2153,14 +2149,8 @@ mod tests {
         assert_eq!(q.waiting(), 1);
     }
 
-    // ── `WorkspaceChanged` → re-read (B3's push, arriving) ───────────────────
+    // ── The input gate ───────────────────────────────────────────────────────
 
-    /// **A burst of changes costs one round trip per workspace.**
-    ///
-    /// B3's contract for this event is that it means only "read it again", so
-    /// losing one is safe and getting ten is safe. Collapsing them is the whole
-    /// of the logic that rule buys — and the thing that keeps a client with a
-    /// chatty peer from opening a `WorkspaceGet` per keystroke of theirs.
     #[test]
     fn every_state_says_what_it_means_for_the_keyboard() {
         let cases = [

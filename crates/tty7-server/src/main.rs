@@ -218,7 +218,7 @@ fn run_stdio(args: &[String]) -> io::Result<()> {
                     // the same rule `bridge_panes` follows one dialect over,
                     // and for the same reason. Two `--stdio` sessions both
                     // falling through to serving in-process would each hold
-                    // their own `WorkspaceStore` over the one file, and
+                    // their own `MachineStore` over the one file, and
                     // `persist` writes the whole document: the second to save
                     // silently drops the first's changes. Their attachment
                     // registries would be separate too, which makes design

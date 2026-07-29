@@ -226,37 +226,22 @@ pub fn run_daemon() -> anyhow::Result<()> {
 
 /// What this machine offers over a control connection, beyond its filesystem.
 ///
-/// The workspace store is why a daemon serves control at all: the workspace
+/// The machine tree is why a daemon serves control at all: the workspace
 /// list, the tab/pane tree and each pane's facts live on **the machine the
 /// panes run on**, so that every client of this machine — the GUI on it, a
 /// laptop across the world — sees the same thing. Clients keep only their own
 /// view state.
 ///
 /// A machine with no home directory to place the file in still serves files
-/// and panes — it simply omits `workspace-store` from its capabilities, and
-/// clients see the same "does not serve the workspace store" answer a server
+/// and panes — it simply omits `machine-tree` from its capabilities, and
+/// clients see the same "does not serve the machine tree" answer a server
 /// without one has always given.
 pub fn control_services() -> crate::host::server::Services {
     use crate::core::machine::MachineStore;
-    use crate::core::workspace_store::WorkspaceStore;
     // Reported on stderr as well as the log, like the socket line in
     // [`run_daemon`]: on a headless box the log file is off by default, and
-    // "which stores does this daemon actually serve" is the first question a
+    // "does this daemon actually serve the tree" is the first question a
     // capability mismatch raises.
-    let services = match WorkspaceStore::shared() {
-        Ok(store) => {
-            eprintln!("workspace store at {}", store.path().display());
-            crate::host::server::Services::with_workspaces(store)
-        }
-        Err(e) => {
-            eprintln!("no workspace store ({e}); serving files and panes only");
-            crate::host::server::Services::none()
-        }
-    };
-    // The machine tree rides alongside the record store while clients migrate
-    // from whole-record `Put` to the semantic operations; both resolve their
-    // file under the same data directory, so a machine that can hold one can
-    // hold the other.
     match MachineStore::shared() {
         Ok(machine) => {
             eprintln!("machine tree at {}", machine.path().display());
@@ -265,11 +250,11 @@ pub fn control_services() -> crate::host::server::Services {
             // what a client revives from is what the machine saw, not what
             // some client last remembered to write.
             crate::core::machine::publish_observations(&machine);
-            services.and_machine(machine)
+            crate::host::server::Services::with_machine(machine)
         }
         Err(e) => {
-            eprintln!("no machine tree ({e}); its verbs stay unserved");
-            services
+            eprintln!("no machine tree ({e}); serving files and panes only");
+            crate::host::server::Services::none()
         }
     }
 }

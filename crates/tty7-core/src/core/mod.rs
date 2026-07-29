@@ -31,5 +31,4 @@ pub mod shells;
 pub mod ssh_profile;
 pub mod threads;
 pub mod window_state;
-pub mod workspace_store;
 pub mod worktree;
