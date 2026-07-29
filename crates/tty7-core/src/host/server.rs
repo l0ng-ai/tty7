@@ -42,7 +42,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -50,7 +50,7 @@ use crate::core::workspace_store::{Attachment, SubscriberId, Subscription, Works
 use crate::daemon::control::{
     CONTROL_VERSION, ControlClientMsg, ControlEvent, ControlHello, ControlHelloOk, ControlReply,
     ControlRequest, ControlServerMsg, GIT_STREAM_CHUNK, GIT_STREAM_CHUNK_MAX, LinkShutdown,
-    ReplyOk, WATCH_BURST_CAP, WireError, WireErrorKind, feature,
+    MAX_CONCURRENT_GIT_STREAMS, ReplyOk, WATCH_BURST_CAP, WireError, WireErrorKind, feature,
 };
 use crate::daemon::duplex::{Duplex, Halves};
 use crate::host::{Host, SearchHit, SharedHost, WatchSub};
@@ -402,6 +402,7 @@ where
         watches: Mutex::new(HashMap::new()),
         deferred_watches: Mutex::new(HashMap::new()),
         next_watch: AtomicU64::new(1),
+        git_streams: Arc::new(AtomicUsize::new(0)),
         pool: Pool::new(),
         workspaces: services.workspaces.clone(),
         workspace_origin: workspace_sub.as_ref().map(Subscription::id),
@@ -929,6 +930,10 @@ struct Conn {
     /// something else touches the directory.
     deferred_watches: Mutex<HashMap<u64, (u64, smol::channel::Receiver<Vec<PathBuf>>)>>,
     next_watch: AtomicU64,
+    /// Git streams running on this connection right now, against
+    /// [`MAX_CONCURRENT_GIT_STREAMS`]. Shared with each stream's own thread,
+    /// which gives its slot back on the way out — see [`StreamSlot`].
+    git_streams: Arc<AtomicUsize>,
     pool: Pool,
     /// The machine's workspace records, when this server serves them.
     workspaces: Option<Arc<WorkspaceStore>>,
@@ -1109,15 +1114,36 @@ impl Conn {
     ///
     /// Whatever happens, the client hears the end of it: a stream that stops
     /// sending without a [`ControlEvent::GitEnd`] leaves the reader waiting on
-    /// pushes that will never come, and unlike a request it has no deadline to
-    /// fall out of. The single exception is a link that is already gone, where
-    /// there is nobody left to tell.
+    /// pushes that will never come, and only its idle timeout to fall out of.
+    /// The single exception is a link that is already gone, where there is
+    /// nobody left to tell.
+    ///
+    /// Capped at [`MAX_CONCURRENT_GIT_STREAMS`] per connection: this is the one
+    /// request that spawns a thread outside the bounded worker pool, so nothing
+    /// else counts them.
     fn start_git_stream(&self, id: u64, cwd: PathBuf, args: Vec<String>) {
         let host = Arc::clone(&self.host);
         let sink = Arc::clone(&self.sink);
+        // The slot is claimed *before* the thread exists, so a burst of requests
+        // cannot all look at the counter and each see room. The guard gives it
+        // back however this leaves — refused here, failed to spawn below, or the
+        // thread running to its end.
+        let slot = StreamSlot(Arc::clone(&self.git_streams));
+        if slot.0.fetch_add(1, Ordering::AcqRel) >= MAX_CONCURRENT_GIT_STREAMS {
+            drop(slot);
+            let _ = self
+                .sink
+                .send(&ControlServerMsg::Event(ControlEvent::GitEnd {
+                    id,
+                    code: None,
+                    failed: true,
+                }));
+            return;
+        }
         let spawned = std::thread::Builder::new()
             .name("tty7-control-git-stream".into())
             .spawn(move || {
+                let _slot = slot;
                 let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
                 let mut batch: Vec<u8> = Vec::with_capacity(GIT_STREAM_CHUNK);
                 let mut stopped: Option<StreamStop> = None;
@@ -1312,6 +1338,19 @@ fn spawn_watch_forwarder(id: u64, rx: smol::channel::Receiver<Vec<PathBuf>>, sin
 /// The two are not interchangeable, which is the whole reason the distinction
 /// is carried: only one of them means the peer is gone. See
 /// [`Conn::start_git_stream`].
+/// One connection's claim on a concurrent git stream, given back on drop.
+///
+/// A guard rather than a bare `fetch_sub` at the end of the thread, so a slot is
+/// returned on every exit — including the thread that fails to spawn, and a
+/// panic unwinding out of the read.
+struct StreamSlot(Arc<AtomicUsize>);
+
+impl Drop for StreamSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StreamStop {
     /// The write failed: the link is retired or broken, and nothing more will
@@ -2993,6 +3032,46 @@ mod tests {
             ]},
             "last_active": 1_753_600_000u64,
         })
+    }
+
+    /// A stream slot is given back on every exit, so the per-connection ceiling
+    /// is a limit on *concurrency* and never drifts into a permanent refusal.
+    ///
+    /// The failure this guards is one-directional and unrecoverable: a slot that
+    /// leaks is never reclaimed, so after [`MAX_CONCURRENT_GIT_STREAMS`] leaks
+    /// that connection can no longer read a diff at all until it is rebuilt.
+    #[test]
+    fn a_stream_slot_comes_back_however_it_leaves() {
+        let count = Arc::new(AtomicUsize::new(0));
+
+        // The ordinary path: claimed, then released at the end of the read.
+        {
+            let slot = StreamSlot(Arc::clone(&count));
+            slot.0.fetch_add(1, Ordering::AcqRel);
+            assert_eq!(count.load(Ordering::Acquire), 1);
+        }
+        assert_eq!(count.load(Ordering::Acquire), 0, "released on drop");
+
+        // The refusal path and the failed-to-spawn path are the same shape: the
+        // guard exists but the thread never runs.
+        let refused = StreamSlot(Arc::clone(&count));
+        refused.0.fetch_add(1, Ordering::AcqRel);
+        drop(refused);
+        assert_eq!(count.load(Ordering::Acquire), 0);
+
+        // A panic unwinding out of the read still returns the slot.
+        let panicking = Arc::clone(&count);
+        let _ = std::thread::spawn(move || {
+            let slot = StreamSlot(panicking);
+            slot.0.fetch_add(1, Ordering::AcqRel);
+            panic!("the read blew up");
+        })
+        .join();
+        assert_eq!(
+            count.load(Ordering::Acquire),
+            0,
+            "a panicking stream must not take its slot with it"
+        );
     }
 
     /// A git stream end to end over the wire: the reply is accepted, chunks

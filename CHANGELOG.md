@@ -62,7 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   companion to its buffered `git`, implemented on both the local host and the
   remote wire protocol, so a read whose size scales with the work tree no
   longer has to exist in memory all at once on either side. The buffered call
-  stays for the many reads that answer in bytes. (#239)
+  stays for the many reads that answer in bytes. A stream that goes silent for
+  two minutes while the link stays up ends with a timeout rather than parking
+  its reader forever — the wait is between chunks, not on the whole read, so a
+  slow-but-alive `git diff` still runs to completion. (#239)
 
 - **Sidebar diff preview is optional** — clicking a sidebar row's `+N −N`
   working-tree counts opens the diff overlay, which is the point of them for
@@ -120,12 +123,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   - The full `git diff HEAD` was read into one `String` before parsing began.
     It is now read incrementally through a new streaming call on `Host`, so
-    peak transient memory is one 64 KiB buffer rather than the whole diff.
-    Measured on this repository's own `git log -p -n 400` (8 269 409 bytes of
-    real git output, release build): 8.3 MB resident → 64 KiB, and *faster*
-    end to end — 829 ms buffered (817 ms read + 12 ms parse) → 557 ms streamed,
-    because parsing now overlaps with git producing output instead of waiting
-    for all of it.
+    what is held at once is one 64 KiB read buffer plus the line being
+    reassembled rather than the whole diff — and that line is itself capped at
+    1 MiB, because a line is only complete at its newline and a minified bundle
+    is one line of many megabytes. Measured on this repository's own `git log -p
+    -n 400` (8 269 409 bytes of real git output, release build): 8.3 MB resident
+    → 64 KiB, and *faster* end to end — 829 ms buffered (817 ms read + 12 ms
+    parse) → 557 ms streamed, because parsing now overlaps with git producing
+    output instead of waiting for all of it.
   - The parsed snapshot was deep-cloned onto every tab's overlay *on the UI
     update path*. It is now shared behind an `Arc`: 1.99 ms of main-thread
     copying per holder → 10 ns (426 µs → 10 ns even at the new retention

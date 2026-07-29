@@ -36,13 +36,13 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::daemon::control::{
     ControlClient, ControlEvent, ControlHello, ControlHelloOk, ControlRequest, EventSink,
-    KEEPALIVE_DEAD_AFTER, KEEPALIVE_IDLE_BEFORE_PING, KEEPALIVE_PING_INTERVAL, LinkShutdown,
-    ReplyOk,
+    GIT_STREAM_IDLE_TIMEOUT, KEEPALIVE_DEAD_AFTER, KEEPALIVE_IDLE_BEFORE_PING,
+    KEEPALIVE_PING_INTERVAL, LinkShutdown, ReplyOk,
 };
 use crate::host::{
     Entry, Host, HostId, Meta, Output, SearchHit, SharedHost, WatchHandle, WatchSub,
@@ -389,7 +389,7 @@ impl Host for RemoteHost {
         // Registered *before* the request goes out, so a chunk cannot arrive
         // with nowhere to go — see `ControlRequest::GitStream`.
         let id = self.next_stream.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = smol::channel::unbounded();
+        let (tx, rx) = mpsc::channel();
         self.streams.insert(id, tx);
         // The receiver comes off the registry however this returns: an early
         // `?` below would otherwise leak the entry for the life of the
@@ -408,23 +408,7 @@ impl Host for RemoteHost {
             other => return Err(wrong_shape("an accepted git stream", &other)),
         }
 
-        let mut split = crate::core::git::LineSplitter::default();
-        loop {
-            match rx.recv_blocking() {
-                Ok(GitStreamMsg::Chunk(bytes)) => split.push(&bytes, &mut *on_line),
-                Ok(GitStreamMsg::End { code, failed }) => {
-                    split.finish(&mut *on_line);
-                    return if failed {
-                        Err(io::Error::other("the server could not run git"))
-                    } else {
-                        Ok(code)
-                    };
-                }
-                // The connection died mid-stream. Distinguishable from a
-                // non-zero exit, same as everywhere else in this file.
-                Err(_) => return Err(io::Error::other("the control connection closed mid-stream")),
-            }
-        }
+        drain_git_stream(&rx, GIT_STREAM_IDLE_TIMEOUT, on_line)
     }
 
     fn watch(&self, dirs: &[PathBuf]) -> io::Result<WatchSub> {
@@ -479,6 +463,53 @@ impl std::fmt::Debug for RemoteHost {
 // Watches
 // ---------------------------------------------------------------------------
 
+/// Reassemble one git stream's pushes into lines, ending on `GitEnd`, on a link
+/// that died, or on `idle` elapsing between chunks.
+///
+/// Split out from [`RemoteHost::git_lines`] so the three ways a stream ends are
+/// reachable from a test without a socket — the timeout in particular, which
+/// otherwise could only be exercised by waiting out
+/// [`GIT_STREAM_IDLE_TIMEOUT`].
+fn drain_git_stream(
+    rx: &mpsc::Receiver<GitStreamMsg>,
+    idle: Duration,
+    on_line: &mut dyn FnMut(&str),
+) -> io::Result<Option<i32>> {
+    let mut split = crate::core::git::LineSplitter::default();
+    loop {
+        // The wait is per *chunk*, not for the stream as a whole — a slow link
+        // is allowed to take as long as it takes, a silent one is not. See
+        // `GIT_STREAM_IDLE_TIMEOUT` for what this catches that neither the
+        // request deadline nor keepalive can.
+        match rx.recv_timeout(idle) {
+            Ok(GitStreamMsg::Chunk(bytes)) => split.push(&bytes, &mut *on_line),
+            Ok(GitStreamMsg::End { code, failed }) => {
+                split.finish(&mut *on_line);
+                return if failed {
+                    Err(io::Error::other("the server could not run git"))
+                } else {
+                    Ok(code)
+                };
+            }
+            // Nothing is coming and nothing said so. The lines already handed
+            // out are *not* retracted, but the result is an error: half a diff
+            // reported as a successful read is how a stale overlay becomes a
+            // wrong one.
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("the git stream went silent for {idle:?} while the link stayed up"),
+                ));
+            }
+            // The connection died mid-stream. Distinguishable from a non-zero
+            // exit, same as everywhere else in this file.
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other("the control connection closed mid-stream"));
+            }
+        }
+    }
+}
+
 /// Removes a stream's registry entry however its reader leaves — an early
 /// return on a wire error would otherwise leave the sender in the map for the
 /// life of the connection.
@@ -516,7 +547,7 @@ struct GitStreamRegistry {
 
 #[derive(Default)]
 struct StreamTable {
-    senders: HashMap<u64, smol::channel::Sender<GitStreamMsg>>,
+    senders: HashMap<u64, mpsc::Sender<GitStreamMsg>>,
     /// Set by [`GitStreamRegistry::close_all`] and never cleared: a
     /// `ControlClient` never comes back up, so once the link is gone no stream
     /// registered afterwards could ever be answered. Without it a `git_lines`
@@ -526,7 +557,7 @@ struct StreamTable {
 }
 
 impl GitStreamRegistry {
-    fn insert(&self, id: u64, tx: smol::channel::Sender<GitStreamMsg>) {
+    fn insert(&self, id: u64, tx: mpsc::Sender<GitStreamMsg>) {
         if let Ok(mut m) = self.streams.lock()
             && !m.closed
         {
@@ -557,18 +588,16 @@ impl GitStreamRegistry {
             return;
         };
         m.closed = true;
-        for (_, tx) in m.senders.drain() {
-            // Closing rather than only dropping, to say what this is for:
-            // chunks already queued stay readable and the receiver then sees
-            // the end of the channel.
-            tx.close();
-        }
+        // Dropping every sender is the signal: chunks already queued stay
+        // readable and the receiver then sees `Disconnected` rather than
+        // waiting out its idle timeout for a link that is already gone.
+        m.senders.clear();
     }
 
     /// Route one push. Runs on the reader thread, so it must not block — the
-    /// channel is unbounded and `try_send` never waits. A chunk for an id that
-    /// has already finished (a cancelled read the server had not noticed yet)
-    /// is dropped, which is the same unknown-id rule watches follow.
+    /// channel is unbounded and `send` never waits. A chunk for an id that has
+    /// already finished (a cancelled read the server had not noticed yet) is
+    /// dropped, which is the same unknown-id rule watches follow.
     fn dispatch(&self, event: ControlEvent) {
         let (id, msg) = match event {
             ControlEvent::GitChunk { id, bytes } => (id, GitStreamMsg::Chunk(bytes)),
@@ -578,7 +607,7 @@ impl GitStreamRegistry {
         if let Ok(m) = self.streams.lock()
             && let Some(tx) = m.senders.get(&id)
         {
-            let _ = tx.try_send(msg);
+            let _ = tx.send(msg);
         }
     }
 }
@@ -934,6 +963,73 @@ mod tests {
         )
         .unwrap();
         (host, seen_rx)
+    }
+
+    /// A stream that goes quiet without ending gives up rather than parking
+    /// forever.
+    ///
+    /// This is the case nothing else on the client can see. Keepalive watches
+    /// the *link*, and the link is fine — a server whose `git` is wedged on a
+    /// network filesystem keeps answering pings. The request deadline was
+    /// satisfied by the immediate `Unit` reply, long before any data. So without
+    /// this the calling thread — one of a small pool — is parked for the life of
+    /// the process, and the repo it was probing never gets another answer.
+    ///
+    /// Driven through the extracted drain loop with a short idle so the test
+    /// costs milliseconds instead of `GIT_STREAM_IDLE_TIMEOUT`.
+    #[test]
+    fn a_stream_that_goes_silent_times_out() {
+        let (tx, rx) = mpsc::channel();
+        // A live sender that simply never speaks again — the wedged-server
+        // shape. Dropping it would exercise `Disconnected` instead, which is a
+        // different arm.
+        tx.send(GitStreamMsg::Chunk(b"alpha\n".to_vec())).unwrap();
+
+        let mut lines = Vec::new();
+        let started = Instant::now();
+        let got = drain_git_stream(&rx, Duration::from_millis(120), &mut |l| {
+            lines.push(l.to_string())
+        });
+
+        let err = got.expect_err("a stream that never ends must not read as success");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+        assert_eq!(lines, ["alpha"], "what did arrive was still delivered");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the wait is the idle gap, not the whole stream"
+        );
+        drop(tx);
+    }
+
+    /// The idle timer measures the gap *between* chunks, not the stream's total
+    /// length: a slow-but-alive read must be allowed to take as long as it
+    /// takes, which is why a total deadline would be the wrong instrument.
+    #[test]
+    fn a_slow_stream_outlives_its_idle_timeout() {
+        let (tx, rx) = mpsc::channel();
+        let idle = Duration::from_millis(150);
+        thread::spawn(move || {
+            // Five gaps, each under the idle limit; together well past it.
+            for i in 0..5 {
+                thread::sleep(Duration::from_millis(60));
+                let _ = tx.send(GitStreamMsg::Chunk(format!("line {i}\n").into_bytes()));
+            }
+            let _ = tx.send(GitStreamMsg::End {
+                code: Some(0),
+                failed: false,
+            });
+        });
+
+        let mut lines = Vec::new();
+        let started = Instant::now();
+        let code = drain_git_stream(&rx, idle, &mut |l| lines.push(l.to_string())).unwrap();
+
+        assert_eq!(code, Some(0));
+        assert_eq!(lines.len(), 5, "{lines:?}");
+        assert!(
+            started.elapsed() > idle,
+            "the read outlived a single idle window without being cut"
+        );
     }
 
     /// A link that dies mid-stream ends the read with an error rather than

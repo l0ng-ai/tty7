@@ -317,10 +317,32 @@ pub fn git_stream(
 /// entire output on one bad byte, which for a diff of a latin-1 file means
 /// showing nothing at all; a replacement character in one line is the better
 /// answer.
+///
+/// Bounded by [`MAX_LINE`], which is what makes "streaming" a claim about peak
+/// memory rather than only about allocation count — see that constant.
 #[derive(Default)]
 pub struct LineSplitter {
     tail: Vec<u8>,
+    /// Bytes of the line in progress that were dropped for being past
+    /// [`MAX_LINE`]. Reported in the emitted line rather than swallowed.
+    dropped: usize,
 }
+
+/// Ceiling on one reassembled line.
+///
+/// Without it "incremental" bounds the number of allocations but not the size
+/// of any of them: a line is only complete at its `\n`, so a work tree holding
+/// a minified bundle — one `+` line of many megabytes — accumulates that whole
+/// line in `tail` before anything is emitted, on both ends of a remote link and
+/// in the server's outgoing batch. That is the same peak the buffered read was
+/// replaced to avoid, reached through the one input shape nobody bounds.
+///
+/// A megabyte is far past anything a diff viewer can show (the overlay
+/// truncates a *cell* long before this) and far past any line git prints about
+/// its own state, so nothing legitimate is cut. What is cut says so in the line
+/// itself: silent truncation is how a rendered diff quietly stops matching the
+/// file.
+pub const MAX_LINE: usize = 1024 * 1024;
 
 impl LineSplitter {
     /// Feed a chunk, calling `on_line` for every complete line it finishes.
@@ -328,24 +350,52 @@ impl LineSplitter {
         let mut rest = chunk;
         while let Some(nl) = rest.iter().position(|b| *b == b'\n') {
             let (line, after) = rest.split_at(nl);
-            if self.tail.is_empty() {
+            // The common case by far — a whole line inside this chunk, with
+            // nothing held over — hands out a borrow of the chunk itself. Worth
+            // keeping as its own arm: it is one branch per line against a copy
+            // per line, on a path that runs ninety thousand times.
+            if self.tail.is_empty() && self.dropped == 0 && line.len() <= MAX_LINE {
                 on_line(&trim_cr(line));
             } else {
-                self.tail.extend_from_slice(line);
+                self.keep(line);
                 let joined = std::mem::take(&mut self.tail);
-                on_line(&trim_cr(&joined));
+                let dropped = std::mem::take(&mut self.dropped);
+                emit(&joined, dropped, &mut on_line);
             }
             rest = &after[1..];
         }
-        self.tail.extend_from_slice(rest);
+        self.keep(rest);
     }
 
     /// Emit whatever is left when the stream ends without a final newline.
     pub fn finish(self, mut on_line: impl FnMut(&str)) {
-        if !self.tail.is_empty() {
-            on_line(&trim_cr(&self.tail));
+        if !self.tail.is_empty() || self.dropped > 0 {
+            emit(&self.tail, self.dropped, &mut on_line);
         }
     }
+
+    /// Append what still fits under [`MAX_LINE`], counting the rest as dropped.
+    fn keep(&mut self, bytes: &[u8]) {
+        let room = MAX_LINE.saturating_sub(self.tail.len());
+        let take = room.min(bytes.len());
+        self.tail.extend_from_slice(&bytes[..take]);
+        self.dropped += bytes.len() - take;
+    }
+}
+
+/// Hand one reassembled line to the caller, saying so when it was cut.
+fn emit(line: &[u8], dropped: usize, on_line: &mut impl FnMut(&str)) {
+    if dropped == 0 {
+        on_line(&trim_cr(line));
+        return;
+    }
+    // No `trim_cr` on a cut line: its last byte is one from the middle of the
+    // real line, and a `\r` that lands there is content, not a terminator.
+    let mut text = String::from_utf8_lossy(line).into_owned();
+    text.push_str(&format!(
+        " …[{dropped} more bytes on this line dropped: past tty7's {MAX_LINE}-byte line cap]"
+    ));
+    on_line(&text);
 }
 
 /// Drop a trailing `\r` (git on Windows) and decode lossily.
@@ -404,6 +454,61 @@ mod tests {
         split.finish(|l| got.push(l.to_string()));
         assert_eq!(got.len(), 1);
         assert!(got[0].starts_with("caf"), "{:?}", got[0]);
+    }
+
+    /// A line past [`MAX_LINE`] is cut rather than accumulated, and says so.
+    ///
+    /// This is what makes the streaming read's memory claim true: a line is only
+    /// complete at its `\n`, so without a cap one minified-bundle line rebuilds
+    /// the whole-output peak that streaming exists to remove. The lines around
+    /// it are untouched, and the byte count in the notice is the *dropped*
+    /// remainder, so the reader can tell how much is missing.
+    #[test]
+    fn line_splitter_caps_one_absurd_line() {
+        let mut split = LineSplitter::default();
+        let mut got = Vec::new();
+        let huge = vec![b'x'; MAX_LINE + 5_000];
+        split.push(b"before\n", |l| got.push(l.to_string()));
+        // Fed in pieces, so the cap has to hold across chunk boundaries too.
+        for piece in huge.chunks(64 * 1024) {
+            split.push(piece, |l| got.push(l.to_string()));
+        }
+        split.push(b"\nafter\n", |l| got.push(l.to_string()));
+        split.finish(|l| got.push(l.to_string()));
+
+        assert_eq!(
+            got.len(),
+            3,
+            "{:?}",
+            got.iter().map(|l| l.len()).collect::<Vec<_>>()
+        );
+        assert_eq!(got[0], "before");
+        assert_eq!(got[2], "after", "the next line is unaffected");
+        assert!(
+            got[1].starts_with(&"x".repeat(1000)),
+            "the kept prefix is the real content"
+        );
+        assert!(
+            got[1].contains("5000 more bytes"),
+            "the cut says how much went: {}",
+            &got[1][got[1].len() - 80..]
+        );
+        assert!(
+            got[1].len() < MAX_LINE + 200,
+            "nothing past the cap was retained"
+        );
+    }
+
+    /// A cut line with no trailing newline still comes out of `finish`, rather
+    /// than being dropped along with the bytes past the cap.
+    #[test]
+    fn line_splitter_caps_a_final_unterminated_line() {
+        let mut split = LineSplitter::default();
+        let mut got = Vec::new();
+        split.push(&vec![b'y'; MAX_LINE + 7], |l| got.push(l.to_string()));
+        split.finish(|l| got.push(l.to_string()));
+        assert_eq!(got.len(), 1);
+        assert!(got[0].contains("7 more bytes"), "{}", got[0]);
     }
 
     /// The streaming read and the buffered one must agree line for line —

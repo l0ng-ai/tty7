@@ -146,15 +146,51 @@ pub const GIT_STREAM_CHUNK: usize = 64 * 1024;
 /// [`GIT_STREAM_CHUNK`]'s target.
 ///
 /// A batch is flushed once it *reaches* the target, so its size is the target
-/// plus whatever the line that crossed it was — and a work tree holding a
-/// minified bundle has single lines of many megabytes. Without a ceiling such a
-/// batch encodes to a frame larger than [`crate::daemon::protocol::MAX_FRAME`]
-/// and cannot be sent at all. Half the frame limit leaves room for base64's
+/// plus whatever the line that crossed it was. Without a ceiling such a batch
+/// could encode to a frame larger than [`crate::daemon::protocol::MAX_FRAME`]
+/// and not be sendable at all. Half the frame limit leaves room for base64's
 /// four-thirds expansion and the JSON envelope around it. Splitting at this
 /// size can land mid-line; that is safe precisely because the receiver
 /// reassembles with [`crate::core::git::LineSplitter`], which spans chunk
 /// boundaries.
+///
+/// A backstop rather than a working limit: [`crate::core::git::MAX_LINE`] caps
+/// the line that crosses the target, so a real batch is a megabyte at worst and
+/// never reaches this. It stays because the two bounds answer to different
+/// things — one to what a diff viewer can show, this one to what a frame can
+/// hold — and a batch that cannot be sent is a stream that never ends.
 pub const GIT_STREAM_CHUNK_MAX: usize = crate::daemon::protocol::MAX_FRAME / 2;
+
+/// How long a [`ControlRequest::GitStream`] reader waits for the *next* chunk
+/// before giving up on the stream.
+///
+/// Idle time, deliberately, not elapsed time: a `git diff` over a big work tree
+/// on a slow link is allowed to take as long as it takes, and any cap on the
+/// total would eventually truncate a legitimate read. What it catches is the
+/// case nothing else can — a link that is *alive* while the server's git is
+/// wedged (a network filesystem that stops answering, a lock held by something
+/// that never exits). Keepalive cannot see that: the connection keeps answering
+/// pings, so it is never declared dead, and the stream is answered by pushes so
+/// the request deadline is long since satisfied. Without this the calling
+/// thread parks for the life of the process.
+///
+/// Set well past the slowest plausible gap between chunks — a cold-cache `git
+/// diff` on a huge tree can take a while to print its first byte, and that gap
+/// is the one being measured.
+pub const GIT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Ceiling on [`ControlRequest::GitStream`]s running at once on one connection.
+///
+/// Each is an OS thread of its own reading a `git` child, and unlike a request
+/// it is not answered from the bounded worker pool — nothing else counts them.
+/// One client asking honestly needs one or two (the diff overlay and the
+/// Changes panel share a probe); this is set well above that and is a backstop
+/// against a peer that asks faster than it drains, not a working limit.
+///
+/// A refused stream is answered with a failed [`ControlEvent::GitEnd`] rather
+/// than dropped, because a stream that never speaks is the one shape a client
+/// cannot recover from cheaply.
+pub const MAX_CONCURRENT_GIT_STREAMS: usize = 8;
 
 /// Capability strings advertised in [`crate::daemon::protocol::DaemonVersion::features`].
 ///
@@ -1284,11 +1320,14 @@ impl ControlClient {
     /// there: [`ControlRequest::GitStream`]'s reply arrives long before its
     /// data does, so the thread draining the chunks is waiting on a channel
     /// this module has never heard of. Without a hook that channel is never
-    /// closed and the thread parks for the life of the process, holding
-    /// whatever the caller believed was merely in flight. A deadline would not
-    /// do instead: a slow-but-alive link must be allowed to take as long as it
-    /// takes, so any timeout is a guess that eventually truncates a legitimate
-    /// read.
+    /// closed and the thread parks until its idle timeout expires, holding
+    /// whatever the caller believed was merely in flight.
+    ///
+    /// [`GIT_STREAM_IDLE_TIMEOUT`] does not make this redundant, and neither
+    /// makes the other so: this fires the instant the link is known to be gone,
+    /// where the timeout would sit out its full wait for an answer that is
+    /// already impossible. The timeout covers the case a hook cannot see at all
+    /// — a link that stays up while the far side stops producing.
     ///
     /// A hook may run more than once (`close` and the reader's own teardown
     /// both declare the link dead) and must therefore be idempotent, and it
