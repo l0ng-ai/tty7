@@ -17,6 +17,7 @@ pub mod crash;
 pub mod git;
 pub mod gitignore;
 pub mod logfile;
+pub mod machine;
 // SSH connection-manager data layer (WS1). Its public API is consumed by the
 // daemon-session, auth, forwarding, and UI workstreams, which land separately —
 // so parts of it read as dead code until those merge.

@@ -1,0 +1,1916 @@
+//! The machine's workspace tree, owned by the daemon: the tmux model.
+//!
+//! # What this replaces, and why
+//!
+//! [`crate::core::workspace_store`] is the previous design: an *opaque* record
+//! store, where the client owned the schema and the server filed JSON blobs it
+//! never read. That shape was right when there was exactly one writer (the GUI)
+//! and the server's only job was to make a laptop's layout visible from a
+//! desktop. It stops being right the moment two clients — a GUI and a CLI, or
+//! two GUIs — write concurrently: whole-record `Put` is last-writer-wins, and
+//! a lost update's only symptom is a tab that quietly un-moves itself.
+//!
+//! So the daemon now owns the tree outright, the way tmux's server owns its
+//! sessions: clients send *semantic operations* ("split this pane", "rename
+//! that tab"), the daemon validates each against the tree it holds, persists,
+//! and broadcasts an incremental [`LayoutDelta`] to every other client. Two
+//! clients editing different corners of one workspace both land; a client that
+//! falls behind re-pulls the tree it fell behind on.
+//!
+//! # The shape of the tree
+//!
+//! ```text
+//! Machine
+//! ├── workspaces: Vec<Workspace { tabs: Vec<Tab { root: PaneNode }> }>
+//! └── panes:      Vec<PaneRecord>          ← the pane registry
+//! ```
+//!
+//! A [`PaneNode::Leaf`] holds a **pane id and nothing else**. Everything that
+//! used to ride the client's leaf — cwd, ssh spec, agent identity — is a fact
+//! *about the pane*, observed by the daemon itself (OSC 7, the agent hooks,
+//! the spawn request), and lives once in the pane registry rather than being a
+//! snapshot some client remembered. That is what makes revival sound: after a
+//! daemon restart the tree still names its panes, every named pane is known
+//! dead (see below), and the pane's own record carries exactly what a client
+//! needs to start its successor — the cwd to spawn in, the SSH spec to
+//! reconnect, the agent session to `--resume`.
+//!
+//! # Restart means every pane is dead, and the tree says so
+//!
+//! PTYs die with the daemon process, so [`load_machine`] force-clears every
+//! [`PaneRecord::live`] flag: a freshly-opened store *cannot* claim a live
+//! pane, and a leaf whose record answers `live == false` is by construction
+//! "awaiting revival". No client-side instance stamps, no id-reuse heuristics
+//! — the process that owns the PTYs is the process answering the question, so
+//! the answer is a fact rather than a guess.
+//!
+//! # Paths are `String` here
+//!
+//! The tree crosses the control wire (replies and [`LayoutDelta`] events), and
+//! the dialect's rule is that paths travel as `String` — `PathBuf`'s serde
+//! form for a non-UTF-8 path is platform-dependent and unencodable as JSON,
+//! and one such cwd must not make a whole workspace unreadable. Lossy
+//! conversion happens where the fact is recorded, which is also where the loss
+//! is visible in a log.
+//!
+//! # Concurrency
+//!
+//! One mutex over the tree *and* the file write, exactly like the store this
+//! replaces: the on-disk order is the in-memory order. Deltas are delivered
+//! outside the lock, and a subscriber's callback must only enqueue — a peer
+//! that stopped reading its socket must not stall another peer's edit.
+
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use serde::{Deserialize, Serialize};
+
+use crate::core::cli_agent::CLIAgent;
+use crate::core::session::WorkspaceId;
+use crate::core::workspace_store::Attachment;
+use crate::daemon::protocol::NativeSshSpec;
+
+/// The file's name under the data directory ([`crate::core::workspace_store::DATA_DIR_ENV`]
+/// resolves where that is).
+///
+/// Deliberately **not** `workspaces.json`: that file's document is the retired
+/// opaque-record store, whose reader quarantines anything it cannot parse. A
+/// build downgraded across this refactor must find its old file untouched, and
+/// this build's tree must not be "repaired" away by the old reader.
+pub const MACHINE_FILE: &str = "machine.json";
+
+/// Ceiling on workspaces, carried over from the old store: a client looping on
+/// "create workspace" should hit a named error rather than grow the file until
+/// the disk fills.
+pub const MAX_WORKSPACES: usize = 1024;
+
+/// Ceiling on panes the registry will hold. Panes are bounded by what a machine
+/// can actually run, so this only ever catches a client gone wrong.
+pub const MAX_PANES: usize = 16 * 1024;
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+/// Stable identity for one tab, minted by the daemon when the tab is created
+/// and carried across restarts.
+///
+/// Tabs need an identity of their own because operations address them across
+/// reorders: "rename tab 2" from a client that has not yet heard about another
+/// client's move would rename the wrong tab, while "rename tab `t-…`" cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TabId(uuid::Uuid);
+
+impl TabId {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl Default for TabId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for TabId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Split orientation. Its own enum rather than a reuse of the client session
+/// model's, because this schema is the daemon's to evolve and must not be
+/// coupled to a file format that is on its way out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Axis {
+    Horizontal,
+    Vertical,
+}
+
+/// Which child of a [`PaneNode::Split`] a path step descends into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Side {
+    A,
+    B,
+}
+
+// ---------------------------------------------------------------------------
+// The tree
+// ---------------------------------------------------------------------------
+
+/// Everything one machine's daemon knows about its workspaces. The document
+/// [`MachineStore`] persists, and the payload a full pull returns.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Machine {
+    #[serde(default)]
+    pub workspaces: Vec<Workspace>,
+    /// The pane registry: every pane the tree references, by id. Facts about
+    /// panes live here exactly once — see the module header.
+    #[serde(default)]
+    pub panes: Vec<PaneRecord>,
+}
+
+/// One workspace: a named group of tabs. The unit a window shows and a client
+/// attaches to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Workspace {
+    #[serde(default)]
+    pub id: WorkspaceId,
+    /// User-set name. `None` lets clients derive one from the tabs' repo/cwd.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Unix seconds when a client last focused this workspace. 0 == never.
+    #[serde(default)]
+    pub last_active: u64,
+    #[serde(default)]
+    pub tabs: Vec<Tab>,
+    /// Which tab is active. `None` for a workspace with no tabs (a real state:
+    /// the home page), and healed to a real tab whenever one exists.
+    #[serde(default)]
+    pub active_tab: Option<TabId>,
+    /// Who is attached right now. **Runtime only** — an attachment describes a
+    /// live connection, and a stale one on disk would report a takeover
+    /// against a client that no longer exists.
+    #[serde(skip)]
+    pub attachment: Option<Attachment>,
+}
+
+impl Default for Workspace {
+    fn default() -> Self {
+        Workspace {
+            id: WorkspaceId::new(),
+            name: None,
+            last_active: unix_now(),
+            tabs: Vec::new(),
+            active_tab: None,
+            attachment: None,
+        }
+    }
+}
+
+/// One tab: a pane tree plus its labels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Tab {
+    #[serde(default)]
+    pub id: TabId,
+    /// User-set name from "Rename Tab". `None` falls back to a title-derived
+    /// label at render time, on the client.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The tab's sidebar repo group (its repository home), as the client that
+    /// resolved it reported. A path in the *machine's* namespace, as a string
+    /// for the same reason every other path here is.
+    #[serde(default)]
+    pub sidebar_group: Option<String>,
+    pub root: PaneNode,
+}
+
+impl Tab {
+    /// A tab holding exactly `pane`.
+    pub fn leaf(pane: u64) -> Tab {
+        Tab {
+            id: TabId::new(),
+            name: None,
+            sidebar_group: None,
+            root: PaneNode::Leaf { pane },
+        }
+    }
+}
+
+/// A tab's split structure. Leaves hold a pane **id and nothing else**; every
+/// fact about the pane lives in the registry ([`PaneRecord`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PaneNode {
+    Leaf {
+        pane: u64,
+    },
+    Split {
+        axis: Axis,
+        #[serde(default = "default_ratio")]
+        ratio: f32,
+        a: Box<PaneNode>,
+        b: Box<PaneNode>,
+    },
+}
+
+fn default_ratio() -> f32 {
+    0.5
+}
+
+impl PaneNode {
+    /// Every pane id under this node, in layout order.
+    pub fn pane_ids(&self) -> Vec<u64> {
+        let mut out = Vec::new();
+        self.collect_panes(&mut out);
+        out
+    }
+
+    fn collect_panes(&self, out: &mut Vec<u64>) {
+        match self {
+            PaneNode::Leaf { pane } => out.push(*pane),
+            PaneNode::Split { a, b, .. } => {
+                a.collect_panes(out);
+                b.collect_panes(out);
+            }
+        }
+    }
+
+    /// Whether `pane` appears as a leaf under this node.
+    pub fn contains(&self, pane: u64) -> bool {
+        match self {
+            PaneNode::Leaf { pane: p } => *p == pane,
+            PaneNode::Split { a, b, .. } => a.contains(pane) || b.contains(pane),
+        }
+    }
+
+    /// The node a split path resolves to, if the path is still valid.
+    fn descend_mut(&mut self, path: &[Side]) -> Option<&mut PaneNode> {
+        match path.split_first() {
+            None => Some(self),
+            Some((side, rest)) => match self {
+                PaneNode::Leaf { .. } => None,
+                PaneNode::Split { a, b, .. } => match side {
+                    Side::A => a.descend_mut(rest),
+                    Side::B => b.descend_mut(rest),
+                },
+            },
+        }
+    }
+
+    /// Replace the leaf holding `pane` with a split of it and `new`, answering
+    /// whether the leaf was found.
+    fn split_leaf(&mut self, pane: u64, new: u64, axis: Axis, ratio: f32, first: bool) -> bool {
+        match self {
+            PaneNode::Leaf { pane: p } if *p == pane => {
+                let old = PaneNode::Leaf { pane };
+                let added = PaneNode::Leaf { pane: new };
+                let (a, b) = if first { (added, old) } else { (old, added) };
+                *self = PaneNode::Split {
+                    axis,
+                    ratio,
+                    a: Box::new(a),
+                    b: Box::new(b),
+                };
+                true
+            }
+            PaneNode::Leaf { .. } => false,
+            PaneNode::Split { a, b, .. } => {
+                a.split_leaf(pane, new, axis, ratio, first)
+                    || b.split_leaf(pane, new, axis, ratio, first)
+            }
+        }
+    }
+
+    /// Remove the leaf holding `pane`, collapsing its parent split so the
+    /// sibling takes the whole space. `None` when the node *is* that leaf —
+    /// the caller then removes the tab. `Some(found)` otherwise.
+    fn remove_leaf(&mut self, pane: u64) -> Option<bool> {
+        match self {
+            PaneNode::Leaf { pane: p } => {
+                if *p == pane {
+                    None
+                } else {
+                    Some(false)
+                }
+            }
+            PaneNode::Split { a, b, .. } => {
+                if matches!(&**a, PaneNode::Leaf { pane: p } if *p == pane) {
+                    *self = (**b).clone();
+                    return Some(true);
+                }
+                if matches!(&**b, PaneNode::Leaf { pane: p } if *p == pane) {
+                    *self = (**a).clone();
+                    return Some(true);
+                }
+                match a.remove_leaf(pane) {
+                    Some(true) => Some(true),
+                    Some(false) => b.remove_leaf(pane),
+                    // A whole subtree cannot be the leaf; unreachable because
+                    // leaf children are handled above, but total anyway.
+                    None => Some(false),
+                }
+            }
+        }
+    }
+
+    /// Rebind the leaf holding `old` to `new`, answering whether it was found.
+    fn replace_leaf(&mut self, old: u64, new: u64) -> bool {
+        match self {
+            PaneNode::Leaf { pane } if *pane == old => {
+                *pane = new;
+                true
+            }
+            PaneNode::Leaf { .. } => false,
+            PaneNode::Split { a, b, .. } => a.replace_leaf(old, new) || b.replace_leaf(old, new),
+        }
+    }
+}
+
+/// One pane, as the daemon knows it: identity, liveness, and the facts a dead
+/// pane's successor is started from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneRecord {
+    /// The daemon's pane id — the same number the pane protocol's `Spawn`
+    /// answered with. One id space, so a leaf, a `PaneInfo` and this record
+    /// can only ever mean the same pane.
+    pub id: u64,
+    /// Working directory, from OSC 7 (or the spawn request until the first
+    /// report). The machine's own namespace.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Last-known title, for labels on a pane that is awaiting revival.
+    #[serde(default)]
+    pub title: String,
+    /// The native-SSH spec this pane ran, **secrets stripped**
+    /// ([`NativeSshSpec::without_secrets`]). What a revival reconnects with.
+    #[serde(default)]
+    pub ssh_spec: Option<Box<NativeSshSpec>>,
+    /// The coding agent running in this pane, if the hooks reported one.
+    #[serde(default)]
+    pub agent: Option<AgentFacts>,
+    /// Whether a PTY for this pane exists **in this daemon process**.
+    ///
+    /// Serialized, because clients read it off the wire — `false` on a leaf's
+    /// record *is* the "awaiting revival" state a client renders and revives.
+    /// But it is a fact about a *process*, so [`load_machine`] force-clears it
+    /// on open: PTYs die with the daemon, and whatever the file claims, a
+    /// freshly-started process has none. No client-side instance stamp or
+    /// id-reuse heuristic is needed, because the process that owns the PTYs is
+    /// the one answering.
+    #[serde(default)]
+    pub live: bool,
+}
+
+impl PaneRecord {
+    /// A bare record for `id`, with no facts yet.
+    pub fn new(id: u64) -> PaneRecord {
+        PaneRecord {
+            id,
+            cwd: None,
+            title: String::new(),
+            ssh_spec: None,
+            agent: None,
+            live: false,
+        }
+    }
+}
+
+/// What the daemon knows about the agent a pane runs — enough to resume the
+/// conversation in a successor pane after the original dies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentFacts {
+    pub agent: CLIAgent,
+    /// The agent's own session id, from its `session-start` hook. What
+    /// `claude --resume <id>` (and each agent's equivalent) takes.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// The argv the agent was launched with, so a resume carries the user's
+    /// flags (`--dangerously-skip-permissions`, …) instead of resuming bare.
+    #[serde(default)]
+    pub launch_argv: Option<Vec<String>>,
+    /// Latest coarse status the hooks reported ("thinking", "idle", …).
+    /// Display only; never load-bearing.
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+/// The facts a client hands over when an operation introduces a pane the store
+/// has not seen — a new tab's pane, a split's second pane, a revival's
+/// replacement. The pane itself was spawned over the pane protocol (that is
+/// where PTYs come from); this is its birth certificate for the tree.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneSeed {
+    pub pane: u64,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub ssh_spec: Option<Box<NativeSshSpec>>,
+    #[serde(default)]
+    pub agent: Option<AgentFacts>,
+}
+
+impl PaneSeed {
+    /// A seed carrying only the id.
+    pub fn bare(pane: u64) -> PaneSeed {
+        PaneSeed {
+            pane,
+            cwd: None,
+            ssh_spec: None,
+            agent: None,
+        }
+    }
+
+    fn into_record(self) -> PaneRecord {
+        PaneRecord {
+            id: self.pane,
+            cwd: self.cwd,
+            title: String::new(),
+            ssh_spec: self.ssh_spec.map(|s| Box::new(s.without_secrets())),
+            agent: self.agent,
+            // Seeded panes were just spawned by the client that seeds them; the
+            // pane server's own liveness reporting refines this later.
+            live: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Deltas
+// ---------------------------------------------------------------------------
+
+/// One incremental change to one workspace's tree, as broadcast to every
+/// client but the writer.
+///
+/// The granularity rule: label changes are carried field-by-field, structural
+/// changes carry the whole affected [`Tab`]. A tab is small (a few hundred
+/// bytes), and shipping it whole means a client applies structure by
+/// *replacement* instead of by re-implementing the server's tree surgery —
+/// the class of client/server divergence that cannot happen is the class that
+/// was never written.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutDelta {
+    /// A workspace appeared. Carries it whole (it is newborn, so small).
+    WorkspaceCreated {
+        workspace: Workspace,
+    },
+    WorkspaceRenamed {
+        name: Option<String>,
+    },
+    WorkspaceDeleted,
+    WorkspaceTouched {
+        last_active: u64,
+    },
+    ActiveTabChanged {
+        tab: TabId,
+    },
+    /// A tab appeared at `at`. Structural, so it carries the tab whole.
+    TabCreated {
+        at: usize,
+        tab: Tab,
+    },
+    TabClosed {
+        tab: TabId,
+    },
+    TabRenamed {
+        tab: TabId,
+        name: Option<String>,
+    },
+    TabMoved {
+        tab: TabId,
+        to: usize,
+    },
+    TabRegrouped {
+        tab: TabId,
+        group: Option<String>,
+    },
+    /// A tab's pane structure changed (split, close, revival rebind). The tab
+    /// is carried whole — see the enum's granularity rule. `pane` names the
+    /// registry record that changed alongside, when one did.
+    TabRestructured {
+        tab: Tab,
+        pane: Option<PaneRecord>,
+    },
+    /// One split's divider moved. Fine-grained because ratio drags are the
+    /// hottest structural edit and the only one where shipping a whole tab
+    /// per event would be felt.
+    RatioChanged {
+        tab: TabId,
+        path: Vec<Side>,
+        ratio: f32,
+    },
+    /// A pane's facts changed (cwd, title, agent, liveness). Not a layout
+    /// change, but clients rendering "awaiting revival" or a title need it.
+    PaneFacts {
+        pane: PaneRecord,
+    },
+}
+
+/// Identifies one subscriber, so a writer is excluded from its own echo.
+/// Same shape as the old store's, for the same reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SubscriberId(pub u64);
+
+/// What a subscriber receives: which workspace, and what changed. Runs on the
+/// writer's thread — enqueue and return.
+pub type Notify = Arc<dyn Fn(&str, &LayoutDelta) + Send + Sync>;
+
+/// A live subscription; dropping it unsubscribes.
+pub struct Subscription {
+    store: Arc<MachineStore>,
+    id: SubscriberId,
+}
+
+impl Subscription {
+    /// This subscriber's id — pass it as the `origin` of your own writes.
+    pub fn id(&self) -> SubscriberId {
+        self.id
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        self.store.unsubscribe(self.id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The store
+// ---------------------------------------------------------------------------
+
+/// The daemon's tree, and the one writer to its file.
+pub struct MachineStore {
+    path: PathBuf,
+    state: Mutex<Machine>,
+    subscribers: Mutex<Vec<(SubscriberId, Notify)>>,
+    next_subscriber: AtomicU64,
+}
+
+/// The error every invalid operation answers with. `InvalidInput` so the wire
+/// layer maps it to a client-visible refusal rather than a server fault.
+fn refuse(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, msg.into())
+}
+
+fn not_found(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::NotFound, msg.into())
+}
+
+impl MachineStore {
+    /// Open the store at `path`, reading whatever is there.
+    ///
+    /// Infallible by design: a machine whose tree file is missing or
+    /// unreadable must still serve panes and files. A file that does not parse
+    /// is copied aside as `machine.json.corrupt` before anything overwrites
+    /// it, so "the tree came up empty" is recoverable by hand.
+    pub fn open(path: impl Into<PathBuf>) -> Arc<MachineStore> {
+        let path = path.into();
+        let machine = load_machine(&path);
+        Arc::new(MachineStore {
+            path,
+            state: Mutex::new(machine),
+            subscribers: Mutex::new(Vec::new()),
+            next_subscriber: AtomicU64::new(1),
+        })
+    }
+
+    /// Open the store at its default location under the data directory.
+    pub fn shared() -> io::Result<Arc<MachineStore>> {
+        Ok(MachineStore::open(default_machine_path()?))
+    }
+
+    /// Where this store is persisted.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    // ----- reads -----------------------------------------------------------
+
+    /// A snapshot of the whole tree. What a full pull answers with.
+    pub fn machine(&self) -> Machine {
+        self.locked().clone()
+    }
+
+    /// One workspace, whole. `NotFound` when there is no such workspace.
+    pub fn workspace(&self, id: WorkspaceId) -> io::Result<Workspace> {
+        self.locked()
+            .workspaces
+            .iter()
+            .find(|w| w.id == id)
+            .cloned()
+            .ok_or_else(|| not_found(format!("no workspace {id} on this machine")))
+    }
+
+    /// One pane's record.
+    pub fn pane(&self, id: u64) -> Option<PaneRecord> {
+        self.locked().panes.iter().find(|p| p.id == id).cloned()
+    }
+
+    // ----- workspace operations --------------------------------------------
+
+    /// Create a workspace (empty — its first tab arrives as its own op).
+    pub fn workspace_create(
+        &self,
+        name: Option<String>,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<Workspace> {
+        let created = self.mutate(origin, |m| {
+            if m.workspaces.len() >= MAX_WORKSPACES {
+                return Err(refuse(format!(
+                    "this machine already holds {MAX_WORKSPACES} workspaces"
+                )));
+            }
+            let workspace = Workspace {
+                name: name.clone(),
+                ..Workspace::default()
+            };
+            m.workspaces.push(workspace.clone());
+            Ok((
+                workspace.clone(),
+                vec![(
+                    workspace.id,
+                    LayoutDelta::WorkspaceCreated {
+                        workspace: workspace.clone(),
+                    },
+                )],
+            ))
+        })?;
+        Ok(created)
+    }
+
+    /// Set (or clear) a workspace's user-chosen name.
+    pub fn workspace_rename(
+        &self,
+        id: WorkspaceId,
+        name: Option<String>,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        self.mutate(origin, |m| {
+            let ws = find_workspace(m, id)?;
+            ws.name = name.clone();
+            Ok(((), vec![(id, LayoutDelta::WorkspaceRenamed { name })]))
+        })
+    }
+
+    /// Forget a workspace and every pane record only it referenced.
+    ///
+    /// Answers the ids of the panes that went with it, so the caller can kill
+    /// their PTYs — the store never touches a process, only bookkeeping.
+    pub fn workspace_delete(
+        &self,
+        id: WorkspaceId,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<Vec<u64>> {
+        self.mutate(origin, |m| {
+            let index = m
+                .workspaces
+                .iter()
+                .position(|w| w.id == id)
+                .ok_or_else(|| not_found(format!("no workspace {id} on this machine")))?;
+            m.workspaces.remove(index);
+            let orphans = collect_orphan_panes(m);
+            m.panes.retain(|p| !orphans.contains(&p.id));
+            Ok((orphans, vec![(id, LayoutDelta::WorkspaceDeleted)]))
+        })
+    }
+
+    /// Stamp a workspace as just-focused.
+    pub fn workspace_touch(&self, id: WorkspaceId, origin: Option<SubscriberId>) -> io::Result<()> {
+        self.mutate(origin, |m| {
+            let ws = find_workspace(m, id)?;
+            let now = unix_now();
+            ws.last_active = now;
+            Ok((
+                (),
+                vec![(id, LayoutDelta::WorkspaceTouched { last_active: now })],
+            ))
+        })
+    }
+
+    /// Change which tab is active.
+    pub fn workspace_set_active_tab(
+        &self,
+        id: WorkspaceId,
+        tab: TabId,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        self.mutate(origin, |m| {
+            let ws = find_workspace(m, id)?;
+            if !ws.tabs.iter().any(|t| t.id == tab) {
+                return Err(not_found(format!("workspace {id} has no tab {tab}")));
+            }
+            ws.active_tab = Some(tab);
+            Ok(((), vec![(id, LayoutDelta::ActiveTabChanged { tab })]))
+        })
+    }
+
+    // ----- tab operations --------------------------------------------------
+
+    /// Create a tab holding `pane`, at `at` (clamped; `None` appends), and make
+    /// it active — a created tab is one the user is about to type into.
+    pub fn tab_create(
+        &self,
+        workspace: WorkspaceId,
+        at: Option<usize>,
+        pane: PaneSeed,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<Tab> {
+        self.mutate(origin, |m| {
+            register_pane(m, pane.clone())?;
+            let ws = find_workspace(m, workspace)?;
+            let tab = Tab::leaf(pane.pane);
+            let at = at.unwrap_or(ws.tabs.len()).min(ws.tabs.len());
+            ws.tabs.insert(at, tab.clone());
+            ws.active_tab = Some(tab.id);
+            Ok((
+                tab.clone(),
+                vec![(workspace, LayoutDelta::TabCreated { at, tab })],
+            ))
+        })
+    }
+
+    /// Close a tab, answering the pane ids that left the tree with it (for the
+    /// caller to kill — see [`MachineStore::workspace_delete`]).
+    pub fn tab_close(
+        &self,
+        workspace: WorkspaceId,
+        tab: TabId,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<Vec<u64>> {
+        self.mutate(origin, |m| {
+            let ws = find_workspace(m, workspace)?;
+            let index = ws
+                .tabs
+                .iter()
+                .position(|t| t.id == tab)
+                .ok_or_else(|| not_found(format!("workspace {workspace} has no tab {tab}")))?;
+            ws.tabs.remove(index);
+            heal_active_tab(ws, index);
+            let orphans = collect_orphan_panes(m);
+            m.panes.retain(|p| !orphans.contains(&p.id));
+            Ok((orphans, vec![(workspace, LayoutDelta::TabClosed { tab })]))
+        })
+    }
+
+    /// Set (or clear) a tab's user-chosen name.
+    pub fn tab_rename(
+        &self,
+        workspace: WorkspaceId,
+        tab: TabId,
+        name: Option<String>,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        self.mutate(origin, |m| {
+            let t = find_tab(m, workspace, tab)?;
+            t.name = name.clone();
+            Ok(((), vec![(workspace, LayoutDelta::TabRenamed { tab, name })]))
+        })
+    }
+
+    /// Move a tab to position `to` (clamped).
+    pub fn tab_move(
+        &self,
+        workspace: WorkspaceId,
+        tab: TabId,
+        to: usize,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        self.mutate(origin, |m| {
+            let ws = find_workspace(m, workspace)?;
+            let from = ws
+                .tabs
+                .iter()
+                .position(|t| t.id == tab)
+                .ok_or_else(|| not_found(format!("workspace {workspace} has no tab {tab}")))?;
+            let moved = ws.tabs.remove(from);
+            let to = to.min(ws.tabs.len());
+            ws.tabs.insert(to, moved);
+            Ok(((), vec![(workspace, LayoutDelta::TabMoved { tab, to })]))
+        })
+    }
+
+    /// Record which repo group a tab belongs to in the sidebar.
+    pub fn tab_set_group(
+        &self,
+        workspace: WorkspaceId,
+        tab: TabId,
+        group: Option<String>,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        self.mutate(origin, |m| {
+            let t = find_tab(m, workspace, tab)?;
+            t.sidebar_group = group.clone();
+            Ok((
+                (),
+                vec![(workspace, LayoutDelta::TabRegrouped { tab, group })],
+            ))
+        })
+    }
+
+    // ----- pane operations -------------------------------------------------
+
+    /// Split the leaf holding `pane`: the new pane takes the `first` (upper /
+    /// left) or second position, at `ratio`.
+    pub fn pane_split(
+        &self,
+        workspace: WorkspaceId,
+        pane: u64,
+        axis: Axis,
+        ratio: f32,
+        new: PaneSeed,
+        first: bool,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        let ratio = clamp_ratio(ratio)?;
+        self.mutate(origin, |m| {
+            register_pane(m, new.clone())?;
+            let record = m
+                .panes
+                .iter()
+                .find(|p| p.id == new.pane)
+                .cloned()
+                .expect("registered above");
+            let ws = find_workspace(m, workspace)?;
+            let tab = ws
+                .tabs
+                .iter_mut()
+                .find(|t| t.root.contains(pane))
+                .ok_or_else(|| {
+                    not_found(format!("workspace {workspace} has no pane {pane} to split"))
+                })?;
+            tab.root.split_leaf(pane, new.pane, axis, ratio, first);
+            let delta = LayoutDelta::TabRestructured {
+                tab: tab.clone(),
+                pane: Some(record),
+            };
+            Ok(((), vec![(workspace, delta)]))
+        })
+    }
+
+    /// Remove the leaf holding `pane`. When it was the tab's last pane the tab
+    /// closes with it. Answers the pane ids that left the tree.
+    pub fn pane_close(
+        &self,
+        workspace: WorkspaceId,
+        pane: u64,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<Vec<u64>> {
+        self.mutate(origin, |m| {
+            let ws = find_workspace(m, workspace)?;
+            let index = ws
+                .tabs
+                .iter()
+                .position(|t| t.root.contains(pane))
+                .ok_or_else(|| not_found(format!("workspace {workspace} has no pane {pane}")))?;
+            let delta = match ws.tabs[index].root.remove_leaf(pane) {
+                // The tab was that one leaf: the tab goes.
+                None => {
+                    let closed = ws.tabs.remove(index);
+                    heal_active_tab(ws, index);
+                    LayoutDelta::TabClosed { tab: closed.id }
+                }
+                Some(true) => LayoutDelta::TabRestructured {
+                    tab: ws.tabs[index].clone(),
+                    pane: None,
+                },
+                Some(false) => unreachable!("the tab was chosen because it contains the pane"),
+            };
+            let orphans = collect_orphan_panes(m);
+            m.panes.retain(|p| !orphans.contains(&p.id));
+            Ok((orphans, vec![(workspace, delta)]))
+        })
+    }
+
+    /// Move a split's divider. `path` addresses the split from the tab root.
+    pub fn pane_set_ratio(
+        &self,
+        workspace: WorkspaceId,
+        tab: TabId,
+        path: Vec<Side>,
+        ratio: f32,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        let ratio = clamp_ratio(ratio)?;
+        self.mutate(origin, |m| {
+            let t = find_tab(m, workspace, tab)?;
+            match t.root.descend_mut(&path) {
+                Some(PaneNode::Split { ratio: r, .. }) => *r = ratio,
+                _ => {
+                    return Err(refuse(format!(
+                        "tab {tab} has no split at that path any more"
+                    )));
+                }
+            }
+            Ok((
+                (),
+                vec![(workspace, LayoutDelta::RatioChanged { tab, path, ratio })],
+            ))
+        })
+    }
+
+    /// Move the leaf holding `pane` next to `to`, splitting it along `axis`.
+    /// The tmux `move-pane`: remove from where it is (collapsing that split),
+    /// then re-split at the destination.
+    pub fn pane_move(
+        &self,
+        workspace: WorkspaceId,
+        pane: u64,
+        to: u64,
+        axis: Axis,
+        first: bool,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        if pane == to {
+            return Err(refuse("a pane cannot be moved next to itself"));
+        }
+        self.mutate(origin, |m| {
+            let ws = find_workspace(m, workspace)?;
+            let from = ws
+                .tabs
+                .iter()
+                .position(|t| t.root.contains(pane))
+                .ok_or_else(|| not_found(format!("workspace {workspace} has no pane {pane}")))?;
+            let dest = ws
+                .tabs
+                .iter()
+                .position(|t| t.root.contains(to))
+                .ok_or_else(|| not_found(format!("workspace {workspace} has no pane {to}")))?;
+
+            let mut deltas: Vec<(WorkspaceId, LayoutDelta)> = Vec::new();
+            match ws.tabs[from].root.remove_leaf(pane) {
+                None => {
+                    // The pane was a whole tab; that tab dissolves into the
+                    // destination.
+                    if from == dest {
+                        return Err(refuse("a pane cannot be moved next to itself".to_string()));
+                    }
+                    let closed = ws.tabs.remove(from);
+                    heal_active_tab(ws, from);
+                    deltas.push((workspace, LayoutDelta::TabClosed { tab: closed.id }));
+                }
+                Some(true) => {
+                    deltas.push((
+                        workspace,
+                        LayoutDelta::TabRestructured {
+                            tab: ws.tabs[from].clone(),
+                            pane: None,
+                        },
+                    ));
+                }
+                Some(false) => unreachable!("the tab was chosen because it contains the pane"),
+            }
+            // Indices may have shifted if a tab was removed above.
+            let dest_tab = ws
+                .tabs
+                .iter_mut()
+                .find(|t| t.root.contains(to))
+                .expect("the destination tab still exists; only the source tab can close");
+            dest_tab.root.split_leaf(to, pane, axis, 0.5, first);
+            deltas.push((
+                workspace,
+                LayoutDelta::TabRestructured {
+                    tab: dest_tab.clone(),
+                    pane: None,
+                },
+            ));
+            Ok(((), deltas))
+        })
+    }
+
+    /// Rebind the leaf holding `old` to a freshly-spawned successor — the
+    /// revival op. The old record leaves the registry with its facts spent.
+    pub fn pane_replace(
+        &self,
+        workspace: WorkspaceId,
+        old: u64,
+        new: PaneSeed,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        self.mutate(origin, |m| {
+            register_pane(m, new.clone())?;
+            let record = m
+                .panes
+                .iter()
+                .find(|p| p.id == new.pane)
+                .cloned()
+                .expect("registered above");
+            let ws = find_workspace(m, workspace)?;
+            let tab = ws
+                .tabs
+                .iter_mut()
+                .find(|t| t.root.contains(old))
+                .ok_or_else(|| not_found(format!("workspace {workspace} has no pane {old}")))?;
+            tab.root.replace_leaf(old, new.pane);
+            let delta = LayoutDelta::TabRestructured {
+                tab: tab.clone(),
+                pane: Some(record),
+            };
+            m.panes.retain(|p| p.id != old);
+            Ok(((), vec![(workspace, delta)]))
+        })
+    }
+
+    // ----- pane facts (the daemon's own observations) ----------------------
+
+    /// Record facts the daemon observed about `pane` — OSC 7 cwd, a title
+    /// change, agent hook events, liveness. Unknown panes are ignored (a pane
+    /// the tree never adopted is not the tree's business). The delta is
+    /// attributed to no origin: facts come from the machine, so *every*
+    /// client hears them.
+    pub fn note_pane_facts(&self, pane: u64, update: impl FnOnce(&mut PaneRecord)) {
+        let result: io::Result<()> = self.mutate(None, |m| {
+            let Some(record) = m.panes.iter_mut().find(|p| p.id == pane) else {
+                return Ok(((), Vec::new()));
+            };
+            let before = record.clone();
+            update(record);
+            record.id = before.id;
+            if *record == before {
+                return Ok(((), Vec::new()));
+            }
+            let record = record.clone();
+            let workspaces: Vec<WorkspaceId> = m
+                .workspaces
+                .iter()
+                .filter(|w| w.tabs.iter().any(|t| t.root.contains(pane)))
+                .map(|w| w.id)
+                .collect();
+            Ok((
+                (),
+                workspaces
+                    .into_iter()
+                    .map(|w| {
+                        (
+                            w,
+                            LayoutDelta::PaneFacts {
+                                pane: record.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
+            ))
+        });
+        if let Err(e) = result {
+            log::warn!("could not record facts about pane {pane}: {e}");
+        }
+    }
+
+    // ----- attachment (runtime; never persisted) ----------------------------
+
+    /// Record `who` as the workspace's current session and answer whoever held
+    /// it before — the data half of the takeover, unchanged in meaning from
+    /// the old store's.
+    pub fn attach(&self, workspace: WorkspaceId, who: Attachment) -> Option<Attachment> {
+        let mut m = self.locked();
+        let ws = m.workspaces.iter_mut().find(|w| w.id == workspace)?;
+        ws.attachment.replace(who)
+    }
+
+    /// Who is attached to `workspace`, if anyone.
+    pub fn attachment(&self, workspace: WorkspaceId) -> Option<Attachment> {
+        self.locked()
+            .workspaces
+            .iter()
+            .find(|w| w.id == workspace)
+            .and_then(|w| w.attachment.clone())
+    }
+
+    /// Release `workspace`, but **only if `token` still holds it** — the guard
+    /// that keeps a preempted client's teardown from evicting its usurper.
+    pub fn detach(&self, workspace: WorkspaceId, token: &str) -> bool {
+        let mut m = self.locked();
+        let Some(ws) = m.workspaces.iter_mut().find(|w| w.id == workspace) else {
+            return false;
+        };
+        if ws.attachment.as_ref().is_some_and(|a| a.token == token) {
+            ws.attachment = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    // ----- change notification ---------------------------------------------
+
+    /// Be told about every delta. Dropping the [`Subscription`] unsubscribes.
+    /// The callback runs on the writer's thread: enqueue and return.
+    pub fn subscribe(self: &Arc<Self>, f: Notify) -> Subscription {
+        let id = SubscriberId(self.next_subscriber.fetch_add(1, Ordering::Relaxed));
+        self.subscribers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((id, f));
+        Subscription {
+            store: Arc::clone(self),
+            id,
+        }
+    }
+
+    fn unsubscribe(&self, id: SubscriberId) {
+        self.subscribers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(sid, _)| *sid != id);
+    }
+
+    // ----- internals -------------------------------------------------------
+
+    fn locked(&self) -> std::sync::MutexGuard<'_, Machine> {
+        // A poisoned lock means a panic mid-mutation, but every mutation is
+        // rolled back on failure before the lock is released, so the state is
+        // still a valid tree; carrying on beats taking the daemon down.
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Run one operation: mutate under the lock, persist, and — only if the
+    /// disk said yes — deliver the deltas outside the lock.
+    ///
+    /// A failed persist rolls the tree back to the pre-mutation clone, so the
+    /// in-memory state never claims something the file does not, and a change
+    /// nobody can re-read is a change nobody is told about.
+    fn mutate<T>(
+        &self,
+        origin: Option<SubscriberId>,
+        op: impl FnOnce(&mut Machine) -> io::Result<(T, Vec<(WorkspaceId, LayoutDelta)>)>,
+    ) -> io::Result<T> {
+        let deltas;
+        let value;
+        {
+            let mut m = self.locked();
+            let before = m.clone();
+            match op(&mut m).and_then(|out| {
+                if *m != before {
+                    self.persist(&m)?;
+                }
+                Ok(out)
+            }) {
+                Ok((v, d)) => {
+                    value = v;
+                    deltas = d;
+                }
+                Err(e) => {
+                    *m = before;
+                    return Err(e);
+                }
+            }
+        }
+        if !deltas.is_empty() {
+            self.notify_all(&deltas, origin);
+        }
+        Ok(value)
+    }
+
+    /// Serialize the whole document and replace the file atomically. The
+    /// pretty form, so a human can read and repair it — this file is the
+    /// machine's memory of every workspace on it.
+    fn persist(&self, m: &Machine) -> io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(m).map_err(io::Error::other)?;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        crate::core::config::write_atomic(&self.path, &bytes)
+    }
+
+    /// Fan the deltas out, skipping the subscriber that caused them. Called
+    /// with no lock held.
+    fn notify_all(&self, deltas: &[(WorkspaceId, LayoutDelta)], origin: Option<SubscriberId>) {
+        let subscribers: Vec<(SubscriberId, Notify)> = self
+            .subscribers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        for (workspace, delta) in deltas {
+            let key = workspace.to_string();
+            for (sid, f) in &subscribers {
+                if Some(*sid) != origin {
+                    f(&key, delta);
+                }
+            }
+        }
+    }
+}
+
+/// Find a workspace or answer the `NotFound` every op shares.
+fn find_workspace(m: &mut Machine, id: WorkspaceId) -> io::Result<&mut Workspace> {
+    m.workspaces
+        .iter_mut()
+        .find(|w| w.id == id)
+        .ok_or_else(|| not_found(format!("no workspace {id} on this machine")))
+}
+
+fn find_tab(m: &mut Machine, workspace: WorkspaceId, tab: TabId) -> io::Result<&mut Tab> {
+    let ws = find_workspace(m, workspace)?;
+    ws.tabs
+        .iter_mut()
+        .find(|t| t.id == tab)
+        .ok_or_else(|| not_found(format!("workspace {workspace} has no tab {tab}")))
+}
+
+/// Keep `active_tab` naming a real tab after the tab at `removed` left.
+///
+/// The replacement is the neighbour that slid into the removed tab's place
+/// (or the new last tab), which is what every tab strip does on close.
+fn heal_active_tab(ws: &mut Workspace, removed: usize) {
+    let named = ws
+        .active_tab
+        .is_some_and(|active| ws.tabs.iter().any(|t| t.id == active));
+    if named {
+        return;
+    }
+    ws.active_tab = if ws.tabs.is_empty() {
+        None
+    } else {
+        Some(ws.tabs[removed.min(ws.tabs.len() - 1)].id)
+    };
+}
+
+/// Adopt a seed into the registry.
+///
+/// A pane already shown anywhere in the tree is **refused**: one pane has one
+/// stream and one subscriber, so a second leaf on the same id would be two
+/// windows silently fighting over one PTY — the exact corruption the old
+/// client-side `dedupe_pane_ids` pass existed to mop up after the fact. The
+/// daemon owning the tree means it can simply not happen.
+///
+/// Every registry record is referenced by some leaf (the close paths collect
+/// orphans), so "known pane, not in any tree" cannot arise and needs no merge
+/// path.
+fn register_pane(m: &mut Machine, seed: PaneSeed) -> io::Result<()> {
+    let shown = m
+        .workspaces
+        .iter()
+        .any(|w| w.tabs.iter().any(|t| t.root.contains(seed.pane)));
+    if shown || m.panes.iter().any(|p| p.id == seed.pane) {
+        return Err(refuse(format!(
+            "pane {} is already part of this machine's tree",
+            seed.pane
+        )));
+    }
+    if m.panes.len() >= MAX_PANES {
+        return Err(refuse(format!(
+            "this machine's tree already references {MAX_PANES} panes"
+        )));
+    }
+    m.panes.push(seed.into_record());
+    Ok(())
+}
+
+/// The pane ids no leaf references any more. Computed over the whole machine
+/// because a pane id means one pane — it must not be forgotten while any
+/// workspace still shows it.
+fn collect_orphan_panes(m: &Machine) -> Vec<u64> {
+    m.panes
+        .iter()
+        .map(|p| p.id)
+        .filter(|id| {
+            !m.workspaces
+                .iter()
+                .any(|w| w.tabs.iter().any(|t| t.root.contains(*id)))
+        })
+        .collect()
+}
+
+fn clamp_ratio(ratio: f32) -> io::Result<f32> {
+    if !ratio.is_finite() {
+        return Err(refuse("a split ratio must be a finite number"));
+    }
+    Ok(ratio.clamp(0.05, 0.95))
+}
+
+/// Read the file, or start empty. An unparseable file is quarantined so the
+/// user's tree is recoverable by hand rather than silently overwritten.
+fn load_machine(path: &Path) -> Machine {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Machine::default(),
+        Err(e) => {
+            log::warn!("could not read {}: {e}; starting empty", path.display());
+            return Machine::default();
+        }
+    };
+    match serde_json::from_str::<Machine>(crate::core::config::strip_bom(&text)) {
+        Ok(mut machine) => {
+            // PTYs die with the daemon process, so whatever the file says,
+            // nothing is live in a store that was just opened. This line is
+            // the whole of the restart semantic: every leaf is now "awaiting
+            // revival" simply because its pane's record says so.
+            for pane in &mut machine.panes {
+                pane.live = false;
+            }
+            machine
+        }
+        Err(e) => {
+            log::warn!("{} does not parse ({e}); quarantining it", path.display());
+            quarantine(path);
+            Machine::default()
+        }
+    }
+}
+
+/// Copy a file we are about to stop honouring somewhere the user can find it.
+fn quarantine(path: &Path) {
+    let aside = path.with_extension("json.corrupt");
+    match std::fs::copy(path, &aside) {
+        Ok(_) => log::warn!("the previous contents were kept at {}", aside.display()),
+        Err(e) => log::warn!("could not keep a copy at {}: {e}", aside.display()),
+    }
+}
+
+/// `<data-dir>/machine.json` — beside the old store's `workspaces.json`, under
+/// the same directory resolution ([`crate::core::workspace_store`] documents
+/// the order).
+pub fn default_machine_path() -> io::Result<PathBuf> {
+    crate::core::workspace_store::default_store_path().map(|p| p.with_file_name(MACHINE_FILE))
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> (Arc<MachineStore>, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        (MachineStore::open(dir.path().join(MACHINE_FILE)), dir)
+    }
+
+    fn seed(pane: u64, cwd: &str) -> PaneSeed {
+        PaneSeed {
+            pane,
+            cwd: Some(cwd.to_string()),
+            ssh_spec: None,
+            agent: None,
+        }
+    }
+
+    /// A store, one workspace, one tab on pane 1.
+    fn store_with_tab() -> (Arc<MachineStore>, tempfile::TempDir, WorkspaceId, Tab) {
+        let (store, dir) = store();
+        let ws = store.workspace_create(Some("api".into()), None).unwrap();
+        let tab = store
+            .tab_create(ws.id, None, seed(1, "/work"), None)
+            .unwrap();
+        (store, dir, ws.id, tab)
+    }
+
+    /// Record every delta a subscriber hears, as `(workspace-key, delta)`.
+    fn recorded(
+        store: &Arc<MachineStore>,
+    ) -> (Subscription, Arc<Mutex<Vec<(String, LayoutDelta)>>>) {
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&heard);
+        let sub = store.subscribe(Arc::new(move |ws: &str, delta: &LayoutDelta| {
+            sink.lock().unwrap().push((ws.to_string(), delta.clone()));
+        }));
+        (sub, heard)
+    }
+
+    // ── The tree survives the file ─────────────────────────────────────────
+
+    #[test]
+    fn the_tree_round_trips_through_the_file() {
+        let (store, dir) = store();
+        let ws = store.workspace_create(Some("api".into()), None).unwrap();
+        store
+            .tab_create(ws.id, None, seed(1, "/work"), None)
+            .unwrap();
+        store
+            .pane_split(
+                ws.id,
+                1,
+                Axis::Vertical,
+                0.3,
+                seed(2, "/work/api"),
+                false,
+                None,
+            )
+            .unwrap();
+
+        let reopened = MachineStore::open(dir.path().join(MACHINE_FILE));
+        let machine = reopened.machine();
+        assert_eq!(machine.workspaces.len(), 1);
+        let back = &machine.workspaces[0];
+        assert_eq!(back.id, ws.id, "workspace identity survives a restart");
+        assert_eq!(back.name.as_deref(), Some("api"));
+        assert_eq!(back.tabs.len(), 1);
+        assert_eq!(back.tabs[0].root.pane_ids(), vec![1, 2]);
+        match &back.tabs[0].root {
+            PaneNode::Split { axis, ratio, .. } => {
+                assert_eq!(*axis, Axis::Vertical);
+                assert!((ratio - 0.3).abs() < 1e-6);
+            }
+            PaneNode::Leaf { .. } => panic!("the split has to survive"),
+        }
+        assert_eq!(
+            machine.panes.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![1, 2],
+            "the pane registry rides the same file"
+        );
+        assert_eq!(machine.panes[0].cwd.as_deref(), Some("/work"));
+    }
+
+    /// **The revival contract.** After a restart every pane the tree names is
+    /// dead — PTYs die with the process — and the tree must say so on its own,
+    /// with no client-side instance stamp to consult. The leaf stays (the
+    /// layout is the thing being revived), the record keeps the facts a
+    /// successor is started from, and `live` is false because it cannot be
+    /// anything else in a process that spawned nothing yet.
+    #[test]
+    fn a_reopened_store_marks_every_pane_awaiting_revival() {
+        let (store, dir) = store();
+        let ws = store.workspace_create(None, None).unwrap();
+        store
+            .tab_create(ws.id, None, seed(7, "/work"), None)
+            .unwrap();
+        assert!(
+            store.pane(7).unwrap().live,
+            "the pane its own client just seeded is live"
+        );
+
+        let restarted = MachineStore::open(dir.path().join(MACHINE_FILE));
+        let record = restarted.pane(7).expect("the record survives the restart");
+        assert!(!record.live, "a restarted daemon has no live panes");
+        assert_eq!(
+            record.cwd.as_deref(),
+            Some("/work"),
+            "the facts a successor spawns from survive"
+        );
+        assert_eq!(
+            restarted.workspace(ws.id).unwrap().tabs[0].root.pane_ids(),
+            vec![7],
+            "the leaf still names the dead pane: that is the revival slot"
+        );
+    }
+
+    /// The revival itself: a fresh pane takes the leaf over, the spent record
+    /// leaves the registry, and everyone else hears the whole tab.
+    #[test]
+    fn replacing_a_dead_pane_rebinds_the_leaf_and_spends_the_record() {
+        let (store, dir) = store();
+        let ws = store.workspace_create(None, None).unwrap();
+        store
+            .tab_create(ws.id, None, seed(7, "/work"), None)
+            .unwrap();
+
+        let restarted = MachineStore::open(dir.path().join(MACHINE_FILE));
+        let (_sub, heard) = recorded(&restarted);
+        restarted
+            .pane_replace(ws.id, 7, seed(42, "/work"), None)
+            .unwrap();
+
+        assert_eq!(
+            restarted.workspace(ws.id).unwrap().tabs[0].root.pane_ids(),
+            vec![42]
+        );
+        assert!(restarted.pane(7).is_none(), "the old record is spent");
+        assert!(restarted.pane(42).unwrap().live);
+        let heard = heard.lock().unwrap();
+        assert_eq!(heard.len(), 1);
+        match &heard[0].1 {
+            LayoutDelta::TabRestructured { tab, pane } => {
+                assert_eq!(tab.root.pane_ids(), vec![42]);
+                assert_eq!(pane.as_ref().map(|p| p.id), Some(42));
+            }
+            other => panic!("expected TabRestructured, got {other:?}"),
+        }
+    }
+
+    // ── Workspace ops ──────────────────────────────────────────────────────
+
+    #[test]
+    fn workspace_create_rename_touch_delete_land_and_broadcast() {
+        let (store, _dir) = store();
+        let (_sub, heard) = recorded(&store);
+
+        let ws = store.workspace_create(Some("api".into()), None).unwrap();
+        store
+            .workspace_rename(ws.id, Some("web".into()), None)
+            .unwrap();
+        store.workspace_touch(ws.id, None).unwrap();
+        assert_eq!(store.workspace(ws.id).unwrap().name.as_deref(), Some("web"));
+
+        store.workspace_delete(ws.id, None).unwrap();
+        assert!(store.workspace(ws.id).is_err());
+
+        let heard = heard.lock().unwrap();
+        let kinds: Vec<&LayoutDelta> = heard.iter().map(|(_, d)| d).collect();
+        assert!(matches!(kinds[0], LayoutDelta::WorkspaceCreated { .. }));
+        assert!(matches!(kinds[1], LayoutDelta::WorkspaceRenamed { name: Some(n) } if n == "web"));
+        assert!(matches!(kinds[2], LayoutDelta::WorkspaceTouched { .. }));
+        assert!(matches!(kinds[3], LayoutDelta::WorkspaceDeleted));
+        assert!(
+            heard.iter().all(|(key, _)| key == &ws.id.to_string()),
+            "every delta names the workspace it is about"
+        );
+    }
+
+    #[test]
+    fn deleting_a_workspace_forgets_the_panes_only_it_referenced() {
+        let (store, _dir, ws, _tab) = store_with_tab();
+        let dropped = store.workspace_delete(ws, None).unwrap();
+        assert_eq!(dropped, vec![1], "the caller is told which PTYs to kill");
+        assert!(store.pane(1).is_none());
+    }
+
+    // ── Tab ops ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_created_tab_lands_at_its_position_and_becomes_active() {
+        let (store, _dir, ws, first) = store_with_tab();
+        let second = store.tab_create(ws, None, seed(2, "/b"), None).unwrap();
+        let between = store.tab_create(ws, Some(1), seed(3, "/c"), None).unwrap();
+
+        let workspace = store.workspace(ws).unwrap();
+        let order: Vec<TabId> = workspace.tabs.iter().map(|t| t.id).collect();
+        assert_eq!(order, vec![first.id, between.id, second.id]);
+        assert_eq!(workspace.active_tab, Some(between.id));
+
+        // An out-of-range position clamps rather than refusing: the client's
+        // idea of "after the last tab" can be stale by one concurrent close.
+        let clamped = store.tab_create(ws, Some(99), seed(4, "/d"), None).unwrap();
+        assert_eq!(
+            store.workspace(ws).unwrap().tabs.last().unwrap().id,
+            clamped.id
+        );
+    }
+
+    #[test]
+    fn closing_a_tab_forgets_its_panes_and_heals_the_active_tab() {
+        let (store, _dir, ws, first) = store_with_tab();
+        let second = store.tab_create(ws, None, seed(2, "/b"), None).unwrap();
+        store.workspace_set_active_tab(ws, second.id, None).unwrap();
+
+        let dropped = store.tab_close(ws, second.id, None).unwrap();
+        assert_eq!(dropped, vec![2]);
+        let workspace = store.workspace(ws).unwrap();
+        assert_eq!(workspace.tabs.len(), 1);
+        assert_eq!(
+            workspace.active_tab,
+            Some(first.id),
+            "the active tab may not dangle on a closed id"
+        );
+
+        let dropped = store.tab_close(ws, first.id, None).unwrap();
+        assert_eq!(dropped, vec![1]);
+        assert_eq!(
+            store.workspace(ws).unwrap().active_tab,
+            None,
+            "a workspace with no tabs has no active one — the home-page state"
+        );
+    }
+
+    #[test]
+    fn tabs_rename_move_and_regroup_in_place() {
+        let (store, _dir, ws, first) = store_with_tab();
+        let second = store.tab_create(ws, None, seed(2, "/b"), None).unwrap();
+
+        store
+            .tab_rename(ws, first.id, Some("build".into()), None)
+            .unwrap();
+        store
+            .tab_set_group(ws, first.id, Some("/repo/tty7".into()), None)
+            .unwrap();
+        store.tab_move(ws, first.id, 1, None).unwrap();
+
+        let workspace = store.workspace(ws).unwrap();
+        assert_eq!(workspace.tabs[0].id, second.id);
+        assert_eq!(workspace.tabs[1].name.as_deref(), Some("build"));
+        assert_eq!(
+            workspace.tabs[1].sidebar_group.as_deref(),
+            Some("/repo/tty7")
+        );
+    }
+
+    // ── Pane ops ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn splitting_and_closing_panes_reshapes_the_tree() {
+        let (store, _dir, ws, tab) = store_with_tab();
+        store
+            .pane_split(ws, 1, Axis::Horizontal, 0.5, seed(2, "/b"), false, None)
+            .unwrap();
+        store
+            .pane_split(ws, 2, Axis::Vertical, 0.5, seed(3, "/c"), true, None)
+            .unwrap();
+        assert_eq!(
+            store.workspace(ws).unwrap().tabs[0].root.pane_ids(),
+            vec![1, 3, 2],
+            "`first` puts the new pane on the a side"
+        );
+
+        // Closing a middle pane collapses its split; the sibling takes over.
+        let dropped = store.pane_close(ws, 3, None).unwrap();
+        assert_eq!(dropped, vec![3]);
+        assert_eq!(
+            store.workspace(ws).unwrap().tabs[0].root.pane_ids(),
+            vec![1, 2]
+        );
+
+        // Closing down to one pane leaves a plain leaf, not a degenerate split.
+        store.pane_close(ws, 2, None).unwrap();
+        assert!(matches!(
+            store.workspace(ws).unwrap().tabs[0].root,
+            PaneNode::Leaf { pane: 1 }
+        ));
+
+        // Closing the last pane closes the tab itself.
+        let (_sub, heard) = recorded(&store);
+        store.pane_close(ws, 1, None).unwrap();
+        assert!(store.workspace(ws).unwrap().tabs.is_empty());
+        assert!(matches!(
+            heard.lock().unwrap()[0].1,
+            LayoutDelta::TabClosed { tab: id } if id == tab.id
+        ));
+    }
+
+    #[test]
+    fn a_ratio_change_lands_on_the_split_its_path_names() {
+        let (store, _dir, ws, tab) = store_with_tab();
+        store
+            .pane_split(ws, 1, Axis::Horizontal, 0.5, seed(2, "/b"), false, None)
+            .unwrap();
+        store
+            .pane_split(ws, 2, Axis::Vertical, 0.5, seed(3, "/c"), false, None)
+            .unwrap();
+
+        // The nested split lives on the b side of the root.
+        store
+            .pane_set_ratio(ws, tab.id, vec![Side::B], 0.7, None)
+            .unwrap();
+        match &store.workspace(ws).unwrap().tabs[0].root {
+            PaneNode::Split { a, b, ratio, .. } => {
+                assert!((ratio - 0.5).abs() < 1e-6, "the root ratio is untouched");
+                assert!(matches!(&**a, PaneNode::Leaf { pane: 1 }));
+                match &**b {
+                    PaneNode::Split { ratio, .. } => assert!((ratio - 0.7).abs() < 1e-6),
+                    PaneNode::Leaf { .. } => panic!("the nested split is gone"),
+                }
+            }
+            PaneNode::Leaf { .. } => panic!("the root split is gone"),
+        }
+
+        // A path that no longer names a split refuses rather than guessing —
+        // the client falls back to a full re-pull.
+        let err = store
+            .pane_set_ratio(ws, tab.id, vec![Side::A], 0.6, None)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+        // Ratios clamp to sane bounds instead of letting a pane vanish.
+        store
+            .pane_set_ratio(ws, tab.id, vec![], 0.0001, None)
+            .unwrap();
+        match &store.workspace(ws).unwrap().tabs[0].root {
+            PaneNode::Split { ratio, .. } => assert!(*ratio >= 0.05),
+            PaneNode::Leaf { .. } => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn moving_a_pane_between_tabs_dissolves_an_emptied_tab() {
+        let (store, _dir, ws, first) = store_with_tab();
+        let second = store.tab_create(ws, None, seed(2, "/b"), None).unwrap();
+
+        store
+            .pane_move(ws, 2, 1, Axis::Vertical, false, None)
+            .unwrap();
+        let workspace = store.workspace(ws).unwrap();
+        assert_eq!(workspace.tabs.len(), 1, "the emptied tab dissolved");
+        assert_eq!(workspace.tabs[0].id, first.id);
+        assert_eq!(workspace.tabs[0].root.pane_ids(), vec![1, 2]);
+        assert!(
+            !workspace.tabs.iter().any(|t| t.id == second.id),
+            "the source tab is gone"
+        );
+        assert!(store.pane(2).is_some(), "the pane moved; it did not die");
+
+        // Moving a pane next to itself is meaningless and refused.
+        let err = store
+            .pane_move(ws, 2, 2, Axis::Vertical, false, None)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    // ── Validation is refusal, not corruption ──────────────────────────────
+
+    /// A refused operation leaves the tree byte-for-byte what it was and
+    /// tells nobody anything — a delta for a change that did not happen would
+    /// desynchronize every listening client at once.
+    #[test]
+    fn a_refused_operation_changes_nothing_and_notifies_nobody() {
+        let (store, _dir, ws, tab) = store_with_tab();
+        let before = store.machine();
+        let (_sub, heard) = recorded(&store);
+
+        let missing = WorkspaceId::new();
+        assert!(store.workspace_rename(missing, None, None).is_err());
+        assert!(
+            store
+                .tab_create(missing, None, seed(9, "/x"), None)
+                .is_err()
+        );
+        assert!(store.tab_close(ws, TabId::new(), None).is_err());
+        assert!(
+            store
+                .pane_split(ws, 999, Axis::Vertical, 0.5, seed(9, "/x"), false, None)
+                .is_err()
+        );
+        assert!(store.pane_close(ws, 999, None).is_err());
+        assert!(
+            store
+                .pane_set_ratio(ws, tab.id, vec![Side::A], 0.5, None)
+                .is_err()
+        );
+        assert!(
+            store
+                .pane_set_ratio(ws, tab.id, vec![], f32::NAN, None)
+                .is_err()
+        );
+        assert!(store.pane_replace(ws, 999, seed(9, "/x"), None).is_err());
+
+        assert_eq!(store.machine(), before);
+        assert!(heard.lock().unwrap().is_empty());
+        assert!(
+            store.pane(9).is_none(),
+            "a seed on a refused op must not leak into the registry"
+        );
+    }
+
+    // ── Origin exclusion ───────────────────────────────────────────────────
+
+    /// The writer does not hear its own echo; everyone else does. This is the
+    /// mechanism that lets a client apply its own edit optimistically and
+    /// apply everyone else's from deltas without double-applying its own.
+    #[test]
+    fn a_delta_reaches_every_subscriber_but_its_author() {
+        let (store, _dir, ws, _tab) = store_with_tab();
+        let (author, heard_by_author) = recorded(&store);
+        let (_other, heard_by_other) = recorded(&store);
+
+        store
+            .workspace_rename(ws, Some("renamed".into()), Some(author.id()))
+            .unwrap();
+        assert!(heard_by_author.lock().unwrap().is_empty());
+        assert_eq!(heard_by_other.lock().unwrap().len(), 1);
+
+        // A write with no origin reaches all.
+        store.workspace_rename(ws, None, None).unwrap();
+        assert_eq!(heard_by_author.lock().unwrap().len(), 1);
+        assert_eq!(heard_by_other.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn dropping_a_subscription_stops_the_deltas() {
+        let (store, _dir, ws, _tab) = store_with_tab();
+        let (sub, heard) = recorded(&store);
+        store.workspace_touch(ws, None).unwrap();
+        assert_eq!(heard.lock().unwrap().len(), 1);
+        drop(sub);
+        store.workspace_touch(ws, None).unwrap();
+        assert_eq!(heard.lock().unwrap().len(), 1);
+    }
+
+    // ── Pane facts ─────────────────────────────────────────────────────────
+
+    /// The daemon's own observations reach every client of every workspace
+    /// showing the pane — origin exclusion does not apply, because the machine
+    /// is the author and the machine is nobody's echo.
+    #[test]
+    fn pane_facts_update_the_record_and_reach_every_client() {
+        let (store, _dir, ws, _tab) = store_with_tab();
+        let (sub, heard) = recorded(&store);
+
+        store.note_pane_facts(1, |p| {
+            p.cwd = Some("/work/deeper".into());
+            p.title = "vim".into();
+        });
+        let record = store.pane(1).unwrap();
+        assert_eq!(record.cwd.as_deref(), Some("/work/deeper"));
+        assert_eq!(record.title, "vim");
+        {
+            let heard = heard.lock().unwrap();
+            assert_eq!(heard.len(), 1);
+            assert_eq!(heard[0].0, ws.to_string());
+            assert!(matches!(&heard[0].1, LayoutDelta::PaneFacts { pane } if pane.id == 1));
+        }
+
+        // No change, no noise; an unknown pane is nobody's business.
+        store.note_pane_facts(1, |_| {});
+        store.note_pane_facts(999, |p| p.title = "ghost".into());
+        assert_eq!(heard.lock().unwrap().len(), 1);
+        drop(sub);
+    }
+
+    /// One pane, one leaf. A second adoption of a pane already shown is the
+    /// two-windows-one-PTY corruption the old client-side dedupe pass mopped
+    /// up after the fact; the daemon owning the tree refuses it up front.
+    #[test]
+    fn a_pane_already_in_the_tree_cannot_be_adopted_again() {
+        let (store, _dir, ws, _tab) = store_with_tab();
+        store.note_pane_facts(1, |p| p.cwd = Some("/observed".into()));
+
+        let other = store.workspace_create(None, None).unwrap();
+        let err = store
+            .tab_create(other.id, None, seed(1, "/stale"), None)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            store.workspace(other.id).unwrap().tabs.is_empty(),
+            "the refused tab must not half-exist"
+        );
+        assert_eq!(
+            store.pane(1).unwrap().cwd.as_deref(),
+            Some("/observed"),
+            "and the stale seed must not clobber the daemon's own facts"
+        );
+        let _ = ws;
+    }
+
+    // ── Attachment ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn attachments_takeover_and_are_never_persisted() {
+        let (store, dir, ws, _tab) = store_with_tab();
+        assert_eq!(store.attachment(ws), None);
+
+        let laptop = Attachment::new("tok-1", "laptop");
+        assert_eq!(store.attach(ws, laptop.clone()), None);
+        let desktop = Attachment::new("tok-2", "desktop");
+        assert_eq!(store.attach(ws, desktop.clone()), Some(laptop.clone()));
+
+        // The preempted client tidying up must not evict the new owner.
+        assert!(!store.detach(ws, &laptop.token));
+        assert_eq!(store.attachment(ws).unwrap().hostname, "desktop");
+        assert!(store.detach(ws, &desktop.token));
+        assert_eq!(store.attachment(ws), None);
+
+        // Attachments describe live connections; a restarted daemon has none.
+        store.attach(ws, Attachment::new("secret-token", "laptop"));
+        store.workspace_touch(ws, None).unwrap(); // force a persist
+        let text = std::fs::read_to_string(dir.path().join(MACHINE_FILE)).unwrap();
+        assert!(!text.contains("secret-token"), "{text}");
+        assert_eq!(
+            MachineStore::open(dir.path().join(MACHINE_FILE)).attachment(ws),
+            None
+        );
+    }
+
+    // ── Corruption ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_corrupt_file_is_quarantined_rather_than_overwritten() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(MACHINE_FILE);
+        std::fs::write(&path, b"{ this is not json").unwrap();
+
+        let store = MachineStore::open(&path);
+        assert!(store.machine().workspaces.is_empty());
+        store.workspace_create(None, None).unwrap();
+        let aside = std::fs::read_to_string(path.with_extension("json.corrupt")).unwrap();
+        assert_eq!(aside, "{ this is not json");
+    }
+
+    /// Fields this build has never heard of survive nothing — but fields it
+    /// *lacks* must not fail the parse: the schema is `#[serde(default)]`
+    /// throughout so the daemon can keep evolving it.
+    #[test]
+    fn a_sparse_document_decodes_with_defaults() {
+        let machine: Machine =
+            serde_json::from_str(r#"{"workspaces":[{"tabs":[{"root":{"Leaf":{"pane":3}}}]}]}"#)
+                .expect("missing fields default rather than fail");
+        assert_eq!(machine.workspaces.len(), 1);
+        assert_eq!(machine.workspaces[0].tabs[0].root.pane_ids(), vec![3]);
+        assert!(machine.panes.is_empty());
+    }
+}
