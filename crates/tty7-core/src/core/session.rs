@@ -146,6 +146,17 @@ impl std::fmt::Display for WorkspaceId {
     }
 }
 
+impl std::str::FromStr for WorkspaceId {
+    type Err = uuid::Error;
+
+    /// The inverse of `Display`, for the places a workspace id crosses a
+    /// string-keyed boundary (the control dialect's attach verbs, which
+    /// predate the typed tree) and has to come back out as itself.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse().map(WorkspaceId)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Remote references
 // ---------------------------------------------------------------------------

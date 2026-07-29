@@ -590,21 +590,38 @@ fn attach_workspace(
     workspace: &str,
     dedicated: bool,
 ) -> io::Result<Option<String>> {
-    let store = conn.workspaces()?;
+    // The attach verbs predate the machine tree, so the id arrives as a
+    // string; while the record store and the tree coexist, the attachment's
+    // data half lands on **whichever of the two this server carries** (both,
+    // on a full daemon — they describe the same workspace). A server with
+    // neither answers exactly what a store-less server always has.
+    if conn.workspaces.is_none() && conn.machine.is_none() {
+        return Err(io::Error::other(
+            "this server does not serve the workspace store",
+        ));
+    }
+    let tree_id: Option<crate::core::session::WorkspaceId> = workspace.parse().ok();
     let (displaced, evicted) = {
-        // Both tables move under one lock. Held only across the two moves —
+        // Every table moves under one lock. Held only across the moves —
         // the notice below goes out with nothing held, because writing to a
         // peer that has stopped reading must not hold up the next client's
         // attach.
         let _handover = conn.attachments.handover();
-        let displaced = store.attach(
-            workspace,
-            Attachment::new(conn.holder.token.clone(), conn.holder.hostname.clone()),
-        );
+        let attachment = Attachment::new(conn.holder.token.clone(), conn.holder.hostname.clone());
+        let displaced_record = conn
+            .workspaces
+            .as_ref()
+            .and_then(|store| store.attach(workspace, attachment.clone()));
+        let displaced_tree = match (&conn.machine, tree_id) {
+            (Some(machine), Some(id)) => machine.attach(id, attachment),
+            _ => None,
+        };
         let evicted = conn
             .attachments
             .claim(workspace, conn.id, &conn.holder, dedicated);
-        (displaced, evicted)
+        // On a server carrying both, the two answers name the same session;
+        // the record store's wins only in the sense that it is asked first.
+        (displaced_record.or(displaced_tree), evicted)
     };
 
     if let Some(evicted) = evicted {
@@ -640,11 +657,22 @@ fn attach_workspace(
 /// are the same guard seen from both halves: a session that was preempted and
 /// then tidied up must not evict the client that took over from it.
 fn detach_workspace(conn: &Arc<Conn>, workspace: &str) -> io::Result<bool> {
-    let store = conn.workspaces()?;
+    if conn.workspaces.is_none() && conn.machine.is_none() {
+        return Err(io::Error::other(
+            "this server does not serve the workspace store",
+        ));
+    }
     let _handover = conn.attachments.handover();
     let released = conn.attachments.release(workspace, conn.id);
-    let forgotten = store.detach(workspace, &conn.holder.token);
-    Ok(released || forgotten)
+    let forgotten = conn
+        .workspaces
+        .as_ref()
+        .is_some_and(|store| store.detach(workspace, &conn.holder.token));
+    let forgotten_tree = match (&conn.machine, workspace.parse().ok()) {
+        (Some(machine), Some(id)) => machine.detach(id, &conn.holder.token),
+        _ => false,
+    };
+    Ok(released || forgotten || forgotten_tree)
 }
 
 /// This machine's home directory, for the handshake's `home` field — the value
@@ -1166,11 +1194,13 @@ impl Conn {
     fn release_all_workspaces(&self) {
         let _handover = self.attachments.handover();
         let released = self.attachments.release_conn(self.id);
-        let Some(store) = self.workspaces.as_ref() else {
-            return;
-        };
         for workspace in released {
-            store.detach(&workspace, &self.holder.token);
+            if let Some(store) = self.workspaces.as_ref() {
+                store.detach(&workspace, &self.holder.token);
+            }
+            if let (Some(machine), Some(id)) = (&self.machine, workspace.parse().ok()) {
+                machine.detach(id, &self.holder.token);
+            }
         }
     }
 

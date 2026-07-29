@@ -394,6 +394,85 @@ fn an_operation_from_one_client_reaches_the_other_as_a_delta() {
     assert_eq!(watcher.delta_count(), 2, "still only the writer's two ops");
 }
 
+/// Takeover semantics on the new tree, with **no record store served at
+/// all**: the attach verbs predate the tree, and their contract — newcomer
+/// wins, the displaced session is told, a stale detach cannot evict the
+/// usurper — must survive the record store's retirement.
+#[test]
+fn attachment_rides_the_tree_when_no_record_store_is_served() {
+    use tty7_core::host::local::LocalHost;
+    use tty7_core::host::server;
+
+    let dir = data_dir();
+    let machine = tty7_core::core::machine::MachineStore::open(machine_file(&dir));
+    let sock = dir.path().join("control.sock");
+    let listener = server::bind_control_socket(&sock).unwrap();
+    {
+        let machine = Arc::clone(&machine);
+        std::thread::spawn(move || {
+            server::serve_listener_with(
+                listener,
+                LocalHost::new(),
+                server::Services::none().and_machine(machine),
+            )
+        });
+    }
+    let ws = machine
+        .workspace_create(Some("shared".into()), None)
+        .unwrap();
+
+    let laptop = bridged(&sock, "laptop");
+    let desktop = bridged(&sock, "desktop");
+
+    let attach = |client: &Client| {
+        client.control.call(ControlRequest::WorkspaceAttach {
+            id: ws.id.to_string(),
+        })
+    };
+    match attach(&laptop).expect("first attach") {
+        ReplyOk::Attached { took_over_from } => assert_eq!(took_over_from, None),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        machine.attachment(ws.id).map(|a| a.hostname),
+        Some("laptop".into()),
+        "the tree's own record says who holds the workspace"
+    );
+
+    // The newcomer wins, learns whom it displaced, and the displaced session
+    // is pushed a Preempted notice.
+    match attach(&desktop).expect("takeover") {
+        ReplyOk::Attached { took_over_from } => {
+            assert_eq!(took_over_from.as_deref(), Some("laptop"));
+        }
+        other => panic!("{other:?}"),
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let seen = laptop.events.lock().unwrap().clone();
+        if seen.iter().any(|e| {
+            matches!(e, ControlEvent::Preempted { workspace, by }
+                if *workspace == ws.id.to_string() && by == "desktop")
+        }) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no Preempted push; saw {seen:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // The preempted session tidying up must not evict the usurper.
+    laptop
+        .control
+        .call(ControlRequest::WorkspaceDetach {
+            id: ws.id.to_string(),
+        })
+        .expect("a stale detach is success, not eviction");
+    assert_eq!(
+        machine.attachment(ws.id).map(|a| a.hostname),
+        Some("desktop".into())
+    );
+}
+
 /// A `--stdio --bridge` child connected to an already-listening control
 /// socket — the two-hop shape a real multi-client machine has.
 fn bridged(sock: &Path, token: &str) -> Client {
