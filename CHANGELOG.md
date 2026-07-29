@@ -29,8 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Every header in the window moves it now** — grabbing the window by a header
   is a property of the whole app rather than a per-surface feature, so you never
   have to learn which rows happen to be draggable. The detail panel's section
-  title (Info / Outline / Changes / Files, and the remote Files header) joins the
-  caption rows that already were. In horizontal-tab mode the strip also keeps a
+  title joins the caption rows that already were, wherever the panel draws one —
+  every tab off macOS, where that row is also the panel's tab switcher, and the
+  remote Files header on macOS. In horizontal-tab mode the strip also keeps a
   bare 80px slice of caption for grabbing: its spacer was a flexible one with no
   minimum, so it collapsed to exactly 0px once the tab chips saturated the row —
   around 7-8 tabs on a 1440px window — leaving nothing to grab but three 6px

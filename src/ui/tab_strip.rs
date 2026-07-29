@@ -595,8 +595,9 @@ impl Tty7App {
             // The workspace chip used to lead this group; it moved to the rail's
             // head (`tab_sidebar`), where the list it names actually lives. What
             // forced the move is that this group's other host is the *panel's* top
-            // zone, and a panel the user can drag down to 200px cannot seat the
-            // panel's four tabs plus three window controls — the row wanted 268px.
+            // zone, and a panel the user can drag down to `right_panel::MIN_WIDTH`
+            // cannot seat the panel's four tabs plus three window controls — the
+            // row wanted 268px.
             // Nothing that has no business being scoped to the panel gets to
             // compete for that width.
             //

@@ -291,17 +291,25 @@ pub(crate) struct WindowMoveArm {
 // form), diff file-card headers (click-to-collapse rows inside a scroll list),
 // and the command palette (a transient modal over a dismiss-on-press scrim).
 //
-// One region satisfies the rule by adjacency rather than on its own, and that is
-// deliberate — not an oversight to tidy up later. The detail panel's macOS top
-// zone is every-child-occluded (four tab tiles plus the corner chrome) and that
-// fixed footprint comes to 214px against a `right_panel::MIN_WIDTH` of 216, so
-// at the panel's floor its spacer is a couple of pixels — a handle only on
-// paper. It keeps a real one anyway: the panel's section title
-// (`right_panel::panel_title`) is draggable and sits immediately below it.
-// Raising `MIN_WIDTH` far enough to seat a grabbable spacer would trade a real
-// capability — narrowing the panel — for a handle the user already has a few
-// pixels lower, so the floor stays where it is and the row keeps all its
-// controls.
+// One region stops satisfying the rule near one edge of its size range, and
+// that is an accepted limitation rather than an oversight to tidy up later. The
+// detail panel's macOS top zone is every-child-occluded (four tab tiles plus the
+// corner chrome), and that fixed footprint lands within a couple of pixels of
+// `right_panel::MIN_WIDTH` — so the spacer between them is a real handle at any
+// comfortable panel width and effectively nothing at the panel's floor.
+//
+// The row below only partly covers that. The panel's section title
+// (`right_panel::panel_title`) is draggable and sits immediately under the top
+// zone, but on macOS it draws nothing for a tab that passes no `trailing`, which
+// is every tab except the remote SFTP browser. So the adjacent handle is there
+// off macOS (where that row is the panel's tab switcher and always drawn) and on
+// macOS for SFTP; for Info, Outline, Changes and Files on macOS, a panel dragged
+// to its floor has no header of its own to grab.
+//
+// Left that way by explicit decision: `MIN_WIDTH` stays where it is rather than
+// trading a real capability — narrowing the panel — for a grab handle, and no
+// control moves off that row either. The window still moves from the caption
+// strip and the rail's top zone at every panel width.
 
 /// Arm-on-press / move-on-first-move window dragging for a row that stands in
 /// for the title bar. [`title_bar_drag`] is this plus the double-click-to-zoom
