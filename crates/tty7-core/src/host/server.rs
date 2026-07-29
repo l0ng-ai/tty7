@@ -49,8 +49,8 @@ use std::time::Duration;
 use crate::core::workspace_store::{Attachment, SubscriberId, Subscription, WorkspaceStore};
 use crate::daemon::control::{
     CONTROL_VERSION, ControlClientMsg, ControlEvent, ControlHello, ControlHelloOk, ControlReply,
-    ControlRequest, ControlServerMsg, GIT_STREAM_CHUNK, LinkShutdown, ReplyOk, WATCH_BURST_CAP,
-    WireError, WireErrorKind, feature,
+    ControlRequest, ControlServerMsg, GIT_STREAM_CHUNK, GIT_STREAM_CHUNK_MAX, LinkShutdown,
+    ReplyOk, WATCH_BURST_CAP, WireError, WireErrorKind, feature,
 };
 use crate::daemon::duplex::{Duplex, Halves};
 use crate::host::{Host, SearchHit, SharedHost, WatchSub};
@@ -1106,6 +1106,12 @@ impl Conn {
     }
 
     /// Run a git stream, pushing its output under `id`.
+    ///
+    /// Whatever happens, the client hears the end of it: a stream that stops
+    /// sending without a [`ControlEvent::GitEnd`] leaves the reader waiting on
+    /// pushes that will never come, and unlike a request it has no deadline to
+    /// fall out of. The single exception is a link that is already gone, where
+    /// there is nobody left to tell.
     fn start_git_stream(&self, id: u64, cwd: PathBuf, args: Vec<String>) {
         let host = Arc::clone(&self.host);
         let sink = Arc::clone(&self.sink);
@@ -1114,39 +1120,56 @@ impl Conn {
             .spawn(move || {
                 let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
                 let mut batch: Vec<u8> = Vec::with_capacity(GIT_STREAM_CHUNK);
-                let mut dead = false;
-                let flush = |batch: &mut Vec<u8>, dead: &mut bool| {
-                    if batch.is_empty() || *dead {
+                let mut stopped: Option<StreamStop> = None;
+                let flush = |batch: &mut Vec<u8>, stopped: &mut Option<StreamStop>| {
+                    if batch.is_empty() || stopped.is_some() {
                         return;
                     }
                     let bytes = std::mem::take(batch);
-                    if sink
-                        .send(&ControlServerMsg::Event(ControlEvent::GitChunk {
+                    // One flush is usually one frame; it is more only when a
+                    // single line pushed the batch past the frame ceiling.
+                    for piece in bytes.chunks(GIT_STREAM_CHUNK_MAX) {
+                        let event = ControlServerMsg::Event(ControlEvent::GitChunk {
                             id,
-                            bytes,
-                        }))
-                        .is_err()
-                    {
-                        // The connection is gone; stop feeding a closed sink.
-                        *dead = true;
+                            bytes: piece.to_vec(),
+                        });
+                        // Encoding and writing are asked separately because
+                        // their failures mean opposite things — see
+                        // `Sink::send_frame`. A payload that will not encode
+                        // leaves a connection this stream still owes an answer
+                        // to; a write that fails means there is nobody left to
+                        // answer.
+                        let Ok((kind, payload)) = event.to_frame() else {
+                            *stopped = Some(StreamStop::Unencodable);
+                            return;
+                        };
+                        if sink.send_frame(kind, &payload).is_err() {
+                            *stopped = Some(StreamStop::LinkGone);
+                            return;
+                        }
                     }
                 };
                 let result = host.git_lines(&cwd, &borrowed, &mut |line| {
                     batch.extend_from_slice(line.as_bytes());
                     batch.push(b'\n');
                     if batch.len() >= GIT_STREAM_CHUNK {
-                        flush(&mut batch, &mut dead);
+                        flush(&mut batch, &mut stopped);
                     }
                 });
-                flush(&mut batch, &mut dead);
-                if dead {
+                flush(&mut batch, &mut stopped);
+                if matches!(stopped, Some(StreamStop::LinkGone)) {
                     return;
                 }
-                let (code, failed) = match result {
-                    Ok(code) => (code, false),
+                let (code, failed) = match (stopped, result) {
+                    // The bytes exist but could not be put on the wire. The
+                    // client cannot be given them, and saying so is the only
+                    // honest end — silence would leave it parked on a stream
+                    // that will never speak again.
+                    (Some(StreamStop::Unencodable), _) => (None, true),
+                    (_, Ok(code)) => (code, false),
                     // git could not be run at all — distinct from a non-zero exit,
                     // and the client must be able to tell them apart.
-                    Err(_) => (None, true),
+                    (_, Err(_)) => (None, true),
                 };
                 let _ = sink.send(&ControlServerMsg::Event(ControlEvent::GitEnd {
                     id,
@@ -1264,6 +1287,21 @@ fn spawn_watch_forwarder(id: u64, rx: smol::channel::Receiver<Vec<PathBuf>>, sin
     if let Err(e) = spawned {
         log::warn!("could not start the watch forwarder for subscription {id}: {e}");
     }
+}
+
+/// Why a git stream stopped pushing chunks early.
+///
+/// The two are not interchangeable, which is the whole reason the distinction
+/// is carried: only one of them means the peer is gone. See
+/// [`Conn::start_git_stream`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamStop {
+    /// The write failed: the link is retired or broken, and nothing more will
+    /// reach the client — including a `GitEnd`.
+    LinkGone,
+    /// The chunk would not encode. The connection is fine and still owes this
+    /// stream a terminating event.
+    Unencodable,
 }
 
 /// The connection's write half.
@@ -2939,9 +2977,6 @@ mod tests {
         })
     }
 
-    /// Issue one request and return its reply, ignoring any pushes that arrive
-    /// first — a `WorkspaceChanged` from another connection can legitimately
-    /// interleave with this one's reply.
     /// A git stream end to end over the wire: the reply is accepted, chunks
     /// arrive as events under the id the *client* chose, and the terminating
     /// event carries git's exit code. Reassembled, the lines are exactly what
@@ -3020,6 +3055,9 @@ mod tests {
         assert!(!got.is_empty(), "this repo has commits");
     }
 
+    /// Issue one request and return its reply, ignoring any pushes that arrive
+    /// first — a `WorkspaceChanged` from another connection can legitimately
+    /// interleave with this one's reply.
     fn ask(client: &mut UnixStream, req_id: u64, req: ControlRequest) -> ControlReply {
         ControlClientMsg::Request { req_id, req }
             .encode(&mut *client)

@@ -151,6 +151,10 @@ impl RemoteHost {
 
         let client = Arc::new(ControlClient::connect_with(r, w, shutdown, hello, sink)?);
         let separator = client.hello().separator;
+        // A stream is answered by pushes, not by a reply, so `fail_all` cannot
+        // see anyone waiting on one — see [`GitStreamRegistry::close_all`].
+        let down_streams = Arc::clone(&streams);
+        client.on_link_down(move || down_streams.close_all());
 
         let host = Arc::new(RemoteHost {
             id,
@@ -507,19 +511,57 @@ enum GitStreamMsg {
 /// go — see [`ControlRequest::GitStream`].
 #[derive(Default)]
 struct GitStreamRegistry {
-    streams: Mutex<HashMap<u64, smol::channel::Sender<GitStreamMsg>>>,
+    streams: Mutex<StreamTable>,
+}
+
+#[derive(Default)]
+struct StreamTable {
+    senders: HashMap<u64, smol::channel::Sender<GitStreamMsg>>,
+    /// Set by [`GitStreamRegistry::close_all`] and never cleared: a
+    /// `ControlClient` never comes back up, so once the link is gone no stream
+    /// registered afterwards could ever be answered. Without it a `git_lines`
+    /// that registered just after the teardown swept the table would park on a
+    /// sender nothing will ever close.
+    closed: bool,
 }
 
 impl GitStreamRegistry {
     fn insert(&self, id: u64, tx: smol::channel::Sender<GitStreamMsg>) {
-        if let Ok(mut m) = self.streams.lock() {
-            m.insert(id, tx);
+        if let Ok(mut m) = self.streams.lock()
+            && !m.closed
+        {
+            m.senders.insert(id, tx);
         }
+        // Dropped rather than filed when the link is already down, which closes
+        // the channel and sends the caller straight down the mid-stream arm.
     }
 
     fn remove(&self, id: u64) {
         if let Ok(mut m) = self.streams.lock() {
-            m.remove(&id);
+            m.senders.remove(&id);
+        }
+    }
+
+    /// Wake every reader still draining a stream, because the link they were
+    /// being fed by is gone.
+    ///
+    /// The counterpart to `ClientInner::fail_all`, and the reason this is
+    /// needed at all: a `GitStream` reply arrives long before its data, so from
+    /// `fail_all`'s point of view the request is finished and there is nobody
+    /// to fail. The thread is really parked on the channel below, which lives
+    /// here and outlives the reader thread — so unless the senders are closed
+    /// deliberately, a dropped connection parks that thread forever and the
+    /// caller's in-flight bookkeeping is never unwound.
+    fn close_all(&self) {
+        let Ok(mut m) = self.streams.lock() else {
+            return;
+        };
+        m.closed = true;
+        for (_, tx) in m.senders.drain() {
+            // Closing rather than only dropping, to say what this is for:
+            // chunks already queued stay readable and the receiver then sees
+            // the end of the channel.
+            tx.close();
         }
     }
 
@@ -534,7 +576,7 @@ impl GitStreamRegistry {
             _ => return,
         };
         if let Ok(m) = self.streams.lock()
-            && let Some(tx) = m.get(&id)
+            && let Some(tx) = m.senders.get(&id)
         {
             let _ = tx.try_send(msg);
         }
@@ -892,6 +934,83 @@ mod tests {
         )
         .unwrap();
         (host, seen_rx)
+    }
+
+    /// A link that dies mid-stream ends the read with an error rather than
+    /// parking the thread that was draining it.
+    ///
+    /// The regression this guards is a *hang*, not a wrong answer, so the call
+    /// is made on its own thread and the assertion is on it having returned at
+    /// all. A stream is answered by pushes, so the failure path every other
+    /// method relies on — a deadline, or `fail_all` emptying `pending` — has
+    /// nothing to fail here; only closing the stream's own channel wakes it.
+    #[test]
+    fn a_link_that_dies_mid_stream_ends_the_read() {
+        let host = host_with_peer_dying_mid_stream();
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let got = host.git_lines(Path::new("/repo"), &["diff"], &mut |_| {});
+            let _ = done_tx.send(got.is_err());
+        });
+
+        match done_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(errored) => assert!(
+                errored,
+                "a stream cut short must report an error, not a successful read of half a diff"
+            ),
+            Err(_) => panic!(
+                "git_lines never returned: the reader is parked on a stream nothing will close"
+            ),
+        }
+    }
+
+    /// A peer that accepts a `GitStream`, pushes part of it, and then hangs up
+    /// without a `GitEnd` — an SSH link dropping mid-diff.
+    fn host_with_peer_dying_mid_stream() -> Arc<RemoteHost> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            match ControlClientMsg::read(&mut sock).unwrap() {
+                ControlClientMsg::Hello(_) => {}
+                other => panic!("expected Hello, got {other:?}"),
+            }
+            ControlServerMsg::HelloOk(hello_ok('/'))
+                .encode(&mut sock)
+                .unwrap();
+            sock.flush().unwrap();
+            let (req_id, id) = match ControlClientMsg::read(&mut sock) {
+                Ok(ControlClientMsg::Request {
+                    req_id,
+                    req: ControlRequest::GitStream { id, .. },
+                }) => (req_id, id),
+                other => panic!("expected a GitStream request, got {other:?}"),
+            };
+            ControlServerMsg::Response {
+                req_id,
+                reply: ControlReply::Ok(ReplyOk::Unit),
+            }
+            .encode(&mut sock)
+            .unwrap();
+            ControlServerMsg::Event(ControlEvent::GitChunk {
+                id,
+                bytes: b"alpha\n".to_vec(),
+            })
+            .encode(&mut sock)
+            .unwrap();
+            sock.flush().unwrap();
+            // Dropping the socket here is the whole point: the client is now
+            // waiting on chunks that will never come, with the reply it was
+            // told to wait for already delivered.
+        });
+
+        let sock = TcpStream::connect(addr).unwrap();
+        RemoteHost::over_tcp(
+            sock,
+            "ssh-alias:testbox",
+            &ControlHello::host_rpc("tok", "laptop"),
+        )
+        .unwrap()
     }
 
     /// Path arithmetic follows the *peer's* separator, not the client's. On a

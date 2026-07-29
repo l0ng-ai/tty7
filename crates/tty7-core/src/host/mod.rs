@@ -249,7 +249,11 @@ pub struct Output {
 }
 
 /// `Vec<u8>` ⇄ base64 string, for the byte fields that cross a JSON wire.
-mod b64 {
+///
+/// Shared with the control dialect ([`crate::daemon::control::ControlEvent::GitChunk`])
+/// rather than duplicated there: every byte field on that wire has the same
+/// hazard, and one encoding is one thing to get right.
+pub(crate) mod b64 {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
     use serde::{Deserialize as _, Deserializer, Serializer};

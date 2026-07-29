@@ -672,7 +672,7 @@ impl Tty7App {
         // take, and its list is right there the moment you switch.
         let changed = match &self.right_panel.diff {
             Some(Some(snap)) => {
-                let n = snap.files.len() + snap.untracked.len();
+                let n = snap.files.len() + snap.untracked_count();
                 (n > 0).then_some(n)
             }
             _ => None,
