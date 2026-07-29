@@ -345,12 +345,26 @@ pub fn git_bash_path() -> Option<PathBuf> {
     find_git_bash()
 }
 
-/// Installed WSL distributions. Exposed only to tests, for the same reason as
-/// [`git_bash_path`]: the live-PTY check needs a real distro to launch into,
-/// and skips itself when there is none.
-#[cfg(all(windows, test))]
+/// Installed WSL distribution names, empty when WSL is absent — and always
+/// empty off Windows, so callers need no `cfg` of their own.
+///
+/// Two callers want the same list for different reasons. [`detect_shells`]
+/// offers a distro as a **shell** to launch in a pane; the workspace switcher
+/// offers it as a **machine** that can host a remote workspace
+/// (`ui::remote_connect::available_hosts`). Same enumeration, so the two lists
+/// can never disagree about which distros exist.
+///
+/// Spawns `wsl.exe` on Windows — the same rule as [`detect_shells`]: call it
+/// off the UI thread.
 pub fn wsl_distros() -> Vec<String> {
-    list_wsl_distros()
+    #[cfg(windows)]
+    {
+        list_wsl_distros()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
 }
 
 /// Git Bash from the usual Git-for-Windows install roots (machine-wide x64,

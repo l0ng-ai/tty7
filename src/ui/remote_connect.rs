@@ -27,6 +27,15 @@
 //! entry points use. A machine reachable as an SSH pane is reachable as a
 //! workspace, with nothing to configure twice and nothing to keep in step.
 //!
+//! ## …except WSL, which is configured zero times
+//!
+//! A WSL distribution is the one machine with nothing to
+//! configure: it is reached by spawning `wsl.exe -d <distro> -- tty7-server
+//! --stdio`, so there is no address, no credential and no host key — nothing
+//! that could be set up, and nothing that could be set up wrongly. So it is not
+//! read from a store like the other rows but *discovered*, by [`sweep_wsl`],
+//! and every distro the user has installed is offered.
+//!
 //! ## The connection is routed, not direct
 //!
 //! Design D3: the GUI never speaks SSH. It opens the same local daemon socket it
@@ -39,9 +48,9 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use gpui::{App, Global};
+use gpui::{App, AppContext as _, BorrowAppContext as _, Global};
 
 use crate::core::config::Config;
 use crate::core::session::{RemoteTarget, WorkspaceId};
@@ -70,14 +79,18 @@ pub struct HostChoice {
     pub detail: String,
 }
 
-/// Every machine tty7 already knows how to reach, saved profiles first and
-/// `~/.ssh/config` aliases after.
+/// Every machine tty7 already knows how to reach: saved profiles first, then
+/// this computer's WSL distributions, then `~/.ssh/config` aliases.
 ///
 /// Profiles come first because they are the ones the user built deliberately;
 /// the config aliases are a long tail that is often machine-generated. An alias
 /// whose name matches a profile is dropped rather than listed twice — the
 /// profile carries strictly more (credentials, forwards), so it is the better
 /// of the two rows and the duplicate would only make the list longer.
+///
+/// Distributions sit between the two: installing one is as deliberate as
+/// writing a profile, but the list is *discovered* rather than written, so it
+/// does not outrank the machines the user named by hand.
 pub fn available_hosts(cx: &App) -> Vec<HostChoice> {
     let mut out: Vec<HostChoice> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
@@ -97,6 +110,8 @@ pub fn available_hosts(cx: &App) -> Vec<HostChoice> {
             target,
         });
     }
+
+    out.extend(wsl_hosts(cx));
 
     for imported in crate::core::ssh_config::import_profiles() {
         let alias = imported.profile.name.clone();
@@ -182,6 +197,103 @@ fn local_stdio_host() -> Option<HostChoice> {
     })
 }
 
+/// What the endpoint column says for a distribution. It has no address to
+/// print, so it says what kind of machine it is and where it is instead — and
+/// it doubles as the thing a user typing `wsl` into the search box matches,
+/// since [`host_score`] falls back to this line.
+const WSL_DETAIL: &str = "WSL · this computer";
+
+/// This computer's WSL distributions, as machines a workspace can live on.
+///
+/// Reads [`WslDistros`] and never probes: this runs inside the switcher's
+/// render, and enumerating distros spawns a process. [`sweep_wsl`] is what
+/// fills it.
+fn wsl_hosts(cx: &App) -> Vec<HostChoice> {
+    let names = cx
+        .try_global::<WslDistros>()
+        .map(|state| state.names.as_slice())
+        .unwrap_or_default();
+    wsl_choices(names)
+}
+
+/// The pure half of [`wsl_hosts`]: distro names in, rows out.
+fn wsl_choices(names: &[String]) -> Vec<HostChoice> {
+    names
+        .iter()
+        .map(|distro| HostChoice {
+            target: RemoteTarget::Wsl {
+                distro: distro.clone(),
+            },
+            // The distro name *is* what the user calls it — `wsl -d` takes this
+            // exact string — so there is no friendlier name to look up.
+            label: distro.clone(),
+            detail: WSL_DETAIL.to_string(),
+        })
+        .collect()
+}
+
+/// This computer's WSL distributions, as of the last probe.
+///
+/// A global filled in the background rather than a call, because
+/// [`available_hosts`] runs inside the switcher's render and `wsl.exe -l -q` is
+/// a process spawn — a beat on a warm distribution, much worse on a cold one.
+/// The same shape `terminal::pane_liveness` uses for the machine answers drawn
+/// two rows above these.
+#[derive(Default)]
+pub struct WslDistros {
+    names: Vec<String>,
+    /// When the last probe landed; `None` while none ever has, which is what
+    /// makes the first [`sweep_wsl`] run instead of waiting out the TTL.
+    probed_at: Option<Instant>,
+    /// One probe at a time: the switcher can render many frames inside the
+    /// couple of hundred milliseconds `wsl.exe` takes to answer.
+    in_flight: bool,
+}
+
+impl Global for WslDistros {}
+
+/// How long a distribution list is trusted. Installing or unregistering one is
+/// rare and deliberate, so this is not a poll — it is short enough that someone
+/// who just ran `wsl --install` finds their distro by reopening the switcher
+/// rather than by restarting tty7.
+const WSL_TTL: Duration = Duration::from_secs(30);
+
+/// Re-enumerate this computer's WSL distributions if the list is missing or
+/// stale.
+///
+/// Safe to call from `render` or from an action: it reads the global, may start
+/// background work, and never blocks. Off Windows there are no distributions
+/// and nothing is spawned.
+pub fn sweep_wsl(cx: &mut App) {
+    if !cfg!(windows) {
+        return;
+    }
+    {
+        let state = cx.default_global::<WslDistros>();
+        if state.in_flight || state.probed_at.is_some_and(|at| at.elapsed() < WSL_TTL) {
+            return;
+        }
+    }
+    cx.update_global::<WslDistros, _>(|state, _| state.in_flight = true);
+    cx.spawn(async move |cx| {
+        let names = cx
+            .background_spawn(async { crate::core::shells::wsl_distros() })
+            .await;
+        let _ = cx.update(|cx| {
+            cx.update_global::<WslDistros, _>(|state, _| {
+                state.names = names;
+                state.probed_at = Some(Instant::now());
+                state.in_flight = false;
+            });
+            // The frame that asked for this list is long gone — the answer lands
+            // on a background task, and an idle switcher has nothing else that
+            // would redraw it.
+            cx.refresh_windows();
+        });
+    })
+    .detach();
+}
+
 /// `user@host` — with the port only when it isn't the default, which is the
 /// convention every other endpoint line in the app follows.
 fn endpoint_label(user: &str, host: &str, port: u16) -> String {
@@ -247,15 +359,12 @@ pub fn spec_for(target: &RemoteTarget, cx: &App) -> Result<NativeSshSpec, String
                 cfg.verify_host_keys,
             ))
         }
-        // M8. Named here so the match is total and the message is honest rather
-        // than a silent connect that never arrives.
-        RemoteTarget::Wsl { .. } => {
-            Err("WSL workspaces aren't available in this build yet".to_string())
-        }
         // Both of these address their machine directly; there is no SSH
         // connection to describe, which is exactly what `Err` means to
-        // [`crate::terminal::PaneWorkspace::route_header`] — it reads the target
-        // instead.
+        // [`control_route`] and
+        // [`crate::terminal::PaneWorkspace::route_header`] — they read the
+        // target instead and build a `wsl:` / `stdio:` header from it.
+        RemoteTarget::Wsl { .. } => Err("a WSL workspace has no SSH connection".to_string()),
         RemoteTarget::LocalStdio { .. } => {
             Err("a local --stdio workspace has no SSH connection".to_string())
         }
@@ -1312,5 +1421,48 @@ mod tests {
     fn a_query_nothing_matches_returns_nothing() {
         let hosts = vec![host("gate2jup", "root@18.143.92.244")];
         assert!(filter_hosts(&hosts, "zzz").is_empty());
+    }
+
+    /// A distro row carries the exact string `wsl -d` takes, because that is
+    /// what [`RouteHeader::wsl`](crate::daemon::router::RouteHeader::wsl) will
+    /// be handed and what `wsl:<distro>` keys the machine by. A row whose label
+    /// were prettied up ("Ubuntu 22.04") would connect to nothing.
+    #[test]
+    fn a_wsl_row_names_the_distro_verbatim() {
+        let rows = wsl_choices(&["Ubuntu-22.04".to_string(), "Arch".to_string()]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].label, "Ubuntu-22.04");
+        assert_eq!(
+            rows[0].target,
+            RemoteTarget::Wsl {
+                distro: "Ubuntu-22.04".to_string()
+            }
+        );
+        assert_eq!(rows[0].target.connection_key(), "wsl:Ubuntu-22.04");
+        assert_eq!(rows[1].label, "Arch");
+    }
+
+    /// Nothing installed is not an empty *section* — it is no section at all,
+    /// which is what keeps the band off a Mac and off a Windows box with no WSL.
+    #[test]
+    fn no_distros_is_no_rows() {
+        assert!(wsl_choices(&[]).is_empty());
+    }
+
+    /// Both ways a user looks for a distro: by its name, and by the kind of
+    /// thing it is. The second only works because the endpoint column says
+    /// `WSL`, and [`host_score`] searches it.
+    #[test]
+    fn a_distro_is_found_by_name_or_by_wsl() {
+        let mut hosts = vec![host("gate2jup", "root@18.143.92.244")];
+        hosts.extend(wsl_choices(&["Ubuntu".to_string()]));
+
+        let by_name = filter_hosts(&hosts, "ubun");
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].label, "Ubuntu");
+
+        let by_kind = filter_hosts(&hosts, "wsl");
+        assert_eq!(by_kind.len(), 1);
+        assert_eq!(by_kind[0].label, "Ubuntu");
     }
 }

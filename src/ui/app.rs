@@ -1003,6 +1003,10 @@ impl Tty7App {
         // at a different build, and the consent handler that the install path
         // asks before writing a binary onto someone else's machine.
         crate::ui::remote_connect::register(cx);
+        // Enumerate this computer's WSL distributions once at startup so the
+        // first switcher open already lists them, rather than filling them in a
+        // beat later. Backgrounded; a no-op off Windows.
+        crate::ui::remote_connect::sweep_wsl(cx);
         Self::prompt_remote_daemon_mismatch(window, cx);
         // A window that came back on a remote workspace has its last-pulled
         // layout but no connection yet. Reconnecting is M6's; this is the seam

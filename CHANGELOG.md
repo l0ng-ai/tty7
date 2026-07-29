@@ -51,6 +51,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transcript, so the turn you're watching won't be in the copy. The parent is
   never modified either way. (#211)
 
+- **Your WSL distributions are machines you can open a workspace on** — the
+  transport for them has been there since remote workspaces landed
+  (`wsl.exe -d <distro> -- tty7-server --stdio`: no SSH, no address, no
+  credential, no host key), but nothing offered one, so nothing could reach it.
+  Every installed distribution now appears in the workspace switcher beside your
+  saved SSH hosts, and opening one is the whole setup — there is nothing to
+  configure, because there is nothing that *could* be configured. The row is
+  named exactly what `wsl -d` calls the distro, since that string is also how
+  the machine is keyed (`wsl:<distro>`), and searching the switcher for `wsl`
+  finds all of them.
+
+  A distribution is served the Linux `tty7-server` this client shipped with
+  rather than one downloaded from a release, so the first connect writes it into
+  `~/.local/share/tty7/bin` inside the distro — with the same one-time
+  confirmation any other machine gets, and no `sudo` anywhere. A build with no
+  bundled server (any `cargo build`, and any platform that isn't Windows) says
+  so and names the directories it looked in.
+
+  Two things had to be fixed for this to work at all, both invisible until
+  something could actually select a distribution. WSL kills what an interop
+  session started the moment its `wsl.exe` exits, and `setsid` does not make the
+  new daemon safe instantly — so the launch now holds its invocation open for a
+  beat, instead of reporting "started but nothing was answering on the control
+  socket" over a correctly installed binary. And a pane's connection now asks
+  for the remote's *pane* socket: the flag that says so was added by the SSH
+  path and by the local `--stdio` one, but never by WSL, so the workspace would
+  connect and the window would open with a pane that could not reach the machine.
+
+  Ports need no forwarding (WSL shares `localhost`, so ⌘-clicking a dev server's
+  URL just works), and files move over the same `Host` calls every remote
+  workspace uses, or through `\\wsl$` directly.
+
 - **Copy Session ID** — the agent's native session id on the clipboard, beside
   *Copy Working Directory* in the tab / sidebar context menu, the palette and
   the File menu. Codex has no copy-or-duplicate subcommand — forking *is* how

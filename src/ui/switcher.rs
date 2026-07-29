@@ -260,6 +260,10 @@ impl Tty7App {
         // connect. Idempotent and last-call-wins, exactly as `begin_connect`
         // registered it.
         remote_connect::register(cx);
+        // Re-enumerate this computer's WSL distributions, which are rows in the
+        // band below. TTL'd and backgrounded, so opening the panel twice in a
+        // row costs nothing and opening it once never waits on `wsl.exe`.
+        remote_connect::sweep_wsl(cx);
         // Named, because the field is the panel's only affordance that does not
         // say what it does: a bare magnifier over a list of machines reads as
         // "filter these rows", and it also finds machines that have no row yet.
@@ -503,6 +507,10 @@ impl Tty7App {
     /// friends), which can never host a workspace. Rather than guess which is
     /// which (guess wrong and the user cannot reach their own box), the panel
     /// sorts by *whether it has been used* and folds the rest away.
+    ///
+    /// The WSL distributions installed on this computer land here too, for the
+    /// same reason and with the same handling: until one has hosted a
+    /// workspace, it is a machine the user *could* use, not one they do.
     fn other_hosts(&self, groups: &[Group], cx: &App) -> Vec<HostChoice> {
         let known: HashSet<&str> = groups.iter().map(|g| g.key.as_str()).collect();
         remote_connect::available_hosts(cx)
@@ -1380,7 +1388,9 @@ impl Tty7App {
                     GUTTER,
                     Icon::new(IconName::Globe).size(px(ICON)).text_color(dim),
                 ))
-                .child(div().text_sm().text_color(muted).child("Other SSH Hosts"))
+                // Not "Other SSH Hosts": a WSL distribution is in this band and
+                // is reached by spawning `wsl.exe`, with no SSH anywhere.
+                .child(div().text_sm().text_color(muted).child("Other Machines"))
                 .child(div().flex_1())
                 .child(
                     div()
