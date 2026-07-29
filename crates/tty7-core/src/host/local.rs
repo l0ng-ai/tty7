@@ -329,6 +329,24 @@ impl Host for LocalHost {
         git::git_output(cwd, args)
     }
 
+    /// Straight off the pipe: this machine's git writes into a buffer we drain
+    /// as it fills, so a multi-megabyte diff never exists as one allocation.
+    fn git_lines(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        on_line: &mut dyn FnMut(&str),
+    ) -> io::Result<Option<i32>> {
+        guard_off_ui();
+        let mut split = git::LineSplitter::default();
+        let code = git::git_stream(cwd, args, |chunk| {
+            split.push(chunk, &mut *on_line);
+            true
+        })?;
+        split.finish(&mut *on_line);
+        Ok(code)
+    }
+
     fn watch(&self, dirs: &[PathBuf]) -> io::Result<WatchSub> {
         guard_off_ui();
         local_watch(dirs, Arc::clone(&self.gitignore))

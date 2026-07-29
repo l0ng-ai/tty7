@@ -12,7 +12,7 @@
 //! here: it is a gpui global, so it stays in the GUI crate
 //! (`terminal::git_status::GitStatusCache`).
 
-use std::io;
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -233,6 +233,130 @@ pub fn git_output(cwd: &Path, args: &[&str]) -> io::Result<Output> {
     })
 }
 
+/// [`git_output`], but handing stdout to `on_chunk` as it arrives instead of
+/// buffering it whole.
+///
+/// Every invariant [`git_output`] documents holds here too — this is the same
+/// invocation, only read differently. What it buys is peak memory: `git diff
+/// HEAD` on a large work tree prints tens of megabytes, and the caller keeps a
+/// small fraction of it, so materialising the whole thing first is pure cost.
+///
+/// Chunks are byte slices, not lines: a line can straddle two of them and
+/// splitting is the caller's business (see [`LineSplitter`]). `on_chunk`
+/// returning `false` stops the read early — the child's stdout is dropped, git
+/// gets `EPIPE` and exits rather than blocking forever on a full pipe.
+///
+/// Returns git's exit status once it has been reaped, `Err` if it could not be
+/// run at all — the same split [`git_output`] makes.
+pub fn git_stream(
+    cwd: &Path,
+    args: &[&str],
+    mut on_chunk: impl FnMut(&[u8]) -> bool,
+) -> io::Result<Option<i32>> {
+    if !cwd.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("git cwd does not exist: {}", cwd.display()),
+        ));
+    }
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(cwd)
+        .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        // Dropped on the floor rather than piped: nothing reads it here, and an
+        // unread pipe is how you deadlock a child that decides to be chatty.
+        .stderr(Stdio::null());
+    let mut child = crate::core::proc::hide_console(&mut cmd).spawn()?;
+    // Taken so the pipe can be closed before `wait`.
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("git stdout was not piped"))?;
+
+    // 64 KiB: large enough that a multi-megabyte diff is a few hundred reads,
+    // small enough to stay a rounding error next to the parsed structure.
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut read_err = None;
+    loop {
+        match stdout.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if !on_chunk(&buf[..n]) {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                read_err = Some(e);
+                break;
+            }
+        }
+    }
+    drop(stdout);
+    let status = child.wait()?;
+    match read_err {
+        Some(e) => Err(e),
+        None => Ok(status.code()),
+    }
+}
+
+/// Reassembles a byte stream into lines across chunk boundaries.
+///
+/// Chunked transports — a pipe read, a wire frame — cut wherever they happen
+/// to fill a buffer, so a diff line routinely spans two chunks. This holds the
+/// partial tail and emits only whole lines, with the trailing `\n`/`\r`
+/// stripped; [`finish`](Self::finish) releases a last line that had no
+/// terminator.
+///
+/// Invalid UTF-8 is replaced rather than fatal. The buffered path drops the
+/// entire output on one bad byte, which for a diff of a latin-1 file means
+/// showing nothing at all; a replacement character in one line is the better
+/// answer.
+#[derive(Default)]
+pub struct LineSplitter {
+    tail: Vec<u8>,
+}
+
+impl LineSplitter {
+    /// Feed a chunk, calling `on_line` for every complete line it finishes.
+    pub fn push(&mut self, chunk: &[u8], mut on_line: impl FnMut(&str)) {
+        let mut rest = chunk;
+        while let Some(nl) = rest.iter().position(|b| *b == b'\n') {
+            let (line, after) = rest.split_at(nl);
+            if self.tail.is_empty() {
+                on_line(&trim_cr(line));
+            } else {
+                self.tail.extend_from_slice(line);
+                let joined = std::mem::take(&mut self.tail);
+                on_line(&trim_cr(&joined));
+            }
+            rest = &after[1..];
+        }
+        self.tail.extend_from_slice(rest);
+    }
+
+    /// Emit whatever is left when the stream ends without a final newline.
+    pub fn finish(self, mut on_line: impl FnMut(&str)) {
+        if !self.tail.is_empty() {
+            on_line(&trim_cr(&self.tail));
+        }
+    }
+}
+
+/// Drop a trailing `\r` (git on Windows) and decode lossily.
+fn trim_cr(line: &[u8]) -> std::borrow::Cow<'_, str> {
+    let line = match line.last() {
+        Some(b'\r') => &line[..line.len() - 1],
+        _ => line,
+    };
+    String::from_utf8_lossy(line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +365,75 @@ mod tests {
     /// hands `probe` for a local pane.
     fn h() -> crate::host::SharedHost {
         crate::host::local::LocalHost::new()
+    }
+
+    /// A line split across two chunks is rejoined, not cut in half — the whole
+    /// reason `LineSplitter` exists, since a 64 KiB read boundary lands mid-line
+    /// on essentially every large diff.
+    #[test]
+    fn line_splitter_rejoins_across_chunks() {
+        let mut split = LineSplitter::default();
+        let mut got = Vec::new();
+        split.push(b"alpha\nbe", |l| got.push(l.to_string()));
+        assert_eq!(got, ["alpha"], "only the complete line so far");
+        split.push(b"ta\ngamma\n", |l| got.push(l.to_string()));
+        split.finish(|l| got.push(l.to_string()));
+        assert_eq!(got, ["alpha", "beta", "gamma"]);
+    }
+
+    /// A final line with no terminator still arrives, and `\r\n` endings are
+    /// normalised — git on Windows writes them and the parser must not see the
+    /// carriage return as content.
+    #[test]
+    fn line_splitter_handles_crlf_and_a_missing_final_newline() {
+        let mut split = LineSplitter::default();
+        let mut got = Vec::new();
+        split.push(b"one\r\ntwo\r\nthree", |l| got.push(l.to_string()));
+        split.finish(|l| got.push(l.to_string()));
+        assert_eq!(got, ["one", "two", "three"]);
+    }
+
+    /// Invalid UTF-8 is replaced, not fatal: the buffered path drops the entire
+    /// output on one bad byte, which for a diff of a latin-1 file means showing
+    /// nothing at all.
+    #[test]
+    fn line_splitter_replaces_invalid_utf8() {
+        let mut split = LineSplitter::default();
+        let mut got = Vec::new();
+        split.push(b"caf\xe9\n", |l| got.push(l.to_string()));
+        split.finish(|l| got.push(l.to_string()));
+        assert_eq!(got.len(), 1);
+        assert!(got[0].starts_with("caf"), "{:?}", got[0]);
+    }
+
+    /// The streaming read and the buffered one must agree line for line —
+    /// overriding `git_lines` is an optimisation, never a behaviour change.
+    #[test]
+    fn streaming_and_buffered_reads_agree() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let args = ["log", "--oneline", "-n", "40"];
+        let Ok(code) = git_stream(here, &args, |_| true) else {
+            return; // no git, or not a work tree — nothing to compare
+        };
+        if code != Some(0) {
+            return;
+        }
+        let mut streamed = Vec::new();
+        let mut split = LineSplitter::default();
+        git_stream(here, &args, |chunk| {
+            split.push(chunk, |l| streamed.push(l.to_string()));
+            true
+        })
+        .unwrap();
+        split.finish(|l| streamed.push(l.to_string()));
+
+        let buffered = git_output(here, &args).unwrap();
+        let expected: Vec<String> = String::from_utf8_lossy(&buffered.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(streamed, expected);
+        assert!(!streamed.is_empty(), "this repo has commits");
     }
 
     /// A tmp path that is not a git repo yields no snapshot (and never panics).

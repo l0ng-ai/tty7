@@ -49,8 +49,8 @@ use std::time::Duration;
 use crate::core::workspace_store::{Attachment, SubscriberId, Subscription, WorkspaceStore};
 use crate::daemon::control::{
     CONTROL_VERSION, ControlClientMsg, ControlEvent, ControlHello, ControlHelloOk, ControlReply,
-    ControlRequest, ControlServerMsg, LinkShutdown, ReplyOk, WATCH_BURST_CAP, WireError,
-    WireErrorKind, feature,
+    ControlRequest, ControlServerMsg, GIT_STREAM_CHUNK, LinkShutdown, ReplyOk, WATCH_BURST_CAP,
+    WireError, WireErrorKind, feature,
 };
 use crate::daemon::duplex::{Duplex, Halves};
 use crate::host::{Host, SearchHit, SharedHost, WatchSub};
@@ -498,6 +498,11 @@ fn handshake<R: Read>(
     let mut features = vec![
         feature::CONTROL.to_string(),
         feature::HOST_RPC.to_string(),
+        // Advertised because this build serves `GitStream`. A client that does
+        // not see it must fall back to the buffered `Git`: a server predating
+        // the variant cannot decode it, and an undecodable frame ends the
+        // connection.
+        feature::GIT_STREAM.to_string(),
         feature::STDIO_BRIDGE.to_string(),
     ];
     if services.workspaces.is_some() {
@@ -810,6 +815,13 @@ fn run_request(
             // semantics for every remote workspace at once.
             (ReplyOk::Output(h.git(&p(&cwd), &borrowed)?), Vec::new())
         }
+        ControlRequest::GitStream { id, cwd, args } => {
+            // Started straight away: the client chose `id` and registered its
+            // receiver before sending, so a chunk that overtakes this reply is
+            // delivered, not dropped. See `ControlRequest::GitStream`.
+            conn.start_git_stream(id, p(&cwd), args);
+            (ReplyOk::Unit, Vec::new())
+        }
 
         // ----- watch ---------------------------------------------------------
         ControlRequest::WatchOpen { dirs } => {
@@ -1096,6 +1108,68 @@ impl Conn {
             return;
         }
         spawn_watch_forwarder(id, rx, Arc::clone(&self.sink));
+    }
+
+    /// Run a git stream, pushing its output under `id`.
+    fn start_git_stream(&self, id: u64, cwd: PathBuf, args: Vec<String>) {
+        let host = Arc::clone(&self.host);
+        let sink = Arc::clone(&self.sink);
+        let spawned = std::thread::Builder::new()
+            .name("tty7-control-git-stream".into())
+            .spawn(move || {
+                let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+                let mut batch: Vec<u8> = Vec::with_capacity(GIT_STREAM_CHUNK);
+                let mut dead = false;
+                let flush = |batch: &mut Vec<u8>, dead: &mut bool| {
+                    if batch.is_empty() || *dead {
+                        return;
+                    }
+                    let bytes = std::mem::take(batch);
+                    if sink
+                        .send(&ControlServerMsg::Event(ControlEvent::GitChunk {
+                            id,
+                            bytes,
+                        }))
+                        .is_err()
+                    {
+                        // The connection is gone; stop feeding a closed sink.
+                        *dead = true;
+                    }
+                };
+                let result = host.git_lines(&cwd, &borrowed, &mut |line| {
+                    batch.extend_from_slice(line.as_bytes());
+                    batch.push(b'\n');
+                    if batch.len() >= GIT_STREAM_CHUNK {
+                        flush(&mut batch, &mut dead);
+                    }
+                });
+                flush(&mut batch, &mut dead);
+                if dead {
+                    return;
+                }
+                let (code, failed) = match result {
+                    Ok(code) => (code, false),
+                    // git could not be run at all — distinct from a non-zero exit,
+                    // and the client must be able to tell them apart.
+                    Err(_) => (None, true),
+                };
+                let _ = sink.send(&ControlServerMsg::Event(ControlEvent::GitEnd {
+                    id,
+                    code,
+                    failed,
+                }));
+            });
+        if spawned.is_err() {
+            // No thread to read git with: say so rather than leaving the client
+            // waiting out its deadline on a stream that will never speak.
+            let _ = self
+                .sink
+                .send(&ControlServerMsg::Event(ControlEvent::GitEnd {
+                    id,
+                    code: None,
+                    failed: true,
+                }));
+        }
     }
 
     fn set_watch_dirs(&self, id: u64, dirs: &[PathBuf]) -> io::Result<()> {
@@ -2873,6 +2947,95 @@ mod tests {
     /// Issue one request and return its reply, ignoring any pushes that arrive
     /// first — a `WorkspaceChanged` from another connection can legitimately
     /// interleave with this one's reply.
+    /// The feature is advertised, which is the whole basis of the fallback: a
+    /// client that does not see it must not send `GitStream`, because a server
+    /// predating the variant cannot decode it and an undecodable frame ends the
+    /// connection.
+    #[test]
+    fn git_stream_is_advertised() {
+        let (_client, hello) = raw();
+        assert!(hello.has_feature(feature::GIT_STREAM));
+    }
+
+    /// A git stream end to end over the wire: the reply is accepted, chunks
+    /// arrive as events under the id the *client* chose, and the terminating
+    /// event carries git's exit code. Reassembled, the lines are exactly what
+    /// the buffered `Git` returns for the same invocation.
+    #[test]
+    fn git_stream_delivers_the_same_lines_as_the_buffered_read() {
+        let (mut client, hello) = raw();
+        assert!(hello.has_feature(feature::GIT_STREAM));
+        let here = env!("CARGO_MANIFEST_DIR");
+        let args: Vec<String> = ["log", "--oneline", "-n", "30"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // What the buffered path says, for comparison.
+        let buffered = match ask(
+            &mut client,
+            1,
+            ControlRequest::Git {
+                cwd: here.to_string(),
+                args: args.clone(),
+            },
+        ) {
+            ControlReply::Ok(ReplyOk::Output(o)) => o,
+            other => panic!("expected output, got {other:?}"),
+        };
+        if buffered.status != Some(0) {
+            return; // no git here; nothing to compare
+        }
+        let expected: Vec<String> = String::from_utf8_lossy(&buffered.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+
+        // The client picks the id, so it could have registered a receiver
+        // before sending — that is what makes an early chunk safe.
+        ControlClientMsg::Request {
+            req_id: 2,
+            req: ControlRequest::GitStream {
+                id: 77,
+                cwd: here.to_string(),
+                args,
+            },
+        }
+        .encode(&mut client)
+        .unwrap();
+        client.flush().unwrap();
+
+        let mut split = crate::core::git::LineSplitter::default();
+        let mut got: Vec<String> = Vec::new();
+        let mut accepted = false;
+        let code = loop {
+            match ControlServerMsg::read(&mut client).unwrap() {
+                ControlServerMsg::Response { req_id: 2, reply } => {
+                    assert!(
+                        matches!(reply, ControlReply::Ok(ReplyOk::Unit)),
+                        "{reply:?}"
+                    );
+                    accepted = true;
+                }
+                ControlServerMsg::Event(ControlEvent::GitChunk { id, bytes }) => {
+                    assert_eq!(id, 77, "chunks carry the id the client chose");
+                    split.push(&bytes, |l| got.push(l.to_string()));
+                }
+                ControlServerMsg::Event(ControlEvent::GitEnd { id, code, failed }) => {
+                    assert_eq!(id, 77);
+                    assert!(!failed, "git ran");
+                    break code;
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        split.finish(|l| got.push(l.to_string()));
+        assert!(accepted, "the request was answered");
+        assert_eq!(code, Some(0));
+        assert_eq!(got, expected, "streamed lines match the buffered read");
+        assert!(!got.is_empty(), "this repo has commits");
+    }
+
     fn ask(client: &mut UnixStream, req_id: u64, req: ControlRequest) -> ControlReply {
         ControlClientMsg::Request { req_id, req }
             .encode(&mut *client)

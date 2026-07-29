@@ -58,6 +58,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session" means: paste it into `codex resume`, a bug report, or another tool.
   (#211)
 
+- **Remote panes read big git output incrementally** — `Host` grew a streaming
+  companion to its buffered `git`, implemented on both the local host and the
+  remote wire protocol, so a read whose size scales with the work tree no
+  longer has to exist in memory all at once on either side. Servers advertise
+  it as the `git-stream` feature and clients fall back to the buffered read
+  when it is absent, so an older `tty7-server` keeps working exactly as it did
+  — it is never sent a request it could not decode. (#239)
+
 - **Sidebar diff preview is optional** — clicking a sidebar row's `+N −N`
   working-tree counts opens the diff overlay, which is the point of them for
   most people but not for everyone. Settings → Window & Tabs → *Open diff
@@ -113,13 +121,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   300-file, 90 000-line, 4.5 MB working-tree diff:
 
   - The full `git diff HEAD` was read into one `String` before parsing began.
-    It is now streamed off the pipe a line at a time, so peak transient memory
-    is the longest line — 4 552 060 bytes resident → 50 bytes — at a cost of
-    ~1.7× the parse CPU (3.97 ms → 6.76 ms) on the background thread, where it
-    never touches a frame.
+    It is now read incrementally through a new streaming call on `Host`, so
+    peak transient memory is one 64 KiB buffer rather than the whole diff.
+    Measured on this repository's own `git log -p -n 400` (8 269 409 bytes of
+    real git output, release build): 8.3 MB resident → 64 KiB, and *faster*
+    end to end — 829 ms buffered (817 ms read + 12 ms parse) → 557 ms streamed,
+    because parsing now overlaps with git producing output instead of waiting
+    for all of it.
   - The parsed snapshot was deep-cloned onto every tab's overlay *on the UI
-    update path*. It is now shared behind an `Arc`: 2.41 ms of main-thread
-    copying per holder → 11 ns.
+    update path*. It is now shared behind an `Arc`: 1.99 ms of main-thread
+    copying per holder → 10 ns (426 µs → 10 ns even at the new retention
+    budget).
   - The per-file 2000-line cap bounded one pathological file but not the sum,
     so two hundred ordinary files could retain 90 000 `DiffLine`s. A repo-wide
     budget now caps retained lines and files-with-hunks — 90 000 lines / 6.2 MiB

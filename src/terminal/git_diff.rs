@@ -13,7 +13,9 @@
 //!
 //! And never trusted to be *small*, either. `git diff HEAD` is the one git read
 //! in this app whose output scales with the working tree rather than with what
-//! the UI can show, so the parser retains at most [`MAX_LINES_PER_FILE`] per
+//! the UI can show, so two things bound it: the read is incremental
+//! ([`Host::git_lines`](crate::ui::host_ops::Host::git_lines)) rather than
+//! buffered whole, and the parser retains at most [`MAX_LINES_PER_FILE`] per
 //! file and [`MAX_TOTAL_LINES`] / [`MAX_FILES_WITH_HUNKS`] across the
 //! repository. The `+`/`−` counts deliberately escape all of it: they are
 //! compared against `git diff --numstat` to decide whether the overlay is
@@ -248,13 +250,24 @@ pub fn probe(host: &dyn Host, cwd: &Path) -> Option<DiffSnapshot> {
     // unified format. A failed diff (e.g. racing a concurrent git write) still
     // yields a snapshot — an empty file list with the branch — rather than
     // hiding the overlay; the next refresh fills it in.
-    let files = git_status::git(
-        host,
+    // Incremental, not buffered: `git diff HEAD` on a big work tree prints tens
+    // of megabytes, and holding all of it before parsing could drop what it
+    // doesn't keep is the cost issue #239 measured. `git_lines` funnels through
+    // the pane's own host either way — it is streaming where the transport can
+    // carry it and buffered where it can't, so the lines seen here are the same
+    // either way.
+    let mut parser = DiffParser::default();
+    let files = match host.git_lines(
         cwd,
         &["diff", "--no-color", "--no-ext-diff", "-M", "HEAD"],
-    )
-    .map(|out| parse_unified(&out))
-    .unwrap_or_default();
+        &mut |line| parser.push_line(line),
+    ) {
+        // A failed diff (e.g. racing a concurrent git write) still yields a
+        // snapshot — an empty file list with the branch — rather than hiding
+        // the overlay; the next refresh fills it in.
+        Ok(Some(0)) => parser.finish(),
+        _ => Vec::new(),
+    };
     // `--full-name` pins paths to the repo root regardless of which
     // subdirectory the pane sits in, matching the diff's path space. Capped for
     // the same reason the diff is: `--others` walks everything not yet ignored,
@@ -262,20 +275,17 @@ pub fn probe(host: &dyn Host, cwd: &Path) -> Option<DiffSnapshot> {
     // paths.
     let mut untracked: Vec<String> = Vec::new();
     let mut untracked_total = 0usize;
-    let ok = git_status::git(
-        host,
+    let listed = host.git_lines(
         cwd,
         &["ls-files", "--others", "--exclude-standard", "--full-name"],
-    )
-    .map(|out| {
-        for line in out.lines() {
+        &mut |line| {
             untracked_total += 1;
             if untracked.len() < MAX_UNTRACKED {
                 untracked.push(line.to_string());
             }
-        }
-    });
-    if ok.is_none() {
+        },
+    );
+    if !matches!(listed, Ok(Some(0))) {
         // A failed listing is "we don't know", not "there are none" — same
         // shape as the diff above.
         untracked.clear();
@@ -295,9 +305,10 @@ pub fn probe(host: &dyn Host, cwd: &Path) -> Option<DiffSnapshot> {
 /// and the first hunk (modes, index, similarity) are simply skipped, so a git
 /// version printing extra headers degrades to "fewer facts", never a panic.
 ///
-/// The whole-string form: [`probe`] hands it the output of one `git diff`
-/// invocation. [`DiffParser`] underneath is incremental, so a caller that can
-/// feed lines as they arrive does not have to hold the whole diff at once.
+/// The whole-string form the tests drive the parser through. [`probe`] feeds
+/// [`DiffParser`] a line at a time off the host's streaming read instead, so no
+/// caller in the app ever holds the full diff as one `String`.
+#[cfg(test)]
 pub fn parse_unified(out: &str) -> Vec<FileDiff> {
     let mut parser = DiffParser::default();
     for line in out.lines() {
@@ -873,71 +884,56 @@ index 1..2 100644
     /// Measurement harness for issue #239 finding 1 — run with
     /// `cargo test --release -- --ignored --nocapture bench_stream_vs_buffer`.
     ///
-    /// Stands in for `Command::output()` vs [`git_status::git_lines`] with a
-    /// file on disk, so the two paths differ only in whether the whole diff is
-    /// materialised as one `String` before parsing starts.
+    /// Measures the shipped code paths against real git output in this
+    /// repository: `git_output` (what `Host::git` uses) versus `git_stream` +
+    /// `LineSplitter` (what `Host::git_lines` uses on a local host), both fed
+    /// to the same [`DiffParser`].
     #[test]
     #[ignore = "measurement, not an assertion"]
     fn bench_stream_vs_buffer() {
-        use std::io::{BufRead as _, BufReader, Write as _};
         use std::time::Instant;
+        use tty7_core::core::git::{LineSplitter, git_output, git_stream};
 
-        let path = std::env::temp_dir().join("tty7-diff-bench.patch");
-        {
-            let mut f = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
-            // ~90k changed lines over 300 files — a big but not absurd agent
-            // session's working tree.
-            for file in 0..300 {
-                write!(
-                    f,
-                    "diff --git a/f{file}.rs b/f{file}.rs\nindex 1..2 100644\n--- a/f{file}.rs\n+++ b/f{file}.rs\n@@ -0,0 +1,300 @@\n"
-                )
-                .unwrap();
-                for i in 0..300 {
-                    writeln!(f, "+file {file} line {i} of a fairly typical source line").unwrap();
-                }
-            }
-        }
-        let size = std::fs::metadata(&path).unwrap().len();
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        // Real, sizeable git output: patches for the last few hundred commits.
+        let args = ["log", "-p", "-n", "400", "--no-color"];
 
         let t = Instant::now();
-        let buffered = std::fs::read_to_string(&path).unwrap();
+        let Ok(out) = git_output(here, &args) else {
+            println!("no git here; skipping");
+            return;
+        };
         let read = t.elapsed();
+        let resident = out.stdout.len();
         let t = Instant::now();
-        let a = parse_unified(&buffered);
+        let buffered_files = parse_unified(&String::from_utf8_lossy(&out.stdout));
+        let buffered_parse = t.elapsed();
         println!(
-            "buffered: read {size} bytes in {read:?} (all resident), parse {:?}, {} files",
-            t.elapsed(),
-            a.len()
+            "buffered: {resident} bytes resident, read {read:?}, parse {buffered_parse:?}, \
+             {} files",
+            buffered_files.len()
         );
-        drop(buffered);
+        drop(out);
 
         let t = Instant::now();
         let mut parser = DiffParser::default();
-        // Same capacity `git_lines` uses.
-        let mut reader = BufReader::with_capacity(64 * 1024, std::fs::File::open(&path).unwrap());
-        let mut buf = Vec::new();
-        let mut longest = 0usize;
-        loop {
-            buf.clear();
-            if reader.read_until(b'\n', &mut buf).unwrap() == 0 {
-                break;
-            }
-            while buf.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
-                buf.pop();
-            }
-            longest = longest.max(buf.len());
-            parser.push_line(&String::from_utf8_lossy(&buf));
-        }
-        let b = parser.finish();
+        let mut split = LineSplitter::default();
+        let mut peak = 0usize;
+        git_stream(here, &args, |chunk| {
+            peak = peak.max(chunk.len());
+            split.push(chunk, |line| parser.push_line(line));
+            true
+        })
+        .unwrap();
+        split.finish(|line| parser.push_line(line));
+        let streamed = t.elapsed();
+        let streamed_files = parser.finish();
         println!(
-            "streamed: read+parse {:?}, {} files, peak transient buffer {longest} bytes \
-             (vs {size} buffered)",
-            t.elapsed(),
-            b.len()
+            "streamed: peak transient chunk {peak} bytes (vs {resident} resident), \
+             read+parse {streamed:?}, {} files",
+            streamed_files.len()
         );
-        assert_eq!(a.len(), b.len());
-        let _ = std::fs::remove_file(&path);
+        assert_eq!(buffered_files.len(), streamed_files.len());
     }
 
     /// Measurement harness for issue #239, not a correctness gate — run with

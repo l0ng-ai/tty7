@@ -35,13 +35,14 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use crate::daemon::control::{
     ControlClient, ControlEvent, ControlHello, ControlHelloOk, ControlRequest, EventSink,
     KEEPALIVE_DEAD_AFTER, KEEPALIVE_IDLE_BEFORE_PING, KEEPALIVE_PING_INTERVAL, LinkShutdown,
-    ReplyOk,
+    ReplyOk, feature,
 };
 use crate::host::{
     Entry, Host, HostId, Meta, Output, SearchHit, SharedHost, WatchHandle, WatchSub,
@@ -53,6 +54,11 @@ pub struct RemoteHost {
     client: Arc<ControlClient>,
     separator: char,
     watches: Arc<WatchRegistry>,
+    streams: Arc<GitStreamRegistry>,
+    /// Ids for [`ControlRequest::GitStream`]. Client-assigned so the receiver
+    /// can be registered before the request is sent; unique per connection is
+    /// all they need to be.
+    next_stream: AtomicU64,
 }
 
 impl RemoteHost {
@@ -123,6 +129,8 @@ impl RemoteHost {
         // rather than reached back into.
         let watches = Arc::new(WatchRegistry::default());
         let sink_watches = Arc::clone(&watches);
+        let streams: Arc<GitStreamRegistry> = Arc::new(GitStreamRegistry::default());
+        let sink_streams = Arc::clone(&streams);
         // The id is derived here rather than read back off the host because the
         // sink has to exist before the host does — and because an event that
         // could not say *which machine* it came from would be useless to the
@@ -133,6 +141,10 @@ impl RemoteHost {
             ControlEvent::Watch { .. } | ControlEvent::WatchOverflow { .. } => {
                 sink_watches.dispatch(event);
             }
+            // Git chunks belong to whichever thread is draining that stream.
+            ControlEvent::GitChunk { .. } | ControlEvent::GitEnd { .. } => {
+                sink_streams.dispatch(event);
+            }
             // Everything else is about a *window*, and this layer has none.
             other => crate::daemon::control::observe_event(id, other),
         });
@@ -142,6 +154,8 @@ impl RemoteHost {
 
         let host = Arc::new(RemoteHost {
             id,
+            streams,
+            next_stream: AtomicU64::new(1),
             client: Arc::clone(&client),
             separator,
             watches,
@@ -357,6 +371,70 @@ impl Host for RemoteHost {
         }
     }
 
+    /// Incremental when the peer serves it, buffered when it does not.
+    ///
+    /// The fallback is not a nicety: a server predating
+    /// [`ControlRequest::GitStream`] cannot *decode* the variant, and an
+    /// undecodable frame ends the connection — so asking a machine that has not
+    /// advertised [`feature::GIT_STREAM`] would not degrade, it would
+    /// disconnect. The buffered path it falls back to is the one every remote
+    /// pane used before this existed, so an older server keeps working exactly
+    /// as it did.
+    fn git_lines(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        on_line: &mut dyn FnMut(&str),
+    ) -> io::Result<Option<i32>> {
+        if !self.client.hello().has_feature(feature::GIT_STREAM) {
+            let out = self.git(cwd, args)?;
+            let mut split = crate::core::git::LineSplitter::default();
+            split.push(&out.stdout, &mut *on_line);
+            split.finish(&mut *on_line);
+            return Ok(out.status);
+        }
+
+        // Registered *before* the request goes out, so a chunk cannot arrive
+        // with nowhere to go — see `ControlRequest::GitStream`.
+        let id = self.next_stream.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = smol::channel::unbounded();
+        self.streams.insert(id, tx);
+        // The receiver comes off the registry however this returns: an early
+        // `?` below would otherwise leak the entry for the life of the
+        // connection.
+        let _guard = StreamGuard {
+            streams: &self.streams,
+            id,
+        };
+
+        match self.call(ControlRequest::GitStream {
+            id,
+            cwd: wire_path(cwd),
+            args: args.iter().map(|a| a.to_string()).collect(),
+        })? {
+            ReplyOk::Unit => {}
+            other => return Err(wrong_shape("an accepted git stream", &other)),
+        }
+
+        let mut split = crate::core::git::LineSplitter::default();
+        loop {
+            match rx.recv_blocking() {
+                Ok(GitStreamMsg::Chunk(bytes)) => split.push(&bytes, &mut *on_line),
+                Ok(GitStreamMsg::End { code, failed }) => {
+                    split.finish(&mut *on_line);
+                    return if failed {
+                        Err(io::Error::other("the server could not run git"))
+                    } else {
+                        Ok(code)
+                    };
+                }
+                // The connection died mid-stream. Distinguishable from a
+                // non-zero exit, same as everywhere else in this file.
+                Err(_) => return Err(io::Error::other("the control connection closed mid-stream")),
+            }
+        }
+    }
+
     fn watch(&self, dirs: &[PathBuf]) -> io::Result<WatchSub> {
         let id = match self.call(ControlRequest::WatchOpen {
             dirs: wire_paths(dirs),
@@ -408,6 +486,72 @@ impl std::fmt::Debug for RemoteHost {
 // ---------------------------------------------------------------------------
 // Watches
 // ---------------------------------------------------------------------------
+
+/// Removes a stream's registry entry however its reader leaves — an early
+/// return on a wire error would otherwise leave the sender in the map for the
+/// life of the connection.
+struct StreamGuard<'a> {
+    streams: &'a GitStreamRegistry,
+    id: u64,
+}
+
+impl Drop for StreamGuard<'_> {
+    fn drop(&mut self) {
+        self.streams.remove(self.id);
+    }
+}
+
+/// One chunk of a running [`ControlRequest::GitStream`], as the reader thread
+/// hands it to the thread that asked for the stream.
+enum GitStreamMsg {
+    Chunk(Vec<u8>),
+    /// The stream is over: git's exit code, and whether the server failed to
+    /// run it at all.
+    End {
+        code: Option<i32>,
+        failed: bool,
+    },
+}
+
+/// Receivers for git streams currently running on this connection, keyed by the
+/// id the client chose for each. Entries are inserted *before* the request goes
+/// out and removed when the stream ends, so no chunk can arrive with nowhere to
+/// go — see [`ControlRequest::GitStream`].
+#[derive(Default)]
+struct GitStreamRegistry {
+    streams: Mutex<HashMap<u64, smol::channel::Sender<GitStreamMsg>>>,
+}
+
+impl GitStreamRegistry {
+    fn insert(&self, id: u64, tx: smol::channel::Sender<GitStreamMsg>) {
+        if let Ok(mut m) = self.streams.lock() {
+            m.insert(id, tx);
+        }
+    }
+
+    fn remove(&self, id: u64) {
+        if let Ok(mut m) = self.streams.lock() {
+            m.remove(&id);
+        }
+    }
+
+    /// Route one push. Runs on the reader thread, so it must not block — the
+    /// channel is unbounded and `try_send` never waits. A chunk for an id that
+    /// has already finished (a cancelled read the server had not noticed yet)
+    /// is dropped, which is the same unknown-id rule watches follow.
+    fn dispatch(&self, event: ControlEvent) {
+        let (id, msg) = match event {
+            ControlEvent::GitChunk { id, bytes } => (id, GitStreamMsg::Chunk(bytes)),
+            ControlEvent::GitEnd { id, code, failed } => (id, GitStreamMsg::End { code, failed }),
+            _ => return,
+        };
+        if let Ok(m) = self.streams.lock()
+            && let Some(tx) = m.get(&id)
+        {
+            let _ = tx.try_send(msg);
+        }
+    }
+}
 
 /// Live subscriptions, keyed by the id the server assigned.
 ///
@@ -674,6 +818,41 @@ mod tests {
         )
         .unwrap();
         (host, seen_rx)
+    }
+
+    /// A peer that does not advertise `git-stream` must never be sent the
+    /// variant: it predates it, could not decode it, and an undecodable frame
+    /// ends the connection. `git_lines` falls back to the buffered `Git` and
+    /// still yields the same lines, so an older server keeps working exactly as
+    /// it did. (`hello_ok` above advertises only `control` and `host-rpc`,
+    /// which is precisely that server.)
+    #[test]
+    fn git_lines_falls_back_to_the_buffered_read_without_the_feature() {
+        let (host, seen) = host_with_peer('/', |req| match req {
+            ControlRequest::Git { .. } => Some((
+                ControlReply::Ok(ReplyOk::Output(Output {
+                    status: Some(0),
+                    stdout: b"alpha\nbeta\ngamma\n".to_vec(),
+                    stderr: Vec::new(),
+                })),
+                Vec::new(),
+            )),
+            other => panic!("a peer without the feature must not be asked {other:?}"),
+        });
+
+        let mut lines = Vec::new();
+        let code = host
+            .git_lines(Path::new("/repo"), &["diff"], &mut |l| {
+                lines.push(l.to_string())
+            })
+            .unwrap();
+
+        assert_eq!(code, Some(0));
+        assert_eq!(lines, ["alpha", "beta", "gamma"]);
+        assert!(
+            matches!(seen.recv().unwrap(), ControlRequest::Git { .. }),
+            "the buffered request went out, not GitStream"
+        );
     }
 
     /// Path arithmetic follows the *peer's* separator, not the client's. On a

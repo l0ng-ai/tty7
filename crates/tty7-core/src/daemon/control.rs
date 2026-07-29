@@ -142,6 +142,11 @@ pub mod kind {
 /// These exist so a capability added after protocol v3 doesn't need another
 /// version bump: a peer answers "what can you do" with a list rather than a
 /// number, and an unknown string is simply a capability this build won't use.
+/// Target size of a [`ControlEvent::GitChunk`] batch. Big enough that a
+/// multi-megabyte diff is a few hundred frames rather than a frame per line,
+/// small enough that neither side ever holds much of it.
+pub const GIT_STREAM_CHUNK: usize = 64 * 1024;
+
 pub mod feature {
     /// Speaks the control dialect: kinds 60-63, this module's framing.
     pub const CONTROL: &str = "control";
@@ -151,6 +156,13 @@ pub mod feature {
     pub const HOST_RPC: &str = "host-rpc";
     /// Serves the `Workspace*` requests.
     pub const WORKSPACE_STORE: &str = "workspace-store";
+    /// Serves [`super::ControlRequest::GitStream`] — the incremental form of
+    /// [`super::ControlRequest::Git`], for reads whose output scales with the
+    /// work tree rather than with what the caller can use. Advertised
+    /// separately because a server predating it would fail to *decode* the
+    /// variant, and an undecodable frame ends the connection; a client that
+    /// does not see this flag must use the buffered `Git` instead.
+    pub const GIT_STREAM: &str = "git-stream";
     /// Can be launched as `--stdio` and bridge its own stdin/stdout to the
     /// machine-local socket (the fallback when `AllowStreamLocalForwarding` is
     /// off, the only option under WSL, and how the CI end-to-end test runs).
@@ -266,6 +278,27 @@ pub enum ControlRequest {
         cwd: String,
         args: Vec<String>,
     },
+    /// `git -C <cwd> <args>`, delivered incrementally: the server pushes
+    /// [`ControlEvent::GitChunk`]s under `id` until a [`ControlEvent::GitEnd`]
+    /// carrying the exit status.
+    ///
+    /// Same invariants as [`Git`](Self::Git) — it is the same invocation — but
+    /// neither side has to hold the whole output: `git diff HEAD` on a large
+    /// work tree is tens of megabytes, and the caller throws most of it away.
+    /// Gated on [`feature::GIT_STREAM`].
+    ///
+    /// **The client picks `id`**, which is why there is no id in the reply.
+    /// Ids only have to be unique within a connection, and one connection has
+    /// one client — so choosing it here lets the client register its receiver
+    /// *before* the request goes out. A server-assigned id would arrive in the
+    /// reply, leaving a window in which a chunk that overtook it would reach a
+    /// client with no entry for that id and be dropped under the unknown-id
+    /// rule, silently losing the front of the diff.
+    GitStream {
+        id: u64,
+        cwd: String,
+        args: Vec<String>,
+    },
 
     // ----- watch ------------------------------------------------------------
     /// Open a subscription; the server answers with a [`ReplyOk::WatchId`].
@@ -346,7 +379,7 @@ impl ControlRequest {
             CreateFileNew { .. } | CreateDir { .. } | Rename { .. } | Remove { .. } => {
                 Duration::from_secs(10)
             }
-            Git { .. } | Search { .. } => Duration::from_secs(20),
+            Git { .. } | GitStream { .. } | Search { .. } => Duration::from_secs(20),
             WorkspaceList | WorkspaceGet { .. } | WorkspacePut { .. } | WorkspaceDelete { .. } => {
                 Duration::from_secs(10)
             }
@@ -540,6 +573,30 @@ pub enum ControlEvent {
     /// the client invalidates the subtree instead of applying a list.
     WatchOverflow {
         id: u64,
+    },
+
+    /// A batch of a [`ControlRequest::GitStream`]'s stdout, in order.
+    ///
+    /// Line data, newline-terminated, batched into frames of roughly
+    /// [`GIT_STREAM_CHUNK`] bytes — not a verbatim slice of git's stdout. The
+    /// server reads through [`crate::host::Host::git_lines`], so what crosses
+    /// the wire is what that yields: line *content* is preserved exactly (bar
+    /// the lossy UTF-8 replacement it already applies), while `\r\n` endings
+    /// and whether the last line carried a terminator are normalised away. The
+    /// only consumer is line-oriented, so that is the contract rather than an
+    /// accident — and framing per batch instead of per line is what keeps a
+    /// 90 000-line diff from becoming 90 000 frames.
+    GitChunk {
+        id: u64,
+        bytes: Vec<u8>,
+    },
+    /// The stream is over. `code` is git's exit status, `None` when it was
+    /// killed by a signal; `failed` reports a read error on the server side,
+    /// which is distinct from git exiting non-zero.
+    GitEnd {
+        id: u64,
+        code: Option<i32>,
+        failed: bool,
     },
 
     // ----- reserved for M5/M6; defined so the dialect doesn't need a bump ---
