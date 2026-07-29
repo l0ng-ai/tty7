@@ -103,6 +103,71 @@ fn ssh_connection_for(
     })
 }
 
+/// Run the *whole* daemon — panes **and** control — until killed. The one
+/// entry point behind both `tty7 --daemon` and `tty7-server --daemon`.
+///
+/// Local and remote are deliberately the same shape: a machine is a machine,
+/// whether the client sits on it or an ocean away, and the design's terminal
+/// state is "one machine = one daemon = one workspace tree". That tree is
+/// served over the control dialect, so the *local* daemon has to speak it too —
+/// which is why this lives here rather than staying a `tty7-server` detail.
+///
+/// Control comes up first, and on its own thread: a machine that cannot host
+/// panes (no pty, a locked-down container) should still be able to back a
+/// workspace's files, so a control failure is logged and stepped over rather
+/// than being fatal. The pane listener then owns this thread until the process
+/// is killed, exactly as [`run`] always has.
+///
+/// The control listener stays `#[cfg(unix)]`: the control dialect rides a
+/// Unix-domain socket, and the Windows pane path (token-checked loopback TCP)
+/// has no control listener yet. On Windows this is therefore [`run`] plus a
+/// log line — the pane protocol is untouched.
+pub fn run_daemon() -> anyhow::Result<()> {
+    // Reported on **stderr**, not only the log: a headless server's log file is
+    // off unless `TTY7_LOG` asks for it, and the bound path is this daemon's
+    // one observable answer to "where do I connect". The remote-router test
+    // reads this exact line back to prove the client's derivation and the
+    // server's bind agree, so the prefix is part of the contract.
+    #[cfg(unix)]
+    match crate::host::server::spawn_control_listener_with(
+        crate::host::local::LocalHost::shared(),
+        control_services(),
+    ) {
+        Ok(path) => eprintln!("tty7-server: control socket at {}", path.display()),
+        Err(e) => eprintln!("tty7-server: control listener unavailable: {e}"),
+    }
+    #[cfg(not(unix))]
+    log::info!("no control listener on this platform; serving panes only");
+
+    run()
+}
+
+/// What this machine offers over a control connection, beyond its filesystem.
+///
+/// The workspace store is why a daemon serves control at all: the workspace
+/// list, the tab/pane tree and each pane's facts live on **the machine the
+/// panes run on**, so that every client of this machine — the GUI on it, a
+/// laptop across the world — sees the same thing. Clients keep only their own
+/// view state.
+///
+/// A machine with no home directory to place the file in still serves files
+/// and panes — it simply omits `workspace-store` from its capabilities, and
+/// clients see the same "does not serve the workspace store" answer a server
+/// without one has always given.
+pub fn control_services() -> crate::host::server::Services {
+    use crate::core::workspace_store::WorkspaceStore;
+    match WorkspaceStore::shared() {
+        Ok(store) => {
+            log::info!("workspace store at {}", store.path().display());
+            crate::host::server::Services::with_workspaces(store)
+        }
+        Err(e) => {
+            log::warn!("no workspace store ({e}); serving files and panes only");
+            crate::host::server::Services::none()
+        }
+    }
+}
+
 /// Run the daemon: bind the socket and serve connections forever. Returns `Err`
 /// only on a fatal setup failure (bad socket path, bind error); the accept loop
 /// itself runs until the process is killed.

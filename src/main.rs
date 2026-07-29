@@ -317,9 +317,13 @@ fn main() {
     // Daemon mode: when launched with `--daemon` we run the headless persistent
     // terminal server and never open a window. This is the backing process the GUI
     // auto-spawns and reconnects to; it owns all PTYs + child shells and outlives
-    // the GUI. Run to completion (the accept loop blocks until killed) then return.
+    // the GUI. It is the *same* daemon `tty7-server --daemon` runs on a remote
+    // box — panes plus the control dialect — because a local machine and a
+    // remote one are the same thing seen from different distances, and the
+    // workspace tree both serve lives behind control. Run to completion (the
+    // accept loop blocks until killed) then return.
     if std::env::args().any(|a| a == "--daemon") {
-        if let Err(e) = crate::daemon::server::run() {
+        if let Err(e) = crate::daemon::server::run_daemon() {
             log::error!("daemon exited with error: {e}");
         }
         return;
