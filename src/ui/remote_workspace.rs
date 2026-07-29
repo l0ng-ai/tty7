@@ -1905,6 +1905,14 @@ pub(crate) fn workspace_accepts_input(cx: &gpui::App, workspace: WorkspaceId) ->
     RemoteLinks::status_of(cx, workspace).is_none_or(|s| s.accepts_input())
 }
 
+/// Whether another client's session currently holds `workspace`. Read by the
+/// delta application, which must leave a preempted window passive — attaching
+/// to the usurper's panes would steal the streams they are typing into.
+pub(crate) fn workspace_is_preempted(cx: &gpui::App, workspace: WorkspaceId) -> bool {
+    cx.try_global::<RemoteLinks>()
+        .is_some_and(|links| links.preempted.contains_key(&workspace))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

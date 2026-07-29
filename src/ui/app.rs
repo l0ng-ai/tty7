@@ -936,7 +936,9 @@ impl Tty7App {
         let is_remote = WorkspaceStore::all(cx)
             .get(workspace)
             .is_some_and(|w| w.is_remote());
-        let hydrate = known && restore;
+        // A remote workspace hydrates even with restore off: its panes are
+        // running sessions on another machine, not a saved layout.
+        let hydrate = known && (restore || is_remote);
         // A workspace that was already on file restores its tab/split layout and
         // each pane's cwd, unless the user turned restore off — then it starts
         // fresh. A *brand-new* one has no tabs to restore, so what it comes up
@@ -1519,9 +1521,14 @@ impl Tty7App {
         // over there. Nothing would reconnect it and nothing would offer it
         // again; the only way back is re-adding the machine by hand.
         let answered = WorkspaceStore::machine_is_connected(cx, self.workspace);
-        if self.tabs.is_empty() && answered {
+        if self.tabs.is_empty()
+            && answered
+            && crate::ui::tree_sync::window_is_informed(cx, self.workspace)
+        {
             // Same as the picker swap: an empty workspace being dropped takes
-            // its (empty) tree on the machine with it.
+            // its (empty) tree on the machine with it. Only an informed window
+            // may say so — one still waiting on its hydration is empty because
+            // the pull has not answered, not because the workspace is.
             crate::ui::tree_sync::fire_workspace_op(cx, self.workspace, |ws| {
                 tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
             });
@@ -1664,7 +1671,11 @@ impl Tty7App {
         if previous == id {
             return;
         }
-        if self.tabs.is_empty() {
+        // Only an *informed* empty window proves the workspace is blank: one
+        // still waiting on its hydration is empty because the pull has not
+        // answered, and dropping the workspace then would delete a populated
+        // tree on the strength of our own ignorance.
+        if self.tabs.is_empty() && crate::ui::tree_sync::window_is_informed(cx, previous) {
             // Dropping the blank workspace here, so the machine's tree drops
             // its (equally blank) copy — otherwise every visit to the picker
             // would leave an empty workspace behind on the daemon.
@@ -1672,6 +1683,8 @@ impl Tty7App {
                 tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
             });
             WorkspaceStore::remove(cx, previous);
+        } else if self.tabs.is_empty() {
+            WorkspaceStore::close_window(cx, previous);
         } else {
             self.save_session(cx);
             WorkspaceStore::close_window(cx, previous);
@@ -1680,16 +1693,23 @@ impl Tty7App {
 
         let restore = cx.global::<Config>().restore_session;
         let (claimed, session) = WorkspaceStore::claim(cx, Some(id));
+        let is_remote = WorkspaceStore::all(cx)
+            .get(claimed)
+            .is_some_and(|w| w.is_remote());
         crate::ui::windows::WindowRegistry::rebind(cx, previous, claimed);
-        if restore {
+        // A remote workspace hydrates regardless of the restore setting: its
+        // panes are running sessions on another machine, not a saved layout,
+        // and "restore off" opening it empty-and-authoritative would have the
+        // first sync close every one of its tabs.
+        if restore || is_remote {
             // Same shape as `for_workspace`: the machine's tree is the layout
             // authority, so the window swaps to empty and the pull rebuilds it
             // — for the local daemon within milliseconds.
             self.adopt_workspace(claimed, Session::default(), window, cx);
             crate::ui::tree_sync::hydrate_window_from_tree(cx, claimed);
         } else {
-            // Restore off: the saved layout the user explicitly picked from
-            // the switcher is the intended state, tree included.
+            // Restore off, local: the saved layout the user explicitly picked
+            // from the switcher is the intended state, tree included.
             crate::ui::tree_sync::mark_window_informed(cx, claimed);
             self.adopt_workspace(claimed, session, window, cx);
         }

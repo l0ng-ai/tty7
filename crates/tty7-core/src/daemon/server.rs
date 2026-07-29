@@ -46,6 +46,35 @@ impl Registry {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Never mint an id `machine`'s tree already names — see the caller in
+    /// [`run`] for the aliasing failures this closes. The registry and the
+    /// leaves are checked both: a pane record can outlive its leaf briefly,
+    /// and either one aliased is one too many.
+    fn seed_ids_past(&self, machine: &crate::core::machine::Machine) {
+        let max = machine
+            .panes
+            .iter()
+            .map(|p| p.id)
+            .chain(
+                machine
+                    .workspaces
+                    .iter()
+                    .flat_map(|w| w.tabs.iter())
+                    .flat_map(|t| t.root.pane_ids()),
+            )
+            .max()
+            .unwrap_or(0);
+        // fetch_max rather than store: harmless today (this runs before any
+        // spawn), but a seed must never move the counter backwards.
+        let before = self.next_id.fetch_max(max + 1, Ordering::Relaxed);
+        if max + 1 > before {
+            log::info!(
+                "pane ids start at {} (the tree names panes up to {max})",
+                max + 1
+            );
+        }
+    }
+
     fn insert(&self, pane: Arc<DaemonPane>) {
         self.panes.lock().unwrap().insert(pane.id, pane);
     }
@@ -285,6 +314,17 @@ pub fn run() -> anyhow::Result<()> {
     // HUP each PTY's foreground group and leave background jobs behind.
     #[cfg(unix)]
     serve_sigterm(registry.clone());
+
+    // Pane ids must never alias across restarts: the persisted tree still
+    // names the previous process's panes, and a fresh process minting from 1
+    // would hand a new shell an id some dead leaf claims — at which point the
+    // record's `live` flag flips back on for the wrong pane, revival stalls on
+    // "pane N is already part of this machine's tree", and a window attaching
+    // by the stale id steals an unrelated workspace's stream. Starting past
+    // everything the tree knows makes the id a name, not a slot.
+    if let Some(store) = crate::core::machine::observed_store() {
+        registry.seed_ids_past(&store.machine());
+    }
 
     // Now that the tree has an owner filling it, the daemon can *see* panes
     // nothing references any more — but it only reports them, deliberately.
@@ -918,6 +958,30 @@ mod tests {
         assert_eq!(reg.alloc_id(), 1);
         assert_eq!(reg.alloc_id(), 2);
         assert_eq!(reg.alloc_id(), 3);
+    }
+
+    /// Pane ids are names, not slots: a fresh process must never re-mint an id
+    /// the persisted tree still references, or a stale leaf aliases a new
+    /// shell — the tree marks the wrong pane live, revival's re-registration
+    /// is refused forever, and an attach by the old id steals another
+    /// workspace's stream.
+    #[test]
+    fn pane_ids_never_alias_what_the_persisted_tree_references() {
+        use crate::core::machine::{MachineStore, PaneSeed};
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = MachineStore::open(dir.path().join("machine.json"));
+        let ws = store.workspace_create(None, None, None).unwrap();
+        store
+            .tab_create(ws.id, None, PaneSeed::bare(7), None, None)
+            .unwrap();
+
+        let reg = Registry::new();
+        reg.seed_ids_past(&store.machine());
+        assert_eq!(reg.alloc_id(), 8, "past the highest id the tree names");
+
+        // A seed can only move the counter forward.
+        reg.seed_ids_past(&store.machine());
+        assert_eq!(reg.alloc_id(), 9);
     }
 
     #[test]
