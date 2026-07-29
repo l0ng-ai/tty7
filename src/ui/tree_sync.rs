@@ -1716,13 +1716,21 @@ impl Tty7App {
             .get(self.workspace)
             .is_some_and(|w| w.is_remote());
         let mut existing: HashMap<u64, PaneSlot> = HashMap::new();
+        // Native-SSH leaves in a remote window hold panes in *this* client's
+        // daemon: they are deliberately absent from the remote machine's tree
+        // (their ids would collide with unrelated panes there), so the tree
+        // this tab is rebuilt from cannot mention them. They are kept aside
+        // and appended back as splits below — dropping their views would
+        // orphan running local sessions the writer never touched.
+        let mut ssh_slots: Vec<PaneSlot> = Vec::new();
         for slot in self.tabs[index].pane.leaves() {
             let id = match &slot {
-                // A native-SSH leaf in a remote window holds a pane in *this*
-                // client's daemon; its id shares nothing but digits with the
-                // remote machine's, and matching it here would rebind the SSH
-                // view onto an unrelated remote pane.
-                PaneSlot::Ready(view) if remote && view.read(cx).ssh_spec().is_some() => None,
+                // Matching a native-SSH leaf's *local* id against remote ids
+                // would rebind the SSH view onto an unrelated remote pane.
+                PaneSlot::Ready(view) if remote && view.read(cx).ssh_spec().is_some() => {
+                    ssh_slots.push(slot);
+                    continue;
+                }
                 PaneSlot::Ready(view) => Some(view.read(cx).pane_id),
                 PaneSlot::Connecting(pending) => pending.read(cx).spawn.restore_pane,
             };
@@ -1733,6 +1741,12 @@ impl Tty7App {
         let Some(pane) = self.build_pane_from_tree(&tab.root, &mut existing, window, cx) else {
             return false;
         };
+        // The ssh leaves' places in the old split geometry are unknowable from
+        // the delta (the tree never held them), so each comes back as a fresh
+        // half-and-half split on the right — the shape a split created it in.
+        let pane = ssh_slots.into_iter().fold(pane, |tree, slot| {
+            Pane::split_node(gpui::Axis::Horizontal, 0.5, tree, Pane::Leaf(slot))
+        });
         let gui = &mut self.tabs[index];
         gui.pane = pane;
         gui.name = tab.name.clone();

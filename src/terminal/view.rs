@@ -8111,6 +8111,27 @@ pub(crate) fn quiet_test_pane(
     (view, daemon_side)
 }
 
+/// [`quiet_test_pane`], marked as a native-SSH pane — the shape a remote
+/// window's local SSH split has. `ssh_spec` is otherwise set only by the real
+/// spawn path, which needs an actual SSH handshake.
+#[cfg(all(test, unix))]
+pub(crate) fn quiet_test_ssh_pane(
+    pane_id: u64,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) -> (gpui::Entity<TerminalView>, std::os::unix::net::UnixStream) {
+    let (view, stream) = quiet_test_pane(pane_id, window, cx);
+    view.update(cx, |view, _| {
+        view.ssh_spec = Some(Box::new(
+            serde_json::from_str(
+                r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
+            )
+            .expect("a minimal NativeSshSpec decodes"),
+        ));
+    });
+    (view, stream)
+}
+
 /// gpui-harness tests: a real (headless) App + Window around a `TerminalView`
 /// wired to a socketpair, so `handle_event` and the event pump run exactly as
 /// in production. The test plays the daemon on the other end of the socket —

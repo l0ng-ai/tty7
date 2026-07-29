@@ -8540,6 +8540,100 @@ pub(crate) mod test_window {
     }
 }
 
+/// A native-SSH split inside a *remote* workspace's window runs in this
+/// client's daemon and is deliberately absent from the remote machine's tree —
+/// so a tree-driven tab rebuild has no leaf for it, and has to keep its view
+/// anyway or a running local session is orphaned with nothing on screen.
+#[cfg(all(test, unix))]
+mod ssh_rebuild_gpui_tests {
+    use super::test_window::harness_with_pane;
+    use crate::core::session::{
+        RemoteRef, RemoteTarget, WindowView, WindowViews, WorkspaceId, WorkspaceStore,
+    };
+    use crate::ui::pane::{Pane, PaneSlot};
+    use gpui::TestAppContext;
+    use tty7_core::core::machine::{LayoutDelta, PaneNode, Tab as TreeTab};
+
+    #[gpui::test]
+    fn a_tree_rebuild_keeps_the_native_ssh_split_a_remote_tab_holds(cx: &mut TestAppContext) {
+        // A window with one tab holding remote pane 1 (as far as the window is
+        // concerned; the socketpair plays the daemon).
+        let (app, mut vcx, _remote_pane_stream) = harness_with_pane(cx);
+
+        // Bind the window to a remote workspace and split a native-SSH pane
+        // into the tab — the state a remote window with a local SSH split has.
+        let remote = WindowView::on_remote(RemoteRef::new(
+            RemoteTarget::Alias {
+                alias: "build-box".into(),
+            },
+            WorkspaceId::new(),
+        ));
+        let remote_id = remote.id;
+        let _ssh_stream = app.update_in(&mut vcx, |app, window, cx| {
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![remote],
+                    active: None,
+                },
+            );
+            app.workspace = remote_id;
+            let (ssh_view, stream) = crate::terminal::view::quiet_test_ssh_pane(2, window, cx);
+            let existing = std::mem::replace(&mut app.tabs[0].pane, Pane::Empty);
+            app.tabs[0].pane = Pane::split_node(
+                gpui::Axis::Horizontal,
+                0.5,
+                existing,
+                Pane::leaf(PaneSlot::Ready(ssh_view)),
+            );
+            stream
+        });
+
+        // Another client of the remote machine restructured the tab. The
+        // delta's tree names only the remote pane — the SSH leaf was never in
+        // that tree to be named.
+        let applied = app.update_in(&mut vcx, |app, window, cx| {
+            let tab = TreeTab {
+                id: app.tabs[0].tree_id.get(),
+                name: None,
+                sidebar_group: None,
+                root: PaneNode::Leaf { pane: 1 },
+            };
+            app.apply_layout_delta(
+                &LayoutDelta::TabRestructured { tab, pane: None },
+                window,
+                cx,
+            )
+        });
+        assert!(
+            applied,
+            "the delta must apply without falling back to a resync"
+        );
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            let leaves = app.tabs[0].pane.leaves();
+            assert_eq!(leaves.len(), 2, "the ssh split must survive the rebuild");
+            assert!(
+                leaves.iter().any(|slot| match slot {
+                    PaneSlot::Ready(view) => view.read(cx).ssh_spec().is_some(),
+                    _ => false,
+                }),
+                "one leaf is still the native-SSH pane"
+            );
+            assert!(
+                leaves.iter().any(|slot| match slot {
+                    PaneSlot::Ready(view) => {
+                        let view = view.read(cx);
+                        view.ssh_spec().is_none() && view.pane_id == 1
+                    }
+                    _ => false,
+                }),
+                "the remote pane's existing view is reused, not re-attached"
+            );
+        });
+    }
+}
+
 #[cfg(test)]
 mod keybinding_gpui_tests {
     use super::test_window::harness;
