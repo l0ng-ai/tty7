@@ -1338,9 +1338,9 @@ mod tests {
     #[test]
     fn diff_click_target_needs_a_repo_either_way() {
         let mut cfg = Config::default();
-        assert_eq!(diff_click_cwd(&cfg, None), None);
+        assert_eq!(diff_click_cwd::<PathBuf>(&cfg, None), None);
         cfg.sidebar_diff_preview = false;
-        assert_eq!(diff_click_cwd(&cfg, None), None);
+        assert_eq!(diff_click_cwd::<PathBuf>(&cfg, None), None);
     }
 
     /// Groups appear in first-appearance order with Scratch pinned last, and

@@ -295,10 +295,9 @@ pub fn probe(host: &dyn Host, cwd: &Path) -> Option<DiffSnapshot> {
 /// and the first hunk (modes, index, similarity) are simply skipped, so a git
 /// version printing extra headers degrades to "fewer facts", never a panic.
 ///
-/// The whole-string form the tests drive the parser through; [`probe`] streams
-/// the same [`DiffParser`] line by line off git's stdout instead, so no caller
-/// in the app ever holds the full diff as one `String`.
-#[cfg(test)]
+/// The whole-string form: [`probe`] hands it the output of one `git diff`
+/// invocation. [`DiffParser`] underneath is incremental, so a caller that can
+/// feed lines as they arrive does not have to hold the whole diff at once.
 pub fn parse_unified(out: &str) -> Vec<FileDiff> {
     let mut parser = DiffParser::default();
     for line in out.lines() {

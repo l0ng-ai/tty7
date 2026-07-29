@@ -1186,7 +1186,7 @@ impl Tty7App {
         if self.right_panel.diff_cwd.as_ref() != Some(&key) {
             self.right_panel.diff_cwd = Some(key);
             self.right_panel.diff = None;
-            self.spawn_right_panel_diff(cwd.clone(), cx);
+            self.spawn_right_panel_diff(host.clone(), cwd.clone(), cx);
         } else if self.right_panel.diff.is_none() && self.right_panel.diff_pending.is_none() {
             // Nothing cached and nothing in flight: a probe for a previous cwd
             // landed after we had already moved on and dropped its result, so

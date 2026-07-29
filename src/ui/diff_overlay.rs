@@ -184,7 +184,7 @@ impl Tty7App {
         // probe still flies below, so the seeded view is never the last word.
         // Read here, before the `&mut` borrow of the tab.
         let seed = match (&self.right_panel.diff_cwd, &self.right_panel.diff) {
-            (Some(panel_cwd), Some(Some(snap))) if *panel_cwd == cwd => {
+            (Some(panel_key), Some(Some(snap))) if *panel_key == (host, cwd.clone()) => {
                 DiffLoad::Ready(Arc::clone(snap))
             }
             _ => DiffLoad::Loading,
@@ -740,7 +740,7 @@ impl Tty7App {
         // question: a binary file or a pure rename has no hunks and is not
         // truncated, so its body is empty and the header *is* the card. A
         // truncated file with no parsable hunks still renders the notice.
-        let has_body = expanded && (!file.hunks.is_empty() || file.truncated);
+        let has_body = expanded && (!file.hunks.is_empty() || file.truncated.is_some());
 
         // The header paints a solid band flush into the card's corners, and the
         // card's `overflow_hidden` cannot round it — that clip is a square,
@@ -858,7 +858,7 @@ impl Tty7App {
                 .iter()
                 .map(|hunk| (hunk, split_hunk(&hunk.lines)))
                 .collect();
-            let closing_row = if file.truncated {
+            let closing_row = if file.truncated.is_some() {
                 None
             } else {
                 hunks
