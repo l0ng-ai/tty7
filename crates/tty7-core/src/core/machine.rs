@@ -487,6 +487,12 @@ pub enum LayoutDelta {
     WorkspaceTouched {
         last_active: u64,
     },
+    /// Which tab is active changed — by an explicit set, by a created tab
+    /// becoming active, or by the close paths healing a dangling active id.
+    /// Emitted for every *implicit* change too, so a mirroring client never
+    /// has to re-implement the server's heal rule; the one inexpressible case
+    /// (a workspace losing its last tab has no active tab) needs no delta,
+    /// because "no tabs → no active tab" is a fact, not surgery.
     ActiveTabChanged {
         tab: TabId,
     },
@@ -568,6 +574,14 @@ impl Drop for Subscription {
 pub struct MachineStore {
     path: PathBuf,
     state: Mutex<Machine>,
+    /// Serializes each mutation *with its own delivery*. The state lock alone
+    /// orders the mutations, but deltas are delivered after it is released —
+    /// without this, writer B's deltas could overtake writer A's and every
+    /// subscriber would apply the store's history in the wrong order, ending
+    /// on the losing state with no error to trigger a re-pull. Cheap to hold
+    /// across delivery because a subscriber's callback is enqueue-only by
+    /// contract. Always taken before `state`, never inside it.
+    notify_order: Mutex<()>,
     subscribers: Mutex<Vec<(SubscriberId, Notify)>>,
     next_subscriber: AtomicU64,
 }
@@ -595,6 +609,7 @@ impl MachineStore {
         Arc::new(MachineStore {
             path,
             state: Mutex::new(machine),
+            notify_order: Mutex::new(()),
             subscribers: Mutex::new(Vec::new()),
             next_subscriber: AtomicU64::new(1),
         })
@@ -748,9 +763,13 @@ impl MachineStore {
             let at = at.unwrap_or(ws.tabs.len()).min(ws.tabs.len());
             ws.tabs.insert(at, tab.clone());
             ws.active_tab = Some(tab.id);
+            let active = tab.id;
             Ok((
                 tab.clone(),
-                vec![(workspace, LayoutDelta::TabCreated { at, tab })],
+                vec![
+                    (workspace, LayoutDelta::TabCreated { at, tab }),
+                    (workspace, LayoutDelta::ActiveTabChanged { tab: active }),
+                ],
             ))
         })
     }
@@ -771,10 +790,13 @@ impl MachineStore {
                 .position(|t| t.id == tab)
                 .ok_or_else(|| not_found(format!("workspace {workspace} has no tab {tab}")))?;
             ws.tabs.remove(index);
-            heal_active_tab(ws, index);
+            let mut deltas = vec![(workspace, LayoutDelta::TabClosed { tab })];
+            if let Some(active) = heal_active_tab(ws, index) {
+                deltas.push((workspace, LayoutDelta::ActiveTabChanged { tab: active }));
+            }
             let orphans = collect_orphan_panes(m);
             m.panes.retain(|p| !orphans.contains(&p.id));
-            Ok((orphans, vec![(workspace, LayoutDelta::TabClosed { tab })]))
+            Ok((orphans, deltas))
         })
     }
 
@@ -888,22 +910,28 @@ impl MachineStore {
                 .iter()
                 .position(|t| t.root.contains(pane))
                 .ok_or_else(|| not_found(format!("workspace {workspace} has no pane {pane}")))?;
-            let delta = match ws.tabs[index].root.remove_leaf(pane) {
+            let mut deltas = Vec::new();
+            match ws.tabs[index].root.remove_leaf(pane) {
                 // The tab was that one leaf: the tab goes.
                 None => {
                     let closed = ws.tabs.remove(index);
-                    heal_active_tab(ws, index);
-                    LayoutDelta::TabClosed { tab: closed.id }
+                    deltas.push((workspace, LayoutDelta::TabClosed { tab: closed.id }));
+                    if let Some(active) = heal_active_tab(ws, index) {
+                        deltas.push((workspace, LayoutDelta::ActiveTabChanged { tab: active }));
+                    }
                 }
-                Some(true) => LayoutDelta::TabRestructured {
-                    tab: ws.tabs[index].clone(),
-                    pane: None,
-                },
+                Some(true) => deltas.push((
+                    workspace,
+                    LayoutDelta::TabRestructured {
+                        tab: ws.tabs[index].clone(),
+                        pane: None,
+                    },
+                )),
                 Some(false) => unreachable!("the tab was chosen because it contains the pane"),
             };
             let orphans = collect_orphan_panes(m);
             m.panes.retain(|p| !orphans.contains(&p.id));
-            Ok((orphans, vec![(workspace, delta)]))
+            Ok((orphans, deltas))
         })
     }
 
@@ -971,8 +999,10 @@ impl MachineStore {
                         return Err(refuse("a pane cannot be moved next to itself".to_string()));
                     }
                     let closed = ws.tabs.remove(from);
-                    heal_active_tab(ws, from);
                     deltas.push((workspace, LayoutDelta::TabClosed { tab: closed.id }));
+                    if let Some(active) = heal_active_tab(ws, from) {
+                        deltas.push((workspace, LayoutDelta::ActiveTabChanged { tab: active }));
+                    }
                 }
                 Some(true) => {
                     deltas.push((
@@ -1142,23 +1172,30 @@ impl MachineStore {
     // ----- internals -------------------------------------------------------
 
     fn locked(&self) -> std::sync::MutexGuard<'_, Machine> {
-        // A poisoned lock means a panic mid-mutation, but every mutation is
-        // rolled back on failure before the lock is released, so the state is
-        // still a valid tree; carrying on beats taking the daemon down.
+        // A poisoned lock means a panic mid-mutation. Every *fallible* path
+        // rolls back before releasing the lock (see `mutate`); the only
+        // panics inside an op are `unreachable!`/`expect`s on invariants the
+        // same op just established, so a poisoned tree is still the pre- or
+        // post-images of some operation. Carrying on beats taking the daemon
+        // — and every pane on the machine — down with a bookkeeping panic.
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Run one operation: mutate under the lock, persist, and — only if the
-    /// disk said yes — deliver the deltas outside the lock.
+    /// disk said yes — deliver the deltas outside the state lock.
     ///
     /// A failed persist rolls the tree back to the pre-mutation clone, so the
     /// in-memory state never claims something the file does not, and a change
     /// nobody can re-read is a change nobody is told about.
+    ///
+    /// `notify_order` is held across the whole thing — see the field — so
+    /// subscribers receive deltas in exactly the order the mutations landed.
     fn mutate<T>(
         &self,
         origin: Option<SubscriberId>,
         op: impl FnOnce(&mut Machine) -> io::Result<(T, Vec<(WorkspaceId, LayoutDelta)>)>,
     ) -> io::Result<T> {
+        let _order = self.notify_order.lock().unwrap_or_else(|e| e.into_inner());
         let deltas;
         let value;
         {
@@ -1236,18 +1273,21 @@ fn find_tab(m: &mut Machine, workspace: WorkspaceId, tab: TabId) -> io::Result<&
 ///
 /// The replacement is the neighbour that slid into the removed tab's place
 /// (or the new last tab), which is what every tab strip does on close.
-fn heal_active_tab(ws: &mut Workspace, removed: usize) {
+///
+/// Answers the tab that became active when the heal actually re-pointed it,
+/// so the caller can broadcast the change — a client mirroring by deltas must
+/// not have to re-implement this rule (see [`LayoutDelta::ActiveTabChanged`]).
+fn heal_active_tab(ws: &mut Workspace, removed: usize) -> Option<TabId> {
     let named = ws
         .active_tab
         .is_some_and(|active| ws.tabs.iter().any(|t| t.id == active));
-    if named {
-        return;
+    if named || ws.tabs.is_empty() {
+        ws.active_tab = ws.active_tab.filter(|_| named);
+        return None;
     }
-    ws.active_tab = if ws.tabs.is_empty() {
-        None
-    } else {
-        Some(ws.tabs[removed.min(ws.tabs.len() - 1)].id)
-    };
+    let active = ws.tabs[removed.min(ws.tabs.len() - 1)].id;
+    ws.active_tab = Some(active);
+    Some(active)
 }
 
 /// Adopt a seed into the registry.
@@ -1366,6 +1406,13 @@ pub fn observe_pane(pane: u64, f: impl FnOnce(&mut PaneRecord)) {
     if let Some(store) = store {
         store.note_pane_facts(pane, f);
     }
+}
+
+/// Test-only: clear the slot again, so one test's store cannot swallow the
+/// observations of unrelated tests running later in the same binary.
+#[cfg(test)]
+pub(crate) fn withdraw_observations() {
+    *OBSERVED.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Copy a file we are about to stop honouring somewhere the user can find it.
@@ -1606,6 +1653,7 @@ mod tests {
         let second = store.tab_create(ws, None, seed(2, "/b"), None).unwrap();
         store.workspace_set_active_tab(ws, second.id, None).unwrap();
 
+        let (_sub, heard) = recorded(&store);
         let dropped = store.tab_close(ws, second.id, None).unwrap();
         assert_eq!(dropped, vec![2]);
         let workspace = store.workspace(ws).unwrap();
@@ -1615,13 +1663,32 @@ mod tests {
             Some(first.id),
             "the active tab may not dangle on a closed id"
         );
+        // The heal is broadcast, not left for clients to re-derive: after the
+        // `TabClosed` comes an `ActiveTabChanged` naming the survivor.
+        assert!(
+            matches!(
+                heard.lock().unwrap().as_slice(),
+                [
+                    (_, LayoutDelta::TabClosed { tab }),
+                    (_, LayoutDelta::ActiveTabChanged { tab: active })
+                ] if *tab == second.id && *active == first.id
+            ),
+            "heard {:?}",
+            heard.lock().unwrap()
+        );
 
+        heard.lock().unwrap().clear();
         let dropped = store.tab_close(ws, first.id, None).unwrap();
         assert_eq!(dropped, vec![1]);
         assert_eq!(
             store.workspace(ws).unwrap().active_tab,
             None,
             "a workspace with no tabs has no active one — the home-page state"
+        );
+        assert_eq!(
+            heard.lock().unwrap().len(),
+            1,
+            "losing the last tab needs no ActiveTabChanged: no tabs, no active tab"
         );
     }
 
@@ -1907,6 +1974,7 @@ mod tests {
             store.pane(1).unwrap().cwd.as_deref(),
             Some("/observed/here")
         );
+        withdraw_observations();
     }
 
     // ── Attachment ─────────────────────────────────────────────────────────

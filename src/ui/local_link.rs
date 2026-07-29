@@ -133,6 +133,10 @@ impl LocalLink {
             link.client = None;
         }
         match link.next_attempt {
+            // Never attempted at all: due now. The daemon is normally already
+            // up (main spawns it before the first window), so the first tick
+            // should connect, not start a schedule.
+            None if link.backoff.attempt() == 0 => {}
             None => {
                 link.next_attempt = Some(now + link.backoff.delay());
                 return;

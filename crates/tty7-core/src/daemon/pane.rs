@@ -1289,9 +1289,16 @@ impl DaemonPane {
                             // change so the per-chunk cost is two clones and a
                             // compare, not a store mutation per chunk.
                             let pane = st.id;
+                            // Read *with* the facts, not assumed: on Windows
+                            // the exit monitor can report the death (flipping
+                            // `alive`) while this thread is still draining
+                            // ConPTY's buffered output, and the death report
+                            // is latched — a "proof of life" published here
+                            // after it would mark a dead pane live forever.
+                            let alive = st.alive;
                             let facts_after = observed_facts(&st);
                             drop(st);
-                            if facts_after != facts_before {
+                            if facts_changed(&facts_before, &facts_after) {
                                 let (cwd, agent) = facts_after;
                                 crate::core::machine::observe_pane(pane, |p| {
                                     // An unknown cwd never clears a seeded one:
@@ -1305,9 +1312,11 @@ impl DaemonPane {
                                     // foreground, and a revival must not
                                     // resume a session that already ended.
                                     p.agent = agent;
-                                    // Output is proof of life, whatever the
-                                    // record thought.
-                                    p.live = true;
+                                    // Output is proof of life — but only while
+                                    // the pane still is; see `alive` above.
+                                    if alive {
+                                        p.live = true;
+                                    }
                                 });
                             }
                         }
@@ -1950,6 +1959,29 @@ fn observed_facts(st: &PaneState) -> (Option<String>, Option<crate::core::machin
         status: st.agent_session.as_ref().map(|s| s.status),
     });
     (cwd, agent)
+}
+
+/// Whether a chunk's facts are worth a store mutation.
+///
+/// The coarse agent status is deliberately **outside** the gate: it flips on
+/// every hook event (working ↔ waiting ↔ idle), each of which would otherwise
+/// rewrite `machine.json` from the PTY reader thread, and it is documented
+/// display-only. It still *rides along* — whenever a load-bearing fact
+/// changes, the record published carries the current status too.
+fn facts_changed(
+    before: &(Option<String>, Option<crate::core::machine::AgentFacts>),
+    after: &(Option<String>, Option<crate::core::machine::AgentFacts>),
+) -> bool {
+    let strip = |facts: &(Option<String>, Option<crate::core::machine::AgentFacts>)| {
+        (
+            facts.0.clone(),
+            facts.1.clone().map(|mut agent| {
+                agent.status = None;
+                agent
+            }),
+        )
+    };
+    strip(before) != strip(after)
 }
 
 /// Apply sniffed signals to the shared state and notify the subscriber of any cwd

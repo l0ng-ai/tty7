@@ -157,13 +157,17 @@ pub fn run_daemon() -> anyhow::Result<()> {
 pub fn control_services() -> crate::host::server::Services {
     use crate::core::machine::MachineStore;
     use crate::core::workspace_store::WorkspaceStore;
+    // Reported on stderr as well as the log, like the socket line in
+    // [`run_daemon`]: on a headless box the log file is off by default, and
+    // "which stores does this daemon actually serve" is the first question a
+    // capability mismatch raises.
     let services = match WorkspaceStore::shared() {
         Ok(store) => {
-            log::info!("workspace store at {}", store.path().display());
+            eprintln!("workspace store at {}", store.path().display());
             crate::host::server::Services::with_workspaces(store)
         }
         Err(e) => {
-            log::warn!("no workspace store ({e}); serving files and panes only");
+            eprintln!("no workspace store ({e}); serving files and panes only");
             crate::host::server::Services::none()
         }
     };
@@ -173,7 +177,7 @@ pub fn control_services() -> crate::host::server::Services {
     // hold the other.
     match MachineStore::shared() {
         Ok(machine) => {
-            log::info!("machine tree at {}", machine.path().display());
+            eprintln!("machine tree at {}", machine.path().display());
             // From here on the pane server's own observations — OSC 7 cwds,
             // agent identities, deaths — land on the tree's pane records, so
             // what a client revives from is what the machine saw, not what
@@ -182,7 +186,7 @@ pub fn control_services() -> crate::host::server::Services {
             services.and_machine(machine)
         }
         Err(e) => {
-            log::warn!("no machine tree ({e}); its verbs stay unserved");
+            eprintln!("no machine tree ({e}); its verbs stay unserved");
             services
         }
     }

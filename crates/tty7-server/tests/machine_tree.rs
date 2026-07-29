@@ -372,6 +372,12 @@ fn an_operation_from_one_client_reaches_the_other_as_a_delta() {
         ws.id,
         |d| matches!(d, LayoutDelta::TabCreated { tab: t, .. } if t.id == tab.id),
     );
+    // The created tab became active, and the *change of active tab* is its own
+    // delta — implicit activation must not be something a client re-derives.
+    watcher.expect_delta(
+        ws.id,
+        |d| matches!(d, LayoutDelta::ActiveTabChanged { tab: t } if *t == tab.id),
+    );
     assert_eq!(
         writer.delta_count(),
         0,
@@ -391,7 +397,7 @@ fn an_operation_from_one_client_reaches_the_other_as_a_delta() {
         ws.id,
         |d| matches!(d, LayoutDelta::TabRenamed { name: Some(n), .. } if n == "build"),
     );
-    assert_eq!(watcher.delta_count(), 2, "still only the writer's two ops");
+    assert_eq!(watcher.delta_count(), 3, "still only the writer's own ops");
 }
 
 /// Takeover semantics on the new tree, with **no record store served at
