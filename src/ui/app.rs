@@ -24,11 +24,12 @@ use crate::core::config::{
 use crate::core::session::{
     Session, SessionAxis, SessionPane, SessionTab, WorkspaceId, WorkspaceStore,
 };
-use crate::core::shells::DetectedShell;
+use crate::core::shells::ShellInventory;
 use crate::core::ssh_config;
 use crate::core::window_state::{WindowGeometry as _, WindowState};
 use crate::daemon::protocol::{RemoteContext, ShellSpec, ssh_option_takes_value};
 use crate::terminal::view::{ChildExited, TerminalView};
+use crate::ui::host_registry::HostId;
 use crate::ui::palette::{
     ChromeState, Command, CommandGroup, CommandKind, PaletteEvent, PaletteView,
 };
@@ -598,10 +599,19 @@ pub struct Tty7App {
     /// Keeping something focused keeps keystrokes flowing through the window's
     /// dispatch path, so ⌘T & friends still reach the root action handlers.
     pub(crate) home_focus: gpui::FocusHandle,
-    /// Shells found on this machine (`core::shells::detect_shells`), listed in
-    /// the "+" dropdown. Probed once at startup off the UI thread — empty until
-    /// that lands, when the dropdown offers just the default entry.
-    pub(crate) detected_shells: Vec<DetectedShell>,
+    /// The shells of the machine **this window is bound to**, listed in the "+"
+    /// dropdown. Fetched once per machine off the UI thread — empty until that
+    /// lands (and while a remote machine is unreachable), when the dropdown
+    /// offers just the default entry.
+    ///
+    /// Not "this computer's shells": a remote workspace's window opens its tabs
+    /// on the far machine, and a menu built here would offer paths that only
+    /// exist locally. See [`Tty7App::refresh_shells`].
+    pub(crate) shells: ShellInventory,
+    /// Which machine [`Self::shells`] describes, so a landing fetch for a
+    /// machine the window has since left can be discarded, and so the menu knows
+    /// whether the local config's `shell` override applies to it.
+    pub(crate) shells_host: HostId,
     /// Pane-contextual SSH loopback forward UI state. The controls render only
     /// over the active SSH pane, but the input/editing state is app-owned so it
     /// is not tied to the Settings tab.
@@ -1042,7 +1052,7 @@ impl Tty7App {
                 cx.notify();
             }
         });
-        let app = Self {
+        let mut app = Self {
             tabs,
             active,
             font_size,
@@ -1069,7 +1079,8 @@ impl Tty7App {
             mod_hint_gen: 0,
             record_gen: 0,
             home_focus: cx.focus_handle(),
-            detected_shells: Vec::new(),
+            shells: ShellInventory::default(),
+            shells_host: HostId::LOCAL,
             loopback_panel: LoopbackForwardPanelState {
                 form_pane_id: None,
                 managed: Vec::new(),
@@ -1121,22 +1132,8 @@ impl Tty7App {
         if !cfg!(test) && crate::ui::windows::WindowRegistry::count(cx) == 0 {
             crate::ui::tray::init(cx);
         }
-        // Discover this machine's shells for the "+" dropdown off the UI thread
-        // (the WSL probe on Windows spawns a process, and /etc/shells hits the
-        // filesystem). Until it lands the dropdown offers just the default entry.
-        cx.spawn(async move |this, cx| {
-            let shells = cx
-                .background_spawn(async { crate::core::shells::detect_shells() })
-                .await;
-            // `notify` so the strip re-renders and the dropdown closure
-            // captures the freshly landed list (nothing else is guaranteed to
-            // redraw an idle window).
-            let _ = this.update(cx, |app, cx| {
-                app.detected_shells = shells;
-                cx.notify();
-            });
-        })
-        .detach();
+        // Fill the "+" dropdown from the machine this window is bound to.
+        app.refresh_shells(cx);
         // Persist the session one last time as the app quits. This captures the
         // latest state — including a plain `cd` that changed a pane's cwd but
         // triggered no structural change — so the next launch restores where the
@@ -1477,6 +1474,9 @@ impl Tty7App {
         // The closed-tab stack is per *window* and survives a workspace swap,
         // so it is the one thing that could carry a tab across machines.
         self.rebind_host(previous_host, cx);
+        // So does the "+" dropdown's shell list — and unlike the closed stack it
+        // is rebuilt rather than dropped, from the machine now in front of us.
+        self.refresh_shells(cx);
         let font_size = self.font_size;
         let pane_ws = self.window_workspace(cx);
         let (tabs, active) =
@@ -2994,7 +2994,25 @@ impl Tty7App {
         // Whether the user was sitting on this pane while it connected. Read
         // before the swap, since the placeholder leaves the tree in it.
         let was_focused = pending.read(cx).focus_handle.contains_focused(window, cx);
+        // The saved id was gone and this is a fresh shell in its cwd, so the
+        // agent that was running in it has to be resumed by hand — the same
+        // thing a local pane's restore does, deferred to here because only the
+        // machine could say whether the attach took.
+        let resume = (!parts.restored)
+            .then(|| {
+                let spawn = &pending.read(cx).spawn;
+                agent_resume_command(
+                    &spawn.agent,
+                    spawn.agent_session_id.as_deref(),
+                    spawn.agent_launch_argv.as_deref(),
+                    cx,
+                )
+            })
+            .flatten();
         let view = build_terminal_view(parts, font_size, window, cx);
+        if let Some(cmd) = resume {
+            view.read(cx).run_command_line(&cmd);
+        }
         let slot = PaneSlot::Ready(view.clone());
         self.tabs
             .iter_mut()
@@ -6869,6 +6887,25 @@ fn tab_to_session(tab: &Tab, cx: &App) -> SessionTab {
     }
 }
 
+/// The command that puts a saved coding-agent conversation back, or `None` when
+/// there is nothing to resume (no agent, no captured session id, the agent opts
+/// out of sessions, or the user turned the feature off).
+///
+/// Shared by the two places that learn a pane came back as a bare shell: session
+/// restore, for a local leaf whose daemon already said the pane was gone, and
+/// [`Tty7App::land_pane`], for a remote one where only the machine could say.
+fn agent_resume_command(
+    agent: &Option<crate::core::cli_agent::CLIAgent>,
+    session_id: Option<&str>,
+    launch_argv: Option<&[String]>,
+    cx: &App,
+) -> Option<String> {
+    if !cx.global::<Config>().restore_agent_sessions {
+        return None;
+    }
+    agent.as_ref()?.resume_command(session_id?, launch_argv)
+}
+
 /// Convert a live `Pane` tree into its serializable mirror, reading each
 /// leaf's current cwd and each split's axis + ratio. Used when saving.
 fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
@@ -6883,9 +6920,15 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
                 cwd: spawn.working_directory.clone(),
                 pane_id: spawn.restore_pane,
                 ssh_spec: None,
-                agent: None,
-                agent_session_id: None,
-                agent_launch_argv: None,
+                // Written back out rather than blanked. A remote pane spends
+                // its first seconds here, and any save landing in that window
+                // used to drop the agent this leaf was running — after which
+                // ending the workspace's sessions left nothing to resume from.
+                // The pane cannot be interrogated yet, but what it is being
+                // rebuilt *from* is right here.
+                agent: spawn.agent,
+                agent_session_id: spawn.agent_session_id.clone(),
+                agent_launch_argv: spawn.agent_launch_argv.clone(),
             }
         }
         Pane::Leaf(PaneSlot::Ready(view)) => {
@@ -7111,17 +7154,33 @@ fn session_to_pane(
             // where it left off (cmux's auto-resume, config-gated). The bytes
             // sit in the PTY input queue until the shell reads its first
             // command — same mechanism as tmux send-keys at spawn.
-            if restore.is_none()
-                && cx.global::<Config>().restore_agent_sessions
-                && let (Some(agent), Some(id)) = (agent, agent_session_id)
-                && let Some(cmd) = agent.resume_command(id, agent_launch_argv.as_deref())
-                // A pane whose terminal has not arrived yet cannot be sent a
-                // resume command. It does not need one either: `restore_pane`
-                // travelled with the spawn, so what lands is the *same* agent
-                // pane, still running its conversation.
-                && let Some(terminal) = view.terminal()
-            {
-                terminal.read(cx).run_command_line(&cmd);
+            match &view {
+                // A local leaf already knows the answer: `alive` was read from
+                // its daemon, so `restore.is_some()` means the pane is there
+                // and still running the conversation itself.
+                PaneSlot::Ready(terminal) if restore.is_none() => {
+                    if let Some(cmd) = agent_resume_command(
+                        agent,
+                        agent_session_id.as_deref(),
+                        agent_launch_argv.as_deref(),
+                        cx,
+                    ) {
+                        terminal.read(cx).run_command_line(&cmd);
+                    }
+                }
+                PaneSlot::Ready(_) => {}
+                // A remote leaf does not know yet whether its id was still
+                // good — the attach is happening on a background thread. The
+                // agent travels with the attempt and `land_pane` decides. This
+                // is also what keeps a save landing mid-connect from erasing
+                // it (see `pane_to_session`).
+                PaneSlot::Connecting(pending) => {
+                    pending.update(cx, |pending, _| {
+                        pending.spawn.agent = *agent;
+                        pending.spawn.agent_session_id = agent_session_id.clone();
+                        pending.spawn.agent_launch_argv = agent_launch_argv.clone();
+                    });
+                }
             }
             Some(Pane::leaf(view))
         }
@@ -7193,6 +7252,12 @@ fn new_terminal(
         working_directory,
         restore_pane,
         shell,
+        // Filled in by session restore, the only caller with an agent session
+        // to bring back (see `session_to_pane`). A brand-new tab or split has
+        // no conversation behind it.
+        agent: None,
+        agent_session_id: None,
+        agent_launch_argv: None,
         font_size,
     };
     // The machine as the user knows it. `RemoteTarget`'s `Display` is the same
@@ -7230,32 +7295,21 @@ fn start_pane_spawn(
         let parts = cx
             .background_executor()
             .spawn(async move {
-                let attempt = |restore| {
-                    TerminalView::spawn_shell_terminal_in(
-                        spawn.workspace.clone(),
-                        spawn.working_directory.clone(),
-                        restore,
-                        spawn.shell.clone(),
-                    )
-                };
-                match spawn.restore_pane {
-                    // Restore, on a machine nobody asked "which panes are still
-                    // alive?" — because asking is itself a routed round trip and
-                    // the UI thread is where that question used to be asked from
-                    // (`alive_panes_on`). Trying the attach *is* the question,
-                    // and a failed one costs one round trip on a connection this
-                    // pane needed open anyway.
-                    //
-                    // Falling back to a fresh pane rather than surfacing the
-                    // error: an id that is gone is the ordinary case after the
-                    // remote's daemon has restarted, and a pane the user cannot
-                    // get back is not worth a slot that only offers "Try Again".
-                    Some(id) => attempt(Some(id)).or_else(|e| {
-                        log::info!("pane {id} is gone on its machine ({e:#}); spawning fresh");
-                        attempt(None)
-                    }),
-                    None => attempt(None),
-                }
+                // Restore, on a machine nobody asked "which panes are still
+                // alive?" — because asking is itself a routed round trip and
+                // the UI thread is where that question used to be asked from
+                // (`alive_panes_on`). Trying the attach *is* the question, and a
+                // failed one falls back to a fresh pane inside
+                // `spawn_shell_terminal_in`: an id that is gone is the ordinary
+                // case after the workspace's sessions were ended, and a pane the
+                // user cannot get back is not worth a slot that only offers
+                // "Try Again".
+                TerminalView::spawn_shell_terminal_in(
+                    spawn.workspace.clone(),
+                    spawn.working_directory.clone(),
+                    spawn.restore_pane,
+                    spawn.shell.clone(),
+                )
                 // Flattened to a string here rather than carried as an
                 // `anyhow::Error`: the chain is not `Send` across this await in
                 // a form worth keeping, and what the pane shows is the rendered
@@ -7294,6 +7348,17 @@ fn build_terminal_view(
     cx.subscribe_in(&view, window, |app, view, _: &ChildExited, window, cx| {
         app.on_child_exited(view.clone(), window, cx);
     })
+    .detach();
+    // The pane's agent started (or replaced) a conversation. Persist it: the
+    // session id is what a later restore resumes from, and nothing else was
+    // making the window save between the id arriving and the user acting.
+    cx.subscribe_in(
+        &view,
+        window,
+        |app, _view, _: &crate::terminal::view::AgentSessionChanged, _window, cx| {
+            app.save_session(cx);
+        },
+    )
     .detach();
     // Native-SSH auth/host-key prompts raised by this pane → in-pane sheet. Same
     // single build site as ChildExited, so every pane (new tab, split, restore)
@@ -7598,6 +7663,55 @@ mod tests {
         );
     }
 
+    /// **A pane that is still connecting keeps the agent it is being rebuilt
+    /// from.** Every remote pane spends its first seconds in that state, and a
+    /// save landing in the window — a focus change, a resize, the window
+    /// closing — used to write `agent: null` over the record. Ending that
+    /// workspace's sessions afterwards left nothing to resume *from*, which is
+    /// what made the resume look like it worked only sometimes.
+    #[gpui::test]
+    fn a_connecting_pane_saves_the_agent_it_is_rebuilding(cx: &mut gpui::TestAppContext) {
+        use crate::core::cli_agent::CLIAgent;
+        use crate::core::session::SessionPane;
+        use crate::ui::pane::{Pane, PaneSlot};
+        use crate::ui::pending_pane::{PendingPane, PendingSpawn};
+        use gpui::AppContext as _;
+
+        cx.update(|cx| {
+            let pending = cx.new(|cx| {
+                PendingPane::new(
+                    "build-box",
+                    PendingSpawn {
+                        workspace: None,
+                        working_directory: Some(std::path::PathBuf::from("/work")),
+                        restore_pane: Some(7),
+                        shell: None,
+                        agent: Some(CLIAgent::Claude),
+                        agent_session_id: Some("sid-abc".to_string()),
+                        agent_launch_argv: Some(vec!["claude".to_string()]),
+                        font_size: 14.0,
+                    },
+                    cx,
+                )
+            });
+            let saved = super::pane_to_session(&Pane::leaf(PaneSlot::Connecting(pending)), cx);
+            let SessionPane::Leaf {
+                pane_id,
+                agent,
+                agent_session_id,
+                agent_launch_argv,
+                ..
+            } = saved
+            else {
+                panic!("a leaf saves as a leaf");
+            };
+            assert_eq!(pane_id, Some(7), "the id it is re-attaching to");
+            assert_eq!(agent, Some(CLIAgent::Claude));
+            assert_eq!(agent_session_id.as_deref(), Some("sid-abc"));
+            assert_eq!(agent_launch_argv, Some(vec!["claude".to_string()]));
+        });
+    }
+
     #[test]
     fn parses_ssh_option_words_with_quotes() {
         assert_eq!(
@@ -7822,5 +7936,134 @@ mod keybinding_gpui_tests {
             app.active_settings().map(|s| s.recording.is_some())
         });
         assert_eq!(recording, Some(false));
+    }
+}
+
+/// The "+" dropdown is a property of the window's *machine* — the whole of
+/// [`Tty7App::refresh_shells`]'s reason to exist.
+#[cfg(test)]
+mod shell_menu_gpui_tests {
+    use crate::core::config::Config;
+    use crate::core::session::{
+        RemoteRef, RemoteTarget, Session, Workspace, WorkspaceId, WorkspaceStore, Workspaces,
+    };
+    use crate::ui::app::Tty7App;
+    use gpui::{AppContext, Entity, TestAppContext, VisualTestContext};
+
+    fn harness(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
+        // The window's construction persists a session; without this it would
+        // write the developer's real one.
+        crate::core::config::pin_test_config_dir();
+        // The shell probe runs on `HostOps`' own thread pool, off gpui's
+        // executor, so waiting for it parks the test thread.
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+            // Switching workspaces rebinds the window's registry entry; the
+            // headless harness opens windows directly, so nothing else installs
+            // it. Empty is the truth here — this window was never registered.
+            crate::ui::windows::WindowRegistry::init(cx);
+        });
+        let window = cx.add_window(|window, cx| {
+            let app =
+                cx.new(|cx| Tty7App::with_session(None, Some(Session::default()), window, cx));
+            gpui_component::Root::new(app, window, cx)
+        });
+        let app = window
+            .update(cx, |root, _, _| {
+                root.view()
+                    .clone()
+                    .downcast::<Tty7App>()
+                    .ok()
+                    .expect("window root wraps a Tty7App")
+            })
+            .unwrap();
+        let vcx = VisualTestContext::from_window(window.into(), cx);
+        (app, vcx)
+    }
+
+    /// Pump both executors until `done`, or give up. The probe crosses back from
+    /// a real thread pool, so `run_until_parked` alone has nothing to wait on.
+    fn pump_until(
+        app: &Entity<Tty7App>,
+        vcx: &mut VisualTestContext,
+        done: impl Fn(&Tty7App) -> bool,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            vcx.background_executor.run_until_parked();
+            if app.update(vcx, |app, _| done(app)) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// A local window fills its menu from this computer, as it always has.
+    #[gpui::test]
+    fn a_local_window_lists_this_computers_shells(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        assert!(
+            pump_until(&app, &mut vcx, |app| !app.shells.shells.is_empty()),
+            "the local probe never landed"
+        );
+        app.update(&mut vcx, |app, _| {
+            assert!(app.shells_host.is_local());
+            assert!(
+                !app.shells.default_name.is_empty(),
+                "the menu has no default to tag"
+            );
+        });
+    }
+
+    /// **The bug this exists to stop.** A window bound to a machine that isn't
+    /// answering offers *nothing* rather than this computer's shells: every one
+    /// of those rows would spawn a path that only exists here (`/bin/zsh` on a
+    /// box whose zsh is `/usr/bin/zsh`), and the pane would come up as a spawn
+    /// failure. The empty list falls back to the plain "New Tab" entry, which
+    /// the far end resolves with its own default shell.
+    #[gpui::test]
+    fn an_unreachable_remote_window_offers_no_local_shells(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        assert!(
+            pump_until(&app, &mut vcx, |app| !app.shells.shells.is_empty()),
+            "the local probe never landed"
+        );
+
+        // A workspace on a machine nothing in this process has connected to.
+        let remote = Workspace::on_remote(RemoteRef::new(
+            RemoteTarget::Alias {
+                alias: "build-box".into(),
+            },
+            WorkspaceId::new(),
+        ));
+        let remote_id = remote.id;
+        app.update_in(&mut vcx, |app, window, cx| {
+            WorkspaceStore::install_for_test(
+                cx,
+                Workspaces {
+                    workspaces: vec![remote],
+                    active: None,
+                },
+            );
+            app.switch_workspace(remote_id, window, cx);
+        });
+
+        assert!(
+            pump_until(&app, &mut vcx, |app| !app.shells_host.is_local()),
+            "the window never rebound to the remote machine"
+        );
+        app.update(&mut vcx, |app, _| {
+            assert!(
+                app.shells.shells.is_empty(),
+                "a remote window must not offer this computer's shells: {:?}",
+                app.shells.shells
+            );
+        });
     }
 }

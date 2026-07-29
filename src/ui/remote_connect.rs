@@ -48,7 +48,8 @@ use crate::core::config::Config;
 use crate::core::session::{RemoteTarget, WorkspaceId};
 use crate::daemon::control::{ControlHello, ControlRequest, ReplyOk};
 use crate::daemon::install::{
-    InstallConfirm, InstallDecision, InstallRequest, MismatchedRemoteDaemon,
+    InstallConfirm, InstallDecision, InstallPhase, InstallProgress, InstallRequest,
+    MismatchedRemoteDaemon,
 };
 use crate::daemon::protocol::{AuthPromptKind, AuthResponse, NativeSshSpec};
 use crate::daemon::router::RouteHeader;
@@ -639,7 +640,11 @@ pub fn install_title(request: &InstallRequest) -> String {
 
 /// Bytes as the user thinks of them. Binary units with one decimal, matching the
 /// download sizes shown elsewhere in the app.
-fn human_bytes(n: u64) -> String {
+///
+/// Shared with the switcher's install bar so the size quoted in the consent
+/// prompt and the size counting up underneath it are formatted identically —
+/// they are the same number, and "8.2 MiB" beside "8.2 MB" would look like two.
+pub fn human_bytes(n: u64) -> String {
     const KIB: f64 = 1024.0;
     let n = n as f64;
     if n < KIB {
@@ -705,12 +710,69 @@ impl InstallConfirm for GuiInstallConfirm {
     }
 }
 
+/// The latest progress report, per machine.
+///
+/// Keyed by [`HostId`] rather than by the label the user typed, because the
+/// string the installer reports is a *daemon-side* connection key
+/// (`install::connection_label`) — the same one a relayed mismatch carries, and
+/// the same one [`origin_host`] exists to translate. An alias like `java` never
+/// reaches that side.
+///
+/// Several machines can be installing at once (two windows, two connects), so
+/// this is a map and not a slot. [`clear_install_progress`] drops an entry as
+/// soon as its connect settles.
+static PROGRESS: Mutex<Vec<(HostId, InstallPhase)>> = Mutex::new(Vec::new());
+
+/// The progress sink the GUI registers ([`register`]).
+///
+/// Called from whichever thread is moving bytes — the routed connection's
+/// reader, in the normal case — so it does nothing but overwrite the machine's
+/// slot. The panel picks it up on the poll it already runs while a connect is in
+/// flight (`watch_for_install_consent`), which is what keeps a burst of reports
+/// from becoming a burst of repaints.
+pub struct GuiInstallProgress;
+
+impl InstallProgress for GuiInstallProgress {
+    fn report(&self, host: &str, phase: InstallPhase) {
+        // Same fallback as the auth relay's: a key this client never noted an
+        // origin for still resolves to a stable id, so an install is never
+        // silently unattributable.
+        let id = origin_host(host).unwrap_or_else(|| HostId::from_connection_key(host));
+        let Ok(mut slots) = PROGRESS.lock() else {
+            return;
+        };
+        match slots.iter_mut().find(|(known, _)| *known == id) {
+            Some(slot) => slot.1 = phase,
+            None => slots.push((id, phase)),
+        }
+    }
+}
+
+/// What `host` last reported, if it is installing right now.
+pub fn install_progress_for(host: HostId) -> Option<InstallPhase> {
+    let slots = PROGRESS.lock().ok()?;
+    slots
+        .iter()
+        .find(|(known, _)| *known == host)
+        .map(|(_, phase)| *phase)
+}
+
+/// Forget a machine's progress. Called when a connect settles either way: on
+/// success the install is over, and on failure the error takes the same space
+/// the bar was using.
+pub fn clear_install_progress(host: HostId) {
+    if let Ok(mut slots) = PROGRESS.lock() {
+        slots.retain(|(known, _)| *known != host);
+    }
+}
+
 /// Install the GUI's consent handler. Called once at startup; without it the
 /// process-wide default declines every install, which is deliberate — a tty7
 /// with no UI attached must not decide on the user's behalf that writing to
 /// their servers is fine.
 pub fn register(cx: &mut App) {
     crate::daemon::install::set_install_confirm(Arc::new(GuiInstallConfirm));
+    crate::daemon::install::set_install_progress(Arc::new(GuiInstallProgress));
     crate::daemon::router::set_route_auth_responder(Arc::new(GuiRouteAuth));
     // Touch the globals so the first connect isn't also the first allocation of
     // the table it writes into, on a thread that is holding a socket open.

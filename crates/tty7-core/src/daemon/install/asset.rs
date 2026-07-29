@@ -199,6 +199,26 @@ pub fn binary_name(version: &str) -> String {
     format!("tty7-server-{version}")
 }
 
+/// [`RemotePaths`] pointing at a binary that is **already on the machine**,
+/// found rather than named — the server a connect adopted because it speaks our
+/// dialects (`Installer::adoptable_running_server`).
+///
+/// `binary` is the path as the remote reported it, verbatim: it is what the
+/// transport must connect to, and rebuilding it from a version parsed out of the
+/// filename would turn a binary installed somewhere unexpected into a path that
+/// does not exist.
+///
+/// `temp` and `dir_chain` still describe *our* install location, because that is
+/// where a later install would write. Nothing writes anything on the adoption
+/// path, so they are unused there; keeping them well-formed means a caller that
+/// falls back to installing does not need a second `RemotePaths`.
+pub fn remote_paths_for_binary(home: &str, binary: &str) -> RemotePaths {
+    let version = version_from_path(binary);
+    let mut paths = remote_paths(home, version.as_deref().unwrap_or("unknown"));
+    paths.binary = binary.to_string();
+    paths
+}
+
 /// The version encoded in an installed binary's *path*, if it is one of ours.
 ///
 /// This is how the running daemon's build is identified without asking it: the

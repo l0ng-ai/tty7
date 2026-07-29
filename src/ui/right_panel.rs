@@ -581,11 +581,14 @@ impl Tty7App {
                     rows.push(("cwd", compact_path(&cwd)));
                     cwd_for_actions = Some(cwd);
                 }
-                let shell = view.shell_spec().map(|s| s.program.clone());
-                rows.push((
-                    "shell",
-                    crate::core::shells::default_shell_name(shell.as_deref()),
-                ));
+                // A pane that named no shell took its machine's default — which
+                // for a remote workspace is the *far* machine's, not this
+                // computer's `$SHELL`.
+                let shell = match view.shell_spec().map(|s| s.program.clone()) {
+                    Some(program) => crate::core::shells::default_shell_name(Some(&program)),
+                    None => self.default_shell_label(cx),
+                };
+                rows.push(("shell", shell));
                 if let Some(ssh) = view.ssh_spec() {
                     rows.push(("ssh", ssh.host.clone()));
                 }

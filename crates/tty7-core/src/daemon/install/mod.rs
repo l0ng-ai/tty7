@@ -154,6 +154,22 @@ pub trait RemoteOps: Send + Sync {
     fn chmod(&self, path: &str, mode: u32) -> Result<(), String>;
     /// Write `bytes` to `path`, truncating anything already there.
     fn put(&self, path: &str, bytes: &[u8]) -> Result<(), String>;
+    /// [`put`](Self::put), calling `on_progress(written)` as the write
+    /// advances. Defaulted to plain `put` for the same reason as
+    /// [`AssetFetcher::get_with_progress`]: an in-memory fake writes all of it
+    /// at once and has no intermediate state to report.
+    fn put_with_progress(
+        &self,
+        path: &str,
+        bytes: &[u8],
+        on_progress: &(dyn Fn(u64) + Send + Sync),
+    ) -> Result<(), String> {
+        let result = self.put(path, bytes);
+        if result.is_ok() {
+            on_progress(bytes.len() as u64);
+        }
+        result
+    }
     /// Rename `from` over `to`. Same directory, so same filesystem, so atomic.
     fn rename(&self, from: &str, to: &str) -> Result<(), String>;
     fn remove_file(&self, path: &str) -> Result<(), String>;
@@ -167,6 +183,22 @@ pub trait RemoteOps: Send + Sync {
 /// feature).
 pub trait AssetFetcher: Send + Sync {
     fn get(&self, url: &str) -> Result<Vec<u8>, String>;
+
+    /// [`get`](Self::get), calling `on_progress(done, total)` as the body
+    /// arrives. `total` is the `Content-Length` when the server sent one.
+    ///
+    /// Defaulted to plain `get` so a fetcher that has nothing useful to say
+    /// mid-transfer — every fake in the tests, and the checksums fetch, which is
+    /// under a kilobyte — implements one method, not two. The real
+    /// [`HttpsFetcher`](download::HttpsFetcher) overrides it.
+    fn get_with_progress(
+        &self,
+        url: &str,
+        on_progress: &dyn Fn(u64, Option<u64>),
+    ) -> Result<Vec<u8>, String> {
+        let _ = on_progress;
+        self.get(url)
+    }
 }
 
 /// A verified server binary, and where it came from.
@@ -206,6 +238,21 @@ impl std::fmt::Debug for LoadedBinary {
 /// ourselves would verify nothing that the client's own signature did not.
 pub trait ServerBinarySource: Send + Sync {
     fn load(&self, version: &str, asset: &'static str) -> Result<LoadedBinary, InstallError>;
+
+    /// [`load`](Self::load), reporting bytes as they arrive.
+    ///
+    /// Defaulted to plain `load` because only one of the three sources has a
+    /// transfer worth watching: [`wsl::BundledServerBinary`] reads a local file
+    /// and is done before a bar could paint.
+    fn load_with_progress(
+        &self,
+        version: &str,
+        asset: &'static str,
+        on_progress: &dyn Fn(u64, Option<u64>),
+    ) -> Result<LoadedBinary, InstallError> {
+        let _ = on_progress;
+        self.load(version, asset)
+    }
 }
 
 /// A local binary if [`wsl::BUNDLED_DIR_ENV`] names a directory holding one,
@@ -243,13 +290,26 @@ impl<'a> BundledOrRelease<'a> {
 
 impl ServerBinarySource for BundledOrRelease<'_> {
     fn load(&self, version: &str, asset: &'static str) -> Result<LoadedBinary, InstallError> {
+        self.load_with_progress(version, asset, &|_, _| {})
+    }
+
+    fn load_with_progress(
+        &self,
+        version: &str,
+        asset: &'static str,
+        on_progress: &dyn Fn(u64, Option<u64>),
+    ) -> Result<LoadedBinary, InstallError> {
         match &self.bundled {
             // A named directory that does *not* hold this asset is an error, not
             // a reason to fall back: someone who set the variable meant to
             // install from it, and quietly downloading instead would defeat
             // whichever of the reasons above they set it for.
             Some(bundled) => bundled.load(version, asset),
-            None => ReleaseDownload { fetch: self.fetch }.load(version, asset),
+            None => ReleaseDownload { fetch: self.fetch }.load_with_progress(
+                version,
+                asset,
+                on_progress,
+            ),
         }
     }
 }
@@ -263,8 +323,20 @@ pub struct ReleaseDownload<'a> {
 
 impl ServerBinarySource for ReleaseDownload<'_> {
     fn load(&self, version: &str, asset: &'static str) -> Result<LoadedBinary, InstallError> {
+        self.load_with_progress(version, asset, &|_, _| {})
+    }
+
+    fn load_with_progress(
+        &self,
+        version: &str,
+        asset: &'static str,
+        on_progress: &dyn Fn(u64, Option<u64>),
+    ) -> Result<LoadedBinary, InstallError> {
         let tag = asset::release_tag(version);
         let manifest_url = asset::download_url(&tag, asset::CHECKSUMS_ASSET);
+        // Not reported: `checksums.txt` is under a kilobyte, and a bar that
+        // jumped to 100% for it before restarting for the real asset would read
+        // as a stall rather than as two files.
         let manifest = self
             .fetch
             .get(&manifest_url)
@@ -280,7 +352,7 @@ impl ServerBinarySource for ReleaseDownload<'_> {
         let asset_url = asset::download_url(&tag, asset);
         let bytes = self
             .fetch
-            .get(&asset_url)
+            .get_with_progress(&asset_url, on_progress)
             .map_err(|reason| InstallError::Download {
                 url: asset_url.clone(),
                 reason,
@@ -415,6 +487,218 @@ pub fn install_confirm() -> Arc<dyn InstallConfirm> {
         .lock()
         .map(|slot| slot.clone())
         .unwrap_or_else(|_| Arc::new(DenyInstall))
+}
+
+// ---------------------------------------------------------------------------
+// Install progress (§12)
+// ---------------------------------------------------------------------------
+
+/// How far a first install has got, in bytes.
+///
+/// Only the two steps that take real time appear. `uname`, `stat`, `mkdir`,
+/// `chmod` and the rename are single round trips: a phase for each would flicker
+/// past faster than it could be read, and a progress display that spends most of
+/// its life on two steps is better off saying which of the two it is on.
+///
+/// The byte counts are of the *asset*, so `Uploading` restarts at zero rather
+/// than continuing where `Downloading` left off. Two bars' worth of work shown
+/// as one 0-200% sweep would be worse; two named phases each running 0-100% is
+/// what the user is actually waiting through.
+///
+/// Serialisable because the install runs in the **daemon** and the user is in
+/// the GUI: this crosses the routed connection as a
+/// [`RoutePrompt::InstallProgress`](crate::daemon::router::RoutePrompt) frame.
+/// Unlike [`InstallRequest`] it needs no wire twin — every field is already a
+/// plain number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallPhase {
+    /// Fetching the asset onto *this* machine over HTTPS.
+    ///
+    /// `total` is `None` when the server sent no `Content-Length` — rare for a
+    /// release asset, but a chunked response is legal and a progress sink that
+    /// cannot represent "unknown total" would have to invent one.
+    Downloading { done: u64, total: Option<u64> },
+    /// Writing the verified bytes to the remote over SFTP. `total` is exact:
+    /// the bytes are in memory by now.
+    Uploading { done: u64, total: u64 },
+}
+
+impl InstallPhase {
+    /// Fraction complete in `0.0..=1.0`, or `None` when the total is unknown.
+    pub fn fraction(&self) -> Option<f32> {
+        let (done, total) = match *self {
+            InstallPhase::Downloading { done, total } => (done, total?),
+            InstallPhase::Uploading { done, total } => (done, total),
+        };
+        if total == 0 {
+            return None;
+        }
+        Some((done as f32 / total as f32).clamp(0.0, 1.0))
+    }
+}
+
+/// Watches an install go by (design §12: the first install writes ~8 MB across
+/// two network hops, and a client that says only "connecting…" for the length of
+/// both is indistinguishable from one that has hung).
+///
+/// **Reports are frequent and must be cheap.** One arrives per transfer chunk —
+/// hundreds over a single install — so an implementation stores the latest and
+/// returns. It must not block, lock anything a UI thread holds, or do IO: the
+/// thread calling this is the one moving the bytes.
+///
+/// **Nothing here affects the install.** It is a side channel, which is why
+/// [`Installer`] reaches for it through the global rather than carrying it as a
+/// field the way it carries [`InstallConfirm`] — a sink cannot change what gets
+/// written, so it does not belong in the constructor every caller and fake has
+/// to satisfy.
+///
+/// The default ([`SilentProgress`]) drops everything, which is the right
+/// behaviour for a headless daemon with nobody watching.
+pub trait InstallProgress: Send + Sync {
+    /// `host` is the same label [`InstallRequest::host`] carries, so a sink
+    /// serving several machines can tell them apart.
+    fn report(&self, host: &str, phase: InstallPhase);
+}
+
+/// The default: nobody is watching, so nothing is recorded.
+pub struct SilentProgress;
+
+impl InstallProgress for SilentProgress {
+    fn report(&self, _host: &str, _phase: InstallPhase) {}
+}
+
+static PROGRESS: OnceLock<Mutex<Arc<dyn InstallProgress>>> = OnceLock::new();
+
+fn progress_slot() -> &'static Mutex<Arc<dyn InstallProgress>> {
+    PROGRESS.get_or_init(|| Mutex::new(Arc::new(SilentProgress)))
+}
+
+/// Register the process-wide progress sink. Called once by the GUI at startup;
+/// last call wins.
+pub fn set_install_progress(progress: Arc<dyn InstallProgress>) {
+    if let Ok(mut slot) = progress_slot().lock() {
+        *slot = progress;
+    }
+}
+
+thread_local! {
+    /// A sink that outranks [`PROGRESS`] for the duration of one call, on one
+    /// thread. See [`with_install_progress`].
+    static SCOPED_PROGRESS: std::cell::RefCell<Option<Arc<dyn InstallProgress>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `progress` receiving any install it drives, then put the
+/// previous sink back.
+///
+/// The same shape, and the same reason, as [`with_install_confirm`]: in the
+/// daemon the only sink that can reach a user is one bound to a particular
+/// routed connection, and two machines installing at once through a global would
+/// report both machines' bytes to whichever client asked last.
+pub fn with_install_progress<T>(progress: Arc<dyn InstallProgress>, f: impl FnOnce() -> T) -> T {
+    let previous = SCOPED_PROGRESS.with(|slot| slot.borrow_mut().replace(progress));
+    let out = f();
+    SCOPED_PROGRESS.with(|slot| *slot.borrow_mut() = previous);
+    out
+}
+
+/// The progress sink in force: this thread's scoped one, else the process-wide
+/// one, else [`SilentProgress`].
+pub fn install_progress() -> Arc<dyn InstallProgress> {
+    if let Some(scoped) = SCOPED_PROGRESS.with(|slot| slot.borrow().clone()) {
+        return scoped;
+    }
+    progress_slot()
+        .lock()
+        .map(|slot| slot.clone())
+        .unwrap_or_else(|_| Arc::new(SilentProgress))
+}
+
+// ---------------------------------------------------------------------------
+// Asking a server binary what it speaks (§12)
+// ---------------------------------------------------------------------------
+
+/// The flag that makes a `tty7-server` print [`RemoteProtocol`] and exit.
+///
+/// A *file*, not a running daemon: the numbers are compile-time constants, so
+/// this answers "what would this binary speak" without a socket, a handshake, or
+/// anything already being up. That is what lets the installer decide whether to
+/// write 8 MB **before** writing it.
+///
+/// Servers older than this flag print usage to stderr and exit non-zero, which
+/// [`Installer::probe_protocol`] reads as "no opinion" — the same conservative
+/// answer an unreadable `/proc` gets.
+pub const PROTOCOL_FLAG: &str = "--protocol";
+
+/// What a `tty7-server` binary speaks, as it reports itself.
+///
+/// The remote counterpart of [`DaemonVersion`](crate::daemon::protocol::DaemonVersion),
+/// and deliberately the same shape: two dialect numbers that decide
+/// compatibility, plus a build string that decides nothing.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RemoteProtocol {
+    /// [`crate::daemon::control::CONTROL_VERSION`] — the control dialect, which
+    /// is what a remote *workspace* runs on.
+    pub control: u32,
+    /// [`crate::daemon::protocol::PROTOCOL_VERSION`] — the pane dialect, which
+    /// is what a routed *pane* on that machine runs on.
+    pub protocol: u32,
+    /// `CARGO_PKG_VERSION`. **Display only** — same rule as
+    /// [`DaemonVersion::build`](crate::daemon::protocol::DaemonVersion::build)
+    /// and [`ControlHelloOk::build`](crate::daemon::control::ControlHelloOk::build).
+    /// Two builds that speak the same numbers are interchangeable no matter what
+    /// their version strings say, and treating a version string as a dialect is
+    /// exactly the bug this type exists to end.
+    pub build: String,
+}
+
+impl RemoteProtocol {
+    /// What this client speaks.
+    pub fn of_this_build() -> RemoteProtocol {
+        RemoteProtocol {
+            control: crate::daemon::control::CONTROL_VERSION,
+            protocol: crate::daemon::protocol::PROTOCOL_VERSION,
+            build: client_version().to_string(),
+        }
+    }
+
+    /// Whether a server speaking `self` can serve a client speaking `other`.
+    ///
+    /// **Both numbers, both exactly equal** — the same judgement
+    /// `spawn::ensure_running` makes locally (`v.protocol == PROTOCOL_VERSION`),
+    /// applied to both dialects because a remote workspace uses both: control
+    /// for the workspace itself, pane for every terminal in it.
+    ///
+    /// Equality rather than `>=` deliberately. A newer server is not
+    /// automatically able to speak an older client's dialect, and guessing that
+    /// it can turns a clean prompt into a wire error halfway through a session.
+    pub fn serves(&self, other: &RemoteProtocol) -> bool {
+        self.control == other.control && self.protocol == other.protocol
+    }
+
+    /// The single line a server prints for [`PROTOCOL_FLAG`].
+    ///
+    /// Paired with [`parse`](Self::parse) here rather than left to each side's
+    /// own `serde_json` call: the writer is `tty7-server` and the reader is the
+    /// client, they ship separately and meet over SSH, and one shared function
+    /// is what stops the format drifting between them.
+    pub fn to_line(&self) -> String {
+        // Infallible in practice — three plain fields — and a server that could
+        // not describe itself should still exit cleanly rather than make the
+        // caller handle an error that cannot happen.
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// Parse one from a probe's stdout.
+    ///
+    /// Takes the **last** non-blank line: a login shell that prints a banner
+    /// from `.bashrc` would otherwise poison an otherwise fine answer, and the
+    /// server writes its line last because it writes it at exit.
+    pub fn parse(stdout: &str) -> Option<RemoteProtocol> {
+        let line = stdout.lines().rev().find(|l| !l.trim().is_empty())?;
+        serde_json::from_str(line.trim()).ok()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -623,8 +907,19 @@ pub struct InstallReport {
     pub confirmed: bool,
     /// Whether a daemon had to be launched (false when one was already serving).
     pub launched: bool,
-    /// Set when a daemon of another build is serving this machine.
+    /// Set when a daemon that **cannot serve this client** is on the machine.
+    ///
+    /// A different build is not a mismatch — a different *dialect* is. See
+    /// [`Installer::check_running_build`].
     pub mismatch: Option<MismatchedRemoteDaemon>,
+    /// The already-running server this connect adopted instead of installing,
+    /// when its dialects matched ours despite a different build.
+    ///
+    /// `Some` is the case design §12 always intended and the implementation
+    /// missed: a 26.7.6 client meeting a 26.7.7 server they both speak. Recorded
+    /// because "we deliberately did not install" is otherwise indistinguishable
+    /// in a log from "we forgot to".
+    pub reused: Option<RemoteProtocol>,
 }
 
 // ---------------------------------------------------------------------------
@@ -739,6 +1034,7 @@ impl<'a> Installer<'a> {
             confirmed: false,
             launched: false,
             mismatch: None,
+            reused: None,
         };
 
         // A file that exists but is not executable is a half-finished install
@@ -746,16 +1042,82 @@ impl<'a> Installer<'a> {
         // than launching something the kernel will refuse.
         let usable = already.is_some_and(|stat| !stat.is_dir && stat.mode & 0o100 != 0);
         if !usable {
-            let (confirmed, _) = self.install(asset, &paths)?;
-            report.installed = true;
-            report.confirmed = confirmed;
+            // --- 3. before writing 8 MB, ask what is already serving ----------
+            //
+            // Design §12 says version skew is settled by comparing dialects, not
+            // build strings. Only the *running* server is asked: the socket is
+            // singular, so a compatible binary that is merely present on disk
+            // would still have to be started — and starting our own is simpler
+            // and more predictable than adopting a stranger's file.
+            match self.adoptable_running_server()? {
+                Some((exe, spoken)) => {
+                    log::info!(
+                        "remote {}: adopting the running {} (control {}, protocol {}) \
+                         instead of installing {} — same dialects",
+                        self.host,
+                        spoken.build,
+                        spoken.control,
+                        spoken.protocol,
+                        self.version,
+                    );
+                    report.paths = asset::remote_paths_for_binary(&home, &exe);
+                    report.reused = Some(spoken);
+                }
+                None => {
+                    let (confirmed, _) = self.install(asset, &paths)?;
+                    report.installed = true;
+                    report.confirmed = confirmed;
+                }
+            }
         }
 
         // --- 6. make sure a daemon is serving --------------------------------
-        let (launched, mismatch) = self.ensure_daemon(&paths)?;
+        let (launched, mismatch) = self.ensure_daemon(&report.paths)?;
         report.launched = launched;
         report.mismatch = mismatch;
         Ok(report)
+    }
+
+    /// The running `tty7-server` on this machine, when it speaks our dialects.
+    ///
+    /// `None` covers every reason not to adopt one, and they are deliberately
+    /// indistinguishable to the caller: nothing running, an unreadable `/proc`,
+    /// a binary too old to know [`PROTOCOL_FLAG`], or one that answered with
+    /// dialects we cannot speak. All four mean "install ours", and none of them
+    /// is an error — a machine we cannot interrogate is a machine we install on,
+    /// exactly as before this existed.
+    fn adoptable_running_server(&self) -> Result<Option<(String, RemoteProtocol)>, InstallError> {
+        let Some(exe) = self.running_server_exe() else {
+            return Ok(None);
+        };
+        let Some(spoken) = self.probe_protocol(&exe) else {
+            return Ok(None);
+        };
+        if !spoken.serves(&RemoteProtocol::of_this_build()) {
+            return Ok(None);
+        }
+        Ok(Some((exe, spoken)))
+    }
+
+    /// Ask a server *binary* what it speaks. `None` if it cannot say.
+    ///
+    /// Cheap by design: one SSH command against a file, no socket and no daemon,
+    /// so it can be asked before deciding whether to transfer anything.
+    fn probe_protocol(&self, exe: &str) -> Option<RemoteProtocol> {
+        let cmd = format!("{} {PROTOCOL_FLAG}", shell_quote(exe));
+        let out = self.ops.run(&cmd).ok()?;
+        if !out.success() {
+            // A server older than the flag prints usage and exits non-zero.
+            return None;
+        }
+        RemoteProtocol::parse(&out.stdout)
+    }
+
+    /// The executable path of this user's running `tty7-server`, if any.
+    fn running_server_exe(&self) -> Option<String> {
+        let out = self.ops.run(RUNNING_EXE_COMMAND).ok()?;
+        let exe = out.stdout.trim();
+        (!exe.is_empty()).then(|| exe.to_string())
     }
 
     /// Steps 3–5: download, verify, confirm, upload, publish.
@@ -808,8 +1170,12 @@ impl<'a> Installer<'a> {
         // refuses SETSTAT) must not block an install that will otherwise work.
         let _ = self.ops.chmod(&paths.bin_dir, DIR_MODE);
 
+        let sink = install_progress();
+        let total = bytes.len() as u64;
         self.ops
-            .put(&paths.temp, &bytes)
+            .put_with_progress(&paths.temp, &bytes, &|done| {
+                sink.report(&self.host, InstallPhase::Uploading { done, total });
+            })
             .map_err(|reason| InstallError::Write {
                 path: paths.temp.clone(),
                 reason,
@@ -847,8 +1213,12 @@ impl<'a> Installer<'a> {
     /// Where step 3's bytes come from: the injected source if there is one,
     /// otherwise a [`ReleaseDownload`] over the injected fetcher.
     fn load_binary(&self, asset: &'static str) -> Result<LoadedBinary, InstallError> {
+        let sink = install_progress();
+        let on_progress = |done: u64, total: Option<u64>| {
+            sink.report(&self.host, InstallPhase::Downloading { done, total });
+        };
         if let Some(source) = self.source {
-            return source.load(&self.version, asset);
+            return source.load_with_progress(&self.version, asset, &on_progress);
         }
         let Some(fetch) = self.fetch else {
             // Unreachable through either constructor; a plain error rather than
@@ -859,7 +1229,7 @@ impl<'a> Installer<'a> {
                 reason: "no binary source was configured".to_string(),
             });
         };
-        ReleaseDownload { fetch }.load(&self.version, asset)
+        ReleaseDownload { fetch }.load_with_progress(&self.version, asset, &on_progress)
     }
 
     /// Whether tty7 has ever written to this machine, decided from the remote's
@@ -930,22 +1300,39 @@ impl<'a> Installer<'a> {
             .map_err(|reason| InstallError::Launch { reason })
     }
 
-    /// Identify the build of the daemon that is actually serving, and record a
-    /// mismatch if it is not ours.
+    /// Identify the daemon that is actually serving, and record a mismatch only
+    /// if it **cannot speak to us**.
     ///
-    /// The install path carries the version by construction, so reading the
-    /// running process's executable link answers this for *every* build we have
-    /// shipped — including ones older than any handshake we could send them.
-    /// Failing to read it is not an error: an unreadable `/proc` means we simply
-    /// have no opinion, and no opinion must never be reported as a mismatch.
+    /// **A different build is not a mismatch.** Design §12: "握手比
+    /// `PROTOCOL_VERSION`,兼容就继续用旧 server" — the same judgement
+    /// `spawn::ensure_running` makes locally, where a daemon whose `build`
+    /// differs but whose `protocol` matches is reused in silence. Comparing
+    /// version *strings* here is what made a 26.7.6 client prompt about a
+    /// 26.7.7 server it could talk to perfectly well, and made it upload 8 MB to
+    /// a machine that needed nothing.
+    ///
+    /// Failing to read any of it is not an error: an unreadable `/proc`, or a
+    /// server too old to know [`PROTOCOL_FLAG`], means we have no opinion — and
+    /// no opinion must never be reported as a mismatch.
     fn check_running_build(&self, paths: &RemotePaths) -> Option<MismatchedRemoteDaemon> {
-        let out = self.ops.run(RUNNING_EXE_COMMAND).ok()?;
-        let exe = out.stdout.trim();
-        if exe.is_empty() {
-            return None;
-        }
+        let exe = self.running_server_exe()?;
+        let exe = exe.as_str();
         let running_version = asset::version_from_path(exe);
         if running_version.as_deref() == Some(self.version.as_str()) || exe == paths.binary {
+            return None;
+        }
+        // A different build, so ask the only question that decides anything.
+        // An unanswerable probe leaves the old behaviour in place: a server that
+        // predates the flag really might not understand us, and the prompt is
+        // the honest response to not knowing.
+        if self
+            .probe_protocol(exe)
+            .is_some_and(|spoken| spoken.serves(&RemoteProtocol::of_this_build()))
+        {
+            log::info!(
+                "remote {} is served by {exe}, a different build this client speaks to anyway",
+                self.host,
+            );
             return None;
         }
         let entry = MismatchedRemoteDaemon {

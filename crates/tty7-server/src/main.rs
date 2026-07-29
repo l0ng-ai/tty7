@@ -64,6 +64,7 @@ OPTIONS:
       --pane                Forward to the machine's *pane* socket instead
       --control-sock <p>    Use <p> as the control socket instead of the default
     --config-dir <dir>    Use <dir> for the socket, config and session files
+    --protocol            Print the dialects this binary speaks, as JSON
     -V, --version         Print the version and exit
     -h, --help            Print this help and exit
 ";
@@ -85,6 +86,22 @@ fn main() -> ExitCode {
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("tty7-server {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+    // Before the config dir, the crash handler and the logger, like `--version`:
+    // a client asking what this binary speaks must not touch the machine's
+    // state, and must answer even on a box where the config dir is unwritable.
+    //
+    // One line of JSON on stdout, because the reader is a client parsing SSH
+    // output rather than a person (`install::RemoteProtocol::parse`).
+    if args
+        .iter()
+        .any(|a| a == tty7_core::daemon::install::PROTOCOL_FLAG)
+    {
+        println!(
+            "{}",
+            tty7_core::daemon::install::RemoteProtocol::of_this_build().to_line()
+        );
         return ExitCode::SUCCESS;
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {

@@ -155,7 +155,16 @@ impl RemoteOps for SshRemoteOps {
     }
 
     fn put(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
-        SftpManager::global().put_bytes(&self.conn, path, bytes)
+        SftpManager::global().put_bytes(&self.conn, path, bytes, &|_| {})
+    }
+
+    fn put_with_progress(
+        &self,
+        path: &str,
+        bytes: &[u8],
+        on_progress: &(dyn Fn(u64) + Send + Sync),
+    ) -> Result<(), String> {
+        SftpManager::global().put_bytes(&self.conn, path, bytes, on_progress)
     }
 
     fn rename(&self, from: &str, to: &str) -> Result<(), String> {

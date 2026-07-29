@@ -90,6 +90,22 @@ pub struct AuthPromptReady;
 
 impl gpui::EventEmitter<AuthPromptReady> for TerminalView {}
 
+/// The pane's coding agent reported a different native session id than the one
+/// the saved layout knows about — it started a conversation, or replaced the
+/// one it had. `Tty7App` subscribes (see `new_terminal`) and re-saves.
+///
+/// # Why an event and not just "it's read at save time"
+///
+/// The id arrives asynchronously, on the agent's own hooks, long after
+/// everything that *structurally* changes a window. Nothing else was making the
+/// window save in between, so whether the id reached `session.json` came down
+/// to whether the user happened to open a tab, split a pane or move focus
+/// afterwards. That is what made resume-after-End-Sessions work sometimes and
+/// not others: the layout on file simply had no agent in it.
+pub struct AgentSessionChanged;
+
+impl gpui::EventEmitter<AgentSessionChanged> for TerminalView {}
+
 /// An established native-SSH daemon pane, ready to be wrapped in a view: the
 /// output of the fallible [`TerminalView::spawn_native_ssh_terminal`], consumed
 /// by the infallible [`TerminalView::from_native_ssh_parts`].
@@ -125,6 +141,12 @@ pub struct ShellParts {
     /// Readable for the same reason as `pane_id` above: killing an orphaned
     /// pane has to dial the machine it actually landed on.
     pub(crate) workspace: Option<crate::terminal::PaneWorkspace>,
+    /// Whether this is the pane the caller asked to re-attach to, or a fresh
+    /// one spawned because that id was gone. A restored pane is still running
+    /// whatever it was running; a respawned one is a bare shell in the same
+    /// directory, which is the case a saved coding-agent session has to be
+    /// resumed into.
+    pub(crate) restored: bool,
 }
 
 /// See `TerminalView::drag_scroll`.
@@ -321,6 +343,14 @@ pub struct TerminalView {
     /// waiting, working → done) fire exactly one notification each and repaint
     /// the status dot.
     last_agent_status: Option<crate::core::cli_agent::AgentStatus>,
+    /// The agent identity that is worth *persisting* — the native session id and
+    /// the argv it was launched with — as last seen. Compared on every poll so a
+    /// change raises [`AgentSessionChanged`] and the layout on file catches up.
+    ///
+    /// Deliberately not the agent chip itself: that can blip for a moment when
+    /// the agent shells out, and a blip here would mean a save (and, on a remote
+    /// workspace, a push) for nothing. The session id does not blip.
+    last_agent_session: (Option<String>, Option<Vec<String>>),
     /// When the current rich turn entered `Working`, for the "finished after
     /// Ns" copy on its `Done` notification.
     agent_turn_started: Option<std::time::Instant>,
@@ -998,8 +1028,18 @@ impl TerminalView {
     /// The PTY lives in the daemon now. On session restore (`restore_pane`),
     /// re-`attach` to the still-running pane so its process + scrollback come
     /// back intact; otherwise `spawn` a fresh pane (with the caller's shell
-    /// pick, if any). The caller only passes a `restore_pane` it has already
-    /// confirmed alive, so we trust it here.
+    /// pick, if any).
+    ///
+    /// **A `restore_pane` that is gone falls back to a fresh pane** rather than
+    /// failing. Callers do check first, but neither check is a guarantee: a
+    /// local one asks the daemon and can be raced by the pane exiting, and a
+    /// remote one cannot afford to ask at all (`alive_panes_on` is a blocking
+    /// round trip and the UI thread is where it would run) — trying the attach
+    /// *is* the question there. Either way an id that no longer exists is the
+    /// ordinary state of a workspace whose sessions were ended, and the answer
+    /// to it is the same as for a session written before the daemon existed: a
+    /// fresh shell in the saved cwd. `restored` says which happened, because
+    /// what the caller does next differs — see [`ShellParts`].
     ///
     /// **`workspace: None` is the local path, unchanged down to the byte** —
     /// [`PaneRoute::for_workspace`] answers `Local`, and `Local` is a bare
@@ -1017,14 +1057,21 @@ impl TerminalView {
         shell: Option<ShellSpec>,
     ) -> anyhow::Result<ShellParts> {
         let route = crate::terminal::PaneRoute::for_workspace(workspace.as_ref());
-        let (terminal, pane_id, shell_spec) = match restore_pane {
-            Some(id) => (
-                RemoteTerminal::attach_on(&route, TermSize::new(80, 24), 8, 17, id)?,
-                id,
+        let attached = match restore_pane {
+            Some(id) => match RemoteTerminal::attach_on(&route, TermSize::new(80, 24), 8, 17, id) {
                 // An attached pane keeps whatever shell it already runs; the
                 // pick that spawned it (if any) isn't persisted.
-                None,
-            ),
+                Ok(terminal) => Some((terminal, id, None)),
+                Err(e) => {
+                    log::info!("pane {id} is gone on its machine ({e:#}); spawning fresh");
+                    None
+                }
+            },
+            None => None,
+        };
+        let restored = attached.is_some();
+        let (terminal, pane_id, shell_spec) = match attached {
+            Some(parts) => parts,
             None => {
                 let (terminal, id) = RemoteTerminal::spawn_on(
                     &route,
@@ -1042,6 +1089,7 @@ impl TerminalView {
             pane_id,
             shell_spec,
             workspace,
+            restored,
         })
     }
 
@@ -1327,6 +1375,12 @@ impl TerminalView {
             running_title: String::new(),
             running_agent: None,
             last_agent_status: None,
+            // Empty rather than seeded from the saved layout: a pane that comes
+            // back attached to a running agent then reports the id it already
+            // had, which reads as a change and saves once. Harmless, and the
+            // alternative — trusting the record — would skip the save that
+            // fixes a record which is *wrong*.
+            last_agent_session: (None, None),
             agent_turn_started: None,
             agent_was_rich: false,
             agent_result_unread: false,
@@ -3560,6 +3614,18 @@ impl TerminalView {
         }
         if self.terminal.foreground_agent().is_none() && session.is_none() {
             self.agent_was_rich = false;
+        }
+
+        // Ahead of the status early-return below, because this does not move
+        // with the status: an id appears when the agent's hooks first report a
+        // conversation, which is a moment the status has no opinion about.
+        let identity = (
+            session.as_ref().and_then(|s| s.session_id.clone()),
+            session.as_ref().and_then(|s| s.launch_argv.clone()),
+        );
+        if identity != self.last_agent_session {
+            self.last_agent_session = identity;
+            cx.emit(AgentSessionChanged);
         }
 
         let status = session.as_ref().map(|s| s.status);
@@ -8038,6 +8104,77 @@ mod gpui_tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         panic!("the prompt report never reached the view");
+    }
+
+    /// **A session id the agent reports raises [`AgentSessionChanged`], and it
+    /// does so without the status moving.** That is the whole point: the id
+    /// arrives on the agent's hooks, minutes after anything structural happened
+    /// to the window, and nothing else was going to make the layout save. A
+    /// record with no session id in it is a workspace that cannot resume, which
+    /// is what made resume-after-End-Sessions look intermittent.
+    ///
+    /// The second poll must stay quiet — a save (and, on a remote workspace, a
+    /// push to the machine) per repaint would be a different bug.
+    #[gpui::test]
+    fn a_reported_session_id_asks_the_window_to_save(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::{AgentSessionState, AgentStatus};
+
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        let saves = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let view = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+        {
+            let saves = saves.clone();
+            cx.update(|cx| {
+                cx.subscribe(&view, move |_, _: &AgentSessionChanged, _| {
+                    saves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+                .detach();
+            });
+        }
+
+        // The hooks report a conversation. `status` is `Idle` before and after,
+        // so a poll keyed only on the status would never notice.
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status: AgentStatus::Idle,
+            message: None,
+            session_id: Some("sid-abc".into()),
+            launch_argv: Some(vec!["claude".into()]),
+            rich: true,
+            cwd: None,
+            activity: 0,
+        }))
+        .encode(&mut daemon)
+        .unwrap();
+        for _ in 0..200 {
+            if window
+                .update(cx, |view, _, _| view.terminal.agent_session().is_some())
+                .unwrap()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, _, cx| view.poll_agent_status(false, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            saves.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the id has to reach the layout on file"
+        );
+
+        window
+            .update(cx, |view, _, cx| view.poll_agent_status(false, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            saves.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an unchanged session must not re-save on every poll"
+        );
     }
 
     /// A hover cell remembered while the pane was tall names a row the grid no

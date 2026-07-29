@@ -26,10 +26,16 @@ use std::path::Path;
 #[cfg(windows)]
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 /// One launchable shell surfaced in the new-tab dropdown. `program` + `args`
 /// have the same shape as `config::ShellConfig` / `protocol::ShellSpec`: a
 /// bare name resolved via `PATH` or an absolute path, plus launch arguments.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serializable because the dropdown of a **remote** workspace's window lists
+/// the shells of the machine that workspace lives on, not this one's: the list
+/// crosses the control dialect as [`ShellInventory`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetectedShell {
     /// Human-readable menu label, e.g. `zsh`, `PowerShell 7`, `WSL · Ubuntu`.
     pub label: String,
@@ -44,6 +50,37 @@ impl DetectedShell {
             program: program.into(),
             args: Vec::new(),
         }
+    }
+}
+
+/// What one machine can launch: its shells, plus which of them a plain new tab
+/// lands on. The unit the new-tab dropdown is built from.
+///
+/// Both halves have to come from the *same* machine. A remote workspace's
+/// window that listed this computer's shells would offer `/bin/zsh` on a box
+/// whose zsh is at `/usr/bin/zsh` — a picker whose every entry fails to spawn.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellInventory {
+    pub shells: Vec<DetectedShell>,
+    /// Short name of the shell a *default* spawn resolves to (`zsh`,
+    /// `PowerShell 7`), for the menu's `default` tag.
+    pub default_name: String,
+}
+
+/// This machine's [`ShellInventory`], honoring the `shell` override in the
+/// config file *this process* reads.
+///
+/// The config lookup goes through [`crate::core::config::shell_command`] rather
+/// than a GPUI global on purpose: the remote `tty7-server` answers this on the
+/// far side of an SSH connection with no GUI in the process, and the override
+/// that matters there is the one in *its* `config.json`.
+///
+/// Runs filesystem probes — call off the UI thread.
+pub fn inventory() -> ShellInventory {
+    let configured = crate::core::config::shell_command();
+    ShellInventory {
+        shells: detect_shells(),
+        default_name: default_shell_name(configured.as_ref().map(|(p, _)| p.as_str())),
     }
 }
 

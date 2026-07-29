@@ -488,6 +488,25 @@ impl Workspace {
         out
     }
 
+    /// Drop every saved pane id, keeping the layout. Answers how many were
+    /// dropped, so a caller with nothing to forget can skip the write.
+    ///
+    /// For the one caller that *knows* the panes are gone: ending a workspace's
+    /// sessions kills them and then leaves the record on file to be reopened.
+    /// The ids in it are ours to invalidate — we are what killed them — and a
+    /// leaf with no id is exactly what restore needs to see, because that is
+    /// the path that spawns a fresh shell in the saved cwd and hands a coding
+    /// agent its `--resume`. Left in place they are a promise the machine
+    /// cannot keep: the reattach finds nothing, and on a remote workspace it
+    /// used to have no way to say so.
+    pub fn forget_pane_ids(&mut self) -> usize {
+        let mut forgotten = 0;
+        for tab in &mut self.session.tabs {
+            forgotten += blank_pane_ids(&mut tab.pane);
+        }
+        forgotten
+    }
+
     /// Stamp this workspace as just-focused.
     pub fn touch(&mut self) {
         self.last_active = now_secs();
@@ -804,6 +823,15 @@ fn collect_pane_ids(pane: &SessionPane, out: &mut Vec<u64>) {
     }
 }
 
+/// Blank every leaf's `pane_id` under `pane`, answering how many were set.
+/// See [`Workspace::forget_pane_ids`].
+pub fn blank_pane_ids(pane: &mut SessionPane) -> usize {
+    match pane {
+        SessionPane::Leaf { pane_id, .. } => usize::from(pane_id.take().is_some()),
+        SessionPane::Split { a, b, .. } => blank_pane_ids(a) + blank_pane_ids(b),
+    }
+}
+
 /// Blank any `pane_id` already claimed by an earlier-visited workspace. A
 /// blanked leaf still restores — it just spawns a fresh shell in its saved cwd,
 /// the same path a session from before the daemon existed takes.
@@ -1114,6 +1142,44 @@ mod tests {
         assert!(!only.open);
         assert_eq!(only.last_active, 1_700_000_000);
         assert_eq!(back.active, Some(id));
+    }
+
+    /// Ending a workspace's sessions leaves the layout and drops the ids — the
+    /// cwds are what reopening rebuilds from, and a kept id would send restore
+    /// down the reattach path to a pane that no longer exists.
+    #[test]
+    fn forgetting_pane_ids_keeps_the_layout_and_the_cwds() {
+        let mut ws = workspace(vec![
+            tab(
+                SessionPane::Split {
+                    axis: SessionAxis::Horizontal,
+                    ratio: 0.5,
+                    a: Box::new(leaf(Some("/work"), Some(1))),
+                    b: Box::new(leaf(Some("/work/api"), Some(2))),
+                },
+                Some("/work"),
+            ),
+            tab(leaf(Some("/tmp"), None), None),
+        ]);
+
+        assert_eq!(
+            ws.forget_pane_ids(),
+            2,
+            "only the claims that existed count"
+        );
+        assert!(ws.pane_ids().is_empty());
+        assert_eq!(ws.session.tabs.len(), 2, "the tabs are what survives");
+        assert_eq!(ws.pane_count(), 3, "and so is the split");
+        assert_eq!(
+            ws.first_cwd(),
+            Some(PathBuf::from("/work")),
+            "reopening respawns in the saved directory, so it must still be there"
+        );
+        assert_eq!(
+            ws.forget_pane_ids(),
+            0,
+            "a second pass has nothing to do, so the caller can skip its write"
+        );
     }
 
     #[test]

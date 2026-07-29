@@ -90,7 +90,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::daemon::install::{
-    InstallConfirm, InstallDecision, InstallRequest, MismatchedRemoteDaemon,
+    InstallConfirm, InstallDecision, InstallPhase, InstallProgress, InstallRequest,
+    MismatchedRemoteDaemon,
 };
 use crate::daemon::protocol::{self, AuthPromptKind, AuthResponse, DaemonMsg, NativeSshSpec};
 use crate::daemon::remote_link::RemoteLink;
@@ -464,6 +465,12 @@ pub enum RoutePrompt {
     Mismatch {
         daemons: Vec<MismatchedRemoteDaemon>,
     },
+    /// How far the install this connection is performing has got. Told, not
+    /// asked, like `Mismatch` — but unlike it, **freely droppable**: these
+    /// arrive hundreds of times per install and each one supersedes the last, so
+    /// a client that misses some has lost nothing a later frame will not
+    /// correct.
+    InstallProgress { host: String, phase: InstallPhase },
 }
 
 /// The client's answer to a [`RoutePrompt`].
@@ -633,6 +640,13 @@ fn answer(machine: &RouteTarget, prompt: RoutePrompt) -> Option<RouteReply> {
             crate::daemon::install::record_remote_mismatches(daemons);
             None
         }
+        RoutePrompt::InstallProgress { host, phase } => {
+            // Into this process's sink, which in the GUI is what the switcher
+            // reads. Same shape as `Mismatch`: relayed precisely so it lands on
+            // the side with a user on it.
+            crate::daemon::install::install_progress().report(&host, phase);
+            None
+        }
     }
 }
 
@@ -730,6 +744,10 @@ pub struct RouteSetup {
     /// Install consent, in the shape [`crate::daemon::install::Installer`]
     /// already speaks.
     pub confirm: Arc<dyn InstallConfirm>,
+    /// Where that install's byte counts go. Separate from `confirm` even though
+    /// one `Relay` is both, because [`unattended`](RouteSetup::unattended) wants
+    /// a sink that discards and a confirm that refuses — two different defaults.
+    pub progress: Arc<dyn InstallProgress>,
     /// Where a build mismatch discovered during setup is collected, to be
     /// handed to the client instead of to this process's registry.
     pub mismatches: Arc<Mutex<Vec<MismatchedRemoteDaemon>>>,
@@ -745,6 +763,7 @@ impl RouteSetup {
         RouteSetup {
             broker: PromptBroker::new(Box::new(|_| false)),
             confirm: Arc::new(crate::daemon::install::DenyInstall),
+            progress: Arc::new(crate::daemon::install::SilentProgress),
             mismatches: Arc::new(Mutex::new(Vec::new())),
             channel,
         }
@@ -764,10 +783,13 @@ impl RouteSetup {
         T: Send + 'static,
     {
         let confirm = self.confirm.clone();
+        let progress = self.progress.clone();
         let sink = self.mismatches.clone();
         tokio::task::spawn_blocking(move || {
             crate::daemon::install::with_install_confirm(confirm, || {
-                crate::daemon::install::with_mismatch_sink(sink, f)
+                crate::daemon::install::with_install_progress(progress, || {
+                    crate::daemon::install::with_mismatch_sink(sink, f)
+                })
             })
         })
         .await
@@ -838,6 +860,26 @@ impl InstallConfirm for Relay {
     }
 }
 
+impl InstallProgress for Relay {
+    /// Fire-and-forget onto the outbox, with no reply to wait for and no error
+    /// path — the send fails only once the client has gone, and an install that
+    /// nobody is watching any more should carry on rather than abort over a
+    /// progress frame.
+    ///
+    /// The outbox is unbounded, so this never blocks the thread pushing bytes
+    /// over SFTP. The frames are small (tens of bytes) and the writer drains
+    /// them between transfer chunks.
+    fn report(&self, host: &str, phase: InstallPhase) {
+        let prompt = RoutePrompt::InstallProgress {
+            host: host.to_string(),
+            phase,
+        };
+        if let Ok(payload) = serde_json::to_vec(&prompt) {
+            let _ = self.out.send((ROUTE_PROMPT_KIND, payload));
+        }
+    }
+}
+
 /// The forwarding hub. Stateless: a routed connection's only state is the two
 /// halves of the pipe, and both die with it.
 pub struct RemoteRouter;
@@ -887,6 +929,7 @@ async fn drive(local: Stream, header: &RouteHeader) -> io::Result<()> {
             _ => true,
         })),
         confirm: relay.clone(),
+        progress: relay.clone(),
         mismatches: Arc::new(Mutex::new(Vec::new())),
         channel: header.channel,
     };

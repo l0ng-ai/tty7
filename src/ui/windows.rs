@@ -457,6 +457,21 @@ fn confirm_destructive(
 /// Callers confirm first unless [`live_pane_count`] answered zero; with nothing
 /// running there is nothing to lose.
 pub fn stop_workspace(cx: &mut App, workspace: WorkspaceId) {
+    stop_workspace_keeping(cx, workspace, ClearedLayout::Push);
+}
+
+/// What to do with the record once its panes are dead.
+#[derive(Clone, Copy, PartialEq)]
+enum ClearedLayout {
+    /// Send it to the machine that owns it — the workspace is going to be
+    /// reopened, and it must not reopen claiming panes that no longer exist.
+    Push,
+    /// Leave it alone: the caller is about to delete the record outright, and a
+    /// push racing that delete could put the workspace back on the machine.
+    Discard,
+}
+
+fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId, cleared: ClearedLayout) {
     // A remote workspace's panes live on the remote server, and its pane ids are
     // *that* daemon's. Sending them here would not fail — it would succeed
     // against whatever local panes happen to hold those numbers, killing a
@@ -509,7 +524,54 @@ pub fn stop_workspace(cx: &mut App, workspace: WorkspaceId) {
     // half-finished action.
     close_window_for(cx, workspace);
     WorkspaceStore::close_window(cx, workspace);
+    // Last, and after the window is gone so nothing records the old layout back
+    // over it: the ids we just killed are dead by our own hand, and a record
+    // that still claims them reopens into panes that cannot be attached to.
+    // Locally that is invisible (`alive_panes_on` asks the daemon and gets the
+    // same answer); on a remote workspace nobody asks, so the stale id is the
+    // whole difference between reopening onto fresh shells with the agent
+    // conversation resumed and reopening onto `tty7 — disconnected`.
+    forget_killed_panes(cx, workspace, cleared);
     refresh_menu(cx);
+}
+
+/// Drop `workspace`'s pane ids, and tell the machine that owns the record.
+///
+/// The push is not optional for a remote workspace that is being kept: design
+/// §10 makes the remote's `workspaces.json` the authority, so reopening pulls
+/// its copy over the client's ([`WorkspaceStore::apply_remote`]) and a
+/// local-only edit would be undone by the next open — which is the open this
+/// exists for.
+fn forget_killed_panes(cx: &mut App, workspace: WorkspaceId, cleared: ClearedLayout) {
+    if !WorkspaceStore::forget_pane_ids(cx, workspace) {
+        return;
+    }
+    if cleared == ClearedLayout::Discard {
+        return;
+    }
+    let Some((host, key, record)) = WorkspaceStore::remote_payload(cx, workspace) else {
+        return;
+    };
+    let Some(connection) = crate::ui::remote_workspace::connection_for(cx, workspace) else {
+        // Not connected, so the panes were not killed either — `kill_pane_on`
+        // needs the same route. The client's copy is still worth clearing: it
+        // is what a reconnect pushes back up.
+        log::info!(
+            "ended sessions on {} without reaching it; the cleared layout goes up on reconnect",
+            host.target
+        );
+        return;
+    };
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(e) = crate::ui::remote_connect::put_remote_layout(&connection, key, record) {
+                log::warn!(
+                    "could not tell {} its workspace's panes are gone: {e}",
+                    host.target
+                );
+            }
+        })
+        .detach();
 }
 
 /// Delete a workspace outright: stop it, then forget it entirely. Irreversible
@@ -519,7 +581,10 @@ pub fn delete_workspace(cx: &mut App, workspace: WorkspaceId) {
     // still on file. Doing this after `WorkspaceStore::remove` would leave the
     // record stranded on the remote with no way left to name it.
     delete_on_remote(cx, workspace);
-    stop_workspace(cx, workspace);
+    // …and the stop that follows must not push the emptied layout back up: the
+    // delete above is in flight on a background task, and a push landing after
+    // it would recreate the record it just removed.
+    stop_workspace_keeping(cx, workspace, ClearedLayout::Discard);
     WorkspaceStore::remove(cx, workspace);
     release_unused_hosts(cx);
     refresh_menu(cx);

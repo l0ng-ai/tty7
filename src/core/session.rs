@@ -201,6 +201,29 @@ impl WorkspaceStore {
         store.workspaces.save();
     }
 
+    /// Drop the pane ids a workspace claims, keeping its layout. Answers
+    /// whether anything changed, so a caller can skip the follow-up push to a
+    /// remote that owns the record.
+    ///
+    /// Called right after those panes have been killed — see
+    /// [`Workspace::forget_pane_ids`] for why the ids have to go rather than
+    /// being left for the reattach to trip over.
+    pub fn forget_pane_ids(cx: &mut gpui::App, id: WorkspaceId) -> bool {
+        let Some(store) = Self::try_store(cx) else {
+            return false;
+        };
+        let Some(workspace) = store.workspaces.get_mut(id) else {
+            return false;
+        };
+        let forgotten = workspace.forget_pane_ids();
+        if forgotten == 0 {
+            return false;
+        }
+        store.workspaces.save();
+        log::info!("workspace {id} forgot {forgotten} pane id(s): its sessions were ended");
+        true
+    }
+
     /// Forget a workspace entirely — the explicit "Close Workspace" action.
     /// The caller is responsible for killing its daemon panes first; this only
     /// drops the bookkeeping.
@@ -548,6 +571,66 @@ mod tests {
                 "the cached layout must survive for the connect to rebuild from"
             );
         });
+    }
+
+    /// "End Sessions" kills the panes and then has to say so on file, or
+    /// reopening the workspace walks into the reattach path with ids nothing
+    /// answers to. The second call answering `false` is what lets the caller
+    /// skip the push that follows.
+    #[gpui::test]
+    fn forgetting_a_workspaces_panes_is_recorded_once(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::core::config::pin_test_config_dir();
+
+            let mut entry = Workspace::on_remote(remote_ref());
+            entry.session = local_layout();
+            let id = entry.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                Workspaces {
+                    workspaces: vec![entry],
+                    active: None,
+                },
+            );
+            assert_eq!(WorkspaceStore::all(cx).get(id).unwrap().pane_ids(), vec![7]);
+
+            assert!(WorkspaceStore::forget_pane_ids(cx, id));
+            let after = WorkspaceStore::all(cx).get(id).unwrap();
+            assert!(after.pane_ids().is_empty());
+            assert_eq!(
+                after.session.tabs.len(),
+                1,
+                "the layout is exactly what reopening rebuilds from"
+            );
+            assert!(
+                !WorkspaceStore::forget_pane_ids(cx, id),
+                "nothing left to forget"
+            );
+        });
+    }
+
+    /// **Why clearing the ids locally is not enough.** The remote owns the
+    /// record (design §10), so reopening pulls its copy over the client's — and
+    /// a copy that still claims the killed panes puts them straight back. This
+    /// is the constraint `windows::forget_killed_panes` pushes to satisfy; if
+    /// this assertion ever flips, that push is dead weight.
+    #[test]
+    fn a_remote_record_reinstates_pane_ids_a_client_only_clear_dropped() {
+        let mut theirs = Workspace::on_remote(remote_ref());
+        theirs.session = local_layout();
+        let record = theirs.to_remote_json();
+
+        let mut ours = Workspace::on_remote(remote_ref());
+        ours.session = local_layout();
+        ours.forget_pane_ids();
+        assert!(ours.pane_ids().is_empty());
+
+        ours.apply_remote_json(&record).unwrap();
+        assert_eq!(
+            ours.pane_ids(),
+            vec![7],
+            "the machine's copy wins, so the clear has to reach it"
+        );
     }
 
     /// The remote-bound payload travels under the *remote's* id, so a record

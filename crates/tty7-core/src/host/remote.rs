@@ -44,7 +44,7 @@ use crate::daemon::control::{
     ReplyOk,
 };
 use crate::host::{
-    Entry, Host, HostId, Meta, Output, SearchHit, SharedHost, WatchHandle, WatchSub,
+    Entry, Host, HostId, Meta, Output, SearchHit, SharedHost, ShellInventory, WatchHandle, WatchSub,
 };
 
 /// A [`Host`] backed by a control connection to another machine.
@@ -357,6 +357,17 @@ impl Host for RemoteHost {
         }
     }
 
+    /// Safe to send unguarded: the request landed in control v2, and the
+    /// handshake already refused any peer on another dialect. A server too old
+    /// to know the variant is never on the other end of a live connection — it
+    /// was replaced at install time, or the connection never opened.
+    fn shells(&self) -> io::Result<ShellInventory> {
+        match self.call(ControlRequest::Shells)? {
+            ReplyOk::Shells(inv) => Ok(inv),
+            other => Err(wrong_shape("a shell inventory", &other)),
+        }
+    }
+
     fn watch(&self, dirs: &[PathBuf]) -> io::Result<WatchSub> {
         let id = match self.call(ControlRequest::WatchOpen {
             dirs: wire_paths(dirs),
@@ -593,6 +604,7 @@ mod tests {
                 crate::daemon::control::feature::CONTROL.into(),
                 crate::daemon::control::feature::HOST_RPC.into(),
             ],
+            instance: "test-instance".into(),
         }
     }
 
@@ -674,6 +686,33 @@ mod tests {
         )
         .unwrap();
         (host, seen_rx)
+    }
+
+    /// The dropdown of a remote window is built from the *server's* shells.
+    /// This is the whole point: a menu filled from the client's `/etc/shells`
+    /// offers `/bin/zsh` on a box whose zsh lives elsewhere, and every pick
+    /// fails to spawn.
+    #[test]
+    fn shells_come_from_the_peer() {
+        let (host, seen) = host_with_peer('/', |req| match req {
+            ControlRequest::Shells => Some((
+                ControlReply::Ok(ReplyOk::Shells(crate::core::shells::ShellInventory {
+                    shells: vec![crate::core::shells::DetectedShell {
+                        label: "zsh".into(),
+                        program: "/usr/bin/zsh".into(),
+                        args: vec![],
+                    }],
+                    default_name: "zsh".into(),
+                })),
+                vec![],
+            )),
+            other => panic!("unexpected request {other:?}"),
+        });
+
+        let inv = host.shells().unwrap();
+        assert_eq!(seen.recv().unwrap(), ControlRequest::Shells);
+        assert_eq!(inv.default_name, "zsh");
+        assert_eq!(inv.shells[0].program, "/usr/bin/zsh");
     }
 
     /// Path arithmetic follows the *peer's* separator, not the client's. On a

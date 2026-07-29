@@ -46,6 +46,8 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::thread::ThreadId;
 
+pub use crate::core::shells::ShellInventory;
+
 // ---------------------------------------------------------------------------
 // Identity
 // ---------------------------------------------------------------------------
@@ -502,6 +504,18 @@ pub trait Host: Send + Sync + 'static {
     /// a current directory, `GIT_OPTIONAL_LOCKS=0`, null stdin, `GIT_DIR` and
     /// `GIT_WORK_TREE` cleared, and both output streams captured.
     fn git(&self, cwd: &Path, args: &[&str]) -> io::Result<Output>;
+
+    // ----- machine inventory -----------------------------------------------
+
+    /// The shells this host can launch, plus which one a plain new tab lands
+    /// on — the new-tab dropdown's menu.
+    ///
+    /// On the trait rather than beside `detect_shells` because a window bound to
+    /// a remote workspace opens its tabs *over there*: a picker built from this
+    /// computer's `/etc/shells` offers paths that don't exist on the machine the
+    /// spawn actually reaches. Probing is not free (Windows enumerates WSL by
+    /// spawning `wsl.exe`), so callers ask once per machine, not per menu open.
+    fn shells(&self) -> io::Result<ShellInventory>;
 
     // ----- watching --------------------------------------------------------
 

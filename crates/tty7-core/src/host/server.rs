@@ -513,6 +513,7 @@ fn handshake<R: Read>(
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default(),
         features,
+        instance: crate::daemon::control::server_instance().to_string(),
     }))?;
 
     if hello.control_version != CONTROL_VERSION {
@@ -810,6 +811,9 @@ fn run_request(
             // semantics for every remote workspace at once.
             (ReplyOk::Output(h.git(&p(&cwd), &borrowed)?), Vec::new())
         }
+
+        // ----- machine inventory ---------------------------------------------
+        ControlRequest::Shells => (ReplyOk::Shells(h.shells()?), Vec::new()),
 
         // ----- watch ---------------------------------------------------------
         ControlRequest::WatchOpen { dirs } => {
@@ -2004,6 +2008,9 @@ mod tests {
                 stderr: Vec::new(),
             })
         }
+        fn shells(&self) -> io::Result<crate::host::ShellInventory> {
+            self.inner.shells()
+        }
         fn watch(&self, dirs: &[PathBuf]) -> io::Result<WatchSub> {
             self.inner.watch(dirs)
         }
@@ -2186,6 +2193,7 @@ mod tests {
                 separator: '/',
                 home: "/root".into(),
                 features: vec![],
+                instance: "other-instance".into(),
             })
             .encode(&mut s);
         });

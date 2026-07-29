@@ -425,6 +425,75 @@ impl Tty7App {
         }
     }
 
+    /// The short name of the shell a plain new tab on this window's machine
+    /// lands on — the menu's `default` tag, and the details panel's "shell" row
+    /// for a pane that never named one.
+    ///
+    /// A local window reads the live `Config` global rather than what the probe
+    /// recorded, so changing `shell` in Settings retags the menu at once. A
+    /// remote window's default is a fact about the far machine — its own
+    /// `config.json`, its own `$SHELL` — and only it can report it.
+    pub(crate) fn default_shell_label(&self, cx: &gpui::App) -> String {
+        if self.shells_host.is_local() {
+            crate::core::shells::default_shell_name(
+                cx.global::<crate::core::config::Config>()
+                    .shell
+                    .as_ref()
+                    .map(|s| s.program.as_str()),
+            )
+        } else {
+            self.shells.default_name.clone()
+        }
+    }
+
+    /// Refill the "+" dropdown from the machine this window is bound to.
+    ///
+    /// The fourth row of the module header's table, in effect: a window that
+    /// listed *this* computer's shells would hand a remote spawn `/bin/zsh` on a
+    /// box whose zsh is `/usr/bin/zsh`, and the pane would come up as a spawn
+    /// failure rather than a shell. So the list is a property of the window's
+    /// machine, refetched whenever that machine changes or comes back.
+    ///
+    /// A machine that isn't reachable yet empties the list rather than keeping
+    /// the last one: the window is either still connecting (the connect calls
+    /// back here) or offline, and in both cases a stale menu would be offering
+    /// picks that cannot be spawned. The dropdown falls back to its plain "New
+    /// Tab" entry, which the far end resolves with its own default shell.
+    pub(crate) fn refresh_shells(&mut self, cx: &mut Context<Self>) {
+        let host_id = self.spawn_host(cx);
+        self.shells_host = host_id;
+        let Some(host) = crate::ui::host_registry::HostRegistry::get(cx, host_id) else {
+            self.shells = Default::default();
+            cx.notify();
+            return;
+        };
+        // Off the UI thread: `/etc/shells` plus a `PATH` walk locally, a round
+        // trip (and a `wsl.exe` spawn on a Windows peer) remotely.
+        crate::ui::host_ops::HostOps::run(
+            host,
+            cx,
+            |h| h.shells(),
+            move |app, out, cx| {
+                // The window may have moved to another machine while this was in
+                // the air; a late answer for the machine it left is not an answer
+                // about the one it is on.
+                if app.shells_host != host_id {
+                    return;
+                }
+                app.shells = match out {
+                    Ok(inventory) => inventory,
+                    Err(e) => {
+                        log::warn!("could not list the shells of this window's machine: {e}");
+                        Default::default()
+                    }
+                };
+                // Nothing else redraws an idle window, and the dropdown's
+                // closure captures the list at build time.
+                cx.notify();
+            },
+        );
+    }
+
     /// Every pane in this window, in tab order.
     ///
     /// The reconnect walks these: a workspace's panes are exactly the panes of
@@ -489,12 +558,21 @@ impl Tty7App {
         };
         let target = choice.target.clone();
         let label = choice.label.clone();
+        // Connecting is the answer to having disconnected, so it clears it —
+        // otherwise the supervisor would tear this connection back down on its
+        // next tick, and the user would have pressed Connect to no effect.
+        cx.default_global::<RemoteLinks>()
+            .suspended
+            .remove(&choice.target.host_id());
         self.connect = Some(ConnectFlow::Connecting {
             choice: choice.clone(),
         });
         cx.notify();
 
-        self.watch_for_install_consent(cx);
+        // A retry after a failed install must not paint the previous attempt's
+        // bar for the instant before the first new report lands.
+        remote_connect::clear_install_progress(choice.target.host_id());
+        self.watch_for_install_consent(choice.target.host_id(), cx);
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -513,8 +591,16 @@ impl Tty7App {
     /// future is still pending, so anything that only looked after it finished
     /// would deadlock until the consent timeout. The loop ends when the flow
     /// leaves `Connecting`, so it costs nothing when nothing is connecting.
-    fn watch_for_install_consent(&self, cx: &mut Context<Self>) {
+    ///
+    /// It is also what paints the install's progress bar. The bytes arrive far
+    /// faster than a screen refresh — hundreds of reports over one install — so
+    /// they land in a slot ([`remote_connect::GuiInstallProgress`]) and this
+    /// loop samples it, repainting only when the number it reads has actually
+    /// changed. A connect that installs nothing therefore costs no repaints at
+    /// all.
+    fn watch_for_install_consent(&self, host: HostId, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
+            let mut painted: Option<crate::daemon::install::InstallPhase> = None;
             loop {
                 let connecting = this
                     .update(cx, |this, _| {
@@ -528,6 +614,11 @@ impl Tty7App {
                     let _ = this.update_in(cx, |this, window, cx| {
                         this.prompt_install_consent(pending, window, cx)
                     });
+                }
+                let reported = remote_connect::install_progress_for(host);
+                if reported != painted {
+                    painted = reported;
+                    let _ = this.update(cx, |_, cx| cx.notify());
                 }
                 // The other question a routed connect can raise: a password, a
                 // key passphrase, a host key. Same mailbox shape, same reason it
@@ -553,6 +644,9 @@ impl Tty7App {
             // drops with the result; nothing to show.
             return;
         };
+        // Either way the install is over: on success there is nothing left to
+        // report, and on failure the error needs the space the bar was in.
+        remote_connect::clear_install_progress(choice.target.host_id());
         match result {
             Ok(connected) => {
                 let home = connected.home.clone();
@@ -801,9 +895,9 @@ impl Tty7App {
     /// **This throws work away and says so.** Every pane the old server hosts
     /// dies with it — that is what the prompt the user just answered warns
     /// about, and it is why nothing on the connect path does this on its own.
-    /// The panes stay on screen in their disconnected state (§17: never
-    /// auto-close), the supervisor reconnects the machine, and what comes back
-    /// is a server with no panes in it.
+    /// The supervisor reconnects the machine, finds a server whose instance id
+    /// differs from the one it was talking to, and rebuilds each window from its
+    /// layout: same tabs and splits, new shells, nothing running in them.
     fn restart_remote_server(
         &mut self,
         mismatch: crate::daemon::install::MismatchedRemoteDaemon,
@@ -1022,6 +1116,25 @@ pub(crate) struct RemoteLinks {
     /// Workspaces taken over, and by whom. Per **workspace**: one machine can
     /// hold three of them and lose exactly one.
     preempted: std::collections::HashMap<WorkspaceId, String>,
+    /// Machines the user has deliberately disconnected from.
+    ///
+    /// Without this the supervisor would reconnect on the next tick: it keeps a
+    /// link to every machine with an open workspace, and "the user asked us to
+    /// stop" is not something it can read off the connection. Cleared by every
+    /// path that asks to be connected again ([`RemoteLinks::retry_now`], the
+    /// switcher's connect), and by [`pump_tick`] the moment a machine's last
+    /// window closes — from there a reopened workspace connects like any other.
+    suspended: std::collections::HashSet<HostId>,
+    /// The `tty7-server` **process** each machine was last served by
+    /// ([`crate::daemon::control::server_instance`]).
+    ///
+    /// Kept per machine and consulted on every reconnect, because it is the only
+    /// thing that distinguishes the two ways a link comes back: to the same
+    /// process (every `pane_id` still names the pane it always did) or to a new
+    /// one (they name nothing, and the window has to be rebuilt). A machine
+    /// absent from this map has never been seen before, which is **not** the
+    /// same as having restarted — see [`finish_attempt`].
+    instances: std::collections::HashMap<HostId, String>,
     /// Workspaces this client is pushing a layout for right now.
     ///
     /// Read by [`refresh_remote_workspace`], which skips them: a record we are
@@ -1121,6 +1234,8 @@ impl RemoteLinks {
         };
         let links = cx.default_global::<RemoteLinks>();
         links.preempted.remove(&workspace);
+        // Asking to reconnect outranks having asked to disconnect.
+        links.suspended.remove(&host.host_id());
         let link = links.machines.entry(host.host_id()).or_insert(MachineLink {
             state: LinkState::Reconnecting,
             backoff: Backoff::default(),
@@ -1136,6 +1251,35 @@ impl RemoteLinks {
             link.state = LinkState::Reconnecting;
         }
         RemoteLinks::ensure_running(cx);
+        cx.refresh_windows();
+    }
+
+    /// Stop holding a connection to `host`, because the user said so.
+    ///
+    /// **Nothing closes.** The windows on that machine stay exactly where they
+    /// are and go read-only, which is the same resting state a dropped link
+    /// leaves behind (§17, and design §10's "永不自动关窗") — with the difference
+    /// that this one is one click from being undone: no `MachineLink` at all
+    /// reads as [`RemoteStatus::Disconnected`], and that state already draws a
+    /// "Connect" button on the window's strip.
+    ///
+    /// Closing the user's windows for them would be a different, destructive
+    /// act wearing the same word. If that is what they want, closing a window is
+    /// already how it is said — and it disconnects too, by way of the machine
+    /// going unbound.
+    pub(crate) fn disconnect(cx: &mut gpui::App, host: HostId) {
+        cx.default_global::<RemoteLinks>().suspended.insert(host);
+        // Let go of the streams before the connection: a pane still holding one
+        // would keep reading from a socket that is about to be dropped under it.
+        for (workspace, _) in workspaces_on(cx, host) {
+            release_panes(cx, workspace);
+            cx.default_global::<RemoteLinks>()
+                .preempted
+                .remove(&workspace);
+        }
+        remote_connect::RemoteConnections::remove(cx, host);
+        cx.default_global::<RemoteLinks>().machines.remove(&host);
+        log::info!("disconnected from a machine at the user's request");
         cx.refresh_windows();
     }
 
@@ -1170,14 +1314,30 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
         // exists, and a stale one would have a reopened workspace come back
         // read-only against a takeover that happened to a window that is gone.
         let links = cx.default_global::<RemoteLinks>();
+        let forgotten = links.machines.len();
         links.machines.clear();
         links.preempted.clear();
+        links.suspended.clear();
+        // Logged because the *state* it leaves behind is indistinguishable from
+        // never having connected: `status_of` reads a missing link as
+        // `Disconnected`, so a window whose workspace is somehow not `open`
+        // sits under a "Not connected" strip with a live machine behind it.
+        // This line is how that is told apart from a real disconnect.
+        log::info!("supervisor stopped: no open remote workspace ({forgotten} link(s) dropped)");
         return false;
     }
+
+    prune_suspended(&mut cx.default_global::<RemoteLinks>().suspended, &bound);
+    let suspended = cx.default_global::<RemoteLinks>().suspended.clone();
 
     let now = Instant::now();
     let mut changed = false;
     for (host, target) in bound {
+        // Skipped before the liveness check, not after: the point is that this
+        // machine gets no attempt at all, not that it gets a quieter one.
+        if suspended.contains(&host) {
+            continue;
+        }
         let live = remote_connect::RemoteConnections::get(cx, host)
             .is_some_and(|h| h.client().is_connected());
         let attempting = cx
@@ -1186,12 +1346,17 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
             .is_some_and(|l| l.attempting);
 
         if live {
+            let mut became = false;
             RemoteLinks::mark(cx, host, |link| {
-                changed |= link.state != LinkState::Attached;
+                became = link.state != LinkState::Attached;
                 link.state = LinkState::Attached;
                 link.backoff.reset();
                 link.next_attempt = None;
             });
+            if became {
+                changed = true;
+                log::info!("link to {target} is attached");
+            }
             continue;
         }
         if attempting {
@@ -1234,6 +1399,23 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
         cx.refresh_windows();
     }
     true
+}
+
+/// A deliberate disconnect lasts exactly as long as there is a window to be
+/// disconnected *in*.
+///
+/// Once a machine's last workspace closes, the state has nothing left to
+/// describe — and remembering it would leave a workspace reopened an hour later
+/// sitting offline for no reason the user could see, with no failure to point
+/// at. Closing the window is itself an end to the connection; this is that,
+/// written down.
+///
+/// Pure so the rule is a test rather than a comment.
+fn prune_suspended(
+    suspended: &mut std::collections::HashSet<HostId>,
+    bound: &[(HostId, RemoteTarget)],
+) {
+    suspended.retain(|host| bound.iter().any(|(id, _)| id == host));
 }
 
 /// Every machine this client should be holding a connection to: the distinct
@@ -1407,9 +1589,14 @@ fn refresh_remote_workspace(cx: &mut gpui::App, host: HostId, store_key: String)
 /// `retry_now` (rather than letting the backoff schedule it) because a restart
 /// the user asked for should come back at once — this is exactly the "the user
 /// pressed the button is information the backoff does not have" case it exists
-/// for. **The panes do not come back**: their ids named panes in the old daemon,
-/// so each relink fails and each pane stays on screen, disconnected. That is
-/// what "Restart Server ends every session it is hosting" meant.
+/// for.
+///
+/// **The sessions do not come back, but the window does.** Their pane ids named
+/// panes in the old process, so nothing re-attaches; the reconnect notices the
+/// new [`server_instance`](crate::daemon::control::server_instance) and rebuilds
+/// each window from its layout — fresh shells in their saved cwds, agents
+/// resumed where an id was captured. That is what "Restart Server ends every
+/// session it is hosting" means: the work in them is gone, the window is not.
 fn reconnect_after_restart(origin: &str, cx: &mut gpui::App) {
     let Some(host) = remote_connect::origin_host(origin) else {
         return;
@@ -1508,6 +1695,7 @@ fn finish_attempt(
             // The remote's record is the authority for the layout (design §10),
             // so what came back with the connect replaces what this client had.
             let rows = connected.rows.clone();
+            let restarted = server_restarted(cx, host, &connected.host);
             // The home too, not just the connection: this is the path a machine
             // comes back on after a restart or a dropped link, and dropping it
             // here is what left "New Workspace" missing on a machine the panel
@@ -1518,11 +1706,24 @@ fn finish_attempt(
                     WorkspaceStore::apply_remote(cx, id, &row.record);
                 }
                 cx.default_global::<RemoteLinks>().preempted.remove(&id);
-                relink_panes(cx, id);
-                // A window that came up before its machine did has no panes to
-                // relink — it opened empty because there was nothing to route
-                // to. Now there is.
-                hydrate_window(cx, id);
+                if restarted {
+                    // Every pane id this workspace holds was minted by a process
+                    // that is gone. Re-attaching them would cost one doomed round
+                    // trip each and leave the window exactly as disconnected as
+                    // it is now, so the window is rebuilt from the layout instead
+                    // — the same thing a local daemon restart does.
+                    rebuild_after_server_restart(cx, id);
+                } else {
+                    relink_panes(cx, id);
+                    // A window that came up before its machine did has no panes to
+                    // relink — it opened empty because there was nothing to route
+                    // to. Now there is.
+                    hydrate_window(cx, id);
+                }
+                // Same reason the window had no panes: with the machine
+                // unreachable there was nothing to ask for its shells, so the
+                // "+" dropdown has been sitting on the empty fallback.
+                refresh_window_shells(cx, id);
             }
             RemoteLinks::mark(cx, host, |link| {
                 link.state = LinkState::Attached;
@@ -1660,6 +1861,115 @@ fn hydrate_window(cx: &mut gpui::App, workspace: WorkspaceId) {
             app.adopt_workspace(workspace, session, window, cx)
         });
     });
+}
+
+/// Whether the machine we just reconnected to is being served by a *different*
+/// `tty7-server` process than the one we last spoke to.
+///
+/// `true` is a statement of fact, not a guess, and that is the whole point: it
+/// is the difference between a link that blinked (re-attach; the shells are
+/// still running over there) and a server that was replaced (rebuild; they are
+/// not). Before the instance id existed there was nothing to tell them apart —
+/// `build` and both dialect numbers survive a restart unchanged — so the
+/// reconnect had to assume the safer of the two and leave dead panes on screen.
+///
+/// Two cases answer `false` and mean different things, both deliberately:
+///
+/// | | |
+/// |---|---|
+/// | No previous instance recorded | First time we have reached this machine. Nothing was attached, so nothing was lost |
+/// | The peer reported no instance | We cannot tell. Never treat "don't know" as "restarted" — that would throw away live shells on a hunch |
+fn server_restarted(cx: &mut gpui::App, host: HostId, peer: &RemoteHost) -> bool {
+    let instance = peer.peer().instance.clone();
+    let seen = &mut cx.default_global::<RemoteLinks>().instances;
+    note_instance(seen, host, &instance)
+}
+
+/// Record `instance` as what is serving `host` and answer whether it displaced a
+/// *different* one. Split out from [`server_restarted`] because the rule matters
+/// more than the plumbing around it and is worth a test that doesn't need a
+/// connection to run.
+fn note_instance(
+    seen: &mut std::collections::HashMap<HostId, String>,
+    host: HostId,
+    instance: &str,
+) -> bool {
+    if instance.is_empty() {
+        // Nothing learned, so nothing recorded: writing an empty value would
+        // make the *next* reconnect compare against it and read a real instance
+        // as a restart.
+        return false;
+    }
+    match seen.insert(host, instance.to_string()) {
+        Some(before) if before != instance => {
+            log::info!(
+                "the tty7-server on this machine is a new process ({before} → {instance}); \
+                 its panes are gone"
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Rebuild a workspace's window after its machine's server was replaced.
+///
+/// The local analogue is [`Tty7App::restart_daemon_confirmed`], and this is
+/// deliberately the same shape: the layout is the thing that survives, and every
+/// leaf in it comes back as a fresh shell in its saved cwd. What makes it safe
+/// here is only that [`server_restarted`] *knew* — the same rebuild triggered by
+/// a guess would be a way to lose running work.
+///
+/// **The saved pane ids are dropped first**, and that is what makes the resume
+/// work rather than being a tidiness measure. `session_to_pane` keeps a remote
+/// leaf's id unconditionally (its liveness cannot be probed without a round
+/// trip) and lets the attach fail into a spawn *inside* the terminal — by which
+/// point the code that would have sent `claude --resume <id>` has already
+/// decided it wasn't needed. Clearing the ids up here makes the leaf take the
+/// same path a dead local pane takes, so the agent conversation continues.
+///
+/// Unlike [`hydrate_window`] this does **not** skip a window with tabs. Those
+/// tabs are precisely what has to go: every one of them is a pane bound to a
+/// process that no longer exists.
+fn rebuild_after_server_restart(cx: &mut gpui::App, workspace: WorkspaceId) {
+    let mut session = match WorkspaceStore::all(cx).get(workspace) {
+        Some(entry) if entry.is_remote() => entry.session.clone(),
+        _ => return,
+    };
+    if session.tabs.is_empty() {
+        return;
+    }
+    for tab in &mut session.tabs {
+        tty7_core::core::session::blank_pane_ids(&mut tab.pane);
+    }
+    let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, workspace) else {
+        return;
+    };
+    let Some(app) =
+        crate::ui::windows::WindowRegistry::app_for(cx, workspace).and_then(|app| app.upgrade())
+    else {
+        return;
+    };
+    log::info!(
+        "rebuilding {} tab(s) of workspace {workspace}: its machine is serving a new process",
+        session.tabs.len()
+    );
+    let _ = handle.update(cx, move |_, window, cx| {
+        app.update(cx, |app, cx| {
+            app.adopt_workspace(workspace, session, window, cx)
+        });
+    });
+}
+
+/// Ask the window showing `workspace` to refill its "+" dropdown, now that its
+/// machine is answering. No-op for a workspace with no window on screen.
+fn refresh_window_shells(cx: &mut gpui::App, workspace: WorkspaceId) {
+    let Some(app) =
+        crate::ui::windows::WindowRegistry::app_for(cx, workspace).and_then(|app| app.upgrade())
+    else {
+        return;
+    };
+    app.update(cx, |app, cx| app.refresh_shells(cx));
 }
 
 /// Design §10's takeover, on this client's side: stop holding a stream to a
@@ -1889,6 +2199,104 @@ mod tests {
             error: "no route to host".into(),
         };
         assert_eq!(flow.choice(), Some(&choice));
+    }
+
+    /// The rule that decides re-attach vs rebuild. Getting any of these four
+    /// wrong costs the user running work: a false positive rebuilds a window
+    /// whose shells were fine, a false negative leaves a screen of dead panes.
+    #[test]
+    fn only_a_changed_instance_counts_as_a_restart() {
+        let mut seen = std::collections::HashMap::new();
+        let host = HostId::from_connection_key("ssh:build-box");
+
+        // First sight of a machine. Nothing was attached to the old process
+        // because there was no old process *we* knew about.
+        assert!(!note_instance(&mut seen, host, "abc"));
+        // The link blinked and came back to the same server.
+        assert!(!note_instance(&mut seen, host, "abc"));
+        // Replaced.
+        assert!(note_instance(&mut seen, host, "def"));
+        // …and the new one is now the baseline, so it is not a restart twice.
+        assert!(!note_instance(&mut seen, host, "def"));
+    }
+
+    /// A peer that reports no instance leaves no trace. Recording the empty
+    /// string would make the *next* reconnect — one that does report an id —
+    /// read as a restart and throw away live shells.
+    #[test]
+    fn an_unknown_instance_is_not_a_restart_and_is_not_remembered() {
+        let mut seen = std::collections::HashMap::new();
+        let host = HostId::from_connection_key("ssh:build-box");
+
+        assert!(!note_instance(&mut seen, host, ""));
+        assert!(seen.is_empty(), "an unknown instance must not be recorded");
+        assert!(
+            !note_instance(&mut seen, host, "abc"),
+            "the first real instance is a first sighting, not a restart"
+        );
+    }
+
+    /// Two machines are tracked apart. They mint instance ids independently, so
+    /// one restarting must not rebuild the other's windows.
+    #[test]
+    fn instances_are_per_machine() {
+        let mut seen = std::collections::HashMap::new();
+        let a = HostId::from_connection_key("ssh:box-a");
+        let b = HostId::from_connection_key("ssh:box-b");
+
+        assert!(!note_instance(&mut seen, a, "a1"));
+        assert!(!note_instance(&mut seen, b, "b1"));
+        assert!(note_instance(&mut seen, a, "a2"));
+        assert!(
+            !note_instance(&mut seen, b, "b1"),
+            "box-b never changed; box-a restarting is not its business"
+        );
+    }
+
+    /// Every leaf loses its id, at every depth. A `Split` branch that kept its
+    /// ids would leave those panes attaching to a dead process — and, worse,
+    /// skipping the agent resume, because that only fires for a leaf with no id.
+    #[test]
+    fn forgetting_pane_ids_reaches_every_leaf() {
+        use crate::core::session::{SessionAxis, SessionPane};
+
+        fn leaf(id: u64) -> SessionPane {
+            SessionPane::Leaf {
+                cwd: None,
+                pane_id: Some(id),
+                ssh_spec: None,
+                agent: None,
+                agent_session_id: None,
+                agent_launch_argv: None,
+            }
+        }
+        fn ids(pane: &SessionPane, out: &mut Vec<Option<u64>>) {
+            match pane {
+                SessionPane::Leaf { pane_id, .. } => out.push(*pane_id),
+                SessionPane::Split { a, b, .. } => {
+                    ids(a, out);
+                    ids(b, out);
+                }
+            }
+        }
+
+        let mut pane = SessionPane::Split {
+            axis: SessionAxis::Horizontal,
+            ratio: 0.5,
+            a: Box::new(leaf(1)),
+            b: Box::new(SessionPane::Split {
+                axis: SessionAxis::Vertical,
+                ratio: 0.5,
+                a: Box::new(leaf(2)),
+                b: Box::new(leaf(3)),
+            }),
+        };
+        let forgotten = tty7_core::core::session::blank_pane_ids(&mut pane);
+
+        let mut found = Vec::new();
+        ids(&pane, &mut found);
+        assert_eq!(found, vec![None, None, None]);
+        assert_eq!(forgotten, 3, "every dropped claim is counted");
     }
 
     // ── The reconnect schedule (design §10; contract §18: no network) ────────
@@ -2156,5 +2564,85 @@ mod tests {
             .as_deref(),
             Some("This workspace was opened on desktop")
         );
+    }
+
+    // ── A deliberate disconnect ──────────────────────────────────────────────
+
+    fn machine(alias: &str) -> (HostId, RemoteTarget) {
+        let target = RemoteTarget::Alias {
+            alias: alias.to_string(),
+        };
+        (target.host_id(), target)
+    }
+
+    /// A disconnect holds only while the machine still has a window on it.
+    ///
+    /// The supervisor reconnects to every machine with an open workspace, so
+    /// without this set a disconnect would last one tick. With it kept
+    /// *forever*, the opposite failure: a workspace closed and reopened a day
+    /// later would come up offline against a decision the user has no memory of
+    /// and nothing on screen to explain.
+    #[test]
+    fn a_disconnect_ends_when_the_last_window_on_that_machine_closes() {
+        let (build, build_t) = machine("build-box");
+        let (gpu, gpu_t) = machine("gpu-lab");
+        let mut suspended = std::collections::HashSet::from([build, gpu]);
+
+        // Both still have a window: both decisions still mean something.
+        prune_suspended(&mut suspended, &[(build, build_t.clone()), (gpu, gpu_t)]);
+        assert_eq!(suspended.len(), 2);
+
+        // The gpu box's last workspace closed. Its disconnect goes with it; the
+        // build box's is untouched.
+        prune_suspended(&mut suspended, &[(build, build_t)]);
+        assert_eq!(
+            suspended.into_iter().collect::<Vec<_>>(),
+            vec![build],
+            "closing one machine's window must not resume another"
+        );
+    }
+
+    /// Disconnecting drops the machine's link state, which *is* how the window
+    /// says "not connected": `status_of` reads a missing `MachineLink` as
+    /// `Disconnected`, and that state already draws the Connect button. Asking
+    /// to reconnect then clears the decision, or the supervisor would undo the
+    /// reconnect on its next tick.
+    #[gpui::test]
+    fn disconnecting_rests_at_not_connected_and_connect_undoes_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::core::config::pin_test_config_dir();
+            cx.set_global(crate::core::config::Config::default());
+            crate::ui::windows::WindowRegistry::init(cx);
+
+            let (host, target) = machine("build-box");
+            let mut entry = crate::core::session::Workspace::on_remote(RemoteRef::new(
+                target,
+                WorkspaceId::new(),
+            ));
+            entry.open = true;
+            let id = entry.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::Workspaces {
+                    workspaces: vec![entry],
+                    active: None,
+                },
+            );
+
+            RemoteLinks::disconnect(cx, host);
+            assert!(cx.default_global::<RemoteLinks>().suspended.contains(&host));
+            assert_eq!(
+                RemoteLinks::status_of(cx, id),
+                Some(RemoteStatus::Disconnected),
+                "a disconnected machine rests where a never-connected one does"
+            );
+
+            // The strip's Connect button.
+            RemoteLinks::retry_now(cx, id);
+            assert!(
+                !cx.default_global::<RemoteLinks>().suspended.contains(&host),
+                "asking to connect must outrank having asked to disconnect"
+            );
+        });
     }
 }
