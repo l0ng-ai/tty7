@@ -43,5 +43,6 @@ pub mod tab_sidebar;
 pub mod tab_strip;
 pub mod theme;
 pub mod tray;
+pub mod tree_sync;
 pub mod windows;
 pub mod worktree_prompt;

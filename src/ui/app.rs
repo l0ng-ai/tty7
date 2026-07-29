@@ -449,6 +449,14 @@ pub struct Tab {
     /// clicking a file in the tree behind it brings the editor back — the same
     /// "click it, it comes forward" rule as window stacking.
     pub(crate) overlay_top: OverlayTop,
+    /// This tab's identity in the daemon's machine tree — the id every
+    /// semantic operation about it carries. Minted here (the daemon keeps a
+    /// client-minted id, see `ControlRequest::TabCreate`), so the tab can be
+    /// addressed before its create has round-tripped. A `Cell` because the
+    /// sync layer re-points it at an existing daemon tab when it recognizes
+    /// one by its panes (`tree_sync::adopt_tab_ids`), and that pass runs with
+    /// the same shared borrow every save runs under.
+    pub(crate) tree_id: std::cell::Cell<tty7_core::core::machine::TabId>,
 }
 
 /// Stacking order for the two overlays that cover the whole column. See
@@ -470,6 +478,7 @@ impl Tab {
             code: None,
             overlay_top: OverlayTop::default(),
             sidebar_group: std::cell::RefCell::new(None),
+            tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
         }
     }
 
@@ -1441,6 +1450,10 @@ impl Tty7App {
         // the latter is also what keeps a window that failed to restore from
         // pushing its emptiness over a good record.
         self.push_remote_layout(self.workspace, cx);
+        // The structural change this save records also goes to the machine's
+        // own tree, as the semantic operations it amounts to — the write path
+        // of the daemon-owned model that is replacing both stores above.
+        crate::ui::tree_sync::sync_window(self, cx);
     }
 
     /// This window is going away: capture its final state (a plain `cd` may
@@ -1466,11 +1479,19 @@ impl Tty7App {
         // again; the only way back is re-adding the machine by hand.
         let answered = WorkspaceStore::machine_is_connected(cx, self.workspace);
         if self.tabs.is_empty() && answered {
+            // Same as the picker swap: an empty workspace being dropped takes
+            // its (empty) tree on the machine with it.
+            crate::ui::tree_sync::fire_workspace_op(cx, self.workspace, |ws| {
+                tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
+            });
             WorkspaceStore::remove(cx, self.workspace);
         } else {
             WorkspaceStore::close_window(cx, self.workspace);
         }
         crate::ui::windows::WindowRegistry::unregister(cx, self.workspace);
+        // The window's tree-sync bookkeeping goes with the window; the
+        // machine's tree itself keeps the workspace, which is the detach.
+        crate::ui::tree_sync::forget(cx, self.workspace);
         // The workspace just moved from "on screen" to "detached" — the Window
         // menu is the only place that says so.
         crate::ui::windows::refresh_menu(cx);
@@ -1603,11 +1624,18 @@ impl Tty7App {
             return;
         }
         if self.tabs.is_empty() {
+            // Dropping the blank workspace here, so the machine's tree drops
+            // its (equally blank) copy — otherwise every visit to the picker
+            // would leave an empty workspace behind on the daemon.
+            crate::ui::tree_sync::fire_workspace_op(cx, previous, |ws| {
+                tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
+            });
             WorkspaceStore::remove(cx, previous);
         } else {
             self.save_session(cx);
             WorkspaceStore::close_window(cx, previous);
         }
+        crate::ui::tree_sync::forget(cx, previous);
 
         let (claimed, session) = WorkspaceStore::claim(cx, Some(id));
         crate::ui::windows::WindowRegistry::rebind(cx, previous, claimed);
@@ -1695,6 +1723,7 @@ impl Tty7App {
                 // Keep the group it had when closed — the row reappears where
                 // it lived instead of flashing through Scratch.
                 sidebar_group: std::cell::RefCell::new(st.sidebar_group),
+                tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
             },
         );
         self.active = insert_at;
@@ -7326,6 +7355,7 @@ fn tabs_from_session(
             // renders grouped on the first frame; the first landed probe
             // corrects it if the tab's repo changed while we were gone.
             sidebar_group: std::cell::RefCell::new(st.sidebar_group.clone()),
+            tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
         });
     }
     // Clamp the saved active index into the rebuilt range (which can be empty

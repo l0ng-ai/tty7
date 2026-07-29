@@ -99,11 +99,6 @@ impl LocalLink {
     /// so callers treat it exactly like an unreachable remote: skip the
     /// operation, or queue nothing and rely on the full pull that follows a
     /// reconnect.
-    #[allow(
-        dead_code,
-        reason = "the semantic-operation senders land with the client-side tree \
-                  migration; the link itself comes first so events already flow"
-    )]
     pub fn client(cx: &mut App) -> Option<Arc<ControlClient>> {
         let link = cx.default_global::<LocalLink>();
         link.client.as_ref().filter(|c| c.is_connected()).cloned()

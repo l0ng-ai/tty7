@@ -149,6 +149,11 @@ impl WorkspaceStore {
         }
         store.workspaces.active = Some(id);
         store.workspaces.save();
+        // The machine's tree keeps its own recency (its pickers order by it),
+        // so the focus is a fact to report there too.
+        crate::ui::tree_sync::fire_workspace_op(cx, id, |ws| {
+            tty7_core::daemon::control::ControlRequest::WorkspaceTouch { workspace: ws }
+        });
     }
 
     /// Set (or clear, with `None`) a workspace's user-chosen name. Clearing
@@ -158,9 +163,17 @@ impl WorkspaceStore {
             return;
         };
         if let Some(workspace) = store.workspaces.get_mut(id) {
-            workspace.name = name;
+            workspace.name = name.clone();
         }
         store.workspaces.save();
+        // The name is the machine's fact now — its tree is what other clients
+        // list this workspace from.
+        crate::ui::tree_sync::fire_workspace_op(cx, id, move |ws| {
+            tty7_core::daemon::control::ControlRequest::WorkspaceRename {
+                workspace: ws,
+                name,
+            }
+        });
     }
 
     /// Pick the one workspace launch will show, and detach every other one that

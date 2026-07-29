@@ -97,6 +97,22 @@ impl WindowRegistry {
             .or_else(|| registry.windows.first().map(|w| w.workspace))
     }
 
+    /// The `Tty7App` rendered in `window`, if it is one of ours.
+    ///
+    /// For code that runs *inside* a window (an element's event handler) but
+    /// has no line to the app entity — the inverse lookup of
+    /// [`window_for`](Self::window_for), keyed by the handle instead of the
+    /// workspace.
+    pub fn app_in(cx: &mut App, window: &Window) -> Option<gpui::Entity<Tty7App>> {
+        Self::sweep(cx);
+        let handle = window.window_handle();
+        cx.global::<Self>()
+            .windows
+            .iter()
+            .find(|w| w.handle == handle)
+            .and_then(|w| w.app.upgrade())
+    }
+
     /// The `Tty7App` showing `workspace`, if one is open.
     pub fn app_for(cx: &mut App, workspace: WorkspaceId) -> Option<WeakEntity<Tty7App>> {
         Self::sweep(cx);
@@ -581,6 +597,12 @@ pub fn delete_workspace(cx: &mut App, workspace: WorkspaceId) {
     // still on file. Doing this after `WorkspaceStore::remove` would leave the
     // record stranded on the remote with no way left to name it.
     delete_on_remote(cx, workspace);
+    // …and out of the machine's tree, which is where every other client (and
+    // the next launch) lists workspaces from.
+    crate::ui::tree_sync::fire_workspace_op(cx, workspace, |ws| {
+        tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
+    });
+    crate::ui::tree_sync::forget(cx, workspace);
     // …and the stop that follows must not push the emptied layout back up: the
     // delete above is in flight on a background task, and a push landing after
     // it would recreate the record it just removed.

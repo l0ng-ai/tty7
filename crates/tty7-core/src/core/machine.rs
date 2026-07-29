@@ -285,7 +285,12 @@ impl PaneNode {
 
     /// Replace the leaf holding `pane` with a split of it and `new`, answering
     /// whether the leaf was found.
-    fn split_leaf(&mut self, pane: u64, new: u64, axis: Axis, ratio: f32, first: bool) -> bool {
+    ///
+    /// Public (as are [`remove_leaf`](PaneNode::remove_leaf) and
+    /// [`replace_leaf`](PaneNode::replace_leaf)) because a client predicting the
+    /// outcome of its own operation must run *this* surgery, not a
+    /// reimplementation that could disagree with the server's.
+    pub fn split_leaf(&mut self, pane: u64, new: u64, axis: Axis, ratio: f32, first: bool) -> bool {
         match self {
             PaneNode::Leaf { pane: p } if *p == pane => {
                 let old = PaneNode::Leaf { pane };
@@ -310,7 +315,7 @@ impl PaneNode {
     /// Remove the leaf holding `pane`, collapsing its parent split so the
     /// sibling takes the whole space. `None` when the node *is* that leaf —
     /// the caller then removes the tab. `Some(found)` otherwise.
-    fn remove_leaf(&mut self, pane: u64) -> Option<bool> {
+    pub fn remove_leaf(&mut self, pane: u64) -> Option<bool> {
         match self {
             PaneNode::Leaf { pane: p } => {
                 if *p == pane {
@@ -340,7 +345,7 @@ impl PaneNode {
     }
 
     /// Rebind the leaf holding `old` to `new`, answering whether it was found.
-    fn replace_leaf(&mut self, old: u64, new: u64) -> bool {
+    pub fn replace_leaf(&mut self, old: u64, new: u64) -> bool {
         match self {
             PaneNode::Leaf { pane } if *pane == old => {
                 *pane = new;
