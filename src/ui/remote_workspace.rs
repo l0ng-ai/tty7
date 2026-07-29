@@ -1071,6 +1071,13 @@ pub(crate) struct RemoteLinks {
     /// Workspaces taken over, and by whom. Per **workspace**: one machine can
     /// hold three of them and lose exactly one.
     preempted: std::collections::HashMap<WorkspaceId, String>,
+    /// Workspaces being taken *back*: [`RemoteLinks::retry_now`] cleared their
+    /// preemption and the reconnect is in flight. Remembered because the
+    /// window still shows the pre-takeover layout, and [`finish_attempt`]
+    /// must rebuild it from the tree whole (`Adopt::Replace`) — the IfEmpty
+    /// hydration it runs for an ordinary reconnect skips any non-empty
+    /// window, which is precisely what a preempted window is.
+    reclaiming: std::collections::HashSet<WorkspaceId>,
     /// Machines the user has deliberately disconnected from.
     ///
     /// Without this the supervisor would reconnect on the next tick: it keeps a
@@ -1190,7 +1197,12 @@ impl RemoteLinks {
             return;
         };
         let links = cx.default_global::<RemoteLinks>();
-        links.preempted.remove(&workspace);
+        if links.preempted.remove(&workspace).is_some() {
+            // Taking back, not merely reconnecting: the window's layout is
+            // the pre-takeover one, so the attach that lands must rebuild it
+            // from the tree rather than trust what it shows.
+            links.reclaiming.insert(workspace);
+        }
         // Asking to reconnect outranks having asked to disconnect.
         links.suspended.remove(&host.host_id());
         let link = links.machines.entry(host.host_id()).or_insert(MachineLink {
@@ -1230,9 +1242,9 @@ impl RemoteLinks {
         // would keep reading from a socket that is about to be dropped under it.
         for (workspace, _) in workspaces_on(cx, host) {
             release_panes(cx, workspace);
-            cx.default_global::<RemoteLinks>()
-                .preempted
-                .remove(&workspace);
+            let links = cx.default_global::<RemoteLinks>();
+            links.preempted.remove(&workspace);
+            links.reclaiming.remove(&workspace);
         }
         remote_connect::HostLinks::remove(cx, host);
         cx.default_global::<RemoteLinks>().machines.remove(&host);
@@ -1274,6 +1286,7 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
         let forgotten = links.machines.len();
         links.machines.clear();
         links.preempted.clear();
+        links.reclaiming.clear();
         links.suspended.clear();
         // Logged because the *state* it leaves behind is indistinguishable from
         // never having connected: `status_of` reads a missing link as
@@ -1438,6 +1451,11 @@ pub(crate) fn drain_events(cx: &mut gpui::App) {
                     .preempted
                     .insert(id, by.clone());
                 release_panes(cx, id);
+                // The window's tree-sync state goes with the streams: its
+                // mirror and queue describe a session that just lost the
+                // workspace, and its `informed` licence must not survive into
+                // the take-back (see `tree_sync::on_preempted`).
+                crate::ui::tree_sync::on_preempted(cx, id);
                 cx.refresh_windows();
             }
             // Another writer edited a workspace tree this client shows: apply
@@ -1571,13 +1589,25 @@ fn finish_attempt(
             // was quite happily calling connected.
             remote_connect::HostLinks::insert(cx, connected.host, connected.home);
             for (id, _key) in workspaces_on(cx, host) {
-                cx.default_global::<RemoteLinks>().preempted.remove(&id);
-                if restarted {
-                    // Every pane this window shows lived in a process that is
-                    // gone; the machine's tree knows it (a fresh server holds
-                    // no live panes), so the window is rebuilt from the tree —
-                    // fresh shells in the recorded cwds, agents resumed. The
-                    // same thing a local daemon restart amounts to.
+                let reclaimed = {
+                    let links = cx.default_global::<RemoteLinks>();
+                    // The attach that just landed preempts whoever held the
+                    // workspace, so a still-recorded preemption is one this
+                    // reconnect ends — same situation as an explicit Take
+                    // Back, and rebuilt the same way below.
+                    links.preempted.remove(&id).is_some() | links.reclaiming.remove(&id)
+                };
+                if restarted || reclaimed {
+                    // Rebuild from the tree whole. After a server restart
+                    // every pane this window shows lived in a process that is
+                    // gone (a fresh server holds no live panes), so the tree
+                    // lowers each leaf to a revival — fresh shells in the
+                    // recorded cwds, agents resumed. After a take-back the
+                    // panes may well be alive, but the *layout* on screen is
+                    // the pre-takeover one: the IfEmpty hydration below would
+                    // skip this non-empty window and leave it stale — the
+                    // "take back re-pulls whole" the preemption paths promise
+                    // happens here, as a Replace.
                     crate::ui::tree_sync::resync_window_from_tree(cx, id);
                 } else {
                     relink_panes(cx, id);
@@ -1915,6 +1945,89 @@ pub(crate) fn workspace_is_preempted(cx: &gpui::App, workspace: WorkspaceId) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Take Back is `retry_now` on a preempted workspace, and the window it
+    /// recovers still shows the pre-takeover layout — so clearing the
+    /// preemption must leave a `reclaiming` mark behind for `finish_attempt`
+    /// to read, or the landed attach runs its ordinary IfEmpty hydration,
+    /// skips the non-empty window, and the stale layout survives to roll the
+    /// other client's edits back on the next save.
+    #[gpui::test]
+    fn taking_back_marks_the_workspace_for_a_whole_rebuild(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            // `retry_now` wakes the supervisor, whose first tick resolves the
+            // machine's route off the config global.
+            cx.set_global(crate::core::config::Config::default());
+            let host = RemoteRef::new(
+                RemoteTarget::Alias {
+                    alias: "build-box".into(),
+                },
+                WorkspaceId::new(),
+            );
+            let view = crate::core::session::WindowView {
+                host: Some(host),
+                ..Default::default()
+            };
+            let id = view.id;
+            crate::core::session::WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views: vec![view],
+                    active: None,
+                },
+            );
+            cx.default_global::<RemoteLinks>()
+                .preempted
+                .insert(id, "laptop".into());
+
+            RemoteLinks::retry_now(cx, id);
+
+            let links = cx.default_global::<RemoteLinks>();
+            assert!(
+                !links.preempted.contains_key(&id),
+                "the takeover is being reversed; the read-only state ends now"
+            );
+            assert!(
+                links.reclaiming.contains(&id),
+                "the attach that lands must know to rebuild this window from the tree"
+            );
+        });
+    }
+
+    /// A plain reconnect (never preempted) must not be marked for a rebuild —
+    /// its panes are alive and re-attachable, and a Replace would tear down
+    /// views the relink was about to reuse.
+    #[gpui::test]
+    fn a_plain_reconnect_is_not_marked_for_a_rebuild(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::core::config::Config::default());
+            let host = RemoteRef::new(
+                RemoteTarget::Alias {
+                    alias: "build-box".into(),
+                },
+                WorkspaceId::new(),
+            );
+            let view = crate::core::session::WindowView {
+                host: Some(host),
+                ..Default::default()
+            };
+            let id = view.id;
+            crate::core::session::WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views: vec![view],
+                    active: None,
+                },
+            );
+
+            RemoteLinks::retry_now(cx, id);
+
+            assert!(
+                !cx.default_global::<RemoteLinks>().reclaiming.contains(&id),
+                "nothing was taken over, so nothing needs the Replace path"
+            );
+        });
+    }
 
     #[test]
     fn the_status_strip_speaks_unless_everything_is_working() {

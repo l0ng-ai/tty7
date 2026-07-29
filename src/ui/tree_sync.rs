@@ -849,6 +849,15 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
     if !cx.has_global::<crate::core::session::WorkspaceStore>() {
         return;
     }
+    // A preempted window is read-only, and that has to hold on the write path
+    // too: a click on its tab strip would flip the usurper's active tab, and —
+    // worse — its next save would Full-diff the pre-takeover layout against
+    // the mirror and roll the usurper's edits back wholesale. Its sync state
+    // was dropped at preemption ([`on_preempted`]); taking the workspace back
+    // re-pulls the tree whole.
+    if crate::ui::remote_workspace::workspace_is_preempted(cx, client_ws) {
+        return;
+    }
     adopt_tab_ids(app, cx);
     let (desired, desired_active, held) = desired_tabs(app, cx);
     let machine_ws = tree_workspace_id(cx, client_ws);
@@ -971,6 +980,27 @@ fn adopt_tab_ids(app: &Tty7App, cx: &App) {
         };
         tab.tree_id.set(matched.id);
     }
+}
+
+/// The workspace was just taken over by another client: drop everything this
+/// window's sync believed.
+///
+/// The queue and mirror go because they describe edits the usurper is about
+/// to invalidate; `informed` goes because it is the licence to prune, and a
+/// preempted window's next diff (after take-back re-primes it) must start
+/// additive — its stale layout is *not* the whole story any more. Leaving
+/// `informed` set was how a taken-back window's first save could still roll
+/// the other client's work away.
+pub(crate) fn on_preempted(cx: &mut App, client_ws: WorkspaceId) {
+    let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
+        return;
+    };
+    state.sync = SyncPhase::Unprimed {
+        dirty: false,
+        priming: false,
+    };
+    state.queue.clear();
+    state.informed = false;
 }
 
 /// Drop a window's sync state — its window is closing or rebinding. The
@@ -1535,13 +1565,7 @@ pub(crate) fn on_layout_delta(cx: &mut App, host: HostId, key: &str, delta: Layo
     // streams as they work. The mirror goes stale instead, and taking the
     // workspace back re-pulls it whole.
     if crate::ui::remote_workspace::workspace_is_preempted(cx, client_ws) {
-        if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) {
-            state.sync = SyncPhase::Unprimed {
-                dirty: false,
-                priming: false,
-            };
-            state.queue.clear();
-        }
+        on_preempted(cx, client_ws);
         return;
     }
 
@@ -1976,6 +2000,46 @@ mod tests {
 
         assert!(matches!(classify_tree_link(None), TreeLink::Down));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Preemption must leave the window's sync with nothing to say: the
+    /// queued ops and the mirror describe a session that just lost the
+    /// workspace, and `informed` is the licence to prune — kept, it would let
+    /// the taken-back window's first Full diff roll the usurper's edits away.
+    #[gpui::test]
+    fn preemption_drops_the_mirror_the_queue_and_the_informed_licence(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let ws = WorkspaceId::new();
+            {
+                let state = cx
+                    .default_global::<TreeSync>()
+                    .windows
+                    .entry(ws)
+                    .or_default();
+                state.sync = SyncPhase::Primed(WsMirror::default());
+                state.informed = true;
+                state.queue.push_back(ControlRequest::Ping);
+            }
+            on_preempted(cx, ws);
+            let state = &cx.default_global::<TreeSync>().windows[&ws];
+            assert!(matches!(
+                state.sync,
+                SyncPhase::Unprimed {
+                    dirty: false,
+                    priming: false,
+                }
+            ));
+            assert!(
+                state.queue.is_empty(),
+                "queued ops belong to the lost session"
+            );
+            assert!(
+                !state.informed,
+                "the licence to prune must not survive a takeover"
+            );
+        });
     }
 
     fn seed(pane: u64) -> PaneSeed {
