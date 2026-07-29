@@ -870,7 +870,15 @@ mod tests {
         ws.name = Some("api".into());
         ws.last_active = 1_753_600_000;
         let id = ws.id.to_string();
-        store.put(&id, ws.to_remote_json(), None).unwrap();
+        // The remote-owned half of a record, spelled inline: the helper that
+        // used to derive it is retired with the whole-record write path.
+        let record = serde_json::json!({
+            "id": id,
+            "name": "api",
+            "session": { "active": 0, "tabs": [] },
+            "last_active": 1_753_600_000u64,
+        });
+        store.put(&id, record, None).unwrap();
 
         let text = std::fs::read_to_string(dir.path().join(STORE_FILE)).unwrap();
         let parsed = Workspaces::decode(&text).expect("the store's file is a Workspaces document");

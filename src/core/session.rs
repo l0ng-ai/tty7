@@ -30,14 +30,7 @@ impl WorkspaceStore {
     /// duplicate pane claims, and install the result as the app global. Call
     /// once, before the first window is built.
     pub fn init(cx: &mut gpui::App) {
-        let mut workspaces = Workspaces::load().unwrap_or_default();
-        let dropped = workspaces.dedupe_pane_ids();
-        if dropped > 0 {
-            log::warn!(
-                "session.json claimed {dropped} pane(s) from more than one workspace; \
-                 the stale claims will spawn fresh shells instead"
-            );
-        }
+        let workspaces = Workspaces::load().unwrap_or_default();
         cx.set_global(Self { workspaces });
     }
 
@@ -84,7 +77,6 @@ impl WorkspaceStore {
         // workspace whose machine is unreachable must open empty. See
         // [`claimable_session`].
         let reachable = id.is_none_or(|id| Self::machine_is_connected(cx, id));
-        let instance = Self::serving_instance(cx, id);
         let Some(store) = Self::try_store(cx) else {
             // No store (tests): hand back a detached identity so the window
             // still builds, but nothing is persisted.
@@ -100,10 +92,7 @@ impl WorkspaceStore {
         };
         workspace.open = true;
         workspace.touch();
-        let claimed = (
-            workspace.id,
-            claimable_session(workspace, reachable, instance.as_deref()),
-        );
+        let claimed = (workspace.id, claimable_session(workspace, reachable));
         store.workspaces.active = Some(claimed.0);
         store.workspaces.save();
         claimed
@@ -122,7 +111,6 @@ impl WorkspaceStore {
         // describing that machine's layout, so it does not get to overwrite the
         // copy we have of it — see [`record_session`].
         let reachable = Self::machine_is_connected(cx, id);
-        let instance = Self::serving_instance(cx, Some(id));
         let Some(store) = Self::try_store(cx) else {
             return;
         };
@@ -131,7 +119,7 @@ impl WorkspaceStore {
             // tearing down); nothing to record.
             return;
         };
-        record_session(workspace, session, reachable, instance);
+        record_session(workspace, session, reachable);
         if let Some(window) = window {
             workspace.window = Some(window);
         }
@@ -297,60 +285,6 @@ impl WorkspaceStore {
         crate::ui::remote_connect::RemoteConnections::get(cx, host.host_id()).is_some()
     }
 
-    /// The process whose pane ids this workspace's record is about: this
-    /// machine's daemon for a local workspace, the far machine's `tty7-server`
-    /// for a remote one. `None` when it cannot be named — an older peer, a
-    /// machine not connected right now, or a brand-new workspace with no host
-    /// yet — which every reader treats as "no instance check possible".
-    ///
-    /// One function for both because [`Workspace::daemon_instance`] means the
-    /// same thing on both sides. It used to be local-only, on the reasoning
-    /// that a remote server's identity is tracked live per connection instead
-    /// — but that live map lives in memory, so it is empty on the launch that
-    /// matters most: the one where the client was closed while the remote
-    /// server was replaced.
-    pub fn serving_instance(cx: &mut gpui::App, id: Option<WorkspaceId>) -> Option<String> {
-        match id.and_then(|id| Self::remote_ref(cx, id)) {
-            Some(host) => crate::ui::remote_connect::RemoteConnections::get(cx, host.host_id())
-                .map(|h| h.peer().instance.clone())
-                .filter(|instance| !instance.is_empty()),
-            None => crate::daemon::spawn::local_daemon_instance(),
-        }
-    }
-
-    /// Blank `id`'s saved pane ids when they were recorded against a different
-    /// server process than `instance`, and persist that. Answers whether any
-    /// were dropped.
-    ///
-    /// The remote counterpart of the check [`claimable_session`] runs for a
-    /// local workspace at claim time. It cannot run there for a remote one: at
-    /// claim time the machine is usually not connected yet, so there is no
-    /// instance to compare against. The reconnect is the first moment the
-    /// answer exists, which is where this is called from.
-    pub fn forget_stale_pane_ids(cx: &mut gpui::App, id: WorkspaceId, instance: &str) -> bool {
-        let current = (!instance.is_empty()).then_some(instance);
-        let Some(store) = Self::try_store(cx) else {
-            return false;
-        };
-        let Some(workspace) = store.workspaces.get_mut(id) else {
-            return false;
-        };
-        let dropped = workspace.forget_stale_pane_ids(current);
-        if dropped == 0 {
-            return false;
-        }
-        // Stamped now rather than left for the next save: the record has just
-        // been made to describe *this* server, and a crash before the window
-        // saves must not leave it claiming the old process again.
-        workspace.daemon_instance = current.map(str::to_string);
-        store.workspaces.save();
-        log::info!(
-            "workspace {id}: {dropped} saved pane id(s) belong to a previous \
-             tty7-server process; rebuilding from the layout"
-        );
-        true
-    }
-
     /// The client-side entry for `host` — the existing one if this machine has
     /// seen that workspace before, a fresh one otherwise.
     ///
@@ -387,47 +321,6 @@ impl WorkspaceStore {
         store.workspaces.save();
         id
     }
-
-    /// Merge an authoritative record pulled from the remote into the client's
-    /// entry. Only the remote-owned fields move; `open`, `window` and `host`
-    /// stay as this machine left them (see [`Workspace::apply_remote_json`]).
-    ///
-    /// A record that will not decode is dropped with a log line rather than
-    /// failing the open: the layout is recoverable on the next push, an
-    /// unopenable workspace is not.
-    pub fn apply_remote(cx: &mut gpui::App, id: WorkspaceId, record: &serde_json::Value) {
-        let Some(store) = Self::try_store(cx) else {
-            return;
-        };
-        let Some(workspace) = store.workspaces.get_mut(id) else {
-            return;
-        };
-        if let Err(e) = workspace.apply_remote_json(record) {
-            log::warn!("remote workspace {id} sent a record this build cannot read: {e}");
-            return;
-        }
-        store.workspaces.save();
-    }
-
-    /// What to send the remote for `id`: its store key and the remote-owned half
-    /// of the record. `None` for a local workspace — there is nobody to send to.
-    pub fn remote_payload(
-        cx: &gpui::App,
-        id: WorkspaceId,
-    ) -> Option<(RemoteRef, String, serde_json::Value)> {
-        let workspace = Self::all(cx).get(id)?;
-        let host = workspace.host.clone()?;
-        let key = host.store_key();
-        // The record travels under the *remote's* id, not the client entry's:
-        // the remote store is keyed by its own ids, and a record whose `id`
-        // disagreed with its key would be a workspace that renames itself on
-        // every round trip.
-        let mut record = workspace.to_remote_json();
-        if let Some(obj) = record.as_object_mut() {
-            obj.insert("id".to_string(), serde_json::json!(key));
-        }
-        Some((host, key, record))
-    }
 }
 
 /// The machine a window showing `id` is bound to.
@@ -456,56 +349,20 @@ pub(crate) fn crosses_machines(previous: HostId, current: HostId) -> bool {
 }
 
 /// The layout a window opening on `workspace` may rebuild — the read-side twin
-/// of [`record_session`].
+/// of [`record_session`], and by now only the *fallback* source: the machine's
+/// tree is the layout authority, and the hydration that follows a claim is
+/// what actually fills the window. What this still decides is the shape the
+/// window opens in.
 ///
-/// A remote entry's `session` is this client's copy of a record the machine
-/// owns: pulled on connect, refreshed on every `WorkspaceChanged`, pushed back
-/// on every structural change. Rebuilding from it is the whole of "reconnecting
-/// gets my tabs back", and it is safe to do because every pane it names is
-/// routed by [`crate::ui::remote_workspace::pane_workspace_for`] — a leaf in a
-/// remote workspace attaches or spawns *over there*, and a machine that cannot
-/// be reached fails the spawn rather than falling back to a local shell.
-///
-/// `reachable` is what keeps that guarantee from being theoretical. With the
-/// link down, `List` answers nothing, so every leaf would miss its live pane and
-/// try to spawn a fresh one — either failing (an empty window, having thrown the
-/// layout away) or, worse, landing a second shell next to the one still running
-/// over there. So an unreachable remote workspace opens empty **without
-/// touching the cached layout**, and
-/// [`crate::ui::remote_workspace`]'s connect path rebuilds the window the moment
-/// the machine answers.
-/// `current_instance` is the identity of the process serving this workspace's
-/// panes (see [`WorkspaceStore::serving_instance`]). A workspace whose saved ids
-/// were recorded against a different one blanks them first — after a restart the
-/// numbers begin again at 1, so a stale id would otherwise pass the aliveness
-/// check by landing on whatever unrelated pane holds it now. Blanked in the
-/// stored entry too, not just the returned copy, so the record stops claiming
-/// panes that no longer exist even if the window never saves again.
-///
-/// A remote workspace usually reaches the early return above instead: at claim
-/// time its machine is not connected yet, so there is no instance to compare and
-/// no layout to hand back. `remote_workspace::finish_attempt` runs the same
-/// check the moment the connect answers, which is the first point it can.
-fn claimable_session(
-    workspace: &mut Workspace,
-    reachable: bool,
-    current_instance: Option<&str>,
-) -> Session {
-    // A remote workspace *always* opens empty now, reachable or not: its
-    // machine's tree is the layout authority, and the hydration that follows
-    // the claim (`tree_sync::hydrate_window_from_tree`) is what fills the
-    // window — from the tree, not from this client's cache.
+/// A remote workspace opens empty unconditionally — its layout lives on
+/// another machine, and this client's cached copy is an import fallback, not
+/// something to build panes from. A local one hands back the cached layout for
+/// the paths that deliberately skip hydration (restore off, and the hydration
+/// import itself).
+fn claimable_session(workspace: &mut Workspace, reachable: bool) -> Session {
     let _ = reachable;
     if workspace.is_remote() {
         return Session::default();
-    }
-    let dropped = workspace.forget_stale_pane_ids(current_instance);
-    if dropped > 0 {
-        log::info!(
-            "workspace {}: {dropped} saved pane id(s) belong to a previous serving \
-             process; restoring with fresh shells (and agent resume where recorded)",
-            workspace.id
-        );
     }
     workspace.session.clone()
 }
@@ -515,29 +372,14 @@ fn claimable_session(
 ///
 /// A window that cannot reach its machine is not describing that machine's
 /// layout (its panes failed to restore, or are sitting there disconnected), so
-/// it records nothing rather than replacing the copy we have with the wreckage.
-/// The remote's own `workspaces.json` is still the authority; this entry is the
-/// cache the next launch opens from.
-/// The record is stamped with the process its pane ids came from (`instance`):
-/// this machine's daemon for a local workspace, the far machine's
-/// `tty7-server` for a remote one. That is what lets the next launch tell a
-/// surviving process from a replaced one — see [`claimable_session`] and
-/// [`WorkspaceStore::forget_stale_pane_ids`].
-///
-/// The unreachable early return doubles as the guard on that stamp: with the
-/// machine down there is no instance to record, and writing `None` over a good
-/// one would throw away the very comparison the next connect needs.
-fn record_session(
-    workspace: &mut Workspace,
-    session: Session,
-    reachable: bool,
-    instance: Option<String>,
-) {
+/// it records nothing rather than replacing the copy we have with the
+/// wreckage. The machine's tree is the authority; this entry is the cache the
+/// hydration import falls back to.
+fn record_session(workspace: &mut Workspace, session: Session, reachable: bool) {
     if workspace.is_remote() && !reachable {
         return;
     }
     workspace.session = session;
-    workspace.daemon_instance = instance;
 }
 
 #[cfg(test)]
@@ -580,7 +422,7 @@ mod tests {
     #[test]
     fn a_local_workspace_stores_its_own_layout() {
         let mut workspace = Workspace::default();
-        record_session(&mut workspace, local_layout(), true, None);
+        record_session(&mut workspace, local_layout(), true);
         assert_eq!(workspace.session.tabs.len(), 1);
         assert_eq!(workspace.pane_ids(), vec![7]);
     }
@@ -592,42 +434,13 @@ mod tests {
     #[test]
     fn a_connected_remote_workspace_stores_its_layout() {
         let mut workspace = Workspace::on_remote(remote_ref());
-        record_session(&mut workspace, local_layout(), true, None);
+        record_session(&mut workspace, local_layout(), true);
         assert_eq!(workspace.session.tabs.len(), 1);
         assert_eq!(
             workspace.pane_ids(),
             vec![7],
             "the pane ids are the remote daemon's, and are what a reconnect re-attaches"
         );
-    }
-
-    /// A remote workspace's record is stamped with the **server's** instance,
-    /// not left blank. That stamp is the only part of "which process minted
-    /// these ids" that survives the client being closed, and it is what the
-    /// next connect compares against before re-attaching anything.
-    #[test]
-    fn a_connected_remote_workspace_records_the_serving_instance() {
-        let mut workspace = Workspace::on_remote(remote_ref());
-        record_session(
-            &mut workspace,
-            local_layout(),
-            true,
-            Some("server-a".to_string()),
-        );
-        assert_eq!(workspace.daemon_instance.as_deref(), Some("server-a"));
-    }
-
-    /// …and an unreachable machine does not un-stamp it. `None` there means
-    /// "nobody to ask", and writing it over a good value would disarm the very
-    /// check the next connect needs — the ids would look current again.
-    #[test]
-    fn an_unreachable_remote_window_does_not_erase_the_recorded_instance() {
-        let mut workspace = Workspace::on_remote(remote_ref());
-        workspace.session = local_layout();
-        workspace.daemon_instance = Some("server-a".to_string());
-        record_session(&mut workspace, Session::default(), false, None);
-        assert_eq!(workspace.daemon_instance.as_deref(), Some("server-a"));
-        assert_eq!(workspace.session.tabs.len(), 1, "and the layout stays too");
     }
 
     /// A local workspace opens on the layout it saved.
@@ -637,46 +450,10 @@ mod tests {
             session: local_layout(),
             ..Workspace::default()
         };
-        let claimed = claimable_session(&mut workspace, true, None);
+        let claimed = claimable_session(&mut workspace, true);
         assert_eq!(claimed.tabs.len(), 1);
         // And the entry is left alone.
         assert_eq!(workspace.session.tabs.len(), 1);
-    }
-
-    /// Claiming a local workspace whose ids were recorded against a *different*
-    /// daemon process blanks them — in the returned session **and** in the
-    /// stored entry. After a reboot the numbers restart from 1, so a stale id
-    /// passes the aliveness check by landing on whatever unrelated pane holds
-    /// it now; blanking is what turns that into an honest fresh spawn (with
-    /// the agent resume the leaf recorded).
-    #[test]
-    fn claiming_a_local_workspace_from_another_daemon_process_blanks_its_ids() {
-        let mut workspace = Workspace {
-            session: local_layout(),
-            daemon_instance: Some("previous-boot".into()),
-            ..Workspace::default()
-        };
-        let leaf_id = |session: &Session| match &session.tabs[0].pane {
-            SessionPane::Leaf { pane_id, .. } => *pane_id,
-            SessionPane::Split { .. } => panic!("the fixture is a single leaf"),
-        };
-        let claimed = claimable_session(&mut workspace, true, Some("current-boot"));
-        assert_eq!(claimed.tabs.len(), 1, "the layout still restores");
-        assert_eq!(
-            leaf_id(&claimed),
-            None,
-            "but no leaf may attach by a number from a dead daemon"
-        );
-        assert!(workspace.pane_ids().is_empty(), "the entry agrees");
-
-        // Same process → the ids stay attachable.
-        let mut workspace = Workspace {
-            session: local_layout(),
-            daemon_instance: Some("current-boot".into()),
-            ..Workspace::default()
-        };
-        let claimed = claimable_session(&mut workspace, true, Some("current-boot"));
-        assert_eq!(leaf_id(&claimed), Some(7));
     }
 
     /// A remote workspace opens empty even when its machine is connected: the
@@ -687,7 +464,7 @@ mod tests {
     fn a_connected_remote_workspace_still_opens_empty_for_the_tree_to_fill() {
         let mut workspace = Workspace::on_remote(remote_ref());
         workspace.session = local_layout();
-        let claimed = claimable_session(&mut workspace, true, None);
+        let claimed = claimable_session(&mut workspace, true);
         assert!(claimed.tabs.is_empty());
         assert_eq!(workspace.session.tabs.len(), 1, "the cache is kept");
     }
@@ -702,7 +479,7 @@ mod tests {
         let mut workspace = Workspace::on_remote(remote_ref());
         workspace.session = local_layout();
 
-        let claimed = claimable_session(&mut workspace, false, None);
+        let claimed = claimable_session(&mut workspace, false);
         assert!(claimed.tabs.is_empty(), "the window must open with no tabs");
         assert_eq!(
             workspace.session.tabs.len(),
@@ -718,7 +495,7 @@ mod tests {
     fn an_unreachable_remote_window_does_not_overwrite_the_cached_layout() {
         let mut workspace = Workspace::on_remote(remote_ref());
         workspace.session = local_layout();
-        record_session(&mut workspace, Session::default(), false, None);
+        record_session(&mut workspace, Session::default(), false);
         assert_eq!(workspace.session.tabs.len(), 1);
     }
 
@@ -804,108 +581,6 @@ mod tests {
                 "nothing left to forget"
             );
         });
-    }
-
-    /// **The cold-launch half of the restart check.** `RemoteLinks::instances`
-    /// is in memory, so on the first connect after the client starts every
-    /// machine is a first sighting and nothing is judged a restart. A server
-    /// replaced while the client was closed would therefore sail through, and
-    /// its recycled ids — daemons number panes from 1 — would attach to
-    /// whatever unrelated shells hold those numbers now. The stamp on the
-    /// record is what closes that, so this is the test that has to hold.
-    #[gpui::test]
-    fn a_remote_workspace_drops_pane_ids_minted_by_a_previous_server(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(|cx| {
-            crate::core::config::pin_test_config_dir();
-
-            let mut entry = Workspace::on_remote(remote_ref());
-            entry.session = local_layout();
-            entry.daemon_instance = Some("server-a".to_string());
-            let id = entry.id;
-            WorkspaceStore::install_for_test(
-                cx,
-                Workspaces {
-                    workspaces: vec![entry],
-                    active: None,
-                },
-            );
-
-            // Same process: these ids still name the panes they always did.
-            assert!(!WorkspaceStore::forget_stale_pane_ids(cx, id, "server-a"));
-            assert_eq!(WorkspaceStore::all(cx).get(id).unwrap().pane_ids(), vec![7]);
-
-            // An unknown instance is never judged — a peer too old to report
-            // one must not cost the user every pane on the machine.
-            assert!(!WorkspaceStore::forget_stale_pane_ids(cx, id, ""));
-            assert_eq!(WorkspaceStore::all(cx).get(id).unwrap().pane_ids(), vec![7]);
-
-            // Replaced: the claims go, the layout stays, and the stamp moves on.
-            assert!(WorkspaceStore::forget_stale_pane_ids(cx, id, "server-b"));
-            let after = WorkspaceStore::all(cx).get(id).unwrap();
-            assert!(after.pane_ids().is_empty());
-            assert_eq!(
-                after.session.tabs.len(),
-                1,
-                "the layout is exactly what the rebuild draws from"
-            );
-            assert_eq!(
-                after.daemon_instance.as_deref(),
-                Some("server-b"),
-                "stamped now, so a crash before the next save cannot re-arm the old claim"
-            );
-
-            // And the same server is not a restart twice over.
-            assert!(!WorkspaceStore::forget_stale_pane_ids(cx, id, "server-b"));
-        });
-    }
-
-    /// **Why clearing the ids locally is not enough.** The remote owns the
-    /// record, so reopening pulls its copy over the client's — and
-    /// a copy that still claims the killed panes puts them straight back. This
-    /// is the constraint `windows::forget_killed_panes` pushes to satisfy; if
-    /// this assertion ever flips, that push is dead weight.
-    #[test]
-    fn a_remote_record_reinstates_pane_ids_a_client_only_clear_dropped() {
-        let mut theirs = Workspace::on_remote(remote_ref());
-        theirs.session = local_layout();
-        let record = theirs.to_remote_json();
-
-        let mut ours = Workspace::on_remote(remote_ref());
-        ours.session = local_layout();
-        ours.forget_pane_ids();
-        assert!(ours.pane_ids().is_empty());
-
-        ours.apply_remote_json(&record).unwrap();
-        assert_eq!(
-            ours.pane_ids(),
-            vec![7],
-            "the machine's copy wins, so the clear has to reach it"
-        );
-    }
-
-    /// The remote-bound payload travels under the *remote's* id, so a record
-    /// pushed and pulled back names the same workspace both times.
-    #[test]
-    fn the_remote_payload_is_keyed_by_the_remote_id_not_the_client_entry() {
-        let host = remote_ref();
-        let workspace = Workspace::on_remote(host.clone());
-        let mut record = workspace.to_remote_json();
-        record
-            .as_object_mut()
-            .unwrap()
-            .insert("id".into(), serde_json::json!(host.store_key()));
-        assert_eq!(host.store_key(), host.workspace.to_string());
-        assert_ne!(host.store_key(), workspace.id.to_string());
-        assert_eq!(record["id"], serde_json::json!(host.store_key()));
-        // The client-owned half never crosses.
-        for client_only in tty7_core::core::session::CLIENT_OWNED_FIELDS {
-            assert!(
-                record.get(*client_only).is_none(),
-                "{client_only} must not be sent to the remote"
-            );
-        }
     }
 
     /// **The window/host invariant, as a test.**

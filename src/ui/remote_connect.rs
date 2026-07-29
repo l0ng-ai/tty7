@@ -1260,7 +1260,7 @@ mod tests {
     /// name derived the way a local workspace's would be when none is set.
     #[test]
     fn rows_from_the_tree_sort_newest_first_and_derive_names() {
-        use tty7_core::core::machine::{Machine, PaneNode, PaneRecord, Tab, Workspace};
+        use tty7_core::core::machine::{Machine, PaneRecord, Tab, Workspace};
         let older = WorkspaceId::new();
         let newer = WorkspaceId::new();
         let machine = Machine {
