@@ -270,7 +270,7 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Input,
-            title: "Option acts as Meta",
+            title: "Option (⌥) acts as Meta",
             keywords: "alt keyboard modifier escape macos option meta",
         },
         SearchEntry {
@@ -311,30 +311,38 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: "ssh tunnel local remote dynamic socks forward rule",
         },
         // ── Agents ──────────────────────────────────────────────────────────
+        // Titles mirror `HookAgent::display_name()`, which is what each row is
+        // rendered with; the mechanism word (hooks/plugin/extension) lives in
+        // `keywords`. Pinned by `agent_rows_are_in_the_search_index`.
         SearchEntry {
             section: Agents,
-            title: "Claude Code hooks",
-            keywords: "agent integration install uninstall status rich session working waiting tab bar sidebar badge claude",
+            title: "Claude Code",
+            keywords: "agent integration hooks install uninstall status rich session working waiting tab bar sidebar badge claude",
         },
         SearchEntry {
             section: Agents,
-            title: "Codex hooks",
-            keywords: "agent integration install openai codex",
+            title: "Codex",
+            keywords: "agent integration hooks install openai codex",
         },
         SearchEntry {
             section: Agents,
-            title: "Copilot CLI hooks",
-            keywords: "agent integration install github copilot",
+            title: "Copilot CLI",
+            keywords: "agent integration hooks install github copilot",
         },
         SearchEntry {
             section: Agents,
-            title: "OpenCode plugin",
-            keywords: "agent integration install opencode",
+            title: "OpenCode",
+            keywords: "agent integration plugin install opencode",
         },
         SearchEntry {
             section: Agents,
-            title: "Pi extension",
-            keywords: "agent integration install pi",
+            title: "Pi",
+            keywords: "agent integration extension install pi",
+        },
+        SearchEntry {
+            section: Agents,
+            title: "Grok Build",
+            keywords: "agent integration hooks install xai grok build",
         },
         // ── Window & Tabs ───────────────────────────────────────────────────
         SearchEntry {
@@ -5625,10 +5633,31 @@ mod tests {
             "Tab completion",
             "History search",
             "Dim inactive panes",
+            "Option (⌥) acts as Meta",
         ] {
             assert!(
                 settings_search_entries().iter().any(|e| e.title == title),
                 "no index entry titled {title:?}"
+            );
+        }
+    }
+
+    /// The Agents rows are titled by [`HookAgent::display_name`], so the index
+    /// is derived rather than pinned: every hook-capable agent must have an
+    /// Agents-section entry under exactly that name. Adding an agent to
+    /// `HookAgent::ALL` without indexing it — how Grok Build became
+    /// unsearchable — fails here, as does renaming an agent without moving its
+    /// index entry.
+    #[test]
+    fn agent_rows_are_in_the_search_index() {
+        for agent in crate::core::agent_hooks::HookAgent::ALL {
+            assert!(
+                settings_search_entries()
+                    .iter()
+                    .any(|e| e.section == SettingsSection::Agents
+                        && e.title == agent.display_name()),
+                "no Agents index entry titled {:?}",
+                agent.display_name()
             );
         }
     }
