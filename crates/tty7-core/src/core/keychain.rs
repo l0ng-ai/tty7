@@ -20,7 +20,7 @@
 //! `daemon::protocol`'s `NativeSshSpec`) and the headless `tty7-server` runs on
 //! boxes that have no OS keychain at all. Keeping `keyring` out of this crate's
 //! manifest is what keeps a static `tty7-server` from linking the whole
-//! `zbus`/`secret-service` stack it can never use — see the design doc §11.
+//! `zbus`/`secret-service` stack it can never use.
 //!
 //! What has to stay is exactly what `Config` needs to parse `config.json`
 //! identically on the server: the account-naming scheme and [`CredentialRef`].

@@ -357,7 +357,7 @@ fn classify_external_change(
 /// What a landed write does to the buffer it wrote.
 ///
 /// Separated for the same reason: this is the three-way answer that the ⌘S
-/// exemption in contract §1 turns on, and it is pure.
+/// exemption turns on, and it is pure.
 #[derive(Debug, PartialEq, Eq)]
 struct SaveLanding {
     /// The buffer still holds what reached disk, so it may be marked clean.
@@ -806,7 +806,7 @@ impl Tty7App {
     /// Write one buffer back to its path, optionally closing it once the write
     /// lands.
     ///
-    /// The write is asynchronous (contract §1 exempts this): ⌘S no longer
+    /// The write is asynchronous (an explicit exemption): ⌘S no longer
     /// blocks the UI thread, so the dirty marker clears a frame later rather
     /// than instantly. Three things that costs us, and how each is paid:
     ///
@@ -1514,7 +1514,7 @@ mod tests {
         Some(MTime { secs, nanos })
     }
 
-    /// M2 regression guard (contract §10.5): the save → external-change →
+    /// M2 regression guard: the save → external-change →
     /// reload states still decide correctly now that the write is asynchronous.
     #[test]
     fn external_changes_are_told_apart_from_our_own_saves() {
@@ -1561,7 +1561,7 @@ mod tests {
         );
     }
 
-    /// M2 regression guard (contract §1, the ⌘S exemption): the three things
+    /// M2 regression guard (the ⌘S exemption): the three things
     /// asynchronous saving has to get right.
     #[test]
     fn a_landed_save_only_cleans_a_buffer_that_did_not_move() {

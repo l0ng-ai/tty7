@@ -264,7 +264,7 @@ mod tests {
         }
     }
 
-    /// And must not swallow the failures §17 requires to be reported: a full
+    /// And must not swallow the failures that have to be reported: a full
     /// disk or a read-only home has to surface as an error with a path, never as
     /// "the file isn't there, go ahead and install".
     #[test]

@@ -9,7 +9,7 @@
 //!
 //! Everything `--stdio` is Unix-only — the flag is refused on Windows, where a
 //! machine is reached over its own transport rather than by shipping a server
-//! onto it (contract §8). The plain argument handling below is not, and runs
+//! onto it. The plain argument handling below is not, and runs
 //! everywhere.
 
 use std::process::{Command, Stdio};

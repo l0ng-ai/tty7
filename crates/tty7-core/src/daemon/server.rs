@@ -545,7 +545,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
 
         // A remote workspace has no pane here to address, so its forwards and
         // SFTP go through one envelope that names the connection instead
-        // (design §15). The whole answer — including every failure — is built by
+        //. The whole answer — including every failure — is built by
         // `ssh::workspace::handle`, so this arm stays a pipe.
         ClientMsg::OnWorkspace(req) => {
             let mut w = write_stream;

@@ -1,5 +1,4 @@
-//! Installing, launching and version-matching `tty7-server` on a remote machine
-//! (design §12, §16, §17).
+//! Installing, launching and version-matching `tty7-server` on a remote machine.
 //!
 //! The six steps, in order:
 //!
@@ -23,7 +22,7 @@
 //!
 //! ## …except for WSL, which downloads nothing
 //!
-//! Design §12's last paragraph: a WSL distro is served the Linux binary the
+//! A WSL distro is served the Linux binary the
 //! *Windows client already shipped with*, not one fetched from a release. Both
 //! paths meet at [`ServerBinarySource`] — [`ReleaseDownload`] for a real remote,
 //! [`wsl::BundledServerBinary`] for a distro on this machine — so steps 2 and
@@ -40,7 +39,7 @@
 //!
 //! ## Scope
 //!
-//! Nothing here uses `sudo` or writes outside `$HOME` (§16). Nothing here opens
+//! Nothing here uses `sudo` or writes outside `$HOME`. Nothing here opens
 //! the workspace link either: this module's contract with the transport
 //! (`remote_link` / the SSH router) is exactly [`ensure_remote_server`] — call it,
 //! and on `Ok` the far end has the right binary installed and a daemon serving.
@@ -72,7 +71,7 @@ pub fn client_version() -> &'static str {
 /// 0700 — the *directory* is 0700, which is what actually scopes access, and a
 /// 0755 binary matches what every other user-local install looks like.
 const BINARY_MODE: u32 = 0o755;
-/// Mode bits for every directory we create (§16: directories 0700).
+/// Mode bits for every directory we create (directories 0700).
 const DIR_MODE: u32 = 0o700;
 
 /// How long a freshly launched remote daemon gets to start answering on its
@@ -316,7 +315,7 @@ impl ServerBinarySource for BundledOrRelease<'_> {
 
 /// The default source: fetch the release asset and its `checksums.txt` over
 /// HTTPS, and verify one against the other before anything is written or the
-/// user is asked (§16, §17).
+/// user is asked.
 pub struct ReleaseDownload<'a> {
     pub fetch: &'a dyn AssetFetcher,
 }
@@ -367,7 +366,7 @@ impl ServerBinarySource for ReleaseDownload<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// Consent (§12, §16) — the decision point M5's UI plugs into.
+// Consent — the decision point M5's UI plugs into.
 // ---------------------------------------------------------------------------
 
 /// Everything the user needs to answer "may tty7 write a binary onto this
@@ -404,7 +403,7 @@ pub enum InstallDecision {
 }
 
 /// Asks the user whether to write a server binary onto a machine for the first
-/// time (§12: "往别人机器上写二进制值得问一次").
+/// time ("往别人机器上写二进制值得问一次").
 ///
 /// **Only the first install on a given machine asks.** "First" is decided from
 /// evidence on the remote itself — an empty (or absent)
@@ -490,7 +489,7 @@ pub fn install_confirm() -> Arc<dyn InstallConfirm> {
 }
 
 // ---------------------------------------------------------------------------
-// Install progress (§12)
+// Install progress
 // ---------------------------------------------------------------------------
 
 /// How far a first install has got, in bytes.
@@ -538,7 +537,7 @@ impl InstallPhase {
     }
 }
 
-/// Watches an install go by (design §12: the first install writes ~8 MB across
+/// Watches an install go by (the first install writes ~8 MB across
 /// two network hops, and a client that says only "connecting…" for the length of
 /// both is indistinguishable from one that has hung).
 ///
@@ -616,7 +615,7 @@ pub fn install_progress() -> Arc<dyn InstallProgress> {
 }
 
 // ---------------------------------------------------------------------------
-// Asking a server binary what it speaks (§12)
+// Asking a server binary what it speaks
 // ---------------------------------------------------------------------------
 
 /// The flag that makes a `tty7-server` print [`RemoteProtocol`] and exit.
@@ -702,7 +701,7 @@ impl RemoteProtocol {
 }
 
 // ---------------------------------------------------------------------------
-// Version negotiation (§12, mirroring `spawn::ensure_running`).
+// Version negotiation (mirroring `spawn::ensure_running`).
 // ---------------------------------------------------------------------------
 
 /// A remote daemon that is serving a machine at a *different* build than the
@@ -782,7 +781,7 @@ fn record_mismatch(entry: MismatchedRemoteDaemon) {
 /// The relay's landing point (`daemon::router`): the daemon finds the mismatch,
 /// the GUI is the process with the keep-or-restart prompt, and
 /// [`take_mismatched_remote_daemons`] only ever reads a local static. Without
-/// this the prompt design §12 specifies could not fire at all.
+/// this the consent prompt could not fire at all.
 pub fn record_remote_mismatches(entries: Vec<MismatchedRemoteDaemon>) {
     for entry in entries {
         record_mismatch(entry);
@@ -800,7 +799,7 @@ pub fn take_mismatched_remote_daemons() -> Vec<MismatchedRemoteDaemon> {
 }
 
 // ---------------------------------------------------------------------------
-// Errors (§17: specific, path-bearing, never retried into a different path).
+// Errors (specific, path-bearing, never retried into a different path).
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -815,12 +814,11 @@ pub enum InstallError {
     /// proxy). Carries the URL, because "which release did it even look for" is
     /// the first question.
     Download { url: String, reason: String },
-    /// sha256 verification failed. Terminal: no retry, no unverified fallback
-    /// (§16, §17).
+    /// sha256 verification failed. Terminal: no retry, no unverified fallback.
     Checksum(ChecksumError),
     /// A WSL install found no bundled Linux server binary in this client's own
     /// installation. Terminal, and deliberately **not** downgraded to a
-    /// download: design §12 says a WSL distro is served the binary the client
+    /// download: a WSL distro is served the binary the client
     /// shipped with, and silently reaching for GitHub instead would turn a
     /// packaging bug into an intermittent network failure on someone else's
     /// machine. Names every directory that was looked in, because the fix is
@@ -833,7 +831,7 @@ pub enum InstallError {
     Declined { host: String, path: String },
     /// A write to the remote failed — full disk, read-only home, no permission.
     /// Reports the exact path and the server's own reason, and is **not**
-    /// retried anywhere else (§17: "不重试，不降级到别的路径").
+    /// retried anywhere else ("不重试，不降级到别的路径").
     Write { path: String, reason: String },
     /// The daemon would not start, or would not answer after starting.
     Launch { reason: String },
@@ -915,7 +913,7 @@ pub struct InstallReport {
     /// The already-running server this connect adopted instead of installing,
     /// when its dialects matched ours despite a different build.
     ///
-    /// `Some` is the case design §12 always intended and the implementation
+    /// `Some` is the case always intended and the implementation
     /// missed: a 26.7.6 client meeting a 26.7.7 server they both speak. Recorded
     /// because "we deliberately did not install" is otherwise indistinguishable
     /// in a log from "we forgot to".
@@ -1044,7 +1042,7 @@ impl<'a> Installer<'a> {
         if !usable {
             // --- 3. before writing 8 MB, ask what is already serving ----------
             //
-            // Design §12 says version skew is settled by comparing dialects, not
+            // Version skew is settled by comparing dialects, not
             // build strings. Only the *running* server is asked: the socket is
             // singular, so a compatible binary that is merely present on disk
             // would still have to be started — and starting our own is simpler
@@ -1254,7 +1252,7 @@ impl<'a> Installer<'a> {
     /// so its exit status *is* the answer, and a socket file a crash left behind
     /// reads as "nothing there" rather than as a live server. Nothing here
     /// parses a frame — the protocol handshake is end-to-end between the GUI and
-    /// the far server (contract §6.9), and a second opinion about the version
+    /// the far server, and a second opinion about the version
     /// living down here is exactly the coupling that design forbids.
     fn ensure_daemon(
         &self,
@@ -1303,8 +1301,8 @@ impl<'a> Installer<'a> {
     /// Identify the daemon that is actually serving, and record a mismatch only
     /// if it **cannot speak to us**.
     ///
-    /// **A different build is not a mismatch.** Design §12: "握手比
-    /// `PROTOCOL_VERSION`,兼容就继续用旧 server" — the same judgement
+    /// **A different build is not a mismatch.** The rule is to compare
+    /// `PROTOCOL_VERSION` and keep an older server that is compatible — the same judgement
     /// `spawn::ensure_running` makes locally, where a daemon whose `build`
     /// differs but whose `protocol` matches is reused in silence. Comparing
     /// version *strings* here is what made a 26.7.6 client prompt about a
@@ -1394,7 +1392,7 @@ impl<'a> Installer<'a> {
 /// Find the executable path of this user's running `tty7-server`, if any.
 ///
 /// `readlink /proc/<pid>/exe` is readable only for the caller's own processes,
-/// which is exactly the scope wanted: one `tty7-server` per user (contract §8).
+/// which is exactly the scope wanted: one `tty7-server` per user.
 /// `|| true` on the loop keeps a `set -e` login shell from turning "no daemon
 /// running" into a failed command.
 const RUNNING_EXE_COMMAND: &str = r#"for p in /proc/[0-9]*; do e=$(readlink "$p/exe" 2>/dev/null) || continue; case "$e" in */tty7-server-*) printf '%s' "${e% (deleted)}"; break;; esac; done; true"#;

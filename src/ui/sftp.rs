@@ -73,7 +73,7 @@ pub(crate) enum SftpEdit {
 }
 
 /// Which SSH connection this panel's requests run on — the *only* thing that
-/// differs between an SSH pane and a remote workspace (design §15).
+/// differs between an SSH pane and a remote workspace.
 ///
 /// A plain `Copy`-able bundle rather than a lookup at each call site, because
 /// every request runs on a background executor: the pane entity is not reachable
@@ -173,8 +173,8 @@ pub(crate) struct SftpPanelState {
     /// not by a toggle: the browser is a *view of the pane*, so which pane you're
     /// looking at is the only thing that decides it.
     pub(crate) open_pane_id: Option<u64>,
-    /// The remote workspace the open pane belongs to, when it is one (design
-    /// §15). Captured beside `open_pane_id` because every SFTP call needs it and
+    /// The remote workspace the open pane belongs to, when it is one.
+    /// Captured beside `open_pane_id` because every SFTP call needs it and
     /// the calls run on a background executor, where the pane entity is out of
     /// reach. `None` — the case for SSH panes — keeps the pane-addressed path.
     pub(crate) open_workspace: Option<crate::terminal::PaneWorkspace>,
@@ -417,7 +417,7 @@ impl Tty7App {
     }
 
     /// How this panel's requests reach the far side: the open pane's own
-    /// connection, or — for a remote-workspace pane — the workspace's (§15).
+    /// connection, or — for a remote-workspace pane — the workspace's.
     ///
     /// Resolved on the UI thread and cloned into every background call, because
     /// the pane entity is not reachable from a background executor.

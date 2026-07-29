@@ -12,8 +12,8 @@
 //!
 //! # Blocking on purpose
 //!
-//! Every method blocks. That is a decision, not an oversight
-//! (`docs/2026-07-27-remote-workspace-impl-contract.md` §1): the trait has to be
+//! Every method blocks. That is a decision, not an oversight: the trait
+//! has to be
 //! object-safe because the whole tree holds `Arc<dyn Host>`, the server side
 //! serves these same calls from a blocking thread pool, and a GPUI
 //! `&mut Context<T>` cannot be held across an `.await` anyway — so making the
@@ -458,7 +458,7 @@ pub trait Host: Send + Sync + 'static {
     /// conflict prompt. The post-write metadata is the write's own answer, so
     /// it closes the window by construction. It is also one round trip instead
     /// of two on every remote save; the control reply already carried it
-    /// (contract §6.4), so nothing on the wire moved.
+    ///, so nothing on the wire moved.
     ///
     /// Callers that genuinely don't want it write `.map(|_| ())`.
     fn write_file(&self, p: &Path, bytes: &[u8]) -> io::Result<Meta>;

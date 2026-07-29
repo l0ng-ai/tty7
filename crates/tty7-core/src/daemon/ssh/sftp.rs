@@ -52,7 +52,7 @@ use crate::daemon::protocol::{
 
 use super::{ConnectionKey, SshConnection, SshManager};
 
-/// Chunk size for streaming reads/writes (matches the Tabby reference, §6).
+/// Chunk size for streaming reads/writes (matches the Tabby reference).
 const CHUNK: usize = 256 * 1024;
 
 /// How long a finished job's final progress lingers for the GUI to observe before

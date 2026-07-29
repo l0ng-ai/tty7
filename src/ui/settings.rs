@@ -572,7 +572,7 @@ pub(crate) enum AgentHooksView {
     /// [`crate::core::agent_hooks::HookAgent::ALL`] order.
     Ready(Vec<AgentHookRow>),
     /// The machine can't be acted on, and the sentence says which hop gave up
-    /// (design §17: a failure is a resting state, not a blank).
+    /// (a failure is a resting state, not a blank).
     Unavailable(String),
 }
 
@@ -4279,7 +4279,7 @@ impl Tty7App {
                     )
                     .into_any_element();
             }
-            // §17: a resting state that says which hop gave up and what to do
+            // A resting state that says which hop gave up and what to do
             // next, rather than rows that would silently write nowhere.
             AgentHooksView::Unavailable(reason) => {
                 return page

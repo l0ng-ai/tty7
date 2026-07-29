@@ -164,7 +164,7 @@ mod tests {
     ///   of nothing. Asserting real content is what catches that.
     /// - **The TLS trust anchor works.** ureq's webpki roots must accept
     ///   github.com's chain; that HTTPS connection *is* the security model here
-    ///   (§16 — `checksums.txt` is not separately signed).
+    ///   (`checksums.txt` is not separately signed).
     ///
     /// Deliberately a small file rather than a release asset: assets are ~20 MB
     /// and this is a correctness check, not a bandwidth test.

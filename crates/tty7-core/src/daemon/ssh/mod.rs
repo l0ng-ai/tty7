@@ -20,7 +20,7 @@ pub mod forward;
 pub mod known_hosts;
 pub mod session;
 pub mod sftp;
-/// Workspace-scoped control requests (design §15) — see `workspace::handle`.
+/// Workspace-scoped control requests — see `workspace::handle`.
 pub mod workspace;
 
 mod auth;
@@ -393,7 +393,7 @@ impl SshManager {
     /// [`ConnectionKey`] registry the SSH panes use, so a workspace opened
     /// against a host the user already has a pane on costs no prompt at all, and
     /// a second workspace on the same host costs no second prompt — each stream
-    /// is a new *channel*, never a new authentication (design §7.1). One channel
+    /// is a new *channel*, never a new authentication. One channel
     /// per pane, one per workspace control stream; no multiplexing of our own on
     /// top of SSH's.
     ///
@@ -499,7 +499,7 @@ impl SshManager {
     }
 
     /// Replace the `tty7-server` running on `spec`'s host with this client's
-    /// build — design §12's "restart the service", and **it drops every pane
+    /// build — "Restart Server", and **it drops every pane
     /// that server is hosting**.
     ///
     /// Only ever reached from a [`RouteAction::RestartServer`](crate::daemon::router::RouteAction)

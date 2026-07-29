@@ -1,4 +1,4 @@
-//! "Connect to Host": the client half of a remote workspace (design §10, §12).
+//! "Connect to Host": the client half of a remote workspace.
 //!
 //! This module is everything between *the user picked a machine* and *the window
 //! is bound to a workspace on it*. It has no gpui views of its own — the home
@@ -19,7 +19,7 @@
 //!
 //! ## Machines are configured once
 //!
-//! Design §2: a remote workspace reuses an SSH configuration that already
+//! A remote workspace reuses an SSH configuration that already
 //! exists — a saved profile or a `~/.ssh/config` alias — with its keys, its jump
 //! host and its `ProxyCommand` already set up. There is deliberately no host
 //! *editor* here; [`available_hosts`] only reads, and [`spec_for`] hands the
@@ -293,7 +293,7 @@ pub fn control_route(target: &RemoteTarget, cx: &App) -> Result<RouteHeader, Str
 /// A machine that answered: its host object, and the workspaces it says it has.
 pub struct Connected {
     pub host: Arc<RemoteHost>,
-    /// The remote's `$HOME` — where a *new* workspace starts (design §10). The
+    /// The remote's `$HOME` — where a *new* workspace starts. The
     /// remote's, never this client's.
     pub home: PathBuf,
     pub rows: Vec<RemoteWorkspaceRow>,
@@ -410,7 +410,7 @@ pub fn list_workspaces(host: &Arc<RemoteHost>) -> io::Result<Vec<RemoteWorkspace
     }
 }
 
-/// A one-off session token. Design §10's takeover (M6) decides between two
+/// A one-off session token. The takeover (M6) decides between two
 /// clients by this plus the hostname; until then it is only carried.
 fn new_session_token() -> String {
     uuid::Uuid::new_v4().to_string()
@@ -523,7 +523,7 @@ impl RemoteConnections {
     }
 
     /// Where a *new* workspace on `id` would start: that machine's own `$HOME`,
-    /// never this client's (design §10).
+    /// never this client's.
     pub fn home(cx: &mut App, id: HostId) -> Option<PathBuf> {
         cx.default_global::<RemoteConnections>()
             .homes
@@ -559,7 +559,7 @@ impl RemoteConnections {
     }
 }
 
-/// Push a workspace's layout to the machine that owns it (design §10: the
+/// Push a workspace's layout to the machine that owns it (the
 /// remote's `workspaces.json` is the authority). Blocking.
 pub fn put_remote_layout(host: &Arc<RemoteHost>, key: String, record: Value) -> io::Result<()> {
     host.client()
@@ -573,7 +573,7 @@ pub fn put_remote_layout(host: &Arc<RemoteHost>, key: String, record: Value) -> 
 /// Pull one workspace's authoritative record from the machine that owns it.
 /// Blocking.
 ///
-/// The read side of design §10's split, and what a
+/// The read side of the split, and what a
 /// [`ControlEvent::WorkspaceChanged`](crate::daemon::control::ControlEvent)
 /// asks for: the event says only *that* a record moved, so the record itself is
 /// fetched rather than carried. `ErrorKind::NotFound` is a real answer — the
@@ -600,7 +600,7 @@ pub fn delete_remote_workspace(host: &Arc<RemoteHost>, key: String) -> io::Resul
 }
 
 // ---------------------------------------------------------------------------
-// 6. Install consent (design §12, §16)
+// 6. Install consent
 // ---------------------------------------------------------------------------
 
 /// The prompt shown before tty7 writes a binary onto someone else's machine.
@@ -835,7 +835,7 @@ struct RouteOrigin {
 ///
 /// **Why a table and not the connecting thread.** A question raised while a
 /// routed connection is being set up has to be attributed to a machine: the
-/// sheet names it, the start-up queue is keyed by it (design §10, D7), and
+/// sheet names it, the start-up queue is keyed by it (D7), and
 /// `raise_auth_sheet` finds a window with it. That used to be read off a
 /// thread-local set by [`connect_blocking`], which held for the workspace
 /// connect and quietly did not for a pane's — `connect_routed` lives in
@@ -946,7 +946,7 @@ pub fn take_pending_auth() -> Option<PendingAuth> {
 }
 
 // ---------------------------------------------------------------------------
-// 7. Remote daemon version skew (design §12)
+// 7. Remote daemon version skew
 // ---------------------------------------------------------------------------
 
 /// The keep-or-restart question for a remote `tty7-server` at a different build.
@@ -988,7 +988,7 @@ pub fn mismatch_target(m: &MismatchedRemoteDaemon) -> Option<RemoteTarget> {
     origin_target(&m.host)
 }
 
-/// Carry out design §12's "Restart Server": stop the `tty7-server` on the
+/// Carry out "Restart Server": stop the `tty7-server` on the
 /// machine `header` names and start this client's build. **Blocking**, and
 /// **every pane that server hosts dies** — only ever call this with the user's
 /// explicit answer behind it.
@@ -1031,7 +1031,7 @@ mod tests {
         }
     }
 
-    /// §12 is explicit that the confirmation says *what* is written, *where*,
+    /// The confirmation says *what* is written, *where*,
     /// *how big* and *where from*. A field silently dropped from the prompt
     /// would turn an informed decision back into a blind one, so every one of
     /// them is pinned here rather than eyeballed.

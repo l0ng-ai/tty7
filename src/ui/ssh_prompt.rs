@@ -598,7 +598,7 @@ impl Tty7App {
 
     fn dismiss_and_advance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pane = self.ssh_prompt.pane.clone();
-        // Design §10 / D7: the sheet is one machine's turn. Handing it back is
+        // D7: the sheet is one machine's turn. Handing it back is
         // what lets the next machine's queued connect ask its question, so it
         // has to happen on every exit from a routed sheet — answered, cancelled
         // or dismissed.

@@ -138,7 +138,7 @@ struct ReaderSignals {
 }
 
 /// The remote workspace a pane belongs to, and how the local daemon reaches its
-/// machine (design §15).
+/// machine.
 ///
 /// A pane of a remote workspace runs on the *remote* `tty7-server`, so nothing
 /// about it is addressable here by `pane_id`. This is what a pane carries
@@ -166,7 +166,7 @@ pub struct PaneWorkspace {
 
 impl PaneWorkspace {
     /// Whether this workspace shares `localhost` with the client, so a
-    /// `localhost:PORT` link resolves without any forward (design §15's WSL
+    /// `localhost:PORT` link resolves without any forward (the WSL
     /// exception).
     pub fn shares_localhost(&self) -> bool {
         matches!(self.target, crate::core::session::RemoteTarget::Wsl { .. })
@@ -222,7 +222,7 @@ impl PaneWorkspace {
 /// the window showing it, and this is the whole of how it says so. The transport
 /// underneath is identical either way — the same local socket, the same
 /// `try_clone`, the same reader thread — because the local daemon forwards a
-/// routed connection byte for byte (design §6).
+/// routed connection byte for byte.
 #[derive(Clone, Debug, Default)]
 pub enum PaneRoute {
     /// This machine's daemon. Every pane before remote workspaces existed, and
@@ -556,7 +556,7 @@ impl RemoteTerminal {
         Ok(term)
     }
 
-    // ── Design §10's pane half of a reconnect ────────────────────────────────
+    // ── The pane half of a reconnect ────────────────────────────────
     //
     // For one pane: **reopen the channel, `Attach`, take the replay, resize to
     // this client's geometry.** It happens *in place* — the same `Term`, the
@@ -598,7 +598,7 @@ impl RemoteTerminal {
     /// start. Advancing that onto a grid that still holds the pre-disconnect
     /// screen would append a second copy of everything. So the mirror is reset
     /// and the machine's own record becomes the whole truth — which is also the
-    /// honest presentation of the replay boundary (design §10): the ring holds
+    /// honest presentation of the replay boundary: the ring holds
     /// 8 MiB, a pane that outran it comes back with the daemon's current grid
     /// and **the middle is genuinely gone**. Nothing here interpolates it, and
     /// nothing upstream may imply it will fill in later.
@@ -672,7 +672,7 @@ impl RemoteTerminal {
         }
         self.reader_thread = Some(reader);
         self.route = route.clone();
-        // Design §10's last step: "以新客户端的尺寸 Resize". `Attach` carries a
+        // The last step: "以新客户端的尺寸 Resize". `Attach` carries a
         // size but deliberately does not resize the PTY, so the geometry only
         // becomes real when this frame lands — and `synced_size = false` is what
         // lets it through when the size happens to equal the last one.
@@ -783,7 +783,7 @@ impl RemoteTerminal {
 
     /// Close this pane's link, leaving the pane running on its machine.
     ///
-    /// The same two frames `Drop` sends, without dropping: design §10's
+    /// The same two frames `Drop` sends, without dropping: the
     /// takeover needs the client to *stop being attached* while the view stays
     /// on screen in its read-only state.
     pub fn detach_link(&mut self) {
@@ -793,7 +793,7 @@ impl RemoteTerminal {
         }
         // The reader observes the close and runs its own teardown, so the pane
         // lands in exactly the state a dropped network link leaves it in — which
-        // is the state design §10 wants after a takeover, reached by the code
+        // is the state wanted after a takeover, reached by the code
         // path that is already exercised every time a connection fails.
         if let Some(handle) = self.reader_thread.take() {
             let _ = handle.join();
@@ -1840,7 +1840,7 @@ impl RemoteTerminal {
         query(pane_id).unwrap_or_default()
     }
 
-    // ── Remote workspaces (design §15) ───────────────────────────────────────
+    // ── Remote workspaces ───────────────────────────────────────
 
     /// Send one workspace-scoped request and return the daemon's reply.
     ///
@@ -2428,7 +2428,7 @@ mod tests {
     }
 
     /// WSL routes by distro and carries no spec, because there is no connection
-    /// to name (design §7.3).
+    /// to name.
     #[test]
     fn a_wsl_workspace_routes_by_distro() {
         let ws = PaneWorkspace {

@@ -200,7 +200,7 @@ pub struct TerminalView {
     /// through [`host`](Self::host) at use time means a reconnect is picked up
     /// by the next probe with nothing to notify.
     host_id: crate::ui::host_ops::HostId,
-    /// The remote workspace this pane belongs to, when it is one (design §15).
+    /// The remote workspace this pane belongs to, when it is one.
     ///
     /// `None` — the case today, until the M5 window/workspace binding calls
     /// [`set_workspace`](Self::set_workspace) — means a local pane or an SSH
@@ -561,7 +561,7 @@ enum LoopbackOpen {
 }
 
 /// How a ⌘/Ctrl-clicked URL should be opened, decided before anything is done
-/// about it (design §15).
+/// about it.
 ///
 /// Split out as a pure decision so the branch a pane takes is testable without a
 /// daemon, a connection, or a browser — the three things this feature otherwise
@@ -572,7 +572,7 @@ pub(super) enum LoopbackPlan {
     /// machine: hand the URL to the OS unchanged.
     Direct,
     /// A remote whose `localhost` *is* the client's — WSL shares the network
-    /// namespace with its Windows host (design §15's exception). No forward is
+    /// namespace with its Windows host (the exception). No forward is
     /// built; the original URL already resolves. Wired now so M8 only has to
     /// start constructing `RemoteTarget::Wsl`.
     NoForwardNeeded,
@@ -1526,7 +1526,7 @@ impl TerminalView {
     ///   - **`remote_context`** — the pane's *own* process is elsewhere (a pane
     ///     tty7 dialled over SSH, a `wsl.exe` pane, a foreground `ssh`). The
     ///     daemon reports it, having watched the process.
-    ///   - **`host_id`** — the pane belongs to a **remote workspace** (§15).
+    ///   - **`host_id`** — the pane belongs to a **remote workspace**.
     ///     Nothing about the pane itself is remote *from its own daemon's point
     ///     of view*: `tty7-server` on the far machine spawned an ordinary local
     ///     shell and reports `remote_context: None`, exactly as a local daemon
@@ -1545,7 +1545,7 @@ impl TerminalView {
     /// what "+", a split, and the persisted session hand the new shell.
     ///
     /// Deliberately **not** [`local_cwd`](Self::local_cwd), and the difference
-    /// is the whole point. A window shows one machine (§3), so a sibling lands
+    /// is the whole point. A window shows one machine, so a sibling lands
     /// on the machine this pane's shell already runs on: for a remote-workspace
     /// pane that is the far box, where `/home/me/proj` is exactly right and
     /// withholding it would open every new tab at `$HOME` instead.
@@ -1579,7 +1579,7 @@ impl TerminalView {
     }
 
     /// The remote workspace this pane belongs to, if any — what its port
-    /// forwards are owned by and whose SSH connection its SFTP rides (§15).
+    /// forwards are owned by and whose SSH connection its SFTP rides.
     pub fn workspace(&self) -> Option<&crate::terminal::PaneWorkspace> {
         self.workspace.as_ref()
     }
@@ -1622,7 +1622,7 @@ impl TerminalView {
         crate::terminal::PaneRoute::for_workspace(self.workspace.as_ref())
     }
 
-    /// Design §10's read-only degrade, as the keyboard sees it.
+    /// The read-only degrade, as the keyboard sees it.
     ///
     /// **A local pane always answers `true`** — it has no connection to lose,
     /// and `workspace()` is `None` for it, so this is a field test and not a
@@ -1645,7 +1645,7 @@ impl TerminalView {
 
     /// Everything a reconnect needs to know about this pane, read on the UI
     /// thread before the blocking half runs off it: which pane, and at what
-    /// geometry to bring it back (design §10: "以新客户端的尺寸 Resize").
+    /// geometry to bring it back ("以新客户端的尺寸 Resize").
     ///
     /// The geometry is *this* client's current one, not the one the pane was
     /// recorded at — a laptop that reconnects to a workspace it left on a
@@ -1684,7 +1684,7 @@ impl TerminalView {
 
     /// Let go of this pane's link without ending the pane.
     ///
-    /// Design §10's takeover: another client attached, so this one stops being
+    /// The takeover: another client attached, so this one stops being
     /// the workspace's session. The pane stays on screen, read-only, exactly as
     /// a dropped link leaves it — what must *not* happen is this client going on
     /// holding a stream to a workspace somebody else is now typing in.
@@ -1886,7 +1886,7 @@ impl TerminalView {
                 // read the same and the wording is unchanged; for a remote
                 // workspace they are opposite facts, and "process exited" on a
                 // pane whose shell is still running on the far machine is the
-                // one claim design §10's degrade must not make — the whole
+                // one claim the degrade must not make — the whole
                 // promise is that the work is still there when the link returns.
                 self.title = if self.workspace().is_some() && !self.terminal.child_exited() {
                     "tty7 — disconnected".to_string()
@@ -1976,7 +1976,7 @@ impl TerminalView {
         // early return is unchanged — a local pane's link only dies when its
         // daemon does.
         //
-        // For a remote-workspace pane they are not. Design §10's read-only
+        // For a remote-workspace pane they are not. The read-only
         // degrade is precisely the case where the link is gone and the shell is
         // not: that window must keep scrolling, selecting, copying and
         // searching, and every one of those runs below this line. What must not
@@ -2075,12 +2075,12 @@ impl TerminalView {
             return;
         }
 
-        // Design §10's read-only degrade, placed **here and not at the top of
+        // The read-only degrade, placed **here and not at the top of
         // this function**.
         //
         // Everything above is the window's own keyboard, not the machine's:
         // ⌘F opens the search bar, ⌘A selects, ⌘C copies, ⌘1-9 switches tabs.
-        // §10 promises every one of those keeps working while the link is
+        // Every one of those keeps working while the link is
         // down — "能滚历史、能选能复制、能 ⌘F 搜索" — and a gate at the top of
         // `on_key_down` would silently take them all away, turning a read-only
         // window into an inert one. (⌘V is not an exception that needs handling
@@ -4725,7 +4725,7 @@ impl TerminalView {
     /// Two shapes qualify, and they are found by different signals:
     ///   - a **native-SSH pane** — tty7 dialled it, so `remote_context` says so
     ///     and the daemon holds the authenticated connection under its pane id;
-    ///   - a **remote-workspace pane** (§15) — its `tty7-server` reports it as
+    ///   - a **remote-workspace pane** — its `tty7-server` reports it as
     ///     an ordinary local pane (it *is* one, over there), so `remote_context`
     ///     is `None` and only this side's `workspace` binding reveals it. The
     ///     connection is the workspace's, not the pane's.
@@ -5483,7 +5483,7 @@ impl TerminalView {
             return LoopbackOpen::NotLoopback;
         };
         // WSL shares the Windows host's `localhost`, so the URL already points at
-        // the right place — building a forward would be pure overhead (design §15).
+        // the right place — building a forward would be pure overhead.
         if matches!(plan, LoopbackPlan::NoForwardNeeded) {
             return LoopbackOpen::NotLoopback;
         }
@@ -7133,7 +7133,7 @@ mod tests {
     use gpui_component::IconName;
     use std::path::{Path, PathBuf};
 
-    // ── ⌘-click `localhost:PORT` routing (design §15) ────────────────────────
+    // ── ⌘-click `localhost:PORT` routing ────────────────────────
 
     use crate::core::session::{RemoteTarget, WorkspaceId};
     use crate::daemon::protocol::RemoteKind;
@@ -7195,7 +7195,7 @@ mod tests {
         );
     }
 
-    /// **The WSL exception (design §15).** WSL shares `localhost` with its
+    /// **The WSL exception.** WSL shares `localhost` with its
     /// Windows host, so the URL already resolves — building a forward would be
     /// pure overhead. Wired now; M8 supplies the target.
     #[test]
@@ -9684,7 +9684,7 @@ mod gpui_tests {
         assert_eq!(next_input(&mut daemon), b"ping".to_vec());
     }
 
-    // ── Design §10's read-only degrade, at the five keystroke entry points ───
+    // ── The read-only degrade, at the five keystroke entry points ───
 
     /// Install a store holding one remote workspace with no connection, and
     /// bind `view` to it. `RemoteLinks` has never heard of the machine, so
@@ -9724,7 +9724,7 @@ mod gpui_tests {
         id
     }
 
-    /// Design §10: a window that is not attached **still shows, scrolls,
+    /// A window that is not attached **still shows, scrolls,
     /// selects and searches — but typing goes nowhere**, and nothing is
     /// buffered for later (D6).
     ///
@@ -9753,7 +9753,7 @@ mod gpui_tests {
         );
     }
 
-    /// The rest of design §10's degrade, and the half a gate at the top of
+    /// The rest of the degrade, and the half a gate at the top of
     /// `on_key_down` would silently destroy: **a read-only window is not an
     /// inert one.**
     ///
@@ -9910,7 +9910,7 @@ mod gpui_tests {
         assert_eq!(next_input(&mut daemon), b"z".to_vec());
     }
 
-    // ── Design §10's reconnect: the pane relink ──────────────────────────────
+    // ── The reconnect: the pane relink ──────────────────────────────
 
     /// The pane half of a reconnect swaps the socket **in place**: same `Term`,
     /// same event channel, same shared signals — because the view's event pump
@@ -9978,7 +9978,7 @@ mod gpui_tests {
             "the mirror must be reset before the daemon replays onto it"
         );
 
-        // Design §10's last step: resize to *this* client's geometry.
+        // The last step: resize to *this* client's geometry.
         let resize = loop {
             match ClientMsg::read(&mut new_daemon).expect("the new socket is live") {
                 ClientMsg::Resize(win) => break win,

@@ -1,5 +1,5 @@
 //! [`RemoteRouter`] — the local daemon as a forwarding hub for remote
-//! workspaces (design §6).
+//! workspaces.
 //!
 //! ## The shape
 //!
@@ -18,7 +18,7 @@
 //!
 //! A router that parsed the stream would become a third opinion about the
 //! protocol version. The remote's dialect is negotiated between the GUI and the
-//! remote server — contract §6.9's end-to-end handshake, and the reason the
+//! remote server — the end-to-end handshake, and the reason the
 //! contract resolves erratum #15 the way it does: a local daemon that had to
 //! understand remote frames would need to be upgraded in lockstep with both
 //! ends, and every version skew would land in the middle where neither user nor
@@ -74,7 +74,7 @@
 //!
 //! [`RouteAction::RestartServer`] uses the same window in the opposite
 //! direction: the *client* tells the daemon to replace the `tty7-server` on the
-//! target machine (design §12's "restart the service"). It is here for the same
+//! target machine ("Restart Server"). It is here for the same
 //! reason the prompts are — the decision needs a user and the act needs an
 //! `Arc<SshConnection>`, and those live in different processes — and it fits the
 //! window's own rule, being a precondition for a usable link rather than
@@ -181,7 +181,7 @@ pub enum RouteTarget {
     /// A host reached over SSH: `direct-streamlocal` when the server allows it,
     /// `tty7-server --stdio` on a session channel when it does not.
     Ssh(Box<NativeSshSpec>),
-    /// A WSL distribution — no SSH, no auth, no network (design §7.3, D9).
+    /// A WSL distribution — no SSH, no auth, no network (D9).
     ///
     /// The distro name as `wsl.exe -l -q` prints it. Nothing else is carried,
     /// because nothing else exists: no user (the distribution's default user is
@@ -200,7 +200,7 @@ pub enum RouteTarget {
 ///
 /// Everything else in this module assumes [`Forward`](RouteAction::Forward) —
 /// the connection is a pipe and the daemon is in the middle of it. The one thing
-/// that is *not* a pipe is design §12's "restart the service": it needs the
+/// that is *not* a pipe is "Restart Server": it needs the
 /// machine's `Arc<SshConnection>`, which exists only in the daemon process,
 /// while the decision to do it can only be made by the process with a user in
 /// front of it. So it travels the same way every other cross-process question on
@@ -225,7 +225,7 @@ pub enum RouteAction {
     /// and no link is opened: there is nothing to talk to afterwards, since the
     /// daemon that was serving is the one being replaced.
     ///
-    /// Design §12: this drops every pane that daemon hosts. It happens only when
+    /// This drops every pane that daemon hosts. It happens only when
     /// a user has answered the keep-or-restart prompt with "Restart Server".
     RestartServer,
 }
@@ -252,7 +252,7 @@ pub struct RouteHeader {
     /// What the daemon should do with this connection.
     ///
     /// `#[serde(default)]` = [`RouteAction::Forward`], the only thing a routed
-    /// connection did before design §12's restart needed a way across the
+    /// connection did before the restart needed a way across the
     /// process boundary.
     #[serde(default)]
     pub action: RouteAction,
@@ -297,7 +297,7 @@ impl RouteHeader {
     }
 
     /// The same machine, but asking the daemon to replace the `tty7-server`
-    /// running there rather than to talk to it (design §12).
+    /// running there rather than to talk to it.
     ///
     /// The connection carries nothing afterwards: the ack is the whole
     /// conversation. Callers must have a user's explicit "Restart Server" behind
@@ -453,7 +453,7 @@ pub enum RoutePrompt {
         request_id: u64,
         prompt: AuthPromptKind,
     },
-    /// "May tty7 write a server binary onto this machine?" (design §12).
+    /// "May tty7 write a server binary onto this machine?".
     Install {
         request_id: u64,
         request: Box<InstallRequestWire>,
@@ -531,7 +531,7 @@ impl RouteReply {
 /// **`machine` is the connection's own target**, handed down from the
 /// [`RouteHeader`] this negotiation opened with. A client with more than one
 /// machine has to know which one is asking — to name it in the sheet, and to
-/// queue one sheet per machine (design §10, D7) — and the header is the only
+/// queue one sheet per machine (D7) — and the header is the only
 /// place that fact is certain. It used to be inferred from the answering
 /// *thread*, which held for the workspace connect and silently did not for a
 /// pane's (`connect_routed` never set it), leaving every routed pane prompt
@@ -982,7 +982,7 @@ async fn drive(local: Stream, header: &RouteHeader) -> io::Result<()> {
                 // but dropping it would be a silent truncation.
                 Some((link, conn, frames.into_buffer()))
             }
-            // Design §12's restart: the daemon that would have been on the other
+            // The restart: the daemon that would have been on the other
             // end of this pipe is the one that was just replaced, so the ack is
             // the last thing this connection carries. The client reconnects to
             // the new one on its own — the supervisor's reconnect is already the
@@ -1127,7 +1127,7 @@ async fn perform(header: &RouteHeader, setup: &RouteSetup) -> anyhow::Result<Per
     }
 }
 
-/// Design §12's "restart the service", on the side of the boundary that holds
+/// "Restart Server", on the side of the boundary that holds
 /// the connection.
 ///
 /// SSH only, and that is not a gap being deferred: a WSL distribution's server
@@ -1161,7 +1161,7 @@ async fn open_link(
                 .await?;
             Ok((link, Some(conn)))
         }
-        // WSL (design §7.3): no connection object, so nothing is returned to
+        // WSL: no connection object, so nothing is returned to
         // hold open — the link *is* the child process, and dropping it reaps it.
         //
         // `ensure_wsl_server` runs first, on a blocking thread: it is several
@@ -1240,7 +1240,7 @@ mod tests {
 
     /// A WSL header carries the distro name and nothing else — no user, no
     /// port, no credentials, because none of those exist for a distribution on
-    /// this machine (design §7.3, D9).
+    /// this machine (D9).
     #[test]
     fn a_wsl_header_round_trips_with_only_a_distro_name() {
         let mut buf = Vec::new();
@@ -1713,7 +1713,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // The restart action (design §12): the one thing on this connection that
+    // The restart action: the one thing on this connection that
     // travels client → daemon.
     // -----------------------------------------------------------------------
 

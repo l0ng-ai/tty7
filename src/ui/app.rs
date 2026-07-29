@@ -820,7 +820,7 @@ pub struct Tty7App {
     /// `focus_active`, which only takes `&self`.
     window_title: std::cell::RefCell<String>,
     /// The home page's "Connect to Host" flow, or `None` when it isn't running
-    /// (design §10). Lives on the window rather than on the app because a
+    ///. Lives on the window rather than on the app because a
     /// window is what a remote workspace ends up bound to — two windows can be
     /// reaching two different machines at once.
     pub(crate) connect: Option<crate::ui::remote_workspace::ConnectFlow>,
@@ -924,7 +924,7 @@ impl Tty7App {
         Self::prompt_daemon_version_mismatch(window, cx);
         // The same question for any *remote* server this client already found
         // at a different build, and the consent handler that the install path
-        // asks before writing a binary onto someone else's machine (design §12).
+        // asks before writing a binary onto someone else's machine.
         crate::ui::remote_connect::register(cx);
         Self::prompt_remote_daemon_mismatch(window, cx);
         // A window that came back on a remote workspace has its last-pulled
@@ -1476,7 +1476,7 @@ impl Tty7App {
         crate::ui::windows::refresh_menu(cx);
     }
 
-    /// Design §15's other half: a workspace's forwards belong to the workspace,
+    /// The other half: a workspace's forwards belong to the workspace,
     /// so stopping it has to end them — nothing else will. A pane's forwards
     /// need no equivalent; the daemon drops those with the pane.
     ///
@@ -2548,7 +2548,7 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.ssh_warn_on_close = on);
     }
 
-    /// How a forward on `pane_id` reaches the daemon (design §15).
+    /// How a forward on `pane_id` reaches the daemon.
     ///
     /// Looked up across every tab's leaves rather than off the focused one: the
     /// Forwards band tracks the pane the *panel* is showing, which is not
@@ -3132,7 +3132,7 @@ impl Tty7App {
     ) {
         let parts = match parts {
             Ok(parts) => parts,
-            // §17: the slot keeps its place and says what went wrong. It does
+            // The slot keeps its place and says what went wrong. It does
             // not collapse the split under the user, and it does not close the
             // tab — both would throw away a layout because a network blinked.
             Err(reason) => {
@@ -3234,7 +3234,7 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A window is one machine (design §2). A remote workspace's window must
+        // A window is one machine. A remote workspace's window must
         // not open a shell on *this* computer, so the refusal happens before
         // anything is spawned rather than after a local pane is already in the
         // tab strip.
@@ -6256,10 +6256,10 @@ pub(crate) mod render_probe {
 }
 
 impl Tty7App {
-    /// Design §10's status strip, on a window that has tabs.
+    /// The status strip, on a window that has tabs.
     ///
     /// `ui::home` draws the same line on an *empty* remote window; this is the
-    /// one that matters, because §17's rule — a window that loses its machine
+    /// one that matters, because the rule — a window that loses its machine
     /// keeps showing what it had — only means anything when there is something
     /// to keep showing. Both read the same
     /// [`RemoteStatus::strip_message`](crate::ui::remote_workspace::RemoteStatus::strip_message),
@@ -6321,7 +6321,7 @@ impl Tty7App {
         )
     }
 
-    /// Design §10's bottom line: 未连接 — 输入暂不生效.
+    /// The bottom line: 未连接 — 输入暂不生效.
     ///
     /// It exists because the degrade is otherwise invisible. Everything a
     /// disconnected window *can* still do — scroll, select, copy, ⌘F — works
@@ -6368,7 +6368,7 @@ impl Tty7App {
 }
 
 /// Which SSH connection a forward is established on: the pane's own, or — for a
-/// remote workspace — the **workspace's** (design §15, M7).
+/// remote workspace — the **workspace's** (M7).
 ///
 /// The same shape and the same reason as
 /// [`SftpRoute`](crate::ui::sftp::SftpRoute): resolved on the UI thread from the
@@ -6442,7 +6442,7 @@ impl ForwardRoute {
         Self::forwards(crate::terminal::RemoteTerminal::on_workspace(req))
     }
 
-    /// Drop every forward the workspace owns (design §15: they outlive the
+    /// Drop every forward the workspace owns (they outlive the
     /// panes, so something has to end them when the workspace does).
     ///
     /// A no-op on the pane arm, and that is correct rather than a gap: a pane's
@@ -6582,7 +6582,7 @@ impl Render for Tty7App {
             })
             // Native-SSH status strip / reconnect notice (E1/E4).
             .when_some(ssh_status, |this, el| this.child(el))
-            // The remote *workspace*'s own state (design §10). A sibling of the
+            // The remote *workspace*'s own state. A sibling of the
             // SSH pane strip rather than a merge: that one is about one pane's
             // ssh process, this is about the machine the whole window is on, and
             // a window can legitimately show both.

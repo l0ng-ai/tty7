@@ -86,7 +86,7 @@ pub struct PendingSpawn {
 pub enum PendingState {
     Connecting,
     /// The attempt failed, with the reason as the user should read it. A
-    /// resting state (design §17): the slot keeps its place in the layout and
+    /// resting state: the slot keeps its place in the layout and
     /// offers the next move rather than collapsing the split under the user.
     Failed(SharedString),
 }
@@ -189,7 +189,7 @@ impl Render for PendingPane {
                         .text_color(theme.foreground)
                         .child(format!("Couldn't reach {}", self.machine)),
                 )
-                // The hop that gave up, in full. §17: a failure says which of
+                // The hop that gave up, in full: a failure says which of
                 // "the daemon isn't running", "that machine refused us" and
                 // "the server over there is too old" it was, because they want
                 // completely different things from the user.

@@ -874,7 +874,7 @@ fn optimistic_write(
 /// leaves the tree showing pre-change content indefinitely, since nothing is
 /// left in flight or marked stale to correct it. Discarding cannot be wrong:
 /// the host is the authority, the next paint asks it, and the row vanishing on
-/// failure is exactly what contract §1 says an optimistic write costs.
+/// failure is exactly what an optimistic write costs.
 ///
 /// `before` is taken by value so the snapshot is consumed rather than left
 /// lying around for a caller to misuse.
@@ -909,7 +909,7 @@ impl Tty7App {
     /// [`spawn_host`](Tty7App::spawn_host) resolved to its host object.
     ///
     /// **Derived from the window's workspace, never cached.** A window shows one
-    /// workspace and a workspace names one machine (design §3), so there is a
+    /// workspace and a workspace names one machine, so there is a
     /// right answer at every instant and no event to subscribe to — a tab
     /// switch, a new split, a rebind and a session restore all move it by
     /// construction. An earlier version of this re-derived the id from the
@@ -944,7 +944,7 @@ impl Tty7App {
             None => Vec::new(),
         };
         // Only panes on the window's own machine contribute. They all are, by
-        // design §3 — but a stray one (a tab carried across a rebind) would put
+        // design — but a stray one (a tab carried across a rebind) would put
         // a path from another machine into the root set, and every listing of it
         // would then be asked of the wrong host.
         //
@@ -2434,7 +2434,7 @@ mod tests {
         let host = tty7_core::host::local::LocalHost::new();
         // The fixture is built through the host too. Partly because it is the
         // thing under test and partly because it keeps this module honest: the
-        // §10.6 grep that forbids direct filesystem calls in `src/ui` does not
+        // CI grep that forbids direct filesystem calls in `src/ui` does not
         // know test modules from production code, and it should not have to.
         let tmp = std::env::temp_dir().join(format!("tty7-tree-host-{}", std::process::id()));
         let _ = host.remove(&tmp, true);
@@ -2556,7 +2556,7 @@ mod tests {
         let _ = host.remove(&tmp, true);
     }
 
-    /// M2 regression guard (contract §10.5): a create, a rename and a delete
+    /// M2 regression guard: a create, a rename and a delete
     /// each show their result before the host has confirmed it, and a failure
     /// leaves the directory to relist rather than showing a row for a file that
     /// does not exist.

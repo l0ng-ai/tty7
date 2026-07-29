@@ -271,7 +271,7 @@ pub struct LoopbackForwardRequest {
 }
 
 // ---------------------------------------------------------------------------
-// Workspace-scoped control requests (design §15, M7).
+// Workspace-scoped control requests (M7).
 //
 // A *remote workspace* has no pane on this daemon: its panes live on the remote
 // `tty7-server`, and the only thing this side owns is the `SshConnection` the
@@ -1032,7 +1032,7 @@ pub enum ClientMsg {
     /// every pane, forever, to feed a view that's usually closed.
     QueryProcs { pane_id: u64 },
     /// A control request scoped to a **remote workspace's** SSH connection
-    /// instead of a pane's (design §15). See [`WorkspaceRequest`].
+    /// instead of a pane's. See [`WorkspaceRequest`].
     OnWorkspace(Box<WorkspaceRequest>),
     /// Ask which protocol version the daemon speaks (control connection); the
     /// daemon replies `Version`. A daemon that predates versioning doesn't know
@@ -1179,7 +1179,7 @@ mod kind {
     // here because this module is private and the router must not become a
     // reason to open it — but the number is spent either way.
     /// `OnWorkspace` — a control request on a remote workspace's SSH connection
-    /// (design §15). 52 is the next number clear of every range above, of the
+    ///. 52 is the next number clear of every range above, of the
     /// router's 51, and of the retired 13; the contract's control connection
     /// reserves 60-63, which this stays below.
     pub const ON_WORKSPACE: u8 = 52;

@@ -137,7 +137,7 @@ enum Link {
     /// A connect is in flight right now.
     Connecting,
     /// The last attempt failed. A resting state, not a transient one: design
-    /// §17 says a failure always stays put and offers the next move, so the
+    /// A failure always stays put and offers the next move, so the
     /// reason rides along on the group (see [`Group::error`]).
     Failed,
     /// No connection. **Not an error** — the rows below it are what this client
@@ -761,7 +761,7 @@ impl Tty7App {
     /// The one row the panel keeps below the fold — adding a machine it does not
     /// know about yet — and the one gesture nothing else advertises.
     ///
-    /// Deliberately *not* an "add host" form. Design §2 is that a machine is
+    /// Deliberately *not* an "add host" form. A machine is
     /// configured once and remote workspaces reuse whatever is already set up,
     /// so this points at where that lives instead of growing a second place to
     /// do it.
@@ -866,7 +866,7 @@ impl Tty7App {
         if let Some(phase) = group.installing {
             block = block.child(self.render_install_progress(phase, cx));
         }
-        // §17: a failure is a resting state — it stays on screen with its reason
+        // A failure is a resting state — it stays on screen with its reason
         // in full and its next move one click away, rather than reverting the
         // panel and leaving the user to guess between VPN, keys and the box.
         if let Some(error) = group.error.as_ref() {
@@ -1461,7 +1461,7 @@ impl Group {
     /// it names that this client has no record of becomes an extra row marked
     /// for adoption. Rows this client *does* have are left alone: their local
     /// record carries window geometry and the `open` flag, which are this
-    /// client's business and not the remote's (design §10's storage split).
+    /// client's business and not the remote's (the storage split).
     fn merge(&mut self, remote: &[RemoteWorkspaceRow], now: u64) {
         if self.target.is_none() {
             return;

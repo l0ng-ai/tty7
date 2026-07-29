@@ -24,7 +24,7 @@
 
 // Unix-only: every case here is a `--stdio` child, and `--stdio` is refused on
 // Windows by design — a Windows machine is reached over its own transport, not
-// by shipping a server onto it (contract §8).
+// by shipping a server onto it.
 #![cfg(unix)]
 
 use std::io;

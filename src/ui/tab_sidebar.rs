@@ -1057,7 +1057,7 @@ impl Tty7App {
                 // path, and that is correct rather than a shortcut: a tab
                 // belongs to one workspace, a workspace names one machine in
                 // `Workspace.host`, and a window shows one workspace — design
-                // §3 rules out ever mixing local and remote in one window. So
+                // Mixing local and remote in one window never happens. So
                 // the qualified key is `(workspace.host_id(), sidebar_group)`
                 // with the host half held once per workspace instead of once
                 // per tab, and two machines can't collide here without a

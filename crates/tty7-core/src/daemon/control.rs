@@ -341,7 +341,7 @@ pub enum ControlRequest {
         id: String,
     },
 
-    // ----- attachment (M6's takeover, design §10) ---------------------------
+    // ----- attachment (M6's takeover) ---------------------------------------
     /// Claim a workspace for this connection's session, taking it over from
     /// whoever held it. The server answers
     /// [`ReplyOk::Attached`] and pushes [`ControlEvent::Preempted`] to the
@@ -374,7 +374,7 @@ impl ControlRequest {
     /// conservative timeout would make the fast paths feel broken; a single
     /// aggressive one would break the slow paths.
     ///
-    /// A timeout **never drops the connection** (§6.8): the request fails with
+    /// A timeout **never drops the connection**: the request fails with
     /// `TimedOut`, a [`kind::CANCEL`] goes out, and every other in-flight
     /// request is untouched.
     pub fn deadline(&self) -> Duration {
@@ -469,7 +469,7 @@ pub enum ReplyOk {
     Json(serde_json::Value),
     /// [`ControlRequest::WorkspaceAttach`] succeeded. `took_over_from` names the
     /// machine whose session was displaced, so the client that *did* the taking
-    /// can say so — design §10 only specifies the notice going the other way,
+    /// can say so — only the notice going the other way is specified,
     /// but a takeover the new client cannot see is one the user cannot explain.
     Attached {
         took_over_from: Option<String>,
@@ -604,7 +604,7 @@ pub enum ControlEvent {
         pane_id: u64,
         json: serde_json::Value,
     },
-    /// Design §10's takeover: someone else attached to `workspace`, so this
+    /// The takeover: someone else attached to `workspace`, so this
     /// session no longer holds it.
     ///
     /// **`workspace` is not redundant.** One control connection carries a whole
@@ -1089,7 +1089,7 @@ pub type EventSink = Box<dyn Fn(ControlEvent) + Send + Sync + 'static>;
 /// `shutdown`, a child process has `kill`, an SSH channel has `close` — hence
 /// this one-method abstraction rather than a bound on the stream type.
 ///
-/// **Note for the server side** (contract §7.4's `Duplex`): the same problem
+/// **Note for the server side** (the `Duplex`): the same problem
 /// exists there in mirror image, so `Duplex` will want the same capability.
 /// Aligning is a matter of `Duplex` either requiring `LinkShutdown` as a
 /// supertrait or exposing an equivalent method; this trait is deliberately
@@ -1288,7 +1288,7 @@ impl ControlClient {
     /// Issue a request and block until its reply, `deadline` elapses, or the
     /// link drops.
     ///
-    /// Blocking is deliberate (contract §1): `Host` is a blocking, object-safe
+    /// Blocking is deliberate: `Host` is a blocking, object-safe
     /// trait, and every caller is already on a background thread. Blocking here
     /// blocks exactly one of them.
     pub fn call(&self, req: ControlRequest) -> io::Result<ReplyOk> {

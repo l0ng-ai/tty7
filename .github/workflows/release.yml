@@ -12,7 +12,7 @@ jobs:
   build:
     # The Windows installer embeds the Linux musl `tty7-server` so a WSL distro
     # can be served the binary the client already shipped with, instead of
-    # downloading one (design §12: WSL installs nothing over the network). That
+    # downloading one (WSL installs nothing over the network). That
     # binary comes from `server-musl`, so the two jobs can no longer run in
     # parallel. Serialising all four platforms behind it costs a few minutes on
     # a release — cheap next to splitting the Windows entry into its own job and
@@ -150,10 +150,11 @@ jobs:
           if-no-files-found: error
 
   # The headless server binary remote workspaces install on the far machine
-  # (design doc D10/§12). Statically linked against musl so a single binary runs
+  # (decision D10). Statically linked against musl so a single binary runs
   # on any distro whatever its glibc vintage, and shipped as a bare executable
   # rather than an archive so the client can fetch exactly one file and verify it
-  # against checksums.txt. Asset naming contract: docs/remote-server-assets.md.
+  # against checksums.txt. The asset names are a contract with the installer:
+  # `tty7_core::daemon::install::asset` derives them from `uname -sm`.
   #
   # Separate from the `build` matrix above because it shares nothing with it: no
   # GUI toolchain, no bundling, no code signing, two targets off one runner.
@@ -193,7 +194,7 @@ jobs:
           workspaces: tty7
           key: ${{ matrix.target }}
 
-      # Until the crate split (§11) lands there is no tty7-server to build. Skip
+      # Until the crate split lands there is no tty7-server to build. Skip
       # rather than fail, so this workflow can ship ahead of the split; the
       # release simply carries no server assets until it arrives.
       - name: Look for the tty7-server package
@@ -224,7 +225,7 @@ jobs:
         run: bash .github/scripts/assert-static.sh "target/${{ matrix.target }}/release/tty7-server"
 
       # Flat, version-free asset name — the tag in the download URL carries the
-      # version. See docs/remote-server-assets.md for the contract the client
+      # version. See `install::asset` for the contract the client
       # installer derives this name from.
       - name: Stage the asset
         if: steps.probe.outputs.present == 'true'
@@ -262,12 +263,12 @@ jobs:
           merge-multiple: true
 
       # sha256 over every asset, so the remote-server installer can verify what
-      # it downloaded before writing it to someone else's machine (design §16 —
-      # a mismatch aborts the install outright). Generated here rather than in
+      # it downloaded before writing it to someone else's machine (a mismatch
+      # aborts the install outright). Generated here rather than in
       # the build jobs because only this job sees the complete asset set, and a
       # per-job fragment would have to be concatenated in a deterministic order
       # anyway. GNU coreutils format ("<hex>  <name>"), bare filenames, sorted —
-      # see docs/remote-server-assets.md for the format the client parses.
+      # see `install::checksums` for the format the client parses.
       - name: Generate checksums.txt
         run: |
           set -euo pipefail

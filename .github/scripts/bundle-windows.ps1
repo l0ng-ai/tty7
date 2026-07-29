@@ -27,7 +27,7 @@ Copy-Item LICENSE "$Stage/LICENSE.txt"
 Copy-Item README.md "$Stage/README.md"
 
 # The Linux musl `tty7-server`, staged at server/ so a WSL distro can be handed
-# the binary this client shipped with (design §12: WSL downloads nothing). The
+# the binary this client shipped with (WSL downloads nothing). The
 # lookup path is a contract with `daemon::install::wsl` — it searches
 # <dir of tty7.exe>/server/<asset> first — so this directory name is not free to
 # change on its own. Missing is a warning, not an error, matching `server-musl`'s

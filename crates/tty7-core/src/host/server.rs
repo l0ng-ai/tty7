@@ -8,7 +8,7 @@
 //! carries nothing else.
 //!
 //! That symmetry is not an accident, it is the reason the trait is blocking
-//! (contract §1). A server handler runs on a thread pool, where blocking is what
+//!. A server handler runs on a thread pool, where blocking is what
 //! you want, so the identical `LocalHost` that answers a local file tree answers
 //! a remote one — no async mirror of every method, and no second implementation
 //! to drift.
@@ -124,10 +124,10 @@ impl Services {
 }
 
 // ---------------------------------------------------------------------------
-// Attachment / takeover (design §10, D8)
+// Attachment / takeover (D8)
 // ---------------------------------------------------------------------------
 
-/// The live half of design §10's attachment record.
+/// The live half of the attachment record.
 ///
 /// [`Attachment`](crate::core::workspace_store::Attachment) in the store is the
 /// *data* — token, hostname, since — and answers "who holds this workspace".
@@ -183,7 +183,7 @@ struct Evicted {
     /// Whether the link exists *for* this workspace, and so should be closed
     /// with it.
     ///
-    /// Design §10 says to close the displaced session's streams. When the
+    /// The displaced session's streams are closed. When the
     /// connection was opened for one workspace — its hello named it — that is
     /// exactly right, and it is the strong form of the guarantee: the old client
     /// cannot write again even if it is wedged or hostile.
@@ -473,7 +473,7 @@ fn is_disconnect(e: &io::Error) -> bool {
 /// The reply goes out **even on a mismatch**, which is the only reason the
 /// client can say "the server speaks v2, I speak v1" instead of "the connection
 /// dropped" — a `HELLO` carries no `req_id`, so there is no error reply to hang
-/// the mismatch on (contract §6.7).
+/// the mismatch on.
 fn handshake<R: Read>(
     r: &mut R,
     sink: &Sink,
@@ -530,7 +530,7 @@ fn handshake<R: Read>(
 /// connections apart even when the same client opens both.
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
-/// Design §10's takeover, server side: claim `workspace` for this connection and
+/// The takeover, server side: claim `workspace` for this connection and
 /// tell whoever held it.
 ///
 /// The order is the whole behaviour. The store's record moves first (so a
@@ -668,7 +668,7 @@ fn submit(conn: &Arc<Conn>, req_id: u64, req: ControlRequest, blob: Vec<u8>) {
 fn run_job(conn: &Arc<Conn>, req_id: u64, req: ControlRequest, blob: Vec<u8>) {
     // Cheap pre-check: a request cancelled before a worker picked it up is not
     // worth running at all. (Once it *has* started there is nothing to do — a
-    // filesystem call is not interruptible, so §6.8's "best effort, not
+    // filesystem call is not interruptible, so "best effort, not
     // guaranteed" is discharged by discarding the result.)
     if conn.is_cancelled(req_id) {
         conn.forget(req_id);
@@ -873,7 +873,7 @@ fn run_request(
             (ReplyOk::Unit, Vec::new())
         }
 
-        // ----- attachment (design §10, D8) -----------------------------------
+        // ----- attachment (D8) -----------------------------------
         ControlRequest::WorkspaceAttach { id } => (
             ReplyOk::Attached {
                 took_over_from: attach_workspace(conn, &id, false)?,
@@ -3160,7 +3160,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Attachment and takeover (design §10, D8)
+    // Attachment and takeover (D8)
     // -----------------------------------------------------------------------
 
     /// **D8 in one test.** The newcomer wins, the incumbent is *told* rather
@@ -3221,7 +3221,7 @@ mod tests {
         );
     }
 
-    /// Design §10 says to close the displaced session's stream, and when the
+    /// The displaced session's stream is closed, and when the
     /// connection exists for that one workspace that is exactly right.
     #[test]
     fn a_dedicated_connection_is_closed_when_its_workspace_is_taken() {

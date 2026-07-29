@@ -13,8 +13,8 @@ pub mod file_tree;
 pub mod forwards;
 pub mod hints;
 pub mod home;
-// The `Host` layer's GUI half (`docs/2026-07-27-remote-workspace-impl-contract.md`
-// §5). The facade and the registry land ahead of the call sites that consume
+// The `Host` layer's GUI half. The facade and the registry land ahead of the
+// call sites that consume
 // them — the six views move over to `HostOps` as a separate change — so they
 // read as dead code until that merges.
 #[allow(dead_code)]

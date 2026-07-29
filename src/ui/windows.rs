@@ -511,7 +511,7 @@ fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId, cleared: Cleared
             cache.invalidate(host)
         });
     }
-    // Design §15: a remote workspace's port forwards are owned by the
+    // A remote workspace's port forwards are owned by the
     // *workspace*, not by its panes, so nothing else ends them. Done before the
     // window closes, because the route to the daemon is read off a live pane.
     if let Some(app) = WindowRegistry::app_for(cx, workspace)
@@ -538,7 +538,7 @@ fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId, cleared: Cleared
 /// Drop `workspace`'s pane ids, and tell the machine that owns the record.
 ///
 /// The push is not optional for a remote workspace that is being kept: design
-/// §10 makes the remote's `workspaces.json` the authority, so reopening pulls
+/// The remote's `workspaces.json` is the authority, so reopening pulls
 /// its copy over the client's ([`WorkspaceStore::apply_remote`]) and a
 /// local-only edit would be undone by the next open — which is the open this
 /// exists for.
@@ -590,7 +590,7 @@ pub fn delete_workspace(cx: &mut App, workspace: WorkspaceId) {
     refresh_menu(cx);
 }
 
-/// Forget a remote workspace on the machine that owns it (design §10: the
+/// Forget a remote workspace on the machine that owns it (the
 /// remote's `workspaces.json` is the authority, so deleting only the client's
 /// pointer would leave the workspace there and reappear on the next connect).
 ///

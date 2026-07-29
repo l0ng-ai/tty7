@@ -90,7 +90,7 @@ pub(crate) struct RightPanelState {
     /// runs, or `None` when the pane on screen has nothing to forward over.
     ///
     /// A route rather than a `bool` because a remote workspace's forwards belong
-    /// to the *workspace*, not the pane (design §15): the pane id alone cannot
+    /// to the *workspace*, not the pane: the pane id alone cannot
     /// say which of the two owners to ask, and the reschedule below re-reads
     /// this rather than carrying the decision forward.
     pub(crate) procs_forwards: Option<crate::ui::app::ForwardRoute>,
@@ -607,7 +607,7 @@ impl Tty7App {
                 }
                 // Two ways a pane has something to forward over: it *is* an
                 // SSH session, or it belongs to a remote workspace, whose
-                // forwards run on the workspace's own connection (design §15).
+                // forwards run on the workspace's own connection.
                 // The second arm is empty in this build — nothing binds a pane
                 // to a workspace yet — which is deliberate: the band stays
                 // empty rather than offering an add that would have nowhere to

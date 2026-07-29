@@ -247,12 +247,12 @@ impl Tty7App {
             )
     }
 
-    // ----- connect to another machine (design §10) --------------------------
+    // ----- connect to another machine --------------------------
 
     /// The status strip a remote window wears when it is not attached.
     ///
-    /// Design §10 puts one at the top of the window in every state that is not
-    /// `Attached`, and §17 is why: a window that has lost its machine must keep
+    /// One sits at the top of the window in every state that is not
+    /// `Attached`, and this is why: a window that has lost its machine must keep
     /// showing what it had and say so, rather than close or empty itself. A
     /// local window and a healthy remote one say nothing — a permanent "you are
     /// fine" banner is noise.
@@ -263,7 +263,7 @@ impl Tty7App {
         let machine = self.remote_machine_label(cx);
         let status = self.remote_status(cx)?;
         let message = status.strip_message(&machine)?;
-        // §17: a failure state is a resting state, so it always offers the next
+        // A failure state is a resting state, so it always offers the next
         // move. The button belongs here and not only on a window with tabs —
         // this is the *empty* remote window, which is precisely the one with no
         // other way out.

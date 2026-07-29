@@ -1,6 +1,6 @@
 //! The install flow, driven end to end against an in-memory remote.
 //!
-//! Contract §18 asks for four things by name — `uname` parsing, version path
+//! Four things are asked for by name — `uname` parsing, version path
 //! construction, atomic replacement, and the sha256 failure path — and none of
 //! them may touch the network. The first two are unit-tested in
 //! [`super::asset`] and [`super::checksums`]; the last two need the *whole*
@@ -509,7 +509,7 @@ fn the_final_path_is_only_ever_reached_by_renaming_a_ready_temp() {
 }
 
 /// The directory chain is created outermost-first (SFTP has no `mkdir -p`) and
-/// the directory that holds the binaries ends up 0700 (§16).
+/// the directory that holds the binaries ends up 0700.
 #[test]
 fn the_install_directory_is_created_in_order_and_locked_down() {
     let remote = FakeRemote::new();
@@ -540,7 +540,7 @@ fn the_install_directory_is_created_in_order_and_locked_down() {
 }
 
 // ---------------------------------------------------------------------------
-// sha256 (§16, §17) — the failure path §18 names.
+// sha256 — the failure path.
 // ---------------------------------------------------------------------------
 
 /// **A checksum mismatch aborts and writes nothing.** Not a retry, not an
@@ -602,10 +602,10 @@ fn a_release_missing_our_asset_aborts() {
 }
 
 // ---------------------------------------------------------------------------
-// Consent (§12).
+// Consent.
 // ---------------------------------------------------------------------------
 
-/// The prompt has to carry everything §12 asks it to say: which path, how big,
+/// The prompt has to carry everything it must say: which path, how big,
 /// and where the bytes came from.
 #[test]
 fn the_confirmation_states_path_size_and_origin() {
@@ -749,7 +749,7 @@ fn a_present_but_unexecutable_binary_is_reinstalled() {
 }
 
 // ---------------------------------------------------------------------------
-// Refusals and write failures (§17).
+// Refusals and write failures.
 // ---------------------------------------------------------------------------
 
 /// An architecture we do not publish for is refused before anything is
@@ -782,7 +782,7 @@ fn an_unsupported_machine_is_refused_before_any_work() {
 }
 
 /// **A failed remote write reports the path and the server's reason, and is not
-/// retried anywhere else** (§17). A full disk must not become "let me try
+/// retried anywhere else**. A full disk must not become "let me try
 /// /tmp".
 #[test]
 fn a_failed_write_names_the_path_and_does_not_fall_back() {
@@ -1188,7 +1188,7 @@ fn the_published_path_is_absolute_and_version_qualified() {
 }
 
 // ---------------------------------------------------------------------------
-// Progress (§12: an 8 MB first install must not look like a hang).
+// Progress (an 8 MB first install must not look like a hang).
 // ---------------------------------------------------------------------------
 
 /// Records every report in order, which is what makes "monotonic" and "reaches
@@ -1438,7 +1438,7 @@ fn a_fraction_is_either_absent_or_in_range() {
 }
 
 // ---------------------------------------------------------------------------
-// Dialects, not build strings (§12).
+// Dialects, not build strings.
 // ---------------------------------------------------------------------------
 
 /// What this client speaks, which is what a remote has to match.

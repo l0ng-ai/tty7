@@ -10,7 +10,7 @@ publish = false
 # The whole point of this crate is that it does *not* depend on gpui. Everything
 # here has to compile and run on a headless Linux box (that is what
 # `tty7-server` is), so nothing windowing-, rendering- or GUI-shaped belongs in
-# these dependencies — see `docs/2026-07-27-remote-workspace-design.md` §11.
+# these dependencies.
 [dependencies]
 anyhow.workspace = true
 log.workspace = true
@@ -155,7 +155,7 @@ tokio = { version = "1", features = ["test-util", "macros", "rt"] }
 # unchanged. It has to be optional because `libgssapi` binds the *system* MIT /
 # Heimdal krb5 through bindgen: a machine without krb5 headers cannot build it
 # at all, and a static musl `tty7-server` — the binary remote workspaces push
-# onto arbitrary hosts (design §12, D10) — cannot link it under any
+# onto arbitrary hosts (decision D10) — cannot link it under any
 # circumstances. Without the feature, `SshAuthMode::Gssapi` reports that the
 # method is unavailable in this build and the other auth families are untouched.
 #
@@ -170,7 +170,7 @@ tokio = { version = "1", features = ["test-util", "macros", "rt"] }
 default = []
 gssapi = ["dep:libgssapi"]
 # Lets this build download a `tty7-server` release asset over HTTPS and push it
-# onto a remote machine (design §12). Off by default so `tty7-server` — which is
+# onto a remote machine. Off by default so `tty7-server` — which is
 # the thing being downloaded, and never the thing doing the downloading — links
 # no HTTP client. Without it, `daemon::install` still installs from bytes it is
 # handed and still launches/probes a remote daemon; only the fetch fails, with a

@@ -16,8 +16,7 @@ path = "src/main.rs"
 [dependencies]
 # The framework-free half of tty7: wire protocol, session daemon, PTY, the
 # native SSH engine, and the domain model the headless `tty7-server` shares with
-# this GUI. Everything that does *not* need gpui lives there — see
-# `docs/2026-07-27-remote-workspace-design.md` §11.
+# this GUI. Everything that does *not* need gpui lives there.
 # `gssapi` is off in tty7-core's defaults (a static musl `tty7-server` cannot
 # link the system krb5 it binds); the GUI, which builds against a real desktop
 # toolchain, turns it on so managed SSH connections keep offering
@@ -25,7 +24,7 @@ path = "src/main.rs"
 #
 # `remote-install` is off there for the same shape of reason: it pulls an HTTPS
 # client used only to *download* a `tty7-server` onto a remote machine
-# (design §12, D5). The server binary is the thing being downloaded, so it can
+# (decision D5). The server binary is the thing being downloaded, so it can
 # never take that path; the GUI, which is the client that pushes it, can.
 tty7-core = { path = "crates/tty7-core", features = ["gssapi", "remote-install"] }
 

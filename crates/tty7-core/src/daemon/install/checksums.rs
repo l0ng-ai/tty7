@@ -1,4 +1,4 @@
-//! `checksums.txt` parsing and asset verification (§16).
+//! `checksums.txt` parsing and asset verification.
 //!
 //! The release publishes one GNU coreutils `sha256sum`-format manifest covering
 //! every asset. HTTPS to github.com is the trust anchor — the manifest is not
@@ -18,7 +18,7 @@ use sha2::{Digest as _, Sha256};
 pub type Digest = [u8; 32];
 
 /// Why an asset failed verification. Every variant aborts the install; none of
-/// them is retried, and there is no unverified fallback (§17).
+/// them is retried, and there is no unverified fallback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChecksumError {
     /// The manifest has no line for this asset. Either the release is
@@ -80,7 +80,7 @@ pub fn hex(digest: &Digest) -> String {
     })
 }
 
-/// Parse 64 hex characters into a digest. Case-insensitive (§16 step 3); any
+/// Parse 64 hex characters into a digest. Case-insensitive; any
 /// other length or a non-hex character is a parse failure.
 fn parse_hex(s: &str) -> Option<Digest> {
     if s.len() != 64 {
@@ -95,7 +95,7 @@ fn parse_hex(s: &str) -> Option<Digest> {
 
 /// The digest `manifest` records for `asset`.
 ///
-/// **The filename field is matched whole, never by substring** (§16 step 2).
+/// **The filename field is matched whole, never by substring.**
 /// `tty7-server-x86_64-unknown-linux-musl` happens not to be a substring of any
 /// other asset today, but that is an accident of the current release contents,
 /// not a property anyone maintains — and a substring match that drifted would
@@ -165,7 +165,7 @@ mod tests {
         verify(&manifest, ASSET_X86_64, bytes).expect("the published bytes must verify");
     }
 
-    /// Uppercase hex in the manifest is still the same digest (§16 step 3).
+    /// Uppercase hex in the manifest is still the same digest.
     #[test]
     fn digest_comparison_is_case_insensitive() {
         let bytes = b"payload".as_slice();
@@ -174,7 +174,7 @@ mod tests {
         verify(&manifest, ASSET_X86_64, bytes).expect("case must not matter");
     }
 
-    /// **The failure path §18 names.** Bytes that do not match must abort with
+    /// **The failure path.** Bytes that do not match must abort with
     /// both digests reported — not retry, not install anyway.
     #[test]
     fn mismatched_bytes_abort_with_both_digests() {
@@ -255,8 +255,8 @@ mod tests {
     }
 
     /// **Whole-field match, not substring.** A manifest carrying a longer name
-    /// that *contains* ours must not satisfy the lookup — this is the guard §16
-    /// step 2 asks for.
+    /// that *contains* ours must not satisfy the lookup — this is the guard
+    /// whole-field matching exists for.
     #[test]
     fn filename_matching_is_exact_not_substring() {
         let payload = b"decoy".as_slice();

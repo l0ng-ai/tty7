@@ -14,7 +14,7 @@
 //! unit-tested there.
 
 // Unix-only: the hub this stands up is a Unix-domain socket, which is also the
-// only shape the remote side of a routed connection takes (contract §8). The
+// only shape the remote side of a routed connection takes. The
 // Windows client reaches a *remote* server the same way; it is the local hop
 // that differs, and `daemon::router` covers that with its own `cfg`.
 #![cfg(unix)]
