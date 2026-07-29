@@ -91,7 +91,7 @@ pub(super) fn grid_smart_range<T: EventListener>(
         });
     }
 
-    let (text, points, click_idx) = logical_line_at(term, click)?;
+    let (text, points, click_idx) = logical_line_at(term, click, false)?;
     let chars: Vec<char> = text.chars().collect();
     let separators = term.semantic_escape_chars();
     // A span whose flanks are separator chars ends exactly where alacritty's
@@ -305,7 +305,7 @@ mod tokenizer {
 /// The contiguous run of cells carrying the same OSC 8 hyperlink URI as the
 /// clicked cell, following soft wraps in both directions (a long link wraps
 /// across rows; stopping at the row edge would truncate the selection).
-fn hyperlink_run<T: EventListener>(term: &Term<T>, click: Point) -> Option<(Point, Point)> {
+pub(super) fn hyperlink_run<T: EventListener>(term: &Term<T>, click: Point) -> Option<(Point, Point)> {
     let grid = term.grid();
     let cols = term.columns();
     if click.column.0 >= cols {
@@ -363,9 +363,17 @@ fn hyperlink_run<T: EventListener>(term: &Term<T>, click: Point) -> Option<(Poin
 /// the text with wide-char spacers dropped, a per-char grid point, and the
 /// char index the click landed on. `None` when the click maps to no char
 /// (out-of-bounds column).
-fn logical_line_at<T: EventListener>(
+///
+/// When `bridge_hard_wrap` is set, rows are also joined across a *producer*
+/// hard newline (no `WRAPLINE` flag) when the row is filled to the right edge
+/// with a link char that continues into the first column of the next row. This
+/// lets link resolution recover a URL a printing program split with a literal
+/// `\n`, while double-click smart-select (which passes `false`) keeps its
+/// word/semantic boundaries and never glues separate output lines together.
+pub(super) fn logical_line_at<T: EventListener>(
     term: &Term<T>,
     click: Point,
+    bridge_hard_wrap: bool,
 ) -> Option<(String, Vec<Point>, usize)> {
     let cols = term.columns();
     if click.column.0 >= cols {
@@ -373,19 +381,30 @@ fn logical_line_at<T: EventListener>(
     }
     let grid = term.grid();
     let last_col = Column(cols - 1);
+    let top = term.topmost_line();
+    let bottom = term.bottommost_line();
     let wraps = |line: Line| grid[line][last_col].flags.contains(Flags::WRAPLINE);
+    // A hard bridge joins `line` to `line + 1` when the row is full to the
+    // right edge with a link char and the next row opens with one too. Guards
+    // against gluing an ordinary short line onto the following paragraph.
+    let is_link_char = |c: char| c != ' ' && super::search::is_url_char(c);
+    let hard = |line: Line| {
+        bridge_hard_wrap
+            && line < bottom
+            && is_link_char(grid[line][last_col].c)
+            && is_link_char(grid[Line(line.0 + 1)][Column(0)].c)
+    };
+    let continues = |line: Line| wraps(line) || hard(line);
 
     let mut start_line = click.line;
-    let top = term.topmost_line();
     let mut guard = 0;
-    while start_line > top && guard < MAX_WRAP_ROWS && wraps(start_line - 1) {
+    while start_line > top && guard < MAX_WRAP_ROWS && continues(start_line - 1) {
         start_line -= 1;
         guard += 1;
     }
     let mut end_line = click.line;
-    let bottom = term.bottommost_line();
     guard = 0;
-    while end_line < bottom && guard < MAX_WRAP_ROWS && wraps(end_line) {
+    while end_line < bottom && guard < MAX_WRAP_ROWS && continues(end_line) {
         end_line += 1;
         guard += 1;
     }
@@ -767,6 +786,42 @@ mod tests {
         assert_eq!(
             grid_select(&term, 1, col_of("com/deep/path here", "deep")).as_deref(),
             Some(whole),
+        );
+    }
+
+    #[test]
+    fn hard_wrapped_url_is_bridged_only_for_links() {
+        // A printing program emitted a literal `\n` mid-URL: the head fills
+        // row 0 exactly (20 chars, no WRAPLINE flag) and the tail lands on
+        // row 1. Soft-wrap stitching can't see across this gap; the hard
+        // bridge in link mode joins them, while smart-select stays put.
+        let term = term_with(20, 4, "https://example.com/\r\ndeep/path/seg rest");
+        // The break carries no WRAPLINE flag — this is a producer hard newline,
+        // not a terminal soft wrap.
+        assert!(
+            !term.grid()[Line(0)][Column(19)]
+                .flags
+                .contains(Flags::WRAPLINE),
+            "fixture must be a hard newline, not a soft wrap"
+        );
+
+        // Link mode (bridge_hard_wrap = true) recovers the whole URL spanning
+        // both rows.
+        let click = Point::new(Line(0), Column(3));
+        let (text, _points, _idx) =
+            logical_line_at(&term, click, true).expect("logical line under click");
+        let idx = text.find("https").expect("url in bridged line");
+        let (_s, _e, url) = crate::terminal::search::url_span_at(&text, idx + 2)
+            .expect("url span in bridged line");
+        assert_eq!(url, "https://example.com/deep/path/seg");
+
+        // Smart-select mode (bridge_hard_wrap = false) must NOT glue the two
+        // output lines together.
+        let (text, _points, _idx) =
+            logical_line_at(&term, click, false).expect("logical line under click");
+        assert!(
+            !text.contains("deep"),
+            "double-click must not bridge a hard newline: {text:?}"
         );
     }
 
