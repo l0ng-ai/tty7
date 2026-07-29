@@ -1681,7 +1681,17 @@ pub(crate) fn on_layout_delta(cx: &mut App, host: HostId, key: &str, delta: Layo
             "workspace {client_ws}: delta {delta:?} did not apply cleanly; re-pulling the tree"
         );
         resync_window_from_tree(cx, client_ws);
+        return;
     }
+    // A clean apply may still have left the window ahead of the tree: adopting
+    // a tab whose pane was dead on arrival attaches nothing and spawns a fresh
+    // pane under a *new* id, and nothing else on this path saves — the tree
+    // would keep the dead leaf until the user's next structural change (and a
+    // relaunch would spawn a second successor beside the leaked first). One
+    // sync here is free when window and mirror agree (the diff is empty) and
+    // is exactly the `PaneReplace` that spends the dead record when they
+    // don't.
+    app.update(cx, |app, cx| sync_window(app, cx));
 }
 
 /// Advance the mirror by one delta. `false` means the delta names state the
