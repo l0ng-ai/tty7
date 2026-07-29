@@ -42,7 +42,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use gpui::{App, Global};
-use serde_json::Value;
 
 use crate::core::config::Config;
 use crate::core::session::{RemoteTarget, WorkspaceId};
@@ -401,11 +400,11 @@ fn handshake(
 
 /// Ask a connected machine for its workspaces.
 pub fn list_workspaces(host: &Arc<RemoteHost>) -> io::Result<Vec<RemoteWorkspaceRow>> {
-    match host.client().call(ControlRequest::WorkspaceList)? {
-        ReplyOk::Json(Value::Array(list)) => Ok(rows_from_list(&list)),
+    match host.client().call(ControlRequest::MachineGet)? {
+        ReplyOk::MachineTree(machine) => Ok(rows_from_machine(&machine)),
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("the server answered a workspace list with {other:?}"),
+            format!("the server answered a machine tree with {other:?}"),
         )),
     }
 }
@@ -444,42 +443,68 @@ fn client_hostname() -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteWorkspaceRow {
     pub id: WorkspaceId,
-    /// Already resolved through `Workspace::display_name`'s rules, so a record
-    /// with no user-set name still reads as its repo or directory.
+    /// The user-set name when there is one, else derived from the tabs' repo
+    /// groups and cwds — the same precedence `Workspace::display_name` gives a
+    /// local workspace, computed here from the machine's tree.
     pub name: String,
     pub panes: usize,
     pub last_active: u64,
-    /// The raw record, kept so opening the row can `apply_remote_json` it
-    /// without a second round trip.
-    pub record: Value,
 }
 
-/// Turn a `WorkspaceList` payload into picker rows, newest first.
-///
-/// Records the client cannot decode are **skipped, not fatal**: the list is
-/// written by whichever tty7 last touched that machine, and one record from a
-/// newer build must not make every other workspace on the box unreachable.
-pub fn rows_from_list(list: &[Value]) -> Vec<RemoteWorkspaceRow> {
-    let mut rows: Vec<RemoteWorkspaceRow> = list
+/// Turn a machine's tree into picker rows, newest first.
+pub fn rows_from_machine(machine: &tty7_core::core::machine::Machine) -> Vec<RemoteWorkspaceRow> {
+    let mut rows: Vec<RemoteWorkspaceRow> = machine
+        .workspaces
         .iter()
-        .filter_map(|record| {
-            // The remote record is the remote-owned half of a `Workspace`, so it
-            // decodes by merging onto a blank one — which is also what gives us
-            // `display_name` and `pane_count` for free rather than reimplemented.
-            let mut workspace = crate::core::session::Workspace::default();
-            workspace.apply_remote_json(record).ok()?;
-            let id: WorkspaceId = serde_json::from_value(record.get("id")?.clone()).ok()?;
-            Some(RemoteWorkspaceRow {
-                id,
-                name: workspace.display_name(),
-                panes: workspace.pane_count(),
-                last_active: workspace.last_active,
-                record: record.clone(),
-            })
+        .map(|ws| RemoteWorkspaceRow {
+            id: ws.id,
+            name: tree_display_name(ws, &machine.panes),
+            panes: ws.tabs.iter().map(|t| t.root.pane_ids().len()).sum(),
+            last_active: ws.last_active,
         })
         .collect();
     rows.sort_by_key(|row| std::cmp::Reverse(row.last_active));
     rows
+}
+
+/// A tree workspace's picker label: the user-set name, else the repository
+/// most of its tabs live in, else the first pane's directory, else a generic
+/// fallback — `Workspace::display_name`'s rules, read off the tree.
+fn tree_display_name(
+    ws: &tty7_core::core::machine::Workspace,
+    panes: &[tty7_core::core::machine::PaneRecord],
+) -> String {
+    if let Some(name) = ws.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        return name.to_string();
+    }
+    // The repo group most tabs belong to, ties toward the earliest tab.
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for group in ws.tabs.iter().filter_map(|t| t.sidebar_group.as_deref()) {
+        match counts.iter_mut().find(|(g, _)| *g == group) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((group, 1)),
+        }
+    }
+    let dominant = counts.into_iter().max_by_key(|(_, n)| *n).map(|(g, _)| g);
+    let first_cwd = ws
+        .tabs
+        .iter()
+        .flat_map(|t| t.root.pane_ids())
+        .find_map(|id| {
+            panes
+                .iter()
+                .find(|p| p.id == id)
+                .and_then(|p| p.cwd.as_deref())
+        });
+    dominant
+        .or(first_cwd)
+        .and_then(|path| {
+            std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Untitled".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -557,46 +582,6 @@ impl RemoteConnections {
     pub fn len(cx: &mut App) -> usize {
         cx.default_global::<RemoteConnections>().hosts.len()
     }
-}
-
-/// Push a workspace's layout to the machine that owns it (the
-/// remote's `workspaces.json` is the authority). Blocking.
-pub fn put_remote_layout(host: &Arc<RemoteHost>, key: String, record: Value) -> io::Result<()> {
-    host.client()
-        .call(ControlRequest::WorkspacePut {
-            id: key,
-            json: record,
-        })
-        .map(|_| ())
-}
-
-/// Pull one workspace's authoritative record from the machine that owns it.
-/// Blocking.
-///
-/// The read side of the split, and what a
-/// [`ControlEvent::WorkspaceChanged`](crate::daemon::control::ControlEvent)
-/// asks for: the event says only *that* a record moved, so the record itself is
-/// fetched rather than carried. `ErrorKind::NotFound` is a real answer — the
-/// workspace was deleted on the far side — and is deliberately distinguishable
-/// from an empty one.
-pub fn get_remote_layout(host: &Arc<RemoteHost>, key: String) -> io::Result<Value> {
-    match host
-        .client()
-        .call(ControlRequest::WorkspaceGet { id: key })?
-    {
-        ReplyOk::Json(record) => Ok(record),
-        other => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("the server answered a workspace record with {other:?}"),
-        )),
-    }
-}
-
-/// Forget a workspace on the machine that owns it. Blocking.
-pub fn delete_remote_workspace(host: &Arc<RemoteHost>, key: String) -> io::Result<()> {
-    host.client()
-        .call(ControlRequest::WorkspaceDelete { id: key })
-        .map(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -1271,54 +1256,47 @@ mod tests {
         assert_eq!(endpoint_label("", "box.local", 22), "box.local");
     }
 
-    /// The picker's rows come from records the *remote* wrote, so they have to
-    /// survive a record this build cannot read: one bad entry may not hide the
-    /// rest of the machine's workspaces.
+    /// The picker's rows come from the machine's tree: newest first, with a
+    /// name derived the way a local workspace's would be when none is set.
     #[test]
-    fn rows_skip_undecodable_records_and_sort_newest_first() {
+    fn rows_from_the_tree_sort_newest_first_and_derive_names() {
+        use tty7_core::core::machine::{Machine, PaneNode, PaneRecord, Tab, Workspace};
         let older = WorkspaceId::new();
         let newer = WorkspaceId::new();
-        let list = vec![
-            serde_json::json!({
-                "id": older.to_string(),
-                "name": "api",
-                "session": { "tabs": [] },
-                "last_active": 100,
-            }),
-            // No `id` at all — unreadable, and skipped rather than fatal.
-            serde_json::json!({ "name": "broken" }),
-            serde_json::json!({
-                "id": newer.to_string(),
-                "name": "web",
-                "session": { "tabs": [] },
-                "last_active": 500,
-            }),
-        ];
-        let rows = rows_from_list(&list);
-        assert_eq!(rows.len(), 2, "the undecodable record is skipped");
+        let machine = Machine {
+            workspaces: vec![
+                Workspace {
+                    id: older,
+                    name: Some("api".into()),
+                    last_active: 100,
+                    tabs: vec![Tab::leaf(1)],
+                    ..Default::default()
+                },
+                Workspace {
+                    id: newer,
+                    name: None,
+                    last_active: 500,
+                    tabs: vec![Tab::leaf(2)],
+                    ..Default::default()
+                },
+            ],
+            panes: vec![
+                PaneRecord::new(1),
+                PaneRecord {
+                    cwd: Some("/srv/checkout".into()),
+                    ..PaneRecord::new(2)
+                },
+            ],
+        };
+        let rows = rows_from_machine(&machine);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].id, newer, "newest first");
-        assert_eq!(rows[0].name, "web");
-        assert_eq!(rows[1].id, older);
-    }
-
-    /// A record with no user-set name falls back to the same derived name a
-    /// local workspace would get, rather than showing a raw uuid.
-    #[test]
-    fn rows_derive_a_name_when_the_record_has_none() {
-        let id = WorkspaceId::new();
-        let list = vec![serde_json::json!({
-            "id": id.to_string(),
-            "session": {
-                "tabs": [{
-                    "pane": { "Leaf": { "cwd": "/srv/checkout" } }
-                }]
-            },
-            "last_active": 1,
-        })];
-        let rows = rows_from_list(&list);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].name, "checkout");
+        assert_eq!(
+            rows[0].name, "checkout",
+            "no user name falls back to the first pane's directory"
+        );
         assert_eq!(rows[0].panes, 1);
+        assert_eq!(rows[1].name, "api", "a user-set name wins");
     }
 
     fn host(label: &str, detail: &str) -> HostChoice {

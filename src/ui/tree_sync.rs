@@ -278,36 +278,66 @@ pub(crate) struct WsMirror {
 /// predicted post-state as it goes.
 ///
 /// `workspace` is the machine-side id the ops carry.
+/// How much of the tree a window's diff may claim to speak for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SyncScope {
+    /// The window has seen the tree (it was hydrated from it, or the tree was
+    /// empty when it primed): its state is the whole story, and tabs it does
+    /// not show are tabs to close.
+    Full,
+    /// The window has **not** seen the tree — it opened empty ahead of a pull
+    /// that has not landed (or was skipped). Its tabs are additions and edits,
+    /// never evidence of absence: a diff that closed tree tabs such a window
+    /// simply never displayed would eat another session's layout.
+    Additive,
+}
+
 pub(crate) fn diff(
     workspace: WorkspaceId,
     mirror: &mut WsMirror,
     desired: &[DesiredTab],
     desired_active: Option<TabId>,
+    scope: SyncScope,
 ) -> Vec<ControlRequest> {
     let mut ops = Vec::new();
 
     // Tabs that are gone. Position by position so the active-tab heal below
-    // sees the same intermediate states the server will.
-    let mut index = 0;
-    while index < mirror.tabs.len() {
-        if desired.iter().any(|t| t.id == mirror.tabs[index].id) {
-            index += 1;
-            continue;
+    // sees the same intermediate states the server will. Only a window that
+    // has seen the tree may prune — see [`SyncScope`].
+    if scope == SyncScope::Full {
+        let mut index = 0;
+        while index < mirror.tabs.len() {
+            if desired.iter().any(|t| t.id == mirror.tabs[index].id) {
+                index += 1;
+                continue;
+            }
+            let closed = mirror.tabs.remove(index);
+            ops.push(ControlRequest::TabClose {
+                workspace,
+                tab: closed.id,
+            });
+            heal_active(mirror, index);
         }
-        let closed = mirror.tabs.remove(index);
-        ops.push(ControlRequest::TabClose {
-            workspace,
-            tab: closed.id,
-        });
-        heal_active(mirror, index);
     }
 
-    // New tabs and per-tab reconciliation, in the window's order.
+    // New tabs and per-tab reconciliation, in the window's order. An additive
+    // window appends its new tabs rather than claiming positions among tabs it
+    // has never seen.
     for (index, want) in desired.iter().enumerate() {
         match mirror.tabs.iter().position(|t| t.id == want.id) {
-            None => create_tab(workspace, mirror, index, want, &mut ops),
+            None => {
+                let at = match scope {
+                    SyncScope::Full => index,
+                    SyncScope::Additive => mirror.tabs.len(),
+                };
+                create_tab(workspace, mirror, at, want, &mut ops);
+            }
             Some(at) => reconcile_tab(workspace, mirror, at, want, &mut ops),
         }
+    }
+
+    if scope == SyncScope::Additive {
+        return ops;
     }
 
     // Order: fix each position left to right. The tab moved is always to the
@@ -729,6 +759,12 @@ struct WsState {
     /// senders would let a later op overtake the edit it builds on.
     queue: VecDeque<ControlRequest>,
     inflight: bool,
+    /// Whether this window has *seen* the tree — hydrated from it, primed
+    /// against an empty one, or deliberately declared authoritative (a
+    /// restore-off open). Until then its diffs run [`SyncScope::Additive`]:
+    /// a window that opened empty ahead of its pull must not read its own
+    /// emptiness as "close everything".
+    informed: bool,
 }
 
 impl Default for WsState {
@@ -740,6 +776,7 @@ impl Default for WsState {
             },
             queue: VecDeque::new(),
             inflight: false,
+            informed: false,
         }
     }
 }
@@ -779,13 +816,29 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
             }
         }
         SyncPhase::Primed(mirror) => {
-            let ops = diff(machine_ws, mirror, &desired, desired_active);
+            let scope = if state.informed {
+                SyncScope::Full
+            } else {
+                SyncScope::Additive
+            };
+            let ops = diff(machine_ws, mirror, &desired, desired_active, scope);
             if !ops.is_empty() {
                 state.queue.extend(ops);
                 pump(cx, client_ws);
             }
         }
     }
+}
+
+/// Declare that `client_ws`'s window speaks for the whole tree from here on —
+/// the deliberate cases (a restore-off open, a window rebuilt from a source
+/// the user chose) where the window's state *is* the intended layout.
+pub(crate) fn mark_window_informed(cx: &mut App, client_ws: WorkspaceId) {
+    cx.default_global::<TreeSync>()
+        .windows
+        .entry(client_ws)
+        .or_default()
+        .informed = true;
 }
 
 /// Give GUI tabs that don't yet know their tree identity the mirror's, matched
@@ -937,6 +990,9 @@ fn finish_prime(cx: &mut App, client_ws: WorkspaceId, outcome: io::Result<WsMirr
     let was_dirty = matches!(state.sync, SyncPhase::Unprimed { dirty: true, .. });
     match outcome {
         Ok(mirror) => {
+            // An empty tree has nothing an uninformed window could wrongly
+            // prune, so priming against one is as good as having seen it.
+            state.informed |= mirror.tabs.is_empty();
             state.sync = SyncPhase::Primed(mirror);
             if !was_dirty {
                 return;
@@ -1236,6 +1292,11 @@ fn finish_hydration(
             .entry(client_ws)
             .or_default();
         let dirty = matches!(state.sync, SyncPhase::Unprimed { dirty: true, .. });
+        // An empty tree has nothing to adopt and nothing a window could
+        // wrongly prune, so the window is as informed as it will ever be. A
+        // non-empty tree informs the window only if the adopt below actually
+        // runs — see the IfEmpty return.
+        state.informed |= mirror.tabs.is_empty();
         state.sync = SyncPhase::Primed(mirror);
         dirty
     };
@@ -1245,8 +1306,9 @@ fn finish_hydration(
         return;
     };
     if adopt == Adopt::IfEmpty && !app.read(cx).tabs.is_empty() {
-        // The user got there first (opened a tab into the empty window); their
-        // window wins, and the sync below reconciles the tree to it.
+        // The user got there first (opened a tab into the empty window). Their
+        // tabs win — but they have never seen the tree's, so the window stays
+        // additive: its edits go up, tabs it never showed stay untouched.
         if was_dirty {
             app.update(cx, |app, cx| sync_window(app, cx));
         }
@@ -1281,6 +1343,9 @@ fn finish_hydration(
         "rebuilding {} tab(s) of workspace {client_ws} from its machine's tree",
         session.tabs.len()
     );
+    // The window is about to display the tree (or the import that stands in
+    // for it); from here its diffs speak for the whole workspace.
+    mark_window_informed(cx, client_ws);
     let _ = handle.update(cx, move |_, window, cx| {
         app.update(cx, |app, cx| {
             app.adopt_workspace(client_ws, session, window, cx)
@@ -1430,7 +1495,7 @@ fn apply_to_mirror(mirror: &mut WsMirror, delta: &LayoutDelta) -> bool {
 
 /// Re-pull the workspace and rebuild its window from the result, replacing
 /// whatever the window holds — the delta fallback.
-fn resync_window_from_tree(cx: &mut App, client_ws: WorkspaceId) {
+pub(crate) fn resync_window_from_tree(cx: &mut App, client_ws: WorkspaceId) {
     hydrate(cx, client_ws, Adopt::Replace);
 }
 
@@ -1733,7 +1798,7 @@ mod tests {
         let mut mirror = WsMirror::default();
         let desired = vec![tab(id, leaf(7))];
 
-        let ops = diff(ws, &mut mirror, &desired, Some(id));
+        let ops = diff(ws, &mut mirror, &desired, Some(id), SyncScope::Full);
         assert_eq!(
             ops,
             vec![ControlRequest::TabCreate {
@@ -1754,10 +1819,10 @@ mod tests {
         let id = TabId::new();
         let mut mirror = WsMirror::default();
         let one = vec![tab(id, leaf(1))];
-        diff(ws, &mut mirror, &one, Some(id));
+        diff(ws, &mut mirror, &one, Some(id), SyncScope::Full);
 
         let two = vec![tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)))];
-        let ops = diff(ws, &mut mirror, &two, Some(id));
+        let ops = diff(ws, &mut mirror, &two, Some(id), SyncScope::Full);
         assert_eq!(
             ops,
             vec![ControlRequest::PaneSplit {
@@ -1777,10 +1842,16 @@ mod tests {
         let ws = WorkspaceId::new();
         let id = TabId::new();
         let mut mirror = WsMirror::default();
-        diff(ws, &mut mirror, &[tab(id, leaf(1))], Some(id));
+        diff(
+            ws,
+            &mut mirror,
+            &[tab(id, leaf(1))],
+            Some(id),
+            SyncScope::Full,
+        );
 
         let want = vec![tab(id, split(TreeAxis::Horizontal, 0.4, leaf(2), leaf(1)))];
-        let ops = diff(ws, &mut mirror, &want, Some(id));
+        let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full);
         assert_eq!(
             ops,
             vec![ControlRequest::PaneSplit {
@@ -1805,10 +1876,11 @@ mod tests {
             &mut mirror,
             &[tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)))],
             Some(id),
+            SyncScope::Full,
         );
 
         let want = vec![tab(id, leaf(1))];
-        let ops = diff(ws, &mut mirror, &want, Some(id));
+        let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full);
         assert_eq!(
             ops,
             vec![ControlRequest::PaneClose {
@@ -1829,10 +1901,11 @@ mod tests {
             &mut mirror,
             &[tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)))],
             Some(id),
+            SyncScope::Full,
         );
 
         let want = vec![tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(9)))];
-        let ops = diff(ws, &mut mirror, &want, Some(id));
+        let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full);
         assert_eq!(
             ops,
             vec![ControlRequest::PaneReplace {
@@ -1857,10 +1930,16 @@ mod tests {
                 split(TreeAxis::Horizontal, r, leaf(2), leaf(3)),
             )
         };
-        diff(ws, &mut mirror, &[tab(id, nested(0.5))], Some(id));
+        diff(
+            ws,
+            &mut mirror,
+            &[tab(id, nested(0.5))],
+            Some(id),
+            SyncScope::Full,
+        );
 
         let want = vec![tab(id, nested(0.7))];
-        let ops = diff(ws, &mut mirror, &want, Some(id));
+        let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full);
         assert_eq!(
             ops,
             vec![ControlRequest::PaneSetRatio {
@@ -1883,10 +1962,11 @@ mod tests {
             &mut mirror,
             &[tab(a, leaf(1)), tab(b, leaf(2))],
             Some(b),
+            SyncScope::Full,
         );
 
         let want = vec![tab(a, leaf(1))];
-        let ops = diff(ws, &mut mirror, &want, None);
+        let ops = diff(ws, &mut mirror, &want, None, SyncScope::Full);
         assert_eq!(
             ops,
             vec![ControlRequest::TabClose {
@@ -1905,10 +1985,10 @@ mod tests {
         let (a, b, c) = (TabId::new(), TabId::new(), TabId::new());
         let mut mirror = WsMirror::default();
         let before = [tab(a, leaf(1)), tab(b, leaf(2)), tab(c, leaf(3))];
-        diff(ws, &mut mirror, &before, Some(c));
+        diff(ws, &mut mirror, &before, Some(c), SyncScope::Full);
 
         let want = vec![tab(c, leaf(3)), tab(a, leaf(1)), tab(b, leaf(2))];
-        let ops = diff(ws, &mut mirror, &want, Some(c));
+        let ops = diff(ws, &mut mirror, &want, Some(c), SyncScope::Full);
         assert_eq!(
             ops,
             vec![ControlRequest::TabMove {
@@ -1925,13 +2005,19 @@ mod tests {
         let ws = WorkspaceId::new();
         let id = TabId::new();
         let mut mirror = WsMirror::default();
-        diff(ws, &mut mirror, &[tab(id, leaf(1))], Some(id));
+        diff(
+            ws,
+            &mut mirror,
+            &[tab(id, leaf(1))],
+            Some(id),
+            SyncScope::Full,
+        );
 
         let mut named = tab(id, leaf(1));
         named.name = Some("build".into());
         named.group = Some("/repo".into());
         let want = vec![named];
-        let ops = diff(ws, &mut mirror, &want, Some(id));
+        let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full);
         assert_eq!(
             ops,
             vec![
@@ -1956,9 +2042,9 @@ mod tests {
         let (a, b) = (TabId::new(), TabId::new());
         let mut mirror = WsMirror::default();
         let both = [tab(a, leaf(1)), tab(b, leaf(2))];
-        diff(ws, &mut mirror, &both, Some(b));
+        diff(ws, &mut mirror, &both, Some(b), SyncScope::Full);
 
-        let ops = diff(ws, &mut mirror, &both, Some(a));
+        let ops = diff(ws, &mut mirror, &both, Some(a), SyncScope::Full);
         assert_eq!(
             ops,
             vec![ControlRequest::WorkspaceSetActiveTab {
@@ -1979,11 +2065,12 @@ mod tests {
             &mut mirror,
             &[tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)))],
             Some(id),
+            SyncScope::Full,
         );
 
         // The two panes trade places: same panes, same shape, different order.
         let want = vec![tab(id, split(TreeAxis::Vertical, 0.5, leaf(2), leaf(1)))];
-        let ops = diff(ws, &mut mirror, &want, Some(id));
+        let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full);
         assert_eq!(
             ops,
             vec![
@@ -2025,7 +2112,7 @@ mod tests {
                 split(TreeAxis::Vertical, 0.7, leaf(3), leaf(4)),
             ),
         )];
-        let ops = diff(ws, &mut mirror, &want, Some(id));
+        let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full);
         assert_eq!(
             ops,
             vec![
@@ -2070,8 +2157,48 @@ mod tests {
         let id = TabId::new();
         let mut mirror = WsMirror::default();
         let want = vec![tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)))];
-        diff(ws, &mut mirror, &want, Some(id));
-        assert_eq!(diff(ws, &mut mirror, &want, Some(id)), Vec::new());
+        diff(ws, &mut mirror, &want, Some(id), SyncScope::Full);
+        assert_eq!(
+            diff(ws, &mut mirror, &want, Some(id), SyncScope::Full),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn an_additive_diff_never_closes_tabs_the_window_has_not_seen() {
+        let ws = WorkspaceId::new();
+        let (a, b) = (TabId::new(), TabId::new());
+        let mut mirror = WsMirror::default();
+        diff(
+            ws,
+            &mut mirror,
+            &[tab(a, leaf(1)), tab(b, leaf(2))],
+            Some(b),
+            SyncScope::Full,
+        );
+
+        // A window that opened empty ahead of its pull and grew one fresh tab:
+        // its diff may add that tab, and must touch nothing else — reading its
+        // ignorance as "close everything" would eat another session's layout.
+        let fresh = TabId::new();
+        let ops = diff(
+            ws,
+            &mut mirror,
+            &[tab(fresh, leaf(9))],
+            Some(fresh),
+            SyncScope::Additive,
+        );
+        assert_eq!(
+            ops,
+            vec![ControlRequest::TabCreate {
+                workspace: ws,
+                at: Some(2),
+                pane: seed(9),
+                tab: Some(fresh),
+            }],
+            "appended after the tabs it has not seen; nothing closed or moved"
+        );
+        assert_eq!(mirror.tabs.len(), 3);
     }
 
     #[test]
@@ -2128,9 +2255,15 @@ mod tests {
 
         // The writer's own mirror, advanced by the diff for the same edits.
         let mut writer = WsMirror::default();
-        diff(ws, &mut writer, &[tab(id, leaf(1))], Some(id));
+        diff(
+            ws,
+            &mut writer,
+            &[tab(id, leaf(1))],
+            Some(id),
+            SyncScope::Full,
+        );
         let final_state = vec![tab(id, split(TreeAxis::Vertical, 0.7, leaf(1), leaf(2)))];
-        diff(ws, &mut writer, &final_state, Some(id));
+        diff(ws, &mut writer, &final_state, Some(id), SyncScope::Full);
 
         assert_eq!(watcher, writer);
     }
@@ -2260,6 +2393,7 @@ mod tests {
             &mut mirror,
             &[tab(a, leaf(1)), tab(b, leaf(2))],
             Some(b),
+            SyncScope::Full,
         );
 
         // Tab a now claims pane 2 (which tab b still holds) instead of pane 1
@@ -2268,7 +2402,7 @@ mod tests {
         // choose it; the rebuild path handles it, and the server refusing
         // *that* too (duplicate pane) desyncs into a fresh pull.
         let want = vec![tab(a, leaf(2)), tab(b, leaf(2))];
-        let ops = diff(ws, &mut mirror, &want, Some(b));
+        let ops = diff(ws, &mut mirror, &want, Some(b), SyncScope::Full);
         assert!(
             !ops.iter()
                 .any(|op| matches!(op, ControlRequest::PaneReplace { .. })),

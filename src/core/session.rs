@@ -491,7 +491,12 @@ fn claimable_session(
     reachable: bool,
     current_instance: Option<&str>,
 ) -> Session {
-    if workspace.is_remote() && !reachable {
+    // A remote workspace *always* opens empty now, reachable or not: its
+    // machine's tree is the layout authority, and the hydration that follows
+    // the claim (`tree_sync::hydrate_window_from_tree`) is what fills the
+    // window — from the tree, not from this client's cache.
+    let _ = reachable;
+    if workspace.is_remote() {
         return Session::default();
     }
     let dropped = workspace.forget_stale_pane_ids(current_instance);
@@ -674,15 +679,17 @@ mod tests {
         assert_eq!(leaf_id(&claimed), Some(7));
     }
 
-    /// A connected remote workspace reopens on the layout its machine last
-    /// reported — the read half of "reconnecting gets my tabs back".
+    /// A remote workspace opens empty even when its machine is connected: the
+    /// machine's tree is the layout authority now, and the hydration that
+    /// follows the claim fills the window from it. The cached copy stays —
+    /// it is the import fallback, not the source.
     #[test]
-    fn a_connected_remote_workspace_reopens_its_layout() {
+    fn a_connected_remote_workspace_still_opens_empty_for_the_tree_to_fill() {
         let mut workspace = Workspace::on_remote(remote_ref());
         workspace.session = local_layout();
         let claimed = claimable_session(&mut workspace, true, None);
-        assert_eq!(claimed.tabs.len(), 1);
-        assert_eq!(workspace.session.tabs.len(), 1);
+        assert!(claimed.tabs.is_empty());
+        assert_eq!(workspace.session.tabs.len(), 1, "the cache is kept");
     }
 
     /// With the machine unreachable, `List` answers nothing, so every leaf

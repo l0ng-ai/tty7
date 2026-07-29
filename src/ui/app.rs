@@ -925,17 +925,18 @@ impl Tty7App {
         let restore = cx.global::<Config>().restore_session;
         let known = id.is_some_and(|id| WorkspaceStore::all(cx).get(id).is_some());
         let (workspace, saved) = WorkspaceStore::claim(cx, id);
-        // A local workspace's layout now lives in the daemon's machine tree,
-        // so a restore *asks* rather than reads: the window opens empty and
+        // A workspace's layout lives in its machine's tree, so a restore
+        // *asks* rather than reads: the window opens empty and
         // `hydrate_window_from_tree` rebuilds it the moment the pull answers —
         // against the local daemon that is milliseconds, so the empty state is
-        // effectively one frame. A remote workspace already worked this way
-        // (its machine has to answer first); it keeps its existing connect-
-        // driven rebuild for now.
+        // effectively one frame; against a remote machine it is however long
+        // the link takes, which is the shape remote windows always had. A
+        // remote machine still unreachable when the hydration gives up is
+        // re-hydrated by the supervisor's reconnect.
         let is_remote = WorkspaceStore::all(cx)
             .get(workspace)
             .is_some_and(|w| w.is_remote());
-        let hydrate = known && restore && !is_remote;
+        let hydrate = known && restore;
         // A workspace that was already on file restores its tab/split layout and
         // each pane's cwd, unless the user turned restore off — then it starts
         // fresh. A *brand-new* one has no tabs to restore, so what it comes up
@@ -958,6 +959,14 @@ impl Tty7App {
             // reads as "close everything".
             crate::ui::tree_sync::hydrate_window_from_tree(cx, workspace);
         } else {
+            // A local window that skipped hydration shows what the user chose
+            // (a fresh shell, restore off): its state is the intended layout,
+            // and its sync may speak for the whole tree. A remote window that
+            // lands here has *not* seen its machine's tree yet, so it stays
+            // additive until a hydration informs it.
+            if !is_remote {
+                crate::ui::tree_sync::mark_window_informed(cx, workspace);
+            }
             // Persist right away. The leaves just spawned (or reattached) now
             // carry daemon pane ids, and nothing else writes them until the
             // next *structural* change — so a crash before the user happens to
@@ -1481,16 +1490,10 @@ impl Tty7App {
             session,
             Some(WindowState::from_bounds(self.window_bounds)),
         );
-        // …and for a remote workspace the machine that owns the layout has to
-        // hear about it, or `session.json` is the only place it exists and any
-        // other client (or a fresh install) opens the workspace empty. No-ops
-        // for a local workspace and for a machine we are not connected to —
-        // the latter is also what keeps a window that failed to restore from
-        // pushing its emptiness over a good record.
-        self.push_remote_layout(self.workspace, cx);
-        // The structural change this save records also goes to the machine's
-        // own tree, as the semantic operations it amounts to — the write path
-        // of the daemon-owned model that is replacing both stores above.
+        // …and the machine that owns the layout hears about the change as the
+        // semantic operations it amounts to, local and remote alike — the
+        // write path of the daemon-owned tree that replaced the whole-record
+        // push this call used to make.
         crate::ui::tree_sync::sync_window(self, cx);
     }
 
@@ -1675,9 +1678,21 @@ impl Tty7App {
         }
         crate::ui::tree_sync::forget(cx, previous);
 
+        let restore = cx.global::<Config>().restore_session;
         let (claimed, session) = WorkspaceStore::claim(cx, Some(id));
         crate::ui::windows::WindowRegistry::rebind(cx, previous, claimed);
-        self.adopt_workspace(claimed, session, window, cx);
+        if restore {
+            // Same shape as `for_workspace`: the machine's tree is the layout
+            // authority, so the window swaps to empty and the pull rebuilds it
+            // — for the local daemon within milliseconds.
+            self.adopt_workspace(claimed, Session::default(), window, cx);
+            crate::ui::tree_sync::hydrate_window_from_tree(cx, claimed);
+        } else {
+            // Restore off: the saved layout the user explicitly picked from
+            // the switcher is the intended state, tree included.
+            crate::ui::tree_sync::mark_window_informed(cx, claimed);
+            self.adopt_workspace(claimed, session, window, cx);
+        }
     }
 
     /// Take over an *already claimed* workspace: rebuild this window's tabs

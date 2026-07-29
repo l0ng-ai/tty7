@@ -473,21 +473,10 @@ fn confirm_destructive(
 /// Callers confirm first unless [`live_pane_count`] answered zero; with nothing
 /// running there is nothing to lose.
 pub fn stop_workspace(cx: &mut App, workspace: WorkspaceId) {
-    stop_workspace_keeping(cx, workspace, ClearedLayout::Push);
+    stop_workspace_keeping(cx, workspace);
 }
 
-/// What to do with the record once its panes are dead.
-#[derive(Clone, Copy, PartialEq)]
-enum ClearedLayout {
-    /// Send it to the machine that owns it — the workspace is going to be
-    /// reopened, and it must not reopen claiming panes that no longer exist.
-    Push,
-    /// Leave it alone: the caller is about to delete the record outright, and a
-    /// push racing that delete could put the workspace back on the machine.
-    Discard,
-}
-
-fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId, cleared: ClearedLayout) {
+fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId) {
     // A remote workspace's panes live on the remote server, and its pane ids are
     // *that* daemon's. Sending them here would not fail — it would succeed
     // against whatever local panes happen to hold those numbers, killing a
@@ -547,97 +536,36 @@ fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId, cleared: Cleared
     // same answer); on a remote workspace nobody asks, so the stale id is the
     // whole difference between reopening onto fresh shells with the agent
     // conversation resumed and reopening onto `tty7 — disconnected`.
-    forget_killed_panes(cx, workspace, cleared);
+    forget_killed_panes(cx, workspace);
     refresh_menu(cx);
 }
 
-/// Drop `workspace`'s pane ids, and tell the machine that owns the record.
+/// Drop `workspace`'s pane ids from the client's cached copy.
 ///
-/// The push is not optional for a remote workspace that is being kept: design
-/// The remote's `workspaces.json` is the authority, so reopening pulls
-/// its copy over the client's ([`WorkspaceStore::apply_remote`]) and a
-/// local-only edit would be undone by the next open — which is the open this
-/// exists for.
-fn forget_killed_panes(cx: &mut App, workspace: WorkspaceId, cleared: ClearedLayout) {
-    if !WorkspaceStore::forget_pane_ids(cx, workspace) {
-        return;
-    }
-    if cleared == ClearedLayout::Discard {
-        return;
-    }
-    let Some((host, key, record)) = WorkspaceStore::remote_payload(cx, workspace) else {
-        return;
-    };
-    let Some(connection) = crate::ui::remote_workspace::connection_for(cx, workspace) else {
-        // Not connected, so the panes were not killed either — `kill_pane_on`
-        // needs the same route. The client's copy is still worth clearing: it
-        // is what a reconnect pushes back up.
-        log::info!(
-            "ended sessions on {} without reaching it; the cleared layout goes up on reconnect",
-            host.target
-        );
-        return;
-    };
-    cx.background_executor()
-        .spawn(async move {
-            if let Err(e) = crate::ui::remote_connect::put_remote_layout(&connection, key, record) {
-                log::warn!(
-                    "could not tell {} its workspace's panes are gone: {e}",
-                    host.target
-                );
-            }
-        })
-        .detach();
+/// The machine needs no message: the kills above end the PTYs, its own pane
+/// server observes each death, and the tree's records flip to `live: false` —
+/// which is exactly the state the next open reads as "revive with a fresh
+/// shell". The clear here only keeps the client's *cache* (the last-resort
+/// import source) from claiming panes it just killed.
+fn forget_killed_panes(cx: &mut App, workspace: WorkspaceId) {
+    WorkspaceStore::forget_pane_ids(cx, workspace);
 }
 
 /// Delete a workspace outright: stop it, then forget it entirely. Irreversible
 /// — nothing about the layout survives.
 pub fn delete_workspace(cx: &mut App, workspace: WorkspaceId) {
-    // Delete it on the machine that owns it first, while the pointer to it is
-    // still on file. Doing this after `WorkspaceStore::remove` would leave the
-    // record stranded on the remote with no way left to name it.
-    delete_on_remote(cx, workspace);
-    // …and out of the machine's tree, which is where every other client (and
-    // the next launch) lists workspaces from.
+    // Delete it out of the machine's tree first, while the pointer to it is
+    // still on file — the tree is where every other client (and the next
+    // launch) lists workspaces from, and doing this after
+    // `WorkspaceStore::remove` would leave it stranded with no way to name it.
     crate::ui::tree_sync::fire_workspace_op(cx, workspace, |ws| {
         tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
     });
     crate::ui::tree_sync::forget(cx, workspace);
-    // …and the stop that follows must not push the emptied layout back up: the
-    // delete above is in flight on a background task, and a push landing after
-    // it would recreate the record it just removed.
-    stop_workspace_keeping(cx, workspace, ClearedLayout::Discard);
+    stop_workspace_keeping(cx, workspace);
     WorkspaceStore::remove(cx, workspace);
     release_unused_hosts(cx);
     refresh_menu(cx);
-}
-
-/// Forget a remote workspace on the machine that owns it (the
-/// remote's `workspaces.json` is the authority, so deleting only the client's
-/// pointer would leave the workspace there and reappear on the next connect).
-///
-/// A no-op for a local workspace, and for a remote one this client is not
-/// currently connected to — there is no way to reach the record, and the delete
-/// is a user action rather than something to queue and replay later.
-fn delete_on_remote(cx: &mut App, workspace: WorkspaceId) {
-    let Some(host) = WorkspaceStore::remote_ref(cx, workspace) else {
-        return;
-    };
-    let Some(connection) = crate::ui::remote_workspace::connection_for(cx, workspace) else {
-        log::info!(
-            "deleting the local pointer to a workspace on {} without reaching it",
-            host.target
-        );
-        return;
-    };
-    let key = host.store_key();
-    cx.background_executor()
-        .spawn(async move {
-            if let Err(e) = crate::ui::remote_connect::delete_remote_workspace(&connection, key) {
-                log::warn!("could not delete the workspace on {}: {e}", host.target);
-            }
-        })
-        .detach();
 }
 
 /// Drop the connection to any machine no workspace points at any more.
