@@ -193,6 +193,13 @@ impl DesiredNode {
 /// occupied, its panes just have no ids yet, and a diff that read its absence
 /// as "closed" would delete the daemon tab (and spend the very records) a
 /// revival in flight is about to replace.
+///
+/// Held is strictly for the *transient* case. A remote window's tab that is
+/// native-SSH through and through is unrepresentable **forever** — its panes
+/// live in this client's daemon — and is neither desired nor held: as far as
+/// this machine's tree is concerned, it does not exist. Holding it instead
+/// would freeze the whole window's ordering and active-tab sync permanently,
+/// because [`diff`] waits out held tabs before touching either.
 pub(crate) fn desired_tabs(
     app: &Tty7App,
     cx: &App,
@@ -205,7 +212,16 @@ pub(crate) fn desired_tabs(
     let mut held = Vec::new();
     for (index, tab) in app.tabs.iter().enumerate() {
         let Some(root) = desired_node(&tab.pane, remote, cx) else {
-            held.push(tab.tree_id.get());
+            // No root means every leaf is individually unrepresentable. If
+            // even one of them is merely *pending* (a spawn or an empty slot
+            // still to fill), the tab is held; a pure native-SSH tab is
+            // permanently invisible instead. The distinction also lets a
+            // mixed tab whose last tree-visible pane was closed fall out of
+            // `desired` entirely, so a Full diff closes its daemon tab
+            // rather than leaving a dead leaf on the machine for ever.
+            if !(remote && every_leaf_is_native_ssh(&tab.pane, cx)) {
+                held.push(tab.tree_id.get());
+            }
             continue;
         };
         let id = tab.tree_id.get();
@@ -224,6 +240,22 @@ pub(crate) fn desired_tabs(
         });
     }
     (out, active, held)
+}
+
+/// Whether every leaf of `pane` is a *ready* native-SSH view — the one kind
+/// of leaf a remote window can never name in its machine's tree, because the
+/// pane lives in this client's own daemon. Only meaningful for a tab whose
+/// desired root came out `None`: it decides permanently-invisible versus
+/// held (see [`desired_tabs`]). A connecting or empty leaf answers `false` —
+/// those are pending, not foreign.
+fn every_leaf_is_native_ssh(pane: &Pane, cx: &App) -> bool {
+    match pane {
+        Pane::Leaf(PaneSlot::Ready(view)) => view.read(cx).ssh_spec().is_some(),
+        Pane::Leaf(PaneSlot::Connecting(_)) | Pane::Empty => false,
+        Pane::Split { a, b, .. } => {
+            every_leaf_is_native_ssh(a, cx) && every_leaf_is_native_ssh(b, cx)
+        }
+    }
 }
 
 /// One GUI pane node, in tree shape. `None` for the unrepresentable: a fresh

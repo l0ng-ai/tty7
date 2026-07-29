@@ -8632,6 +8632,54 @@ mod ssh_rebuild_gpui_tests {
             );
         });
     }
+
+    /// A remote window's tab that is native-SSH through and through is
+    /// unrepresentable in the machine's tree **forever** — so it must be
+    /// invisible to the diff, not *held*. Held means "spawns are landing,
+    /// wait"; a tab that can never land would make every diff return before
+    /// the ordering and active-tab passes, freezing tab order and activation
+    /// sync for the whole window for as long as the tab exists.
+    #[gpui::test]
+    fn a_pure_native_ssh_tab_is_invisible_to_the_tree_not_held(cx: &mut TestAppContext) {
+        let (app, mut vcx, _remote_pane_stream) = harness_with_pane(cx);
+
+        let remote = WindowView::on_remote(RemoteRef::new(
+            RemoteTarget::Alias {
+                alias: "build-box".into(),
+            },
+            WorkspaceId::new(),
+        ));
+        let remote_id = remote.id;
+        let _ssh_stream = app.update_in(&mut vcx, |app, window, cx| {
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![remote],
+                    active: None,
+                },
+            );
+            app.workspace = remote_id;
+            // A second tab holding only a native-SSH pane.
+            let (ssh_view, stream) = crate::terminal::view::quiet_test_ssh_pane(2, window, cx);
+            app.tabs
+                .push(super::Tab::new(Pane::leaf(PaneSlot::Ready(ssh_view))));
+            stream
+        });
+
+        let (desired, _active, held) = app.update_in(&mut vcx, |app, _, cx| {
+            crate::ui::tree_sync::desired_tabs(app, cx)
+        });
+        assert_eq!(
+            desired.len(),
+            1,
+            "only the remote-backed tab can be named in the machine's tree"
+        );
+        assert!(
+            held.is_empty(),
+            "the pure-SSH tab is permanently invisible, not held — holding it \
+             would freeze ordering and active-tab sync for the whole window"
+        );
+    }
 }
 
 #[cfg(test)]
