@@ -21,6 +21,8 @@
 
 **冲突仲裁**：本文档与设计文档冲突时，**以本文档为准**；§11 逐条记录了偏差与理由。
 
+**契约落地之后的变更**：这份文档定的是 M1–M3 那一波的接口，落地后不再逐条同步 —— 签名、wire 结构和字节布局一律**以代码里的 doc comment 为准**（`crates/tty7-core/src/host/mod.rs`、`crates/tty7-core/src/daemon/control.rs`）。目前已知的一处是 #239 的流式 git 读：`Host::git_lines`（默认实现就是缓冲读 `git` 再切行，所以 §4.4 的调用不变量原样成立，也没有绕开 `Host` 的第二条 git 出口），wire 上是 `ControlRequest::GitStream` + `ControlEvent::GitChunk`/`GitEnd`（见 §6.3）。
+
 **行号约定**：正文里 `src/daemon/…` / `src/core/…` 形式的行号引用取自 **M1 拆分前**的树。A1 已经把它们搬到 `crates/tty7-core/src/{daemon,core}/…`（模块路径刻意保持不变，见 §9.1），行号大体不动。`src/ui/…` / `src/terminal/…` 的引用仍然有效。
 
 ---
@@ -602,7 +604,7 @@ blob_len == payload_len - 12 - json_n
 | **回绕** | `u64` 不考虑回绕 |
 | **匹配** | 乱序。客户端维护 `HashMap<u64, oneshot::Sender<Reply>>`；响应到达时 `remove` 并投递 |
 | **未知 req_id 的响应** | **静默丢弃**，不当错误 —— 超时后取消的请求可能仍会收到迟到的响应 |
-| **一请求一响应** | 严格。没有流式、没有多段。大文件靠 `MAX_FRAME` 兜底，超过就 `FileTooLarge` |
+| **一请求一响应** | 严格：一个 req_id 恰好一个响应，没有多段响应。大文件靠 `MAX_FRAME` 兜底，超过就 `FileTooLarge`。#239 加的流式 git 读不破这一条 —— `GitStream` 本身照常一问一答（立刻回 `Unit`），数据走 req_id = 0 的事件推送（`ControlEvent::GitChunk`/`GitEnd`，id 由客户端选），细节以代码为准，见 §0 |
 | **连接重建** | in-flight 全部以 `ErrorKind::ConnectionReset` 失败；req_id 计数器**不重置**（无所谓，但重置也不会错） |
 
 ### 6.4 每个 RPC 的请求/响应结构
