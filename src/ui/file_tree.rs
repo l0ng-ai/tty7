@@ -2058,7 +2058,7 @@ impl Tty7App {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(p.display().to_string()));
                 }
             }))
-            .item(PopupMenuItem::new("Reveal in Finder").on_click({
+            .item(PopupMenuItem::new(crate::ui::right_panel::reveal_label()).on_click({
                 let p = p.clone();
                 move |_, _window, cx| {
                     cx.reveal_path(&p);

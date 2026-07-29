@@ -706,11 +706,7 @@ impl Tty7App {
     /// clipboard. An "open in $EDITOR" button would need a picker, a stored
     /// choice and a settings page to change it; that's a feature, not a row.
     fn cwd_actions(&self, cwd: PathBuf, cx: &mut Context<Self>) -> AnyElement {
-        let reveal_label = if cfg!(target_os = "macos") {
-            "Reveal in Finder"
-        } else {
-            "Open Folder"
-        };
+        let reveal_label = reveal_label();
         h_flex()
             .gap(px(2.))
             .px(px(tile_trailing_inset_sm()))
@@ -1475,6 +1471,18 @@ pub(crate) fn info_chip(
         .text_color(fg)
         .child(text.to_string())
         .into_any_element()
+}
+
+/// The label for revealing a path in the OS file manager: only macOS has a
+/// "Finder", so everywhere else it's the generic "Open Folder". Shared by the
+/// Info row, the file-tree context menu and the SFTP job list so the action
+/// carries one name per platform.
+pub fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Reveal in Finder"
+    } else {
+        "Open Folder"
+    }
 }
 
 /// The one-word status the Info row shows next to the agent's name.

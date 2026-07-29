@@ -1816,7 +1816,7 @@ impl Tty7App {
                                 .icon(IconName::FolderOpen)
                                 .xsmall()
                                 .ghost()
-                                .tooltip("Show in Finder")
+                                .tooltip(crate::ui::right_panel::reveal_label())
                                 .on_click(cx.listener(move |this, _, _w, cx| {
                                     this.sftp_reveal_download(local.clone(), cx)
                                 })),
