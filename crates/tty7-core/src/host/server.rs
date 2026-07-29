@@ -1122,7 +1122,14 @@ impl Conn {
                 let mut batch: Vec<u8> = Vec::with_capacity(GIT_STREAM_CHUNK);
                 let mut stopped: Option<StreamStop> = None;
                 let flush = |batch: &mut Vec<u8>, stopped: &mut Option<StreamStop>| {
-                    if batch.is_empty() || stopped.is_some() {
+                    if stopped.is_some() {
+                        // Nothing will be sent again, so nothing is worth
+                        // holding: whatever accumulated goes now rather than
+                        // riding along to the end of the read.
+                        batch.clear();
+                        return;
+                    }
+                    if batch.is_empty() {
                         return;
                     }
                     let bytes = std::mem::take(batch);
@@ -1150,6 +1157,17 @@ impl Conn {
                     }
                 };
                 let result = host.git_lines(&cwd, &borrowed, &mut |line| {
+                    // Once the stream has stopped speaking, keeping the rest of
+                    // the output would grow this batch to the size of the whole
+                    // diff for a client that will never see a byte of it — the
+                    // peak-memory cost streaming exists to remove. The residual
+                    // is deliberate and bounded: `git_lines` takes a callback
+                    // with no way to say "stop", so git still runs to
+                    // completion and spends its own CPU, but nothing here
+                    // accumulates.
+                    if stopped.is_some() {
+                        return;
+                    }
                     batch.extend_from_slice(line.as_bytes());
                     batch.push(b'\n');
                     if batch.len() >= GIT_STREAM_CHUNK {
