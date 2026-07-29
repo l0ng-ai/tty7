@@ -392,10 +392,11 @@ impl Tty7App {
     /// It used to be a monogram in the window's top-right corner. Two things
     /// were wrong with that. Physically: the corner it sat in is the *panel's*
     /// top zone while the panel is open, so a control that has nothing to do
-    /// with the panel was eating width the panel's own tabs needed — at the
-    /// 200px minimum the row wanted 268px. Semantically: a window's workspace is
-    /// exactly what the rail below enumerates (this workspace's tabs), so the
-    /// name belonged at the head of that column, not across the window from it.
+    /// with the panel was eating width the panel's own tabs needed — at
+    /// `right_panel::MIN_WIDTH` the row wanted 268px. Semantically: a window's
+    /// workspace is exactly what the rail below enumerates (this workspace's
+    /// tabs), so the name belonged at the head of that column, not across the
+    /// window from it.
     ///
     /// Here it can afford the full name — the rail is a column with a width of
     /// its own, and it truncates rather than pushing anything off an edge. The
