@@ -412,9 +412,11 @@ pub struct PaneRecord {
     /// report). The machine's own namespace.
     #[serde(default)]
     pub cwd: Option<String>,
-    /// Last-known title, for labels on a pane that is awaiting revival.
-    #[serde(default)]
-    pub title: String,
+    // No `title` field, deliberately. The pane's title is a *live* answer (a
+    // foreground-process query at `PaneInfo` time), not tracked state the
+    // reader loop observes — so a record field for it was never written, and
+    // a field that is always empty is a standing invitation to trust it.
+    // Revival labels derive from `cwd` and `agent` instead.
     /// The native-SSH spec this pane ran, **secrets stripped**
     /// ([`NativeSshSpec::without_secrets`]). What a revival reconnects with.
     #[serde(default)]
@@ -441,7 +443,6 @@ impl PaneRecord {
         PaneRecord {
             id,
             cwd: None,
-            title: String::new(),
             ssh_spec: None,
             agent: None,
             live: false,
@@ -498,7 +499,6 @@ impl PaneSeed {
         PaneRecord {
             id: self.pane,
             cwd: self.cwd,
-            title: String::new(),
             ssh_spec: self.ssh_spec.map(|s| Box::new(s.without_secrets())),
             agent: self.agent,
             live,
@@ -577,8 +577,8 @@ pub enum LayoutDelta {
         path: Vec<Side>,
         ratio: f32,
     },
-    /// A pane's facts changed (cwd, title, agent, liveness). Not a layout
-    /// change, but clients rendering "awaiting revival" or a title need it.
+    /// A pane's facts changed (cwd, agent, liveness). Not a layout change,
+    /// but clients rendering "awaiting revival" or an agent chip need it.
     PaneFacts {
         pane: PaneRecord,
     },
@@ -1188,8 +1188,8 @@ impl MachineStore {
 
     // ----- pane facts (the daemon's own observations) ----------------------
 
-    /// Record facts the daemon observed about `pane` — OSC 7 cwd, a title
-    /// change, agent hook events, liveness. Unknown panes are ignored (a pane
+    /// Record facts the daemon observed about `pane` — OSC 7 cwd, agent hook
+    /// events, liveness. Unknown panes are ignored (a pane
     /// the tree never adopted is not the tree's business). The delta is
     /// attributed to no origin: facts come from the machine, so *every*
     /// client hears them.
@@ -2191,11 +2191,9 @@ mod tests {
 
         store.note_pane_facts(1, |p| {
             p.cwd = Some("/work/deeper".into());
-            p.title = "vim".into();
         });
         let record = store.pane(1).unwrap();
         assert_eq!(record.cwd.as_deref(), Some("/work/deeper"));
-        assert_eq!(record.title, "vim");
         {
             let heard = heard.lock().unwrap();
             assert_eq!(heard.len(), 1);
@@ -2205,7 +2203,7 @@ mod tests {
 
         // No change, no noise; an unknown pane is nobody's business.
         store.note_pane_facts(1, |_| {});
-        store.note_pane_facts(999, |p| p.title = "ghost".into());
+        store.note_pane_facts(999, |p| p.cwd = Some("/ghost".into()));
         assert_eq!(heard.lock().unwrap().len(), 1);
         drop(sub);
     }

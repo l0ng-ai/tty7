@@ -103,13 +103,17 @@ pub struct DaemonVersion {
     /// every user whose daemon happens to predate it.
     #[serde(default)]
     pub features: Vec<String>,
-    /// Identity of this daemon *process*, minted once at startup. Pane ids are
-    /// only meaningful within one daemon process — after a restart the numbers
-    /// start over from 1 and land on unrelated shells — so a client that
-    /// persists pane ids records this next to them and treats a mismatch as
-    /// "every saved id is stale" (see `Workspace::daemon_instance`). Empty for
-    /// daemons that predate the field; the remote `tty7-server` announces the
-    /// same identity through its control hello.
+    /// Identity of this daemon *process*, minted once at startup — the same
+    /// identity the control hello announces
+    /// ([`ControlHelloOk::instance`](crate::daemon::control::ControlHelloOk::instance)),
+    /// which is what reconnect logic actually consults to tell "the link
+    /// blinked" from "a different process answers now". PTYs die with the
+    /// process, so a changed instance means every previously live pane is
+    /// gone; the machine tree records the same fact per pane (`load_machine`
+    /// clears every `live` flag on open), and a daemon carrying a tree seeds
+    /// its pane ids *past* everything the tree names rather than restarting
+    /// from 1, so a stale id can never alias a new shell. Empty for daemons
+    /// that predate the field — "unknown", never "restarted".
     #[serde(default)]
     pub instance: String,
 }
