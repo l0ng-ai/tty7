@@ -1994,9 +1994,11 @@ fn set_gui_ratio(pane: &mut Pane, path: &[Side], ratio: f32) -> bool {
     match path.split_first() {
         None => match pane {
             Pane::Split { ratio: cell, .. } => {
-                // The GUI renders ratios in a narrower band than the server
-                // accepts; clamp like every GUI-side write does.
-                cell.set(ratio.clamp(0.1, 0.9));
+                // The same band the server accepts (`machine::clamp_ratio`).
+                // Clamping narrower here (0.1–0.9, as this once did) silently
+                // rewrote another client's 0.07 to 0.1 — and the next save's
+                // ratio diff then pushed that rewrite back at the machine.
+                cell.set(ratio.clamp(0.05, 0.95));
                 true
             }
             _ => false,
@@ -2102,6 +2104,26 @@ mod tests {
                 "the licence to prune must not survive a takeover"
             );
         });
+    }
+
+    /// The GUI applies a `RatioChanged` delta in the same band the server
+    /// accepts (0.05–0.95). A narrower client-side clamp is not cosmetic: it
+    /// rewrites another client's ratio, and the next save's diff pushes the
+    /// rewrite back at the machine as an operation.
+    #[test]
+    fn a_ratio_delta_is_clamped_to_the_servers_band_not_a_narrower_one() {
+        let mut pane = Pane::split_node(gpui::Axis::Horizontal, 0.5, Pane::Empty, Pane::Empty);
+        assert!(set_gui_ratio(&mut pane, &[], 0.07));
+        match &pane {
+            Pane::Split { ratio, .. } => assert_eq!(ratio.get(), 0.07),
+            _ => unreachable!("built as a split"),
+        }
+        // Out-of-band values still land clamped, exactly as the server would.
+        assert!(set_gui_ratio(&mut pane, &[], 0.01));
+        match &pane {
+            Pane::Split { ratio, .. } => assert_eq!(ratio.get(), 0.05),
+            _ => unreachable!("built as a split"),
+        }
     }
 
     /// Same overlap as the machine-wide mirror's: a `TabCreated` that
