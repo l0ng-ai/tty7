@@ -252,7 +252,12 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
 
     let first = ClientMsg::from_frame(first_kind, first_payload)?;
     match first {
-        ClientMsg::Spawn { cwd, size, shell } => {
+        ClientMsg::Spawn {
+            cwd,
+            size,
+            shell,
+            owner,
+        } => {
             let id = registry.alloc_id();
             // Reclaim a pane whose child exits while *detached* (nobody attached,
             // so no connection's detach path will ever drop it): remove it from
@@ -272,7 +277,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                         .ok();
                 }
             };
-            let pane = match DaemonPane::spawn(id, cwd, size, shell, on_dead) {
+            let pane = match DaemonPane::spawn(id, cwd, size, shell, owner, on_dead) {
                 Ok(p) => p,
                 Err(e) => {
                     // Report the failure to the client and close.

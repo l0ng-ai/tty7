@@ -390,6 +390,25 @@ pub struct Workspace {
     /// workspace from the laptop at home.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<RemoteRef>,
+    /// Identity of the daemon *process* the pane ids in `session` refer to
+    /// (see `daemon::protocol::DaemonVersion::instance`). One field for the
+    /// whole workspace, not one per leaf, because a workspace's panes all live
+    /// in one daemon (design §2: one window, one machine).
+    ///
+    /// This is what makes a saved pane id safe to trust: daemon ids restart
+    /// from 1, so after a reboot every saved id points at whatever unrelated
+    /// shell happens to hold the number now — and restore's aliveness check
+    /// cannot tell a survivor from a squatter. A claim whose instance differs
+    /// from the daemon now serving blanks its ids instead
+    /// ([`Workspace::forget_stale_pane_ids`]) and takes the fresh-spawn path,
+    /// agent resume included, which is the correct reading of "the daemon
+    /// those panes lived in is gone".
+    ///
+    /// `None` for records written before the field, and for remote workspaces
+    /// — the remote server's instance is tracked live per connection instead
+    /// (`note_instance`). Either way `None` disables the check, never fails it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_instance: Option<String>,
 }
 
 impl Default for Workspace {
@@ -402,6 +421,7 @@ impl Default for Workspace {
             open: true,
             last_active: now_secs(),
             host: None,
+            daemon_instance: None,
         }
     }
 }
@@ -507,6 +527,29 @@ impl Workspace {
         forgotten
     }
 
+    /// Blank every saved pane id if it was recorded against a *different*
+    /// daemon process than `current` — see [`Workspace::daemon_instance`] for
+    /// the id-reuse failure this closes. Answers how many ids were dropped.
+    ///
+    /// Only a **known, differing** instance pair trips it. `None` on either
+    /// side means "cannot tell" (an old record, an old daemon), and treating
+    /// that as stale would respawn every pane on the first launch after an
+    /// upgrade — exactly the sessions persistence exists to keep.
+    ///
+    /// The agent fields stay, deliberately: unlike a *duplicate* claim (see
+    /// `drop_duplicate_pane_ids`), a stale-instance claim means the pane is
+    /// genuinely gone with its daemon, nothing else is running the
+    /// conversation, and the fresh shell resuming it is the feature.
+    pub fn forget_stale_pane_ids(&mut self, current: Option<&str>) -> usize {
+        let (Some(recorded), Some(current)) = (self.daemon_instance.as_deref(), current) else {
+            return 0;
+        };
+        if recorded == current {
+            return 0;
+        }
+        self.forget_pane_ids()
+    }
+
     /// Stamp this workspace as just-focused.
     pub fn touch(&mut self) {
         self.last_active = now_secs();
@@ -588,7 +631,10 @@ impl Workspace {
 pub const REMOTE_OWNED_FIELDS: &[&str] = &["id", "name", "session", "last_active"];
 
 /// The client-side view state, which stays in this machine's `session.json`.
-pub const CLIENT_OWNED_FIELDS: &[&str] = &["window", "open", "host"];
+/// `daemon_instance` is client-owned because it names the **local** daemon the
+/// saved pane ids refer to; a remote workspace leaves it `None` (the remote
+/// server's identity is tracked live per connection, not persisted).
+pub const CLIENT_OWNED_FIELDS: &[&str] = &["window", "open", "host", "daemon_instance"];
 
 /// The remote-owned half of a [`Workspace`], for reading a record back.
 ///
@@ -835,15 +881,33 @@ pub fn blank_pane_ids(pane: &mut SessionPane) -> usize {
 /// Blank any `pane_id` already claimed by an earlier-visited workspace. A
 /// blanked leaf still restores — it just spawns a fresh shell in its saved cwd,
 /// the same path a session from before the daemon existed takes.
+///
+/// The agent resume fields go with it. A blanked leaf takes restore's
+/// spawn-fresh path, and that path auto-types the agent's resume command —
+/// but the pane this claim duplicated is still running that very agent under
+/// its winning workspace, so "recovering" the loser would start a second
+/// process on the same agent session id. The duplicate claim is the evidence
+/// of a corrupted record, not of a lost conversation; the conversation lives
+/// with the winner.
 fn drop_duplicate_pane_ids(
     pane: &mut SessionPane,
     seen: &mut std::collections::HashSet<u64>,
 ) -> usize {
     match pane {
-        SessionPane::Leaf { pane_id, .. } => match *pane_id {
+        SessionPane::Leaf {
+            pane_id,
+            agent_session_id,
+            agent_launch_argv,
+            ..
+        } => match *pane_id {
             Some(id) if !seen.insert(id) => {
-                log::warn!("workspace claims pane {id} twice; dropping the duplicate claim");
+                log::warn!(
+                    "workspace claims pane {id} twice; dropping the duplicate claim \
+                     (and its agent resume, which the winning claim still owns)"
+                );
                 *pane_id = None;
+                *agent_session_id = None;
+                *agent_launch_argv = None;
                 1
             }
             _ => 0,
@@ -1182,6 +1246,72 @@ mod tests {
         );
     }
 
+    /// The stale-instance check: ids recorded against a *different* daemon
+    /// process are blanked (they now name unrelated shells at best), ids
+    /// recorded against the *same* one are kept, and an unknown on either side
+    /// changes nothing — treating "cannot tell" as stale would respawn every
+    /// pane on the first launch after an upgrade.
+    #[test]
+    fn stale_instance_blanks_pane_ids_and_matching_or_unknown_keeps_them() {
+        let fresh = |instance: Option<&str>| {
+            let mut ws = workspace(vec![tab(leaf(Some("/work"), Some(7)), None)]);
+            ws.daemon_instance = instance.map(str::to_string);
+            ws
+        };
+
+        let mut ws = fresh(Some("daemon-a"));
+        assert_eq!(ws.forget_stale_pane_ids(Some("daemon-b")), 1);
+        assert!(ws.pane_ids().is_empty());
+        assert_eq!(
+            ws.first_cwd(),
+            Some(PathBuf::from("/work")),
+            "the layout survives; only the claims go"
+        );
+
+        let mut ws = fresh(Some("daemon-a"));
+        assert_eq!(ws.forget_stale_pane_ids(Some("daemon-a")), 0);
+        assert_eq!(ws.pane_ids(), vec![7], "same process, ids stay attachable");
+
+        let mut ws = fresh(None);
+        assert_eq!(ws.forget_stale_pane_ids(Some("daemon-b")), 0);
+        assert_eq!(ws.pane_ids(), vec![7], "an old record is not judged");
+
+        let mut ws = fresh(Some("daemon-a"));
+        assert_eq!(ws.forget_stale_pane_ids(None), 0);
+        assert_eq!(ws.pane_ids(), vec![7], "an unknown daemon is not judged");
+    }
+
+    /// Unlike a duplicate claim, a stale-instance claim keeps its agent resume:
+    /// the daemon those panes lived in is gone, nothing else runs the
+    /// conversation, and the fresh shell resuming it is the feature working.
+    #[test]
+    fn stale_instance_keeps_the_agent_resume() {
+        let mut ws = workspace(vec![tab(
+            SessionPane::Leaf {
+                cwd: Some(PathBuf::from("/work")),
+                pane_id: Some(7),
+                ssh_spec: None,
+                agent: Some(crate::core::cli_agent::CLIAgent::Claude),
+                agent_session_id: Some("sid".into()),
+                agent_launch_argv: None,
+            },
+            None,
+        )]);
+        ws.daemon_instance = Some("daemon-a".into());
+        assert_eq!(ws.forget_stale_pane_ids(Some("daemon-b")), 1);
+        match &ws.session.tabs[0].pane {
+            SessionPane::Leaf {
+                pane_id,
+                agent_session_id,
+                ..
+            } => {
+                assert!(pane_id.is_none());
+                assert_eq!(agent_session_id.as_deref(), Some("sid"));
+            }
+            SessionPane::Split { .. } => panic!("leaf stays a leaf"),
+        }
+    }
+
     #[test]
     fn display_name_prefers_user_name_then_repo_then_cwd() {
         // No name, no repo group: fall back to the first leaf's directory.
@@ -1263,6 +1393,71 @@ mod tests {
             all.get(stale_id).unwrap().first_cwd(),
             Some(PathBuf::from("/old"))
         );
+    }
+
+    /// The duplicate claim loses its agent resume along with its pane id.
+    /// Restore's spawn-fresh path auto-types the agent's resume command, and
+    /// the winning workspace's pane is still *running* that agent — a loser
+    /// that kept `agent_session_id` would come back as a second process on
+    /// the same conversation (double `claude --resume <id>`, both live).
+    #[test]
+    fn dedupe_pane_ids_disarms_the_duplicate_claims_agent_resume() {
+        let agent_leaf = |pane_id| SessionPane::Leaf {
+            cwd: Some(PathBuf::from("/work")),
+            pane_id: Some(pane_id),
+            ssh_spec: None,
+            agent: Some(crate::core::cli_agent::CLIAgent::Claude),
+            agent_session_id: Some("362f9261".into()),
+            agent_launch_argv: Some(vec!["claude".into(), "--continue".into()]),
+        };
+        let mut stale = workspace(vec![tab(agent_leaf(5), None)]);
+        stale.last_active = 100;
+        let mut fresh = workspace(vec![tab(agent_leaf(5), None)]);
+        fresh.last_active = 200;
+        let (stale_id, fresh_id) = (stale.id, fresh.id);
+
+        let mut all = Workspaces {
+            active: Some(fresh_id),
+            workspaces: vec![stale, fresh],
+        };
+        assert_eq!(all.dedupe_pane_ids(), 1);
+
+        let loser = &all.get(stale_id).unwrap().session.tabs[0].pane;
+        match loser {
+            SessionPane::Leaf {
+                pane_id,
+                cwd,
+                agent_session_id,
+                agent_launch_argv,
+                ..
+            } => {
+                assert!(pane_id.is_none());
+                assert_eq!(
+                    cwd.as_deref(),
+                    Some(std::path::Path::new("/work")),
+                    "the layout survives — only the claim and its resume go"
+                );
+                assert!(
+                    agent_session_id.is_none(),
+                    "no second resume of one conversation"
+                );
+                assert!(agent_launch_argv.is_none());
+            }
+            SessionPane::Split { .. } => panic!("the leaf must survive as a leaf"),
+        }
+
+        // The winner is untouched: its pane is the one actually running the agent.
+        match &all.get(fresh_id).unwrap().session.tabs[0].pane {
+            SessionPane::Leaf {
+                pane_id,
+                agent_session_id,
+                ..
+            } => {
+                assert_eq!(*pane_id, Some(5));
+                assert_eq!(agent_session_id.as_deref(), Some("362f9261"));
+            }
+            SessionPane::Split { .. } => panic!("the leaf must survive as a leaf"),
+        }
     }
 
     /// A pane id is only unique within one daemon, so the same number on two
@@ -1626,6 +1821,9 @@ mod tests {
             },
             WorkspaceId::new(),
         ));
+        // Every skip-when-`None` field must be populated here, or it never
+        // serializes and this census can't see it.
+        ws.daemon_instance = Some("daemon-uuid".into());
 
         let value = serde_json::to_value(&ws).unwrap();
         let mut present: Vec<String> = value

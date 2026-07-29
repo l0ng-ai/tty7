@@ -66,6 +66,42 @@ pub fn take_mismatched_daemon() -> Option<MismatchedDaemon> {
     MISMATCHED_DAEMON.lock().ok()?.take()
 }
 
+/// What the version handshake learned about the daemon currently serving this
+/// process's endpoint. Refreshed by every [`ensure_running`] — including the
+/// one `RemoteTerminal`'s spawn retry runs after a daemon death — and cleared
+/// when the daemon predates the handshake, so a reader never acts on the
+/// identity of a daemon that is no longer the one answering.
+static LOCAL_DAEMON: std::sync::Mutex<Option<DaemonVersion>> = std::sync::Mutex::new(None);
+
+/// The serving daemon's process identity, when it reports one. `None` means
+/// "unknown" (an older daemon, or nothing running) — callers must treat that
+/// as "no instance check possible", never as a mismatch.
+pub fn local_daemon_instance() -> Option<String> {
+    let guard = LOCAL_DAEMON.lock().ok()?;
+    guard
+        .as_ref()
+        .map(|v| v.instance.clone())
+        .filter(|i| !i.is_empty())
+}
+
+/// Whether the serving daemon advertises `feature`
+/// (e.g. [`crate::daemon::protocol::FEATURE_PANE_OWNER`]). `false` when
+/// nothing is known — the safe answer, because every capability gated on this
+/// has a legacy fallback.
+pub fn local_daemon_supports(feature: &str) -> bool {
+    LOCAL_DAEMON
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|v| v.has_feature(feature)))
+        .unwrap_or(false)
+}
+
+fn note_local_daemon(version: Option<DaemonVersion>) {
+    if let Ok(mut slot) = LOCAL_DAEMON.lock() {
+        *slot = version;
+    }
+}
+
 /// How a live daemon answered the version handshake.
 #[derive(Debug, PartialEq, Eq)]
 enum VersionProbe {
@@ -96,7 +132,10 @@ pub fn ensure_running() -> anyhow::Result<()> {
     // panes either way.
     if let Ok(mut stream) = transport::connect() {
         match query_daemon_version(&mut stream) {
-            VersionProbe::Speaks(v) if v.protocol == PROTOCOL_VERSION => return Ok(()),
+            VersionProbe::Speaks(v) if v.protocol == PROTOCOL_VERSION => {
+                note_local_daemon(Some(v));
+                return Ok(());
+            }
             VersionProbe::Speaks(v) => {
                 log::warn!(
                     "daemon (build {}) speaks protocol {}, this build needs {}; \
@@ -105,6 +144,9 @@ pub fn ensure_running() -> anyhow::Result<()> {
                     v.protocol,
                     PROTOCOL_VERSION
                 );
+                // Still the serving daemon: its identity and capability list
+                // are true regardless of the dialect gap.
+                note_local_daemon(Some(v.clone()));
                 if let Ok(mut slot) = MISMATCHED_DAEMON.lock() {
                     *slot = Some(MismatchedDaemon { version: Some(v) });
                 }
@@ -114,6 +156,7 @@ pub fn ensure_running() -> anyhow::Result<()> {
                 log::warn!(
                     "daemon predates protocol versioning; keeping it and deferring to the user"
                 );
+                note_local_daemon(None);
                 if let Ok(mut slot) = MISMATCHED_DAEMON.lock() {
                     *slot = Some(MismatchedDaemon { version: None });
                 }
@@ -121,6 +164,7 @@ pub fn ensure_running() -> anyhow::Result<()> {
             }
             VersionProbe::Unresponsive => {
                 log::info!("daemon did not answer the version handshake; restarting it");
+                note_local_daemon(None);
                 drop(stream);
                 // `stop` shuts the old daemon down gracefully (`Shutdown`
                 // predates versioning, so even the oldest daemon honors it),
@@ -154,7 +198,14 @@ pub fn ensure_running() -> anyhow::Result<()> {
     // (via `bind`) slightly before the accept loop is ready.
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
-        if transport::connect().is_ok() {
+        if let Ok(mut stream) = transport::connect() {
+            // Capture the fresh daemon's identity (instance + features). It is
+            // our own build, but asking beats assuming — and this is the only
+            // handshake a cold start ever runs.
+            match query_daemon_version(&mut stream) {
+                VersionProbe::Speaks(v) => note_local_daemon(Some(v)),
+                _ => note_local_daemon(None),
+            }
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -619,6 +670,7 @@ mod tests {
                 protocol: PROTOCOL_VERSION,
                 build: "test".into(),
                 features: Vec::new(),
+                instance: "inst-test".into(),
             })
             .encode(&mut daemon)
             .unwrap();

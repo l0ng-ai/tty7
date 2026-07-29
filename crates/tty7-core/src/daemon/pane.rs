@@ -748,6 +748,13 @@ struct NativeSshBackend {
 /// locks.
 pub struct DaemonPane {
     pub id: u64,
+    /// The workspace this pane was spawned for (a `WorkspaceId` uuid string),
+    /// when the spawning client said — see `ClientMsg::Spawn`'s `owner`.
+    /// Immutable for the pane's lifetime: ownership is decided at spawn, and a
+    /// pane that could change hands would be exactly the ambiguity this field
+    /// exists to close. Reported in `List` ([`PaneInfo::owner`]) so restore can
+    /// refuse to attach a workspace to a pane another one owns.
+    owner: Option<String>,
     /// The byte source (local PTY or native-SSH channel).
     backend: PaneBackend,
     /// The input side (keyboard input / pasted text): the PTY writer, or the
@@ -839,6 +846,7 @@ impl DaemonPane {
         cwd: Option<PathBuf>,
         size: WinSize,
         shell: Option<ShellSpec>,
+        owner: Option<String>,
         on_dead: impl FnOnce() + Send + 'static,
     ) -> anyhow::Result<Arc<Self>> {
         let pty_size = pty_size(size);
@@ -880,6 +888,7 @@ impl DaemonPane {
 
         let pane = Arc::new(Self {
             id,
+            owner,
             backend: PaneBackend::Pty(PtyBackend {
                 master: master.clone(),
                 child: Mutex::new(child),
@@ -1002,6 +1011,10 @@ impl DaemonPane {
 
         let pane = Arc::new(Self {
             id,
+            // Native-SSH spawns don't carry an owner yet: their leaves persist
+            // an `ssh_spec` and reconnect from it rather than by pane id, so
+            // the ownership check has nothing to protect there today.
+            owner: None,
             backend: PaneBackend::NativeSsh(NativeSshBackend {
                 handle: bridge.handle,
                 connection: connection.clone(),
@@ -1391,6 +1404,7 @@ impl DaemonPane {
             cwd: cwd.or_else(|| self.foreground_cwd()),
             title: self.foreground_title(),
             alive,
+            owner: self.owner.clone(),
         }
     }
 
@@ -2674,6 +2688,7 @@ mod tests {
                 args: vec!["-c".into(), "cd /usr && exec cat".into()],
                 args_are_tty7_defaults: false,
             }),
+            None,
             || {},
         )
         .expect("spawn pane");

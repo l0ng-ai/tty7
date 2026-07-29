@@ -147,6 +147,10 @@ pub struct ShellParts {
     /// directory, which is the case a saved coding-agent session has to be
     /// resumed into.
     pub(crate) restored: bool,
+    /// The workspace whose window created this pane — see
+    /// [`TerminalView::owner_workspace`]. Rides here for the same
+    /// cannot-disagree reason as `workspace` above.
+    pub(crate) owner: Option<crate::core::session::WorkspaceId>,
 }
 
 /// See `TerminalView::drag_scroll`.
@@ -217,6 +221,14 @@ pub struct TerminalView {
     /// panes. In-memory only (not persisted) — held so splits of this pane
     /// inherit the same shell.
     shell_spec: Option<ShellSpec>,
+    /// The workspace whose window created this view (spawn or re-attach).
+    /// `None` only for views built through paths that predate the field (tests,
+    /// native SSH). `Tty7App::save_session` compares it against the workspace
+    /// it is about to record under and shouts on a mismatch — a window whose
+    /// tabs and identity have come apart is exactly the corruption that once
+    /// copied one workspace's layout into another's record, and it must be
+    /// caught at the write, not discovered at the next restart.
+    owner_workspace: Option<crate::core::session::WorkspaceId>,
     /// The native-SSH spec this pane was spawned with, **secrets stripped**
     /// ([`NativeSshSpec::without_secrets`]). `None` for local shells (and a
     /// foreground `ssh` typed in one). Persisted into the session so a *dead*
@@ -1055,6 +1067,7 @@ impl TerminalView {
         working_directory: Option<std::path::PathBuf>,
         restore_pane: Option<u64>,
         shell: Option<ShellSpec>,
+        owner: Option<crate::core::session::WorkspaceId>,
     ) -> anyhow::Result<ShellParts> {
         let route = crate::terminal::PaneRoute::for_workspace(workspace.as_ref());
         let attached = match restore_pane {
@@ -1080,6 +1093,7 @@ impl TerminalView {
                     17,
                     working_directory,
                     shell.clone(),
+                    owner.map(|id| id.to_string()),
                 )?;
                 (terminal, id, shell)
             }
@@ -1090,6 +1104,7 @@ impl TerminalView {
             shell_spec,
             workspace,
             restored,
+            owner,
         })
     }
 
@@ -1102,8 +1117,15 @@ impl TerminalView {
     ) -> Self {
         let mut view = Self::with_terminal(parts.terminal, parts.pane_id, window, cx);
         view.shell_spec = parts.shell_spec;
+        view.owner_workspace = parts.owner;
         view.set_workspace(parts.workspace);
         view
+    }
+
+    /// The workspace whose window created this pane, or `None` when the
+    /// creating path predates the field. See the field for what reads it.
+    pub fn owner_workspace(&self) -> Option<crate::core::session::WorkspaceId> {
+        self.owner_workspace
     }
 
     /// Spawn a native (russh) SSH pane for `spec` and build the view around it
@@ -1340,6 +1362,7 @@ impl TerminalView {
             workspace: None,
             pane_id,
             shell_spec: None,
+            owner_workspace: None,
             ssh_spec: None,
             focus_handle,
             font,

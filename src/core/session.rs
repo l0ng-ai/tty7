@@ -84,6 +84,7 @@ impl WorkspaceStore {
         // workspace whose machine is unreachable must open empty. See
         // [`claimable_session`].
         let reachable = id.is_none_or(|id| Self::machine_is_connected(cx, id));
+        let instance = crate::daemon::spawn::local_daemon_instance();
         let Some(store) = Self::try_store(cx) else {
             // No store (tests): hand back a detached identity so the window
             // still builds, but nothing is persisted.
@@ -99,7 +100,10 @@ impl WorkspaceStore {
         };
         workspace.open = true;
         workspace.touch();
-        let claimed = (workspace.id, claimable_session(workspace, reachable));
+        let claimed = (
+            workspace.id,
+            claimable_session(workspace, reachable, instance.as_deref()),
+        );
         store.workspaces.active = Some(claimed.0);
         store.workspaces.save();
         claimed
@@ -118,6 +122,7 @@ impl WorkspaceStore {
         // describing that machine's layout, so it does not get to overwrite the
         // copy we have of it — see [`record_session`].
         let reachable = Self::machine_is_connected(cx, id);
+        let instance = crate::daemon::spawn::local_daemon_instance();
         let Some(store) = Self::try_store(cx) else {
             return;
         };
@@ -126,7 +131,7 @@ impl WorkspaceStore {
             // tearing down); nothing to record.
             return;
         };
-        record_session(workspace, session, reachable);
+        record_session(workspace, session, reachable, instance);
         if let Some(window) = window {
             workspace.window = Some(window);
         }
@@ -389,9 +394,30 @@ pub(crate) fn crosses_machines(previous: HostId, current: HostId) -> bool {
 /// touching the cached layout**, and
 /// [`crate::ui::remote_workspace`]'s connect path rebuilds the window the moment
 /// the machine answers.
-fn claimable_session(workspace: &mut Workspace, reachable: bool) -> Session {
+/// `current_instance` is the local daemon's identity (see
+/// `Workspace::daemon_instance`). A **local** workspace whose saved ids were
+/// recorded against a different daemon process blanks them first — after a
+/// reboot the numbers restart from 1, so a stale id would otherwise pass the
+/// aliveness check by landing on whatever unrelated pane holds it now. Blanked
+/// in the stored entry too, not just the returned copy, so the record stops
+/// claiming panes that no longer exist even if the window never saves again.
+fn claimable_session(
+    workspace: &mut Workspace,
+    reachable: bool,
+    current_instance: Option<&str>,
+) -> Session {
     if workspace.is_remote() && !reachable {
         return Session::default();
+    }
+    if !workspace.is_remote() {
+        let dropped = workspace.forget_stale_pane_ids(current_instance);
+        if dropped > 0 {
+            log::info!(
+                "workspace {}: {dropped} saved pane id(s) belong to a previous daemon \
+                 process; restoring with fresh shells (and agent resume where recorded)",
+                workspace.id
+            );
+        }
     }
     workspace.session.clone()
 }
@@ -404,11 +430,23 @@ fn claimable_session(workspace: &mut Workspace, reachable: bool) -> Session {
 /// it records nothing rather than replacing the copy we have with the wreckage.
 /// The remote's own `workspaces.json` is still the authority; this entry is the
 /// cache the next launch opens from.
-fn record_session(workspace: &mut Workspace, session: Session, reachable: bool) {
+/// A local workspace's record is stamped with the daemon its pane ids came
+/// from (`instance`), so the next launch can tell a surviving daemon from a
+/// replaced one — see [`claimable_session`]. A remote entry's ids are the
+/// remote server's; its instance is tracked live per connection, never here.
+fn record_session(
+    workspace: &mut Workspace,
+    session: Session,
+    reachable: bool,
+    instance: Option<String>,
+) {
     if workspace.is_remote() && !reachable {
         return;
     }
     workspace.session = session;
+    if !workspace.is_remote() {
+        workspace.daemon_instance = instance;
+    }
 }
 
 #[cfg(test)]
@@ -450,7 +488,7 @@ mod tests {
     #[test]
     fn a_local_workspace_stores_its_own_layout() {
         let mut workspace = Workspace::default();
-        record_session(&mut workspace, local_layout(), true);
+        record_session(&mut workspace, local_layout(), true, None);
         assert_eq!(workspace.session.tabs.len(), 1);
         assert_eq!(workspace.pane_ids(), vec![7]);
     }
@@ -462,7 +500,7 @@ mod tests {
     #[test]
     fn a_connected_remote_workspace_stores_its_layout() {
         let mut workspace = Workspace::on_remote(remote_ref());
-        record_session(&mut workspace, local_layout(), true);
+        record_session(&mut workspace, local_layout(), true, None);
         assert_eq!(workspace.session.tabs.len(), 1);
         assert_eq!(
             workspace.pane_ids(),
@@ -478,10 +516,46 @@ mod tests {
             session: local_layout(),
             ..Workspace::default()
         };
-        let claimed = claimable_session(&mut workspace, true);
+        let claimed = claimable_session(&mut workspace, true, None);
         assert_eq!(claimed.tabs.len(), 1);
         // And the entry is left alone.
         assert_eq!(workspace.session.tabs.len(), 1);
+    }
+
+    /// Claiming a local workspace whose ids were recorded against a *different*
+    /// daemon process blanks them — in the returned session **and** in the
+    /// stored entry. After a reboot the numbers restart from 1, so a stale id
+    /// passes the aliveness check by landing on whatever unrelated pane holds
+    /// it now; blanking is what turns that into an honest fresh spawn (with
+    /// the agent resume the leaf recorded).
+    #[test]
+    fn claiming_a_local_workspace_from_another_daemon_process_blanks_its_ids() {
+        let mut workspace = Workspace {
+            session: local_layout(),
+            daemon_instance: Some("previous-boot".into()),
+            ..Workspace::default()
+        };
+        let leaf_id = |session: &Session| match &session.tabs[0].pane {
+            SessionPane::Leaf { pane_id, .. } => *pane_id,
+            SessionPane::Split { .. } => panic!("the fixture is a single leaf"),
+        };
+        let claimed = claimable_session(&mut workspace, true, Some("current-boot"));
+        assert_eq!(claimed.tabs.len(), 1, "the layout still restores");
+        assert_eq!(
+            leaf_id(&claimed),
+            None,
+            "but no leaf may attach by a number from a dead daemon"
+        );
+        assert!(workspace.pane_ids().is_empty(), "the entry agrees");
+
+        // Same process → the ids stay attachable.
+        let mut workspace = Workspace {
+            session: local_layout(),
+            daemon_instance: Some("current-boot".into()),
+            ..Workspace::default()
+        };
+        let claimed = claimable_session(&mut workspace, true, Some("current-boot"));
+        assert_eq!(leaf_id(&claimed), Some(7));
     }
 
     /// A connected remote workspace reopens on the layout its machine last
@@ -490,7 +564,7 @@ mod tests {
     fn a_connected_remote_workspace_reopens_its_layout() {
         let mut workspace = Workspace::on_remote(remote_ref());
         workspace.session = local_layout();
-        let claimed = claimable_session(&mut workspace, true);
+        let claimed = claimable_session(&mut workspace, true, None);
         assert_eq!(claimed.tabs.len(), 1);
         assert_eq!(workspace.session.tabs.len(), 1);
     }
@@ -505,7 +579,7 @@ mod tests {
         let mut workspace = Workspace::on_remote(remote_ref());
         workspace.session = local_layout();
 
-        let claimed = claimable_session(&mut workspace, false);
+        let claimed = claimable_session(&mut workspace, false, None);
         assert!(claimed.tabs.is_empty(), "the window must open with no tabs");
         assert_eq!(
             workspace.session.tabs.len(),
@@ -521,7 +595,7 @@ mod tests {
     fn an_unreachable_remote_window_does_not_overwrite_the_cached_layout() {
         let mut workspace = Workspace::on_remote(remote_ref());
         workspace.session = local_layout();
-        record_session(&mut workspace, Session::default(), false);
+        record_session(&mut workspace, Session::default(), false, None);
         assert_eq!(workspace.session.tabs.len(), 1);
     }
 

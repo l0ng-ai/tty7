@@ -1022,7 +1022,16 @@ impl Tty7App {
             // First run (no session file): the very first terminal has no
             // predecessor to inherit from, so start in the app's current
             // directory (None → default behavior).
-            None => match new_terminal(pane_ws.clone(), font_size, None, None, None, window, cx) {
+            None => match new_terminal(
+                pane_ws.clone(),
+                Some(workspace),
+                font_size,
+                None,
+                None,
+                None,
+                window,
+                cx,
+            ) {
                 Ok(first) => (vec![Tab::new(Pane::leaf(first))], 0),
                 // The daemon we just tried to start isn't answering. A window
                 // with no tabs is a legal state (it shows the home page), and
@@ -1034,7 +1043,7 @@ impl Tty7App {
             },
             // A saved session (with tabs, or an empty home-page state): rebuild it
             // the same way a daemon restart does.
-            some => tabs_from_session(pane_ws.as_ref(), some, font_size, window, cx),
+            some => tabs_from_session(pane_ws.as_ref(), workspace, some, font_size, window, cx),
         };
         // Sidebar tab filter. Each keystroke re-renders the (cheap) row list so
         // results narrow as you type — the same live-filter wiring the theme
@@ -1257,6 +1266,29 @@ impl Tty7App {
     /// Called after every structural change; the write is a small synchronous
     /// JSON dump and any error is swallowed inside `Session::save`.
     pub(crate) fn save_session(&self, cx: &mut App) {
+        // Tripwire for the write this record must never take: a pane created
+        // for one workspace being persisted under another. Each view remembers
+        // the workspace whose window created it; if that and the id this save
+        // records under have come apart, the window's tabs and its identity
+        // are describing two different workspaces — the exact corruption that
+        // once copied one workspace's whole layout into another's record and
+        // resumed its agents twice. Shout with everything a bug report needs;
+        // the save still runs, because refusing it would silently stop
+        // persisting the user's layout on the strength of one tripped check.
+        for view in self.tabs.iter().flat_map(|tab| tab.pane.terminals()) {
+            let Some(owner) = view.read(cx).owner_workspace() else {
+                continue;
+            };
+            if owner != self.workspace {
+                log::error!(
+                    "save_session: window of workspace {} is recording pane {} \
+                     that was created for workspace {owner} — cross-workspace \
+                     write detected, please report this",
+                    self.workspace,
+                    view.read(cx).pane_id,
+                );
+            }
+        }
         let tabs: Vec<SessionTab> = self
             .tabs
             .iter()
@@ -1479,8 +1511,14 @@ impl Tty7App {
         self.refresh_shells(cx);
         let font_size = self.font_size;
         let pane_ws = self.window_workspace(cx);
-        let (tabs, active) =
-            tabs_from_session(pane_ws.as_ref(), Some(session), font_size, window, cx);
+        let (tabs, active) = tabs_from_session(
+            pane_ws.as_ref(),
+            self.workspace,
+            Some(session),
+            font_size,
+            window,
+            cx,
+        );
         self.tabs = tabs;
         self.active = active;
         self.maximized = None;
@@ -1503,6 +1541,7 @@ impl Tty7App {
         let alive = alive_panes_on(&crate::terminal::PaneRoute::for_workspace(pane_ws.as_ref()));
         let Some(pane) = session_to_pane(
             pane_ws.as_ref(),
+            self.workspace,
             &st.pane,
             &alive,
             self.font_size,
@@ -1780,8 +1819,14 @@ impl Tty7App {
                             .get(this.workspace)
                             .map(|w| w.session.clone());
                         let pane_ws = this.window_workspace(cx);
-                        let (tabs, active) =
-                            tabs_from_session(pane_ws.as_ref(), saved, font_size, window, cx);
+                        let (tabs, active) = tabs_from_session(
+                            pane_ws.as_ref(),
+                            this.workspace,
+                            saved,
+                            font_size,
+                            window,
+                            cx,
+                        );
                         this.tabs = tabs;
                         this.active = active;
                     }
@@ -3086,7 +3131,16 @@ impl Tty7App {
                 .and_then(|leaf| leaf.read(cx).spawnable_cwd())
         });
         let pane_ws = self.window_workspace(cx);
-        let tab = match new_terminal(pane_ws, self.font_size, cwd, None, shell, window, cx) {
+        let tab = match new_terminal(
+            pane_ws,
+            Some(self.workspace),
+            self.font_size,
+            cwd,
+            None,
+            shell,
+            window,
+            cx,
+        ) {
             Ok(view) => view,
             Err(e) => {
                 log::error!("new tab spawn failed: {e}");
@@ -3217,6 +3271,7 @@ impl Tty7App {
             let shell = target.read(cx).shell_spec();
             match new_terminal(
                 self.window_workspace(cx),
+                Some(self.workspace),
                 self.font_size,
                 cwd,
                 None,
@@ -3842,6 +3897,7 @@ impl Tty7App {
         };
         let new = match new_terminal(
             self.window_workspace(cx),
+            Some(self.workspace),
             self.font_size,
             cwd,
             None,
@@ -4089,6 +4145,7 @@ impl Tty7App {
     ) {
         let view = match new_terminal(
             self.window_workspace(cx),
+            Some(self.workspace),
             self.font_size,
             Some(wt.path),
             None,
@@ -6983,10 +7040,11 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
     }
 }
 
-/// Set of pane ids currently alive **on `route`'s machine**, used by
-/// `session_to_pane` to decide per leaf whether to re-`attach` or `spawn`.
-/// Computed once per restore from that daemon's `List`; empty (→ all-fresh)
-/// when it is unreachable.
+/// The pane ids currently alive **on `route`'s machine**, each with the
+/// workspace that owns it (when the daemon knows — `None` for panes spawned by
+/// builds/daemons that predate `pane-owner`). Used by `session_to_pane` to
+/// decide per leaf whether to re-`attach` or `spawn`. Computed once per restore
+/// from that daemon's `List`; empty (→ all-fresh) when it is unreachable.
 ///
 /// There is deliberately no unrouted sibling. Pane ids are **per daemon**:
 /// asking this machine's daemon which of a remote workspace's ids are alive
@@ -6996,7 +7054,9 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
 /// unrouted answer now go through
 /// [`pane_liveness`](crate::terminal::pane_liveness), which cannot spell the
 /// question without naming a machine.
-pub(crate) fn alive_panes_on(route: &crate::terminal::PaneRoute) -> std::collections::HashSet<u64> {
+pub(crate) fn alive_panes_on(
+    route: &crate::terminal::PaneRoute,
+) -> std::collections::HashMap<u64, Option<String>> {
     // **Local routes only.** This is a *blocking* `List`, and every caller is on
     // the UI thread — which is fine against a socket on this machine and is a
     // multi-second window freeze against one that has to open an SSH channel
@@ -7005,13 +7065,44 @@ pub(crate) fn alive_panes_on(route: &crate::terminal::PaneRoute) -> std::collect
     // falls back to a fresh pane when the id is gone, which is exactly what
     // this set was being consulted for.
     if !matches!(route, crate::terminal::PaneRoute::Local) {
-        return std::collections::HashSet::new();
+        return std::collections::HashMap::new();
     }
     crate::terminal::RemoteTerminal::list_panes_on(route)
         .into_iter()
         .filter(|p| p.alive)
-        .map(|p| p.pane_id)
+        .map(|p| (p.pane_id, p.owner))
         .collect()
+}
+
+/// Whether `owner`'s window may re-attach the live pane `id` — the ownership
+/// gate on session restore.
+///
+/// The failure this closes: two workspace records claiming one pane id (a
+/// corrupted `session.json`), or a stale id landing on an unrelated pane after
+/// the numbers were reused. Before the daemon knew owners, both cases attached
+/// — one workspace's window silently picked up another's shell, which is how
+/// `work`'s seven tabs once ended up duplicated into `personal`. A pane with no
+/// recorded owner (older daemon, legacy spawn) stays attachable by anyone —
+/// that is today's behavior, not a new risk.
+fn pane_attachable(
+    alive: &std::collections::HashMap<u64, Option<String>>,
+    id: u64,
+    owner: crate::core::session::WorkspaceId,
+) -> bool {
+    match alive.get(&id) {
+        None => false,
+        Some(None) => true,
+        Some(Some(recorded)) => {
+            let ours = *recorded == owner.to_string();
+            if !ours {
+                log::warn!(
+                    "restore: pane {id} is owned by workspace {recorded}, not {owner}; \
+                     spawning fresh instead of attaching to it"
+                );
+            }
+            ours
+        }
+    }
 }
 
 /// Rebuild the tab list from a persisted `Session`, re-attaching to still-live
@@ -7021,6 +7112,7 @@ pub(crate) fn alive_panes_on(route: &crate::terminal::PaneRoute) -> std::collect
 /// stay in lockstep.
 fn tabs_from_session(
     workspace: Option<&crate::terminal::PaneWorkspace>,
+    owner: WorkspaceId,
     session: Option<Session>,
     font_size: f32,
     window: &mut Window,
@@ -7036,7 +7128,8 @@ fn tabs_from_session(
     for st in &session.tabs {
         // A tab whose every leaf failed to come back has nothing to show; drop
         // it rather than restore an empty frame (or, worse, abort the launch).
-        let Some(pane) = session_to_pane(workspace, &st.pane, &alive, font_size, window, cx) else {
+        let Some(pane) = session_to_pane(workspace, owner, &st.pane, &alive, font_size, window, cx)
+        else {
             log::error!("dropping a restored tab: no pane in it could be started");
             continue;
         };
@@ -7086,8 +7179,9 @@ fn leaf_shares_the_window_daemon(window_is_remote: bool, leaf_is_native_ssh: boo
 /// nodes — which every tree operation ignores — in a live tab.
 fn session_to_pane(
     workspace: Option<&crate::terminal::PaneWorkspace>,
+    owner: WorkspaceId,
     sp: &SessionPane,
-    alive: &std::collections::HashSet<u64>,
+    alive: &std::collections::HashMap<u64, Option<String>>,
     font_size: f32,
     window: &mut Window,
     cx: &mut Context<Tty7App>,
@@ -7114,7 +7208,7 @@ fn session_to_pane(
                 // the attempt to attach happens off the UI thread, where a dead
                 // id costs one failed round trip and falls back to a spawn.
                 true => (*pane_id).filter(|_| same_daemon),
-                false => (*pane_id).filter(|id| same_daemon && alive.contains(id)),
+                false => (*pane_id).filter(|id| same_daemon && pane_attachable(alive, *id, owner)),
             };
             // A *dead* native-SSH leaf (spec persisted, pane no longer alive)
             // reconnects rather than dropping back to a local shell (FR-C2/E4):
@@ -7135,6 +7229,7 @@ fn session_to_pane(
             // must respawn comes back on the default shell.
             let view = match new_terminal(
                 workspace.cloned(),
+                Some(owner),
                 font_size,
                 cwd.clone(),
                 restore,
@@ -7192,8 +7287,8 @@ fn session_to_pane(
             // One side failing collapses the split onto the survivor, exactly
             // as closing that pane by hand would.
             match (
-                session_to_pane(workspace, a, alive, font_size, window, cx),
-                session_to_pane(workspace, b, alive, font_size, window, cx),
+                session_to_pane(workspace, owner, a, alive, font_size, window, cx),
+                session_to_pane(workspace, owner, b, alive, font_size, window, cx),
             ) {
                 (Some(a), Some(b)) => Some(Pane::split_node(axis, *ratio, a, b)),
                 (Some(only), None) | (None, Some(only)) => Some(only),
@@ -7214,8 +7309,14 @@ fn session_to_pane(
 /// to the same machine so everything pane-addressed afterwards (`Kill`, the
 /// restore `List`, a reconnect's `Attach`) goes back to it. `None` is a local
 /// pane, byte-for-byte what it always was.
+/// `owner` is the workspace whose window this pane is being created for —
+/// recorded daemon-side at spawn (so restore can tell whose pane is whose) and
+/// stamped on the view (so `save_session` can shout if a window's tabs and its
+/// identity ever come apart). `None` only for callers that genuinely have no
+/// workspace (tests).
 fn new_terminal(
     workspace: Option<crate::terminal::PaneWorkspace>,
+    owner: Option<WorkspaceId>,
     font_size: f32,
     working_directory: Option<std::path::PathBuf>,
     restore_pane: Option<u64>,
@@ -7240,6 +7341,7 @@ fn new_terminal(
             working_directory,
             restore_pane,
             shell,
+            owner,
         )?;
         return Ok(PaneSlot::Ready(build_terminal_view(
             parts, font_size, window, cx,
@@ -7258,6 +7360,7 @@ fn new_terminal(
         agent: None,
         agent_session_id: None,
         agent_launch_argv: None,
+        owner,
         font_size,
     };
     // The machine as the user knows it. `RemoteTarget`'s `Display` is the same
@@ -7309,6 +7412,7 @@ fn start_pane_spawn(
                     spawn.working_directory.clone(),
                     spawn.restore_pane,
                     spawn.shell.clone(),
+                    spawn.owner,
                 )
                 // Flattened to a string here rather than carried as an
                 // `anyhow::Error`: the chain is not `Send` across this await in
@@ -7616,9 +7720,42 @@ fn apply_ssh_o_option(
 #[cfg(test)]
 mod tests {
     use super::{
-        TabAgentSession, leaf_shares_the_window_daemon, parse_ssh_connect_input,
+        TabAgentSession, leaf_shares_the_window_daemon, pane_attachable, parse_ssh_connect_input,
         parse_ssh_option_words,
     };
+
+    /// The restore-side ownership gate. A pane owned by another workspace must
+    /// read as unattachable even while alive — attaching is how one
+    /// workspace's saved ids once silently picked up another's shells (and
+    /// their running agents). A pane with no recorded owner stays attachable
+    /// by anyone: that is the pre-`pane-owner` behavior, and refusing it would
+    /// orphan every pane a legacy daemon is holding.
+    #[test]
+    fn restore_only_attaches_panes_the_workspace_owns_or_nobody_claims() {
+        let ours = crate::core::session::WorkspaceId::new();
+        let theirs = crate::core::session::WorkspaceId::new();
+        let alive: std::collections::HashMap<u64, Option<String>> = [
+            (1, Some(ours.to_string())),
+            (2, Some(theirs.to_string())),
+            (3, None),
+        ]
+        .into_iter()
+        .collect();
+
+        assert!(pane_attachable(&alive, 1, ours), "our own pane attaches");
+        assert!(
+            !pane_attachable(&alive, 2, ours),
+            "another workspace's pane must spawn fresh instead"
+        );
+        assert!(
+            pane_attachable(&alive, 3, ours),
+            "an unowned pane is legacy"
+        );
+        assert!(
+            !pane_attachable(&alive, 4, ours),
+            "a dead id never attaches"
+        );
+    }
 
     /// A remote window's saved layout can hold a native-SSH pane, whose russh
     /// session runs in *this* client's daemon rather than the machine's. Its
@@ -7689,6 +7826,7 @@ mod tests {
                         agent: Some(CLIAgent::Claude),
                         agent_session_id: Some("sid-abc".to_string()),
                         agent_launch_argv: Some(vec!["claude".to_string()]),
+                        owner: None,
                         font_size: 14.0,
                     },
                     cx,

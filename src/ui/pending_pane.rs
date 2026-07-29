@@ -73,6 +73,10 @@ pub struct PendingSpawn {
     pub agent: Option<crate::core::cli_agent::CLIAgent>,
     pub agent_session_id: Option<String>,
     pub agent_launch_argv: Option<Vec<String>>,
+    /// The workspace this pane is being created for — carried so the spawn that
+    /// finally lands (and any retry) names the same owner the synchronous local
+    /// path would have.
+    pub owner: Option<crate::core::session::WorkspaceId>,
     /// Inherited by the terminal this becomes, so a pane that arrives late
     /// still matches the ones already on screen.
     pub font_size: f32,

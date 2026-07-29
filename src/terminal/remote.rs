@@ -398,7 +398,7 @@ impl RemoteTerminal {
         cwd: Option<PathBuf>,
         shell: Option<ShellSpec>,
     ) -> anyhow::Result<(Self, u64)> {
-        Self::spawn_on(&PaneRoute::Local, size, cell_w, cell_h, cwd, shell)
+        Self::spawn_on(&PaneRoute::Local, size, cell_w, cell_h, cwd, shell, None)
     }
 
     /// [`spawn`](Self::spawn) onto a particular machine.
@@ -409,6 +409,11 @@ impl RemoteTerminal {
     /// What it deliberately does *not* do is restart anything on the far side; a
     /// remote daemon that is missing or mismatched is `install`'s business, and
     /// it has already run by the time the ack arrives.
+    /// `owner` is the workspace the pane will belong to. It only ever reaches
+    /// the wire for a **local** spawn against a daemon that advertises
+    /// `pane-owner` — the gate lives in [`spawn_once`](Self::spawn_once), so
+    /// the retry legs (which may talk to a *different*, freshly started
+    /// daemon) re-decide it per attempt.
     pub fn spawn_on(
         route: &PaneRoute,
         size: TermSize,
@@ -416,10 +421,12 @@ impl RemoteTerminal {
         cell_h: u16,
         cwd: Option<PathBuf>,
         shell: Option<ShellSpec>,
+        owner: Option<String>,
     ) -> anyhow::Result<(Self, u64)> {
         let retry_cwd = cwd.clone();
         let retry_shell = shell.clone();
-        match Self::spawn_once(route, size, cell_w, cell_h, cwd, shell) {
+        let retry_owner = owner.clone();
+        match Self::spawn_once(route, size, cell_w, cell_h, cwd, shell, owner) {
             Ok(term) => Ok(term),
             Err(first_err) if daemon_not_listening(&first_err) => {
                 // Nothing is on the socket: the daemon died (crash, OOM, a stray
@@ -431,13 +438,12 @@ impl RemoteTerminal {
                         "daemon not running ({first_err}); starting one failed: {start_err}"
                     ));
                 }
-                Self::spawn_once(route, size, cell_w, cell_h, retry_cwd, retry_shell).map_err(
-                    |second_err| {
+                Self::spawn_once(route, size, cell_w, cell_h, retry_cwd, retry_shell, retry_owner)
+                    .map_err(|second_err| {
                         anyhow::anyhow!(
                             "daemon not running ({first_err}); started one but Spawn still failed: {second_err}"
                         )
-                    },
-                )
+                    })
             }
             // **Local panes only.** On a routed pane the connection this reads
             // as "disconnected" belongs to the *remote* — the local daemon is
@@ -458,7 +464,7 @@ impl RemoteTerminal {
                         "daemon disconnected before Spawn reply ({first_err}); restart failed: {restart_err}"
                     ));
                 }
-                Self::spawn_once(route, size, cell_w, cell_h, retry_cwd, retry_shell).map_err(|second_err| {
+                Self::spawn_once(route, size, cell_w, cell_h, retry_cwd, retry_shell, retry_owner).map_err(|second_err| {
                     anyhow::anyhow!(
                         "daemon disconnected before Spawn reply ({first_err}); restarted daemon but Spawn still failed: {second_err}"
                     )
@@ -475,9 +481,21 @@ impl RemoteTerminal {
         cell_h: u16,
         cwd: Option<PathBuf>,
         shell: Option<ShellSpec>,
+        owner: Option<String>,
     ) -> anyhow::Result<(Self, u64)> {
         let mut stream = connect_routed(route)?;
         let win = win_size(size, cell_w, cell_h);
+
+        // An owner only goes on the wire when this daemon is known to read the
+        // `SPAWN_OWNED` frame — an older one drops the connection over the
+        // unknown kind. Local only for now: a routed spawn's capability set is
+        // the *remote* server's, which nothing here has interrogated.
+        let owner = owner.filter(|_| {
+            route.is_local()
+                && crate::daemon::spawn::local_daemon_supports(
+                    crate::daemon::protocol::FEATURE_PANE_OWNER,
+                )
+        });
 
         // Ask the daemon to create the pane, then read its assigned id back. The
         // very next frames on this connection are this pane's Snapshot + Output,
@@ -486,6 +504,7 @@ impl RemoteTerminal {
             cwd,
             size: win,
             shell,
+            owner,
         }
         .encode(&mut stream)?;
         let pane_id = match DaemonMsg::read(&mut stream)? {
