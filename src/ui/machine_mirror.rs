@@ -66,8 +66,17 @@ impl MachineMirrors {
     /// call whenever a link comes up or a delta refuses to apply; concurrent
     /// triggers coalesce into one round trip.
     pub fn refresh(cx: &mut App, host: HostId) {
-        let Some(client) = crate::ui::tree_sync::control_for(cx, host) else {
-            return;
+        // A peer that does not advertise `machine-tree` (a server with no
+        // home directory for one) has no tree to pull; asking anyway costs a
+        // round trip per trigger to hear the same refusal. Reads keep their
+        // "never pulled" answer, which renders as not knowing.
+        let client = match crate::ui::tree_sync::tree_control_for(cx, host) {
+            crate::ui::tree_sync::TreeLink::Ready(client) => client,
+            crate::ui::tree_sync::TreeLink::Unserved => {
+                log::debug!("not pulling {host:?}: its server does not serve the machine tree");
+                return;
+            }
+            crate::ui::tree_sync::TreeLink::Down => return,
         };
         let mirrors = cx.default_global::<Self>();
         if mirrors.pulling.contains(&host) {

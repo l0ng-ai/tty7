@@ -95,6 +95,19 @@ use super::protocol::{MAX_FRAME, read_frame, write_frame};
 ///
 /// ## History
 ///
+/// - **v3** — the machine-tree migration. The workspace/tab/pane tree moved
+///   into the daemon: `MachineGet` / `WorkspaceTree`, the semantic tree verbs
+///   (workspace/tab/pane create, close, rename, move, split, ratio, replace),
+///   and the [`ControlEvent::Layout`] pushes — seventeen new variants in all
+///   — while the retired opaque-record verbs
+///   (`workspace_list` / `workspace_get` / `workspace_put` /
+///   `workspace_delete` and the `workspace_changed` event) left the dialect
+///   entirely. A v2 peer meeting any of the new variants fails the whole
+///   decode (no `#[serde(other)]`), and this build meeting a v2 server's
+///   record verbs would answer unknown-variant errors forever. The
+///   [`feature::MACHINE_TREE`] bit still exists *within* v3, because two
+///   current servers can genuinely differ on it (a box with no home
+///   directory serves files but no tree).
 /// - **v2** — [`ControlRequest::Shells`], which backs a remote window's new-tab
 ///   dropdown. Not a `feature` string: every server from this build on answers
 ///   it, so the only thing a capability bit would have bought is that a machine
@@ -102,7 +115,7 @@ use super::protocol::{MAX_FRAME, read_frame, write_frame};
 ///   menu. The bump makes `RemoteProtocol::serves` refuse to adopt that server
 ///   and install this build's instead, which is the actual fix.
 /// - **v1** — the dialect at the time remote workspaces landed.
-pub const CONTROL_VERSION: u32 = 2;
+pub const CONTROL_VERSION: u32 = 3;
 
 /// This process's identity as a control server, minted once on first use.
 ///

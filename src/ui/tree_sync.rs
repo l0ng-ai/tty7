@@ -81,6 +81,42 @@ pub(crate) fn control_for(cx: &mut App, host: HostId) -> Option<Arc<ControlClien
     }
 }
 
+/// The control link to `host`, seen by a caller about to speak the tree verbs.
+///
+/// [`TreeLink::Unserved`] is the difference from [`control_for`]'s plain
+/// `None`: the peer is connected but does not advertise
+/// [`feature::MACHINE_TREE`](tty7_core::daemon::control::feature::MACHINE_TREE)
+/// — a server with no home directory to keep a tree in, or one predating the
+/// verbs. "Down" is transient and retried; "unserved" is a fact about the
+/// peer, and sending it tree verbs anyway would only trade this one clear
+/// state for a refusal (or, on an old enough peer, a decode failure) per
+/// operation.
+pub(crate) enum TreeLink {
+    Ready(Arc<ControlClient>),
+    Unserved,
+    Down,
+}
+
+pub(crate) fn tree_control_for(cx: &mut App, host: HostId) -> TreeLink {
+    classify_tree_link(control_for(cx, host))
+}
+
+/// The judgement half of [`tree_control_for`]: what the handshake's
+/// capability bits say this link is good for.
+fn classify_tree_link(client: Option<Arc<ControlClient>>) -> TreeLink {
+    match client {
+        Some(client)
+            if client
+                .hello()
+                .has_feature(tty7_core::daemon::control::feature::MACHINE_TREE) =>
+        {
+            TreeLink::Ready(client)
+        }
+        Some(_) => TreeLink::Unserved,
+        None => TreeLink::Down,
+    }
+}
+
 /// The machine-side id operations about this window's workspace must carry.
 fn tree_workspace_id(cx: &App, client_ws: WorkspaceId) -> WorkspaceId {
     WorkspaceStore::all(cx)
@@ -963,9 +999,16 @@ pub(crate) fn fire_workspace_op(
     // The op will not echo back to this client (origin exclusion), so the
     // machine-wide mirror folds it in here.
     crate::ui::machine_mirror::MachineMirrors::note_workspace_op(cx, host, &request);
-    let Some(client) = control_for(cx, host) else {
-        log::debug!("no control link to send {request:?}; the machine keeps its copy");
-        return;
+    let client = match tree_control_for(cx, host) {
+        TreeLink::Ready(client) => client,
+        TreeLink::Unserved => {
+            log::warn!("{request:?} not sent: this machine's server does not serve the tree");
+            return;
+        }
+        TreeLink::Down => {
+            log::debug!("no control link to send {request:?}; the machine keeps its copy");
+            return;
+        }
     };
     cx.background_executor()
         .spawn(async move {
@@ -992,15 +1035,26 @@ pub(crate) fn rename_workspace(cx: &mut App, client_ws: WorkspaceId, name: Optio
 fn start_prime(cx: &mut App, client_ws: WorkspaceId) {
     let host = WorkspaceStore::host_of(cx, client_ws);
     let machine_ws = tree_workspace_id(cx, client_ws);
-    let Some(client) = control_for(cx, host) else {
-        // Not reachable right now. Stay dirty; the next save retries, and a
-        // reconnect-triggered save is what usually gets there first.
-        if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws)
-            && let SyncPhase::Unprimed { priming, .. } = &mut state.sync
-        {
-            *priming = false;
+    let client = match tree_control_for(cx, host) {
+        TreeLink::Ready(client) => client,
+        // Not reachable right now (or reachable but tree-less). Stay dirty;
+        // the next save retries, and a reconnect-triggered save is what
+        // usually gets there first. An unserved peer just keeps answering
+        // this way — the window works locally and nothing round-trips.
+        unavailable => {
+            if matches!(unavailable, TreeLink::Unserved) {
+                log::warn!(
+                    "workspace {client_ws}: its machine's server does not serve the tree; \
+                     the layout will not be synced"
+                );
+            }
+            if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws)
+                && let SyncPhase::Unprimed { priming, .. } = &mut state.sync
+            {
+                *priming = false;
+            }
+            return;
         }
-        return;
     };
     cx.spawn(async move |cx| {
         let outcome = cx
@@ -1092,7 +1146,7 @@ fn finish_prime(cx: &mut App, client_ws: WorkspaceId, outcome: io::Result<WsMirr
 /// Send everything queued, in order, one batch in flight at a time.
 fn pump(cx: &mut App, client_ws: WorkspaceId) {
     let host = WorkspaceStore::host_of(cx, client_ws);
-    let client = control_for(cx, host);
+    let client = tree_control_for(cx, host);
     let state = cx
         .default_global::<TreeSync>()
         .windows
@@ -1101,9 +1155,16 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
     if state.inflight || state.queue.is_empty() {
         return;
     }
-    let Some(client) = client else {
-        desync(cx, client_ws, "the control link is down");
-        return;
+    let client = match client {
+        TreeLink::Ready(client) => client,
+        TreeLink::Unserved => {
+            desync(cx, client_ws, "the server does not serve the machine tree");
+            return;
+        }
+        TreeLink::Down => {
+            desync(cx, client_ws, "the control link is down");
+            return;
+        }
     };
     let batch: Vec<ControlRequest> = state.queue.drain(..).collect();
     state.inflight = true;
@@ -1278,18 +1339,29 @@ fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
     }
     cx.spawn(async move |cx| {
         // At launch the link is usually still dialing; wait it out briefly
-        // rather than failing an open the supervisor will fix in a second.
+        // rather than failing an open the supervisor will fix in a second. A
+        // peer that is up but does not serve the tree is not waited on at all
+        // — that answer will not change, and fifteen silent seconds would
+        // read as a hang rather than as the fact it is.
         let deadline = std::time::Instant::now() + HYDRATE_LINK_DEADLINE;
         let client = loop {
-            let client = cx.update(|cx| control_for(cx, host));
-            match client {
-                Some(client) => break Some(client),
-                None if std::time::Instant::now() > deadline => break None,
-                None => cx.background_executor().timer(HYDRATE_LINK_POLL).await,
+            match cx.update(|cx| tree_control_for(cx, host)) {
+                TreeLink::Ready(client) => break Some(client),
+                TreeLink::Unserved => {
+                    log::warn!(
+                        "workspace {client_ws}: its machine's server does not serve the \
+                         machine tree; opening empty"
+                    );
+                    break None;
+                }
+                TreeLink::Down if std::time::Instant::now() > deadline => {
+                    log::warn!("workspace {client_ws}: no link to its machine; opening empty");
+                    break None;
+                }
+                TreeLink::Down => cx.background_executor().timer(HYDRATE_LINK_POLL).await,
             }
         };
         let Some(client) = client else {
-            log::warn!("workspace {client_ws}: no link to its machine; opening empty");
             cx.update(|cx| {
                 if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) {
                     if let SyncPhase::Unprimed { priming, .. } = &mut state.sync {
@@ -1856,6 +1928,55 @@ fn set_gui_ratio(pane: &mut Pane, path: &[Side], ratio: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tree verbs are gated on the handshake's `machine-tree` bit: a
+    /// connected peer that does not advertise it must classify as
+    /// [`TreeLink::Unserved`] — the callers' cue to say "this server does not
+    /// serve the tree" once, instead of paying a refused round trip per
+    /// operation against a server that will never answer differently.
+    #[cfg(unix)]
+    #[test]
+    fn a_peer_without_the_machine_tree_bit_classifies_as_unserved() {
+        use tty7_core::daemon::control::ControlHello;
+        use tty7_core::host::local::LocalHost;
+        use tty7_core::host::server::{Services, serve_with};
+
+        let connect = |services: Services| {
+            let (server, client) = std::os::unix::net::UnixStream::pair().unwrap();
+            std::thread::spawn(move || {
+                let _ = serve_with(server, LocalHost::new(), services);
+            });
+            let hello = ControlHello::host_rpc("test-token", "test-host");
+            Arc::new(
+                tty7_core::daemon::control::ControlClient::over_unix(
+                    client,
+                    &hello,
+                    Box::new(|_| {}),
+                )
+                .unwrap(),
+            )
+        };
+
+        let treeless = connect(Services::none());
+        assert!(matches!(
+            classify_tree_link(Some(treeless)),
+            TreeLink::Unserved
+        ));
+
+        let dir = std::env::temp_dir().join(format!("tty7-treelink-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = tty7_core::core::machine::MachineStore::open(
+            dir.join(tty7_core::core::machine::MACHINE_FILE),
+        );
+        let serving = connect(Services::with_machine(store));
+        assert!(matches!(
+            classify_tree_link(Some(serving)),
+            TreeLink::Ready(_)
+        ));
+
+        assert!(matches!(classify_tree_link(None), TreeLink::Down));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn seed(pane: u64) -> PaneSeed {
         PaneSeed {
