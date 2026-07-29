@@ -2017,27 +2017,17 @@ impl Tty7App {
             // layout returns exactly as it was.
             let _ = this.update_in(cx, |this, window, cx| {
                 match &restarted {
+                    // Rebuild from the machine's tree, which survived the
+                    // restart on disk: the fresh daemon force-cleared every
+                    // pane's live flag, so the resync revives each leaf as a
+                    // fresh shell in its recorded cwd (agents resumed) —
+                    // exactly the semantics the old saved-session rebuild
+                    // hand-rolled. The pull waits out the local link coming
+                    // back up to the fresh daemon.
                     Ok(()) => {
-                        let font_size = this.font_size;
-                        // This window's own workspace only — the other windows
-                        // rebuild themselves from theirs.
-                        let saved = WorkspaceStore::all(cx)
-                            .get(this.workspace)
-                            .map(|w| w.session.clone());
-                        let pane_ws = this.window_workspace(cx);
-                        let (tabs, active) = tabs_from_session(
-                            pane_ws.as_ref(),
-                            this.workspace,
-                            saved,
-                            font_size,
-                            window,
-                            cx,
-                        );
-                        this.tabs = tabs;
-                        this.active = active;
+                        crate::ui::tree_sync::resync_window_from_tree(cx, this.workspace);
                     }
-                    // The fresh daemon never came up; rebuilding would panic in
-                    // `new_terminal`'s connect `.expect`. Stay on the home page and
+                    // The fresh daemon never came up. Stay on the home page and
                     // leave a breadcrumb rather than crash — the user can retry.
                     Err(e) => {
                         log::error!("restart background service failed, staying on home page: {e}");
