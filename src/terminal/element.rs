@@ -616,6 +616,7 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
                     cells: 2,
                     text: char_string(cell.c),
                 });
+                col += 2;
             } else if !is_sara_am(cell.c)
                 && let Some(am) = sara_am_at(row, col + 1)
             {
