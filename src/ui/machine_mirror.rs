@@ -237,6 +237,11 @@ fn apply(machine: &mut Machine, workspace: WorkspaceId, delta: &LayoutDelta) -> 
             true
         }
         LayoutDelta::TabCreated { at, tab } => {
+            // Deltas and full pulls have no ordering barrier: a create that
+            // straddles a pull arrives *after* the snapshot that already
+            // carries its tab. Replace-by-id (the `WorkspaceCreated` retain
+            // above is the precedent) rather than insert twice.
+            ws.tabs.retain(|t| t.id != tab.id);
             let at = (*at).min(ws.tabs.len());
             ws.tabs.insert(at, tab.clone());
             true
@@ -467,6 +472,27 @@ mod tests {
             machine.panes.len(),
             1,
             "the rider pane record is upserted into the registry"
+        );
+    }
+
+    /// Deltas and full pulls have no ordering barrier: a `TabCreated` that
+    /// straddles a `MachineGet` arrives after a snapshot that already carries
+    /// its tab. Applying it must replace by id, not insert a second copy.
+    #[test]
+    fn a_tab_created_delta_that_straddled_a_pull_lands_once() {
+        let ws = Workspace::default();
+        let id = ws.id;
+        let mut machine = machine_with(ws);
+        let delta = LayoutDelta::TabCreated {
+            at: 0,
+            tab: leaf_tab(1),
+        };
+        assert!(apply(&mut machine, id, &delta));
+        assert!(apply(&mut machine, id, &delta));
+        assert_eq!(
+            machine.workspaces[0].tabs.len(),
+            1,
+            "the second application is the pull/delta overlap, not a second tab"
         );
     }
 

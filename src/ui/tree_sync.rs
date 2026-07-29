@@ -816,6 +816,12 @@ struct WsState {
     /// a window that opened empty ahead of its pull must not read its own
     /// emptiness as "close everything".
     informed: bool,
+    /// Which prime/hydrate cycle the pulls in flight belong to. Bumped by
+    /// every path that invalidates the mirror (a hydration start, a desync, a
+    /// preemption); a pull landing under a different number is a pull whose
+    /// question is obsolete, and its answer is dropped rather than allowed to
+    /// roll a mirror that has since advanced back to older state.
+    epoch: u64,
 }
 
 impl Default for WsState {
@@ -828,6 +834,7 @@ impl Default for WsState {
             queue: VecDeque::new(),
             inflight: false,
             informed: false,
+            epoch: 0,
         }
     }
 }
@@ -1001,6 +1008,8 @@ pub(crate) fn on_preempted(cx: &mut App, client_ws: WorkspaceId) {
     };
     state.queue.clear();
     state.informed = false;
+    // …and any pull in flight was asked on the lost session's behalf.
+    state.epoch += 1;
 }
 
 /// Drop a window's sync state — its window is closing or rebinding. The
@@ -1086,12 +1095,18 @@ fn start_prime(cx: &mut App, client_ws: WorkspaceId) {
             return;
         }
     };
+    let epoch = cx
+        .default_global::<TreeSync>()
+        .windows
+        .get(&client_ws)
+        .map(|s| s.epoch)
+        .unwrap_or(0);
     cx.spawn(async move |cx| {
         let outcome = cx
             .background_executor()
             .spawn(async move { pull_or_create(&client, machine_ws) })
             .await;
-        cx.update(|cx| finish_prime(cx, client_ws, outcome));
+        cx.update(|cx| finish_prime(cx, client_ws, epoch, outcome));
     })
     .detach();
 }
@@ -1129,12 +1144,21 @@ fn pull_or_create(client: &ControlClient, machine_ws: WorkspaceId) -> io::Result
     }
 }
 
-fn finish_prime(cx: &mut App, client_ws: WorkspaceId, outcome: io::Result<WsMirror>) {
+fn finish_prime(cx: &mut App, client_ws: WorkspaceId, epoch: u64, outcome: io::Result<WsMirror>) {
     // `get_mut`, never `entry`: a window forgotten while the pull was in
     // flight must not be resurrected as orphaned bookkeeping.
     let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
         return;
     };
+    // Land only into the cycle that asked. A pull outlived by a hydration, a
+    // desync or a preemption (different epoch) — or by anything that already
+    // primed the mirror and let it advance — must be dropped, not installed:
+    // installing would roll the mirror back to the older tree and the next
+    // diff would faithfully re-emit the rollback as operations.
+    if state.epoch != epoch || !matches!(state.sync, SyncPhase::Unprimed { priming: true, .. }) {
+        log::debug!("workspace {client_ws}: dropping a superseded tree pull");
+        return;
+    }
     let was_dirty = matches!(state.sync, SyncPhase::Unprimed { dirty: true, .. });
     let landed = match outcome {
         Ok(mirror) => {
@@ -1242,6 +1266,10 @@ fn desync(cx: &mut App, client_ws: WorkspaceId, why: &str) {
         dirty: true,
         priming: true,
     };
+    // Older pulls in flight were asked against the mirror just discarded;
+    // bumping the epoch is what keeps their answers from landing over the
+    // re-pull this desync is about to start.
+    state.epoch += 1;
     start_prime(cx, client_ws);
 }
 
@@ -1352,7 +1380,7 @@ enum Adopt {
 fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
     let host = WorkspaceStore::host_of(cx, client_ws);
     let machine_ws = tree_workspace_id(cx, client_ws);
-    {
+    let epoch = {
         let state = cx
             .default_global::<TreeSync>()
             .windows
@@ -1366,7 +1394,11 @@ fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
         // mirror this pull is about to replace, and letting it drain after
         // the snapshot would silently diverge the server from it.
         state.queue.clear();
-    }
+        // This hydration owns the cycle from here; older pulls still in
+        // flight land under the previous number and are dropped.
+        state.epoch += 1;
+        state.epoch
+    };
     cx.spawn(async move |cx| {
         // At launch the link is usually still dialing; wait it out briefly
         // rather than failing an open the supervisor will fix in a second. A
@@ -1405,7 +1437,7 @@ fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
             .background_executor()
             .spawn(async move { pull_workspace(&client, machine_ws) })
             .await;
-        cx.update(|cx| finish_hydration(cx, client_ws, adopt, outcome));
+        cx.update(|cx| finish_hydration(cx, client_ws, epoch, adopt, outcome));
     })
     .detach();
 }
@@ -1446,9 +1478,22 @@ fn pull_workspace(
 fn finish_hydration(
     cx: &mut App,
     client_ws: WorkspaceId,
+    epoch: u64,
     adopt: Adopt,
     outcome: io::Result<(Machine, WsMirror, Session)>,
 ) {
+    // A hydration superseded by a newer cycle (another hydration, a desync, a
+    // preemption) must land nothing — not the mirror, not the window, and not
+    // the failure bookkeeping, all of which belong to the newer cycle now.
+    let current = cx
+        .default_global::<TreeSync>()
+        .windows
+        .get(&client_ws)
+        .map(|s| s.epoch);
+    if current != Some(epoch) {
+        log::debug!("workspace {client_ws}: dropping a superseded hydration");
+        return;
+    }
     let (machine, mirror, session) = match outcome {
         Ok(pulled) => pulled,
         Err(e) => {
@@ -1577,8 +1622,13 @@ pub(crate) fn on_layout_delta(cx: &mut App, host: HostId, key: &str, delta: Layo
     {
         Some(SyncPhase::Primed(mirror)) => apply_to_mirror(mirror, &delta),
         // No mirror yet: whatever pull is (or will be) in flight already
-        // answers with a state that includes this delta.
-        _ => true,
+        // answers with a state that includes this delta — so the *window*
+        // must not apply it either. A `TabCreated` landing in a window whose
+        // hydration is mid-flight would both duplicate the tab when the
+        // snapshot arrives and, worse, make `finish_hydration` read the
+        // no-longer-empty window as "the user got here first" and skip
+        // adopting the tree at all.
+        _ => return,
     };
 
     let Some(app) =
@@ -1617,6 +1667,10 @@ fn apply_to_mirror(mirror: &mut WsMirror, delta: &LayoutDelta) -> bool {
             true
         }
         LayoutDelta::TabCreated { at, tab } => {
+            // A create that straddled a re-pull arrives after the snapshot
+            // that already carries its tab; replace-by-id, never insert a
+            // second copy (same rule as the machine-wide mirror's).
+            mirror.tabs.retain(|t| t.id != tab.id);
             let at = (*at).min(mirror.tabs.len());
             mirror.tabs.insert(at, tab.clone());
             true
@@ -1808,6 +1862,14 @@ impl Tty7App {
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) -> bool {
+        // Already shown: the delta straddled a pull whose snapshot carried
+        // this tab, and the rebuild path already displayed it. Building it
+        // again would not just duplicate the tab — attaching to panes this
+        // window already streams would steal their single subscription from
+        // ourselves.
+        if self.tabs.iter().any(|t| t.tree_id.get() == tab.id) {
+            return true;
+        }
         let mut existing = HashMap::new();
         let Some(pane) = self.build_pane_from_tree(&tab.root, &mut existing, window, cx) else {
             return false;
@@ -2039,6 +2101,69 @@ mod tests {
                 !state.informed,
                 "the licence to prune must not survive a takeover"
             );
+        });
+    }
+
+    /// Same overlap as the machine-wide mirror's: a `TabCreated` that
+    /// straddled a re-pull arrives after the snapshot that already carries
+    /// its tab, and must land once.
+    #[test]
+    fn a_tab_created_delta_that_straddled_a_repull_lands_once_in_the_window_mirror() {
+        let mut mirror = WsMirror::default();
+        let delta = LayoutDelta::TabCreated {
+            at: 0,
+            tab: TreeTab::leaf(1),
+        };
+        assert!(apply_to_mirror(&mut mirror, &delta));
+        assert!(apply_to_mirror(&mut mirror, &delta));
+        assert_eq!(mirror.tabs.len(), 1);
+    }
+
+    /// A prime whose pull was outlived by a newer cycle (a hydration, a
+    /// desync, a preemption) must drop its answer: installing it would roll
+    /// the mirror back to older state, and the next diff would faithfully
+    /// re-emit the rollback as operations against the machine.
+    #[gpui::test]
+    fn a_superseded_prime_result_does_not_roll_the_mirror_back(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let ws = WorkspaceId::new();
+            let stale_epoch = {
+                let state = cx
+                    .default_global::<TreeSync>()
+                    .windows
+                    .entry(ws)
+                    .or_default();
+                state.sync = SyncPhase::Unprimed {
+                    dirty: false,
+                    priming: true,
+                };
+                state.epoch
+            };
+            // A hydration supersedes the prime and lands a mirror that has
+            // since advanced by an op.
+            let advanced = WsMirror {
+                tabs: vec![TreeTab::leaf(7)],
+                active: None,
+            };
+            {
+                let state = cx
+                    .default_global::<TreeSync>()
+                    .windows
+                    .get_mut(&ws)
+                    .unwrap();
+                state.epoch += 1;
+                state.sync = SyncPhase::Primed(advanced.clone());
+            }
+
+            finish_prime(cx, ws, stale_epoch, Ok(WsMirror::default()));
+
+            match &cx.default_global::<TreeSync>().windows[&ws].sync {
+                SyncPhase::Primed(mirror) => assert_eq!(
+                    *mirror, advanced,
+                    "the stale pull's empty answer must not replace the advanced mirror"
+                ),
+                _ => panic!("the mirror was dropped entirely"),
+            }
         });
     }
 
