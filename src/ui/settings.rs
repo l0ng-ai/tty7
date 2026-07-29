@@ -271,7 +271,7 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         SearchEntry {
             section: Input,
             title: "Option (⌥) acts as Meta",
-            keywords: "alt keyboard modifier escape macos option meta",
+            keywords: "alt keyboard modifier escape macos option meta option acts as meta",
         },
         SearchEntry {
             section: Input,
