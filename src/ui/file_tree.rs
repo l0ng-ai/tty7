@@ -418,10 +418,14 @@ impl FileTreeState {
     }
 
     /// Ask for a listing of every root and expanded directory that isn't cached
-    /// yet. Called from render, so it must stay map lookups: the `read_dir`
-    /// runs on the background executor and the answer arrives with a
-    /// `cx.notify()`, which is why a just-expanded directory fills in on the
-    /// next frame rather than this one.
+    /// yet. Called from render — so it must stay map lookups — and from the
+    /// watcher callback, which re-reads what it just marked instead of asking
+    /// for a paint to do it. Either way the `read_dir` runs on the background
+    /// executor and the answer arrives with a `cx.notify()`, which is why a
+    /// just-expanded directory fills in on the next frame rather than this one.
+    ///
+    /// Both callers first check that the listings are actually being drawn —
+    /// see [`file_tree_listings_on_screen`](Tty7App::file_tree_listings_on_screen).
     fn request_loads(
         &mut self,
         host: &SharedHost,
@@ -1089,6 +1093,39 @@ impl Tty7App {
             && self.sftp_panel.open_pane_id.is_none()
     }
 
+    /// The Files search box's query, trimmed and lowercased. The one place it
+    /// is derived, because what the tree draws turns on it in two places.
+    fn file_tree_query(&self, cx: &App) -> String {
+        self.file_search.read(cx).value().trim().to_lowercase()
+    }
+
+    /// Whether the Files search box has a query in it, which is the tree's
+    /// other mode: [`render_file_tree_rows`](Self::render_file_tree_rows) draws
+    /// [`search_rows`](FileTreeState::search_rows) then — flat hits from their
+    /// own host-side walk — and the cached directory listings are not on screen
+    /// at all.
+    ///
+    /// The test itself rather than each caller's own copy of it, because the
+    /// paint and the watcher have to agree about which mode the tree is in.
+    pub(crate) fn file_tree_searching(&self, cx: &App) -> bool {
+        !self.file_tree_query(cx).is_empty()
+    }
+
+    /// Whether the tree is drawing directory listings, for the work that only a
+    /// drawn listing can have a result for — which is every `read_dir` the tree
+    /// asks for.
+    ///
+    /// Strictly narrower than [`file_tree_on_screen`](Self::file_tree_on_screen):
+    /// a searching tree *is* on screen, and still owes its column paints, but
+    /// none of them read a listing. Relisting for one is the same waste as
+    /// relisting for a closed panel — a round trip per marked directory per
+    /// event batch, on a remote workspace — and the marks carry the change
+    /// across the same way, re-read by the first paint after the box is
+    /// cleared.
+    pub(crate) fn file_tree_listings_on_screen(&self, cx: &App) -> bool {
+        self.file_tree_on_screen(cx) && !self.file_tree_searching(cx)
+    }
+
     /// Watcher callback (debounced): mark the affected listings for a refresh
     /// and re-read them. A `.gitignore` change resets ignore state wholesale —
     /// its patterns can affect any depth below it.
@@ -1109,8 +1146,16 @@ impl Tty7App {
     ///
     /// Two things still repaint on the event itself: the whole-cache
     /// `.gitignore` branch, whose re-walk only a paint performs, and a batch
-    /// that moved a repository root. Both are gated on the tree being on screen,
-    /// because both exist to get a paint that would do nothing while it is not.
+    /// that moved a repository root. Both are gated on
+    /// [`file_tree_on_screen`](Self::file_tree_on_screen), because both exist to
+    /// get a paint that would do nothing while the column is not drawn — and a
+    /// searching tree does want both, its walk being what `invalidate_all`
+    /// restarts.
+    ///
+    /// The re-read is gated on the narrower
+    /// [`file_tree_listings_on_screen`](Self::file_tree_listings_on_screen)
+    /// instead: it is the only effect here that a search box with something in
+    /// it can have no use for.
     pub(crate) fn file_tree_apply_fs_events(
         &mut self,
         host: HostId,
@@ -1138,6 +1183,12 @@ impl Tty7App {
         // are what carry the change across: they stay, and the first paint after
         // the panel comes back re-reads them.
         let on_screen = self.file_tree_on_screen(cx);
+        // The narrower of the two, for the re-read alone: a tree with a query in
+        // its search box is drawn, and owes the paints below, but draws hits
+        // rather than listings — so a `read_dir` issued for it lands in a cache
+        // nothing is reading. Same predicate the paint decides its own mode
+        // with, rather than a second copy of the test.
+        let listings_on_screen = self.file_tree_listings_on_screen(cx);
         // A `.git` coming or going moves a repository root, which is the one
         // thing the cached root derivation cannot notice by itself.
         let mut roots_moved = false;
@@ -1202,9 +1253,10 @@ impl Tty7App {
             // Re-read what was marked, here rather than on the next paint.
             // Waiting for one would mean notifying to *get* one, which is the
             // full-window redraw per event batch this function's doc comment is
-            // about. Only while the tree is on screen, and only while it is
-            // still pointed at the machine the events came from.
-            if !on_screen {
+            // about. Only while the listings are the thing being drawn, and only
+            // while the tree is still pointed at the machine the events came
+            // from.
+            if !listings_on_screen {
                 return;
             }
             let Some(shared) = self.active_host(cx) else {
@@ -1671,9 +1723,16 @@ impl Tty7App {
     /// tree left the code overlay, which now draws the editor alone.
     ///
     /// The single draw site is why [`file_tree_on_screen`](Self::file_tree_on_screen)
-    /// is one pair of conditions, and why everything this function does per
-    /// paint — re-rooting, moving the watched set, requesting listings — stops
-    /// happening the moment the panel closes.
+    /// is three conditions and no more, and why everything this function does
+    /// per paint — re-rooting, moving the watched set, requesting listings —
+    /// stops happening the moment the panel closes.
+    ///
+    /// Requesting listings stops a step earlier than the rest: a query in the
+    /// search box puts the column in its other mode, drawing hits from their own
+    /// walk, and no cached listing is read at all. That test is
+    /// [`file_tree_searching`](Self::file_tree_searching) rather than a local
+    /// one, because the watcher has to reach the same answer — see
+    /// [`file_tree_apply_fs_events`](Self::file_tree_apply_fs_events).
     pub(crate) fn render_file_tree_rows(
         &mut self,
         window: &mut Window,
@@ -1696,7 +1755,7 @@ impl Tty7App {
             Some(code) => (code.roots.clone(), code.expanded.clone()),
             None => (Vec::new(), std::collections::HashSet::new()),
         };
-        let query = self.file_search.read(cx).value().trim().to_lowercase();
+        let query = self.file_tree_query(cx);
         // `None` — the tree's machine has gone away — still renders: the rows
         // come from caches keyed by its id, so the tree stays on screen as it
         // last was instead of blanking. What stops is the work that needs the
@@ -1713,13 +1772,13 @@ impl Tty7App {
         // Both branches only read caches; whatever is missing is queued onto the
         // background executor and shows up on the paint after it lands.
         self.file_tree.sync_search(&query, &roots, cx);
-        let rows = if query.is_empty() {
+        let rows = if self.file_tree_searching(cx) {
+            self.file_tree.search_rows()
+        } else {
             if let Some(host) = &host {
                 self.file_tree.request_loads(host, &roots, &expanded, cx);
             }
             self.file_tree.visible_rows(host_id, &roots, &expanded)
-        } else {
-            self.file_tree.search_rows()
         };
         let column = v_flex()
             .id("right-panel-tree-rows")
@@ -3155,6 +3214,77 @@ mod render_idle_gpui_tests {
                 .count()
         });
         assert_eq!(left, 0, "the marked listing was re-read on reopening");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same thing one case further in: the panel is open, the tree column is
+    /// drawn, and it is drawing *search hits*. Those come from their own
+    /// host-side walk, so the cached listings are as invisible as they are
+    /// behind a closed panel, and re-reading one for an event batch buys a round
+    /// trip nothing renders.
+    ///
+    /// The query is set on the input rather than typed, which is the same state:
+    /// both the paint and the watcher read `file_search` for the answer.
+    #[gpui::test]
+    fn a_searching_tree_does_no_filesystem_work(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("searching-tree");
+        for n in 0..12 {
+            std::fs::write(root.join(format!("file{n:02}.rs")), "").unwrap();
+        }
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.file_search
+                .update(cx, |st, cx| st.set_value("file0", window, cx));
+            cx.notify();
+        });
+        vcx.background_executor.run_until_parked();
+        assert!(
+            app.update_in(&mut vcx, |app, _, cx| app.file_tree_searching(cx)
+                && !app.file_tree_listings_on_screen(cx)),
+            "the column is drawn, and what it is drawing is not the listings"
+        );
+
+        let path = root.join("file00.rs");
+        std::fs::write(&path, "changed").unwrap();
+        fs_event(&app, &mut vcx, &path);
+        // Long enough for a re-read to have been issued *and* landed, for the
+        // same reason `a_closed_panel_does_no_filesystem_work` waits: an
+        // unwanted one shows up as the mark below having cleared itself.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < until {
+            vcx.background_executor.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let (in_flight, marked) = app.update_in(&mut vcx, |app, _, _| {
+            (
+                app.file_tree.loads.len(),
+                app.file_tree
+                    .stale
+                    .iter()
+                    .filter(|(_, dir)| dir.starts_with(&root))
+                    .count(),
+            )
+        });
+        assert_eq!(in_flight, 0, "nothing was asked of the host");
+        assert!(marked > 0, "but the change was recorded");
+
+        // And clearing the box picks it up, exactly as reopening the panel does.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.file_search
+                .update(cx, |st, cx| st.set_value("", window, cx));
+            cx.notify();
+        });
+        settle(&app, &mut vcx, &root);
+        let left = app.update_in(&mut vcx, |app, _, _| {
+            app.file_tree
+                .stale
+                .iter()
+                .filter(|(_, dir)| dir.starts_with(&root))
+                .count()
+        });
+        assert_eq!(left, 0, "the marked listing was re-read on clearing");
         let _ = std::fs::remove_dir_all(&root);
     }
 

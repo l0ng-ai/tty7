@@ -157,8 +157,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A batch now repaints only when the re-read comes back different from what is
   already on screen, and that re-read is issued from the watcher callback rather
   than by asking for a paint in order to get one. A closed Files panel does no
-  work at all: the change is recorded and picked up on reopening. Real changes
-  still arrive exactly as fast.
+  work at all: the change is recorded and picked up on reopening. A panel showing
+  search hits is the same case — the hits are their own walk, so no listing is on
+  screen to refresh — and the change is picked up when you clear the search box.
+  Real changes still arrive exactly as fast.
 
   Measured headlessly by counting window draws, before and after: five rewrites
   of a file in a displayed directory cost 10 frames and now cost 0.
