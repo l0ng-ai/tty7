@@ -606,6 +606,20 @@ fn close_window_for(cx: &mut App, workspace: WorkspaceId) {
 /// `window.json` fallback, then a centred default — each cascaded so it does
 /// not land exactly on an existing window.
 fn window_options(cx: &mut App, workspace: Option<WorkspaceId>) -> WindowOptions {
+    // X11 needs the icon on the native window itself for taskbars and window
+    // switchers. Wayland resolves the same application identity through the
+    // desktop entry when tty7 is packaged.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    static APP_ICON: std::sync::LazyLock<Option<std::sync::Arc<image::RgbaImage>>> =
+        std::sync::LazyLock::new(|| {
+            image::load_from_memory(include_bytes!("../../assets/app-icon.png"))
+                .ok()
+                // The source asset is 1024×1024, but _NET_WM_ICON ships raw
+                // pixels to the X server per window (~4 MB at full size) and
+                // taskbars want at most 256px anyway.
+                .map(|image| std::sync::Arc::new(image.thumbnail(256, 256).into_rgba8()))
+        });
+
     let remember = cx.global::<Config>().remember_window_size;
     let remembered = remember
         .then(|| {
@@ -645,6 +659,9 @@ fn window_options(cx: &mut App, workspace: Option<WorkspaceId>) -> WindowOptions
 
     WindowOptions {
         window_bounds: Some(window_bounds),
+        app_id: Some("tty7".to_owned()),
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        icon: APP_ICON.as_ref().cloned(),
         // Start from the component defaults but nudge the traffic lights down
         // so they stay vertically centred in our taller (40px) title bar — see
         // `TitleBar::new().h(..)` in `app.rs`. `apply_theme` re-pins the same
