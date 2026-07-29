@@ -229,6 +229,15 @@ pub struct TerminalView {
     /// copied one workspace's layout into another's record, and it must be
     /// caught at the write, not discovered at the next restart.
     owner_workspace: Option<crate::core::session::WorkspaceId>,
+    /// Whether this view re-attached to the pane its caller asked for, rather
+    /// than getting a fresh shell because that pane was gone — [`ShellParts`]'s
+    /// `restored`, kept because restore has to act on it *after* the view is
+    /// built.
+    ///
+    /// `false` for every view that was never restoring anything (a new tab, a
+    /// split, a test), which is the same answer those callers already got from
+    /// "there was no pane id to come back to".
+    restored: bool,
     /// The native-SSH spec this pane was spawned with, **secrets stripped**
     /// ([`NativeSshSpec::without_secrets`]). `None` for local shells (and a
     /// foreground `ssh` typed in one). Persisted into the session so a *dead*
@@ -1118,8 +1127,16 @@ impl TerminalView {
         let mut view = Self::with_terminal(parts.terminal, parts.pane_id, window, cx);
         view.shell_spec = parts.shell_spec;
         view.owner_workspace = parts.owner;
+        view.restored = parts.restored;
         view.set_workspace(parts.workspace);
         view
+    }
+
+    /// Whether this pane came back as the one it was asked to re-attach to.
+    /// `false` means a fresh shell — see the field, and
+    /// [`ShellParts::restored`].
+    pub(crate) fn restored(&self) -> bool {
+        self.restored
     }
 
     /// The workspace whose window created this pane, or `None` when the
@@ -1363,6 +1380,7 @@ impl TerminalView {
             pane_id,
             shell_spec: None,
             owner_workspace: None,
+            restored: false,
             ssh_spec: None,
             focus_handle,
             font,

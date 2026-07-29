@@ -7250,10 +7250,14 @@ fn session_to_pane(
             // sit in the PTY input queue until the shell reads its first
             // command — same mechanism as tmux send-keys at spawn.
             match &view {
-                // A local leaf already knows the answer: `alive` was read from
-                // its daemon, so `restore.is_some()` means the pane is there
-                // and still running the conversation itself.
-                PaneSlot::Ready(terminal) if restore.is_none() => {
+                // A local leaf already knows the answer, and the *view* is what
+                // knows it. Not `restore.is_none()`: `alive` is read once at the
+                // top of the restore, so a pane that exits between that `List`
+                // and this attach fails into a fresh shell inside
+                // `spawn_shell_terminal_in` — which used to land here as
+                // "restore.is_some(), so it kept its agent", leaving an empty
+                // shell and a conversation nobody resumed.
+                PaneSlot::Ready(terminal) if !terminal.read(cx).restored() => {
                     if let Some(cmd) = agent_resume_command(
                         agent,
                         agent_session_id.as_deref(),
