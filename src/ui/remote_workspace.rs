@@ -1464,6 +1464,25 @@ pub(crate) fn drain_events(cx: &mut gpui::App) {
             ControlEvent::Layout { workspace, delta } => {
                 crate::ui::tree_sync::on_layout_delta(cx, host, &workspace, delta);
             }
+            // The machine dropped deltas for this connection: every mirror of
+            // it is now wrong in a way no later delta repairs. Re-pull the
+            // machine whole and rebuild the windows on it — the recovery an
+            // unappliable delta already uses, here announced by the server
+            // instead of stumbled into.
+            ControlEvent::LayoutResync => {
+                log::info!("{host:?} dropped layout deltas for this client; re-pulling");
+                crate::ui::machine_mirror::MachineMirrors::refresh(cx, host);
+                for (workspace, _) in crate::ui::windows::WindowRegistry::open_windows(cx) {
+                    if WorkspaceStore::host_of(cx, workspace) != host {
+                        continue;
+                    }
+                    // A preempted window stays passive; its take-back re-pulls.
+                    if workspace_is_preempted(cx, workspace) {
+                        continue;
+                    }
+                    crate::ui::tree_sync::resync_window_from_tree(cx, workspace);
+                }
+            }
             other => log::debug!("unhandled control event from {host:?}: {other:?}"),
         }
     }

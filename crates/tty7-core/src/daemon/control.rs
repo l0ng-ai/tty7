@@ -98,8 +98,9 @@ use super::protocol::{MAX_FRAME, read_frame, write_frame};
 /// - **v3** — the machine-tree migration. The workspace/tab/pane tree moved
 ///   into the daemon: `MachineGet` / `WorkspaceTree`, the semantic tree verbs
 ///   (workspace/tab/pane create, close, rename, move, split, ratio, replace),
-///   and the [`ControlEvent::Layout`] pushes — seventeen new variants in all
-///   — while the retired opaque-record verbs
+///   and the [`ControlEvent::Layout`] / [`ControlEvent::LayoutResync`] pushes
+///   — seventeen new request variants in all — while the retired opaque-record
+///   verbs
 ///   (`workspace_list` / `workspace_get` / `workspace_put` /
 ///   `workspace_delete` and the `workspace_changed` event) left the dialect
 ///   entirely. A v2 peer meeting any of the new variants fails the whole
@@ -798,6 +799,16 @@ pub enum ControlEvent {
         workspace: String,
         delta: LayoutDelta,
     },
+    /// The server dropped at least one [`Layout`](Self::Layout) push for this
+    /// connection (its per-connection delta queue overflowed — see
+    /// [`crate::host::server::LAYOUT_EVENT_QUEUE`]): the peer's mirrors are
+    /// now wrong in a way no later delta repairs. Sent *before* the next
+    /// delta the connection does receive, so the client re-pulls the machine
+    /// whole and resyncs its windows — the identical recovery a delta that
+    /// will not apply already triggers, just server-announced instead of
+    /// stumbled into. Connection-wide, because drops happen at the queue, not
+    /// per workspace; the watch dialect's `WatchOverflow` is the precedent.
+    LayoutResync,
 }
 
 /// Where control events that are nobody's *local* business end up.

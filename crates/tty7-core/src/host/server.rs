@@ -75,14 +75,17 @@ pub const MAX_QUEUED: usize = 1024;
 /// `Layout` deltas one connection will let queue before it starts dropping.
 ///
 /// A delta is *not* self-superseding — a dropped one leaves the peer's
-/// picture of the tree wrong until its next full pull. The cap is still
+/// picture of the tree wrong until it re-pulls. The cap is still
 /// right, for the same reason as the watch caps: a peer
 /// that has stopped reading its socket must not turn another client's edit
-/// into unbounded server memory. What makes the drop survivable is that such a
-/// peer is already inside [`crate::daemon::control::KEEPALIVE_DEAD_AFTER`] of
-/// losing the link, and every reconnect begins with a full pull that
-/// resynchronizes it; a merely *slow* peer would have to fall a thousand
-/// edits behind to lose one.
+/// into unbounded server memory. What makes the drop survivable is that it is
+/// *announced*: the connection is flagged lagged, and the forwarder sends
+/// [`ControlEvent::LayoutResync`] ahead of the next delta the peer does
+/// receive, so a client that lost one edit re-pulls instead of silently
+/// mirroring a tree it is no longer looking at. A peer too wedged to hear
+/// even that is already inside
+/// [`crate::daemon::control::KEEPALIVE_DEAD_AFTER`] of losing the link, and
+/// every reconnect begins with a full pull.
 pub const LAYOUT_EVENT_QUEUE: usize = 1024;
 
 // ---------------------------------------------------------------------------
@@ -1263,18 +1266,33 @@ impl Conn {
 fn subscribe_machine(services: &Services, sink: &Arc<Sink>) -> Option<machine::Subscription> {
     let store = services.machine.as_ref()?;
     let (tx, rx) = smol::channel::bounded::<(String, machine::LayoutDelta)>(LAYOUT_EVENT_QUEUE);
+    // Set on a drop, consumed by the forwarder: a dropped delta leaves the
+    // peer's mirror wrong forever, so it must be told to re-pull rather than
+    // left to mirror a tree it is no longer looking at.
+    let lagged = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let saw_drop = Arc::clone(&lagged);
     let subscription = store.subscribe(Arc::new(
         move |workspace: &str, delta: &machine::LayoutDelta| {
             if tx.try_send((workspace.to_string(), delta.clone())).is_err() {
-                log::warn!("dropping a layout delta for a peer {LAYOUT_EVENT_QUEUE} deltas behind");
+                saw_drop.store(true, Ordering::Release);
+                log::warn!(
+                    "dropping a layout delta for a peer {LAYOUT_EVENT_QUEUE} deltas behind; \
+                     it will be told to resync"
+                );
             }
         },
     ));
-    spawn_layout_forwarder(rx, Arc::clone(sink));
+    spawn_layout_forwarder(rx, Arc::clone(sink), lagged);
     Some(subscription)
 }
 
-/// Relay tree deltas to the peer as `Layout` pushes.
+/// Relay tree deltas to the peer as `Layout` pushes — prefixed by a
+/// [`ControlEvent::LayoutResync`] whenever the queue dropped one, so the peer
+/// re-pulls before applying anything later than the gap.
+///
+/// The flag-then-announce order is safe by construction: `lagged` is only set
+/// when the queue is full, so at least [`LAYOUT_EVENT_QUEUE`] deliveries
+/// follow every drop and the announcement never waits on a quiet tree.
 ///
 /// Ends on its own when the `Subscription` is dropped: that removes the
 /// closure holding the sender, which closes the channel. Same shape, and the
@@ -1282,11 +1300,19 @@ fn subscribe_machine(services: &Services, sink: &Arc<Sink>) -> Option<machine::S
 fn spawn_layout_forwarder(
     rx: smol::channel::Receiver<(String, machine::LayoutDelta)>,
     sink: Arc<Sink>,
+    lagged: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let spawned = std::thread::Builder::new()
         .name("tty7-control-layout".into())
         .spawn(move || {
             while let Ok((workspace, delta)) = rx.recv_blocking() {
+                if lagged.swap(false, Ordering::AcqRel)
+                    && sink
+                        .send(&ControlServerMsg::Event(ControlEvent::LayoutResync))
+                        .is_err()
+                {
+                    return;
+                }
                 let event = ControlEvent::Layout { workspace, delta };
                 if sink.send(&ControlServerMsg::Event(event)).is_err() {
                     return;
@@ -3024,6 +3050,54 @@ mod tests {
                 other => panic!("unexpected frame: {other:?}"),
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Layout delta forwarding
+    // -----------------------------------------------------------------------
+
+    /// A connection whose delta queue dropped something is *told*: the
+    /// forwarder announces `LayoutResync` ahead of the next delta it does
+    /// deliver, so the peer re-pulls before applying anything later than the
+    /// gap. Before this, the drop was a server-side log line and the client
+    /// mirrored a tree it was no longer looking at, indefinitely.
+    #[test]
+    fn a_lagged_connection_hears_a_resync_before_its_next_delta() {
+        let (server_end, mut client_end) = UnixStream::pair().unwrap();
+        let sink = Arc::new(Sink::new(server_end));
+        let (tx, rx) = smol::channel::bounded::<(String, machine::LayoutDelta)>(4);
+        let lagged = Arc::new(AtomicBool::new(false));
+        spawn_layout_forwarder(rx, sink, Arc::clone(&lagged));
+
+        // A delta was dropped somewhere behind the queue…
+        lagged.store(true, Ordering::Release);
+        // …and the next one that does go through must ride behind the notice.
+        tx.send_blocking(("ws-1".to_string(), machine::LayoutDelta::WorkspaceDeleted))
+            .unwrap();
+
+        assert_eq!(
+            ControlServerMsg::read(&mut client_end).unwrap(),
+            ControlServerMsg::Event(ControlEvent::LayoutResync)
+        );
+        match ControlServerMsg::read(&mut client_end).unwrap() {
+            ControlServerMsg::Event(ControlEvent::Layout { workspace, delta }) => {
+                assert_eq!(workspace, "ws-1");
+                assert_eq!(delta, machine::LayoutDelta::WorkspaceDeleted);
+            }
+            other => panic!("expected the delta after the resync, got {other:?}"),
+        }
+        assert!(
+            !lagged.load(Ordering::Acquire),
+            "the flag is consumed: one gap, one resync"
+        );
+
+        // A later, un-lagged delta arrives bare.
+        tx.send_blocking(("ws-1".to_string(), machine::LayoutDelta::WorkspaceDeleted))
+            .unwrap();
+        assert!(matches!(
+            ControlServerMsg::read(&mut client_end).unwrap(),
+            ControlServerMsg::Event(ControlEvent::Layout { .. })
+        ));
     }
 
     // -----------------------------------------------------------------------
