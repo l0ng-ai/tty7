@@ -291,7 +291,7 @@ impl WorkspaceStore {
     /// The two ids are deliberately different things: the entry has its own
     /// [`WorkspaceId`] (this client's handle, what the window registry and the
     /// Window menu key on), and `host.workspace` is the id **on the remote**,
-    /// which is what the `WorkspacePut` / `WorkspaceGet` calls carry. Reusing
+    /// which is what the machine-tree operations carry. Reusing
     /// one id for both would collide the moment two machines minted the same
     /// uuid, and would quietly make a client id meaningful off this machine.
     ///
