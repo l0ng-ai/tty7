@@ -1185,9 +1185,12 @@ async fn open_link(
                     )
                 }
             };
+            // `setup.channel`, not `Control`: which of the remote's two sockets
+            // this stream is for is carried by the header, and WSL is the one
+            // transport that builds its own argv — see [`RemoteLink::wsl`].
             let link = match (header.server_command.as_deref(), resolved.as_deref()) {
-                (Some(command), _) => RemoteLink::wsl_shell(distro, command)?,
-                (None, Some(binary)) => RemoteLink::wsl(distro, binary)?,
+                (Some(command), _) => RemoteLink::wsl_shell(distro, command, setup.channel)?,
+                (None, Some(binary)) => RemoteLink::wsl(distro, binary, setup.channel)?,
                 (None, None) => unreachable!("resolved is Some whenever there is no override"),
             };
             Ok((link, None))

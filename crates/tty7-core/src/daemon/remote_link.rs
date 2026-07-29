@@ -55,6 +55,7 @@ use russh::Channel;
 use russh::client::Msg;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+use super::router::RouteChannel;
 use super::ssh::ProcessStream;
 
 /// One logical stream between the local daemon and a remote `tty7-server`.
@@ -115,9 +116,21 @@ impl RemoteLink {
     /// No shell is involved, so `server` needs no quoting; the distro name is
     /// validated because it is an *option's* argument and a leading `-` would be
     /// read as another option.
-    pub fn wsl(distro: &str, server: &str) -> io::Result<RemoteLink> {
+    ///
+    /// # `channel`
+    ///
+    /// **A pane bridge and a control bridge are different commands**, and this
+    /// is the only place that can tell them apart for WSL. The remote listens
+    /// twice and the dialects are not interchangeable — a pane landing on the
+    /// control socket writes its `Spawn` and is answered with nothing, which is
+    /// what "the workspace connects but the pane says it can't reach the
+    /// machine" was. The SSH path makes the same choice in
+    /// [`ssh::open_remote_link`](crate::daemon::ssh), and `LocalStdio` makes it
+    /// in the client's `PaneWorkspace::route_header` because its argv is run
+    /// verbatim; WSL builds its argv here, so here is where it belongs.
+    pub fn wsl(distro: &str, server: &str, channel: RouteChannel) -> io::Result<RemoteLink> {
         super::install::wsl::validate_distro(distro)?;
-        let args = super::install::wsl::wsl_args(distro, &[server, "--stdio"]);
+        let args = super::install::wsl::wsl_args(distro, &wsl_link_argv(server, channel));
         Ok(RemoteLink::Wsl(spawn_stdio_owned(
             super::install::wsl::WSL_EXE,
             &args,
@@ -131,9 +144,15 @@ impl RemoteLink {
     ///
     /// The escape hatch for a distribution where the normal install path cannot
     /// be used; the resolved-path form above is what ships.
-    pub fn wsl_shell(distro: &str, command: &str) -> io::Result<RemoteLink> {
+    ///
+    /// `channel` reaches the command through
+    /// [`RouteChannel::bridge_command`], which is the same rewrite the SSH path
+    /// applies to *its* shell command — an override must not silently lose the
+    /// pane dialect that [`RemoteLink::wsl`] gets right.
+    pub fn wsl_shell(distro: &str, command: &str, channel: RouteChannel) -> io::Result<RemoteLink> {
         super::install::wsl::validate_distro(distro)?;
-        let args = super::install::wsl::wsl_args(distro, &["sh", "-c", command]);
+        let command = channel.bridge_command(command);
+        let args = super::install::wsl::wsl_args(distro, &["sh", "-c", &command]);
         Ok(RemoteLink::Wsl(spawn_stdio_owned(
             super::install::wsl::WSL_EXE,
             &args,
@@ -173,6 +192,19 @@ impl RemoteLink {
             RemoteLink::StreamLocal(_) | RemoteLink::SessionExec(_)
         )
     }
+}
+
+/// The command `wsl.exe` runs for a link on `channel`, as an argv.
+///
+/// Pure, because the difference between the two is one flag that decides which
+/// of the remote's two sockets the stream lands on, and it cannot be checked
+/// anywhere a distribution is required. See [`RemoteLink::wsl`].
+fn wsl_link_argv<'a>(server: &'a str, channel: RouteChannel) -> Vec<&'a str> {
+    let mut argv = vec![server, "--stdio"];
+    if channel == RouteChannel::Pane {
+        argv.push("--pane");
+    }
+    argv
 }
 
 fn spawn_stdio(program: &str, args: &[&str]) -> io::Result<ProcessStream> {
@@ -467,6 +499,26 @@ impl std::fmt::Debug for RemoteLink {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// **A WSL pane asks for the pane socket.** The remote listens twice and
+    /// answers only the dialect it was asked for, so a pane that reaches the
+    /// control socket writes its `Spawn` and is answered with nothing at all —
+    /// the workspace connects, the window opens, and the pane inside it says it
+    /// cannot reach the machine. Nothing in the transport reports an error,
+    /// which is why this is pinned here rather than left to the one integration
+    /// path that would catch it.
+    #[test]
+    fn only_a_pane_link_asks_for_the_pane_socket() {
+        let server = "/home/me/.local/share/tty7/bin/tty7-server-26.7.6";
+        assert_eq!(
+            wsl_link_argv(server, RouteChannel::Control),
+            vec![server, "--stdio"]
+        );
+        assert_eq!(
+            wsl_link_argv(server, RouteChannel::Pane),
+            vec![server, "--stdio", "--pane"]
+        );
+    }
 
     /// A child process's stdio really is a duplex stream: bytes written reach
     /// the child's stdin and its stdout comes back, through the same
