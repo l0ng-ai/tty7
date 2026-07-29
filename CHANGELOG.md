@@ -24,41 +24,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resumed at all — that pane never wrote a session to disk, and reopening one
   would override the choice to keep it ephemeral. (#225)
 
-### Changed
-
-- **Every header in the window moves it now** — grabbing the window by a header
-  is a property of the whole app rather than a per-surface feature, so you never
-  have to learn which rows happen to be draggable. The detail panel's section
-  title joins the caption rows that already were, wherever the panel draws one —
-  every tab off macOS, where that row is also the panel's tab switcher, and the
-  remote Files header on macOS. In horizontal-tab mode the strip also keeps a
-  bare 80px slice of caption for grabbing: its spacer was a flexible one with no
-  minimum, so it collapsed to exactly 0px once the tab chips saturated the row —
-  around 7-8 tabs on a 1440px window — leaving nothing to grab but three 6px
-  gaps and a hairline above and below the chips. The chip row's fixed-chrome
-  reserve is corrected to match: it was a flat 100px, sized when the corner held
-  a 30px "+" and a 30px "⋯", and was never raised when the workspace chip
-  absorbed the "⋯" menu in #169/#188 — so the row's width budget was ~20px of a
-  lie. It now measures the group it is reserving for, ~121px of fixed chrome plus
-  the 80px grab handle, so chips reach their minimum width and truncate a tab or
-  two sooner. (#221)
-
-### Fixed
-
-- **Dragging the window by a title bar worked only rarely with a trackpad** —
-  five rows that stand in for the caption (the tab rail's top zone, the settings
-  page's top strip, the detail panel's top zone, and the code and diff overlays'
-  headers) armed their window-drag with a flag that was rebuilt on every render.
-  Any repaint between the press and the first drag event threw the arm away, and
-  the press *itself* schedules one — these rows carry a double-click, which makes
-  gpui refresh the window on mouse-down — so the drag only survived if the first
-  move beat the next vsync: 16ms at 60Hz, 8ms on ProMotion. A mouse press nudges
-  the pointer and often won that race; a trackpad press is a finger pushing down
-  without translating, and almost never did. The terminal's cursor blink disarmed
-  it on its own even without a press. The arm now lives in element state, which
-  survives frames — where gpui-component's own `TitleBar` has always kept it,
-  which is why the ordinary caption strip was never affected. (#221)
-
 - **Fork an agent session** — branch a live agent conversation into a second,
   independent one, so a risky direction can be tried without losing the thread
   that got you there. tty7 shells the agent's *own* fork command rather than
@@ -115,6 +80,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keybindings match modifiers exactly, and no terminal treats that three-key
   chord as a newline. (#182)
 
+- **Every header in the window moves it now** — grabbing the window by a header
+  is a property of the whole app rather than a per-surface feature, so you never
+  have to learn which rows happen to be draggable. The detail panel's section
+  title joins the caption rows that already were, wherever the panel draws one —
+  every tab off macOS, where that row is also the panel's tab switcher, and the
+  remote Files header on macOS. In horizontal-tab mode the strip also keeps a
+  bare 80px slice of caption for grabbing: its spacer was a flexible one with no
+  minimum, so it collapsed to exactly 0px once the tab chips saturated the row —
+  around 7-8 tabs on a 1440px window — leaving nothing to grab but three 6px
+  gaps and a hairline above and below the chips. The chip row's fixed-chrome
+  reserve is corrected to match: it was a flat 100px, sized when the corner held
+  a 30px "+" and a 30px "⋯", and was never raised when the workspace chip
+  absorbed the "⋯" menu in #169/#188 — so the row's width budget was ~20px of a
+  lie. It now measures the group it is reserving for, ~121px of fixed chrome plus
+  the 80px grab handle, so chips reach their minimum width and truncate a tab or
+  two sooner. (#221)
+
 ### Fixed
 
 - **Rounded UI controls no longer square off their corners**
@@ -133,6 +115,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hover fills, the theme picker's flush previews, and the diff overlay's card
   headers and closing rows. Most visible at a device pixel ratio of 1, where the
   hard clip edge is a whole physical pixel wide.
+
+- **Dragging the window by a title bar worked only rarely with a trackpad** —
+  five rows that stand in for the caption (the tab rail's top zone, the settings
+  page's top strip, the detail panel's top zone, and the code and diff overlays'
+  headers) armed their window-drag with a flag that was rebuilt on every render.
+  Any repaint between the press and the first drag event threw the arm away, and
+  the press *itself* schedules one — these rows carry a double-click, which makes
+  gpui refresh the window on mouse-down — so the drag only survived if the first
+  move beat the next vsync: 16ms at 60Hz, 8ms on ProMotion. A mouse press nudges
+  the pointer and often won that race; a trackpad press is a finger pushing down
+  without translating, and almost never did. The terminal's cursor blink disarmed
+  it on its own even without a press. The arm now lives in element state, which
+  survives frames — where gpui-component's own `TitleBar` has always kept it,
+  which is why the ordinary caption strip was never affected. (#221)
 
 ## [26.7.6] - 2026-07-28
 
