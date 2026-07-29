@@ -661,10 +661,10 @@ impl Tty7App {
                         rows: rows.clone(),
                     },
                 );
-                remote_connect::RemoteConnections::insert(cx, connected.host, home.clone());
+                remote_connect::HostLinks::insert(cx, connected.host, home.clone());
                 self.prompt_remote_daemon_mismatch_later(cx);
                 // Nothing left to *show* about the attempt: the machine is now
-                // in `RemoteConnections` and its group in the switcher fills
+                // in `HostLinks` and its group in the switcher fills
                 // itself from there and from the snapshot above.
                 self.connect = None;
             }
@@ -762,7 +762,7 @@ impl Tty7App {
             return;
         };
         remote_connect::register(cx);
-        if remote_connect::RemoteConnections::get(cx, host.host_id()).is_some() {
+        if remote_connect::HostLinks::get(cx, host.host_id()).is_some() {
             // Another window on the same machine got there first. One connection
             // per machine is the point — D7's "connect immediately" is about the
             // *machine*, and a second link to it would be a second SSH session
@@ -1038,7 +1038,7 @@ pub(crate) const PUMP_TICK: Duration = Duration::from_millis(250);
 /// One machine's link, as the supervisor sees it.
 ///
 /// Per **machine**, not per workspace, because that is the granularity a
-/// connection actually has (`RemoteConnections` is keyed by [`HostId`], and two
+/// connection actually has (`HostLinks` is keyed by [`HostId`], and two
 /// windows on one box share a link). Preemption is the one thing that is
 /// per-workspace, and it is kept separately for exactly that reason.
 struct MachineLink {
@@ -1234,7 +1234,7 @@ impl RemoteLinks {
                 .preempted
                 .remove(&workspace);
         }
-        remote_connect::RemoteConnections::remove(cx, host);
+        remote_connect::HostLinks::remove(cx, host);
         cx.default_global::<RemoteLinks>().machines.remove(&host);
         log::info!("disconnected from a machine at the user's request");
         cx.refresh_windows();
@@ -1295,8 +1295,8 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
         if suspended.contains(&host) {
             continue;
         }
-        let live = remote_connect::RemoteConnections::get(cx, host)
-            .is_some_and(|h| h.client().is_connected());
+        let live =
+            remote_connect::HostLinks::get(cx, host).is_some_and(|h| h.client().is_connected());
         let attempting = cx
             .try_global::<RemoteLinks>()
             .and_then(|l| l.machines.get(&host))
@@ -1326,8 +1326,8 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
         // The link is down. Drop the dead host object so nothing keeps calling
         // into it — a control connection that has gone is the whole
         // workspace's lifeline, not one failed request.
-        if remote_connect::RemoteConnections::get(cx, host).is_some() {
-            remote_connect::RemoteConnections::remove(cx, host);
+        if remote_connect::HostLinks::get(cx, host).is_some() {
+            remote_connect::HostLinks::remove(cx, host);
             log::info!("lost the control connection to {target}; reconnecting");
         }
 
@@ -1473,7 +1473,7 @@ fn reconnect_after_restart(origin: &str, cx: &mut gpui::App) {
     let Some(host) = remote_connect::origin_host(origin) else {
         return;
     };
-    remote_connect::RemoteConnections::remove(cx, host);
+    remote_connect::HostLinks::remove(cx, host);
     for (workspace, _) in workspaces_on(cx, host) {
         RemoteLinks::retry_now(cx, workspace);
     }
@@ -1569,7 +1569,7 @@ fn finish_attempt(
             // comes back on after a restart or a dropped link, and dropping it
             // here is what left "New Workspace" missing on a machine the panel
             // was quite happily calling connected.
-            remote_connect::RemoteConnections::insert(cx, connected.host, connected.home);
+            remote_connect::HostLinks::insert(cx, connected.host, connected.home);
             for (id, _key) in workspaces_on(cx, host) {
                 cx.default_global::<RemoteLinks>().preempted.remove(&id);
                 if restarted {

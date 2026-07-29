@@ -570,7 +570,7 @@ fn release_unused_hosts(cx: &mut App) {
         .collect();
     for id in crate::ui::host_registry::HostRegistry::ids(cx) {
         if !id.is_local() && !live.contains(&id) {
-            crate::ui::remote_connect::RemoteConnections::remove(cx, id);
+            crate::ui::remote_connect::HostLinks::remove(cx, id);
         }
     }
 }

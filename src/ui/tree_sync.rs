@@ -66,7 +66,7 @@ use crate::ui::pane::{Pane, PaneSlot};
 ///
 /// The unification the whole design leans on: the local machine's link lives in
 /// [`LocalLink`](crate::ui::local_link::LocalLink), a remote machine's in
-/// [`RemoteConnections`](crate::ui::remote_connect::RemoteConnections), and
+/// [`HostLinks`](crate::ui::remote_connect::HostLinks), and
 /// everything above this function stops caring which. `None` is always
 /// transient (both holders have supervisors reconnecting), so callers treat it
 /// as "not now": mark dirty and let the re-pull that follows reconnection
@@ -75,7 +75,7 @@ pub(crate) fn control_for(cx: &mut App, host: HostId) -> Option<Arc<ControlClien
     if host.is_local() {
         crate::ui::local_link::LocalLink::client(cx)
     } else {
-        crate::ui::remote_connect::RemoteConnections::get(cx, host)
+        crate::ui::remote_connect::HostLinks::get(cx, host)
             .map(|h| Arc::clone(h.client()))
             .filter(|c| c.is_connected())
     }

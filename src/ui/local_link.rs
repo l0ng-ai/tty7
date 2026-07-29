@@ -1,16 +1,15 @@
 //! The GUI's control link to **this machine's own daemon**.
 //!
 //! Local and remote machines are the same thing seen from different distances:
-//! one machine, one daemon, one workspace tree, served over the control
-//! dialect. The remote half of that has always held a `ControlClient` per
-//! machine ([`crate::ui::remote_connect::RemoteConnections`]); this module is
-//! the local half — the link over which the GUI receives the local daemon's
-//! pushes (`ControlEvent::Layout` deltas, `Preempted`) and sends its semantic
-//! tree operations.
+//! one machine, one daemon, one workspace tree, one control link. The remote
+//! machines' links live in [`crate::ui::remote_connect::HostLinks`]; this
+//! module is the local machine's — the link over which the GUI receives the
+//! local daemon's pushes (`ControlEvent::Layout` deltas, `Preempted`) and
+//! sends its semantic tree operations.
 //!
-//! # Not a `RemoteConnections` entry
+//! # Not a `HostLinks` entry
 //!
-//! `RemoteConnections` doubles as the [`crate::ui::host_registry::HostRegistry`]
+//! `HostLinks` doubles as the [`crate::ui::host_registry::HostRegistry`]
 //! feeder: inserting there would register a *wire-backed* `Host` for this
 //! machine, while the local file tree and git must keep going through the
 //! in-process [`LocalHost`](tty7_core::host::local::LocalHost) — a socket

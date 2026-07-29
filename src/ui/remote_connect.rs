@@ -15,7 +15,7 @@
 //! | 2 | Resolve one into a self-contained SSH spec | [`spec_for`] |
 //! | 3 | Open a routed control connection through the local daemon | [`connect_blocking`] |
 //! | 4 | Read the machine's own workspace list | [`rows_from_list`] |
-//! | 5 | Hold the connection for the workspaces bound to it | [`RemoteConnections`] |
+//! | 5 | Hold the connection for the workspaces bound to it | [`HostLinks`] |
 //!
 //! ## Machines are configured once
 //!
@@ -471,16 +471,21 @@ pub fn rows_from_machine(machine: &tty7_core::core::machine::Machine) -> Vec<Rem
 // 5. Holding the connections
 // ---------------------------------------------------------------------------
 
-/// The live remote machines, by [`HostId`].
+/// The live control links, by [`HostId`] — one per machine, one machine per
+/// entry.
 ///
-/// One entry per *machine*, not per workspace — the same granularity the SSH
-/// connection is pooled at and the same one [`crate::ui::host_registry`] uses,
-/// so two windows on one box share a connection, a host object and a git-status
-/// cache. This table holds the concrete [`RemoteHost`] because pushing a layout
-/// needs its control client; `HostRegistry` holds the same object erased to
-/// `dyn Host` for the panels.
+/// The name says the model: every machine this client talks to is reached
+/// over exactly one control link, and the local machine is a machine like any
+/// other — its link simply lives in its own global
+/// ([`LocalLink`](crate::ui::local_link::LocalLink)) because it is in-process
+/// rather than wire-backed. One entry per *machine*, not per workspace — the
+/// same granularity the SSH connection is pooled at and the same one
+/// [`crate::ui::host_registry`] uses, so two windows on one box share a
+/// connection, a host object and a git-status cache. This table holds the
+/// concrete [`RemoteHost`] because pushing a layout needs its control client;
+/// `HostRegistry` holds the same object erased to `dyn Host` for the panels.
 #[derive(Default)]
-pub struct RemoteConnections {
+pub struct HostLinks {
     hosts: HashMap<HostId, Arc<RemoteHost>>,
     /// Each machine's `$HOME`, as its handshake reported it.
     ///
@@ -496,24 +501,18 @@ pub struct RemoteConnections {
     homes: HashMap<HostId, PathBuf>,
 }
 
-impl Global for RemoteConnections {}
+impl Global for HostLinks {}
 
-impl RemoteConnections {
+impl HostLinks {
     /// The connection to `id`, if this process has one.
     pub fn get(cx: &mut App, id: HostId) -> Option<Arc<RemoteHost>> {
-        cx.default_global::<RemoteConnections>()
-            .hosts
-            .get(&id)
-            .cloned()
+        cx.default_global::<HostLinks>().hosts.get(&id).cloned()
     }
 
     /// Where a *new* workspace on `id` would start: that machine's own `$HOME`,
     /// never this client's.
     pub fn home(cx: &mut App, id: HostId) -> Option<PathBuf> {
-        cx.default_global::<RemoteConnections>()
-            .homes
-            .get(&id)
-            .cloned()
+        cx.default_global::<HostLinks>().homes.get(&id).cloned()
     }
 
     /// Record a connection, and register the same object with the host registry
@@ -525,14 +524,14 @@ impl RemoteConnections {
     pub fn insert(cx: &mut App, host: Arc<RemoteHost>, home: PathBuf) {
         let id = host.id();
         crate::ui::host_registry::HostRegistry::insert(cx, Arc::clone(&host).into_shared());
-        let table = cx.default_global::<RemoteConnections>();
+        let table = cx.default_global::<HostLinks>();
         table.hosts.insert(id, host);
         table.homes.insert(id, home);
     }
 
     /// Drop a machine's connection once nothing is using it.
     pub fn remove(cx: &mut App, id: HostId) {
-        let table = cx.default_global::<RemoteConnections>();
+        let table = cx.default_global::<HostLinks>();
         table.hosts.remove(&id);
         table.homes.remove(&id);
         crate::ui::host_registry::HostRegistry::remove(cx, id);
@@ -540,7 +539,7 @@ impl RemoteConnections {
 
     /// Machines currently connected. Diagnostics and teardown.
     pub fn len(cx: &mut App) -> usize {
-        cx.default_global::<RemoteConnections>().hosts.len()
+        cx.default_global::<HostLinks>().hosts.len()
     }
 }
 
@@ -721,7 +720,7 @@ pub fn register(cx: &mut App) {
     crate::daemon::router::set_route_auth_responder(Arc::new(GuiRouteAuth));
     // Touch the globals so the first connect isn't also the first allocation of
     // the table it writes into, on a thread that is holding a socket open.
-    let _ = RemoteConnections::len(cx);
+    let _ = HostLinks::len(cx);
 }
 
 /// The oldest install waiting for an answer, if any.

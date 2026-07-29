@@ -216,7 +216,7 @@ impl WorkspaceStore {
         let Some(host) = Self::remote_ref(cx, id) else {
             return true;
         };
-        crate::ui::remote_connect::RemoteConnections::get(cx, host.host_id()).is_some()
+        crate::ui::remote_connect::HostLinks::get(cx, host.host_id()).is_some()
     }
 
     /// The client-side entry for `host` — the existing one if this machine has

@@ -5894,7 +5894,7 @@ impl Tty7App {
         if !host.is_connected() {
             return None;
         }
-        let home = crate::ui::remote_connect::RemoteConnections::home(cx, host_id)?;
+        let home = crate::ui::remote_connect::HostLinks::home(cx, host_id)?;
         Some((host, Some(home)))
     }
 

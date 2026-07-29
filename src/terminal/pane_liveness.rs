@@ -308,10 +308,10 @@ fn probe_host(cx: &mut App, host: HostId, workspace: WorkspaceId) {
     //
     // Recorded as a landed failure rather than returned from: a bare `return`
     // would leave `needs_probe` true, so the next frame would re-decide this,
-    // and `RemoteConnections::get` reaches its global mutably — which notifies,
+    // and `HostLinks::get` reaches its global mutably — which notifies,
     // which repaints, which sweeps. Storing the answer puts the decision behind
     // the same TTL as every other one.
-    if !host.is_local() && crate::ui::remote_connect::RemoteConnections::get(cx, host).is_none() {
+    if !host.is_local() && crate::ui::remote_connect::HostLinks::get(cx, host).is_none() {
         cx.update_global::<PaneLivenessCache, _>(|cache, _| cache.finish_probe(host, None));
         return;
     }

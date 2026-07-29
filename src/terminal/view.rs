@@ -1599,7 +1599,7 @@ impl TerminalView {
     /// machine.** The host id comes off the workspace's own `RemoteTarget`,
     /// through the same `connection_key` the connection was opened under — so
     /// the id resolves to the very host object
-    /// [`RemoteConnections::insert`](crate::ui::remote_connect::RemoteConnections::insert)
+    /// [`HostLinks::insert`](crate::ui::remote_connect::HostLinks::insert)
     /// registered, with no second source of truth to drift from it. Setting the
     /// route and setting the host is one operation because a pane that ran its
     /// shell on one machine and its `git` on another would be worse than
@@ -8053,7 +8053,7 @@ mod tests {
     /// (which needs a window, a daemon and a pane): the derivation under test is
     /// the target → `HostId` one, and pinning it here is what catches a future
     /// `set_workspace` that forgets the host half. The ids must agree with what
-    /// `RemoteConnections::insert` registered — same `connection_key`, checked
+    /// `HostLinks::insert` registered — same `connection_key`, checked
     /// by `connection_keys_match_the_contract_table` in `tty7-core`.
     #[test]
     fn a_panes_host_is_its_workspaces_machine() {

@@ -218,7 +218,7 @@ pub(crate) struct HostSnapshot {
     /// it could never be given a group to appear in.
     pub target: RemoteTarget,
     /// What the remote said it had. The machine's `$HOME` is deliberately *not*
-    /// here — it lives in `RemoteConnections`, app-wide, because every window
+    /// here — it lives in `HostLinks`, app-wide, because every window
     /// needs it and only one of them ever did the connecting.
     pub rows: Vec<RemoteWorkspaceRow>,
 }
@@ -454,7 +454,7 @@ impl Tty7App {
             // connect, and every reconnect, records the machine's `$HOME` — and
             // that row is the only way to make a workspace on a machine, so it
             // has no business depending on which window did the connecting.
-            group.home = remote_connect::RemoteConnections::home(cx, id);
+            group.home = remote_connect::HostLinks::home(cx, id);
             if let Some(snapshot) = self.host_snapshots.get(&id) {
                 group.merge(&snapshot.rows, now);
             }
@@ -489,7 +489,7 @@ impl Tty7App {
             }
             _ => {}
         }
-        match remote_connect::RemoteConnections::get(cx, target.host_id()) {
+        match remote_connect::HostLinks::get(cx, target.host_id()) {
             Some(_) => Link::Connected,
             None => Link::Offline,
         }
