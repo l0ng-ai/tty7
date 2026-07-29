@@ -71,7 +71,8 @@ const MARKER: &str = "__tty7_wsl__";
 /// Budget for one probe. Generous, because the *first* command against a
 /// stopped distribution pays for booting its VM and init.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
-/// Budget for the fire-and-forget daemon launch, which backgrounds and returns.
+/// Budget for the daemon launch. It backgrounds and returns, but not
+/// immediately — see [`DETACH_SETTLE`], which holds the invocation open.
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Budget for writing the server binary — a few megabytes over a pipe, plus
 /// whatever the distribution's disk is doing.
@@ -283,6 +284,53 @@ const HOME_SCRIPT: &str = "printf '__tty7_wsl__ home=%s\\n' \"$HOME\"\n";
 /// life — and its life is "until the machine reboots". `|| cd /` covers a
 /// distribution whose default user has no home directory.
 const CD_HOME: &str = "cd \"$HOME\" 2>/dev/null || cd /\n";
+
+/// Appended after the daemon launch line so `wsl.exe` does not exit while the
+/// daemon is still detaching.
+///
+/// **WSL reaps what an interop session started when that session's `wsl.exe`
+/// exits**, and `setsid` does not make the child safe the instant it runs.
+/// [`launch_command`](super::launch_command) backgrounds the daemon and returns
+/// in milliseconds, so without this the sequence is: `sh` exits, `wsl.exe`
+/// exits, WSL tears the session down, and the daemon dies before it can bind.
+/// What the user sees is [`ensure_daemon`](super::Installer::ensure_daemon)'s
+/// "started but nothing was answering on the control socket", with a correctly
+/// installed binary and nothing else to go on.
+///
+/// Reproduced by hand against `Ubuntu-24.04`, running the launch line by
+/// itself: with nothing after it the daemon is gone; with as little as
+/// `sleep 0.3` after it the daemon lives and serves. Nothing about the launch
+/// line itself is wrong — `nohup`, `setsid --fork` and a double-forked subshell
+/// all die the same way — so the wait is the fix, not a different spelling of
+/// the detach.
+///
+/// The SSH path needs none of this (an exec channel's close is unhurried), which
+/// is why the shared [`launch_command`](super::launch_command) stays as it is
+/// and this lives here.
+///
+/// # Why a flat wait and not a wait *for the socket*
+///
+/// Polling `<config dir>/daemon.sock` until it appears looks like the obvious
+/// improvement, and it is wrong. [`ensure_daemon`](super::Installer::ensure_daemon)
+/// only reaches the launch when the socket did **not** answer, and the ordinary
+/// reason for that is a socket file a dead daemon left behind — `wsl --shutdown`
+/// is a routine thing to run. A `-S` test would pass on that stale file
+/// immediately, skip the wait, and restore the bug in exactly the state that
+/// produced it.
+///
+/// One second, because 0.3 was enough in the reproduction and this is paid only
+/// on a launch — which happens when no daemon is already serving the
+/// distribution, not on every connect.
+const DETACH_SETTLE: &str = "sleep 1\n";
+
+/// The daemon launch line plus its [`DETACH_SETTLE`] wait.
+///
+/// Split out from [`WslRemoteOps::spawn_detached`] so the composition is
+/// testable without a distribution: the one thing that must never happen is the
+/// wait replacing the launch rather than following it.
+fn launch_script(cmd: &str) -> String {
+    format!("{cmd}\n{DETACH_SETTLE}")
+}
 
 /// `HOME_SCRIPT` has to spell the marker out, because a `const` cannot
 /// `format!`. This is the guard that a rename of [`MARKER`] cannot slip past:
@@ -590,7 +638,7 @@ impl RemoteOps for WslRemoteOps {
         // The status is ignored for the same reason it is over SSH: the script
         // reports on the backgrounding, never on the daemon. Whether the daemon
         // came up is settled by probing its socket.
-        self.sh(cmd, LAUNCH_TIMEOUT).map(|_| ())
+        self.sh(&launch_script(cmd), LAUNCH_TIMEOUT).map(|_| ())
     }
 
     fn stat(&self, path: &str) -> Result<Option<RemoteStat>, String> {
@@ -1114,6 +1162,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The wait follows the launch; it never replaces it. Cheap to get wrong in
+    /// a `format!` and expensive to notice — a daemon that is never launched
+    /// fails exactly like one that was reaped.
+    #[test]
+    fn the_launch_script_keeps_the_launch_and_appends_the_wait() {
+        let script = launch_script("setsid 'tty7-server' --daemon &");
+        let (launch, wait) = script.split_once('\n').expect("two parts");
+        assert_eq!(launch, "setsid 'tty7-server' --daemon &");
+        assert_eq!(wait.trim(), "sleep 1");
+    }
+
+    /// **The settle wait, executed**: the launch still runs, the invocation is
+    /// really held afterwards, and it is held for a beat rather than for the
+    /// whole budget its caller allows.
+    ///
+    /// The middle assertion is the one with teeth. A wait that silently became a
+    /// no-op — a `sleep` a distro rejects, a line lost in a `format!` — reads as
+    /// a passing test everywhere except against a real distribution, which is
+    /// where it already cost an afternoon.
+    #[cfg(unix)]
+    #[test]
+    fn the_settle_wait_really_holds_the_invocation_open() {
+        let started = std::time::Instant::now();
+        let (out, ok) = real_sh(&launch_script("echo launched"));
+        let elapsed = started.elapsed();
+
+        assert!(ok, "{out}");
+        assert!(out.contains("launched"), "the launch still ran: {out:?}");
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "the wait did not happen: {elapsed:?}"
+        );
+        assert!(
+            elapsed < LAUNCH_TIMEOUT,
+            "the wait outlived the budget its caller gives the whole launch"
+        );
     }
 
     /// **The stat probe, executed.** Against a real directory, a real
