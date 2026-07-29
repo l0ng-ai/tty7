@@ -412,6 +412,12 @@ fn main() {
                 })
                 .detach();
             keymap::init(cx);
+            // Hold a control link to this machine's own daemon, exactly as a
+            // remote machine gets one: the daemon owns the workspace tree and
+            // serves it over control, so the local GUI is a control client
+            // like any other. Supervised on its own forever loop — see
+            // `ui::local_link`.
+            crate::ui::local_link::LocalLink::install(cx);
 
             // Come up on the *one* workspace the user was last in, at its own
             // remembered geometry (`ui::windows` owns that logic, since "New

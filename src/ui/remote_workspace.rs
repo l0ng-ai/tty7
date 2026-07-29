@@ -1078,7 +1078,7 @@ pub(crate) fn connection_for(
 /// Fast enough that a `Preempted` push turns a window read-only while the user
 /// is still looking at the machine they typed on, slow enough to be free: a tick
 /// is a hash-map walk over the handful of machines a person has open.
-const PUMP_TICK: Duration = Duration::from_millis(250);
+pub(crate) const PUMP_TICK: Duration = Duration::from_millis(250);
 
 /// One machine's link, as the supervisor sees it.
 ///
@@ -1162,6 +1162,18 @@ impl gpui::Global for RemoteLinks {}
 /// `remote_connect`'s install mailbox uses, for the identical reason.
 static EVENTS: Mutex<Vec<(HostId, ControlEvent)>> = Mutex::new(Vec::new());
 
+/// Point the process-wide control-event observer at [`EVENTS`]. Idempotent
+/// (installing the same closure again is harmless), and shared with the local
+/// link's pump ([`crate::ui::local_link::LocalLink::install`]) — whichever
+/// comes up first, reader threads must never find nobody listening.
+pub(crate) fn install_event_observer() {
+    crate::daemon::control::set_event_observer(Arc::new(|host, event| {
+        if let Ok(mut queue) = EVENTS.lock() {
+            queue.push((host, event));
+        }
+    }));
+}
+
 impl RemoteLinks {
     /// Start the supervisor, and make sure control events have somewhere to go.
     ///
@@ -1169,11 +1181,7 @@ impl RemoteLinks {
     /// (the connect flow, opening one, start-up), because any of them can be the
     /// first.
     pub(crate) fn ensure_running(cx: &mut gpui::App) {
-        crate::daemon::control::set_event_observer(Arc::new(|host, event| {
-            if let Ok(mut queue) = EVENTS.lock() {
-                queue.push((host, event));
-            }
-        }));
+        install_event_observer();
         if cx.default_global::<RemoteLinks>().pumping {
             return;
         }
@@ -1456,7 +1464,7 @@ fn workspaces_on(cx: &gpui::App, host: HostId) -> Vec<(WorkspaceId, String)> {
 }
 
 /// Apply everything the reader threads pushed since the last tick.
-fn drain_events(cx: &mut gpui::App) {
+pub(crate) fn drain_events(cx: &mut gpui::App) {
     let events = match EVENTS.lock() {
         Ok(mut queue) => std::mem::take(&mut *queue),
         Err(_) => return,

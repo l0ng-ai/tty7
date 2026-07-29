@@ -22,6 +22,7 @@ pub mod host_ops;
 #[allow(dead_code)]
 pub mod host_registry;
 pub mod keymap;
+pub mod local_link;
 pub mod palette;
 pub mod pane;
 pub mod pending_pane;
