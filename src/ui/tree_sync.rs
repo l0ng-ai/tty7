@@ -876,8 +876,8 @@ pub(crate) fn mark_window_informed(cx: &mut App, client_ws: WorkspaceId) {
 
 /// Give GUI tabs that don't yet know their tree identity the mirror's, matched
 /// by the panes they hold. This is what keeps a window whose tabs were built
-/// before the tree was pulled (today's `session.json` restore; any full
-/// rebuild) from closing and recreating every daemon tab it already matches.
+/// before the tree was pulled (any full rebuild) from closing and recreating
+/// every daemon tab it already matches.
 fn adopt_tab_ids(app: &Tty7App, cx: &App) {
     let Some(TreeSync { windows }) = cx.try_global::<TreeSync>() else {
         return;
@@ -954,14 +954,22 @@ pub(crate) fn fire_workspace_op(
         .detach();
 }
 
+/// Set (or clear, with `None`) a workspace's user-chosen name. The name is
+/// purely the machine's fact now — its tree is what every picker lists this
+/// workspace from — so a rename is one fire-and-forget operation, and the
+/// machine-wide mirror picks it up on the way out.
+pub(crate) fn rename_workspace(cx: &mut App, client_ws: WorkspaceId, name: Option<String>) {
+    fire_workspace_op(cx, client_ws, move |ws| ControlRequest::WorkspaceRename {
+        workspace: ws,
+        name,
+    });
+}
+
 /// Pull the authoritative tree for this workspace (creating it on the machine
 /// when it has none), then land it as the mirror.
 fn start_prime(cx: &mut App, client_ws: WorkspaceId) {
     let host = WorkspaceStore::host_of(cx, client_ws);
     let machine_ws = tree_workspace_id(cx, client_ws);
-    let name = WorkspaceStore::all(cx)
-        .get(client_ws)
-        .and_then(|w| w.name.clone());
     let Some(client) = control_for(cx, host) else {
         // Not reachable right now. Stay dirty; the next save retries, and a
         // reconnect-triggered save is what usually gets there first.
@@ -975,7 +983,7 @@ fn start_prime(cx: &mut App, client_ws: WorkspaceId) {
     cx.spawn(async move |cx| {
         let outcome = cx
             .background_executor()
-            .spawn(async move { pull_or_create(&client, machine_ws, name) })
+            .spawn(async move { pull_or_create(&client, machine_ws) })
             .await;
         cx.update(|cx| finish_prime(cx, client_ws, outcome));
     })
@@ -983,12 +991,10 @@ fn start_prime(cx: &mut App, client_ws: WorkspaceId) {
 }
 
 /// The blocking half of priming: the workspace's tree, or — when the machine
-/// has never heard of it — the freshly created empty workspace.
-fn pull_or_create(
-    client: &ControlClient,
-    machine_ws: WorkspaceId,
-    name: Option<String>,
-) -> io::Result<WsMirror> {
+/// has never heard of it — the freshly created empty workspace. Created
+/// nameless: the client keeps no name of its own any more, and the machine
+/// derives a display name from the tabs the sync is about to send.
+fn pull_or_create(client: &ControlClient, machine_ws: WorkspaceId) -> io::Result<WsMirror> {
     match client.call(ControlRequest::WorkspaceTree {
         workspace: machine_ws,
     }) {
@@ -1001,7 +1007,7 @@ fn pull_or_create(
         ))),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             match client.call(ControlRequest::WorkspaceCreate {
-                name,
+                name: None,
                 workspace: Some(machine_ws),
             })? {
                 ReplyOk::WorkspaceTree(ws) => Ok(WsMirror {
@@ -1212,10 +1218,9 @@ const HYDRATE_LINK_POLL: std::time::Duration = std::time::Duration::from_millis(
 /// trip that may have to wait out the link coming up; against the local daemon
 /// it lands within milliseconds, so in practice the empty state is one frame.
 ///
-/// A workspace the machine has never heard of is created (empty) — and, as a
-/// one-time courtesy to trees that predate the migration, an *empty* pull
-/// falls back to the client's cached `session` copy: adopting it re-populates
-/// the tree through the ordinary diff, which is the whole import.
+/// A workspace the machine has never heard of is created, empty. There is no
+/// fallback source any more: the client keeps no layout of its own, so what
+/// the machine answers is the layout.
 pub(crate) fn hydrate_window_from_tree(cx: &mut App, client_ws: WorkspaceId) {
     hydrate(cx, client_ws, Adopt::IfEmpty);
 }
@@ -1234,9 +1239,6 @@ enum Adopt {
 fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
     let host = WorkspaceStore::host_of(cx, client_ws);
     let machine_ws = tree_workspace_id(cx, client_ws);
-    let name = WorkspaceStore::all(cx)
-        .get(client_ws)
-        .and_then(|w| w.name.clone());
     {
         let state = cx
             .default_global::<TreeSync>()
@@ -1277,7 +1279,7 @@ fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
         };
         let outcome = cx
             .background_executor()
-            .spawn(async move { pull_workspace(&client, machine_ws, name) })
+            .spawn(async move { pull_workspace(&client, machine_ws) })
             .await;
         cx.update(|cx| finish_hydration(cx, client_ws, adopt, outcome));
     })
@@ -1293,7 +1295,6 @@ fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
 fn pull_workspace(
     client: &ControlClient,
     machine_ws: WorkspaceId,
-    name: Option<String>,
 ) -> io::Result<(Machine, WsMirror, Session)> {
     let machine: Machine = match client.call(ControlRequest::MachineGet)? {
         ReplyOk::MachineTree(m) => *m,
@@ -1310,7 +1311,7 @@ fn pull_workspace(
         }
         None => {
             client.call(ControlRequest::WorkspaceCreate {
-                name,
+                name: None,
                 workspace: Some(machine_ws),
             })?;
             Ok((machine, WsMirror::default(), Session::default()))
@@ -1367,19 +1368,9 @@ fn finish_hydration(
         }
         return;
     }
-    // The one-time import: a tree with nothing for this workspace, a client
-    // with a cached layout — adopt the cache, and the adopt's own save
-    // populates the tree through the ordinary diff. Only on the open path: a
-    // resync is authoritative, and falling back would resurrect what the
-    // machine just said is gone.
-    let session = if session.tabs.is_empty() && adopt == Adopt::IfEmpty {
-        WorkspaceStore::all(cx)
-            .get(client_ws)
-            .map(|w| w.session.clone())
-            .unwrap_or(session)
-    } else {
-        session
-    };
+    // An empty pull leaves an empty window empty — with the client's layout
+    // cache retired there is nothing to import, and the machine answering
+    // "no tabs" *is* the layout.
     if session.tabs.is_empty() && adopt == Adopt::IfEmpty {
         if was_dirty
             && let Some(app) =
@@ -1431,7 +1422,7 @@ pub(crate) fn on_layout_delta(cx: &mut App, host: HostId, key: &str, delta: Layo
         key.parse::<WorkspaceId>().ok()
     } else {
         WorkspaceStore::all(cx)
-            .workspaces
+            .views
             .iter()
             .find(|w| {
                 w.host
@@ -1585,15 +1576,13 @@ impl Tty7App {
             tabs.iter().position(|t| t.tree_id.get() == id)
         };
         let applied = match delta {
+            // Another client naming the workspace needs nothing from the
+            // window: the chip and the picker read the machine mirror, which
+            // already applied the delta.
             LayoutDelta::WorkspaceCreated { .. }
             | LayoutDelta::WorkspaceTouched { .. }
+            | LayoutDelta::WorkspaceRenamed { .. }
             | LayoutDelta::PaneFacts { .. } => true,
-            LayoutDelta::WorkspaceRenamed { name } => {
-                // Another client named the workspace; the chip and the picker
-                // read the store's copy.
-                WorkspaceStore::rename_locally(cx, self.workspace, name.clone());
-                true
-            }
             // Deleting a workspace someone is looking at does not close their
             // window — a window is never closed by remote control. The next
             // structural edit here recreates the workspace on the machine.

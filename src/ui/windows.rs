@@ -179,8 +179,8 @@ impl WindowRegistry {
 }
 
 /// What a *brand-new* workspace's window starts with. Only consulted when the
-/// window is opening on a freshly minted workspace — one restored from
-/// `session.json` always rebuilds its saved tabs.
+/// window is opening on a freshly minted workspace — a known one opens empty
+/// and is filled from its machine's tree.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FreshStart {
     /// A single default terminal, the way every previous launch of tty7 came
@@ -271,8 +271,8 @@ pub const MENU_SLOTS: usize = 9;
 /// visible *somewhere* or it may as well have been deleted.
 pub fn menu_order(cx: &App) -> Vec<(WorkspaceId, bool)> {
     let all = WorkspaceStore::all(cx);
-    let mut open: Vec<_> = all.workspaces.iter().filter(|w| w.open).collect();
-    let mut closed: Vec<_> = all.workspaces.iter().filter(|w| !w.open).collect();
+    let mut open: Vec<_> = all.views.iter().filter(|w| w.open).collect();
+    let mut closed: Vec<_> = all.views.iter().filter(|w| !w.open).collect();
     open.sort_by(|a, b| b.last_active.cmp(&a.last_active));
     closed.sort_by(|a, b| b.last_active.cmp(&a.last_active));
     open.into_iter()
@@ -532,26 +532,11 @@ fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId) {
     // half-finished action.
     close_window_for(cx, workspace);
     WorkspaceStore::close_window(cx, workspace);
-    // Last, and after the window is gone so nothing records the old layout back
-    // over it: the ids we just killed are dead by our own hand, and a record
-    // that still claims them reopens into panes that cannot be attached to.
-    // Locally that is invisible (`alive_panes_on` asks the daemon and gets the
-    // same answer); on a remote workspace nobody asks, so the stale id is the
-    // whole difference between reopening onto fresh shells with the agent
-    // conversation resumed and reopening onto `tty7 — disconnected`.
-    forget_killed_panes(cx, workspace);
+    // No client-side bookkeeping about the panes remains to correct: the kills
+    // above end the PTYs, the machine's own pane server observes each death,
+    // and the tree's records flip to `live: false` — exactly the state the
+    // next open reads as "revive with a fresh shell".
     refresh_menu(cx);
-}
-
-/// Drop `workspace`'s pane ids from the client's cached copy.
-///
-/// The machine needs no message: the kills above end the PTYs, its own pane
-/// server observes each death, and the tree's records flip to `live: false` —
-/// which is exactly the state the next open reads as "revive with a fresh
-/// shell". The clear here only keeps the client's *cache* (the last-resort
-/// import source) from claiming panes it just killed.
-fn forget_killed_panes(cx: &mut App, workspace: WorkspaceId) {
-    WorkspaceStore::forget_pane_ids(cx, workspace);
 }
 
 /// Delete a workspace outright: stop it, then forget it entirely. Irreversible
@@ -578,7 +563,7 @@ pub fn delete_workspace(cx: &mut App, workspace: WorkspaceId) {
 /// careful would tear down a live sibling window's host mid-call.
 fn release_unused_hosts(cx: &mut App) {
     let live: Vec<_> = WorkspaceStore::all(cx)
-        .workspaces
+        .views
         .iter()
         .filter(|w| w.is_remote())
         .map(|w| w.host_id())
@@ -610,11 +595,11 @@ fn close_window_for(cx: &mut App, workspace: WorkspaceId) {
         return;
     }
 
-    let (fresh, session) = WorkspaceStore::claim(cx, None);
+    let fresh = WorkspaceStore::claim(cx, None);
     WindowRegistry::rebind(cx, workspace, fresh);
     let _ = handle.update(cx, |_, window, cx| {
         app.update(cx, |app, cx| {
-            app.adopt_workspace(fresh, session, window, cx)
+            app.adopt_workspace(fresh, crate::core::session::Session::default(), window, cx)
         });
     });
 }

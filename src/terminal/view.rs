@@ -98,8 +98,8 @@ impl gpui::EventEmitter<AuthPromptReady> for TerminalView {}
 ///
 /// The id arrives asynchronously, on the agent's own hooks, long after
 /// everything that *structurally* changes a window. Nothing else was making the
-/// window save in between, so whether the id reached `session.json` came down
-/// to whether the user happened to open a tab, split a pane or move focus
+/// window save in between, so whether the id reached the persisted layout came
+/// down to whether the user happened to open a tab, split a pane or move focus
 /// afterwards. That is what made resume-after-End-Sessions work sometimes and
 /// not others: the layout on file simply had no agent in it.
 pub struct AgentSessionChanged;
@@ -9695,19 +9695,19 @@ mod gpui_tests {
         cx: &mut Context<TerminalView>,
     ) -> crate::core::session::WorkspaceId {
         use crate::core::session::{
-            RemoteRef, RemoteTarget, WorkspaceId, WorkspaceStore, Workspaces,
+            RemoteRef, RemoteTarget, WindowViews, WorkspaceId, WorkspaceStore,
         };
         use crate::terminal::PaneWorkspace;
         let host = RemoteRef::new(
             RemoteTarget::direct("me", "build-box", 22),
             WorkspaceId::new(),
         );
-        let entry = crate::core::session::Workspace::on_remote(host.clone());
+        let entry = crate::core::session::WindowView::on_remote(host.clone());
         let id = entry.id;
         WorkspaceStore::install_for_test(
             cx,
-            Workspaces {
-                workspaces: vec![entry],
+            WindowViews {
+                views: vec![entry],
                 active: None,
             },
         );

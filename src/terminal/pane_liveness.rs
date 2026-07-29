@@ -58,7 +58,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext as _, BorrowAppContext as _};
 
-use crate::core::session::{Workspace, WorkspaceId, WorkspaceStore};
+use crate::core::session::{WindowView, WorkspaceId, WorkspaceStore};
 use crate::terminal::{PaneRoute, RemoteTerminal};
 use crate::ui::host_ops::{HostId, InFlight};
 
@@ -232,8 +232,8 @@ impl PaneLivenessCache {
 /// [`PaneLivenessCache::liveness`] for a whole workspace, read-only.
 ///
 /// The one call the render sites make. It cannot ask the wrong machine: the
-/// host and the ids both come off the same [`Workspace`].
-pub fn liveness_of(cx: &App, workspace: &Workspace) -> Liveness {
+/// host and the ids both come off the same [`WindowView`].
+pub fn liveness_of(cx: &App, workspace: &WindowView) -> Liveness {
     let host = workspace.host_id();
     // The ids live in the machine's tree; its mirror is where they are read.
     // A machine not pulled yet is exactly the "could not check" state — except
@@ -274,7 +274,7 @@ pub fn sweep(cx: &mut App) {
     // first so the borrow of the store is released before the probes, which
     // need `cx` mutably.
     let mut targets: Vec<(HostId, WorkspaceId)> = Vec::new();
-    for w in &WorkspaceStore::all(cx).workspaces {
+    for w in &WorkspaceStore::all(cx).views {
         let host = w.host_id();
         if targets.iter().any(|(seen, _)| *seen == host) {
             continue;

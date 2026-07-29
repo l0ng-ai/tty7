@@ -920,11 +920,11 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Claiming marks the workspace open and hands back its saved tabs, so
-        // the store (not this window) stays the single writer of session.json.
+        // Claiming marks the workspace open; the store stays the single
+        // writer of the view file.
         let restore = cx.global::<Config>().restore_session;
         let known = id.is_some_and(|id| WorkspaceStore::all(cx).get(id).is_some());
-        let (workspace, saved) = WorkspaceStore::claim(cx, id);
+        let workspace = WorkspaceStore::claim(cx, id);
         // A workspace's layout lives in its machine's tree, so a restore
         // *asks* rather than reads: the window opens empty and
         // `hydrate_window_from_tree` rebuilds it the moment the pull answers —
@@ -939,26 +939,24 @@ impl Tty7App {
         // A remote workspace hydrates even with restore off: its panes are
         // running sessions on another machine, not a saved layout.
         let hydrate = known && (restore || is_remote);
-        // A workspace that was already on file restores its tab/split layout and
-        // each pane's cwd, unless the user turned restore off — then it starts
-        // fresh. A *brand-new* one has no tabs to restore, so what it comes up
-        // with is the caller's call: `None` here takes the first-run path in
-        // `with_session`, spawning a single default terminal, which is what
-        // `New Workspace` and a first run both want. Handing an empty session
-        // through instead lands on the home page, for the launch that exists to
-        // show the workspace picker.
+        // What the window opens holding is the caller's call for a *brand-new*
+        // workspace: `None` takes the first-run path in `with_session`,
+        // spawning a single default terminal — what `New Workspace` and a
+        // first run both want — while an empty session lands on the home page,
+        // for the launch that exists to show the workspace picker. A known
+        // workspace opens empty (the hydration fills it), or on a fresh shell
+        // when the user turned restore off.
         let session = match (known, fresh) {
             (true, _) if hydrate => Some(Session::default()),
-            (true, _) => restore.then_some(saved),
+            (true, _) => None,
             (false, crate::ui::windows::FreshStart::Shell) => None,
             (false, crate::ui::windows::FreshStart::HomePage) => Some(Session::default()),
         };
         let app = Self::with_session(Some(workspace), session, window, cx);
         if hydrate {
-            // No immediate save: the window is deliberately empty, and
-            // recording that would both clobber the cached layout the
-            // hydration may fall back to and race the pull with a diff that
-            // reads as "close everything".
+            // No immediate save: the window is deliberately empty, and racing
+            // the pull with a diff that reads as "close everything" is exactly
+            // what the informed gate exists to prevent.
             crate::ui::tree_sync::hydrate_window_from_tree(cx, workspace);
         } else {
             // A local window that skipped hydration shows what the user chose
@@ -1444,12 +1442,12 @@ impl Tty7App {
         app
     }
 
-    /// Snapshot the current tabs/active index into a `Session` and persist it.
-    /// Called after every structural change; the write is a small synchronous
-    /// JSON dump and any error is swallowed inside `Session::save`.
+    /// Push this window's structure to its machine's tree (and its geometry to
+    /// the view file). Called after every structural change — the name
+    /// predates the tree migration, and it remains the single funnel.
     pub(crate) fn save_session(&self, cx: &mut App) {
-        // Tripwire for the write this record must never take: a pane created
-        // for one workspace being persisted under another. Each view remembers
+        // Tripwire for the write this sync must never make: a pane created
+        // for one workspace being recorded under another. Each view remembers
         // the workspace whose window created it; if that and the id this save
         // records under have come apart, the window's tabs and its identity
         // are describing two different workspaces — the exact corruption that
@@ -1471,31 +1469,15 @@ impl Tty7App {
                 );
             }
         }
-        let tabs: Vec<SessionTab> = self
-            .tabs
-            .iter()
-            .map(|tab| tab_to_session(tab, cx))
-            .collect();
-        // Zero tabs is a real state (the home page) and is persisted as such, so
-        // the next launch comes back to it instead of a fresh shell.
-        let active = if tabs.is_empty() {
-            0
-        } else {
-            self.active.min(tabs.len() - 1)
-        };
-        let session = Session { active, tabs };
-        // The store merges this into the other windows' workspaces and owns the
-        // write; the geometry rides along so reopening lands where we are now.
-        WorkspaceStore::record(
+        // The layout goes nowhere near the view file: the machine that owns it
+        // hears about the change as the semantic operations it amounts to,
+        // local and remote alike. What this client persists is only the
+        // geometry, ridden on the same funnel so reopening lands where we are.
+        WorkspaceStore::record_geometry(
             cx,
             self.workspace,
-            session,
-            Some(WindowState::from_bounds(self.window_bounds)),
+            WindowState::from_bounds(self.window_bounds),
         );
-        // …and the machine that owns the layout hears about the change as the
-        // semantic operations it amounts to, local and remote alike — the
-        // write path of the daemon-owned tree that replaced the whole-record
-        // push this call used to make.
         crate::ui::tree_sync::sync_window(self, cx);
     }
 
@@ -1513,11 +1495,10 @@ impl Tty7App {
         // every `New Workspace` the user closes without using would leave one.
         //
         // Unless the emptiness is *this client's* ignorance rather than the
-        // machine's answer. `claimable_session` deliberately opens a remote
-        // workspace empty when its machine cannot be reached, so a window
-        // opened while the box was asleep and then closed — there was nothing
-        // in it to work on — would take the entry with it: its `RemoteRef`, its
-        // cached layout and its geometry, while its panes are still running
+        // machine's answer. Every window opens empty and waits for its tree
+        // pull, so a window opened while the box was asleep and then closed —
+        // there was nothing in it to work on — would take the entry with it:
+        // its `RemoteRef` and its geometry, while its panes are still running
         // over there. Nothing would reconnect it and nothing would offer it
         // again; the only way back is re-adding the machine by hand.
         let answered = WorkspaceStore::machine_is_connected(cx, self.workspace);
@@ -1691,28 +1672,15 @@ impl Tty7App {
         }
         crate::ui::tree_sync::forget(cx, previous);
 
-        let restore = cx.global::<Config>().restore_session;
-        let (claimed, session) = WorkspaceStore::claim(cx, Some(id));
-        let is_remote = WorkspaceStore::all(cx)
-            .get(claimed)
-            .is_some_and(|w| w.is_remote());
+        let claimed = WorkspaceStore::claim(cx, Some(id));
         crate::ui::windows::WindowRegistry::rebind(cx, previous, claimed);
-        // A remote workspace hydrates regardless of the restore setting: its
-        // panes are running sessions on another machine, not a saved layout,
-        // and "restore off" opening it empty-and-authoritative would have the
-        // first sync close every one of its tabs.
-        if restore || is_remote {
-            // Same shape as `for_workspace`: the machine's tree is the layout
-            // authority, so the window swaps to empty and the pull rebuilds it
-            // — for the local daemon within milliseconds.
-            self.adopt_workspace(claimed, Session::default(), window, cx);
-            crate::ui::tree_sync::hydrate_window_from_tree(cx, claimed);
-        } else {
-            // Restore off, local: the saved layout the user explicitly picked
-            // from the switcher is the intended state, tree included.
-            crate::ui::tree_sync::mark_window_informed(cx, claimed);
-            self.adopt_workspace(claimed, session, window, cx);
-        }
+        // The machine's tree is the layout's only home now, so an explicit
+        // pick from the switcher always hydrates — restore-off governs what
+        // *launch* comes back to, not what a deliberate open shows. The window
+        // swaps to empty and the pull rebuilds it, for the local daemon within
+        // milliseconds.
+        self.adopt_workspace(claimed, Session::default(), window, cx);
+        crate::ui::tree_sync::hydrate_window_from_tree(cx, claimed);
     }
 
     /// Take over an *already claimed* workspace: rebuild this window's tabs
@@ -4471,7 +4439,7 @@ impl Tty7App {
         };
         let value = rename.input.read(cx).value().trim().to_string();
         let id = self.workspace;
-        WorkspaceStore::rename(cx, id, (!value.is_empty()).then_some(value));
+        crate::ui::tree_sync::rename_workspace(cx, id, (!value.is_empty()).then_some(value));
         crate::ui::windows::refresh_menu(cx);
         self.sync_window_title(window, cx);
         self.focus_active(window, cx);
@@ -7354,7 +7322,7 @@ pub(crate) fn alive_panes_on(
 /// gate on session restore.
 ///
 /// The failure this closes: two workspace records claiming one pane id (a
-/// corrupted `session.json`), or a stale id landing on an unrelated pane after
+/// corrupted layout store), or a stale id landing on an unrelated pane after
 /// the numbers were reused. Before the daemon knew owners, both cases attached
 /// — one workspace's window silently picked up another's shell, which is how
 /// `work`'s seven tabs once ended up duplicated into `personal`. A pane with no
@@ -8693,7 +8661,7 @@ mod keybinding_gpui_tests {
 mod shell_menu_gpui_tests {
     use crate::core::config::Config;
     use crate::core::session::{
-        RemoteRef, RemoteTarget, Session, Workspace, WorkspaceId, WorkspaceStore, Workspaces,
+        RemoteRef, RemoteTarget, Session, WindowView, WindowViews, WorkspaceId, WorkspaceStore,
     };
     use crate::ui::app::Tty7App;
     use gpui::{AppContext, Entity, TestAppContext, VisualTestContext};
@@ -8784,7 +8752,7 @@ mod shell_menu_gpui_tests {
         );
 
         // A workspace on a machine nothing in this process has connected to.
-        let remote = Workspace::on_remote(RemoteRef::new(
+        let remote = WindowView::on_remote(RemoteRef::new(
             RemoteTarget::Alias {
                 alias: "build-box".into(),
             },
@@ -8794,8 +8762,8 @@ mod shell_menu_gpui_tests {
         app.update_in(&mut vcx, |app, window, cx| {
             WorkspaceStore::install_for_test(
                 cx,
-                Workspaces {
-                    workspaces: vec![remote],
+                WindowViews {
+                    views: vec![remote],
                     active: None,
                 },
             );

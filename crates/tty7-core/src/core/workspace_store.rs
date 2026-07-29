@@ -687,7 +687,7 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::session::{Session, Workspace, WorkspaceId, Workspaces};
+    use crate::core::session::WorkspaceId;
     use std::sync::atomic::AtomicUsize;
 
     fn store() -> (Arc<WorkspaceStore>, tempfile::TempDir) {
@@ -858,37 +858,6 @@ mod tests {
             .collect();
         assert_eq!(ids, vec!["a", "b", "c"], "a rename must not reshuffle");
         assert_eq!(store.get("a").unwrap()["name"], "renamed");
-    }
-
-    /// The file the store writes is the one `Workspaces` parses. That is what
-    /// "换台电脑连过来要看到同一份" means concretely — the record a client puts
-    /// comes back as the same `Workspace` on the next machine.
-    #[test]
-    fn the_file_is_a_workspaces_document() {
-        let (store, dir) = store();
-        let mut ws = Workspace::from_session(Session::default());
-        ws.name = Some("api".into());
-        ws.last_active = 1_753_600_000;
-        let id = ws.id.to_string();
-        // The remote-owned half of a record, spelled inline: the helper that
-        // used to derive it is retired with the whole-record write path.
-        let record = serde_json::json!({
-            "id": id,
-            "name": "api",
-            "session": { "active": 0, "tabs": [] },
-            "last_active": 1_753_600_000u64,
-        });
-        store.put(&id, record, None).unwrap();
-
-        let text = std::fs::read_to_string(dir.path().join(STORE_FILE)).unwrap();
-        let parsed = Workspaces::decode(&text).expect("the store's file is a Workspaces document");
-        assert_eq!(parsed.workspaces.len(), 1);
-        assert_eq!(parsed.workspaces[0].id, ws.id, "the identity survives");
-        assert_eq!(parsed.workspaces[0].name.as_deref(), Some("api"));
-        // The client's view state was never sent, so the remote's copy has the
-        // defaults rather than another machine's window geometry.
-        assert!(parsed.workspaces[0].window.is_none());
-        assert!(!parsed.workspaces[0].is_remote());
     }
 
     // ── Validation ──────────────────────────────────────────────────────────

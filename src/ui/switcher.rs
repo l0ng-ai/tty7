@@ -25,13 +25,14 @@
 //!
 //! # Where the rows come from
 //!
-//! `session.json` already records remote workspaces (`Workspace::host`), so a
+//! The view store records remote workspaces (`WindowView::host`), so a
 //! machine's workspaces are listed **without connecting to it** — the client
-//! remembers what it saw last time. Connecting only ever *adds*: the remote's
-//! own store is the authority, so its rows are merged in when a link exists and
-//! anything this client had not heard of shows up then (see [`Group::merge`]).
-//! That is what makes "expand a machine" a lazy, cheap gesture rather than a
-//! wizard.
+//! remembers which ones it saw, and their display facts come from the
+//! machine's mirror (`ui::machine_mirror`). Connecting only ever *adds*: the
+//! remote's own tree is the authority, so its rows are merged in when a link
+//! exists and anything this client had not heard of shows up then (see
+//! [`Group::merge`]). That is what makes "expand a machine" a lazy, cheap
+//! gesture rather than a wizard.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -194,7 +195,7 @@ struct Row {
     current: bool,
     /// Set for a workspace that exists on the remote but has no local record
     /// yet: opening it has to claim it first. `None` once it is in
-    /// `session.json` like any other.
+    /// the view store like any other.
     adopt: Option<Box<RemoteWorkspaceRow>>,
     /// This row's id **on its own machine**, for a remote workspace. It is what
     /// the remote's list is matched against — the local [`WorkspaceId`] above is
@@ -317,7 +318,7 @@ impl Tty7App {
         {
             let app: &App = cx;
             let store = WorkspaceStore::all(app);
-            for w in &store.workspaces {
+            for w in &store.views {
                 let (key, label, target) = match w.host.as_ref() {
                     None => (String::new(), "This Computer".to_string(), None),
                     Some(r) => {
@@ -586,7 +587,7 @@ impl Tty7App {
             return;
         };
         let value = input.read(cx).value().trim().to_string();
-        WorkspaceStore::rename(cx, id, (!value.is_empty()).then_some(value));
+        crate::ui::tree_sync::rename_workspace(cx, id, (!value.is_empty()).then_some(value));
         crate::ui::windows::refresh_menu(cx);
         if id == self.workspace {
             self.sync_window_title(window, cx);

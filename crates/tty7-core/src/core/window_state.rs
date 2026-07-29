@@ -1,5 +1,5 @@
 //! Persisted last-window geometry, stored at `window.json` in the config dir
-//! (alongside `config.json` / `session.json`). The quit hook in `ui::app`
+//! (alongside `config.json` / `views.json`). The quit hook in `ui::app`
 //! writes the window's final bounds here unconditionally; startup reads it
 //! back only when `Config::remember_window_size` is on, so toggling the
 //! setting off and on again still restores the most recent quit's geometry.
@@ -7,9 +7,9 @@
 //! reads fall back to "nothing remembered", writes are atomic.
 //!
 //! The geometry is four plain `f32`s here rather than a `gpui::Bounds` because
-//! [`Workspace`](super::session::Workspace) embeds it and `session.json` has to
-//! parse without gpui. Converting to and from `Bounds` is the GUI crate's job —
-//! see its `core::window_state::WindowGeometry` extension trait.
+//! [`WindowView`](super::session::WindowView) embeds it and `views.json` is
+//! parsed in this gpui-free crate. Converting to and from `Bounds` is the GUI
+//! crate's job — see its `core::window_state::WindowGeometry` extension trait.
 
 use serde::{Deserialize, Serialize};
 

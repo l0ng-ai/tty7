@@ -299,7 +299,7 @@ fn apply(machine: &mut Machine, workspace: WorkspaceId, delta: &LayoutDelta) -> 
 /// longer lists the workspace).
 fn view_of<'a>(
     cx: &'a App,
-    entry: &crate::core::session::Workspace,
+    entry: &crate::core::session::WindowView,
 ) -> Option<(&'a Workspace, &'a [PaneRecord])> {
     let machine = MachineMirrors::machine(cx, entry.host_id())?;
     let machine_ws = entry.host.as_ref().map(|r| r.workspace).unwrap_or(entry.id);
@@ -310,7 +310,7 @@ fn view_of<'a>(
 /// What the picker and the window title call `entry`: the user-set name, else
 /// derived from the tree's repo groups and cwds. `None` while nothing is known
 /// (machine not pulled yet) — the caller picks its own placeholder.
-pub fn display_name(cx: &App, entry: &crate::core::session::Workspace) -> Option<String> {
+pub fn display_name(cx: &App, entry: &crate::core::session::WindowView) -> Option<String> {
     let (ws, panes) = view_of(cx, entry)?;
     Some(display_name_of(ws, panes))
 }
@@ -364,7 +364,7 @@ pub fn display_name_for(cx: &App, client_ws: WorkspaceId) -> Option<String> {
 }
 
 /// [`subject_path_of`] for a client entry.
-pub fn subject_path(cx: &App, entry: &crate::core::session::Workspace) -> Option<String> {
+pub fn subject_path(cx: &App, entry: &crate::core::session::WindowView) -> Option<String> {
     let (ws, panes) = view_of(cx, entry)?;
     subject_path_of(ws, panes)
 }
@@ -373,7 +373,7 @@ pub fn subject_path(cx: &App, entry: &crate::core::session::Workspace) -> Option
 /// machine's tree has not been pulled — which a caller about to state a fact
 /// ("3 running sessions will be ended") must render as not knowing, not as
 /// zero.
-pub fn pane_ids(cx: &App, entry: &crate::core::session::Workspace) -> Option<Vec<u64>> {
+pub fn pane_ids(cx: &App, entry: &crate::core::session::WindowView) -> Option<Vec<u64>> {
     let (ws, _) = match view_of(cx, entry) {
         Some(view) => view,
         // A pulled machine that no longer lists the workspace *is* an answer:
@@ -385,7 +385,7 @@ pub fn pane_ids(cx: &App, entry: &crate::core::session::Workspace) -> Option<Vec
 }
 
 /// How many terminals `entry` holds across every tab, per its machine's tree.
-pub fn pane_count(cx: &App, entry: &crate::core::session::Workspace) -> Option<usize> {
+pub fn pane_count(cx: &App, entry: &crate::core::session::WindowView) -> Option<usize> {
     pane_ids(cx, entry).map(|ids| ids.len())
 }
 

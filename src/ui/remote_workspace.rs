@@ -19,7 +19,7 @@
 //! |---|---|
 //! | New tab / split | [`Tty7App::spawn_host`] — a remote window refuses to spawn a local shell |
 //! | Reopening a closed tab | [`Tty7App::rebind_host`] clears the closed stack when a window changes machine |
-//! | Restart / session restore | `WorkspaceStore::record`'s storage split — a remote entry never holds a local layout on disk |
+//! | Restart / session restore | the machine's own tree is the only layout source — the client persists no layout at all |
 //!
 //! The fourth path, dragging a tab between windows, does not exist in tty7:
 //! tabs never leave the window they were opened in, so there is nothing to
@@ -1386,7 +1386,7 @@ fn prune_suspended(
 /// window that is not there.
 fn bound_machines(cx: &gpui::App) -> Vec<(HostId, RemoteTarget)> {
     let mut out: Vec<(HostId, RemoteTarget)> = Vec::new();
-    for workspace in &WorkspaceStore::all(cx).workspaces {
+    for workspace in &WorkspaceStore::all(cx).views {
         let Some(host) = workspace.host.as_ref() else {
             continue;
         };
@@ -1405,7 +1405,7 @@ fn bound_machines(cx: &gpui::App) -> Vec<(HostId, RemoteTarget)> {
 /// belong to.
 fn workspaces_on(cx: &gpui::App, host: HostId) -> Vec<(WorkspaceId, String)> {
     WorkspaceStore::all(cx)
-        .workspaces
+        .views
         .iter()
         .filter(|w| w.open)
         .filter_map(|w| {
@@ -2033,52 +2033,6 @@ mod tests {
         );
     }
 
-    /// Every leaf loses its id, at every depth. A `Split` branch that kept its
-    /// ids would leave those panes attaching to a dead process — and, worse,
-    /// skipping the agent resume, because that only fires for a leaf with no id.
-    #[test]
-    fn forgetting_pane_ids_reaches_every_leaf() {
-        use crate::core::session::{SessionAxis, SessionPane};
-
-        fn leaf(id: u64) -> SessionPane {
-            SessionPane::Leaf {
-                cwd: None,
-                pane_id: Some(id),
-                ssh_spec: None,
-                agent: None,
-                agent_session_id: None,
-                agent_launch_argv: None,
-            }
-        }
-        fn ids(pane: &SessionPane, out: &mut Vec<Option<u64>>) {
-            match pane {
-                SessionPane::Leaf { pane_id, .. } => out.push(*pane_id),
-                SessionPane::Split { a, b, .. } => {
-                    ids(a, out);
-                    ids(b, out);
-                }
-            }
-        }
-
-        let mut pane = SessionPane::Split {
-            axis: SessionAxis::Horizontal,
-            ratio: 0.5,
-            a: Box::new(leaf(1)),
-            b: Box::new(SessionPane::Split {
-                axis: SessionAxis::Vertical,
-                ratio: 0.5,
-                a: Box::new(leaf(2)),
-                b: Box::new(leaf(3)),
-            }),
-        };
-        let forgotten = tty7_core::core::session::blank_pane_ids(&mut pane);
-
-        let mut found = Vec::new();
-        ids(&pane, &mut found);
-        assert_eq!(found, vec![None, None, None]);
-        assert_eq!(forgotten, 3, "every dropped claim is counted");
-    }
-
     // ── The reconnect schedule (no network) ─────────────────────────────────
 
     /// The schedule is fixed: **1/2/4/…/30s capped, retried for ever**.
@@ -2327,7 +2281,7 @@ mod tests {
             crate::ui::windows::WindowRegistry::init(cx);
 
             let (host, target) = machine("build-box");
-            let mut entry = crate::core::session::Workspace::on_remote(RemoteRef::new(
+            let mut entry = crate::core::session::WindowView::on_remote(RemoteRef::new(
                 target,
                 WorkspaceId::new(),
             ));
@@ -2335,8 +2289,8 @@ mod tests {
             let id = entry.id;
             WorkspaceStore::install_for_test(
                 cx,
-                crate::core::session::Workspaces {
-                    workspaces: vec![entry],
+                crate::core::session::WindowViews {
+                    views: vec![entry],
                     active: None,
                 },
             );

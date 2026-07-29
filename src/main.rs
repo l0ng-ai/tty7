@@ -79,7 +79,7 @@ fn spawn_config_watcher(cx: &mut App) {
         let Ok(event) = res else { return };
         // React to events that touch our `config.json`, or a theme file dropped
         // into the `themes/` subfolder — both feed the same registry reload below.
-        // Everything else in the dir (`session.json`, `history`, the daemon
+        // Everything else in the dir (`views.json`, `history`, the daemon
         // socket, and our own `.config.json.tmp.<pid>` / `*.yaml.tmp.<pid>` atomic
         // scratch files, whose extensions aren't theme extensions) is ignored.
         let hit = event
@@ -382,10 +382,9 @@ fn main() {
             // theme from it. It has to be read here, off the appearance-observer
             // path — see `ui::theme::SystemAppearance`.
             crate::ui::theme::refresh_system_appearance(cx);
-            // Read `session.json` (migrating a pre-multi-window file) before any
-            // window is built: windows claim their workspace from this store
-            // rather than each parsing the file themselves. It also dedupes
-            // pane claims here, once, instead of per window.
+            // Read `views.json` before any window is built: windows claim
+            // their workspace from this store rather than each parsing the
+            // file themselves.
             crate::core::session::WorkspaceStore::init(cx);
             // The window registry has to exist before the first window opens —
             // `ui::windows::open` registers into it.
@@ -431,7 +430,7 @@ fn main() {
             // opens a single window on a fresh workspace.
             let any_saved = {
                 let store = crate::core::session::WorkspaceStore::all(cx);
-                !store.workspaces.is_empty()
+                !store.views.is_empty()
             };
             let reopen = crate::core::session::WorkspaceStore::restore_one(cx);
             // With nothing to reopen, what that one window should hold depends on
