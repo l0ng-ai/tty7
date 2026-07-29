@@ -970,11 +970,12 @@ fn run_request(
             ReplyOk::WorkspaceTree(Box::new(conn.machine()?.workspace(workspace)?)),
             Vec::new(),
         ),
-        ControlRequest::WorkspaceCreate { name } => (
-            ReplyOk::WorkspaceTree(Box::new(
-                conn.machine()?
-                    .workspace_create(name, conn.machine_origin)?,
-            )),
+        ControlRequest::WorkspaceCreate { name, workspace } => (
+            ReplyOk::WorkspaceTree(Box::new(conn.machine()?.workspace_create(
+                workspace,
+                name,
+                conn.machine_origin,
+            )?)),
             Vec::new(),
         ),
         ControlRequest::WorkspaceRename { workspace, name } => {
@@ -1009,11 +1010,13 @@ fn run_request(
             workspace,
             at,
             pane,
+            tab,
         } => (
             ReplyOk::TabTree(Box::new(conn.machine()?.tab_create(
                 workspace,
                 at.map(clamp_usize),
                 pane,
+                tab,
                 conn.machine_origin,
             )?)),
             Vec::new(),

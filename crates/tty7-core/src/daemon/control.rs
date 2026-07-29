@@ -398,10 +398,14 @@ pub enum ControlRequest {
         workspace: WorkspaceId,
     },
     /// Create an empty workspace; its first tab arrives as its own operation.
-    /// Answers the newborn [`ReplyOk::WorkspaceTree`], so the writer learns
-    /// the minted id from the reply rather than from an echo it never gets.
+    /// Answers the newborn [`ReplyOk::WorkspaceTree`]. `workspace` lets the
+    /// client mint the id — a window names its workspace before any round trip
+    /// completes — and `None` has the daemon mint one, as before. A taken id
+    /// is refused, never adopted.
     WorkspaceCreate {
         name: Option<String>,
+        #[serde(default)]
+        workspace: Option<WorkspaceId>,
     },
     WorkspaceRename {
         workspace: WorkspaceId,
@@ -422,11 +426,15 @@ pub enum ControlRequest {
     },
     /// Create a tab holding `pane` at position `at` (clamped; `None` appends).
     /// `pane` is the seed for a pane the client already spawned over the pane
-    /// protocol — PTYs come from there, the tree only adopts them.
+    /// protocol — PTYs come from there, the tree only adopts them. `tab` is
+    /// the client-minted identity (see `WorkspaceCreate::workspace`); `None`
+    /// has the daemon mint one.
     TabCreate {
         workspace: WorkspaceId,
         at: Option<u64>,
         pane: PaneSeed,
+        #[serde(default)]
+        tab: Option<TabId>,
     },
     /// Close a tab. Answers [`ReplyOk::Panes`]: the pane ids that left the
     /// tree, for the caller to kill — the tree does bookkeeping, not process

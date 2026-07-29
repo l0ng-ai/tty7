@@ -177,6 +177,7 @@ fn the_tree_is_built_by_operations_and_lives_in_the_servers_file() {
         .control
         .call(ControlRequest::WorkspaceCreate {
             name: Some("api".into()),
+            workspace: None,
         })
         .expect("create workspace")
     {
@@ -189,6 +190,7 @@ fn the_tree_is_built_by_operations_and_lives_in_the_servers_file() {
             workspace: ws.id,
             at: None,
             pane: seed(1, "/home/me/proj"),
+            tab: None,
         })
         .expect("create tab")
     {
@@ -245,7 +247,10 @@ fn a_new_server_process_reports_the_old_panes_dead_and_accepts_their_successors(
         let first = connect(dir.path(), "first");
         let ws = match first
             .control
-            .call(ControlRequest::WorkspaceCreate { name: None })
+            .call(ControlRequest::WorkspaceCreate {
+                name: None,
+                workspace: None,
+            })
             .unwrap()
         {
             ReplyOk::WorkspaceTree(ws) => *ws,
@@ -257,6 +262,7 @@ fn a_new_server_process_reports_the_old_panes_dead_and_accepts_their_successors(
                 workspace: ws.id,
                 at: None,
                 pane: seed(7, "/home/me/proj"),
+                tab: None,
             })
             .unwrap();
         first.control.close();
@@ -345,6 +351,7 @@ fn an_operation_from_one_client_reaches_the_other_as_a_delta() {
         .control
         .call(ControlRequest::WorkspaceCreate {
             name: Some("shared".into()),
+            workspace: None,
         })
         .unwrap()
     {
@@ -357,6 +364,7 @@ fn an_operation_from_one_client_reaches_the_other_as_a_delta() {
             workspace: ws.id,
             at: None,
             pane: seed(3, "/srv"),
+            tab: None,
         })
         .unwrap()
     {
@@ -424,7 +432,7 @@ fn attachment_rides_the_tree_when_no_record_store_is_served() {
         });
     }
     let ws = machine
-        .workspace_create(Some("shared".into()), None)
+        .workspace_create(None, Some("shared".into()), None)
         .unwrap();
 
     let laptop = bridged(&sock, "laptop");

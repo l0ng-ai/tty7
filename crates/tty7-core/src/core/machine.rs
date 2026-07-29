@@ -650,8 +650,18 @@ impl MachineStore {
     // ----- workspace operations --------------------------------------------
 
     /// Create a workspace (empty — its first tab arrives as its own op).
+    ///
+    /// `id` lets the *client* mint the identity. A window exists before its
+    /// first round trip completes — the window registry, the view file and
+    /// every queued operation already name the workspace — so making the
+    /// daemon the minter would force every client to hold its ops until a
+    /// reply carried the "real" id back. Ids are uuids, so a client-minted one
+    /// is as unique as a daemon-minted one; a collision with an existing
+    /// workspace is refused rather than adopted, because "create" answering an
+    /// unrelated workspace's tree would hand one client another's tabs.
     pub fn workspace_create(
         &self,
+        id: Option<WorkspaceId>,
         name: Option<String>,
         origin: Option<SubscriberId>,
     ) -> io::Result<Workspace> {
@@ -661,7 +671,13 @@ impl MachineStore {
                     "this machine already holds {MAX_WORKSPACES} workspaces"
                 )));
             }
+            if let Some(id) = id
+                && m.workspaces.iter().any(|w| w.id == id)
+            {
+                return Err(refuse(format!("workspace {id} already exists")));
+            }
             let workspace = Workspace {
+                id: id.unwrap_or_default(),
                 name: name.clone(),
                 ..Workspace::default()
             };
@@ -749,17 +765,35 @@ impl MachineStore {
 
     /// Create a tab holding `pane`, at `at` (clamped; `None` appends), and make
     /// it active — a created tab is one the user is about to type into.
+    ///
+    /// `id` is client-mintable for the same reason
+    /// [`workspace_create`](MachineStore::workspace_create)'s is: the client's
+    /// window holds the tab (and may already have queued operations against it)
+    /// before the reply lands, and a uuid minted there is as good as one minted
+    /// here. A duplicate is refused, never adopted.
     pub fn tab_create(
         &self,
         workspace: WorkspaceId,
         at: Option<usize>,
         pane: PaneSeed,
+        id: Option<TabId>,
         origin: Option<SubscriberId>,
     ) -> io::Result<Tab> {
         self.mutate(origin, |m| {
+            if let Some(id) = id
+                && m.workspaces
+                    .iter()
+                    .any(|w| w.tabs.iter().any(|t| t.id == id))
+            {
+                return Err(refuse(format!("tab {id} already exists")));
+            }
             register_pane(m, pane.clone())?;
             let ws = find_workspace(m, workspace)?;
-            let tab = Tab::leaf(pane.pane);
+            let mut tab = Tab::leaf(pane.pane);
+            if let Some(id) = id {
+                tab.id = id;
+            }
+            let tab = tab;
             let at = at.unwrap_or(ws.tabs.len()).min(ws.tabs.len());
             ws.tabs.insert(at, tab.clone());
             ws.active_tab = Some(tab.id);
@@ -1459,9 +1493,11 @@ mod tests {
     /// A store, one workspace, one tab on pane 1.
     fn store_with_tab() -> (Arc<MachineStore>, tempfile::TempDir, WorkspaceId, Tab) {
         let (store, dir) = store();
-        let ws = store.workspace_create(Some("api".into()), None).unwrap();
+        let ws = store
+            .workspace_create(None, Some("api".into()), None)
+            .unwrap();
         let tab = store
-            .tab_create(ws.id, None, seed(1, "/work"), None)
+            .tab_create(ws.id, None, seed(1, "/work"), None, None)
             .unwrap();
         (store, dir, ws.id, tab)
     }
@@ -1478,14 +1514,60 @@ mod tests {
         (sub, heard)
     }
 
+    // ── Client-minted identities ───────────────────────────────────────────
+
+    #[test]
+    fn a_client_minted_workspace_id_is_kept_and_a_duplicate_is_refused() {
+        let (store, _dir) = store();
+        let id = WorkspaceId::new();
+        let ws = store
+            .workspace_create(Some(id), Some("api".into()), None)
+            .unwrap();
+        assert_eq!(ws.id, id, "the id the client named is the id it gets");
+
+        let refused = store
+            .workspace_create(Some(id), None, None)
+            .expect_err("a second create on the same id must refuse");
+        assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            store.machine().workspaces.len(),
+            1,
+            "the refusal changed nothing"
+        );
+    }
+
+    #[test]
+    fn a_client_minted_tab_id_is_kept_and_a_duplicate_is_refused_anywhere() {
+        let (store, _dir, ws, _tab) = store_with_tab();
+        let id = TabId::new();
+        let tab = store
+            .tab_create(ws, None, seed(2, "/b"), Some(id), None)
+            .unwrap();
+        assert_eq!(tab.id, id);
+
+        // Refused even from another workspace: tab ids are one namespace, so a
+        // delta about a tab can never be ambiguous about which tab it means.
+        let other = store.workspace_create(None, None, None).unwrap();
+        let refused = store
+            .tab_create(other.id, None, seed(3, "/c"), Some(id), None)
+            .expect_err("a taken tab id must refuse");
+        assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            store.pane(3).is_none(),
+            "the refused create adopted no pane either"
+        );
+    }
+
     // ── The tree survives the file ─────────────────────────────────────────
 
     #[test]
     fn the_tree_round_trips_through_the_file() {
         let (store, dir) = store();
-        let ws = store.workspace_create(Some("api".into()), None).unwrap();
+        let ws = store
+            .workspace_create(None, Some("api".into()), None)
+            .unwrap();
         store
-            .tab_create(ws.id, None, seed(1, "/work"), None)
+            .tab_create(ws.id, None, seed(1, "/work"), None, None)
             .unwrap();
         store
             .pane_split(
@@ -1531,9 +1613,9 @@ mod tests {
     #[test]
     fn a_reopened_store_marks_every_pane_awaiting_revival() {
         let (store, dir) = store();
-        let ws = store.workspace_create(None, None).unwrap();
+        let ws = store.workspace_create(None, None, None).unwrap();
         store
-            .tab_create(ws.id, None, seed(7, "/work"), None)
+            .tab_create(ws.id, None, seed(7, "/work"), None, None)
             .unwrap();
         assert!(
             store.pane(7).unwrap().live,
@@ -1560,9 +1642,9 @@ mod tests {
     #[test]
     fn replacing_a_dead_pane_rebinds_the_leaf_and_spends_the_record() {
         let (store, dir) = store();
-        let ws = store.workspace_create(None, None).unwrap();
+        let ws = store.workspace_create(None, None, None).unwrap();
         store
-            .tab_create(ws.id, None, seed(7, "/work"), None)
+            .tab_create(ws.id, None, seed(7, "/work"), None, None)
             .unwrap();
 
         let restarted = MachineStore::open(dir.path().join(MACHINE_FILE));
@@ -1595,7 +1677,9 @@ mod tests {
         let (store, _dir) = store();
         let (_sub, heard) = recorded(&store);
 
-        let ws = store.workspace_create(Some("api".into()), None).unwrap();
+        let ws = store
+            .workspace_create(None, Some("api".into()), None)
+            .unwrap();
         store
             .workspace_rename(ws.id, Some("web".into()), None)
             .unwrap();
@@ -1630,8 +1714,12 @@ mod tests {
     #[test]
     fn a_created_tab_lands_at_its_position_and_becomes_active() {
         let (store, _dir, ws, first) = store_with_tab();
-        let second = store.tab_create(ws, None, seed(2, "/b"), None).unwrap();
-        let between = store.tab_create(ws, Some(1), seed(3, "/c"), None).unwrap();
+        let second = store
+            .tab_create(ws, None, seed(2, "/b"), None, None)
+            .unwrap();
+        let between = store
+            .tab_create(ws, Some(1), seed(3, "/c"), None, None)
+            .unwrap();
 
         let workspace = store.workspace(ws).unwrap();
         let order: Vec<TabId> = workspace.tabs.iter().map(|t| t.id).collect();
@@ -1640,7 +1728,9 @@ mod tests {
 
         // An out-of-range position clamps rather than refusing: the client's
         // idea of "after the last tab" can be stale by one concurrent close.
-        let clamped = store.tab_create(ws, Some(99), seed(4, "/d"), None).unwrap();
+        let clamped = store
+            .tab_create(ws, Some(99), seed(4, "/d"), None, None)
+            .unwrap();
         assert_eq!(
             store.workspace(ws).unwrap().tabs.last().unwrap().id,
             clamped.id
@@ -1650,7 +1740,9 @@ mod tests {
     #[test]
     fn closing_a_tab_forgets_its_panes_and_heals_the_active_tab() {
         let (store, _dir, ws, first) = store_with_tab();
-        let second = store.tab_create(ws, None, seed(2, "/b"), None).unwrap();
+        let second = store
+            .tab_create(ws, None, seed(2, "/b"), None, None)
+            .unwrap();
         store.workspace_set_active_tab(ws, second.id, None).unwrap();
 
         let (_sub, heard) = recorded(&store);
@@ -1695,7 +1787,9 @@ mod tests {
     #[test]
     fn tabs_rename_move_and_regroup_in_place() {
         let (store, _dir, ws, first) = store_with_tab();
-        let second = store.tab_create(ws, None, seed(2, "/b"), None).unwrap();
+        let second = store
+            .tab_create(ws, None, seed(2, "/b"), None, None)
+            .unwrap();
 
         store
             .tab_rename(ws, first.id, Some("build".into()), None)
@@ -1802,7 +1896,9 @@ mod tests {
     #[test]
     fn moving_a_pane_between_tabs_dissolves_an_emptied_tab() {
         let (store, _dir, ws, first) = store_with_tab();
-        let second = store.tab_create(ws, None, seed(2, "/b"), None).unwrap();
+        let second = store
+            .tab_create(ws, None, seed(2, "/b"), None, None)
+            .unwrap();
 
         store
             .pane_move(ws, 2, 1, Axis::Vertical, false, None)
@@ -1839,7 +1935,7 @@ mod tests {
         assert!(store.workspace_rename(missing, None, None).is_err());
         assert!(
             store
-                .tab_create(missing, None, seed(9, "/x"), None)
+                .tab_create(missing, None, seed(9, "/x"), None, None)
                 .is_err()
         );
         assert!(store.tab_close(ws, TabId::new(), None).is_err());
@@ -1942,9 +2038,9 @@ mod tests {
         let (store, _dir, ws, _tab) = store_with_tab();
         store.note_pane_facts(1, |p| p.cwd = Some("/observed".into()));
 
-        let other = store.workspace_create(None, None).unwrap();
+        let other = store.workspace_create(None, None, None).unwrap();
         let err = store
-            .tab_create(other.id, None, seed(1, "/stale"), None)
+            .tab_create(other.id, None, seed(1, "/stale"), None, None)
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(
@@ -2016,7 +2112,7 @@ mod tests {
 
         let store = MachineStore::open(&path);
         assert!(store.machine().workspaces.is_empty());
-        store.workspace_create(None, None).unwrap();
+        store.workspace_create(None, None, None).unwrap();
         let aside = std::fs::read_to_string(path.with_extension("json.corrupt")).unwrap();
         assert_eq!(aside, "{ this is not json");
     }
