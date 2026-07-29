@@ -476,15 +476,33 @@ enum RowSeg {
         cells: usize,
         text: String,
     },
-    /// Style-identical consecutive wide (two-column) glyphs — CJK text, wide
-    /// emoji — shaped as a single line pinned to `2 × cell_width` per glyph.
-    /// A CJK-dense screen used to shape and paint every cell on its own; this
-    /// collapses each run to one `shape_line` + one paint.
+    /// One wide (two-column) glyph — CJK text, wide emoji — shaped on its own
+    /// and pinned to `2 × cell_width`.
+    ///
+    /// These used to batch into multi-glyph runs, which was wrong. gpui's
+    /// `apply_force_width_to_layout` distinguishes a base glyph from a
+    /// zero-advance combining mark by asking whether the shaped x advanced by
+    /// more than *half* the forced width — and fullwidth punctuation fails
+    /// that test: `（` (U+FF08) advances 0.472 em in the common CJK faces,
+    /// while half a two-cell slot is 0.6 em against a 0.6 em primary. The
+    /// glyph *after* such a character was therefore treated as a mark, painted
+    /// at the punctuation's own advance instead of the next column, and the
+    /// two overlapped (every following glyph in the batch then sat one column
+    /// early until the run ended).
+    ///
+    /// Shaping one glyph per line sidesteps the heuristic entirely: the first
+    /// glyph of a line is unconditionally a base. The cost is one `shape_line`
+    /// per wide glyph instead of per run, which the layout cache absorbs —
+    /// it is keyed on text + font + size + force_width, so a per-character key
+    /// recurs far more often than a per-phrase one.
     Wide {
         start: usize,
-        /// Columns covered (2 per glyph, spacers included) — the clip width.
+        /// Columns covered — always 2 (the glyph plus its spacer).
         cells: usize,
-        text: String,
+        /// Interned via [`char_string`], so re-painting a screen full of CJK
+        /// allocates nothing: the same `SharedString` is handed to `shape_line`
+        /// every frame, which is also what keys its layout cache.
+        text: SharedString,
     },
     /// A cell painted on its own: any single-width non-ASCII glyph (box
     /// drawing, accented Latin, …) that may route to a fallback face whose
@@ -543,10 +561,11 @@ fn sara_am_at(row: &[RenderCell], col: usize) -> Option<&RenderCell> {
 /// run, silently join a plain one, and never lead or trail a run.
 ///
 /// Wide glyphs (a cell followed by its spacer — the grid's authoritative
-/// two-column marker) batch into [`RowSeg::Wide`] runs: `force_width` at
-/// `2 × cell_width` pins each to its own column pair, since every wide glyph
-/// is a base glyph to `apply_force_width_to_layout` (a full-width advance is
-/// always > half the forced width, even from a fallback face).
+/// two-column marker) each become their own [`RowSeg::Wide`], shaped alone and
+/// pinned by `force_width` at `2 × cell_width`. They are deliberately *not*
+/// batched: a full-width advance is not always > half the forced width (CJK
+/// fullwidth punctuation is ~0.47 em), which breaks `apply_force_width_to_layout`'s
+/// base-vs-combining-mark test — see [`RowSeg::Wide`].
 ///
 /// Single-width non-ASCII glyphs still paint solo, preserving the per-cell
 /// behavior for glyphs with unpredictable advances (box drawing must fill its
@@ -590,29 +609,14 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
             // Wide (two-column) glyph? The trailing spacer is the grid's own
             // width marker, so no Unicode width guessing is needed.
             if col + 1 < row.len() && row[col + 1].spacer {
-                let style = GlyphStyle::of(cell);
-                let start = col;
-                let mut text = String::new();
-                text.push(cell.c);
-                col += 2;
-                // Extend over strictly consecutive style-identical wide glyphs
-                // (no gap joining — a blank between wide chars ends the run).
-                while col + 1 < row.len()
-                    && !row[col].spacer
-                    && !is_blank(&row[col])
-                    && row[col].marks.is_none()
-                    && !row[col].c.is_ascii_graphic()
-                    && row[col + 1].spacer
-                    && GlyphStyle::of(&row[col]) == style
-                {
-                    text.push(row[col].c);
-                    col += 2;
-                }
+                // One segment per glyph, deliberately unbatched — see the
+                // `RowSeg::Wide` docs for why batching can't be made safe.
                 segs.push(RowSeg::Wide {
-                    start,
-                    cells: col - start,
-                    text,
+                    start: col,
+                    cells: 2,
+                    text: char_string(cell.c),
                 });
+                col += 2;
             } else if !is_sara_am(cell.c)
                 && let Some(am) = sara_am_at(row, col + 1)
             {
@@ -852,8 +856,9 @@ fn seg_clip_width(solo: bool, cells: usize, cell_width: Pixels) -> Pixels {
 /// glyph's font advance ≠ cell_width. gpui's `force_width` (added upstream for
 /// Zed's terminal) pins every glyph in a shaped line to its own column, which
 /// makes batching safe when all glyphs in the line occupy the same number of
-/// columns — so style-identical ASCII runs shape at `cell_width` per glyph,
-/// and style-identical wide runs (CJK text) at `2 × cell_width` per glyph.
+/// columns *and* every one of them clears its base-glyph test — true for
+/// style-identical ASCII runs at `cell_width` per glyph, false for wide glyphs
+/// (see [`RowSeg::Wide`]), which shape one per line at `2 × cell_width`.
 /// Single-width glyphs that may come from a fallback face (box drawing, …)
 /// still paint cell-by-cell: their advances are unpredictable and mixing
 /// widths inside one batch would break `force_width`'s uniform-column
@@ -904,13 +909,9 @@ fn paint_glyphs(
                 ),
                 // Each wide glyph is pinned to its own two-column slot; the
                 // clip stops an oversized fallback glyph bleeding past the run.
-                RowSeg::Wide { start, cells, text } => (
-                    start,
-                    cells,
-                    SharedString::from(text),
-                    Some(geom.cell_width * 2.),
-                    false,
-                ),
+                RowSeg::Wide { start, cells, text } => {
+                    (start, cells, text, Some(geom.cell_width * 2.), false)
+                }
                 // Always exactly one column now — anything with a trailing
                 // spacer became a Wide run in `segment_row`. No `force_width`
                 // for a single glyph — it paints at the run origin regardless.
@@ -2013,7 +2014,7 @@ mod tests {
         RowSeg::Wide {
             start,
             cells,
-            text: text.to_string(),
+            text: text.into(),
         }
     }
 
@@ -2264,21 +2265,58 @@ mod tests {
     }
 
     #[test]
-    fn segment_row_batches_consecutive_wide_glyphs() {
-        // A CJK phrase batches into one Wide run covering glyphs + spacers.
+    fn segment_row_gives_each_wide_glyph_its_own_segment() {
+        // A CJK phrase emits one segment per glyph, each covering its glyph +
+        // spacer. Batching them was wrong: gpui's `apply_force_width_to_layout`
+        // only starts a new column when the shaped x has advanced past *half*
+        // the forced width, and fullwidth punctuation doesn't. `（` advances
+        // 0.472 em where half a two-cell slot is 0.6 em, so the glyph after it
+        // was classified as a combining mark, painted at the punctuation's own
+        // advance instead of the next column, and the two overlapped. Shaping
+        // each glyph alone makes it the first glyph of its line, which that
+        // function always treats as a base.
         let row = wide_cells("你好世界");
-        assert_eq!(segment_row(&row), [wide(0, 8, "你好世界")]);
+        assert_eq!(
+            segment_row(&row),
+            [
+                wide(0, 2, "你"),
+                wide(2, 2, "好"),
+                wide(4, 2, "世"),
+                wide(6, 2, "界")
+            ]
+        );
     }
 
     #[test]
-    fn segment_row_splits_wide_runs_on_style_and_gaps() {
-        // A foreground change mid-phrase splits the batch, like ASCII runs.
+    fn segment_row_isolates_narrow_fullwidth_punctuation() {
+        // The exact reproduction: `（这样` painted `这` on top of `（`.
+        let row = wide_cells("（这样");
+        assert_eq!(
+            segment_row(&row),
+            [wide(0, 2, "（"), wide(2, 2, "这"), wide(4, 2, "样")]
+        );
+    }
+
+    #[test]
+    fn segment_row_tracks_wide_columns_across_styles_and_gaps() {
+        // Per-glyph segments make a mid-phrase style change a non-event: each
+        // glyph already carries its own style at paint. Column starts must
+        // still step by 2.
         let mut row = wide_cells("你好世界");
         row[4].fg = gpui::red(); // third glyph (cols 4-5)
         row[6].fg = gpui::red();
-        assert_eq!(segment_row(&row), [wide(0, 4, "你好"), wide(4, 4, "世界")]);
+        assert_eq!(
+            segment_row(&row),
+            [
+                wide(0, 2, "你"),
+                wide(2, 2, "好"),
+                wide(4, 2, "世"),
+                wide(6, 2, "界")
+            ]
+        );
 
-        // A blank cell between wide glyphs ends the run — no gap joining.
+        // A blank cell between wide glyphs still consumes its column, so the
+        // glyph after it starts at 3, not 2.
         let mut row = wide_cells("你好");
         row.insert(2, cell(' '));
         assert_eq!(segment_row(&row), [wide(0, 2, "你"), wide(3, 2, "好")]);
