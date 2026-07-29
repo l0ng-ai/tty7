@@ -476,10 +476,23 @@ fn confirm_destructive(
 /// Callers confirm first unless [`live_pane_count`] answered zero; with nothing
 /// running there is nothing to lose.
 pub fn stop_workspace(cx: &mut App, workspace: WorkspaceId) {
-    stop_workspace_keeping(cx, workspace);
+    let doomed = doomed_pane_ids(cx, workspace);
+    stop_workspace_keeping(cx, workspace, doomed);
 }
 
-fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId) {
+/// The pane ids stopping or deleting `workspace` must kill, per its machine's
+/// mirror. Read this **before** any operation that removes the workspace from
+/// the mirror — `fire_workspace_op(WorkspaceRemove)` folds the removal in
+/// synchronously ([`crate::ui::machine_mirror::MachineMirrors::note_workspace_op`]),
+/// and a list read after it is always empty.
+fn doomed_pane_ids(cx: &App, workspace: WorkspaceId) -> Vec<u64> {
+    WorkspaceStore::all(cx)
+        .get(workspace)
+        .and_then(|ws| crate::ui::machine_mirror::pane_ids(cx, ws))
+        .unwrap_or_default()
+}
+
+fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId, ids: Vec<u64>) {
     // A remote workspace's panes live on the remote server, and its pane ids are
     // *that* daemon's. Sending them here would not fail — it would succeed
     // against whatever local panes happen to hold those numbers, killing a
@@ -490,10 +503,6 @@ fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId) {
         .get(workspace)
         .map(|w| w.host_id())
         .unwrap_or(crate::ui::host_ops::HostId::LOCAL);
-    let ids = WorkspaceStore::all(cx)
-        .get(workspace)
-        .and_then(|ws| crate::ui::machine_mirror::pane_ids(cx, ws))
-        .unwrap_or_default();
     if !ids.is_empty() {
         // Off the UI thread: each of these dials `route`, and on a remote
         // workspace that is an SSH channel per pane. Stopping a four-pane
@@ -542,18 +551,29 @@ fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId) {
 /// Delete a workspace outright: stop it, then forget it entirely. Irreversible
 /// — nothing about the layout survives.
 pub fn delete_workspace(cx: &mut App, workspace: WorkspaceId) {
-    // Delete it out of the machine's tree first, while the pointer to it is
-    // still on file — the tree is where every other client (and the next
-    // launch) lists workspaces from, and doing this after
-    // `WorkspaceStore::remove` would leave it stranded with no way to name it.
+    let doomed = delete_from_tree(cx, workspace);
+    stop_workspace_keeping(cx, workspace, doomed);
+    WorkspaceStore::remove(cx, workspace);
+    release_unused_hosts(cx);
+    refresh_menu(cx);
+}
+
+/// The tree half of a delete, in the one order that works: read the kill list
+/// off the machine mirror **before** firing `WorkspaceRemove`, because firing
+/// folds the removal into that mirror on the way out and the list read
+/// afterwards is empty — which is how "N running sessions will be ended" once
+/// ended zero. Answers the panes the caller must kill.
+///
+/// The op itself still goes before `WorkspaceStore::remove`: the tree is where
+/// every other client (and the next launch) lists workspaces from, and firing
+/// after the entry is gone would leave it stranded with no way to name it.
+fn delete_from_tree(cx: &mut App, workspace: WorkspaceId) -> Vec<u64> {
+    let doomed = doomed_pane_ids(cx, workspace);
     crate::ui::tree_sync::fire_workspace_op(cx, workspace, |ws| {
         tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
     });
     crate::ui::tree_sync::forget(cx, workspace);
-    stop_workspace_keeping(cx, workspace);
-    WorkspaceStore::remove(cx, workspace);
-    release_unused_hosts(cx);
-    refresh_menu(cx);
+    doomed
 }
 
 /// Drop the connection to any machine no workspace points at any more.
@@ -782,5 +802,55 @@ mod tests {
                 "{verb}: {detail:?} states a count it does not have"
             );
         }
+    }
+
+    /// The regression the delete order guards against: `WorkspaceRemove` is
+    /// folded into the machine mirror synchronously on its way out, so a kill
+    /// list read *after* firing it is always empty — the confirm prompt said
+    /// "3 running sessions will be ended" and the delete then ended none.
+    /// `delete_from_tree` must hand back the panes the mirror listed before
+    /// the removal blanked it.
+    #[gpui::test]
+    fn a_delete_reads_its_kill_list_before_the_removal_blanks_the_mirror(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::session::{WindowView, WindowViews};
+        use tty7_core::core::machine::{Machine, PaneRecord, Tab, Workspace as TreeWorkspace};
+
+        cx.update(|cx| {
+            let view = WindowView::default();
+            let id = view.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![view],
+                    active: None,
+                },
+            );
+            crate::ui::machine_mirror::MachineMirrors::install(
+                cx,
+                crate::ui::host_ops::HostId::LOCAL,
+                Machine {
+                    workspaces: vec![TreeWorkspace {
+                        id,
+                        tabs: vec![Tab::leaf(1), Tab::leaf(2), Tab::leaf(3)],
+                        ..TreeWorkspace::default()
+                    }],
+                    panes: vec![PaneRecord::new(1), PaneRecord::new(2), PaneRecord::new(3)],
+                },
+            );
+
+            let doomed = delete_from_tree(cx, id);
+            assert_eq!(
+                doomed,
+                vec![1, 2, 3],
+                "every session the confirm prompt counted must be on the kill list"
+            );
+            assert!(
+                doomed_pane_ids(cx, id).is_empty(),
+                "the removal has been folded into the mirror — which is exactly why \
+                 the list must be read first"
+            );
+        });
     }
 }
