@@ -1493,6 +1493,12 @@ pub(crate) fn drain_events(cx: &mut gpui::App) {
             }
             // Handled by `stale_workspaces` above, in one pull per workspace.
             ControlEvent::WorkspaceChanged { .. } => {}
+            // Another writer edited a workspace tree this client shows: apply
+            // the delta to the mirror and the live window (or re-pull the
+            // workspace when it will not apply cleanly).
+            ControlEvent::Layout { workspace, delta } => {
+                crate::ui::tree_sync::on_layout_delta(cx, host, &workspace, delta);
+            }
             other => log::debug!("unhandled control event from {host:?}: {other:?}"),
         }
     }

@@ -482,6 +482,24 @@ impl Tab {
         }
     }
 
+    /// A tab mirroring one the daemon's tree already holds — labels and
+    /// identity from the tree, the pane views from `pane` (built by the delta
+    /// application, which attaches or reuses them).
+    pub(crate) fn from_tree(tree: &tty7_core::core::machine::Tab, pane: Pane) -> Self {
+        Self {
+            pane,
+            name: tree.name.clone(),
+            last_focused: None,
+            diff_overlay: None,
+            code: None,
+            overlay_top: OverlayTop::default(),
+            sidebar_group: std::cell::RefCell::new(
+                tree.sidebar_group.clone().map(std::path::PathBuf::from),
+            ),
+            tree_id: std::cell::Cell::new(tree.id),
+        }
+    }
+
     /// The pane to focus when this tab becomes active: the last-focused leaf if
     /// it still exists, otherwise the first leaf.
     fn focus_target(&self) -> Option<crate::ui::pane::PaneSlot> {
@@ -717,7 +735,7 @@ pub struct Tty7App {
     pub(crate) worktree_prompt: Option<crate::ui::worktree_prompt::WorktreePrompt>,
     /// When `Some`, the active tab renders only this one leaf full-window
     /// (Cmd+Shift+Enter maximize). Cleared on any structural / navigation change.
-    maximized: Option<Entity<TerminalView>>,
+    pub(crate) maximized: Option<Entity<TerminalView>>,
     /// Whether the tab chips currently show their ⌘1…⌘9 switch badges
     /// (shown while bare ⌘/Ctrl is held; see `hints::on_modifiers_changed`).
     pub(crate) mod_hint_badges: bool,
@@ -7560,7 +7578,7 @@ fn session_to_pane(
 /// stamped on the view (so `save_session` can shout if a window's tabs and its
 /// identity ever come apart). `None` only for callers that genuinely have no
 /// workspace (tests).
-fn new_terminal(
+pub(crate) fn new_terminal(
     workspace: Option<crate::terminal::PaneWorkspace>,
     owner: Option<WorkspaceId>,
     font_size: f32,

@@ -52,8 +52,8 @@ use std::sync::Arc;
 
 use gpui::{App, Global};
 use tty7_core::core::machine::{
-    AgentFacts, Axis as TreeAxis, Machine, PaneNode, PaneRecord, PaneSeed, Side, Tab as TreeTab,
-    TabId,
+    AgentFacts, Axis as TreeAxis, LayoutDelta, Machine, PaneNode, PaneRecord, PaneSeed, Side,
+    Tab as TreeTab, TabId,
 };
 use tty7_core::daemon::control::{ControlClient, ControlRequest, ReplyOk};
 use tty7_core::host::HostId;
@@ -1117,6 +1117,21 @@ const HYDRATE_LINK_POLL: std::time::Duration = std::time::Duration::from_millis(
 /// falls back to the client's cached `session` copy: adopting it re-populates
 /// the tree through the ordinary diff, which is the whole import.
 pub(crate) fn hydrate_window_from_tree(cx: &mut App, client_ws: WorkspaceId) {
+    hydrate(cx, client_ws, Adopt::IfEmpty);
+}
+
+/// What a finished pull may do to the window.
+#[derive(Clone, Copy, PartialEq)]
+enum Adopt {
+    /// Fill an empty window; a window with tabs wins over the pull (the user
+    /// got there first). The open/restore path.
+    IfEmpty,
+    /// Replace the window's tabs with the pulled tree. The delta-fallback
+    /// resync, where the window is known to have drifted.
+    Replace,
+}
+
+fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
     let host = WorkspaceStore::host_of(cx, client_ws);
     let machine_ws = tree_workspace_id(cx, client_ws);
     let name = WorkspaceStore::all(cx)
@@ -1160,7 +1175,7 @@ pub(crate) fn hydrate_window_from_tree(cx: &mut App, client_ws: WorkspaceId) {
             .background_executor()
             .spawn(async move { pull_workspace(&client, machine_ws, name) })
             .await;
-        cx.update(|cx| finish_hydration(cx, client_ws, outcome));
+        cx.update(|cx| finish_hydration(cx, client_ws, adopt, outcome));
     })
     .detach();
 }
@@ -1199,6 +1214,7 @@ fn pull_workspace(
 fn finish_hydration(
     cx: &mut App,
     client_ws: WorkspaceId,
+    adopt: Adopt,
     outcome: io::Result<(WsMirror, Session)>,
 ) {
     let (mirror, session) = match outcome {
@@ -1228,7 +1244,7 @@ fn finish_hydration(
     else {
         return;
     };
-    if !app.read(cx).tabs.is_empty() {
+    if adopt == Adopt::IfEmpty && !app.read(cx).tabs.is_empty() {
         // The user got there first (opened a tab into the empty window); their
         // window wins, and the sync below reconciles the tree to it.
         if was_dirty {
@@ -1238,8 +1254,10 @@ fn finish_hydration(
     }
     // The one-time import: a tree with nothing for this workspace, a client
     // with a cached layout — adopt the cache, and the adopt's own save
-    // populates the tree through the ordinary diff.
-    let session = if session.tabs.is_empty() {
+    // populates the tree through the ordinary diff. Only on the open path: a
+    // resync is authoritative, and falling back would resurrect what the
+    // machine just said is gone.
+    let session = if session.tabs.is_empty() && adopt == Adopt::IfEmpty {
         WorkspaceStore::all(cx)
             .get(client_ws)
             .map(|w| w.session.clone())
@@ -1247,7 +1265,7 @@ fn finish_hydration(
     } else {
         session
     };
-    if session.tabs.is_empty() {
+    if session.tabs.is_empty() && adopt == Adopt::IfEmpty {
         if was_dirty
             && let Some(app) =
                 crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|a| a.upgrade())
@@ -1268,6 +1286,393 @@ fn finish_hydration(
             app.adopt_workspace(client_ws, session, window, cx)
         });
     });
+}
+
+// ---------------------------------------------------------------------------
+// Incremental deltas: another writer edited a workspace this client shows
+// ---------------------------------------------------------------------------
+
+/// Land one [`LayoutDelta`] pushed by a machine: advance this client's mirror,
+/// then the live window showing the workspace, if any.
+///
+/// The writer never hears its own operation back (origin exclusion), so every
+/// delta arriving here is *another* client's edit — and because application
+/// updates the window and the mirror in the same step, the next local diff
+/// sees no difference and produces no echo.
+///
+/// Anything that will not apply cleanly — a tab the mirror does not know, a
+/// window whose state has drifted — falls back to a full re-pull of the
+/// workspace and a rebuild, the same recovery every other failure uses.
+pub(crate) fn on_layout_delta(cx: &mut App, host: HostId, key: &str, delta: LayoutDelta) {
+    // The event names the machine's workspace id; translate to the client's.
+    let client_ws = if host.is_local() {
+        key.parse::<WorkspaceId>().ok()
+    } else {
+        WorkspaceStore::all(cx)
+            .workspaces
+            .iter()
+            .find(|w| {
+                w.host
+                    .as_ref()
+                    .is_some_and(|r| r.host_id() == host && r.workspace.to_string() == key)
+            })
+            .map(|w| w.id)
+    };
+    let Some(client_ws) = client_ws else {
+        return;
+    };
+
+    let mirror_ok = match cx
+        .default_global::<TreeSync>()
+        .windows
+        .get_mut(&client_ws)
+        .map(|s| &mut s.sync)
+    {
+        Some(SyncPhase::Primed(mirror)) => apply_to_mirror(mirror, &delta),
+        // No mirror yet: whatever pull is (or will be) in flight already
+        // answers with a state that includes this delta.
+        _ => true,
+    };
+
+    let Some(app) =
+        crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|a| a.upgrade())
+    else {
+        return;
+    };
+    let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, client_ws) else {
+        return;
+    };
+    let window_ok = handle
+        .update(cx, |_, window, cx| {
+            app.update(cx, |app, cx| app.apply_layout_delta(&delta, window, cx))
+        })
+        .unwrap_or(true);
+    if !mirror_ok || !window_ok {
+        log::info!(
+            "workspace {client_ws}: delta {delta:?} did not apply cleanly; re-pulling the tree"
+        );
+        resync_window_from_tree(cx, client_ws);
+    }
+}
+
+/// Advance the mirror by one delta. `false` means the delta names state the
+/// mirror does not have — the caller re-pulls.
+fn apply_to_mirror(mirror: &mut WsMirror, delta: &LayoutDelta) -> bool {
+    match delta {
+        // Workspace-level facts carry no tab structure.
+        LayoutDelta::WorkspaceCreated { .. }
+        | LayoutDelta::WorkspaceRenamed { .. }
+        | LayoutDelta::WorkspaceTouched { .. }
+        | LayoutDelta::WorkspaceDeleted
+        | LayoutDelta::PaneFacts { .. } => true,
+        LayoutDelta::ActiveTabChanged { tab } => {
+            mirror.active = Some(*tab);
+            true
+        }
+        LayoutDelta::TabCreated { at, tab } => {
+            let at = (*at).min(mirror.tabs.len());
+            mirror.tabs.insert(at, tab.clone());
+            true
+        }
+        LayoutDelta::TabClosed { tab } => {
+            let before = mirror.tabs.len();
+            mirror.tabs.retain(|t| t.id != *tab);
+            if mirror.tabs.is_empty() {
+                mirror.active = None;
+            }
+            // The heal, when one happened, arrives as its own
+            // ActiveTabChanged — the server promises that.
+            mirror.tabs.len() != before
+        }
+        LayoutDelta::TabRenamed { tab, name } => {
+            let Some(t) = mirror.tabs.iter_mut().find(|t| t.id == *tab) else {
+                return false;
+            };
+            t.name = name.clone();
+            true
+        }
+        LayoutDelta::TabRegrouped { tab, group } => {
+            let Some(t) = mirror.tabs.iter_mut().find(|t| t.id == *tab) else {
+                return false;
+            };
+            t.sidebar_group = group.clone();
+            true
+        }
+        LayoutDelta::TabMoved { tab, to } => {
+            let Some(from) = mirror.tabs.iter().position(|t| t.id == *tab) else {
+                return false;
+            };
+            let moved = mirror.tabs.remove(from);
+            mirror.tabs.insert((*to).min(mirror.tabs.len()), moved);
+            true
+        }
+        LayoutDelta::TabRestructured { tab, .. } => {
+            let Some(t) = mirror.tabs.iter_mut().find(|t| t.id == tab.id) else {
+                return false;
+            };
+            *t = tab.clone();
+            true
+        }
+        LayoutDelta::RatioChanged { tab, path, ratio } => {
+            let Some(t) = mirror.tabs.iter_mut().find(|t| t.id == *tab) else {
+                return false;
+            };
+            match t.root.descend_mut(path) {
+                Some(PaneNode::Split { ratio: r, .. }) => {
+                    *r = *ratio;
+                    true
+                }
+                _ => false,
+            }
+        }
+    }
+}
+
+/// Re-pull the workspace and rebuild its window from the result, replacing
+/// whatever the window holds — the delta fallback.
+fn resync_window_from_tree(cx: &mut App, client_ws: WorkspaceId) {
+    hydrate(cx, client_ws, Adopt::Replace);
+}
+
+impl Tty7App {
+    /// Apply one delta to this window. `false` when it cannot be applied
+    /// cleanly, in which case the caller re-pulls and rebuilds.
+    pub(crate) fn apply_layout_delta(
+        &mut self,
+        delta: &LayoutDelta,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        let index_of = |tabs: &[crate::ui::app::Tab], id: TabId| {
+            tabs.iter().position(|t| t.tree_id.get() == id)
+        };
+        let applied = match delta {
+            LayoutDelta::WorkspaceCreated { .. }
+            | LayoutDelta::WorkspaceTouched { .. }
+            | LayoutDelta::PaneFacts { .. } => true,
+            LayoutDelta::WorkspaceRenamed { name } => {
+                // Another client named the workspace; the chip and the picker
+                // read the store's copy.
+                WorkspaceStore::rename_locally(cx, self.workspace, name.clone());
+                true
+            }
+            // Deleting a workspace someone is looking at does not close their
+            // window — a window is never closed by remote control. The next
+            // structural edit here recreates the workspace on the machine.
+            LayoutDelta::WorkspaceDeleted => {
+                log::info!(
+                    "workspace {} was deleted on its machine; keeping the window",
+                    self.workspace
+                );
+                true
+            }
+            LayoutDelta::ActiveTabChanged { tab } => {
+                if let Some(index) = index_of(&self.tabs, *tab) {
+                    self.activate_from_delta(index, window, cx);
+                }
+                // A tab this window doesn't hold yet: its TabCreated may be a
+                // spawn still in flight. Not worth a rebuild.
+                true
+            }
+            LayoutDelta::TabCreated { at, tab } => {
+                self.insert_tab_from_tree((*at).min(self.tabs.len()), tab, window, cx)
+            }
+            LayoutDelta::TabClosed { tab } => {
+                if let Some(index) = index_of(&self.tabs, *tab) {
+                    // The panes' views go; the panes themselves were the
+                    // closing client's to kill.
+                    self.tabs.remove(index);
+                    self.active = self.active.min(self.tabs.len().saturating_sub(1));
+                    self.maximized = None;
+                    self.focus_active(window, cx);
+                }
+                true
+            }
+            LayoutDelta::TabRenamed { tab, name } => {
+                if let Some(index) = index_of(&self.tabs, *tab) {
+                    self.tabs[index].name = name.clone();
+                }
+                true
+            }
+            LayoutDelta::TabRegrouped { tab, group } => {
+                if let Some(index) = index_of(&self.tabs, *tab) {
+                    *self.tabs[index].sidebar_group.borrow_mut() =
+                        group.clone().map(std::path::PathBuf::from);
+                }
+                true
+            }
+            LayoutDelta::TabMoved { tab, to } => {
+                if let Some(from) = index_of(&self.tabs, *tab) {
+                    let active_id = self.tabs.get(self.active).map(|t| t.tree_id.get());
+                    let moved = self.tabs.remove(from);
+                    self.tabs.insert((*to).min(self.tabs.len()), moved);
+                    if let Some(id) = active_id
+                        && let Some(index) = index_of(&self.tabs, id)
+                    {
+                        self.active = index;
+                    }
+                }
+                true
+            }
+            LayoutDelta::TabRestructured { tab, .. } => {
+                match index_of(&self.tabs, tab.id) {
+                    Some(index) => self.rebuild_tab_from_tree(index, tab, window, cx),
+                    // Restructure of a tab we never built — out of step.
+                    None => false,
+                }
+            }
+            LayoutDelta::RatioChanged { tab, path, ratio } => {
+                if let Some(index) = index_of(&self.tabs, *tab) {
+                    set_gui_ratio(&mut self.tabs[index].pane, path, *ratio)
+                } else {
+                    true
+                }
+            }
+        };
+        cx.notify();
+        applied
+    }
+
+    /// Activate a tab because a delta said so — the parts of `activate` that
+    /// move state, without the save that would echo the change back.
+    fn activate_from_delta(
+        &mut self,
+        index: usize,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if self.active == index {
+            return;
+        }
+        self.maximized = None;
+        self.active = index;
+        self.focus_active(window, cx);
+    }
+
+    /// Build one GUI tab from a tree tab whose panes are all live (they were
+    /// just created by the writer), attaching each by id.
+    fn insert_tab_from_tree(
+        &mut self,
+        at: usize,
+        tab: &TreeTab,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        let mut existing = HashMap::new();
+        let Some(pane) = self.build_pane_from_tree(&tab.root, &mut existing, window, cx) else {
+            return false;
+        };
+        let gui = crate::ui::app::Tab::from_tree(tab, pane);
+        self.tabs.insert(at, gui);
+        if self.active >= at && self.tabs.len() > 1 {
+            self.active += 1;
+        }
+        true
+    }
+
+    /// Rebuild one tab's pane tree to match the machine's, **reusing** the
+    /// views of panes the window already shows — re-attaching a pane this
+    /// window holds would steal its own stream (one pane, one subscriber).
+    fn rebuild_tab_from_tree(
+        &mut self,
+        index: usize,
+        tab: &TreeTab,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        let mut existing: HashMap<u64, PaneSlot> = HashMap::new();
+        for slot in self.tabs[index].pane.leaves() {
+            let id = match &slot {
+                PaneSlot::Ready(view) => Some(view.read(cx).pane_id),
+                PaneSlot::Connecting(pending) => pending.read(cx).spawn.restore_pane,
+            };
+            if let Some(id) = id {
+                existing.insert(id, slot);
+            }
+        }
+        let Some(pane) = self.build_pane_from_tree(&tab.root, &mut existing, window, cx) else {
+            return false;
+        };
+        let gui = &mut self.tabs[index];
+        gui.pane = pane;
+        gui.name = tab.name.clone();
+        *gui.sidebar_group.borrow_mut() = tab.sidebar_group.clone().map(std::path::PathBuf::from);
+        self.maximized = None;
+        // Slots left in `existing` belonged to panes the writer removed; their
+        // views drop with the old tree, and killing the panes was the writer's
+        // act, not ours.
+        true
+    }
+
+    /// Lower a tree node into a GUI pane tree, taking views for known panes
+    /// from `existing` and attaching to unknown (writer-created) ones by id.
+    fn build_pane_from_tree(
+        &self,
+        node: &PaneNode,
+        existing: &mut HashMap<u64, PaneSlot>,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> Option<Pane> {
+        match node {
+            PaneNode::Leaf { pane } => {
+                if let Some(slot) = existing.remove(pane) {
+                    return Some(Pane::Leaf(slot));
+                }
+                match crate::ui::app::new_terminal(
+                    self.window_workspace(cx),
+                    Some(self.workspace),
+                    self.font_size,
+                    None,
+                    Some(*pane),
+                    None,
+                    window,
+                    cx,
+                ) {
+                    Ok(slot) => Some(Pane::Leaf(slot)),
+                    Err(e) => {
+                        log::warn!("could not attach pane {pane} from a delta: {e}");
+                        None
+                    }
+                }
+            }
+            PaneNode::Split { axis, ratio, a, b } => {
+                let left = self.build_pane_from_tree(a, existing, window, cx);
+                let right = self.build_pane_from_tree(b, existing, window, cx);
+                match (left, right) {
+                    (Some(a), Some(b)) => Some(Pane::split_node(
+                        match axis {
+                            TreeAxis::Horizontal => gpui::Axis::Horizontal,
+                            TreeAxis::Vertical => gpui::Axis::Vertical,
+                        },
+                        *ratio,
+                        a,
+                        b,
+                    )),
+                    (one, other) => one.or(other),
+                }
+            }
+        }
+    }
+}
+
+/// Follow `path` through the GUI tree and move that split's divider.
+fn set_gui_ratio(pane: &mut Pane, path: &[Side], ratio: f32) -> bool {
+    match path.split_first() {
+        None => match pane {
+            Pane::Split { ratio: cell, .. } => {
+                cell.set(ratio);
+                true
+            }
+            _ => false,
+        },
+        Some((side, rest)) => match pane {
+            Pane::Split { a, b, .. } => match side {
+                Side::A => set_gui_ratio(a, rest, ratio),
+                Side::B => set_gui_ratio(b, rest, ratio),
+            },
+            _ => false,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -1667,6 +2072,86 @@ mod tests {
         let want = vec![tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)))];
         diff(ws, &mut mirror, &want, Some(id));
         assert_eq!(diff(ws, &mut mirror, &want, Some(id)), Vec::new());
+    }
+
+    #[test]
+    fn deltas_advance_the_mirror_exactly_as_the_writers_operations_did() {
+        // Writer A's mirror advances through `diff`; watcher B's advances by
+        // applying the equivalent deltas. Both must land on the same tree —
+        // that equality is what lets B mirror A without re-implementing A.
+        let ws = WorkspaceId::new();
+        let id = TabId::new();
+        let mut watcher = WsMirror::default();
+
+        let tree_tab = TreeTab {
+            id,
+            name: None,
+            sidebar_group: None,
+            root: PaneNode::Leaf { pane: 1 },
+        };
+        assert!(apply_to_mirror(
+            &mut watcher,
+            &LayoutDelta::TabCreated {
+                at: 0,
+                tab: tree_tab,
+            },
+        ));
+        assert!(apply_to_mirror(
+            &mut watcher,
+            &LayoutDelta::ActiveTabChanged { tab: id },
+        ));
+        assert!(apply_to_mirror(
+            &mut watcher,
+            &LayoutDelta::TabRestructured {
+                tab: TreeTab {
+                    id,
+                    name: None,
+                    sidebar_group: None,
+                    root: PaneNode::Split {
+                        axis: TreeAxis::Vertical,
+                        ratio: 0.5,
+                        a: Box::new(PaneNode::Leaf { pane: 1 }),
+                        b: Box::new(PaneNode::Leaf { pane: 2 }),
+                    },
+                },
+                pane: None,
+            },
+        ));
+        assert!(apply_to_mirror(
+            &mut watcher,
+            &LayoutDelta::RatioChanged {
+                tab: id,
+                path: Vec::new(),
+                ratio: 0.7,
+            },
+        ));
+
+        // The writer's own mirror, advanced by the diff for the same edits.
+        let mut writer = WsMirror::default();
+        diff(ws, &mut writer, &[tab(id, leaf(1))], Some(id));
+        let final_state = vec![tab(id, split(TreeAxis::Vertical, 0.7, leaf(1), leaf(2)))];
+        diff(ws, &mut writer, &final_state, Some(id));
+
+        assert_eq!(watcher, writer);
+    }
+
+    #[test]
+    fn a_delta_about_a_tab_the_mirror_does_not_hold_reports_itself() {
+        let mut mirror = WsMirror::default();
+        assert!(
+            !apply_to_mirror(
+                &mut mirror,
+                &LayoutDelta::TabRenamed {
+                    tab: TabId::new(),
+                    name: Some("x".into()),
+                },
+            ),
+            "an unappliable delta must say so, so the caller re-pulls"
+        );
+        assert!(!apply_to_mirror(
+            &mut mirror,
+            &LayoutDelta::TabClosed { tab: TabId::new() },
+        ),);
     }
 
     #[test]

@@ -156,6 +156,19 @@ impl WorkspaceStore {
         });
     }
 
+    /// Record a rename that *arrived from* the machine — the local half of
+    /// [`rename`](Self::rename), without the operation that would echo it
+    /// straight back.
+    pub fn rename_locally(cx: &mut gpui::App, id: WorkspaceId, name: Option<String>) {
+        let Some(store) = Self::try_store(cx) else {
+            return;
+        };
+        if let Some(workspace) = store.workspaces.get_mut(id) {
+            workspace.name = name;
+        }
+        store.workspaces.save();
+    }
+
     /// Set (or clear, with `None`) a workspace's user-chosen name. Clearing
     /// falls back to the derived repo/cwd name — see [`Workspace::display_name`].
     pub fn rename(cx: &mut gpui::App, id: WorkspaceId, name: Option<String>) {

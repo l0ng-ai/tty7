@@ -269,8 +269,10 @@ impl PaneNode {
         }
     }
 
-    /// The node a split path resolves to, if the path is still valid.
-    fn descend_mut(&mut self, path: &[Side]) -> Option<&mut PaneNode> {
+    /// The node a split path resolves to, if the path is still valid. Public
+    /// for the same reason the surgery methods are: a client applying a
+    /// [`LayoutDelta::RatioChanged`] resolves the identical path.
+    pub fn descend_mut(&mut self, path: &[Side]) -> Option<&mut PaneNode> {
         match path.split_first() {
             None => Some(self),
             Some((side, rest)) => match self {
