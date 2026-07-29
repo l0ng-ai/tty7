@@ -494,16 +494,14 @@ impl PaneSeed {
         }
     }
 
-    fn into_record(self) -> PaneRecord {
+    fn into_record(self, live: bool) -> PaneRecord {
         PaneRecord {
             id: self.pane,
             cwd: self.cwd,
             title: String::new(),
             ssh_spec: self.ssh_spec.map(|s| Box::new(s.without_secrets())),
             agent: self.agent,
-            // Seeded panes were just spawned by the client that seeds them; the
-            // pane server's own liveness reporting refines this later.
-            live: true,
+            live,
         }
     }
 }
@@ -618,10 +616,19 @@ impl Drop for Subscription {
 // The store
 // ---------------------------------------------------------------------------
 
+/// How the store asks the process serving panes whether an id has a live PTY
+/// *right now* — see [`MachineStore::set_liveness_probe`].
+pub type LivenessProbe = Arc<dyn Fn(u64) -> bool + Send + Sync>;
+
 /// The daemon's tree, and the one writer to its file.
 pub struct MachineStore {
     path: PathBuf,
     state: Mutex<Machine>,
+    /// Answers "does this pane have a live PTY right now", installed by the
+    /// daemon's pane server. `None` (a store opened by tests, or before the
+    /// pane listener is wired) trusts the seed. See
+    /// [`set_liveness_probe`](MachineStore::set_liveness_probe).
+    liveness: Mutex<Option<LivenessProbe>>,
     /// Serializes each mutation *with its own delivery*. The state lock alone
     /// orders the mutations, but deltas are delivered after it is released —
     /// without this, writer B's deltas could overtake writer A's and every
@@ -657,10 +664,38 @@ impl MachineStore {
         Arc::new(MachineStore {
             path,
             state: Mutex::new(machine),
+            liveness: Mutex::new(None),
             notify_order: Mutex::new(()),
             subscribers: Mutex::new(Vec::new()),
             next_subscriber: AtomicU64::new(1),
         })
+    }
+
+    /// Install the pane server's answer to "is this pane alive right now",
+    /// consulted whenever a seed introduces a pane to the registry.
+    ///
+    /// A seed used to enter the registry `live: true` unconditionally — but a
+    /// pane that died between its spawn and its adopting operation had its
+    /// death observation dropped ([`MachineStore::note_pane_facts`] ignores
+    /// panes the tree does not hold), and nothing ever flipped the record back:
+    /// the leaf claimed a live pane forever and revival never offered. Asking
+    /// the process that owns the PTYs at registration time closes the window.
+    pub fn set_liveness_probe(&self, probe: LivenessProbe) {
+        *self.liveness.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe);
+    }
+
+    /// Whether a seeded pane is alive, per the installed probe. Without one
+    /// the seed is trusted (`true`): the seeding client just spawned it.
+    fn seed_is_live(&self, pane: u64) -> bool {
+        let probe = self
+            .liveness
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        match probe {
+            Some(probe) => probe(pane),
+            None => true,
+        }
     }
 
     /// Open the store at its default location under the data directory.
@@ -827,6 +862,7 @@ impl MachineStore {
         id: Option<TabId>,
         origin: Option<SubscriberId>,
     ) -> io::Result<Tab> {
+        let live = self.seed_is_live(pane.pane);
         self.mutate(origin, |m| {
             if let Some(id) = id
                 && m.workspaces
@@ -835,7 +871,7 @@ impl MachineStore {
             {
                 return Err(refuse(format!("tab {id} already exists")));
             }
-            register_pane(m, pane.clone())?;
+            register_pane(m, pane.clone(), live)?;
             let ws = find_workspace(m, workspace)?;
             let mut tab = Tab::leaf(pane.pane);
             if let Some(id) = id {
@@ -952,8 +988,9 @@ impl MachineStore {
         origin: Option<SubscriberId>,
     ) -> io::Result<()> {
         let ratio = clamp_ratio(ratio)?;
+        let live = self.seed_is_live(new.pane);
         self.mutate(origin, |m| {
-            register_pane(m, new.clone())?;
+            register_pane(m, new.clone(), live)?;
             let record = m
                 .panes
                 .iter()
@@ -1124,8 +1161,9 @@ impl MachineStore {
         new: PaneSeed,
         origin: Option<SubscriberId>,
     ) -> io::Result<()> {
+        let live = self.seed_is_live(new.pane);
         self.mutate(origin, |m| {
-            register_pane(m, new.clone())?;
+            register_pane(m, new.clone(), live)?;
             let record = m
                 .panes
                 .iter()
@@ -1383,7 +1421,7 @@ fn heal_active_tab(ws: &mut Workspace, removed: usize) -> Option<TabId> {
 /// Every registry record is referenced by some leaf (the close paths collect
 /// orphans), so "known pane, not in any tree" cannot arise and needs no merge
 /// path.
-fn register_pane(m: &mut Machine, seed: PaneSeed) -> io::Result<()> {
+fn register_pane(m: &mut Machine, seed: PaneSeed, live: bool) -> io::Result<()> {
     let shown = m
         .workspaces
         .iter()
@@ -1399,7 +1437,7 @@ fn register_pane(m: &mut Machine, seed: PaneSeed) -> io::Result<()> {
             "this machine's tree already references {MAX_PANES} panes"
         )));
     }
-    m.panes.push(seed.into_record());
+    m.panes.push(seed.into_record(live));
     Ok(())
 }
 
@@ -1425,14 +1463,21 @@ fn clamp_ratio(ratio: f32) -> io::Result<f32> {
     Ok(ratio.clamp(0.05, 0.95))
 }
 
-/// Read the file, or start empty. An unparseable file is quarantined so the
-/// user's tree is recoverable by hand rather than silently overwritten.
+/// Read the file, or start empty. A file that cannot be honoured — whether it
+/// fails to parse or to *read* — is quarantined first, so the user's tree is
+/// recoverable by hand rather than silently overwritten: either way the store
+/// proceeds empty, and its first mutation writes the file anew.
 fn load_machine(path: &Path) -> Machine {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Machine::default(),
         Err(e) => {
-            log::warn!("could not read {}: {e}; starting empty", path.display());
+            // Same isolation as the parse failure below, by rename rather
+            // than copy: a copy re-reads the very file that just refused to
+            // be read, while a rename needs only the directory — which the
+            // store can evidently write, since it is about to persist there.
+            log::warn!("could not read {}; quarantining it: {e}", path.display());
+            quarantine_by_rename(path);
             return Machine::default();
         }
     };
@@ -1505,11 +1550,25 @@ pub(crate) fn withdraw_observations() {
 
 /// Copy a file we are about to stop honouring somewhere the user can find it.
 fn quarantine(path: &Path) {
-    let aside = path.with_extension("json.corrupt");
+    let aside = quarantine_path(path);
     match std::fs::copy(path, &aside) {
         Ok(_) => log::warn!("the previous contents were kept at {}", aside.display()),
         Err(e) => log::warn!("could not keep a copy at {}: {e}", aside.display()),
     }
+}
+
+/// [`quarantine`] for a file that cannot be read: move it aside whole instead
+/// of copying (a copy needs the read permission that just failed).
+fn quarantine_by_rename(path: &Path) {
+    let aside = quarantine_path(path);
+    match std::fs::rename(path, &aside) {
+        Ok(()) => log::warn!("the previous contents were moved to {}", aside.display()),
+        Err(e) => log::warn!("could not move the file to {}: {e}", aside.display()),
+    }
+}
+
+fn quarantine_path(path: &Path) -> PathBuf {
+    path.with_extension("json.corrupt")
 }
 
 /// `<data-dir>/machine.json`.
@@ -1721,6 +1780,40 @@ mod tests {
             restarted.workspace(ws.id).unwrap().tabs[0].root.pane_ids(),
             vec![7],
             "the leaf still names the dead pane: that is the revival slot"
+        );
+    }
+
+    /// The daemon's registration-time liveness check. A pane that dies
+    /// between its spawn and its adopting operation has its death observation
+    /// dropped (`note_pane_facts` ignores panes the tree does not hold), so a
+    /// seed filed `live: true` unconditionally would claim a live pane for
+    /// ever — no revival offered, nothing left to flip the flag. With the
+    /// probe installed, the process that owns the PTYs answers at the moment
+    /// the record is born.
+    #[test]
+    fn a_seed_for_an_already_dead_pane_registers_as_awaiting_revival() {
+        let (store, _dir) = store();
+        store.set_liveness_probe(Arc::new(|id| id == 1));
+        let ws = store.workspace_create(None, None, None).unwrap();
+        store
+            .tab_create(ws.id, None, PaneSeed::bare(1), None, None)
+            .unwrap();
+        store
+            .pane_split(
+                ws.id,
+                1,
+                Axis::Vertical,
+                0.5,
+                PaneSeed::bare(2),
+                false,
+                None,
+            )
+            .unwrap();
+
+        assert!(store.pane(1).unwrap().live, "the probe vouched for pane 1");
+        assert!(
+            !store.pane(2).unwrap().live,
+            "pane 2 died before its adopting op; its record must be born revivable"
         );
     }
 
@@ -2230,6 +2323,39 @@ mod tests {
         store.workspace_create(None, None, None).unwrap();
         let aside = std::fs::read_to_string(path.with_extension("json.corrupt")).unwrap();
         assert_eq!(aside, "{ this is not json");
+    }
+
+    /// An *unreadable* file gets the same isolation as an unparseable one.
+    /// Before this, only the parse path quarantined: a read failure logged,
+    /// started empty — and the first mutation then overwrote the very file
+    /// that could not be read. Quarantine here is by rename (a copy would
+    /// need the read permission that just failed), so the bytes survive.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_is_moved_aside_rather_than_overwritten() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(MACHINE_FILE);
+        std::fs::write(&path, b"{\"workspaces\":[]}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_to_string(&path).is_ok() {
+            // Running as root (some CI containers): the permission bits do
+            // not bite and the scenario cannot be staged.
+            return;
+        }
+
+        let store = MachineStore::open(&path);
+        store.workspace_create(None, None, None).unwrap();
+
+        let aside = path.with_extension("json.corrupt");
+        assert!(aside.exists(), "the unreadable original must be kept");
+        std::fs::set_permissions(&aside, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&aside).unwrap(),
+            "{\"workspaces\":[]}",
+            "moved aside byte-for-byte, ready for a hand repair"
+        );
     }
 
     /// Fields this build has never heard of survive nothing — but fields it

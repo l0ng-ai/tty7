@@ -64,14 +64,15 @@ impl Registry {
             )
             .max()
             .unwrap_or(0);
+        // Saturating: a tree (or a hostile seed) naming u64::MAX must not
+        // panic the daemon at startup. The counter parking at the ceiling is
+        // a bounded absurdity; overflowing is a dead process.
+        let next = max.saturating_add(1);
         // fetch_max rather than store: harmless today (this runs before any
         // spawn), but a seed must never move the counter backwards.
-        let before = self.next_id.fetch_max(max + 1, Ordering::Relaxed);
-        if max + 1 > before {
-            log::info!(
-                "pane ids start at {} (the tree names panes up to {max})",
-                max + 1
-            );
+        let before = self.next_id.fetch_max(next, Ordering::Relaxed);
+        if next > before {
+            log::info!("pane ids start at {next} (the tree names panes up to {max})");
         }
     }
 
@@ -309,6 +310,14 @@ pub fn run() -> anyhow::Result<()> {
     // everything the tree knows makes the id a name, not a slot.
     if let Some(store) = crate::core::machine::observed_store() {
         registry.seed_ids_past(&store.machine());
+        // And let the store ask *us* whether a seeded pane is still alive at
+        // registration time — the pane that dies between its spawn and its
+        // adopting operation would otherwise be filed `live: true` with its
+        // death observation already dropped, and nothing left to flip it.
+        let probe = registry.clone();
+        store.set_liveness_probe(Arc::new(move |id| {
+            probe.get(id).is_some_and(|pane| pane.info().alive)
+        }));
     }
 
     // Now that the tree has an owner filling it, the daemon can *see* panes
@@ -969,6 +978,21 @@ mod tests {
         assert_eq!(reg.alloc_id(), 9);
     }
 
+    /// A tree naming `u64::MAX` (a corrupted file, an absurd client seed)
+    /// must not panic the daemon at startup: `max + 1` overflowed in a debug
+    /// build, taking every pane on the machine down with a bookkeeping add.
+    #[test]
+    fn a_tree_naming_the_maximum_pane_id_does_not_panic_the_seed() {
+        use crate::core::machine::{Machine, PaneRecord};
+        let reg = Registry::new();
+        reg.seed_ids_past(&Machine {
+            workspaces: Vec::new(),
+            panes: vec![PaneRecord::new(u64::MAX)],
+        });
+        // The counter parks at the ceiling — a bounded absurdity, not a crash.
+        assert_eq!(reg.alloc_id(), u64::MAX);
+    }
+
     #[test]
     fn empty_registry_get_remove_list_are_empty() {
         let reg = Registry::new();
@@ -1201,11 +1225,9 @@ mod tests {
             let (client, server) = UnixStream::pair().unwrap();
             let writer = spawn_writer(rx, server, Arc::new(crate::daemon::pane::OutputGate::new()));
 
-            // Kill the client end first, then hand the writer a message: the
+            // Kill the client end first, then hand the writer messages: an
             // encode hits a broken pipe and the thread must bail on its own.
             drop(client);
-            tx.send(DaemonMsg::Output(b"into the void".to_vec()))
-                .unwrap();
 
             // Bounded poll rather than a bare `join()`: the sender stays alive
             // for the whole wait, so only the write-failure path can finish the
@@ -1215,8 +1237,16 @@ mod tests {
             // running the whole suite in parallel can leave this thread
             // unscheduled for seconds. A tight bound turns that into a flake
             // that says nothing about the behaviour under test.
+            //
+            // Kept fed rather than sent one message: the first write into a
+            // freshly-closed socket can *succeed* (the kernel has not
+            // processed the peer's close yet, especially under load), and a
+            // writer that swallowed it would park in `recv()` for the rest of
+            // the deadline. Only a later write is guaranteed to see the
+            // broken pipe, so the loop keeps offering them.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while !writer.is_finished() && std::time::Instant::now() < deadline {
+                let _ = tx.send(DaemonMsg::Output(b"into the void".to_vec()));
                 thread::sleep(std::time::Duration::from_millis(5));
             }
             assert!(
