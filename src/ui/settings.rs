@@ -7,8 +7,8 @@
 
 use gpui::{
     AnyElement, App, Context, Div, Entity, FontWeight, Image, ImageFormat, KeyDownEvent,
-    MouseButton, SharedString, Stateful, Subscription, Window, WindowControlArea, div, img,
-    prelude::*, px, relative, rgb,
+    MouseButton, SharedString, Stateful, Subscription, Window, div, img, prelude::*, px, relative,
+    rgb,
 };
 use gpui_component::InteractiveElementExt as _;
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -23,8 +23,6 @@ use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex,
     v_flex,
 };
-use std::cell::Cell;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use uuid::Uuid;
@@ -272,8 +270,8 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Input,
-            title: "Option acts as Meta",
-            keywords: "alt keyboard modifier escape macos option meta",
+            title: "Option (⌥) acts as Meta",
+            keywords: "alt keyboard modifier escape macos option meta option acts as meta",
         },
         SearchEntry {
             section: Input,
@@ -313,30 +311,38 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: "ssh tunnel local remote dynamic socks forward rule",
         },
         // ── Agents ──────────────────────────────────────────────────────────
+        // Titles mirror `HookAgent::display_name()`, which is what each row is
+        // rendered with; the mechanism word (hooks/plugin/extension) lives in
+        // `keywords`. Pinned by `agent_rows_are_in_the_search_index`.
         SearchEntry {
             section: Agents,
-            title: "Claude Code hooks",
-            keywords: "agent integration install uninstall status rich session working waiting tab bar sidebar badge claude",
+            title: "Claude Code",
+            keywords: "agent integration hooks install uninstall status rich session working waiting tab bar sidebar badge claude",
         },
         SearchEntry {
             section: Agents,
-            title: "Codex hooks",
-            keywords: "agent integration install openai codex",
+            title: "Codex",
+            keywords: "agent integration hooks install openai codex",
         },
         SearchEntry {
             section: Agents,
-            title: "Copilot CLI hooks",
-            keywords: "agent integration install github copilot",
+            title: "Copilot CLI",
+            keywords: "agent integration hooks install github copilot",
         },
         SearchEntry {
             section: Agents,
-            title: "OpenCode plugin",
-            keywords: "agent integration install opencode",
+            title: "OpenCode",
+            keywords: "agent integration plugin install opencode",
         },
         SearchEntry {
             section: Agents,
-            title: "Pi extension",
-            keywords: "agent integration install pi",
+            title: "Pi",
+            keywords: "agent integration extension install pi",
+        },
+        SearchEntry {
+            section: Agents,
+            title: "Grok Build",
+            keywords: "agent integration hooks install xai grok build",
         },
         // ── Window & Tabs ───────────────────────────────────────────────────
         SearchEntry {
@@ -914,7 +920,11 @@ fn seed_input(
 impl Tty7App {
     /// Build the settings tab body: a fixed left sidebar (section nav) beside a
     /// scrollable content area for the selected section. Esc closes the tab.
-    pub(crate) fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn render_settings(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         // Copy the palette out (Hsla is Copy) so this borrow doesn't outlive into
         // `render_settings_search_results` below, which needs `cx` mutably.
         let theme = cx.theme();
@@ -1162,35 +1172,24 @@ impl Tty7App {
             // region is buried. Restore it: a transparent strip across the top
             // band (the height the title bar reserved) that moves the window on
             // drag and zooms it on double-click, exactly like the title bar it
-            // stands in for. Driven the same way `TitleBar` does — a press arms a
-            // `should_move` flag and the first move calls `start_window_move`
-            // (deferring to an actual move keeps a plain click, and double-click,
-            // intact); the `WindowControlArea::Drag` tag covers the Windows path.
-            .child({
-                let should_move = Rc::new(Cell::new(false));
-                div()
-                    .id("settings-titlebar-drag")
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .right_0()
-                    .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
-                    .window_control_area(WindowControlArea::Drag)
-                    .on_mouse_down(MouseButton::Left, {
-                        let should_move = should_move.clone();
-                        move |_, _, _| should_move.set(true)
-                    })
-                    .on_mouse_up(MouseButton::Left, {
-                        let should_move = should_move.clone();
-                        move |_, _, _| should_move.set(false)
-                    })
-                    .on_mouse_move(move |_, window, _| {
-                        if should_move.replace(false) {
-                            window.start_window_move();
-                        }
-                    })
-                    .on_double_click(|_, window, _| window.titlebar_double_click())
-            })
+            // stands in for. `window_move_gesture` owns the gesture and the
+            // reasoning behind it; the #221 failure was worst here, because this
+            // strip *is* the whole top band with no immune caption beside it.
+            .child(
+                crate::ui::app::window_move_gesture(
+                    div()
+                        .id("settings-titlebar-drag")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(crate::ui::app::TITLE_BAR_HEIGHT)),
+                    "settings-titlebar-drag",
+                    window,
+                    cx,
+                )
+                .on_double_click(|_, window, _| window.titlebar_double_click()),
+            )
             .when(show_theme_panel, |r| r.child(self.render_theme_panel(cx)))
             // Close affordance at the page's top-right corner (Esc and Cmd+, also
             // close) — the intuitive "close this page" spot, and clear of the
@@ -5634,10 +5633,30 @@ mod tests {
             "Tab completion",
             "History search",
             "Dim inactive panes",
+            "Option (⌥) acts as Meta",
         ] {
             assert!(
                 settings_search_entries().iter().any(|e| e.title == title),
                 "no index entry titled {title:?}"
+            );
+        }
+    }
+
+    /// The Agents rows are titled by [`HookAgent::display_name`], so the index
+    /// is derived rather than pinned: every hook-capable agent must have an
+    /// Agents-section entry under exactly that name. Adding an agent to
+    /// `HookAgent::ALL` without indexing it — how Grok Build became
+    /// unsearchable — fails here, as does renaming an agent without moving its
+    /// index entry.
+    #[test]
+    fn agent_rows_are_in_the_search_index() {
+        for agent in crate::core::agent_hooks::HookAgent::ALL {
+            assert!(
+                settings_search_entries().iter().any(
+                    |e| e.section == SettingsSection::Agents && e.title == agent.display_name()
+                ),
+                "no Agents index entry titled {:?}",
+                agent.display_name()
             );
         }
     }

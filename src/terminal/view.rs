@@ -1103,7 +1103,8 @@ impl TerminalView {
 
     /// Build the view around an already-connected terminal. Split from [`new`]
     /// so tests can hand in a `RemoteTerminal` backed by a plain socketpair
-    /// and exercise the event plumbing without a live daemon.
+    /// and exercise the event plumbing without a live daemon — see
+    /// [`quiet_test_pane`], which the UI-level tests build their tabs from.
     fn with_terminal(
         terminal: RemoteTerminal,
         pane_id: u64,
@@ -7980,6 +7981,27 @@ mod tests {
         };
         assert_eq!(sibling.target.host_id(), remote);
     }
+}
+
+/// A pane the UI-level gpui tests can put in a tab: a real [`TerminalView`] on a
+/// socketpair with nothing on the far end, so a test window has a pane without a
+/// daemon, a shell, or a byte of output to repaint for. That silence is the
+/// point — the render-idle tests measure what the *window* does when nothing is
+/// happening, so the pane must not be a source of frames.
+///
+/// The caller keeps the returned stream alive: dropping it closes the socket and
+/// the reader retires the pane.
+#[cfg(all(test, unix))]
+pub(crate) fn quiet_test_pane(
+    pane_id: u64,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) -> (gpui::Entity<TerminalView>, std::os::unix::net::UnixStream) {
+    let (client_side, daemon_side) = std::os::unix::net::UnixStream::pair().unwrap();
+    let terminal = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24))
+        .expect("socketpair-backed terminal");
+    let view = cx.new(|cx| TerminalView::with_terminal(terminal, pane_id, window, cx));
+    (view, daemon_side)
 }
 
 /// gpui-harness tests: a real (headless) App + Window around a `TerminalView`

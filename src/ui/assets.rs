@@ -180,7 +180,7 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/machine-local.svg" => include_bytes!("../../assets/icons/machine-local.svg"),
         "icons/machine-remote.svg" => include_bytes!("../../assets/icons/machine-remote.svg"),
         // The Files tab's remote (SFTP) mode needs a refresh it doesn't need
-        // locally: the local tree runs a recursive filesystem watcher and
+        // locally: the local tree watches the directories it displays and
         // invalidates itself, a remote listing has nothing watching it. Drawn to
         // the circle rule above (r 8.6) so it sits level with the `eye` beside it
         // rather than lucide's r=9 `rotate-cw`, whose arrow head is also a size

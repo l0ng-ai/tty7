@@ -34,6 +34,25 @@ use crate::ui::reorder::{self, Reorder, Surface};
 pub(crate) const REORDER_SLIDE_MS: u64 = 140;
 const CHIP_GAP: f32 = 6.;
 
+/// The bare slice of caption the horizontal strip always keeps for grabbing the
+/// window by.
+///
+/// Every header in tty7 has to stay draggable however much content it holds (see
+/// [`crate::ui::app::window_move_gesture`]). Most of them satisfy that for free:
+/// their contents are labels, which take no hit box, so the drag falls straight
+/// through them. This strip is the one that cannot — a tab chip is `occlude()`d
+/// on purpose, because dragging one reorders it — so the spacer between the last
+/// chip and the corner chrome *is* the whole grab region, and a bare `flex_1`
+/// with no floor collapses to exactly 0px once the chip row saturates the line
+/// (around 7-8 tabs on a 1440px window). At that point the only draggable caption
+/// left is three 6px gaps and a ~3.5px band above and below the chips, which is
+/// what "the region that works seems very small" in #221 was describing.
+///
+/// 80px, and the chip row's budget pays for it: chips reach their `min_w` and
+/// start truncating labels a tab or two sooner, and the window is always
+/// grabbable. Chrome and Safari make the same trade for the same reason.
+pub(crate) const GRAB_HANDLE_W: f32 = 80.;
+
 /// How many trailing path components a deep tab label keeps, mirroring
 /// ghostty's zsh integration title `%(4~|…/%3~|%~)`: a path deeper than this
 /// collapses to `…/` plus its last three components; a shallower one shows in
@@ -373,10 +392,11 @@ impl Tty7App {
     /// It used to be a monogram in the window's top-right corner. Two things
     /// were wrong with that. Physically: the corner it sat in is the *panel's*
     /// top zone while the panel is open, so a control that has nothing to do
-    /// with the panel was eating width the panel's own tabs needed — at the
-    /// 200px minimum the row wanted 268px. Semantically: a window's workspace is
-    /// exactly what the rail below enumerates (this workspace's tabs), so the
-    /// name belonged at the head of that column, not across the window from it.
+    /// with the panel was eating width the panel's own tabs needed — at
+    /// `right_panel::MIN_WIDTH` the row wanted 268px. Semantically: a window's
+    /// workspace is exactly what the rail below enumerates (this workspace's
+    /// tabs), so the name belonged at the head of that column, not across the
+    /// window from it.
     ///
     /// Here it can afford the full name — the rail is a column with a width of
     /// its own, and it truncates rather than pushing anything off an edge. The
@@ -576,8 +596,9 @@ impl Tty7App {
             // The workspace chip used to lead this group; it moved to the rail's
             // head (`tab_sidebar`), where the list it names actually lives. What
             // forced the move is that this group's other host is the *panel's* top
-            // zone, and a panel the user can drag down to 200px cannot seat the
-            // panel's four tabs plus three window controls — the row wanted 268px.
+            // zone, and a panel the user can drag down to `right_panel::MIN_WIDTH`
+            // cannot seat the panel's four tabs plus three window controls — the
+            // row wanted 268px.
             // Nothing that has no business being scoped to the panel gets to
             // compete for that width.
             //
@@ -1183,12 +1204,39 @@ impl Tty7App {
         let chrome_band_w = (!cfg!(target_os = "macos") && self.right_panel_open(cx)).then(|| {
             (self.right_panel_px(window, cx) - crate::ui::app::WINDOW_CONTROLS_W - 1.).max(0.)
         });
-        // The "+" and the right-edge overflow "⋯" (30px each), their surrounding
-        // gaps, and the strip's own left/right padding all live *outside* the
-        // clipped chip row — reserve that whole footprint here so the fixed chrome
-        // never overflows the strip box (which would eat the "⋯"'s right inset and
-        // shove it into the window corner) and cap the chip row at the remainder.
-        let chips_avail = (strip_w - px(100.) - px(chrome_band_w.unwrap_or(0.))).max(px(80.));
+        // Everything the strip lays out *beside* the clipped chip row lives
+        // outside that row's budget — reserve the whole footprint here so the
+        // fixed chrome never overflows the strip box (which would eat the corner
+        // chrome's right inset and shove it into the window corner) and cap the
+        // chip row at the remainder.
+        //
+        // The corner is either the free-standing chrome group (trailing pad + the
+        // panel tile + its 2px gap + the app-menu tile: 71px on macOS, 70px
+        // elsewhere) or, off macOS with the panel open, the wider band the chrome
+        // is laid out inside; three `CHIP_GAP`s and the "+" tile sit between it and
+        // the chips — 121px / 120px of fixed chrome all told.
+        //
+        // The trailing pad is not `tile_trailing_inset()` on every platform:
+        // `window_chrome` follows it with `pr_1` off macOS, and gpui's padding
+        // setters *assign* rather than accumulate, so the later 4px replaces the
+        // 5px rather than adding to it.
+        //
+        // This used to be a flat 100px, a leftover from when the corner held a
+        // 30px "+" and a 30px "⋯", and it was never revisited as the group's
+        // contents changed under it — so the reserve and the real footprint had
+        // simply drifted apart, and the flexible spacer, which is the strip's only
+        // grab handle (see `GRAB_HANDLE_W`), was the first thing to pay for it.
+        // Measure the group instead of quoting a number at it.
+        let corner_w = chrome_band_w.unwrap_or_else(|| {
+            let trailing_pad = if cfg!(target_os = "macos") {
+                tile_trailing_inset()
+            } else {
+                4.
+            };
+            trailing_pad + crate::ui::app::TILE_SIZE + 2. + crate::ui::app::TILE_SIZE
+        });
+        let fixed_w = 3. * CHIP_GAP + crate::ui::app::TILE_SIZE + corner_w;
+        let chips_avail = (strip_w - px(fixed_w + GRAB_HANDLE_W)).max(px(80.));
         // Only the chip row clips; a crowded row shrinks its chips (down to their
         // `min_w`) and truncates their labels rather than pushing the "+" away.
         let mut chips = h_flex()
@@ -1664,7 +1712,12 @@ impl Tty7App {
             // so the title bar drops its "+" to avoid a redundant second one —
             // leaving just the "⋯" overflow menu on a thin strip.
             .when(show_chips, move |this| this.child(add_button))
-            .child(div().flex_1())
+            // The strip's grab handle. `min_w` is the whole point: `flex_1` alone
+            // has `flex-basis: 0` and only ever takes leftover space, so it went to
+            // 0px the moment the chips saturated the line and left nowhere to grab
+            // the window by (#221). A flex item never shrinks below its `min_w`, so
+            // the clipping chip row beside it absorbs the pressure instead.
+            .child(div().flex_1().min_w(px(GRAB_HANDLE_W)))
             .when_some(right_chrome, |this, chrome| match chrome_band_w {
                 // Over the panel: left-aligned on the panel's content edge, and
                 // wide enough that its own right edge lands where the window

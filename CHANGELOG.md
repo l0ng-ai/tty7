@@ -80,6 +80,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keybindings match modifiers exactly, and no terminal treats that three-key
   chord as a newline. (#182)
 
+- **Every header in the window moves it now** — grabbing the window by a header
+  is a property of the whole app rather than a per-surface feature, so you never
+  have to learn which rows happen to be draggable. The detail panel's section
+  title joins the caption rows that already were, wherever the panel draws one —
+  every tab off macOS, where that row is also the panel's tab switcher, and the
+  remote Files header on macOS. In horizontal-tab mode the strip also keeps a
+  bare 80px slice of caption for grabbing: its spacer was a flexible one with no
+  minimum, so it collapsed to exactly 0px once the tab chips saturated the row —
+  around 7-8 tabs on a 1440px window — leaving nothing to grab but three 6px
+  gaps and a hairline above and below the chips. The chip row's fixed-chrome
+  reserve is corrected to match: it was a flat 100px, sized when the corner held
+  a 30px "+" and a 30px "⋯", and was never raised when the workspace chip
+  absorbed the "⋯" menu in #169/#188 — so the row's width budget was ~20px of a
+  lie. It now measures the group it is reserving for, ~121px of fixed chrome plus
+  the 80px grab handle, so chips reach their minimum width and truncate a tab or
+  two sooner. (#221)
+
 ### Fixed
 
 - **Rounded UI controls no longer square off their corners**
@@ -98,6 +115,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hover fills, the theme picker's flush previews, and the diff overlay's card
   headers and closing rows. Most visible at a device pixel ratio of 1, where the
   hard clip edge is a whole physical pixel wide.
+
+- **Dragging the window by a title bar worked only rarely with a trackpad** —
+  five rows that stand in for the caption (the tab rail's top zone, the settings
+  page's top strip, the detail panel's top zone, and the code and diff overlays'
+  headers) armed their window-drag with a flag that was rebuilt on every render.
+  Any repaint between the press and the first drag event threw the arm away, and
+  the press *itself* schedules one — these rows carry a double-click, which makes
+  gpui refresh the window on mouse-down — so the drag only survived if the first
+  move beat the next vsync: 16ms at 60Hz, 8ms on ProMotion. A mouse press nudges
+  the pointer and often won that race; a trackpad press is a finger pushing down
+  without translating, and almost never did. The terminal's cursor blink disarmed
+  it on its own even without a press. The arm now lives in element state, which
+  survives frames — where gpui-component's own `TitleBar` has always kept it,
+  which is why the ordinary caption strip was never affected. (#221)
+
+- **An idle window stays idle while a file in the Files panel is being written**
+  — the tree watches its roots plus every directory you have expanded, so what
+  it hears about is a change in a directory it is *displaying*, and a file's
+  contents being rewritten reports exactly as loudly as a file appearing. A
+  formatter rewriting in place, an editor saving on every keystroke, a build
+  dropping its log next to the sources: each of those repainted the whole
+  window, twice over, for as long as it went on. A window with nothing new to
+  draw never reached render idle, which is what issue #243 reports in its title.
+  A batch now repaints only when the re-read comes back different from what is
+  already on screen, and that re-read is issued from the watcher callback rather
+  than by asking for a paint in order to get one. A closed Files panel does no
+  work at all: the change is recorded and picked up on reopening. A panel showing
+  search hits is the same case — the hits are their own walk, so no listing is on
+  screen to refresh — and the change is picked up when you clear the search box.
+  Real changes still arrive exactly as fast.
+
+  Measured headlessly by counting window draws, before and after: five rewrites
+  of a file in a displayed directory cost 10 frames and now cost 0.
+
+  `.gitignore` edits keep their whole-cache refresh, now taken only when the file
+  can actually govern a directory the tree holds. That one is a correctness guard
+  on the most expensive branch here rather than a measurable saving — the watch
+  is non-recursive, so a `.gitignore` has to sit directly in a displayed
+  directory to arrive in the first place.
+
+  The other half of that report — the Files panel flickering — was fixed
+  independently by "keep file-tree listings on screen while they refresh", which
+  landed first and is the mechanism the panel now uses. This is only the frames.
+  Note the redraw behaviour is platform-independent and is what that number is
+  about; the reporter's ~15% CPU figure, and whether their flicker also
+  involved something in the Wayland presentation path, were not reproducible on
+  macOS and are not claimed to be confirmed. (#243)
+
+- **Return no longer confirms the file tree's delete prompt** — it was the only
+  destructive prompt in tty7 with the destructive action first, and on macOS
+  (NSAlert) and Windows (TaskDialog) the first button is the Return-key
+  default, so pressing Return deleted — recursive folder deletion included. The
+  buttons now put the safe option first, matching every other destructive
+  prompt, with Escape still cancelling. Linux uses gpui's click-only fallback
+  dialog, so the swap only reorders the buttons there.
+
+- **"Finder" is no longer named on Linux and Windows** — the file-tree context
+  menu and the SFTP job list's reveal tooltip hardcoded Finder-flavoured
+  labels on every platform; only the Info row's button was conditional. All
+  three sites now share that one conditional, so the action reads "Reveal in
+  Finder" on macOS and "Open Folder" everywhere else. On macOS the SFTP
+  tooltip's "Show in Finder" becomes "Reveal in Finder" too, retiring a third
+  name for the same action.
+
+- **Grok Build turns up in settings search** — the agent renders a Settings →
+  Agents row but had no search-index entry, so searching could never surface
+  it. The other five agent entries had drifted from what their rows actually
+  say ("Claude Code hooks" for a row titled "Claude Code"), as had "Option
+  acts as Meta" from the rendered "Option (⌥) acts as Meta"; the index titles
+  now match the rows, the mechanism words (hooks / plugin / extension) stay
+  behind as search keywords, and a test derives the Agents index from the
+  agent list so a future agent can't ship unsearchable.
 
 ## [26.7.6] - 2026-07-28
 

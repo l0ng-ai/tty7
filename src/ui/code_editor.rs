@@ -1,5 +1,7 @@
-//! The code panel: a full-body overlay of `[file tree | editor]` that covers
-//! the terminal, settings-overlay style.
+//! The code panel: a full-body editor overlay that covers the terminal,
+//! settings-overlay style. It stops short of the right panel rather than
+//! covering it, so the file tree there stays beside the editor — the tree used
+//! to be this overlay's own left column and is not any more.
 //!
 //! A lightweight "look at / touch up code without leaving the terminal"
 //! editor, not a full IDE. The text engine is `gpui_component::input::
@@ -8,8 +10,8 @@
 //! auto-indent, undo/redo and an in-buffer search/replace bar. This module
 //! owns everything around that engine: the open-file set and tab strip, dirty
 //! tracking and save, external-modification reload (via `notify`), the
-//! unsaved-close confirmation, and the overlay chrome itself (the file-tree
-//! column comes from `ui::file_tree`).
+//! unsaved-close confirmation, and the overlay chrome itself. The file tree is
+//! `ui::file_tree`'s, drawn by the right panel's Files tab.
 //!
 //! Deliberately *not* an IDE: there is no language-server integration, and
 //! adding one is not a wanted feature. Opening a `.rs` file silently spawning
@@ -1207,7 +1209,7 @@ impl Tty7App {
             .flex_1()
             .min_w_0()
             .h_full()
-            .child(self.render_editor_header(cx))
+            .child(self.render_editor_header(window, cx))
             .when_some(conflict_banner, |this, b| this.child(b))
             .child(div().flex_1().min_h_0().child(body));
 
@@ -1250,7 +1252,11 @@ impl Tty7App {
     /// every buffer that was ever opened. Sits on the title bar's line and matches
     /// its height, so the editor's top edge lines up with the panel's tab row and
     /// the rail's controls across the window.
-    fn render_editor_header(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    fn render_editor_header(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let active = self.tab_code().and_then(|c| c.active_file());
         let name = active.map(|f| f.label());
         let dirty = active.is_some_and(|f| f.dirty);
@@ -1268,7 +1274,7 @@ impl Tty7App {
         // The overlay covers the real title bar, so this row inherits its drag and
         // zoom gestures — otherwise opening a file turns the top of the window into
         // a strip that looks like the caption and can't move it.
-        crate::ui::app::title_bar_drag(h_flex().id("editor-header"))
+        crate::ui::app::title_bar_drag(h_flex().id("editor-header"), "editor-header", window, cx)
             .flex_none()
             .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
             .items_center()

@@ -226,37 +226,161 @@ pub(crate) const WINDOW_MARK_SIZE: f32 = 20.;
 /// double-click, still land intact. Note that on Windows the drag area maps to
 /// HTCAPTION and the OS claims the press before gpui hit-tests, so every button
 /// inside one of these rows needs an `occlude()` wrapper to get its clicks back.
-pub(crate) fn title_bar_drag(row: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
-    let should_move = Rc::new(Cell::new(false));
+///
+/// `key` must be unique among the stand-in rows that can be on screen together
+/// — see [`window_move_gesture`], which owns the arming and explains why.
+pub(crate) fn title_bar_drag(
+    row: gpui::Stateful<gpui::Div>,
+    key: &'static str,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) -> gpui::Stateful<gpui::Div> {
+    window_move_gesture(row, key, window, cx).on_double_click(|_, window, _| {
+        // gpui only implements `titlebar_double_click` on macOS — the trait
+        // method is an empty default everywhere else, so on Linux this row
+        // swallowed the double-click and nothing zoomed. `zoom_window` is the
+        // maximise toggle there (x11 `_NET_WM_STATE_MAXIMIZED_*`, wayland
+        // `set_maximized`), and what gpui-component's own `TitleBar` calls on
+        // Linux for exactly this reason. Windows needs neither: the row is a
+        // drag area, which maps to HTCAPTION, and the OS has already restored
+        // or maximised the window before this could run.
+        if cfg!(target_os = "linux") {
+            window.zoom_window();
+        } else {
+            window.titlebar_double_click();
+        }
+    })
+}
+
+/// The armed flag behind [`window_move_gesture`]. A single bool, but *where* it
+/// lives is the whole point — see there.
+pub(crate) struct WindowMoveArm {
+    should_move: bool,
+}
+
+// ── Every header in tty7 is draggable ────────────────────────────────────────
+//
+// A standing rule, not a per-surface feature: a user should never have to learn
+// which of this window's headers happen to move it. Any row that reads as a
+// header, caption or title — the caption strip, the rail's and the detail
+// panel's top zones, an overlay's header, the panel's section title — moves the
+// window when you drag it. New headers are expected to arrive that way.
+//
+// Three things that takes, in the order they bite:
+//
+// 1. **Arm it with [`window_move_gesture`]**, never a fresh `Rc<Cell>` per
+//    render. That function's doc explains why (#221).
+// 2. **Non-controls take no hit box.** Anything drawn inside a header that is not
+//    an interactive control — a label, a count, a brand mark, an icon — gets no
+//    `.id()` and no `occlude()`, so the drag falls straight through it and the
+//    row stays grabbable however long its text runs. This is the rule #202
+//    established for the "duo" mark. Its converse binds too: anything that *is* a
+//    control needs an `occlude()` wrapper, or Windows' HTCAPTION claims the press
+//    before gpui hit-tests and the button never fires.
+// 3. **A flexible spacer needs a minimum.** Where a header's contents *do* take
+//    hit boxes by design — the tab strip, whose chips are draggable for reorder —
+//    the bare spacer beside them is the only grab region there is, and
+//    `flex-basis: 0` means it collapses to nothing the moment the row fills up.
+//    See `tab_strip::GRAB_HANDLE_W`.
+//
+// What the rule does *not* reach is a row that only reads like a header. Where
+// the press already means something else, it keeps that meaning, so these being
+// undraggable is a decision rather than a backlog: tab chips (a drag reorders
+// them), the SFTP breadcrumb (a navigation control), settings section and
+// disclosure headings (typography, and click-to-expand rows inside a scrolling
+// form), diff file-card headers (click-to-collapse rows inside a scroll list),
+// and the command palette (a transient modal over a dismiss-on-press scrim).
+//
+// One region stops satisfying the rule near one edge of its size range, and
+// that is an accepted limitation rather than an oversight to tidy up later. The
+// detail panel's macOS top zone is every-child-occluded (four tab tiles plus the
+// corner chrome), and that fixed footprint lands within a couple of pixels of
+// `right_panel::MIN_WIDTH` — so the spacer between them is a real handle at any
+// comfortable panel width and effectively nothing at the panel's floor.
+//
+// The row below only partly covers that. The panel's section title
+// (`right_panel::panel_title`) is draggable and sits immediately under the top
+// zone, but on macOS it draws nothing for a tab that passes no `trailing`, which
+// is every tab except the remote SFTP browser. So the adjacent handle is there
+// off macOS (where that row is the panel's tab switcher and always drawn) and on
+// macOS for SFTP; for Info, Outline, Changes and Files on macOS, a panel dragged
+// to its floor has no header of its own to grab.
+//
+// Left that way by explicit decision: `MIN_WIDTH` stays where it is rather than
+// trading a real capability — narrowing the panel — for a grab handle, and no
+// control moves off that row either. The window still moves from the caption
+// strip and the rail's top zone at every panel width.
+
+/// Arm-on-press / move-on-first-move window dragging for a row that stands in
+/// for the title bar. [`title_bar_drag`] is this plus the double-click-to-zoom
+/// half; the settings page and the detail panel's top zone take this alone
+/// because their double-click differs.
+///
+/// **The arm has to outlive the frame it was set in (#221).** This used to hold
+/// `should_move` in an `Rc<Cell<bool>>` built inside the render function, which
+/// meant every repaint handed the *next* frame's listeners a fresh, zeroed cell
+/// while the press had written to the old one. Any redraw between the press and
+/// the first drag event silently disarmed the hold — and the press itself
+/// schedules one, because `on_double_click` makes gpui call `window.refresh()`
+/// on mouse-down. So a drag only survived if the first move beat the next vsync:
+/// ≤16ms at 60Hz, ≤8ms on ProMotion. A mouse press nudges the pointer and often
+/// wins that race; a trackpad press is a finger pushing down without translating
+/// and almost never does, which is exactly the "success rate is very low, and
+/// only with the trackpad" the issue reported. The terminal's cursor blink
+/// (`cx.notify()` every 530ms) disarms it on its own even without a press.
+///
+/// `window.use_keyed_state` puts the flag in gpui element state instead, which
+/// survives across frames — the same place gpui-component's own `TitleBar` keeps
+/// it, which is why the ordinary caption strip never had this bug. Keyed rather
+/// than `use_state` because one builder serves several call sites: `use_state`
+/// derives its id from the *caller's* `CodeLocation`, so two of these rows on
+/// screen at once (the rail's top zone plus the code overlay's header is a real
+/// combination) would share one arm. `key` must therefore be unique among the
+/// rows that can coexist.
+///
+/// Releasing outside the row disarms too. With a per-frame cell that never
+/// mattered — the flag died with the frame regardless — but a flag that persists
+/// would otherwise stay armed after a press that wandered off the row, and then
+/// start a window move on a later *hover* over it.
+pub(crate) fn window_move_gesture(
+    row: gpui::Stateful<gpui::Div>,
+    key: &'static str,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) -> gpui::Stateful<gpui::Div> {
+    let arm = window.use_keyed_state(key, cx, |_, _| WindowMoveArm { should_move: false });
     row.window_control_area(gpui::WindowControlArea::Drag)
-        .on_mouse_down(gpui::MouseButton::Left, {
-            let should_move = should_move.clone();
-            move |_, _, _| should_move.set(true)
-        })
-        .on_mouse_up(gpui::MouseButton::Left, {
-            let should_move = should_move.clone();
-            move |_, _, _| should_move.set(false)
-        })
-        .on_mouse_move(move |_, window, _| {
-            if should_move.replace(false) {
-                window.start_window_move();
-            }
-        })
-        .on_double_click(|_, window, _| {
-            // gpui only implements `titlebar_double_click` on macOS — the trait
-            // method is an empty default everywhere else, so on Linux this row
-            // swallowed the double-click and nothing zoomed. `zoom_window` is the
-            // maximise toggle there (x11 `_NET_WM_STATE_MAXIMIZED_*`, wayland
-            // `set_maximized`), and what gpui-component's own `TitleBar` calls on
-            // Linux for exactly this reason. Windows needs neither: the row is a
-            // drag area, which maps to HTCAPTION, and the OS has already restored
-            // or maximised the window before this could run.
-            if cfg!(target_os = "linux") {
-                window.zoom_window();
-            } else {
-                window.titlebar_double_click();
-            }
-        })
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            window.listener_for(&arm, |arm, _: &gpui::MouseDownEvent, _, _| {
+                arm.should_move = true;
+            }),
+        )
+        .on_mouse_down_out(
+            window.listener_for(&arm, |arm, _: &gpui::MouseDownEvent, _, _| {
+                arm.should_move = false;
+            }),
+        )
+        .on_mouse_up(
+            gpui::MouseButton::Left,
+            window.listener_for(&arm, |arm, _: &gpui::MouseUpEvent, _, _| {
+                arm.should_move = false;
+            }),
+        )
+        .on_mouse_up_out(
+            gpui::MouseButton::Left,
+            window.listener_for(&arm, |arm, _: &gpui::MouseUpEvent, _, _| {
+                arm.should_move = false;
+            }),
+        )
+        .on_mouse_move(
+            window.listener_for(&arm, |arm, _: &gpui::MouseMoveEvent, window, _| {
+                if arm.should_move {
+                    arm.should_move = false;
+                    window.start_window_move();
+                }
+            }),
+        )
 }
 
 pub(crate) fn window_mark() -> Option<impl IntoElement> {
@@ -5997,6 +6121,65 @@ impl Tty7App {
     }
 }
 
+/// A per-thread count of how many times the window has drawn, for the
+/// render-idle tests (issue #243).
+///
+/// A window that has settled draws once and stops. Anything that notifies from
+/// the paint path turns that into an unbounded loop — the window never reaches
+/// render idle, and on a compositor that presents every frame the panel visibly
+/// flickers. The seam is testable headlessly because gpui's test build redraws
+/// dirty windows inside `flush_effects`: a paint that notifies simply keeps that
+/// loop running, so counting draws across a quiet interval answers the question
+/// without a real window.
+///
+/// The limit of that: `window.request_animation_frame()` does not drive frames
+/// under the test platform. It registers a next-frame callback that only a real
+/// platform window's frame callback drains, so `cx.notify()` is the only thing
+/// this counts. A repaint loop driven by an animation frame would run right past
+/// this probe and needs a different instrument.
+///
+/// Thread-local rather than a global: `#[gpui::test]` cases run in parallel on
+/// their own threads, and gpui drives each one's foreground work on the thread
+/// that owns its `TestAppContext`.
+#[cfg(test)]
+pub(crate) mod render_probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        static DRAWS: Cell<u64> = const { Cell::new(0) };
+        /// When set, the draw that exceeds it panics instead of spinning. A
+        /// repaint loop lives entirely inside one `flush_effects` call, so
+        /// without this a regression hangs the suite rather than failing it.
+        static BUDGET: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    /// One window draw. Called from [`Tty7App::render`].
+    pub(crate) fn record() {
+        let n = DRAWS.get() + 1;
+        DRAWS.set(n);
+        if let Some(budget) = BUDGET.get()
+            && n > budget
+        {
+            BUDGET.set(None);
+            panic!(
+                "the window drew more than {budget} frames without input: it never reached \
+                 render idle (issue #243)"
+            );
+        }
+    }
+
+    /// Start counting from zero, failing the test if `budget` draws pass.
+    pub(crate) fn arm(budget: u64) {
+        DRAWS.set(0);
+        BUDGET.set(Some(budget));
+    }
+
+    /// Draws since [`arm`].
+    pub(crate) fn draws() -> u64 {
+        DRAWS.get()
+    }
+}
+
 impl Tty7App {
     /// Design §10's status strip, on a window that has tabs.
     ///
@@ -6210,6 +6393,15 @@ impl ForwardRoute {
 
 impl Render for Tty7App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        render_probe::record();
+        // `TTY7_PROFILE`: time the whole window build and, via the aggregated
+        // call rate, expose whether it is rebuilding on real changes or in a
+        // notify loop. A settled window should report no calls at all; anything
+        // above zero on a window nobody is touching is the shape of issue #243,
+        // and this is how a report of it can be checked on the machine that sees
+        // it rather than inferred from the code.
+        let prof = crate::ui::perf::enabled().then(std::time::Instant::now);
         // A live drag-reorder commits when the drag *ends*, which in gpui means
         // the mouse was released (nothing else clears an active drag): the first
         // frame without one retires the preview and applies the order it was
@@ -6340,7 +6532,7 @@ impl Render for Tty7App {
         // the rail and the right panel (both are siblings), which is the point:
         // the sidebar's git lines stay clickable to switch repo, and the
         // Changes list stays put so you can walk down it file by file.
-        let diff_overlay = self.render_diff_overlay(cx);
+        let diff_overlay = self.render_diff_overlay(window, cx);
 
         // Code panel: an immersive overlay ([file tree | editor], IDE-style)
         // covering the title strip *and* the terminal — the whole column right
@@ -6527,336 +6719,326 @@ impl Render for Tty7App {
                 // the root's paint — deliberate: the overlay must occlude the
                 // terminal behind it to stay readable.
                 .bg(window_bg)
-                .child(self.render_settings(cx))
+                .child(self.render_settings(window, cx))
         });
 
-        div()
-            .id("tty7-root")
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(window_bg)
-            .text_color(cx.theme().foreground)
-            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
-            .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
-            .on_action(cx.listener(|this, _: &SelectWorkspace1, window, cx| {
-                this.select_workspace_slot(0, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SelectWorkspace2, window, cx| {
-                this.select_workspace_slot(1, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SelectWorkspace3, window, cx| {
-                this.select_workspace_slot(2, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SelectWorkspace4, window, cx| {
-                this.select_workspace_slot(3, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SelectWorkspace5, window, cx| {
-                this.select_workspace_slot(4, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SelectWorkspace6, window, cx| {
-                this.select_workspace_slot(5, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SelectWorkspace7, window, cx| {
-                this.select_workspace_slot(6, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SelectWorkspace8, window, cx| {
-                this.select_workspace_slot(7, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SelectWorkspace9, window, cx| {
-                this.select_workspace_slot(8, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &RenameWorkspace, window, cx| {
-                this.start_workspace_rename(window, cx)
-            }))
-            .on_action(
-                cx.listener(|this, _: &ToggleSwitcher, window, cx| {
+        let root =
+            div()
+                .id("tty7-root")
+                .size_full()
+                .flex()
+                .flex_col()
+                .bg(window_bg)
+                .text_color(cx.theme().foreground)
+                .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
+                .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
+                .on_action(cx.listener(|this, _: &SelectWorkspace1, window, cx| {
+                    this.select_workspace_slot(0, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SelectWorkspace2, window, cx| {
+                    this.select_workspace_slot(1, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SelectWorkspace3, window, cx| {
+                    this.select_workspace_slot(2, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SelectWorkspace4, window, cx| {
+                    this.select_workspace_slot(3, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SelectWorkspace5, window, cx| {
+                    this.select_workspace_slot(4, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SelectWorkspace6, window, cx| {
+                    this.select_workspace_slot(5, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SelectWorkspace7, window, cx| {
+                    this.select_workspace_slot(6, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SelectWorkspace8, window, cx| {
+                    this.select_workspace_slot(7, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SelectWorkspace9, window, cx| {
+                    this.select_workspace_slot(8, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &RenameWorkspace, window, cx| {
+                    this.start_workspace_rename(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| {
                     this.toggle_switcher(window, cx)
-                }),
-            )
-            .on_action(cx.listener(|this, _: &StopWorkspace, window, cx| {
-                let id = this.workspace;
-                this.stop_workspace(id, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &DeleteWorkspace, window, cx| {
-                let id = this.workspace;
-                this.delete_workspace(id, window, cx);
-            }))
-            .on_action(cx.listener(|_this, _: &NewWorkspace, _window, cx| {
-                // A fresh workspace, not a copy of this one: the daemon gives
-                // each pane a single subscriber, so a second window onto the
-                // same panes would steal this window's output.
-                crate::ui::windows::open(cx, None);
-            }))
-            .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
-                // With focus in the editor panel, ⌘W closes the active file
-                // tab instead of the terminal pane/tab.
-                if !this.editor_close_active_if_focused(window, cx) {
-                    this.close_pane(window, cx)
-                }
-            }))
-            .on_action(cx.listener(|this, _: &SplitRight, window, cx| {
-                this.split(Axis::Horizontal, window, cx)
-            }))
-            .on_action(
-                cx.listener(|this, _: &SplitDown, window, cx| {
+                }))
+                .on_action(cx.listener(|this, _: &StopWorkspace, window, cx| {
+                    let id = this.workspace;
+                    this.stop_workspace(id, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &DeleteWorkspace, window, cx| {
+                    let id = this.workspace;
+                    this.delete_workspace(id, window, cx);
+                }))
+                .on_action(cx.listener(|_this, _: &NewWorkspace, _window, cx| {
+                    // A fresh workspace, not a copy of this one: the daemon gives
+                    // each pane a single subscriber, so a second window onto the
+                    // same panes would steal this window's output.
+                    crate::ui::windows::open(cx, None);
+                }))
+                .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
+                    // With focus in the editor panel, ⌘W closes the active file
+                    // tab instead of the terminal pane/tab.
+                    if !this.editor_close_active_if_focused(window, cx) {
+                        this.close_pane(window, cx)
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &SplitRight, window, cx| {
+                    this.split(Axis::Horizontal, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SplitDown, window, cx| {
                     this.split(Axis::Vertical, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &FocusNextPane, window, cx| {
+                }))
+                .on_action(cx.listener(|this, _: &FocusNextPane, window, cx| {
                     this.cycle_pane(true, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &FocusPrevPane, window, cx| {
+                }))
+                .on_action(cx.listener(|this, _: &FocusPrevPane, window, cx| {
                     this.cycle_pane(false, window, cx)
-                }),
-            )
-            .on_action(cx.listener(|this, _: &FocusPaneLeft, window, cx| {
-                this.focus_pane_dir(Dir::Left, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &FocusPaneRight, window, cx| {
-                this.focus_pane_dir(Dir::Right, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &FocusPaneUp, window, cx| {
-                this.focus_pane_dir(Dir::Up, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &FocusPaneDown, window, cx| {
-                this.focus_pane_dir(Dir::Down, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ResizePaneLeft, window, cx| {
-                this.resize_pane(Dir::Left, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ResizePaneRight, window, cx| {
-                this.resize_pane(Dir::Right, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ResizePaneUp, window, cx| {
-                this.resize_pane(Dir::Up, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ResizePaneDown, window, cx| {
-                this.resize_pane(Dir::Down, window, cx)
-            }))
-            .on_action(
-                cx.listener(|this, _: &SwapPaneNext, window, cx| this.swap_pane(true, window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &SwapPanePrev, window, cx| this.swap_pane(false, window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(true, window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &PrevTab, window, cx| this.cycle_tab(false, window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab1, window, cx| {
-                    this.activate_visual(0, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab2, window, cx| {
-                    this.activate_visual(1, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab3, window, cx| {
-                    this.activate_visual(2, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab4, window, cx| {
-                    this.activate_visual(3, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab5, window, cx| {
-                    this.activate_visual(4, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab6, window, cx| {
-                    this.activate_visual(5, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab7, window, cx| {
-                    this.activate_visual(6, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab8, window, cx| {
-                    this.activate_visual(7, window, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ActivateTab9, window, cx| {
-                    this.activate_visual(8, window, cx)
-                }),
-            )
-            .on_action(cx.listener(|this, _: &IncreaseFontSize, _window, cx| {
-                this.change_font_size(FONT_SIZE_STEP, cx)
-            }))
-            .on_action(cx.listener(|this, _: &DecreaseFontSize, _window, cx| {
-                this.change_font_size(-FONT_SIZE_STEP, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ResetFontSize, _window, cx| this.reset_font_size(cx)))
-            .on_action(
-                cx.listener(|this, _: &TogglePalette, window, cx| this.toggle_palette(window, cx)),
-            )
-            .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| {
-                this.reopen_closed_tab(window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ToggleMaximizePane, window, cx| {
-                this.toggle_maximize(window, cx)
-            }))
-            .on_action(
-                cx.listener(|_, _: &ToggleFullscreen, window, _cx| window.toggle_fullscreen()),
-            )
-            .on_action(
-                cx.listener(|this, _: &ToggleTabSidebar, _window, cx| this.toggle_tab_sidebar(cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &ToggleLeftPanel, _window, cx| this.toggle_left_panel(cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &ToggleRightPanel, _window, cx| this.toggle_right_panel(cx)),
-            )
-            .on_action(cx.listener(|this, _: &ShowRightPanelInfo, _window, cx| {
-                this.set_right_panel_tab(crate::core::config::RightPanelTab::Info, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ShowRightPanelOutline, _window, cx| {
-                this.set_right_panel_tab(crate::core::config::RightPanelTab::Outline, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ShowRightPanelChanges, _window, cx| {
-                this.set_right_panel_tab(crate::core::config::RightPanelTab::Changes, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ShowRightPanelFiles, _window, cx| {
-                this.set_right_panel_tab(crate::core::config::RightPanelTab::Files, cx)
-            }))
-            .on_action(
-                cx.listener(|this, _: &OpenSettings, window, cx| this.toggle_settings(window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &RestartDaemon, window, cx| this.restart_daemon(window, cx)),
-            )
-            .on_action(cx.listener(|this, _: &ToggleSftp, window, cx| this.toggle_sftp(window, cx)))
-            .on_action(cx.listener(|this, _: &ShowSshForwards, window, cx| {
-                this.show_ssh_forwards(window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ToggleCodePanel, window, cx| {
-                this.toggle_code_panel(window, cx)
-            }))
-            .on_action(
-                cx.listener(|this, _: &EditorSave, window, cx| this.editor_save_active(window, cx)),
-            )
-            // Quit lives on the same element-tree action path as every other Cmd
-            // shortcut above, so a focused terminal routes `cmd-q` here rather
-            // than relying solely on the global handler (which the keystroke
-            // doesn't reach while focus is deep in the terminal view).
-            .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
-            .on_action(cx.listener(|this, _: &OpenSshProfiles, window, cx| {
-                this.open_settings_section(SettingsSection::Ssh, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &RestartSshSession, window, cx| {
-                this.restart_ssh_session(window, cx)
-            }))
-            // Tab operations that used to be reachable only by right-clicking a
-            // chip. Each targets the active tab, so the menu bar / palette /
-            // keyboard all mean "this tab" without a click to say which.
-            .on_action(cx.listener(|this, _: &RenameTab, window, cx| {
-                this.start_rename(this.active, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &NewWorktreeTab, window, cx| {
-                this.new_worktree_tab(this.active, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &CloseOtherTabs, window, cx| {
-                this.close_other_tabs(this.active, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &CloseTabsToTheRight, window, cx| {
-                this.close_tabs_right_of(this.active, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &CopyWorkingDirectory, window, cx| {
-                this.copy_active_cwd(window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &MarkTabUnread, _window, cx| {
-                this.mark_tab_unread(this.active, cx)
-            }))
-            // Fork: the bare action has no pane the user pointed at, so it
-            // opens a new tab; the four directional ones come from the pane
-            // right-click menu, where the ask *was* spatial.
-            .on_action(cx.listener(|this, _: &ForkAgentSession, window, cx| {
-                this.fork_active_pane_session(ForkPlacement::NewTab, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ForkAgentSessionRight, window, cx| {
-                this.fork_focused_pane_session(Axis::Horizontal, false, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ForkAgentSessionLeft, window, cx| {
-                this.fork_focused_pane_session(Axis::Horizontal, true, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ForkAgentSessionDown, window, cx| {
-                this.fork_focused_pane_session(Axis::Vertical, false, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ForkAgentSessionUp, window, cx| {
-                this.fork_focused_pane_session(Axis::Vertical, true, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &CopyAgentSessionId, window, cx| {
-                this.copy_agent_session_id(this.active, window, cx)
-            }))
-            // Settings destinations that deserve their own way in: Help →
-            // Keyboard Shortcuts and the App menu's About both used to require
-            // opening Settings and then hunting for the section.
-            .on_action(cx.listener(|this, _: &ShowKeyboardShortcuts, window, cx| {
-                this.open_settings_section(SettingsSection::Keybindings, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &About, window, cx| {
-                this.open_settings_section(SettingsSection::About, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
-                this.check_for_updates_now(window, cx)
-            }))
-            // Standard macOS App / Window menu items. gpui exposes the platform
-            // calls but ships no actions for them.
-            .on_action(cx.listener(|_, _: &HideApp, _window, cx| cx.hide()))
-            .on_action(cx.listener(|_, _: &HideOthers, _window, cx| cx.hide_other_apps()))
-            .on_action(cx.listener(|_, _: &ShowAll, _window, cx| cx.unhide_other_apps()))
-            .on_action(cx.listener(|_, _: &MinimizeWindow, window, _cx| window.minimize_window()))
-            .on_action(cx.listener(|_, _: &ZoomWindow, window, _cx| window.zoom_window()))
-            // Help destinations. Opened in the default browser; a failure here is
-            // not worth interrupting the user over, so it is logged, not toasted.
-            .on_action(cx.listener(|_, _: &OpenDocumentation, _window, cx| cx.open_url(DOCS_URL)))
-            .on_action(cx.listener(|_, _: &OpenDiscord, _window, cx| cx.open_url(DISCORD_URL)))
-            .on_action(cx.listener(|_, _: &ReportIssue, _window, cx| cx.open_url(ISSUES_URL)))
-            // The theme's background image, composited over the background fill
-            // at its own opacity and under all content. Absolute, so it doesn't
-            // participate in the flex column; the wrapper clips the Cover
-            // overflow (gpui's `img` paints the fitted bounds unclipped).
-            .when_some(bg_image, |this, image| {
-                this.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .overflow_hidden()
-                        .opacity(image.opacity)
-                        .child(
-                            img(image.path)
-                                .size_full()
-                                .object_fit(gpui::ObjectFit::Cover),
-                        ),
+                }))
+                .on_action(cx.listener(|this, _: &FocusPaneLeft, window, cx| {
+                    this.focus_pane_dir(Dir::Left, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &FocusPaneRight, window, cx| {
+                    this.focus_pane_dir(Dir::Right, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &FocusPaneUp, window, cx| {
+                    this.focus_pane_dir(Dir::Up, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &FocusPaneDown, window, cx| {
+                    this.focus_pane_dir(Dir::Down, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ResizePaneLeft, window, cx| {
+                    this.resize_pane(Dir::Left, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ResizePaneRight, window, cx| {
+                    this.resize_pane(Dir::Right, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ResizePaneUp, window, cx| {
+                    this.resize_pane(Dir::Up, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ResizePaneDown, window, cx| {
+                    this.resize_pane(Dir::Down, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SwapPaneNext, window, cx| {
+                    this.swap_pane(true, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SwapPanePrev, window, cx| {
+                    this.swap_pane(false, window, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(true, window, cx)),
                 )
-            })
-            .child(main_layout)
-            // Settings overlay, above the tabs/terminal when open.
-            .when_some(settings_overlay, |this, overlay| this.child(overlay))
-            // The workspace switcher, in the same layer as the palette: they
-            // answer two different questions and are never open at once.
-            .children(self.render_switcher(cx))
-            // Command palette overlay, layered above everything when open.
-            .when_some(self.palette.clone(), |this, palette| this.child(palette))
-            // Toast layer for `window.push_notification` (worktree/SSH errors).
-            // gpui-component's Root only *stores* the list; the root view must
-            // render the layer — without this child every toast was invisible.
-            .children(gpui_component::Root::render_notification_layer(window, cx))
+                .on_action(
+                    cx.listener(|this, _: &PrevTab, window, cx| this.cycle_tab(false, window, cx)),
+                )
+                .on_action(cx.listener(|this, _: &ActivateTab1, window, cx| {
+                    this.activate_visual(0, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTab2, window, cx| {
+                    this.activate_visual(1, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTab3, window, cx| {
+                    this.activate_visual(2, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTab4, window, cx| {
+                    this.activate_visual(3, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTab5, window, cx| {
+                    this.activate_visual(4, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTab6, window, cx| {
+                    this.activate_visual(5, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTab7, window, cx| {
+                    this.activate_visual(6, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTab8, window, cx| {
+                    this.activate_visual(7, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTab9, window, cx| {
+                    this.activate_visual(8, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &IncreaseFontSize, _window, cx| {
+                    this.change_font_size(FONT_SIZE_STEP, cx)
+                }))
+                .on_action(cx.listener(|this, _: &DecreaseFontSize, _window, cx| {
+                    this.change_font_size(-FONT_SIZE_STEP, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &ResetFontSize, _window, cx| this.reset_font_size(cx)),
+                )
+                .on_action(cx.listener(|this, _: &TogglePalette, window, cx| {
+                    this.toggle_palette(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| {
+                    this.reopen_closed_tab(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ToggleMaximizePane, window, cx| {
+                    this.toggle_maximize(window, cx)
+                }))
+                .on_action(
+                    cx.listener(|_, _: &ToggleFullscreen, window, _cx| window.toggle_fullscreen()),
+                )
+                .on_action(cx.listener(|this, _: &ToggleTabSidebar, _window, cx| {
+                    this.toggle_tab_sidebar(cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &ToggleLeftPanel, _window, cx| {
+                        this.toggle_left_panel(cx)
+                    }),
+                )
+                .on_action(cx.listener(|this, _: &ToggleRightPanel, _window, cx| {
+                    this.toggle_right_panel(cx)
+                }))
+                .on_action(cx.listener(|this, _: &ShowRightPanelInfo, _window, cx| {
+                    this.set_right_panel_tab(crate::core::config::RightPanelTab::Info, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ShowRightPanelOutline, _window, cx| {
+                    this.set_right_panel_tab(crate::core::config::RightPanelTab::Outline, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ShowRightPanelChanges, _window, cx| {
+                    this.set_right_panel_tab(crate::core::config::RightPanelTab::Changes, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ShowRightPanelFiles, _window, cx| {
+                    this.set_right_panel_tab(crate::core::config::RightPanelTab::Files, cx)
+                }))
+                .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                    this.toggle_settings(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &RestartDaemon, window, cx| {
+                    this.restart_daemon(window, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &ToggleSftp, window, cx| this.toggle_sftp(window, cx)),
+                )
+                .on_action(cx.listener(|this, _: &ShowSshForwards, window, cx| {
+                    this.show_ssh_forwards(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ToggleCodePanel, window, cx| {
+                    this.toggle_code_panel(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &EditorSave, window, cx| {
+                    this.editor_save_active(window, cx)
+                }))
+                // Quit lives on the same element-tree action path as every other Cmd
+                // shortcut above, so a focused terminal routes `cmd-q` here rather
+                // than relying solely on the global handler (which the keystroke
+                // doesn't reach while focus is deep in the terminal view).
+                .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
+                .on_action(cx.listener(|this, _: &OpenSshProfiles, window, cx| {
+                    this.open_settings_section(SettingsSection::Ssh, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &RestartSshSession, window, cx| {
+                    this.restart_ssh_session(window, cx)
+                }))
+                // Tab operations that used to be reachable only by right-clicking a
+                // chip. Each targets the active tab, so the menu bar / palette /
+                // keyboard all mean "this tab" without a click to say which.
+                .on_action(cx.listener(|this, _: &RenameTab, window, cx| {
+                    this.start_rename(this.active, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &NewWorktreeTab, window, cx| {
+                    this.new_worktree_tab(this.active, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &CloseOtherTabs, window, cx| {
+                    this.close_other_tabs(this.active, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &CloseTabsToTheRight, window, cx| {
+                    this.close_tabs_right_of(this.active, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &CopyWorkingDirectory, window, cx| {
+                    this.copy_active_cwd(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &MarkTabUnread, _window, cx| {
+                    this.mark_tab_unread(this.active, cx)
+                }))
+                // Fork: the bare action has no pane the user pointed at, so it
+                // opens a new tab; the four directional ones come from the pane
+                // right-click menu, where the ask *was* spatial.
+                .on_action(cx.listener(|this, _: &ForkAgentSession, window, cx| {
+                    this.fork_active_pane_session(ForkPlacement::NewTab, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ForkAgentSessionRight, window, cx| {
+                    this.fork_focused_pane_session(Axis::Horizontal, false, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ForkAgentSessionLeft, window, cx| {
+                    this.fork_focused_pane_session(Axis::Horizontal, true, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ForkAgentSessionDown, window, cx| {
+                    this.fork_focused_pane_session(Axis::Vertical, false, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ForkAgentSessionUp, window, cx| {
+                    this.fork_focused_pane_session(Axis::Vertical, true, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &CopyAgentSessionId, window, cx| {
+                    this.copy_agent_session_id(this.active, window, cx)
+                }))
+                // Settings destinations that deserve their own way in: Help →
+                // Keyboard Shortcuts and the App menu's About both used to require
+                // opening Settings and then hunting for the section.
+                .on_action(cx.listener(|this, _: &ShowKeyboardShortcuts, window, cx| {
+                    this.open_settings_section(SettingsSection::Keybindings, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &About, window, cx| {
+                    this.open_settings_section(SettingsSection::About, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
+                    this.check_for_updates_now(window, cx)
+                }))
+                // Standard macOS App / Window menu items. gpui exposes the platform
+                // calls but ships no actions for them.
+                .on_action(cx.listener(|_, _: &HideApp, _window, cx| cx.hide()))
+                .on_action(cx.listener(|_, _: &HideOthers, _window, cx| cx.hide_other_apps()))
+                .on_action(cx.listener(|_, _: &ShowAll, _window, cx| cx.unhide_other_apps()))
+                .on_action(
+                    cx.listener(|_, _: &MinimizeWindow, window, _cx| window.minimize_window()),
+                )
+                .on_action(cx.listener(|_, _: &ZoomWindow, window, _cx| window.zoom_window()))
+                // Help destinations. Opened in the default browser; a failure here is
+                // not worth interrupting the user over, so it is logged, not toasted.
+                .on_action(
+                    cx.listener(|_, _: &OpenDocumentation, _window, cx| cx.open_url(DOCS_URL)),
+                )
+                .on_action(cx.listener(|_, _: &OpenDiscord, _window, cx| cx.open_url(DISCORD_URL)))
+                .on_action(cx.listener(|_, _: &ReportIssue, _window, cx| cx.open_url(ISSUES_URL)))
+                // The theme's background image, composited over the background fill
+                // at its own opacity and under all content. Absolute, so it doesn't
+                // participate in the flex column; the wrapper clips the Cover
+                // overflow (gpui's `img` paints the fitted bounds unclipped).
+                .when_some(bg_image, |this, image| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .overflow_hidden()
+                            .opacity(image.opacity)
+                            .child(
+                                img(image.path)
+                                    .size_full()
+                                    .object_fit(gpui::ObjectFit::Cover),
+                            ),
+                    )
+                })
+                .child(main_layout)
+                // Settings overlay, above the tabs/terminal when open.
+                .when_some(settings_overlay, |this, overlay| this.child(overlay))
+                // The workspace switcher, in the same layer as the palette: they
+                // answer two different questions and are never open at once.
+                .children(self.render_switcher(cx))
+                // Command palette overlay, layered above everything when open.
+                .when_some(self.palette.clone(), |this, palette| this.child(palette))
+                // Toast layer for `window.push_notification` (worktree/SSH errors).
+                // gpui-component's Root only *stores* the list; the root view must
+                // render the layer — without this child every toast was invisible.
+                .children(gpui_component::Root::render_notification_layer(window, cx));
+
+        if let Some(start) = prof {
+            crate::ui::perf::record("window", start.elapsed());
+        }
+        root
     }
 }
 
@@ -7548,6 +7730,283 @@ fn apply_ssh_o_option(
     Ok(())
 }
 
+/// The window-drag gesture behind every stand-in title bar, exercised against
+/// the real [`title_bar_drag`] rather than a replica of it.
+///
+/// `PlatformWindow::start_window_move` is `unimplemented!()` on gpui's test
+/// platform, which makes a panic a reliable "the window would have started
+/// moving" detector — hence the `#[should_panic]` on the tests that assert a
+/// drag *does* start. The tests that assert one does *not* start simply return.
+#[cfg(test)]
+mod window_drag_tests {
+    use gpui::{
+        Context, InteractiveElement as _, IntoElement, Modifiers, MouseButton, MouseDownEvent,
+        MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, PlatformInput, Point, Render,
+        Styled as _, TestAppContext, VisualTestContext, Window, div, point, px,
+    };
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// A minimal window whose whole surface is one real `title_bar_drag` row, so
+    /// nothing else in the tree can explain a result.
+    struct Host;
+    impl Render for Host {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(super::title_bar_drag(
+                div().id("stand-in-title-bar").w_full().h(px(40.)),
+                "stand-in-title-bar",
+                window,
+                cx,
+            ))
+        }
+    }
+
+    /// A resize handle's geometry over a stand-in title bar. The two real
+    /// handles (`tab_sidebar`, `right_panel`) are absolute, 8px wide, `h_full`
+    /// and centred on a panel edge, so their top band lies over a
+    /// `WindowControlArea::Drag` row; standing either of them up needs a whole
+    /// `Tty7App` window, so this reproduces the geometry instead. `occluded`
+    /// mirrors the real handles; `false` is the control that shows the harness
+    /// detects the hijack when the blocking hitbox is missing.
+    struct HandleOverRow {
+        occluded: bool,
+    }
+    impl Render for HandleOverRow {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let handle = div()
+                .absolute()
+                .top_0()
+                .left(px(296.))
+                .w(px(8.))
+                .h_full()
+                .cursor_col_resize()
+                // What each real handle does on press: arm its own drag and ask
+                // for a repaint.
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.refresh());
+            let handle = if self.occluded {
+                handle.occlude()
+            } else {
+                handle
+            };
+            div()
+                .relative()
+                .size_full()
+                .child(super::title_bar_drag(
+                    div().id("stand-in-title-bar").w_full().h(px(40.)),
+                    "stand-in-title-bar",
+                    window,
+                    cx,
+                ))
+                .child(handle)
+        }
+    }
+
+    /// The pattern `title_bar_drag` used to carry: a `should_move` cell built
+    /// inside `render`, so every frame hands the next one a fresh, zeroed cell.
+    /// Kept as a control — it is what makes the assertions above it meaningful,
+    /// by showing the harness detects the bug when the bug is present.
+    struct PerFrameCellHost;
+    impl Render for PerFrameCellHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let should_move = Rc::new(Cell::new(false));
+            div().size_full().child(
+                div()
+                    .id("per-frame-cell")
+                    .w_full()
+                    .h(px(40.))
+                    .on_mouse_down(MouseButton::Left, {
+                        let should_move = should_move.clone();
+                        move |_, _, _| should_move.set(true)
+                    })
+                    .on_mouse_move(move |_, window, _| {
+                        if should_move.replace(false) {
+                            window.start_window_move();
+                        }
+                    }),
+            )
+        }
+    }
+
+    fn down(at: Point<Pixels>) -> PlatformInput {
+        PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        })
+    }
+
+    fn up(at: Point<Pixels>) -> PlatformInput {
+        PlatformInput::MouseUp(MouseUpEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        })
+    }
+
+    fn moved(at: Point<Pixels>, held: bool) -> PlatformInput {
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: at,
+            pressed_button: held.then_some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        })
+    }
+
+    const ON_ROW: Point<Pixels> = Point {
+        x: px(300.),
+        y: px(20.),
+    };
+
+    fn drifted(at: Point<Pixels>) -> Point<Pixels> {
+        point(at.x + px(12.), at.y + px(3.))
+    }
+
+    /// Press, let the window redraw — in production the next vsync — then move.
+    fn press_repaint_move(vcx: &mut VisualTestContext, at: Point<Pixels>) {
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(at, false), cx);
+            window.dispatch_event(down(at), cx);
+        });
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(drifted(at), true), cx);
+        });
+        vcx.run_until_parked();
+    }
+
+    /// **The regression this file exists for (#221).** A repaint between the
+    /// press and the first drag event must not disarm the hold. It used to: the
+    /// arm lived in an `Rc<Cell<bool>>` rebuilt by every `render`, and the press
+    /// itself schedules a repaint (the row's `on_double_click` makes gpui call
+    /// `window.refresh()` on mouse-down), so a trackpad press — which starts
+    /// sliding tens of milliseconds later, well past the next vsync — almost
+    /// never survived to reach `start_window_move`.
+    #[gpui::test]
+    #[should_panic(expected = "not implemented")]
+    fn the_arm_survives_a_repaint_between_press_and_move(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| Host);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        press_repaint_move(&mut vcx, ON_ROW);
+    }
+
+    /// The control for the test above: with the old per-frame cell, the identical
+    /// event sequence loses the arm and never reaches `start_window_move`. If this
+    /// one ever starts panicking, the harness has stopped being able to tell the
+    /// bug from the fix and the test above proves nothing.
+    #[gpui::test]
+    fn a_per_frame_cell_loses_the_arm_to_the_same_repaint(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| PerFrameCellHost);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        press_repaint_move(&mut vcx, ON_ROW);
+    }
+
+    /// The gesture still defers to an actual move, which is what keeps a plain
+    /// click — and the double-click that zooms the window — intact.
+    #[gpui::test]
+    fn a_press_alone_does_not_move_the_window(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| Host);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(ON_ROW, false), cx);
+            window.dispatch_event(down(ON_ROW), cx);
+            window.dispatch_event(up(ON_ROW), cx);
+        });
+        vcx.run_until_parked();
+    }
+
+    /// The other half of giving the arm a longer life: it now has to be *cleared*
+    /// explicitly. A press that is released and then followed by a plain hover
+    /// must not start a window move — with the old per-frame cell the frame
+    /// boundary did this for free.
+    #[gpui::test]
+    fn a_release_disarms_so_a_later_hover_does_not_drag(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| Host);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(ON_ROW, false), cx);
+            window.dispatch_event(down(ON_ROW), cx);
+            window.dispatch_event(up(ON_ROW), cx);
+        });
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(drifted(ON_ROW), false), cx);
+        });
+        vcx.run_until_parked();
+    }
+
+    /// A panel resize handle must keep its drag. Its hit area runs the panel's
+    /// full height, so the top 40px sit on a stand-in caption row — and gpui's
+    /// hit test walks *past* a non-blocking hitbox, so without `occlude()` the
+    /// press arms the row's window move as well as the resize, and the first
+    /// drag event moves the window instead of resizing the panel. A durable arm
+    /// makes that reliable rather than a race: the handle's own `window.refresh()`
+    /// used to destroy the per-frame cell before the move could land.
+    #[gpui::test]
+    fn a_press_on_a_resize_handle_does_not_move_the_window(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| HandleOverRow { occluded: true });
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        press_repaint_move(&mut vcx, ON_ROW);
+    }
+
+    /// The control for the test above: the same geometry with a plain hitbox
+    /// hands the press to both the handle and the caption row underneath, and
+    /// the window moves. If this stops panicking, the test above is passing for
+    /// some reason other than the `occlude()` it exists to pin.
+    #[gpui::test]
+    #[should_panic(expected = "not implemented")]
+    fn a_handle_without_a_blocking_hitbox_hands_the_press_to_the_row(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| HandleOverRow { occluded: false });
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        press_repaint_move(&mut vcx, ON_ROW);
+    }
+
+    /// Two stand-in rows on screen at once — the rail's top zone plus an overlay
+    /// header is a real combination — must not share one arm. This is why the
+    /// builder takes an explicit `key` instead of `window.use_state`, whose id
+    /// comes from the *caller's* `CodeLocation` and would be identical for both.
+    #[gpui::test]
+    fn two_rows_on_screen_keep_separate_arms(cx: &mut TestAppContext) {
+        struct TwoRows;
+        impl Render for TwoRows {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .child(super::title_bar_drag(
+                        div().id("row-a").w_full().h(px(40.)),
+                        "row-a",
+                        window,
+                        cx,
+                    ))
+                    .child(super::title_bar_drag(
+                        div().id("row-b").w_full().h(px(40.)),
+                        "row-b",
+                        window,
+                        cx,
+                    ))
+            }
+        }
+
+        let window = cx.add_window(|_, _| TwoRows);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        // Arm the upper row, then hover the lower one without a button held.
+        // A shared arm would fire here; separate arms leave the lower row cold.
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(point(px(300.), px(20.)), false), cx);
+            window.dispatch_event(down(point(px(300.), px(20.))), cx);
+        });
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(point(px(312.), px(60.)), false), cx);
+        });
+        vcx.run_until_parked();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -7665,22 +8124,22 @@ mod tests {
     }
 }
 
+/// The shared headless App + Window the UI-level gpui tests drive.
 #[cfg(test)]
-mod keybinding_gpui_tests {
+pub(crate) mod test_window {
     use crate::core::config::Config;
     use crate::core::session::Session;
     use crate::ui::app::Tty7App;
-    use crate::ui::settings::SettingsSection;
     use gpui::{AppContext, Entity, TestAppContext, VisualTestContext};
 
-    fn harness(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
-        // Every keybinding edit below goes through `update_config`, which ends in
-        // `Config::save()` — a *full* overwrite of `config.json` at whatever path
-        // the config dir resolves to. Unpinned, that is the developer's real
-        // `~/.config/tty7/config.json`, so running these tests silently reset the
-        // user's entire config to `Config::default()` plus the shortcut recorded
-        // here. The test-only `Config::save` now panics rather than allow that;
-        // pin a scratch dir so it doesn't have to.
+    pub(crate) fn harness(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
+        // Every keybinding edit a caller makes goes through `update_config`,
+        // which ends in `Config::save()` — a *full* overwrite of `config.json`
+        // at whatever path the config dir resolves to. Unpinned, that is the
+        // developer's real `~/.config/tty7/config.json`, so running those tests
+        // silently reset the user's entire config to `Config::default()` plus
+        // the shortcut recorded there. The test-only `Config::save` now panics
+        // rather than allow that; pin a scratch dir so it doesn't have to.
         crate::core::config::pin_test_config_dir();
 
         // The pause-to-commit is a real `smol::Timer` (off the deterministic
@@ -7717,6 +8176,52 @@ mod keybinding_gpui_tests {
         let vcx = VisualTestContext::from_window(window.into(), cx);
         (app, vcx)
     }
+
+    /// [`harness`] plus one open tab, for the tests that need the window to have
+    /// something to show. The pane is a [`quiet_test_pane`], and the returned
+    /// stream must stay alive for as long as it: dropping it closes the socket
+    /// and the pane retires.
+    ///
+    /// Cursor blink is turned off here. It is a real 530ms `cx.notify()` on a
+    /// focused pane and would otherwise be the only thing the render-idle
+    /// measurements ever counted.
+    #[cfg(unix)]
+    pub(crate) fn harness_with_pane(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Tty7App>,
+        VisualTestContext,
+        std::os::unix::net::UnixStream,
+    ) {
+        use crate::terminal::view::quiet_test_pane;
+        use crate::ui::pane::{Pane, PaneSlot};
+
+        let (app, mut vcx) = harness(cx);
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.cursor_blink = false;
+            cx.set_global(cfg);
+        });
+        let stream = app.update_in(&mut vcx, |app, window, cx| {
+            let (view, stream) = quiet_test_pane(1, window, cx);
+            app.tabs
+                .push(super::Tab::new(Pane::leaf(PaneSlot::Ready(view))));
+            app.active = 0;
+            cx.notify();
+            stream
+        });
+        vcx.background_executor.run_until_parked();
+        (app, vcx, stream)
+    }
+}
+
+#[cfg(test)]
+mod keybinding_gpui_tests {
+    use super::test_window::harness;
+    use crate::core::config::Config;
+    use crate::ui::app::Tty7App;
+    use crate::ui::settings::SettingsSection;
+    use gpui::{Entity, TestAppContext, VisualTestContext};
 
     /// Open Settings → Keybindings and begin capturing `action`.
     fn begin_capture(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, action: &str) {
