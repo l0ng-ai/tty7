@@ -614,7 +614,10 @@ fn window_options(cx: &mut App, workspace: Option<WorkspaceId>) -> WindowOptions
         std::sync::LazyLock::new(|| {
             image::load_from_memory(include_bytes!("../../assets/app-icon.png"))
                 .ok()
-                .map(|image| std::sync::Arc::new(image.into_rgba8()))
+                // The source asset is 1024×1024, but _NET_WM_ICON ships raw
+                // pixels to the X server per window (~4 MB at full size) and
+                // taskbars want at most 256px anyway.
+                .map(|image| std::sync::Arc::new(image.thumbnail(256, 256).into_rgba8()))
         });
 
     let remember = cx.global::<Config>().remember_window_size;
