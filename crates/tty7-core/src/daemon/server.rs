@@ -174,6 +174,11 @@ pub fn control_services() -> crate::host::server::Services {
     match MachineStore::shared() {
         Ok(machine) => {
             log::info!("machine tree at {}", machine.path().display());
+            // From here on the pane server's own observations — OSC 7 cwds,
+            // agent identities, deaths — land on the tree's pane records, so
+            // what a client revives from is what the machine saw, not what
+            // some client last remembered to write.
+            crate::core::machine::publish_observations(&machine);
             services.and_machine(machine)
         }
         Err(e) => {

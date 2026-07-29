@@ -630,6 +630,12 @@ impl OutputGate {
 /// PTY master, writer, child) so a single `Mutex` guards everything the reader
 /// thread and the connection threads both touch.
 struct PaneState {
+    /// The registry id of the pane this state belongs to — [`DaemonPane::id`],
+    /// duplicated here so the code paths that only ever see the state (the
+    /// signal appliers, [`DeathReporter::report`]) can name the pane when
+    /// publishing an observation to the machine tree
+    /// ([`crate::core::machine::observe_pane`]).
+    id: u64,
     /// The replay ring: raw PTY bytes bounded to `RING_CAP`, segmented by the
     /// geometry they were recorded under so `attach` can replay each stretch
     /// at the width it was written for. Also the owner of the pane's current
@@ -812,7 +818,14 @@ impl DeathReporter {
         }
         let mut st = state.lock().unwrap();
         st.alive = false;
+        let pane = st.id;
         if shutting_down.load(Ordering::SeqCst) {
+            drop(st);
+            // Even a teardown the owner initiated is a death the tree must
+            // hear about: the record's `live == false` *is* the client-visible
+            // "awaiting revival" state, and it must not depend on which thread
+            // noticed the child go.
+            crate::core::machine::observe_pane(pane, |p| p.live = false);
             return;
         }
         let subscribed = st.subscriber.is_some();
@@ -820,6 +833,7 @@ impl DeathReporter {
             let _ = sub.send(DaemonMsg::Exited { code: None });
         }
         drop(st);
+        crate::core::machine::observe_pane(pane, |p| p.live = false);
         // A subscriber's later detach reclaims the pane, so only an *unattached*
         // death needs `on_dead` — and it fires at most once.
         if subscribed {
@@ -870,6 +884,7 @@ impl DaemonPane {
         let writer = pair.master.take_writer()?;
 
         let state = Arc::new(Mutex::new(PaneState {
+            id,
             ring: ReplayRing::new(size),
             subscriber: None,
             subscriber_epoch: 0,
@@ -979,6 +994,7 @@ impl DaemonPane {
         };
 
         let state = Arc::new(Mutex::new(PaneState {
+            id,
             ring: ReplayRing::new(size),
             subscriber: None,
             subscriber_epoch: 0,
@@ -1241,6 +1257,7 @@ impl DaemonPane {
 
                             let tr1 = trace.then(std::time::Instant::now);
                             let mut st = state.lock().unwrap();
+                            let facts_before = observed_facts(&st);
                             st.ring.append(bytes);
                             if let Some(sub) = &st.subscriber {
                                 // A send error just means the client is gone; ignore
@@ -1264,6 +1281,34 @@ impl DaemonPane {
                             apply_probed_cwd(&mut st, probed_cwd);
                             if let Some(tr1) = tr1 {
                                 tr_disp_t += tr1.elapsed();
+                            }
+                            // Publish what this chunk changed to the machine
+                            // tree — outside the state lock, because a changed
+                            // fact persists a file and this thread's stalls
+                            // are the child's write stalls. Gated on a real
+                            // change so the per-chunk cost is two clones and a
+                            // compare, not a store mutation per chunk.
+                            let pane = st.id;
+                            let facts_after = observed_facts(&st);
+                            drop(st);
+                            if facts_after != facts_before {
+                                let (cwd, agent) = facts_after;
+                                crate::core::machine::observe_pane(pane, |p| {
+                                    // An unknown cwd never clears a seeded one:
+                                    // the spawn directory in the record is
+                                    // better revival information than nothing.
+                                    if cwd.is_some() {
+                                        p.cwd = cwd;
+                                    }
+                                    // The agent fact applies wholesale — its
+                                    // `None` means the agent left the
+                                    // foreground, and a revival must not
+                                    // resume a session that already ended.
+                                    p.agent = agent;
+                                    // Output is proof of life, whatever the
+                                    // record thought.
+                                    p.live = true;
+                                });
                             }
                         }
                         Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -1880,6 +1925,31 @@ fn attach_subscriber(st: &mut PaneState, subscriber: Sender<DaemonMsg>) -> u64 {
     }
     st.subscriber = Some(subscriber);
     st.subscriber_epoch
+}
+
+/// The slice of a pane's state the machine tree records about it — the cwd a
+/// successor would spawn in, and the agent facts a successor would resume.
+/// Captured before and after a chunk's signal application so the (rare) change
+/// is published outside the state lock; see the reader loop.
+///
+/// The cwd crosses as a `String` because the tree's records do (the dialect's
+/// path rule); the loss, if any, happens here where it can be seen next to the
+/// path that caused it.
+fn observed_facts(st: &PaneState) -> (Option<String>, Option<crate::core::machine::AgentFacts>) {
+    let cwd = st.cwd.as_ref().map(|p| p.to_string_lossy().into_owned());
+    let agent = st.agent.map(|agent| crate::core::machine::AgentFacts {
+        agent,
+        session_id: st.agent_session.as_ref().and_then(|s| s.session_id.clone()),
+        // The session's own argv record wins — it survives the chip clearing —
+        // with the identity poll's capture as the fallback until it is stamped.
+        launch_argv: st
+            .agent_session
+            .as_ref()
+            .and_then(|s| s.launch_argv.clone())
+            .or_else(|| st.agent_argv.clone()),
+        status: st.agent_session.as_ref().map(|s| s.status),
+    });
+    (cwd, agent)
 }
 
 /// Apply sniffed signals to the shared state and notify the subscriber of any cwd
@@ -3649,6 +3719,9 @@ mod tests {
     /// A fresh `PaneState` for the PTY-less state-machine tests.
     fn test_state(alive: bool) -> PaneState {
         PaneState {
+            // Unit tests publish observations nowhere (no store is installed
+            // in this process), so the id is never consulted.
+            id: 0,
             ring: ReplayRing::new(ws(80, 24)),
             subscriber: None,
             subscriber_epoch: 0,
@@ -3660,6 +3733,49 @@ mod tests {
             agent_argv: None,
             alive,
         }
+    }
+
+    /// What the machine tree is told about a pane is exactly what a successor
+    /// needs: the cwd as a string, the session's own argv over the poll's
+    /// capture (the session record survives chip churn), and the coarse
+    /// status. No agent, no facts — a revival must not resume a session that
+    /// was never there.
+    #[test]
+    fn observed_facts_prefer_the_sessions_argv_and_carry_its_status() {
+        use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
+
+        let mut st = test_state(true);
+        assert_eq!(observed_facts(&st), (None, None));
+
+        st.cwd = Some(PathBuf::from("/work/api"));
+        st.agent = Some(CLIAgent::Claude);
+        st.agent_argv = Some(vec!["claude".into()]);
+        st.agent_session = Some(AgentSessionState {
+            status: AgentStatus::Working,
+            session_id: Some("sess-1".into()),
+            launch_argv: Some(vec!["claude".into(), "--model".into(), "opus".into()]),
+            ..Default::default()
+        });
+
+        let (cwd, agent) = observed_facts(&st);
+        assert_eq!(cwd.as_deref(), Some("/work/api"));
+        let agent = agent.expect("an agent in the foreground is a fact");
+        assert_eq!(agent.agent, CLIAgent::Claude);
+        assert_eq!(agent.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(
+            agent.launch_argv.as_deref(),
+            Some(&["claude".to_string(), "--model".into(), "opus".into()][..]),
+            "the session's own argv outranks the identity poll's capture"
+        );
+        assert_eq!(agent.status, Some(AgentStatus::Working));
+
+        // The poll's capture is the fallback until the session stamps its own.
+        st.agent_session = None;
+        let (_, agent) = observed_facts(&st);
+        assert_eq!(
+            agent.unwrap().launch_argv.as_deref(),
+            Some(&["claude".to_string()][..])
+        );
     }
 
     /// The full daemon-side rich-status path: sentinel OSC events sniffed out

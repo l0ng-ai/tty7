@@ -414,10 +414,10 @@ pub struct AgentFacts {
     /// flags (`--dangerously-skip-permissions`, …) instead of resuming bare.
     #[serde(default)]
     pub launch_argv: Option<Vec<String>>,
-    /// Latest coarse status the hooks reported ("thinking", "idle", …).
-    /// Display only; never load-bearing.
+    /// Latest coarse status the daemon's sniffer folded from the agent's
+    /// hook events. Display only; never load-bearing.
     #[serde(default)]
-    pub status: Option<String>,
+    pub status: Option<crate::core::cli_agent::AgentStatus>,
 }
 
 /// The facts a client hands over when an operation introduces a pane the store
@@ -1333,6 +1333,41 @@ fn load_machine(path: &Path) -> Machine {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The daemon's own observations
+// ---------------------------------------------------------------------------
+
+/// The store the running daemon's pane server publishes its observations into.
+///
+/// A process-wide slot rather than a parameter threaded through `DaemonPane`,
+/// for the same reason the control dialect's event observer is one: the
+/// observers (every pane's reader thread) and the owner (the control listener
+/// the daemon starts) come up independently in code that long predates the
+/// tree, and each of the three pane-spawn paths would otherwise have to be
+/// taught to carry an `Option<Arc<MachineStore>>` it never reads. Last install
+/// wins; `None` — a process serving panes with no tree, or a unit test —
+/// simply drops observations.
+static OBSERVED: Mutex<Option<Arc<MachineStore>>> = Mutex::new(None);
+
+/// Install `store` as where [`observe_pane`] lands. The daemon calls this once
+/// while wiring its control services.
+pub fn publish_observations(store: &Arc<MachineStore>) {
+    *OBSERVED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(store));
+}
+
+/// Record an observation about `pane` — a cwd the shell reported, an agent the
+/// sniffer identified, a death — in the installed store, if there is one.
+///
+/// Facts about panes the tree never adopted are dropped by the store itself
+/// (see [`MachineStore::note_pane_facts`]), so callers report unconditionally
+/// and pay nothing for a pane that is nobody's business.
+pub fn observe_pane(pane: u64, f: impl FnOnce(&mut PaneRecord)) {
+    let store = OBSERVED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(store) = store {
+        store.note_pane_facts(pane, f);
+    }
+}
+
 /// Copy a file we are about to stop honouring somewhere the user can find it.
 fn quarantine(path: &Path) {
     let aside = path.with_extension("json.corrupt");
@@ -1855,6 +1890,23 @@ mod tests {
             "and the stale seed must not clobber the daemon's own facts"
         );
         let _ = ws;
+    }
+
+    /// The pane server's side door: once a store is installed, an observation
+    /// lands on the record like any other fact — and before/without one,
+    /// observing is a quiet no-op, which is what lets the pane code report
+    /// unconditionally.
+    #[test]
+    fn published_observations_land_in_the_installed_store() {
+        observe_pane(1, |p| p.cwd = Some("/nowhere".into()));
+
+        let (store, _dir, _ws, _tab) = store_with_tab();
+        publish_observations(&store);
+        observe_pane(1, |p| p.cwd = Some("/observed/here".into()));
+        assert_eq!(
+            store.pane(1).unwrap().cwd.as_deref(),
+            Some("/observed/here")
+        );
     }
 
     // ── Attachment ─────────────────────────────────────────────────────────
