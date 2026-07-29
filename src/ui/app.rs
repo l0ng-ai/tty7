@@ -907,6 +907,17 @@ impl Tty7App {
         let restore = cx.global::<Config>().restore_session;
         let known = id.is_some_and(|id| WorkspaceStore::all(cx).get(id).is_some());
         let (workspace, saved) = WorkspaceStore::claim(cx, id);
+        // A local workspace's layout now lives in the daemon's machine tree,
+        // so a restore *asks* rather than reads: the window opens empty and
+        // `hydrate_window_from_tree` rebuilds it the moment the pull answers —
+        // against the local daemon that is milliseconds, so the empty state is
+        // effectively one frame. A remote workspace already worked this way
+        // (its machine has to answer first); it keeps its existing connect-
+        // driven rebuild for now.
+        let is_remote = WorkspaceStore::all(cx)
+            .get(workspace)
+            .is_some_and(|w| w.is_remote());
+        let hydrate = known && restore && !is_remote;
         // A workspace that was already on file restores its tab/split layout and
         // each pane's cwd, unless the user turned restore off — then it starts
         // fresh. A *brand-new* one has no tabs to restore, so what it comes up
@@ -916,16 +927,25 @@ impl Tty7App {
         // through instead lands on the home page, for the launch that exists to
         // show the workspace picker.
         let session = match (known, fresh) {
+            (true, _) if hydrate => Some(Session::default()),
             (true, _) => restore.then_some(saved),
             (false, crate::ui::windows::FreshStart::Shell) => None,
             (false, crate::ui::windows::FreshStart::HomePage) => Some(Session::default()),
         };
         let app = Self::with_session(Some(workspace), session, window, cx);
-        // Persist right away. The leaves just spawned (or reattached) now carry
-        // daemon pane ids, and nothing else writes them until the next
-        // *structural* change — so a crash before the user happens to open a
-        // tab would strand every one of those panes in the daemon.
-        app.save_session(cx);
+        if hydrate {
+            // No immediate save: the window is deliberately empty, and
+            // recording that would both clobber the cached layout the
+            // hydration may fall back to and race the pull with a diff that
+            // reads as "close everything".
+            crate::ui::tree_sync::hydrate_window_from_tree(cx, workspace);
+        } else {
+            // Persist right away. The leaves just spawned (or reattached) now
+            // carry daemon pane ids, and nothing else writes them until the
+            // next *structural* change — so a crash before the user happens to
+            // open a tab would strand every one of those panes in the daemon.
+            app.save_session(cx);
+        }
         // If startup reused a daemon that speaks a different wire protocol
         // (an app upgrade while the old service kept running), the sessions
         // just restored above are living on that old dialect. Surface the
@@ -7152,6 +7172,10 @@ fn tab_to_session(tab: &Tab, cx: &App) -> SessionTab {
         name: tab.name.clone(),
         pane: pane_to_session(&tab.pane, cx),
         sidebar_group: tab.sidebar_group.borrow().clone(),
+        // Deliberately not the live tab's tree id. This snapshot outlives the
+        // daemon tab it mirrors (the closed-tab stack, the session file), and
+        // rebuilding from it is a *new* tab everywhere it matters.
+        tree_id: None,
     }
 }
 
@@ -7355,7 +7379,13 @@ fn tabs_from_session(
             // renders grouped on the first frame; the first landed probe
             // corrects it if the tab's repo changed while we were gone.
             sidebar_group: std::cell::RefCell::new(st.sidebar_group.clone()),
-            tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
+            // A session lowered from the machine's tree names its daemon tabs;
+            // keeping those ids is what stops the first save from closing and
+            // recreating every one of them.
+            tree_id: std::cell::Cell::new(
+                st.tree_id
+                    .unwrap_or_else(tty7_core::core::machine::TabId::new),
+            ),
         });
     }
     // Clamp the saved active index into the rebuilt range (which can be empty

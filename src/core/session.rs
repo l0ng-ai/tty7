@@ -541,6 +541,7 @@ mod tests {
         Session {
             tabs: vec![SessionTab {
                 name: None,
+                tree_id: None,
                 sidebar_group: None,
                 pane: leaf("/Users/me/work"),
             }],

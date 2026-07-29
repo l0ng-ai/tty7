@@ -101,6 +101,14 @@ pub struct SessionTab {
     /// model does not permit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_group: Option<std::path::PathBuf>,
+    /// The tab's identity in the daemon's machine tree, when this session was
+    /// derived *from* that tree — so a window rebuilt from it addresses the
+    /// daemon's tabs rather than minting new ids and churning them. **Never
+    /// persisted**: the tree is the authority on its own ids, and a stale one
+    /// written to disk would collide with a tab the daemon has since reused it
+    /// for. `None` (every other source) mints a fresh id.
+    #[serde(skip)]
+    pub tree_id: Option<crate::core::machine::TabId>,
 }
 
 /// One workspace's contents: the open tabs and which one was active.
@@ -978,6 +986,7 @@ mod tests {
             tabs: vec![
                 SessionTab {
                     name: Some("build".into()),
+                    tree_id: None,
                     sidebar_group: None,
                     pane: SessionPane::Leaf {
                         cwd: Some(PathBuf::from("/work")),
@@ -990,6 +999,7 @@ mod tests {
                 },
                 SessionTab {
                     name: None,
+                    tree_id: None,
                     sidebar_group: None,
                     pane: SessionPane::Split {
                         axis: SessionAxis::Vertical,
@@ -1128,6 +1138,7 @@ mod tests {
             active: 0,
             tabs: vec![SessionTab {
                 name: Some("main".into()),
+                tree_id: None,
                 sidebar_group: None,
                 pane: SessionPane::Leaf {
                     cwd: Some(PathBuf::from("/home/u")),
@@ -1165,6 +1176,7 @@ mod tests {
     fn tab(pane: SessionPane, group: Option<&str>) -> SessionTab {
         SessionTab {
             name: None,
+            tree_id: None,
             sidebar_group: group.map(PathBuf::from),
             pane,
         }

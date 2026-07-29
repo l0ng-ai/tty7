@@ -318,6 +318,7 @@ mod tests {
     fn closed_tab_label_prefers_the_user_set_name() {
         let tab = SessionTab {
             name: Some("build".into()),
+            tree_id: None,
             sidebar_group: None,
             pane: leaf(Some("/work/getty")),
         };
@@ -328,6 +329,7 @@ mod tests {
     fn closed_tab_label_falls_back_to_the_first_leaf_cwd_dir_name() {
         let tab = SessionTab {
             name: None,
+            tree_id: None,
             sidebar_group: None,
             pane: leaf(Some("/work/getty")),
         };
@@ -336,6 +338,7 @@ mod tests {
         // Whitespace-only names don't count as names.
         let tab = SessionTab {
             name: Some("   ".into()),
+            tree_id: None,
             sidebar_group: None,
             pane: leaf(Some("/work/getty")),
         };
@@ -346,6 +349,7 @@ mod tests {
     fn closed_tab_label_searches_splits_for_the_first_cwd() {
         let tab = SessionTab {
             name: None,
+            tree_id: None,
             sidebar_group: None,
             pane: SessionPane::Split {
                 axis: crate::core::session::SessionAxis::Horizontal,
@@ -362,12 +366,14 @@ mod tests {
         // No name, no cwd — and "/" has no file name either.
         let unnamed = SessionTab {
             name: None,
+            tree_id: None,
             sidebar_group: None,
             pane: leaf(None),
         };
         assert_eq!(closed_tab_label(&unnamed), None);
         let root = SessionTab {
             name: None,
+            tree_id: None,
             sidebar_group: None,
             pane: leaf(Some("/")),
         };
@@ -378,6 +384,7 @@ mod tests {
     fn closed_tab_label_clamps_runaway_names() {
         let tab = SessionTab {
             name: Some("a".repeat(40)),
+            tree_id: None,
             sidebar_group: None,
             pane: leaf(None),
         };

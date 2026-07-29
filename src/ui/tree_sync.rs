@@ -52,12 +52,13 @@ use std::sync::Arc;
 
 use gpui::{App, Global};
 use tty7_core::core::machine::{
-    AgentFacts, Axis as TreeAxis, PaneNode, PaneSeed, Side, Tab as TreeTab, TabId,
+    AgentFacts, Axis as TreeAxis, Machine, PaneNode, PaneRecord, PaneSeed, Side, Tab as TreeTab,
+    TabId,
 };
 use tty7_core::daemon::control::{ControlClient, ControlRequest, ReplyOk};
 use tty7_core::host::HostId;
 
-use crate::core::session::{WorkspaceId, WorkspaceStore};
+use crate::core::session::{Session, SessionPane, SessionTab, WorkspaceId, WorkspaceStore};
 use crate::ui::app::Tty7App;
 use crate::ui::pane::{Pane, PaneSlot};
 
@@ -1025,6 +1026,250 @@ fn desync(cx: &mut App, client_ws: WorkspaceId, why: &str) {
     start_prime(cx, client_ws);
 }
 
+// ---------------------------------------------------------------------------
+// The read path: a window rebuilt from the machine's tree
+// ---------------------------------------------------------------------------
+
+/// One workspace of a pulled [`Machine`], lowered into the `Session` shape the
+/// window builder already consumes — the tree's leaves joined with their pane
+/// registry records.
+///
+/// The lowering *is* the revival decision, made per leaf by the daemon's own
+/// liveness fact: a `live` pane keeps its id (the builder re-attaches), a dead
+/// one lowers to an id-less leaf carrying the record's cwd, SSH spec and agent
+/// resume — exactly the leaf shape that makes the builder spawn a successor.
+/// The save that follows then diffs the successor's id against the mirror and
+/// sends the `PaneReplace` that spends the old record.
+pub(crate) fn session_from_tree(
+    ws: &tty7_core::core::machine::Workspace,
+    panes: &[PaneRecord],
+) -> Session {
+    let tabs: Vec<SessionTab> = ws
+        .tabs
+        .iter()
+        .map(|tab| SessionTab {
+            name: tab.name.clone(),
+            tree_id: Some(tab.id),
+            sidebar_group: tab.sidebar_group.clone().map(std::path::PathBuf::from),
+            pane: session_pane_from_node(&tab.root, panes),
+        })
+        .collect();
+    let active = ws
+        .active_tab
+        .and_then(|id| ws.tabs.iter().position(|t| t.id == id))
+        .unwrap_or(0);
+    Session { active, tabs }
+}
+
+fn session_pane_from_node(node: &PaneNode, panes: &[PaneRecord]) -> SessionPane {
+    match node {
+        PaneNode::Leaf { pane } => {
+            let record = panes.iter().find(|p| p.id == *pane);
+            let live = record.is_some_and(|r| r.live);
+            let (cwd, ssh_spec, agent) = match record {
+                Some(r) => (
+                    r.cwd.clone().map(std::path::PathBuf::from),
+                    r.ssh_spec.clone(),
+                    r.agent.clone(),
+                ),
+                None => (None, None, None),
+            };
+            SessionPane::Leaf {
+                cwd,
+                // The daemon's liveness fact is the whole of the revival
+                // decision: an id is only worth keeping if the daemon holds a
+                // PTY for it *right now*.
+                pane_id: live.then_some(*pane),
+                ssh_spec,
+                agent: agent.as_ref().map(|a| a.agent),
+                agent_session_id: agent.as_ref().and_then(|a| a.session_id.clone()),
+                agent_launch_argv: agent.as_ref().and_then(|a| a.launch_argv.clone()),
+            }
+        }
+        PaneNode::Split { axis, ratio, a, b } => SessionPane::Split {
+            axis: match axis {
+                TreeAxis::Horizontal => crate::core::session::SessionAxis::Horizontal,
+                TreeAxis::Vertical => crate::core::session::SessionAxis::Vertical,
+            },
+            ratio: *ratio,
+            a: Box::new(session_pane_from_node(a, panes)),
+            b: Box::new(session_pane_from_node(b, panes)),
+        },
+    }
+}
+
+/// How long an opening window waits for its machine's link before giving up on
+/// the pull and staying empty. Generous against a slow daemon start; the local
+/// link is normally up within one supervision tick.
+const HYDRATE_LINK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
+const HYDRATE_LINK_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Fill an (empty) window from the machine's tree: pull `MachineGet`, prime
+/// the mirror with the workspace's tabs, and rebuild the window from them —
+/// re-attaching live panes, spawning successors for dead ones.
+///
+/// The window opens first and this runs behind it, because the pull is a round
+/// trip that may have to wait out the link coming up; against the local daemon
+/// it lands within milliseconds, so in practice the empty state is one frame.
+///
+/// A workspace the machine has never heard of is created (empty) — and, as a
+/// one-time courtesy to trees that predate the migration, an *empty* pull
+/// falls back to the client's cached `session` copy: adopting it re-populates
+/// the tree through the ordinary diff, which is the whole import.
+pub(crate) fn hydrate_window_from_tree(cx: &mut App, client_ws: WorkspaceId) {
+    let host = WorkspaceStore::host_of(cx, client_ws);
+    let machine_ws = tree_workspace_id(cx, client_ws);
+    let name = WorkspaceStore::all(cx)
+        .get(client_ws)
+        .and_then(|w| w.name.clone());
+    {
+        let state = cx
+            .default_global::<TreeSync>()
+            .windows
+            .entry(client_ws)
+            .or_default();
+        state.sync = SyncPhase::Unprimed {
+            dirty: false,
+            priming: true,
+        };
+    }
+    cx.spawn(async move |cx| {
+        // At launch the link is usually still dialing; wait it out briefly
+        // rather than failing an open the supervisor will fix in a second.
+        let deadline = std::time::Instant::now() + HYDRATE_LINK_DEADLINE;
+        let client = loop {
+            let client = cx.update(|cx| control_for(cx, host));
+            match client {
+                Some(client) => break Some(client),
+                None if std::time::Instant::now() > deadline => break None,
+                None => cx.background_executor().timer(HYDRATE_LINK_POLL).await,
+            }
+        };
+        let Some(client) = client else {
+            log::warn!("workspace {client_ws}: no link to its machine; opening empty");
+            cx.update(|cx| {
+                if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) {
+                    if let SyncPhase::Unprimed { priming, .. } = &mut state.sync {
+                        *priming = false;
+                    }
+                }
+            });
+            return;
+        };
+        let outcome = cx
+            .background_executor()
+            .spawn(async move { pull_workspace(&client, machine_ws, name) })
+            .await;
+        cx.update(|cx| finish_hydration(cx, client_ws, outcome));
+    })
+    .detach();
+}
+
+/// The blocking half: the whole machine (the tree plus the pane registry —
+/// `WorkspaceTree` alone answers structure without the pane facts revival
+/// needs), reduced to this workspace's mirror and session. A machine that has
+/// no such workspace gets it created, empty.
+fn pull_workspace(
+    client: &ControlClient,
+    machine_ws: WorkspaceId,
+    name: Option<String>,
+) -> io::Result<(WsMirror, Session)> {
+    let machine: Machine = match client.call(ControlRequest::MachineGet)? {
+        ReplyOk::MachineTree(m) => *m,
+        other => return Err(io::Error::other(format!("MachineGet answered {other:?}"))),
+    };
+    match machine.workspaces.iter().find(|w| w.id == machine_ws) {
+        Some(ws) => Ok((
+            WsMirror {
+                tabs: ws.tabs.clone(),
+                active: ws.active_tab,
+            },
+            session_from_tree(ws, &machine.panes),
+        )),
+        None => {
+            client.call(ControlRequest::WorkspaceCreate {
+                name,
+                workspace: Some(machine_ws),
+            })?;
+            Ok((WsMirror::default(), Session::default()))
+        }
+    }
+}
+
+fn finish_hydration(
+    cx: &mut App,
+    client_ws: WorkspaceId,
+    outcome: io::Result<(WsMirror, Session)>,
+) {
+    let (mirror, session) = match outcome {
+        Ok(pulled) => pulled,
+        Err(e) => {
+            log::warn!("could not hydrate workspace {client_ws} from its machine: {e}");
+            if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws)
+                && let SyncPhase::Unprimed { priming, .. } = &mut state.sync
+            {
+                *priming = false;
+            }
+            return;
+        }
+    };
+    let was_dirty = {
+        let state = cx
+            .default_global::<TreeSync>()
+            .windows
+            .entry(client_ws)
+            .or_default();
+        let dirty = matches!(state.sync, SyncPhase::Unprimed { dirty: true, .. });
+        state.sync = SyncPhase::Primed(mirror);
+        dirty
+    };
+    let Some(app) =
+        crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|app| app.upgrade())
+    else {
+        return;
+    };
+    if !app.read(cx).tabs.is_empty() {
+        // The user got there first (opened a tab into the empty window); their
+        // window wins, and the sync below reconciles the tree to it.
+        if was_dirty {
+            app.update(cx, |app, cx| sync_window(app, cx));
+        }
+        return;
+    }
+    // The one-time import: a tree with nothing for this workspace, a client
+    // with a cached layout — adopt the cache, and the adopt's own save
+    // populates the tree through the ordinary diff.
+    let session = if session.tabs.is_empty() {
+        WorkspaceStore::all(cx)
+            .get(client_ws)
+            .map(|w| w.session.clone())
+            .unwrap_or(session)
+    } else {
+        session
+    };
+    if session.tabs.is_empty() {
+        if was_dirty
+            && let Some(app) =
+                crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|a| a.upgrade())
+        {
+            app.update(cx, |app, cx| sync_window(app, cx));
+        }
+        return;
+    }
+    let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, client_ws) else {
+        return;
+    };
+    log::info!(
+        "rebuilding {} tab(s) of workspace {client_ws} from its machine's tree",
+        session.tabs.len()
+    );
+    let _ = handle.update(cx, move |_, window, cx| {
+        app.update(cx, |app, cx| {
+            app.adopt_workspace(client_ws, session, window, cx)
+        });
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1422,6 +1667,102 @@ mod tests {
         let want = vec![tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)))];
         diff(ws, &mut mirror, &want, Some(id));
         assert_eq!(diff(ws, &mut mirror, &want, Some(id)), Vec::new());
+    }
+
+    #[test]
+    fn a_live_leaf_keeps_its_pane_id_and_a_dead_one_lowers_to_a_revival_leaf() {
+        use tty7_core::core::cli_agent::CLIAgent;
+        let tab_id = TabId::new();
+        let ws = tty7_core::core::machine::Workspace {
+            tabs: vec![TreeTab {
+                id: tab_id,
+                name: Some("build".into()),
+                sidebar_group: Some("/repo".into()),
+                root: PaneNode::Split {
+                    axis: TreeAxis::Vertical,
+                    ratio: 0.3,
+                    a: Box::new(PaneNode::Leaf { pane: 1 }),
+                    b: Box::new(PaneNode::Leaf { pane: 2 }),
+                },
+            }],
+            active_tab: Some(tab_id),
+            ..Default::default()
+        };
+        let panes = vec![
+            PaneRecord {
+                id: 1,
+                cwd: Some("/work".into()),
+                live: true,
+                ..PaneRecord::new(1)
+            },
+            PaneRecord {
+                id: 2,
+                cwd: Some("/work/api".into()),
+                live: false,
+                agent: Some(AgentFacts {
+                    agent: CLIAgent::Claude,
+                    session_id: Some("sid".into()),
+                    launch_argv: Some(vec!["claude".into()]),
+                    status: None,
+                }),
+                ..PaneRecord::new(2)
+            },
+        ];
+
+        let session = session_from_tree(&ws, &panes);
+        assert_eq!(session.tabs.len(), 1);
+        assert_eq!(session.active, 0);
+        let tab = &session.tabs[0];
+        assert_eq!(
+            tab.tree_id,
+            Some(tab_id),
+            "the daemon tab's identity rides along"
+        );
+        assert_eq!(tab.name.as_deref(), Some("build"));
+        let SessionPane::Split { ratio, a, b, .. } = &tab.pane else {
+            panic!("the split survives the lowering");
+        };
+        assert!((ratio - 0.3).abs() < 1e-6);
+        match &**a {
+            SessionPane::Leaf { pane_id, cwd, .. } => {
+                assert_eq!(*pane_id, Some(1), "a live pane re-attaches by its id");
+                assert_eq!(cwd.as_deref(), Some(std::path::Path::new("/work")));
+            }
+            _ => panic!("leaf"),
+        }
+        match &**b {
+            SessionPane::Leaf {
+                pane_id,
+                cwd,
+                agent,
+                agent_session_id,
+                ..
+            } => {
+                assert_eq!(
+                    *pane_id, None,
+                    "a dead pane's leaf takes the fresh-spawn path — that is the revival"
+                );
+                assert_eq!(cwd.as_deref(), Some(std::path::Path::new("/work/api")));
+                assert_eq!(*agent, Some(CLIAgent::Claude));
+                assert_eq!(agent_session_id.as_deref(), Some("sid"));
+            }
+            _ => panic!("leaf"),
+        }
+    }
+
+    #[test]
+    fn a_dangling_active_tab_in_the_pulled_tree_falls_back_to_the_first() {
+        let ws = tty7_core::core::machine::Workspace {
+            tabs: vec![TreeTab {
+                id: TabId::new(),
+                name: None,
+                sidebar_group: None,
+                root: PaneNode::Leaf { pane: 1 },
+            }],
+            active_tab: Some(TabId::new()),
+            ..Default::default()
+        };
+        assert_eq!(session_from_tree(&ws, &[]).active, 0);
     }
 
     #[test]
