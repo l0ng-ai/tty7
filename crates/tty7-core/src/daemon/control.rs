@@ -156,13 +156,6 @@ pub mod feature {
     pub const HOST_RPC: &str = "host-rpc";
     /// Serves the `Workspace*` requests.
     pub const WORKSPACE_STORE: &str = "workspace-store";
-    /// Serves [`super::ControlRequest::GitStream`] — the incremental form of
-    /// [`super::ControlRequest::Git`], for reads whose output scales with the
-    /// work tree rather than with what the caller can use. Advertised
-    /// separately because a server predating it would fail to *decode* the
-    /// variant, and an undecodable frame ends the connection; a client that
-    /// does not see this flag must use the buffered `Git` instead.
-    pub const GIT_STREAM: &str = "git-stream";
     /// Can be launched as `--stdio` and bridge its own stdin/stdout to the
     /// machine-local socket (the fallback when `AllowStreamLocalForwarding` is
     /// off, the only option under WSL, and how the CI end-to-end test runs).
@@ -285,8 +278,6 @@ pub enum ControlRequest {
     /// Same invariants as [`Git`](Self::Git) — it is the same invocation — but
     /// neither side has to hold the whole output: `git diff HEAD` on a large
     /// work tree is tens of megabytes, and the caller throws most of it away.
-    /// Gated on [`feature::GIT_STREAM`].
-    ///
     /// **The client picks `id`**, which is why there is no id in the reply.
     /// Ids only have to be unique within a connection, and one connection has
     /// one client — so choosing it here lets the client register its receiver

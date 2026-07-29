@@ -518,9 +518,10 @@ pub trait Host: Send + Sync + 'static {
     /// **The default implementation buffers**, so this is never a second way to
     /// reach git — every implementation still funnels through the same
     /// invocation, and a host with no incremental transport simply pays the
-    /// memory it would have paid anyway. Overriding it is an optimisation, not
-    /// a behaviour change: the lines a caller sees must be identical either
-    /// way.
+    /// memory it would have paid anyway. Both hosts that ship override it;
+    /// the default is what keeps a future one from having to. Overriding is an
+    /// optimisation, not a behaviour change: the lines a caller sees must be
+    /// identical either way.
     fn git_lines(
         &self,
         cwd: &Path,

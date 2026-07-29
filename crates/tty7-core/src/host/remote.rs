@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 use crate::daemon::control::{
     ControlClient, ControlEvent, ControlHello, ControlHelloOk, ControlRequest, EventSink,
     KEEPALIVE_DEAD_AFTER, KEEPALIVE_IDLE_BEFORE_PING, KEEPALIVE_PING_INTERVAL, LinkShutdown,
-    ReplyOk, feature,
+    ReplyOk,
 };
 use crate::host::{
     Entry, Host, HostId, Meta, Output, SearchHit, SharedHost, WatchHandle, WatchSub,
@@ -371,29 +371,17 @@ impl Host for RemoteHost {
         }
     }
 
-    /// Incremental when the peer serves it, buffered when it does not.
-    ///
-    /// The fallback is not a nicety: a server predating
-    /// [`ControlRequest::GitStream`] cannot *decode* the variant, and an
-    /// undecodable frame ends the connection — so asking a machine that has not
-    /// advertised [`feature::GIT_STREAM`] would not degrade, it would
-    /// disconnect. The buffered path it falls back to is the one every remote
-    /// pane used before this existed, so an older server keeps working exactly
-    /// as it did.
+    /// Incremental, always: [`ControlRequest::GitStream`] is part of the
+    /// protocol, not an extension a peer may lack. Remote workspaces have never
+    /// shipped a release, so there is no older server to negotiate with — and a
+    /// capability check with a buffered fallback would be dead code pretending
+    /// otherwise.
     fn git_lines(
         &self,
         cwd: &Path,
         args: &[&str],
         on_line: &mut dyn FnMut(&str),
     ) -> io::Result<Option<i32>> {
-        if !self.client.hello().has_feature(feature::GIT_STREAM) {
-            let out = self.git(cwd, args)?;
-            let mut split = crate::core::git::LineSplitter::default();
-            split.push(&out.stdout, &mut *on_line);
-            split.finish(&mut *on_line);
-            return Ok(out.status);
-        }
-
         // Registered *before* the request goes out, so a chunk cannot arrive
         // with nowhere to go — see `ControlRequest::GitStream`.
         let id = self.next_stream.fetch_add(1, Ordering::Relaxed);
@@ -820,25 +808,12 @@ mod tests {
         (host, seen_rx)
     }
 
-    /// A peer that does not advertise `git-stream` must never be sent the
-    /// variant: it predates it, could not decode it, and an undecodable frame
-    /// ends the connection. `git_lines` falls back to the buffered `Git` and
-    /// still yields the same lines, so an older server keeps working exactly as
-    /// it did. (`hello_ok` above advertises only `control` and `host-rpc`,
-    /// which is precisely that server.)
+    /// `git_lines` asks the peer to stream, and reassembles the chunks it pushes
+    /// into lines. The id in the request is the one the client chose, which is
+    /// what let it register the receiver before sending.
     #[test]
-    fn git_lines_falls_back_to_the_buffered_read_without_the_feature() {
-        let (host, seen) = host_with_peer('/', |req| match req {
-            ControlRequest::Git { .. } => Some((
-                ControlReply::Ok(ReplyOk::Output(Output {
-                    status: Some(0),
-                    stdout: b"alpha\nbeta\ngamma\n".to_vec(),
-                    stderr: Vec::new(),
-                })),
-                Vec::new(),
-            )),
-            other => panic!("a peer without the feature must not be asked {other:?}"),
-        });
+    fn git_lines_streams_over_the_wire() {
+        let (host, seen) = host_with_peer_streaming();
 
         let mut lines = Vec::new();
         let code = host
@@ -849,10 +824,74 @@ mod tests {
 
         assert_eq!(code, Some(0));
         assert_eq!(lines, ["alpha", "beta", "gamma"]);
-        assert!(
-            matches!(seen.recv().unwrap(), ControlRequest::Git { .. }),
-            "the buffered request went out, not GitStream"
-        );
+        match seen.recv().unwrap() {
+            ControlRequest::GitStream { id, cwd, args } => {
+                assert_eq!(id, 1, "the client picks the id, starting at 1");
+                assert_eq!(cwd, "/repo");
+                assert_eq!(args, ["diff"]);
+            }
+            other => panic!("expected a GitStream request, got {other:?}"),
+        }
+    }
+
+    /// A peer that serves `GitStream`: it answers the request, then pushes the
+    /// output as chunks and a terminating `GitEnd`. Deliberately splits a line
+    /// across two chunks, since that is the case the client's reassembly exists
+    /// for.
+    fn host_with_peer_streaming() -> (Arc<RemoteHost>, mpsc::Receiver<ControlRequest>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (seen_tx, seen_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            match ControlClientMsg::read(&mut sock).unwrap() {
+                ControlClientMsg::Hello(_) => {}
+                other => panic!("expected Hello, got {other:?}"),
+            }
+            ControlServerMsg::HelloOk(hello_ok('/'))
+                .encode(&mut sock)
+                .unwrap();
+            sock.flush().unwrap();
+            loop {
+                let (req_id, req) = match ControlClientMsg::read(&mut sock) {
+                    Ok(ControlClientMsg::Request { req_id, req }) => (req_id, req),
+                    _ => return,
+                };
+                let id = match &req {
+                    ControlRequest::GitStream { id, .. } => *id,
+                    other => panic!("expected GitStream, got {other:?}"),
+                };
+                seen_tx.send(req).unwrap();
+                ControlServerMsg::Response {
+                    req_id,
+                    reply: ControlReply::Ok(ReplyOk::Unit),
+                }
+                .encode(&mut sock)
+                .unwrap();
+                for bytes in [b"alpha\nbe".to_vec(), b"ta\ngamma\n".to_vec()] {
+                    ControlServerMsg::Event(ControlEvent::GitChunk { id, bytes })
+                        .encode(&mut sock)
+                        .unwrap();
+                }
+                ControlServerMsg::Event(ControlEvent::GitEnd {
+                    id,
+                    code: Some(0),
+                    failed: false,
+                })
+                .encode(&mut sock)
+                .unwrap();
+                sock.flush().unwrap();
+            }
+        });
+
+        let sock = TcpStream::connect(addr).unwrap();
+        let host = RemoteHost::over_tcp(
+            sock,
+            "ssh-alias:testbox",
+            &ControlHello::host_rpc("tok", "laptop"),
+        )
+        .unwrap();
+        (host, seen_rx)
     }
 
     /// Path arithmetic follows the *peer's* separator, not the client's. On a

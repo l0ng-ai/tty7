@@ -498,11 +498,6 @@ fn handshake<R: Read>(
     let mut features = vec![
         feature::CONTROL.to_string(),
         feature::HOST_RPC.to_string(),
-        // Advertised because this build serves `GitStream`. A client that does
-        // not see it must fall back to the buffered `Git`: a server predating
-        // the variant cannot decode it, and an undecodable frame ends the
-        // connection.
-        feature::GIT_STREAM.to_string(),
         feature::STDIO_BRIDGE.to_string(),
     ];
     if services.workspaces.is_some() {
@@ -2947,24 +2942,13 @@ mod tests {
     /// Issue one request and return its reply, ignoring any pushes that arrive
     /// first — a `WorkspaceChanged` from another connection can legitimately
     /// interleave with this one's reply.
-    /// The feature is advertised, which is the whole basis of the fallback: a
-    /// client that does not see it must not send `GitStream`, because a server
-    /// predating the variant cannot decode it and an undecodable frame ends the
-    /// connection.
-    #[test]
-    fn git_stream_is_advertised() {
-        let (_client, hello) = raw();
-        assert!(hello.has_feature(feature::GIT_STREAM));
-    }
-
     /// A git stream end to end over the wire: the reply is accepted, chunks
     /// arrive as events under the id the *client* chose, and the terminating
     /// event carries git's exit code. Reassembled, the lines are exactly what
     /// the buffered `Git` returns for the same invocation.
     #[test]
     fn git_stream_delivers_the_same_lines_as_the_buffered_read() {
-        let (mut client, hello) = raw();
-        assert!(hello.has_feature(feature::GIT_STREAM));
+        let (mut client, _hello) = raw();
         let here = env!("CARGO_MANIFEST_DIR");
         let args: Vec<String> = ["log", "--oneline", "-n", "30"]
             .iter()

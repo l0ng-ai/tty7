@@ -61,10 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Remote panes read big git output incrementally** — `Host` grew a streaming
   companion to its buffered `git`, implemented on both the local host and the
   remote wire protocol, so a read whose size scales with the work tree no
-  longer has to exist in memory all at once on either side. Servers advertise
-  it as the `git-stream` feature and clients fall back to the buffered read
-  when it is absent, so an older `tty7-server` keeps working exactly as it did
-  — it is never sent a request it could not decode. (#239)
+  longer has to exist in memory all at once on either side. The buffered call
+  stays for the many reads that answer in bytes. (#239)
 
 - **Sidebar diff preview is optional** — clicking a sidebar row's `+N −N`
   working-tree counts opens the diff overlay, which is the point of them for
