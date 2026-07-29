@@ -1602,11 +1602,14 @@ impl Tty7App {
             PromptLevel::Warning,
             &format!("Delete \"{name}\"?"),
             Some(detail),
-            &["Delete", "Cancel"],
+            // Safe option first: the leading button is the Return-key default on
+            // macOS (NSAlert) and Windows (TaskDialog); "Cancel" is what gpui maps
+            // to the Escape key.
+            &["Cancel", "Delete"],
             cx,
         );
         cx.spawn_in(window, async move |app, cx| {
-            let Ok(0) = answer.await else { return };
+            let Ok(1) = answer.await else { return };
             let _ = app.update_in(cx, |app, window, cx| {
                 let Some(host) = app.active_host(cx) else {
                     return;
