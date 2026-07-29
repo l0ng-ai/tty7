@@ -1,4 +1,4 @@
-//! The window's half of "Connect to Host" (design §2, §10, §12).
+//! The window's half of "Connect to Host".
 //!
 //! [`ui::remote_connect`](crate::ui::remote_connect) is the plumbing — SSH
 //! specs, routed control connections, the remote workspace store. This is the
@@ -7,7 +7,7 @@
 //!
 //! ## One window, one machine
 //!
-//! Design §2 has a single rule and design §3 lists its inverse under *never do
+//! There is a single rule, and its inverse is listed under *never do
 //! this*: **a window shows one workspace on one machine, and every tab and pane
 //! in it is on that machine.** The whole M5 data layer leans on it — a workspace
 //! stores its `host` once rather than per pane, and `sidebar_group` stays a bare
@@ -28,11 +28,11 @@
 //! ## What is left for M6
 //!
 //! The flow below reaches `Attached` and stops. Reconnect backoff, takeover
-//! (`Preempted`) and the start-up auth queue are M6 (contract §12), and the
+//! (`Preempted`) and the start-up auth queue are M6, and the
 //! seams for them are named where they belong: [`RemoteStatus`] has the two
 //! states to add, [`Tty7App::connect_remote_workspace`] is the one entry point
 //! that opens a connection, and [`Tty7App::reopen_remote_at_startup`] is where
-//! design §10's "`open: true` remote workspaces reconnect at launch" hooks in.
+//! the "`open: true` remote workspaces reconnect at launch" rule hooks in.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -51,7 +51,7 @@ use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow};
 
 /// Where the home page's "Connect to Host" flow has got to.
 ///
-/// Every state is a place the user can be *left*: design §17 is explicit that no
+/// Every state is a place the user can be *left*: no
 /// failure closes a window, so [`ConnectFlow::Failed`] is a resting state with
 /// its own affordances rather than a toast on the way back to the picker.
 pub enum ConnectFlow {
@@ -59,7 +59,7 @@ pub enum ConnectFlow {
     /// the panel shows while it runs.
     Connecting { choice: HostChoice },
     /// It did not work, and the window stays here until the user decides what to
-    /// do about it (§17: never auto-close, always offer the next move).
+    /// do about it (never auto-close, always offer the next move).
     Failed { choice: HostChoice, error: String },
 }
 
@@ -76,7 +76,7 @@ impl ConnectFlow {
     }
 }
 
-/// A **remote** workspace's connection state (design §10's machine).
+/// A **remote** workspace's connection state.
 ///
 /// Only remote workspaces have one — a local window is not a disconnected
 /// remote window, it is a window with no machine to be connected to, which is
@@ -95,13 +95,13 @@ pub enum RemoteStatus {
     Attached,
     /// The link dropped and the supervisor is retrying, for ever, on the
     /// backoff in [`Backoff`]. Read-only, and the window stays open — design
-    /// §10 is explicit that no failure closes a window.
+    /// No failure closes a window.
     Reconnecting {
         /// How many attempts have already failed. Shown because "reconnecting…"
         /// that has been on screen for four minutes should say so.
         attempt: u32,
     },
-    /// Somebody else attached to this workspace (design §10, D8). Read-only and
+    /// Somebody else attached to this workspace (D8). Read-only and
     /// **not** retried: a client that reconnected automatically would fight the
     /// machine the user just moved to. Taking it back is a deliberate act.
     Preempted {
@@ -134,7 +134,7 @@ impl RemoteStatus {
         }
     }
 
-    /// The line along the bottom of a degraded window (design §10: 底部一条
+    /// The line along the bottom of a degraded window (底部一条
     /// "未连接 — 输入暂不生效").
     ///
     /// Separate from [`RemoteStatus::strip_message`] because they answer
@@ -151,7 +151,7 @@ impl RemoteStatus {
     }
 
     /// What the status strip's button offers, or `None` when there is nothing
-    /// useful to do. §17: a failure state always offers the next move.
+    /// useful to do: a failure state always offers the next move.
     pub fn action_label(&self) -> Option<&'static str> {
         match self {
             RemoteStatus::Attached | RemoteStatus::Connecting => None,
@@ -164,7 +164,7 @@ impl RemoteStatus {
         }
     }
 
-    /// Whether keystrokes reach the panes. Design §10's read-only degrade: a
+    /// Whether keystrokes reach the panes. The read-only degrade: a
     /// window that is not attached still scrolls, selects, copies and searches,
     /// but typing goes nowhere and is **not** buffered (D6).
     ///
@@ -184,17 +184,17 @@ impl RemoteStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Reconnect backoff (design §10: 指数退避 1/2/4/…/30s 封顶，无限重试)
+// Reconnect backoff (指数退避 1/2/4/…/30s 封顶，无限重试)
 // ---------------------------------------------------------------------------
 
 /// The first wait after a link drops.
 pub const RECONNECT_FIRST: std::time::Duration = std::time::Duration::from_secs(1);
-/// The ceiling the doubling stops at. Design §10 fixes it at 30s: long enough
+/// The ceiling the doubling stops at, fixed at 30s: long enough
 /// that a machine that has been down for an hour is not being probed every
 /// second, short enough that plugging the cable back in feels immediate.
 pub const RECONNECT_CAP: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Design §10's retry schedule: 1, 2, 4, 8, 16, 30, 30, … and **never gives
+/// The retry schedule: 1, 2, 4, 8, 16, 30, 30, … and **never gives
 /// up**.
 ///
 /// Giving up is the one thing this must not do. The window stays open in a
@@ -239,10 +239,10 @@ impl Backoff {
 }
 
 // ---------------------------------------------------------------------------
-// The start-up auth queue (design §10, D7)
+// The start-up auth queue (D7)
 // ---------------------------------------------------------------------------
 
-/// Design §10's "需要认证的窗口一次只弹一个 sheet，其余排队".
+/// One auth sheet at a time per window; the rest queue.
 ///
 /// **It queues sheets, not connections.** D7 wants machines that need no
 /// interaction (a key, `ssh-agent`, a connection already authenticated) to
@@ -349,7 +349,7 @@ impl Tty7App {
 
     /// Whether this window may open a shell on *this* machine.
     ///
-    /// The guard on design §3's "never do this". A remote window that spawned a
+    /// The guard on that "never do this". A remote window that spawned a
     /// local shell would put two machines in one window — and would do it
     /// invisibly, because a local shell in a remote window looks exactly like a
     /// remote one until the first `ls`.
@@ -497,7 +497,7 @@ impl Tty7App {
     /// Every pane in this window, in tab order.
     ///
     /// The reconnect walks these: a workspace's panes are exactly the panes of
-    /// the one window showing it (design §2 — one window, one workspace, one
+    /// the one window showing it (one window, one workspace, one
     /// machine), so there is no second place to look.
     pub(crate) fn panes(&self) -> Vec<gpui::Entity<crate::terminal::view::TerminalView>> {
         self.tabs
@@ -506,7 +506,7 @@ impl Tty7App {
             .collect()
     }
 
-    /// This window's connection state (design §10's state machine).
+    /// This window's connection state.
     ///
     /// Two sources, in the order that matters. The *picker* flow wins while it
     /// is running — a window mid-connect is showing that connect, not the
@@ -525,7 +525,7 @@ impl Tty7App {
         RemoteLinks::status_of(cx, self.workspace)
     }
 
-    /// The status strip's button (design §10: [重试] / [抢回]).
+    /// The status strip's button ([重试] / [抢回]).
     pub(crate) fn remote_retry(&mut self, cx: &mut Context<Self>) {
         match &self.connect {
             // Mid-picker: the retry the user can see is the picker's own.
@@ -669,7 +669,7 @@ impl Tty7App {
                 self.connect = None;
             }
             Err(error) => {
-                // §17: this is a resting state. The window keeps everything it
+                // This is a resting state. The window keeps everything it
                 // had, says what went wrong, and offers the next move.
                 log::warn!("connect to {} failed: {error}", choice.label);
                 self.connect = Some(ConnectFlow::Failed { choice, error });
@@ -694,7 +694,7 @@ impl Tty7App {
 
     /// Make a workspace on the connected machine, rooted at *its* `$HOME`.
     ///
-    /// Design §10: "新建的 workspace 落在 `~`" — the remote's, taken from the
+    /// A new workspace lands in `~` — the remote's, taken from the
     /// control handshake (`ControlHelloOk.home`), never this client's. A window
     /// on a Mac opening a workspace on a Linux box must land in
     /// `/home/<them>`, not `/Users/<me>`.
@@ -709,7 +709,7 @@ impl Tty7App {
         let id = WorkspaceStore::claim_remote(cx, host);
         // The name is left unset on purpose: `Workspace::display_name` derives
         // it from the tabs' repo/cwd, which is the same rule a local workspace
-        // follows and the one design §10 asks for. A workspace that opened in
+        // follows and the one intended. A workspace that opened in
         // `~` and then had a repo opened in it renames itself for free.
         self.push_remote_layout(id, cx);
         log::info!(
@@ -733,7 +733,7 @@ impl Tty7App {
     ) {
         self.connect = None;
         // From here on the machine is the supervisor's business: it is what
-        // notices the link dropping, retries on design §10's backoff, and puts
+        // notices the link dropping, retries on the backoff, and puts
         // the window read-only in between.
         RemoteLinks::ensure_running(cx);
         if self.tabs.is_empty() {
@@ -748,7 +748,7 @@ impl Tty7App {
 
     /// Push this window's workspace record to the machine that owns it.
     ///
-    /// The other half of design §10's split: the client keeps `open`, the window
+    /// The other half of the storage split: the client keeps `open`, the window
     /// geometry and the pointer; everything that is a fact about the machine
     /// goes over there. Fire-and-forget on a background task — a failed push is
     /// a log line, not a modal, because the record is rewritten on every
@@ -784,7 +784,7 @@ impl Tty7App {
         .detach();
     }
 
-    /// Design §10's "`open: true` remote workspaces reconnect at launch".
+    /// `open: true` remote workspaces reconnect at launch.
     ///
     /// **M6 owns the behaviour**; this owns the seam. Startup opens a window per
     /// `open: true` workspace regardless of which machine it is on (`main.rs`
@@ -819,7 +819,7 @@ impl Tty7App {
 
     // ----- prompts -----------------------------------------------------------
 
-    /// Design §12's install consent, on the machine that raised it.
+    /// Install consent, relayed to the machine that raised it.
     ///
     /// A native prompt rather than an in-window sheet, matching every other
     /// decision in this class in tty7 ("Restart Daemon?", "Quit and Stop
@@ -857,7 +857,7 @@ impl Tty7App {
         .detach();
     }
 
-    /// Design §12's version skew, for a remote server.
+    /// Version skew, for a remote server.
     ///
     /// Same shape as the local `prompt_daemon_version_mismatch`, and for the
     /// same reason: the running daemon owns every live pane on that machine, so
@@ -889,7 +889,7 @@ impl Tty7App {
         }
     }
 
-    /// Carry out "Restart Server" (design §12): replace the `tty7-server` on a
+    /// Carry out "Restart Server": replace the `tty7-server` on a
     /// machine with this client's build.
     ///
     /// **This throws work away and says so.** Every pane the old server hosts
@@ -1070,7 +1070,7 @@ pub(crate) fn connection_for(
 }
 
 // ---------------------------------------------------------------------------
-// The supervisor (design §10's state machine, running)
+// The supervisor (the connection state machine, running)
 // ---------------------------------------------------------------------------
 
 /// How often the pump looks at every machine.
@@ -1141,7 +1141,7 @@ pub(crate) struct RemoteLinks {
     /// in the middle of replacing is not one to pull back over the top of
     /// ourselves.
     pushing: std::collections::HashSet<WorkspaceId>,
-    /// Design §10's start-up sheet queue. Lives here because it is part of the
+    /// The start-up sheet queue. Lives here because it is part of the
     /// same connection state and has to survive individual windows — the sheet
     /// belongs to a machine, not to whichever window happened to ask first.
     #[allow(
@@ -1224,7 +1224,7 @@ impl RemoteLinks {
 
     /// The user asked to reconnect, or to take a preempted workspace back.
     ///
-    /// Both are the same operation. Design §10's [抢回] is "接管一次" in the
+    /// Both are the same operation. The [抢回] is "接管一次" in the
     /// other direction, and a takeover *is* an attach — so clearing the
     /// preemption and letting the supervisor attach is not a shortcut, it is the
     /// mechanism.
@@ -1258,7 +1258,7 @@ impl RemoteLinks {
     ///
     /// **Nothing closes.** The windows on that machine stay exactly where they
     /// are and go read-only, which is the same resting state a dropped link
-    /// leaves behind (§17, and design §10's "永不自动关窗") — with the difference
+    /// leaves behind (a window is never closed automatically) — with the difference
     /// that this one is one click from being undone: no `MachineLink` at all
     /// reads as [`RemoteStatus::Disconnected`], and that state already draws a
     /// "Connect" button on the window's strip.
@@ -1301,7 +1301,7 @@ impl RemoteLinks {
 /// One turn of the supervisor. `false` ends the pump.
 fn pump_tick(cx: &mut gpui::App) -> bool {
     drain_events(cx);
-    // Design §10, D7: start-up and reconnect are the two moments a dozen
+    // D7: start-up and reconnect are the two moments a dozen
     // machines can ask for a password at once, and both go through here.
     pump_auth_sheets(cx);
 
@@ -1364,7 +1364,7 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
         }
 
         // The link is down. Drop the dead host object so nothing keeps calling
-        // into it — §17: a control connection that has gone is the whole
+        // into it — a control connection that has gone is the whole
         // workspace's lifeline, not one failed request.
         if remote_connect::RemoteConnections::get(cx, host).is_some() {
             remote_connect::RemoteConnections::remove(cx, host);
@@ -1466,7 +1466,7 @@ fn drain_events(cx: &mut gpui::App) {
     let stale = stale_workspaces(&events);
     for (host, event) in events {
         match event {
-            // Design §10's takeover, arriving. The window goes read-only and
+            // The takeover, arriving. The window goes read-only and
             // **stays** — no automatic reconnect, because reconnecting is
             // taking it back, and taking it back is the user's decision.
             ControlEvent::Preempted { workspace, by } => {
@@ -1525,7 +1525,7 @@ fn stale_workspaces(events: &[(HostId, ControlEvent)]) -> Vec<(HostId, String)> 
 /// So there is no path from here to a closed tab, a re-spawned pane or a moved
 /// focus; what a user sees change is the workspace's *name*.
 ///
-/// That is deliberate rather than incidental. Design §10 makes the remote the
+/// That is deliberate rather than incidental. The remote is the
 /// authority for the layout, but the client that has the window open is the one
 /// *living* in it, and rearranging somebody's panes underneath them because
 /// another machine moved a tab is not a refresh, it is a fight. The remote's
@@ -1568,7 +1568,7 @@ fn refresh_remote_workspace(cx: &mut gpui::App, host: HostId, store_key: String)
                 });
             }
             // The workspace was deleted on the far side. The window stays open
-            // with what it had — §10 never closes a window, and least of all
+            // with what it had — a window is never closed, and least of all
             // because another machine decided this one was done with it.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 log::info!("remote workspace {id} is gone from its machine; keeping the window");
@@ -1619,7 +1619,7 @@ fn client_id_for(cx: &gpui::App, host: HostId, store_key: &str) -> Option<Worksp
 
 /// One reconnect attempt, off the UI thread.
 ///
-/// Design §10's sequence, in order: rebuild the control connection, pull the
+/// The sequence, in order: rebuild the control connection, pull the
 /// workspace layout, re-attach each workspace. The pane half — reopen a channel
 /// per pane, `Attach`, replay, then `Resize` to *this* client's geometry — hangs
 /// off [`relink_panes`], which is where it lands when remote panes exist.
@@ -1630,7 +1630,7 @@ fn launch_attempt(cx: &mut gpui::App, host: HostId, target: RemoteTarget) {
         Err(e) => {
             // A profile that has been deleted is not a network failure, and
             // retrying it for ever would be. This is a resting state with a
-            // button, per §17.
+            // button.
             RemoteLinks::mark(cx, host, |link| {
                 link.state = LinkState::Failed(e);
                 link.next_attempt = None;
@@ -1654,7 +1654,7 @@ fn launch_attempt(cx: &mut gpui::App, host: HostId, target: RemoteTarget) {
             .background_executor()
             .spawn(async move {
                 let connected = remote_connect::connect_blocking(&target, header, &label_for_task)?;
-                // Design §10: the attach is what makes this client the
+                // The attach is what makes this client the
                 // workspace's session again — and what preempts whoever took it
                 // while we were away.
                 for key in &keys {
@@ -1692,9 +1692,10 @@ fn finish_attempt(
 ) {
     match outcome {
         Ok(connected) => {
-            // The remote's record is the authority for the layout (design §10),
+            // The remote's record is the authority for the layout,
             // so what came back with the connect replaces what this client had.
             let rows = connected.rows.clone();
+            let instance = connected.host.peer().instance.clone();
             let restarted = server_restarted(cx, host, &connected.host);
             // The home too, not just the connection: this is the path a machine
             // comes back on after a restart or a dropped link, and dropping it
@@ -1706,7 +1707,16 @@ fn finish_attempt(
                     WorkspaceStore::apply_remote(cx, id, &row.record);
                 }
                 cx.default_global::<RemoteLinks>().preempted.remove(&id);
-                if restarted {
+                // The same question `restarted` answers, asked of the *record*
+                // rather than of this process's memory — and it is the only one
+                // that can answer across a client restart. `instances` is an
+                // in-memory map, so on a cold launch every machine is a first
+                // sighting and `restarted` is false; a server replaced while
+                // this client was closed would sail through, and its recycled
+                // ids would attach to whatever unrelated shells now hold the
+                // numbers. `daemon_instance` is on disk and remembers.
+                let stale = WorkspaceStore::forget_stale_pane_ids(cx, id, &instance);
+                if restarted || stale {
                     // Every pane id this workspace holds was minted by a process
                     // that is gone. Re-attaching them would cost one doomed round
                     // trip each and leave the window exactly as disconnected as
@@ -1747,7 +1757,7 @@ fn finish_attempt(
     cx.refresh_windows();
 }
 
-/// Design §10's pane half of a reconnect: for each pane, reopen a channel,
+/// The pane half of a reconnect: for each pane, reopen a channel,
 /// `Attach`, take the replay, then `Resize` to this client's geometry.
 ///
 /// # The replay boundary
@@ -1804,7 +1814,7 @@ fn relink_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
                         }
                     });
                 }
-                // §17: a pane that could not come back stays on screen in its
+                // A pane that could not come back stays on screen in its
                 // disconnected state. The supervisor is still retrying the
                 // machine, and the next success runs this again.
                 Err(e) => log::warn!("could not relink pane {pane_id}: {e}"),
@@ -1972,11 +1982,11 @@ fn refresh_window_shells(cx: &mut gpui::App, workspace: WorkspaceId) {
     app.update(cx, |app, cx| app.refresh_shells(cx));
 }
 
-/// Design §10's takeover, on this client's side: stop holding a stream to a
+/// The takeover, on this client's side: stop holding a stream to a
 /// workspace somebody else is now typing in.
 ///
 /// The remote closes them too — this is not the mechanism, it is the client
-/// making sure. The panes stay on screen (read-only, per §10's "永不自动关窗");
+/// making sure. The panes stay on screen (read-only, never auto-closed);
 /// only the links go.
 fn release_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
     for view in panes_of(cx, workspace) {
@@ -1985,13 +1995,13 @@ fn release_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
 }
 
 // ---------------------------------------------------------------------------
-// The start-up auth queue, wired (design §10, D7)
+// The start-up auth queue, wired (D7)
 // ---------------------------------------------------------------------------
 
 /// Move every routed auth prompt one step: drain the mailbox, offer each to the
 /// queue, and raise the sheet for whichever machine's turn it is.
 ///
-/// Design §10's rule is "**一次只弹一个 sheet，其余排队**", and the queue is keyed
+/// The rule is "**一次只弹一个 sheet，其余排队**", and the queue is keyed
 /// by machine because the credential is the machine's — ten windows restoring
 /// onto one box must ask for one password, not ten.
 ///
@@ -2114,7 +2124,7 @@ fn panes_of(
 
 /// Whether keystrokes should reach the panes of `workspace`.
 ///
-/// **The one call the pane layer makes.** Design §10's read-only degrade has to
+/// **The one call the pane layer makes.** The read-only degrade has to
 /// be checked at every point a keystroke can enter a pane — `on_key_down`, the
 /// IME's `commit_text`, `paste`, `send_to_pty`, and the typeahead `dump_hold`
 /// timer — and a rule copied five times is a rule that will disagree with itself
@@ -2166,7 +2176,7 @@ mod tests {
         );
     }
 
-    /// Design §10's read-only degrade: a window that is connecting or failed
+    /// The read-only degrade: a window that is connecting or failed
     /// still shows and scrolls, but typing goes nowhere — and is not buffered
     /// for later (D6), which is why this is a gate and not a queue.
     #[test]
@@ -2299,9 +2309,9 @@ mod tests {
         assert_eq!(forgotten, 3, "every dropped claim is counted");
     }
 
-    // ── The reconnect schedule (design §10; contract §18: no network) ────────
+    // ── The reconnect schedule (no network) ─────────────────────────────────
 
-    /// Design §10 fixes the schedule: **1/2/4/…/30s capped, retried for ever**.
+    /// The schedule is fixed: **1/2/4/…/30s capped, retried for ever**.
     #[test]
     fn the_backoff_doubles_to_thirty_seconds_and_stays_there() {
         let mut b = Backoff::default();
@@ -2337,7 +2347,7 @@ mod tests {
         assert_eq!(b.delay(), RECONNECT_CAP, "still retrying, still capped");
     }
 
-    // ── The start-up auth queue (design §10, D7) ─────────────────────────────
+    // ── The start-up auth queue (D7) ─────────────────────────────
 
     fn host(key: &str) -> HostId {
         HostId::from_connection_key(key)
@@ -2487,9 +2497,9 @@ mod tests {
         assert!(stale_workspaces(&events).is_empty());
     }
 
-    // ── The read-only degrade, state by state (design §10) ───────────────────
+    // ── The read-only degrade, state by state ───────────────────
 
-    /// Design §10's degrade in one table: which states are read-only, what the
+    /// The degrade in one table: which states are read-only, what the
     /// bottom line says, and what the strip offers to do about it.
     ///
     /// `Preempted` reads differently on purpose — "not connected" would be a
@@ -2540,7 +2550,7 @@ mod tests {
     }
 
     /// The two states M6 added still produce a strip line, and the takeover one
-    /// names the machine that took it — design §10: 状态条写"已在 <主机名> 上打开".
+    /// names the machine that took it — 状态条写"已在 <主机名> 上打开".
     #[test]
     fn the_new_states_name_what_happened() {
         assert_eq!(

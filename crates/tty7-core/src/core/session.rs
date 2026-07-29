@@ -93,8 +93,8 @@ pub struct SessionTab {
     /// is deliberately not persistable. The qualifier is not missing, it is
     /// factored out: a tab always belongs to exactly one [`Workspace`], a
     /// workspace names exactly one machine in [`Workspace::host`], and a
-    /// window shows exactly one workspace (design §2, and §3's "一个窗口里既
-    /// 有本地又有远程 —— 这个**永远不做**"). So the fully-qualified group key
+    /// window shows exactly one workspace — mixing local and remote tabs in one
+    /// window is the thing tty7 never does. So the fully-qualified group key
     /// is `(workspace.host_id(), tab.sidebar_group)`, with the host half
     /// stored once per workspace instead of once per tab. Two machines whose
     /// repos share a root path can only collide inside one window, which the
@@ -153,14 +153,14 @@ impl std::fmt::Display for WorkspaceId {
 /// The machine a remote workspace lives on, named the way the user already
 /// named it.
 ///
-/// **This is a pointer, never a configuration.** Design §2 is explicit that a
+/// **This is a pointer, never a configuration.** It is a hard rule that a
 /// machine is configured once and that remote workspaces reuse what is already
 /// there — the profile's keys, its jump host, its `ProxyCommand` — so this type
 /// has exactly one job: say *which* existing entry to connect through. The
 /// three variants are the three places an SSH target can already have been
 /// spelled out in tty7 today.
 ///
-/// | Variant | Where it came from | Connection key (contract §4.2) |
+/// | Variant | Where it came from | Connection key |
 /// |---|---|---|
 /// | [`Profile`](RemoteTarget::Profile) | A saved [`SshProfile`](crate::core::ssh_profile::SshProfile), by its stable uuid | `ssh-profile:<uuid>` |
 /// | [`Alias`](RemoteTarget::Alias) | A `Host` stanza in `~/.ssh/config` | `ssh-alias:<alias>` |
@@ -192,7 +192,7 @@ pub enum RemoteTarget {
     },
     /// A WSL distribution. **M8 owns the behaviour**; the variant exists now so
     /// that [`connection_key`](RemoteTarget::connection_key) is a total function
-    /// over contract §4.2's table rather than one that grows a case later.
+    /// over the table rather than one that grows a case later.
     Wsl { distro: String },
     /// A `tty7-server --stdio` child process on *this* machine — the workspace
     /// mirror of [`RouteTarget::LocalStdio`](crate::daemon::router::RouteTarget::LocalStdio),
@@ -245,12 +245,11 @@ impl RemoteTarget {
         ))
     }
 
-    /// The canonical connection string this target hashes to (contract §4.2).
+    /// The canonical connection string this target hashes to.
     ///
     /// **Contains no workspace id.** Several workspaces on one box share a key,
     /// and therefore share a [`HostId`](crate::host::HostId) and the one SSH
-    /// connection underneath it — the granularity the whole design assumes
-    /// (design §10).
+    /// connection underneath it — the granularity the whole design assumes.
     ///
     /// One conservative case worth knowing: `me@box` and a bare `box` are
     /// different keys even when the client's SSH would resolve them to the same
@@ -323,7 +322,7 @@ impl std::fmt::Display for RemoteTarget {
 /// into that machine's `~/.local/share/tty7/workspaces.json`
 /// ([`crate::core::workspace_store`]). A client-side [`Workspace`] carrying one
 /// of these is a *view*, not the record: its `session` is left empty until the
-/// layout is pulled from the remote, which owns it (design §10).
+/// layout is pulled from the remote, which owns it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RemoteRef {
     /// Which machine, in terms of a configuration that already exists.
@@ -381,7 +380,7 @@ pub struct Workspace {
     /// The machine this workspace's panes and files live on. `None` means this
     /// one, **and means it identically to every build that predates the field**:
     /// a `session.json` written before this existed decodes with `None`
-    /// throughout, i.e. all-local, which is the behaviour it had (design §10).
+    /// throughout, i.e. all-local, which is the behaviour it had.
     ///
     /// A `Some` entry is a *view* of a record that lives over there. Its
     /// `session` is empty until the layout is pulled from the remote's own
@@ -393,7 +392,7 @@ pub struct Workspace {
     /// Identity of the daemon *process* the pane ids in `session` refer to
     /// (see `daemon::protocol::DaemonVersion::instance`). One field for the
     /// whole workspace, not one per leaf, because a workspace's panes all live
-    /// in one daemon (design §2: one window, one machine).
+    /// in one daemon (one window, one machine).
     ///
     /// This is what makes a saved pane id safe to trust: daemon ids restart
     /// from 1, so after a reboot every saved id points at whatever unrelated
@@ -404,9 +403,16 @@ pub struct Workspace {
     /// agent resume included, which is the correct reading of "the daemon
     /// those panes lived in is gone".
     ///
-    /// `None` for records written before the field, and for remote workspaces
-    /// — the remote server's instance is tracked live per connection instead
-    /// (`note_instance`). Either way `None` disables the check, never fails it.
+    /// A remote workspace records its machine's `tty7-server` instance here,
+    /// for exactly the same reason and read by exactly the same check. The live
+    /// per-connection tracking on the client (`note_instance`) does not replace
+    /// this: that map is in memory, so it is empty on the launch where it would
+    /// matter most — the one after a client restart that spanned a server
+    /// replacement.
+    ///
+    /// `None` for records written before the field, and whenever the serving
+    /// process cannot be named (an older peer, a machine not connected). `None`
+    /// disables the check, never fails it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_instance: Option<String>,
 }
@@ -593,7 +599,7 @@ impl Workspace {
     /// The record the **remote** owns, as the JSON that crosses the wire in a
     /// [`WorkspacePut`](crate::daemon::control::ControlRequest::WorkspacePut).
     ///
-    /// Design §10's storage split, executable rather than aspirational: what
+    /// The storage split, executable rather than aspirational: what
     /// stays here is `window`, `open` and `host` — this client's view state —
     /// and what goes over there is everything that is a fact about the machine.
     /// [`REMOTE_OWNED_FIELDS`] pins the split, and a test fails if a new field
@@ -621,7 +627,7 @@ impl Workspace {
     }
 }
 
-/// The `Workspace` fields the **remote** is the authority for (design §10).
+/// The `Workspace` fields the **remote** is the authority for.
 /// Everything else is client-side view state and never leaves this machine.
 ///
 /// A `Workspace` field that is in neither list is a bug: it would be dropped by
@@ -631,9 +637,10 @@ impl Workspace {
 pub const REMOTE_OWNED_FIELDS: &[&str] = &["id", "name", "session", "last_active"];
 
 /// The client-side view state, which stays in this machine's `session.json`.
-/// `daemon_instance` is client-owned because it names the **local** daemon the
-/// saved pane ids refer to; a remote workspace leaves it `None` (the remote
-/// server's identity is tracked live per connection, not persisted).
+/// `daemon_instance` is client-owned because it records **which serving process
+/// this client last saw** — an observation, not a property of the workspace. Two
+/// clients open on one remote workspace each keep their own, and neither may
+/// overwrite the other's; a remote record that carried it would do exactly that.
 pub const CLIENT_OWNED_FIELDS: &[&str] = &["window", "open", "host", "daemon_instance"];
 
 /// The remote-owned half of a [`Workspace`], for reading a record back.
@@ -1644,7 +1651,7 @@ mod tests {
         assert_eq!(loaded.workspaces[0].host_id(), crate::host::HostId::LOCAL);
     }
 
-    /// The four key formats of contract §4.2, verbatim. These strings are a
+    /// The four key formats of the connection key, verbatim. These strings are a
     /// wire contract in all but name: change one and every workspace on that
     /// machine gets a different `HostId` than the connection pool minted.
     #[test]
@@ -1801,7 +1808,7 @@ mod tests {
         assert_eq!(host.target.connection_key(), "ssh-direct:me@box.local:2222");
     }
 
-    /// Every `Workspace` field belongs to exactly one side of design §10's
+    /// Every `Workspace` field belongs to exactly one side of the storage
     /// split. A new field that is in neither list would be silently dropped by
     /// `to_remote_json` and lost on the next pull, which is data loss that no
     /// other test would notice.
