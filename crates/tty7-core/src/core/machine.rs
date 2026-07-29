@@ -1449,6 +1449,12 @@ pub fn observe_pane(pane: u64, f: impl FnOnce(&mut PaneRecord)) {
     }
 }
 
+/// The installed observation store, if any — for daemon-side code (the orphan
+/// sweep) that wants to *read* the tree the pane server publishes into.
+pub fn observed_store() -> Option<Arc<MachineStore>> {
+    OBSERVED.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// Test-only: clear the slot again, so one test's store cannot swallow the
 /// observations of unrelated tests running later in the same binary.
 #[cfg(test)]

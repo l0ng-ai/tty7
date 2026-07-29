@@ -87,6 +87,59 @@ impl Registry {
     }
 }
 
+/// How often the orphan sweep looks, which doubles as its grace period: a pane
+/// is only reported after it has been unreferenced across two consecutive
+/// looks, so a freshly-spawned pane whose adopting operation is still in
+/// flight is never flagged.
+const ORPHAN_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Periodically report live panes the machine tree does not reference.
+///
+/// **Log-only, on purpose.** An unreferenced pane is not proof of a leak:
+/// a native-SSH pane opened inside a *remote* workspace's window runs in this
+/// (the client's) daemon while belonging to the other machine's tree, so it is
+/// unreferenced here by design — and a reclaim would kill a session the user
+/// is looking at. Until the tree provably references everything legitimate,
+/// the sweep's job is to make leaks observable, not to act on them; killing
+/// can be layered on once the log has shown the false-positive rate is zero.
+fn spawn_orphan_sweep(registry: Arc<Registry>) {
+    let spawned = std::thread::Builder::new()
+        .name("tty7-orphan-sweep".into())
+        .spawn(move || {
+            let mut previous: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            loop {
+                std::thread::sleep(ORPHAN_SWEEP_INTERVAL);
+                // No tree served (a pane-only daemon) means no opinion.
+                let Some(store) = crate::core::machine::observed_store() else {
+                    continue;
+                };
+                let machine = store.machine();
+                let referenced: std::collections::HashSet<u64> = machine
+                    .workspaces
+                    .iter()
+                    .flat_map(|w| w.tabs.iter())
+                    .flat_map(|t| t.root.pane_ids())
+                    .collect();
+                let orphans: std::collections::HashSet<u64> = registry
+                    .list()
+                    .into_iter()
+                    .filter(|p| p.alive && !referenced.contains(&p.pane_id))
+                    .map(|p| p.pane_id)
+                    .collect();
+                for id in orphans.intersection(&previous) {
+                    log::info!(
+                        "pane {id} is running but no workspace tree references it \
+                         (kept; the sweep only reports — see spawn_orphan_sweep)"
+                    );
+                }
+                previous = orphans;
+            }
+        });
+    if let Err(e) = spawned {
+        log::warn!("could not start the orphan-pane sweep: {e}");
+    }
+}
+
 /// Resolve a pane id to its live native-SSH connection, for the SFTP control
 /// handlers. Errors (as a client-facing string) when the pane is unknown or isn't
 /// a native-SSH pane with an established connection (a PTY / compat-`ssh` pane, or
@@ -232,6 +285,10 @@ pub fn run() -> anyhow::Result<()> {
     // HUP each PTY's foreground group and leave background jobs behind.
     #[cfg(unix)]
     serve_sigterm(registry.clone());
+
+    // Now that the tree has an owner filling it, the daemon can *see* panes
+    // nothing references any more — but it only reports them, deliberately.
+    spawn_orphan_sweep(registry.clone());
 
     for stream in listener.incoming() {
         match stream {
