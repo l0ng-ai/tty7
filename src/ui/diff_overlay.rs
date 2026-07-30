@@ -417,7 +417,15 @@ impl Tty7App {
         let content = match &overlay.load {
             DiffLoad::Loading => self.diff_message("Reading diff…", cx),
             DiffLoad::NotARepo => self.diff_message("Not a git repository", cx),
-            DiffLoad::Ready(snap) if snap.files.is_empty() && snap.untracked.is_empty() => {
+            // Empty because the read broke, not because the tree is clean. Both
+            // land here as a snapshot with no files — see
+            // `DiffSnapshot::read_failed` — and only one of them may be reported
+            // as a fact about the repository.
+            DiffLoad::Ready(snap) if empty_snapshot(snap) && snap.read_failed => self.diff_message(
+                "Couldn't read the working-tree diff — retrying on the next refresh.",
+                cx,
+            ),
+            DiffLoad::Ready(snap) if empty_snapshot(snap) => {
                 self.diff_message("Working tree clean", cx)
             }
             DiffLoad::Ready(snap) => {
@@ -464,10 +472,15 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        // Through `stats` like every other whole-snapshot question on the render
+        // path, rather than `totals` plus `untracked_count`: same single walk,
+        // and it keeps "ask the snapshot once" a rule with no exceptions to
+        // drift from.
         let (branch, files, untracked, added, removed) = match &overlay.load {
             DiffLoad::Ready(s) => {
-                let (a, r) = s.totals();
-                (s.branch.clone(), s.files.len(), s.untracked_count(), a, r)
+                let stats = s.stats();
+                let (a, r) = stats.totals;
+                (s.branch.clone(), s.files.len(), stats.untracked_count, a, r)
             }
             _ => (String::new(), 0, 0, 0, 0),
         };
@@ -1107,6 +1120,13 @@ fn focused_name(overlay: &DiffOverlayState) -> Option<String> {
     Some(snap.files[idx].path.clone())
 }
 
+/// Nothing to show: no changed file and no untracked path. Says nothing about
+/// *why* — [`DiffSnapshot::read_failed`] is what tells a clean tree apart from
+/// a read that never landed.
+fn empty_snapshot(snap: &DiffSnapshot) -> bool {
+    snap.files.is_empty() && snap.untracked.is_empty()
+}
+
 /// Whether a file's body shows.
 ///
 /// An explicit choice in `expanded` is final: it is answered before the default
@@ -1437,15 +1457,15 @@ mod tests {
         assert!(file_expanded(&untouched, &picked, false));
     }
 
-    /// Sixty files of forty lines each never trip the per-file threshold (each
-    /// is a tenth of it), yet would open 2400 diff rows at once. `oversized`
-    /// catches it on the line axis, and with everything collapsed the overlay
-    /// builds zero rows.
+    /// Sixty files of a hundred and fifty lines each never trip the per-file
+    /// threshold (each is well under it), yet would open 9000 diff rows at once.
+    /// `oversized` catches it on the line axis, and with everything collapsed
+    /// the overlay builds zero rows.
     #[test]
     fn many_medium_files_are_oversized_and_build_no_rows() {
         let snap = DiffSnapshot {
             files: (0..60)
-                .map(|i| small_file(&format!("f{i}.rs"), 40))
+                .map(|i| small_file(&format!("f{i}.rs"), 150))
                 .collect(),
             ..Default::default()
         };
@@ -1470,32 +1490,102 @@ mod tests {
             .flat_map(|f| &f.hunks)
             .map(|h| split_hunk(&h.lines).len())
             .sum();
-        assert_eq!(rows_expanded, 2400, "what the old rule would have built");
+        assert_eq!(rows_expanded, 9000, "what the old rule would have built");
         assert_eq!(rows_collapsed, 0);
     }
 
-    /// The other side of the same coin: a busy-but-ordinary afternoon — forty
-    /// files, a few lines each — is *not* oversized and opens expanded exactly
-    /// as it does today. The thresholds must not tax a normal working tree.
+    /// The other side of the same coin: a busy-but-ordinary afternoon is *not*
+    /// oversized and opens expanded exactly as it does today. The thresholds
+    /// must not tax a normal working tree.
+    ///
+    /// Built out of context-heavy files rather than bare changed lines, because
+    /// that is what a real diff looks like and it is the difference the line
+    /// threshold is most easily mis-set against: git prints three lines of
+    /// context each side of every hunk, so `retained_lines` runs several times
+    /// the `+N −N` a person reads off the header. A tree of forty files with a
+    /// handful of small hunks each is an afternoon's work, and it must open.
     #[test]
     fn an_ordinary_busy_tree_is_not_oversized() {
+        // Forty files × ten hunks × (6 context + 1 changed) — 2800 retained
+        // lines behind a header reading `+400 −0`, which is a morning, not a
+        // refactor. Sized to sit above the threshold this used to carry and
+        // below the one it carries now: an assertion that passes either way
+        // would not be watching anything.
         let snap = DiffSnapshot {
             files: (0..40)
-                .map(|i| small_file(&format!("f{i}.rs"), 12))
+                .map(|i| {
+                    let mut f = context_heavy_file(&format!("f{i}.rs"));
+                    f.hunks = std::iter::repeat_n(f.hunks[0].clone(), 10).collect();
+                    f.added = 10;
+                    f
+                })
                 .collect(),
             ..Default::default()
         };
-        assert!(!snap.stats().oversized);
+        let (added, removed) = snap.totals();
+        assert!(
+            snap.stats().retained_lines > (added + removed) as usize * 4,
+            "the context lines dominate, as they do in a real diff"
+        );
+        assert!(
+            !snap.stats().oversized,
+            "an ordinary afternoon must not read as a tree too large to render \
+             ({} retained lines)",
+            snap.stats().retained_lines
+        );
         let none = HashMap::new();
         assert!(snap.files.iter().all(|f| file_expanded(f, &none, false)));
     }
 
-    /// A clean diff with a huge untracked list is oversized too. `ls-files
-    /// --others` reaches the overlay without going through the diff at all, so
-    /// an un-ignored `node_modules` produced thousands of rows past every bound
-    /// the rest of this change added.
+    /// An empty snapshot means one of two opposite things, and the overlay has
+    /// to tell them apart before it says either out loud.
+    ///
+    /// "Working tree clean" is a claim about the repository. A probe that could
+    /// not run — a refused stream, a read that went silent, a git racing a
+    /// concurrent write — produces exactly the same empty file list, and saying
+    /// it there tells someone their changes are gone.
     #[test]
-    fn a_huge_untracked_list_is_oversized() {
+    fn an_empty_snapshot_reads_as_clean_only_when_the_probe_worked() {
+        let clean = DiffSnapshot {
+            branch: "main".into(),
+            ..Default::default()
+        };
+        assert!(empty_snapshot(&clean));
+        assert!(!clean.read_failed, "nothing went wrong: this tree is clean");
+
+        let broken = DiffSnapshot {
+            branch: "main".into(),
+            read_failed: true,
+            ..Default::default()
+        };
+        assert!(
+            empty_snapshot(&broken),
+            "indistinguishable by shape — which is the point"
+        );
+        assert!(broken.read_failed, "and distinguishable by this");
+
+        // A read that failed *after* producing something is not the empty case
+        // at all: the file list renders, and no claim about emptiness is made.
+        let partial = DiffSnapshot {
+            files: vec![small_file("one.rs", 3)],
+            read_failed: true,
+            ..Default::default()
+        };
+        assert!(!empty_snapshot(&partial));
+    }
+
+    /// A huge untracked list does *not* collapse the diff — and must not.
+    ///
+    /// It is the same one-row-per-entry cost, but `oversized` is not the lever
+    /// that answers it: folding every file body shut leaves the untracked
+    /// section rendering exactly as many rows as before, because that section
+    /// has no bodies to fold. Driving it from here meant a tree with an
+    /// un-ignored `node_modules` and three edited files hid the three cheap
+    /// things, kept the expensive one, and told the reader their working tree
+    /// was too large to render. What actually bounds it is the retention cap and
+    /// the row cap, asserted below.
+    #[test]
+    fn a_huge_untracked_list_does_not_collapse_the_diff() {
         let snap = DiffSnapshot {
             files: vec![small_file("one.rs", 3)],
             untracked: (0..git_diff::MAX_UNTRACKED)
@@ -1507,8 +1597,25 @@ mod tests {
         assert!(snap.stats().retained_lines < git_diff::AUTO_COLLAPSE_TOTAL_LINES);
         assert!(snap.files.len() < git_diff::AUTO_COLLAPSE_TOTAL_FILES);
         assert!(
-            snap.stats().oversized,
-            "the untracked list alone must trip it"
+            !snap.stats().oversized,
+            "collapsing the diff would not have removed a single untracked row"
+        );
+
+        // The bound that does apply, on the rows that are actually expensive.
+        assert_eq!(
+            snap.untracked.len(),
+            git_diff::MAX_UNTRACKED,
+            "retention is capped at the parser"
+        );
+        assert_eq!(
+            snap.untracked.len().min(MAX_RENDERED_FILES),
+            MAX_RENDERED_FILES,
+            "and rows at the renderer"
+        );
+        assert_eq!(
+            snap.untracked_count(),
+            40_000,
+            "while the reported count stays the true total"
         );
     }
 

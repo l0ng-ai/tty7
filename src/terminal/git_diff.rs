@@ -57,7 +57,17 @@ pub const AUTO_COLLAPSE_LINES: u32 = 400;
 /// threshold matter here — this counts context lines too (they are rendered,
 /// so they are what costs), and it is a sum, so many medium files add up the
 /// way one big file does.
-pub const AUTO_COLLAPSE_TOTAL_LINES: usize = 2_000;
+///
+/// Counting context is also why this sits well above the row count that first
+/// looks alarming. A hunk carries three lines of context each side by default,
+/// so an ordinary afternoon — forty files, a handful of small hunks each —
+/// retains four to six lines for every line it actually changed: at 2000 the
+/// threshold fired on a tree whose `+N −N` read about 400, which is nobody's
+/// idea of a diff too big to open. The number to compare against is
+/// [`MAX_TOTAL_LINES`], the point past which the parser stops retaining at all;
+/// this is deliberately a large fraction of it, because collapsing everything is
+/// the heavier intervention of the two and should not arrive first by much.
+pub const AUTO_COLLAPSE_TOTAL_LINES: usize = 8_000;
 
 /// The same idea by file count. Set well clear of a busy-but-ordinary tree —
 /// forty changed files of a few lines each is a normal afternoon and must still
@@ -114,6 +124,24 @@ pub struct DiffSnapshot {
     /// files having disappeared. Read it through
     /// [`untracked_count`](Self::untracked_count).
     pub untracked_total: usize,
+    /// One of the two reads behind this snapshot did not complete, so the
+    /// emptiness below it means "we could not look", not "there is nothing".
+    ///
+    /// A failed probe still produces a snapshot — the overlay keeps its branch
+    /// and its shape, and the next refresh fills it in, which is better than
+    /// blanking. But an empty file list renders as *Working tree clean*, and
+    /// that sentence is a claim about the repository: saying it because a read
+    /// timed out tells the reader their changes are gone. This is the bit that
+    /// keeps the two apart.
+    ///
+    /// Newly reachable, too. A buffered read either arrived or errored; a
+    /// stream can also be refused ([`MAX_CONCURRENT_GIT_STREAMS`] on one
+    /// connection) or go silent mid-diff, so the empty-because-broken case is
+    /// no longer rare enough to leave conflated with the empty-because-clean
+    /// one.
+    ///
+    /// [`MAX_CONCURRENT_GIT_STREAMS`]: tty7_core::daemon::control::MAX_CONCURRENT_GIT_STREAMS
+    pub read_failed: bool,
 }
 
 impl DiffSnapshot {
@@ -178,7 +206,10 @@ impl DiffSnapshot {
             totals: (added, removed),
             retained_lines,
             untracked_count,
-            oversized: self.files.len() + untracked_count > AUTO_COLLAPSE_TOTAL_FILES
+            // Changed files only. Untracked paths are bounded where they are
+            // *rendered* instead — see the field's own note for why collapsing
+            // bodies is the wrong lever for them.
+            oversized: self.files.len() > AUTO_COLLAPSE_TOTAL_FILES
                 || retained_lines > AUTO_COLLAPSE_TOTAL_LINES,
             budget_exhausted,
             per_file_truncated,
@@ -206,13 +237,15 @@ pub struct DiffStats {
     /// individual files still expand by click, which is the escape hatch the
     /// summary points at.
     ///
-    /// Untracked paths count toward the file axis because they cost the same
-    /// thing a collapsed file card costs — one row each, in the same
-    /// non-virtualized list. A tree with an un-ignored `node_modules` is the
-    /// exact stall this is here to prevent, and it reaches the overlay through
-    /// `ls-files`, not through the diff. The summary names whichever axis
-    /// tripped, so a big untracked list never reads as a claim that the *diff*
-    /// is big.
+    /// Changed files and retained lines only. Untracked paths are the same
+    /// one-row-per-entry cost, but this is not the lever that answers them:
+    /// collapsing every file body leaves the untracked section rendering exactly
+    /// as many rows as before, because that section has no bodies to fold. A
+    /// tree with an un-ignored `node_modules` and three edited files would have
+    /// folded away the three cheap things and kept the expensive one — while
+    /// telling the reader their working tree was too large to render. The
+    /// untracked list is bounded where it is actually built, by
+    /// [`MAX_UNTRACKED`] on retention and [`MAX_RENDERED_FILES`] on rows.
     pub oversized: bool,
     /// The repo-wide budget dropped hunks that a smaller diff would have kept —
     /// the overlay says so, so a missing body reads as a cap rather than as tty7
@@ -301,14 +334,18 @@ pub fn probe(host: &dyn Host, cwd: &Path) -> Option<DiffSnapshot> {
     // carry it and buffered where it can't, so the lines seen here are the same
     // either way.
     let mut parser = DiffParser::default();
-    let files = match host.git_lines(
+    let diffed = host.git_lines(
         cwd,
         &["diff", "--no-color", "--no-ext-diff", "-M", "HEAD"],
         &mut |line| parser.push_line(line),
-    ) {
+    );
+    let files = match diffed {
         // A failed diff (e.g. racing a concurrent git write) still yields a
         // snapshot — an empty file list with the branch — rather than hiding
-        // the overlay; the next refresh fills it in.
+        // the overlay; the next refresh fills it in. A *partial* read is
+        // discarded rather than shown: the stream is reassembled into lines, so
+        // what a cut one is missing is the tail of the diff, and half a diff
+        // presented as a whole one is worse than none.
         Ok(Some(0)) => parser.finish(),
         _ => Vec::new(),
     };
@@ -341,6 +378,7 @@ pub fn probe(host: &dyn Host, cwd: &Path) -> Option<DiffSnapshot> {
         files,
         untracked,
         untracked_total,
+        read_failed: !matches!(diffed, Ok(Some(0))) || !matches!(listed, Ok(Some(0))),
     })
 }
 
@@ -872,9 +910,16 @@ index 1..2 100644
         };
         assert!(by_files.stats().oversized);
 
-        // Few files, but past the line threshold.
+        // Few files, but past the line threshold. Spread over enough files to
+        // clear it without any one of them hitting `MAX_LINES_PER_FILE` first —
+        // the per-file cap would otherwise decide this test's outcome instead of
+        // the repo-wide threshold it is about.
+        let per_file = MAX_LINES_PER_FILE / 2;
         let by_lines = DiffSnapshot {
-            files: parse_unified(&many_files(2, AUTO_COLLAPSE_TOTAL_LINES)),
+            files: parse_unified(&many_files(
+                AUTO_COLLAPSE_TOTAL_LINES / per_file + 1,
+                per_file,
+            )),
             ..Default::default()
         };
         assert!(by_lines.files.len() <= AUTO_COLLAPSE_TOTAL_FILES);

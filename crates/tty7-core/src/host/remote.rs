@@ -35,7 +35,7 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::time::{Duration, Instant};
 
@@ -390,7 +390,14 @@ impl Host for RemoteHost {
         // with nowhere to go — see `ControlRequest::GitStream`.
         let id = self.next_stream.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
-        self.streams.insert(id, tx);
+        let queued = Arc::new(AtomicUsize::new(0));
+        self.streams.insert(
+            id,
+            StreamSink {
+                tx,
+                queued: Arc::clone(&queued),
+            },
+        );
         // The receiver comes off the registry however this returns: an early
         // `?` below would otherwise leak the entry for the life of the
         // connection.
@@ -408,7 +415,7 @@ impl Host for RemoteHost {
             other => return Err(wrong_shape("an accepted git stream", &other)),
         }
 
-        drain_git_stream(&rx, GIT_STREAM_IDLE_TIMEOUT, on_line)
+        drain_git_stream(&rx, &queued, GIT_STREAM_IDLE_TIMEOUT, on_line)
     }
 
     /// Safe to send unguarded: the request landed in control v2, and the
@@ -474,15 +481,45 @@ impl std::fmt::Debug for RemoteHost {
 // Watches
 // ---------------------------------------------------------------------------
 
-/// Reassemble one git stream's pushes into lines, ending on `GitEnd`, on a link
-/// that died, or on `idle` elapsing between chunks.
+/// Bytes one stream may have sitting between the reader thread and the thread
+/// draining it.
 ///
-/// Split out from [`RemoteHost::git_lines`] so the three ways a stream ends are
+/// The queue below is unbounded and its `send` never waits, deliberately: the
+/// reader thread serves the *whole* connection, so parking it there would stall
+/// every other reply, every watch event and the keepalive pongs — a peer that
+/// out-runs one diff reader would take the link down with it. The cost of not
+/// waiting is that nothing throttles the sender, and "streaming" would bound
+/// what each end reads at once while letting the queue between them grow to the
+/// size of the whole diff — the exact peak this path exists to remove, one
+/// container further along.
+///
+/// So the queue is *bounded* instead of back-pressured: past this the stream is
+/// failed with [`GitStreamMsg::Overrun`] rather than served, which turns an
+/// unbounded allocation into a read that says what happened. Real back-pressure
+/// would need credit-based flow control in the dialect — the client telling the
+/// server how much more it may push — which is a protocol change, not a
+/// buffering policy, and is not what this is.
+///
+/// Set far above any healthy gap. The drainer only splits lines and parses, at
+/// roughly 8 MB per 12 ms, so it stays within a chunk or two of a link that is
+/// merely fast; reaching 32 MiB of arrears means the consumer is wedged, not
+/// busy.
+const GIT_STREAM_QUEUE_BUDGET: usize = 32 * 1024 * 1024;
+
+/// Reassemble one git stream's pushes into lines, ending on `GitEnd`, on a link
+/// that died, on the queue budget blowing, or on `idle` elapsing between chunks.
+///
+/// Split out from [`RemoteHost::git_lines`] so the ways a stream ends are
 /// reachable from a test without a socket — the timeout in particular, which
 /// otherwise could only be exercised by waiting out
 /// [`GIT_STREAM_IDLE_TIMEOUT`].
+///
+/// `queued` is the arrears this stream has accrued, in bytes; every chunk taken
+/// off the channel is subtracted from it, which is what lets the reader thread
+/// see a consumer falling behind. See [`GIT_STREAM_QUEUE_BUDGET`].
 fn drain_git_stream(
     rx: &mpsc::Receiver<GitStreamMsg>,
+    queued: &AtomicUsize,
     idle: Duration,
     on_line: &mut dyn FnMut(&str),
 ) -> io::Result<Option<i32>> {
@@ -493,7 +530,31 @@ fn drain_git_stream(
         // `GIT_STREAM_IDLE_TIMEOUT` for what this catches that neither the
         // request deadline nor keepalive can.
         match rx.recv_timeout(idle) {
-            Ok(GitStreamMsg::Chunk(bytes)) => split.push(&bytes, &mut *on_line),
+            Ok(GitStreamMsg::Chunk(bytes)) => {
+                // Before parsing, not after: the arrears the reader thread reads
+                // must fall as soon as the bytes are ours, or a slow parse of one
+                // chunk would count against the budget twice.
+                //
+                // Saturating, because the two sides of this counter are updated
+                // by different threads and only the *sum* is ever meaningful: a
+                // chunk that reached the channel before its charge landed would
+                // otherwise wrap the counter to `usize::MAX` and kill the next
+                // healthy stream for being over budget.
+                let _ = queued.fetch_update(Ordering::AcqRel, Ordering::Acquire, |q| {
+                    Some(q.saturating_sub(bytes.len()))
+                });
+                split.push(&bytes, &mut *on_line);
+            }
+            // The queue outgrew its budget, so the reader thread stopped filling
+            // it. Everything after the last delivered chunk is missing, which
+            // makes this a failed read rather than a short one — the same rule
+            // the timeout arm follows.
+            Ok(GitStreamMsg::Overrun) => {
+                return Err(io::Error::other(format!(
+                    "the git stream outran this client by more than \
+                     {GIT_STREAM_QUEUE_BUDGET} queued bytes"
+                )));
+            }
             Ok(GitStreamMsg::End { code, failed }) => {
                 split.finish(&mut *on_line);
                 return if failed {
@@ -545,6 +606,20 @@ enum GitStreamMsg {
         code: Option<i32>,
         failed: bool,
     },
+    /// This stream fell far enough behind to hit [`GIT_STREAM_QUEUE_BUDGET`],
+    /// so the reader thread cut it loose. Always the last message: its sender
+    /// is off the table by the time it is sent.
+    Overrun,
+}
+
+/// Where one running stream's pushes go, plus what it owes.
+struct StreamSink {
+    tx: mpsc::Sender<GitStreamMsg>,
+    /// Bytes handed to `tx` and not yet taken off it. Written by the reader
+    /// thread, subtracted by the drainer — the one number both sides of the
+    /// queue can see, and the only thing standing between an unbounded queue
+    /// and the whole diff. See [`GIT_STREAM_QUEUE_BUDGET`].
+    queued: Arc<AtomicUsize>,
 }
 
 /// Receivers for git streams currently running on this connection, keyed by the
@@ -558,7 +633,7 @@ struct GitStreamRegistry {
 
 #[derive(Default)]
 struct StreamTable {
-    senders: HashMap<u64, mpsc::Sender<GitStreamMsg>>,
+    senders: HashMap<u64, StreamSink>,
     /// Set by [`GitStreamRegistry::close_all`] and never cleared: a
     /// `ControlClient` never comes back up, so once the link is gone no stream
     /// registered afterwards could ever be answered. Without it a `git_lines`
@@ -568,11 +643,11 @@ struct StreamTable {
 }
 
 impl GitStreamRegistry {
-    fn insert(&self, id: u64, tx: mpsc::Sender<GitStreamMsg>) {
+    fn insert(&self, id: u64, sink: StreamSink) {
         if let Ok(mut m) = self.streams.lock()
             && !m.closed
         {
-            m.senders.insert(id, tx);
+            m.senders.insert(id, sink);
         }
         // Dropped rather than filed when the link is already down, which closes
         // the channel and sends the caller straight down the mid-stream arm.
@@ -609,16 +684,46 @@ impl GitStreamRegistry {
     /// channel is unbounded and `send` never waits. A chunk for an id that has
     /// already finished (a cancelled read the server had not noticed yet) is
     /// dropped, which is the same unknown-id rule watches follow.
+    ///
+    /// Not blocking is what makes the queue everyone's problem, so this is also
+    /// where it is bounded: each chunk is charged to the stream's arrears, and a
+    /// stream whose drainer has fallen [`GIT_STREAM_QUEUE_BUDGET`] behind is cut
+    /// loose with an [`Overrun`](GitStreamMsg::Overrun) instead of being fed
+    /// further. Cutting it loose — rather than dropping the chunk — is the only
+    /// honest option: the queue is a byte stream being reassembled into lines, so
+    /// a hole in the middle of it is not a shorter diff, it is a wrong one.
     fn dispatch(&self, event: ControlEvent) {
         let (id, msg) = match event {
             ControlEvent::GitChunk { id, bytes } => (id, GitStreamMsg::Chunk(bytes)),
             ControlEvent::GitEnd { id, code, failed } => (id, GitStreamMsg::End { code, failed }),
             _ => return,
         };
-        if let Ok(m) = self.streams.lock()
-            && let Some(tx) = m.senders.get(&id)
-        {
-            let _ = tx.send(msg);
+        let Ok(mut m) = self.streams.lock() else {
+            return;
+        };
+        let over = match (m.senders.get(&id), &msg) {
+            (None, _) => return,
+            (Some(sink), GitStreamMsg::Chunk(bytes)) => {
+                sink.queued.fetch_add(bytes.len(), Ordering::AcqRel) + bytes.len()
+                    > GIT_STREAM_QUEUE_BUDGET
+            }
+            // `End` and `Overrun` carry no payload to charge for, and an end must
+            // always get through — a stream that stops speaking without one is
+            // the shape the idle timeout exists to catch, at a cost of two
+            // minutes.
+            (Some(_), _) => false,
+        };
+        if over {
+            // Taken off the table first, so the chunks still arriving for this id
+            // meet the unknown-id rule above instead of queueing behind a message
+            // that says the queue is full.
+            if let Some(sink) = m.senders.remove(&id) {
+                let _ = sink.tx.send(GitStreamMsg::Overrun);
+            }
+            return;
+        }
+        if let Some(sink) = m.senders.get(&id) {
+            let _ = sink.tx.send(msg);
         }
     }
 }
@@ -999,7 +1104,8 @@ mod tests {
 
         let mut lines = Vec::new();
         let started = Instant::now();
-        let got = drain_git_stream(&rx, Duration::from_millis(120), &mut |l| {
+        let queued = AtomicUsize::new(b"alpha\n".len());
+        let got = drain_git_stream(&rx, &queued, Duration::from_millis(120), &mut |l| {
             lines.push(l.to_string())
         });
 
@@ -1034,7 +1140,9 @@ mod tests {
 
         let mut lines = Vec::new();
         let started = Instant::now();
-        let code = drain_git_stream(&rx, idle, &mut |l| lines.push(l.to_string())).unwrap();
+        let queued = AtomicUsize::new(0);
+        let code =
+            drain_git_stream(&rx, &queued, idle, &mut |l| lines.push(l.to_string())).unwrap();
 
         assert_eq!(code, Some(0));
         assert_eq!(lines.len(), 5, "{lines:?}");
@@ -1042,6 +1150,120 @@ mod tests {
             started.elapsed() > idle,
             "the read outlived a single idle window without being cut"
         );
+    }
+
+    /// A stream whose drainer falls far enough behind is cut loose instead of
+    /// being queued without limit.
+    ///
+    /// This is the bound that makes the streaming path's memory claim true on a
+    /// *remote* host. The read is incremental on both ends — 64 KiB at the
+    /// server, one line at the client — but between them sits a queue the reader
+    /// thread never waits on, and it cannot wait on it: that thread serves the
+    /// whole connection, so parking it there would stall every other reply and
+    /// the keepalive with it. Unbounded, a peer pushing faster than this client
+    /// parses rebuilds the whole-diff peak in the channel, which is the one thing
+    /// the buffered read was replaced to avoid.
+    ///
+    /// Driven through `dispatch`, not by hand, because the accounting is split
+    /// across the two threads and only their pairing is worth asserting.
+    #[test]
+    fn a_stream_that_outruns_its_queue_budget_is_cut_loose() {
+        let registry = GitStreamRegistry::default();
+        let (tx, rx) = mpsc::channel();
+        let queued = Arc::new(AtomicUsize::new(0));
+        registry.insert(
+            1,
+            StreamSink {
+                tx,
+                queued: Arc::clone(&queued),
+            },
+        );
+
+        // Nobody is draining, so every chunk is arrears. One megabyte at a time
+        // to keep the test's own allocation modest.
+        let chunk = vec![b'x'; 1024 * 1024];
+        let pushes = GIT_STREAM_QUEUE_BUDGET / chunk.len() + 2;
+        for _ in 0..pushes {
+            registry.dispatch(ControlEvent::GitChunk {
+                id: 1,
+                bytes: chunk.clone(),
+            });
+        }
+        assert!(
+            queued.load(Ordering::Acquire) <= GIT_STREAM_QUEUE_BUDGET + chunk.len(),
+            "the arrears stopped growing at the budget, not at the diff's size"
+        );
+
+        // The reader thread also stops routing to it, so a stream that keeps
+        // arriving cannot queue behind the notice.
+        registry.dispatch(ControlEvent::GitChunk {
+            id: 1,
+            bytes: chunk.clone(),
+        });
+
+        // What the drainer sees: the chunks that fit, then the overrun, and an
+        // error rather than a short read reported as a success.
+        let mut lines = Vec::new();
+        let err = drain_git_stream(&rx, &queued, Duration::from_secs(5), &mut |l| {
+            lines.push(l.to_string())
+        })
+        .expect_err("a cut-off stream must not read as a complete diff");
+        assert!(err.to_string().contains("outran"), "{err}");
+    }
+
+    /// The budget must not fire on a stream that is merely *large*. It bounds
+    /// how far the consumer may fall behind, not how much may cross — a drainer
+    /// keeping up returns the arrears as fast as they are charged, so a diff of
+    /// any size passes through a queue that never grows.
+    ///
+    /// The feeder throttles itself on the same counter the reader thread charges,
+    /// which is what "a consumer keeping up" means here and is what keeps this
+    /// test a statement about the accounting rather than a race between two
+    /// threads' speeds.
+    #[test]
+    fn a_large_but_drained_stream_never_trips_the_budget() {
+        let registry = Arc::new(GitStreamRegistry::default());
+        let (tx, rx) = mpsc::channel();
+        let queued = Arc::new(AtomicUsize::new(0));
+        registry.insert(
+            1,
+            StreamSink {
+                tx,
+                queued: Arc::clone(&queued),
+            },
+        );
+
+        // Twice the budget in total, in 1 MiB chunks, never more than 4 MiB of it
+        // outstanding at once.
+        let feeder = Arc::clone(&registry);
+        let feeder_queued = Arc::clone(&queued);
+        let chunks = GIT_STREAM_QUEUE_BUDGET / (1024 * 1024) * 2;
+        thread::spawn(move || {
+            for _ in 0..chunks {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while feeder_queued.load(Ordering::Acquire) > 4 * 1024 * 1024 {
+                    if Instant::now() > deadline {
+                        break; // the drainer is wedged; let the assertions say so
+                    }
+                    thread::yield_now();
+                }
+                let mut bytes = vec![b'x'; 1024 * 1024 - 1];
+                bytes.push(b'\n');
+                feeder.dispatch(ControlEvent::GitChunk { id: 1, bytes });
+            }
+            feeder.dispatch(ControlEvent::GitEnd {
+                id: 1,
+                code: Some(0),
+                failed: false,
+            });
+        });
+
+        let mut lines = 0usize;
+        let code = drain_git_stream(&rx, &queued, Duration::from_secs(10), &mut |_| lines += 1)
+            .expect("a drained stream is not an overrun, however much crosses it");
+        assert_eq!(code, Some(0));
+        assert_eq!(lines, chunks, "every line arrived");
+        assert_eq!(queued.load(Ordering::Acquire), 0, "the arrears settled");
     }
 
     /// A link that dies mid-stream ends the read with an error rather than

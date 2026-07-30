@@ -1337,11 +1337,6 @@ fn spawn_watch_forwarder(id: u64, rx: smol::channel::Receiver<Vec<PathBuf>>, sin
     }
 }
 
-/// Why a git stream stopped pushing chunks early.
-///
-/// The two are not interchangeable, which is the whole reason the distinction
-/// is carried: only one of them means the peer is gone. See
-/// [`Conn::start_git_stream`].
 /// One connection's claim on a concurrent git stream, given back on drop.
 ///
 /// A guard rather than a bare `fetch_sub` at the end of the thread, so a slot is
@@ -1355,6 +1350,11 @@ impl Drop for StreamSlot {
     }
 }
 
+/// Why a git stream stopped pushing chunks early.
+///
+/// The two are not interchangeable, which is the whole reason the distinction
+/// is carried: only one of them means the peer is gone. See
+/// [`Conn::start_git_stream`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StreamStop {
     /// The write failed: the link is retired or broken, and nothing more will

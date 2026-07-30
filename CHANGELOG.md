@@ -65,7 +65,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stays for the many reads that answer in bytes. A stream that goes silent for
   two minutes while the link stays up ends with a timeout rather than parking
   its reader forever — the wait is between chunks, not on the whole read, so a
-  slow-but-alive `git diff` still runs to completion. (#239)
+  slow-but-alive `git diff` still runs to completion. And the queue *between*
+  the two ends is bounded as well, not just the reads at either end: a peer that
+  pushes faster than this side can parse is cut off at 32 MiB of arrears with an
+  error, rather than quietly reassembling the whole diff in a channel. (#239)
 
 - **Sidebar diff preview is optional** — clicking a sidebar row's `+N −N`
   working-tree counts opens the diff overlay, which is the point of them for
@@ -144,15 +147,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The untracked list escaped all of the above: `git ls-files --others` reports
     every path not yet ignored, and one un-ignored `node_modules` reached the
     overlay as tens of thousands of rows without touching the diff at all. It is
-    now streamed and capped like the diff, counts toward the oversized
-    threshold, and renders a bounded number of rows — while the count shown
-    stays the true total, so a capped list never reads as files having vanished.
-  - The 400-line auto-collapse rule was per-file, so sixty forty-line files all
-    opened at once (2400 side-by-side rows, none of them individually large).
-    Past a repo-wide total the overlay now opens with every file collapsed —
-    zero rows built — leads with a summary saying the diff is too large to
-    render efficiently, and points at expanding individual files or `git diff`
-    in the terminal.
+    now streamed, capped where it is retained and again where it is rendered —
+    while the count shown stays the true total, so a capped list never reads as
+    files having vanished. It deliberately does *not* drive the collapse-
+    everything rule below: folding file bodies shut removes no untracked rows,
+    so a tree with an un-ignored dependency directory and three edited files
+    would have hidden the three cheap things and kept the expensive one.
+  - The 400-line auto-collapse rule was per-file, so sixty medium files all
+    opened at once (thousands of side-by-side rows, none of them individually
+    large). Past a repo-wide total the overlay now opens with every file
+    collapsed — zero rows built — leads with a summary saying the diff is too
+    large to render efficiently, and points at expanding individual files or
+    `git diff` in the terminal. That total counts the context lines git prints
+    around every hunk, which is what is actually rendered, so it sits several
+    times above the `+N −N` figure at which it would otherwise fire on an
+    ordinary afternoon's work.
 
 - **One `git diff` per repository, not two** — the Changes panel and the diff
   overlay each ran their own full-diff probe and kept their own snapshot of the
@@ -161,6 +170,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already showing that repo paints immediately instead of re-probing. (#239)
 
 ### Fixed
+
+- **An unsubscribed directory watch stops delivering immediately** — dropping a
+  local watch handle now closes its delivery channel rather than only asking the
+  OS backend to stand down. Tearing that backend down is not instantaneous, and
+  on Windows a `ReadDirectoryChangesW` completion can fire *during* teardown and
+  reach a consumer that has already unsubscribed. Batches already queued stay
+  readable, which is the one thing a consumer racing its own drop may
+  legitimately still see. (#239)
 
 - **Rounded UI controls no longer square off their corners**
   ([#236](https://github.com/l0ng-ai/tty7/issues/236)) — the cursor-shape
