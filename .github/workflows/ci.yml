@@ -11,10 +11,23 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A superseded PR run is dead weight the moment the next push lands, and a run
+# left going is not free: the account's concurrent-job budget is shared, and
+# macOS slots are the scarce ones. A zombie Windows job (see the `Test` step's
+# timeout below) once held a slot for the full six-hour job limit while an
+# unrelated PR's macOS job queued behind it for two and a half hours.
+#
+# Pushes to main are exempt: each commit's own run is the record of whether that
+# commit was green, and cancelling one to start the next would erase it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -36,6 +49,7 @@ jobs:
   host-boundary:
     name: host boundary
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - run: bash .github/scripts/check-host-boundary.sh
@@ -53,6 +67,10 @@ jobs:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
+    # Backstop under the per-step timeouts below. Without any timeout at all a
+    # hung test runs to GitHub's six-hour job limit, which is how a 90-second
+    # step turned into a six-hour one three times in a day.
+    timeout-minutes: 60
     steps:
       - name: Checkout tty7
         uses: actions/checkout@v4
@@ -88,10 +106,44 @@ jobs:
       # build too; only nightly stays unlocked, because it stamps Cargo.toml's
       # version and relies on cargo refreshing the lock's own root entry.
       - name: Build
+        # Cold-cache builds have been observed at ~10 min; warm ones at ~90s.
+        timeout-minutes: 30
         run: cargo build --locked --target ${{ matrix.target }}
 
+      # `cargo test` has no timeout of its own, so one hung test is
+      # indistinguishable from a slow suite until the job hits GitHub's six-hour
+      # limit. The Windows suite intermittently hangs here — roughly one run in
+      # ten, on any branch, while the same commit passes on a re-run — and every
+      # time it did, the job held a runner slot for hours and reported nothing.
+      #
+      # The step's honest budget is small: ~75s warm and ~3.5 min when this step
+      # also has to compile the test targets, on every platform. 20 minutes is
+      # pure headroom, so a trip means a hang, not a slow runner.
       - name: Test
+        timeout-minutes: 20
         run: cargo test --locked --target ${{ matrix.target }}
+
+      # What the hang has never left behind: any indication of *which* test was
+      # stuck. libtest prints a test's name when it finishes, so a hung one is
+      # the one name missing from a truncated list. The process table has the
+      # answer instead — the surviving test binary names its crate and test
+      # target — so grab it while the runner is still up.
+      #
+      # Windows-only because that is the only platform this has happened on, and
+      # `failure()` rather than `always()` so a green run stays quiet.
+      - name: Which test was still running (Windows post-mortem)
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Write-Host '--- processes under the build/test tree ---'
+          Get-CimInstance Win32_Process |
+            Where-Object { $_.CommandLine -match 'target\\|tty7|cargo' } |
+            Select-Object ProcessId, ParentProcessId, Name, CommandLine |
+            Format-List
+          Write-Host '--- top 15 by working set ---'
+          Get-Process | Sort-Object -Descending WorkingSet64 |
+            Select-Object -First 15 Id, Name, @{n='WS_MB';e={[int]($_.WorkingSet64/1MB)}} |
+            Format-Table -AutoSize
 
   # Static musl builds of the headless server binary that remote workspaces push
   # onto the far machine (decision D10).
@@ -107,6 +159,7 @@ jobs:
   server-musl:
     name: tty7-server musl (${{ matrix.target }})
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
