@@ -1693,6 +1693,12 @@ impl Tty7App {
 
         let claimed = WorkspaceStore::claim(cx, Some(id));
         crate::ui::windows::WindowRegistry::rebind(cx, previous, claimed);
+        // A pick from the switcher is one of the ways a remote workspace comes
+        // back, so it owes the supervisor the same call the launch path makes —
+        // see `RemoteLinks::supervise` for what skipping it leaves on screen.
+        // The outgoing workspace needs no counterpart: `pump_tick` drops a
+        // machine the moment its last open workspace goes.
+        crate::ui::remote_workspace::RemoteLinks::supervise(cx, claimed);
         // The machine's tree is the layout's only home now, so an explicit
         // pick from the switcher always hydrates — restore-off governs what
         // *launch* comes back to, not what a deliberate open shows. The window

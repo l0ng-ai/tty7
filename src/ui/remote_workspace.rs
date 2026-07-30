@@ -757,28 +757,11 @@ impl Tty7App {
     /// its window already built and its layout the last one this client pulled.
     /// What M6 adds is the connect itself plus the auth queue that keeps ten
     /// windows from raising ten password sheets at once.
+    ///
+    /// Nothing but a call to [`RemoteLinks::supervise`], and local workspaces
+    /// pass straight through it — the launch path stays ignorant of hosts.
     pub(crate) fn reopen_remote_at_startup(&self, cx: &mut Context<Self>) {
-        let Some(host) = WorkspaceStore::remote_ref(cx, self.workspace) else {
-            return;
-        };
-        remote_connect::register(cx);
-        if remote_connect::HostLinks::get(cx, host.host_id()).is_some() {
-            // Another window on the same machine got there first. One connection
-            // per machine is the point — D7's "connect immediately" is about the
-            // *machine*, and a second link to it would be a second SSH session
-            // for no reason.
-            return;
-        }
-        log::info!("reconnecting to {} at startup", host.target);
-        // No per-window connect call: the supervisor already knows which
-        // machines have open workspaces, so starting it *is* the reconnect, and
-        // ten windows on one box produce one attempt rather than ten.
-        //
-        // Nothing here classifies the host as needing authentication or not
-        // (D7): every machine is attempted in parallel, and the ones that turn
-        // out to need a human queue for the sheet at the moment they ask — see
-        // [`AuthSheetQueue`].
-        RemoteLinks::ensure_running(cx);
+        RemoteLinks::supervise(cx, self.workspace);
     }
 
     // ----- prompts -----------------------------------------------------------
@@ -1153,6 +1136,45 @@ impl RemoteLinks {
             }
         })
         .detach();
+    }
+
+    /// Put `workspace`'s machine under the supervisor, if it has one. A local
+    /// workspace is a no-op, which is what lets every "a window took over a
+    /// workspace" path call this without first asking whether it is remote.
+    ///
+    /// **Every such path must.** The supervisor is not a one-shot at start-up:
+    /// [`pump_tick`] stops it — and clears every [`MachineLink`] with it — as
+    /// soon as no *open* workspace is on a remote machine, which closing the
+    /// last remote window does. What that leaves behind is a live connection
+    /// with no link behind it, because a closed window is a detach and
+    /// [`remote_connect::HostLinks`] outlives it by design. Reopening the
+    /// workspace then reads as [`RemoteStatus::Disconnected`] — a "Not
+    /// connected" strip and a dead keyboard over panes that are visibly still
+    /// running (#issue: reopened remote workspace stays "not connected").
+    ///
+    /// So an existing `HostLinks` entry is **not** a reason to skip this: it
+    /// answers "is there a socket", and the state the window renders from is
+    /// `machines`. `ensure_running` is idempotent, so the machine that really
+    /// is already supervised costs a flag check, and the first tick over a live
+    /// socket marks it `Attached` without opening a second SSH session.
+    pub(crate) fn supervise(cx: &mut gpui::App, workspace: WorkspaceId) {
+        let Some(host) = WorkspaceStore::remote_ref(cx, workspace) else {
+            return;
+        };
+        remote_connect::register(cx);
+        log::info!(
+            "supervising {} for a workspace that just opened",
+            host.target
+        );
+        // No per-window connect call: the supervisor already knows which
+        // machines have open workspaces, so starting it *is* the reconnect, and
+        // ten windows on one box produce one attempt rather than ten.
+        //
+        // Nothing here classifies the host as needing authentication or not
+        // (D7): every machine is attempted in parallel, and the ones that turn
+        // out to need a human queue for the sheet at the moment they ask — see
+        // [`AuthSheetQueue`].
+        RemoteLinks::ensure_running(cx);
     }
 
     /// This workspace's state, or `None` when it is a local one.
@@ -2009,6 +2031,72 @@ mod tests {
             assert!(
                 links.reclaiming.contains(&id),
                 "the attach that lands must know to rebuild this window from the tree"
+            );
+        });
+    }
+
+    /// **Stopping the supervisor is not a terminal state.** It stops whenever no
+    /// open workspace is remote — closing the last remote window does it — and a
+    /// workspace reopened afterwards has to start it again, or it sits under a
+    /// "Not connected" strip with a dead keyboard for ever while its panes run
+    /// on the far side.
+    ///
+    /// What this pins is that [`RemoteLinks::supervise`] is that restart, from a
+    /// pump that has genuinely stopped. It cannot reproduce the original bug in
+    /// full — that needed a live `HostLinks` entry, which takes a real control
+    /// connection to build — so the other half of the rule lives in
+    /// `supervise`'s own doc: never gate the `ensure_running` call on one.
+    #[gpui::test]
+    fn a_stopped_supervisor_restarts_when_a_remote_workspace_comes_back(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let id = cx.update(|cx| {
+            cx.set_global(crate::core::config::Config::default());
+            // Nothing remote on file yet, so the first tick has no machine to
+            // supervise and shuts the pump down — the state a closed remote
+            // window leaves behind.
+            crate::core::session::WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews::default(),
+            );
+            RemoteLinks::ensure_running(cx);
+            assert!(cx.default_global::<RemoteLinks>().pumping);
+            WorkspaceId::new()
+        });
+        // The tick runs and returns `false` without ever reaching its timer, so
+        // this needs no clock of its own.
+        cx.background_executor.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                !cx.default_global::<RemoteLinks>().pumping,
+                "with no remote workspace open the pump is expected to stop"
+            );
+
+            // The workspace comes back — reopened from the switcher, or the
+            // launch path's window landing on it.
+            let host = RemoteRef::new(
+                RemoteTarget::Alias {
+                    alias: "build-box".into(),
+                },
+                WorkspaceId::new(),
+            );
+            crate::core::session::WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views: vec![crate::core::session::WindowView {
+                        id,
+                        host: Some(host),
+                        open: true,
+                        ..Default::default()
+                    }],
+                    active: Some(id),
+                },
+            );
+            RemoteLinks::supervise(cx, id);
+
+            assert!(
+                cx.default_global::<RemoteLinks>().pumping,
+                "reopening a remote workspace has to start the supervisor again"
             );
         });
     }
