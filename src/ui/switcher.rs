@@ -452,13 +452,24 @@ impl Tty7App {
             // install is its own business, and a bar under a row this panel is
             // not driving would have no "Try Again" to turn into.
             //
-            // `error` counts too, and is not an exception to that: it is the
-            // state a machine is in while the error card.s "Restart Server" — a
-            // exists inside this panel's own error card — is working on it. Left
-            // out, the one flow that transfers nothing would show nothing at all
-            // for the length of two timeouts.
-            if group.link == Link::Connecting || group.error.is_some() {
-                group.installing = remote_connect::install_progress_for(id);
+            // `error` counts too, and is not an exception to that: a machine
+            // being worked on by the "Restart Server" inside this panel's own
+            // error card is still a machine this panel is driving.
+            //
+            // A restart is the exception, and has to be. It is offered from the
+            // machine's `⋯` menu whatever the link is doing — a server worth
+            // restarting is most often one nothing can reach — so gating it on
+            // *this* window's connect would hide the bar in the ordinary case.
+            // And it is the one flow that transfers nothing, which makes the bar
+            // the only thing that says the click landed, for the length of two
+            // timeouts. Showing another window's restart is right rather than
+            // merely tolerable: it is about to end the sessions in this one too.
+            let reported = remote_connect::install_progress_for(id);
+            if group.link == Link::Connecting
+                || group.error.is_some()
+                || matches!(reported, Some(InstallPhase::Restarting))
+            {
+                group.installing = reported;
             }
             // Read app-wide, not from this window's snapshot: any window's
             // connect, and every reconnect, records the machine's `$HOME` — and
@@ -1133,7 +1144,11 @@ impl Tty7App {
             Link::Connected => (Some(gpui::rgb(crate::ui::tab_strip::LIVE_DOT).into()), None),
             // "installing…" while bytes are moving: the bar underneath says how
             // far along, and a header still reading "connecting…" over it would
-            // describe a step that finished a while ago.
+            // describe a step that finished a while ago. A restart moves no
+            // bytes, so it gets its own word rather than borrowing that one.
+            Link::Connecting if matches!(group.installing, Some(InstallPhase::Restarting)) => {
+                (Some(theme.warning), Some("restarting…"))
+            }
             Link::Connecting if group.installing.is_some() => {
                 (Some(theme.warning), Some("installing…"))
             }
@@ -1648,8 +1663,9 @@ fn group_menu(
     );
     if !restartable {
         // A WSL distribution's server is started by this client and a
-        // `LocalStdio` one is a child process per connection, so there is no
-        // daemon over there to restart — the router says the same. Absent rather
+        // `LocalStdio` one is a child process per connection, so neither has a
+        // daemon a routed action could restart — the router refuses both, and
+        // `RemoteTarget::is_ssh` is where the two agree. Absent rather
         // than greyed out, for the reason "Disconnect" is absent from the local
         // group: a permanently disabled row only invites the question.
         return menu;

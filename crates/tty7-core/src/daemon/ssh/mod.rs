@@ -436,8 +436,9 @@ impl SshManager {
 
         // The installed binary's **absolute** path, not the bare name. Nothing
         // puts `~/.local/share/tty7/bin` on a non-interactive `PATH`, and the
-        // file there is `tty7-server-<version>` — so `exec tty7-server --stdio`
-        // is a `command not found` on a machine the install just succeeded on.
+        // file there is `tty7-server-c<control>p<protocol>` — so
+        // `exec tty7-server --stdio` is a `command not found` on a machine the
+        // install just succeeded on.
         // The install pass we just ran is what knows the path, so it hands it
         // over rather than leaving the transport to guess.
         let base = match server_command {

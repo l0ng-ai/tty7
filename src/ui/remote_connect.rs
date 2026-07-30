@@ -495,8 +495,9 @@ pub fn connect_blocking(
 /// Machines whose agent hooks this process has already looked at.
 static HOOKS_REFRESHED: Mutex<Vec<HostId>> = Mutex::new(Vec::new());
 
-/// Heal this machine's stale tty7 agent hooks — the ones pointing at a
-/// `tty7-server-<version>` an upgrade replaced (see
+/// Heal this machine's stale tty7 agent hooks — the ones naming a server binary
+/// that is no longer the one this client installs, whether because a wire break
+/// moved the name or because an older, version-naming client wrote them (see
 /// [`crate::core::agent_hooks::refresh_remote_hooks`]).
 ///
 /// Off the connect's own thread, and once per machine per run: it is a config
@@ -1059,6 +1060,16 @@ pub(crate) fn claim_mailbox() -> std::sync::MutexGuard<'static, ()> {
 // 7. Remote daemon version skew
 // ---------------------------------------------------------------------------
 
+/// The answers the dialect-mismatch prompt offers, in the order `window.prompt`
+/// takes them — **index 1 is the destructive one**, which is what
+/// `prompt_remote_daemon_mismatch` matches on.
+///
+/// Written down here rather than at the prompt because [`mismatch_detail`] spells
+/// both out by name in its body: a detail explaining a button that is no longer
+/// there is worse than no explanation at all. `Keep Sessions` used to be index 0
+/// and had to go, which is precisely the drift this prevents repeating.
+pub const MISMATCH_ANSWERS: [&str; 2] = ["Cancel", "Restart Server"];
+
 /// The restart-or-cancel question for a remote `tty7-server` this client cannot
 /// talk to.
 ///
@@ -1402,6 +1413,24 @@ mod tests {
             ..m
         };
         assert!(mismatch_detail(&unknown).contains("an unknown build"));
+    }
+
+    /// The detail explains the buttons by name, so it has to name the ones that
+    /// are actually there. This is a prompt whose whole job is to make a
+    /// destructive choice legible; a body describing an answer the prompt does
+    /// not offer (as it did while `Keep Sessions` was one of them) turns that
+    /// back into a guess.
+    #[test]
+    fn the_mismatch_detail_explains_every_answer_the_prompt_offers() {
+        let detail = mismatch_detail(&MismatchedRemoteDaemon {
+            host: "me@build-box:22".into(),
+            running_version: Some("0.8.0".into()),
+            running_exe: None,
+            wanted_version: "0.9.1".into(),
+        });
+        for answer in MISMATCH_ANSWERS {
+            assert!(detail.contains(answer), "{answer} is unexplained: {detail}");
+        }
     }
 
     #[test]

@@ -298,18 +298,27 @@ impl RemoteTarget {
 
     /// Whether this machine is reached over SSH.
     ///
-    /// The question "Restart Server" asks. The other two variants have no
-    /// long-lived daemon on the far side to restart: a WSL distribution's server
-    /// is started by this client, and a `LocalStdio` machine is a child process
-    /// per connection — which is why
-    /// [`router::restart_server`](crate::daemon::router) refuses them. Asked
-    /// here rather than re-spelled at each call site, so the UI that offers the
-    /// verb and the router that carries it out cannot disagree about who has it.
+    /// The question "Restart Server" asks, and the answer
+    /// [`router::restart_server`](crate::daemon::router) already gives: it routes
+    /// the action for SSH machines and refuses the other two. A `LocalStdio`
+    /// machine is a child process per connection, so there is nothing there to
+    /// stop and start; a WSL distribution's server is started by this client,
+    /// which makes "stop it and reconnect" the whole of the verb and not
+    /// something a routed action has to carry out. Asked here rather than
+    /// re-spelled at each call site, so the UI that offers the verb and the
+    /// router that carries it out cannot disagree about who has it.
+    ///
+    /// Spelled out variant by variant rather than as a `matches!` of the three
+    /// that say yes: this gates an action that ends every session on a machine,
+    /// and a new [`RemoteTarget`] must not inherit an answer to that by falling
+    /// off the end of a pattern. The compiler asks instead.
     pub fn is_ssh(&self) -> bool {
-        matches!(
-            self,
-            RemoteTarget::Profile { .. } | RemoteTarget::Alias { .. } | RemoteTarget::Direct { .. }
-        )
+        match self {
+            RemoteTarget::Profile { .. }
+            | RemoteTarget::Alias { .. }
+            | RemoteTarget::Direct { .. } => true,
+            RemoteTarget::Wsl { .. } | RemoteTarget::LocalStdio { .. } => false,
+        }
     }
 
     /// The in-process id this target resolves to.

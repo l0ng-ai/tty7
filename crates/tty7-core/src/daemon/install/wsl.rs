@@ -891,7 +891,8 @@ impl ServerBinarySource for BundledServerBinary {
 /// opens one routed connection per pane, all at once, on separate daemon
 /// threads. Without this they run the installer concurrently against the same
 /// distribution, and the interleaving is destructive rather than merely wasteful:
-/// two runs both write `.tty7-server-<ver>.tmp`, the first renames it into place
+/// two runs in *this* process share a pid and so share
+/// `.tty7-server-c<c>p<p>.<pid>.tmp`, the first renames it into place
 /// and reports success, and the second's rename then fails — which sends it down
 /// [`Installer::install`]'s recovery branch, whose `remove_file(&paths.binary)`
 /// **deletes the binary the first run just published**. Every later pane then

@@ -836,7 +836,8 @@ impl Tty7App {
                 PromptLevel::Warning,
                 &title,
                 Some(&detail),
-                &["Cancel", "Restart Server"],
+                // Named once, beside the detail that explains them.
+                &remote_connect::MISMATCH_ANSWERS,
                 cx,
             );
             cx.spawn(async move |this, cx| {
@@ -1017,8 +1018,8 @@ impl Tty7App {
             if !matches!(answer.await, Ok(1)) {
                 return;
             }
-            let _ = this.update_in(cx, |this, _window, cx| {
-                this.replace_remote_server(target, label, cx);
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.replace_remote_server(target, label, window, cx);
             });
         })
         .detach();
@@ -1030,12 +1031,19 @@ impl Tty7App {
         &mut self,
         target: RemoteTarget,
         label: String,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let route = match remote_connect::control_route(&target, cx) {
             Ok(header) => header.replace_server(),
+            // Said out loud, for the reason every other failure on this path is:
+            // the user answered a prompt that promised the machine's server
+            // would be replaced, and a log line is not an answer to that. The
+            // failure this catches — no route to the machine any more — is one
+            // where nothing was touched, which the wording already allows for.
             Err(e) => {
                 log::warn!("could not address {label} to replace its server: {e}");
+                Tty7App::report_restart_failure(&label, &e, window, cx);
                 return;
             }
         };

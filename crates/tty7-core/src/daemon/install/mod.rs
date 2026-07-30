@@ -1,14 +1,14 @@
-//! Installing, launching and version-matching `tty7-server` on a remote machine.
+//! Installing, launching and dialect-matching `tty7-server` on a remote machine.
 //!
 //! The six steps, in order:
 //!
 //! | | Step | Where |
 //! |---|---|---|
 //! | 1 | `uname -sm` → the release asset that runs there | [`asset::asset_for_uname`] |
-//! | 2 | SFTP-stat `~/.local/share/tty7/bin/tty7-server-<client version>` | [`Installer::run`] |
+//! | 2 | SFTP-stat `~/.local/share/tty7/bin/tty7-server-c<control>p<protocol>` | [`Installer::run`] |
 //! | 3 | absent → download the asset **on the client** + sha256-verify it | [`download`], [`checksums`] |
-//! | 4 | SFTP-put into `bin/.tty7-server-<ver>.tmp` | [`RemoteOps::put`] |
-//! | 5 | `chmod 0755` then `rename` — atomic publish | [`RemoteOps::rename`] |
+//! | 4 | SFTP-put into `bin/.tty7-server-c<c>p<p>.<pid>.tmp` | [`RemoteOps::put`] |
+//! | 5 | `chmod 0755`, `--protocol` to earn the name, then `rename` — atomic publish | [`RemoteOps::rename`] |
 //! | 6 | probe the remote control socket; nothing there → launch a detached daemon | [`Installer::ensure_daemon`] |
 //!
 //! ## Why the client downloads
@@ -60,9 +60,13 @@ pub use checksums::ChecksumError;
 
 use crate::daemon::ssh::SshConnection;
 
-/// The client version, which is also the version of the server it installs.
-/// Client and server ship from the same workspace version, so "the server that
-/// matches me" is always `tty7-server-<this>`.
+/// The client version, which is also the version of the server it installs —
+/// client and server ship from the same workspace version.
+///
+/// Names the release to download and labels this client in a prompt, and that is
+/// all it may be used for. **"Which server matches me" is a question about
+/// dialects**, not about this string; two builds between releases share it and
+/// need not speak to each other. See [`asset::binary_name`].
 pub fn client_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
@@ -1162,8 +1166,10 @@ impl<'a> Installer<'a> {
         self
     }
 
-    /// The whole flow. On `Ok`, the machine has `tty7-server-<version>` installed
-    /// and a daemon answering on its control socket.
+    /// The whole flow. On `Ok`, a `tty7-server` this client can speak to is
+    /// answering on the machine's control socket — either the one published at
+    /// `tty7-server-c<control>p<protocol>`, or one that was already running and
+    /// said it speaks our dialects.
     pub fn run(&self) -> Result<InstallReport, InstallError> {
         // --- 1. uname -sm --------------------------------------------------
         let uname = self
@@ -1653,6 +1659,17 @@ fn launch_script(binary: &str, settle: Option<String>) -> String {
 /// `rename`) is the price of the collision it prevents, and it is bounded by how
 /// often that happens — which is "almost never", against "every time two clients
 /// install the same dialect at once" for the shared name.
+///
+/// **A pid, so private to a process and not to a client.** Two tty7 processes on
+/// one machine (the released build and the one you are compiling) cannot collide;
+/// two on *different* machines that happen to share a pid still can. That
+/// remainder is left alone because the `--protocol` check now stands behind it:
+/// bytes from two uploads interleaved into one file do not answer with our
+/// dialect, so the outcome is a [`InstallError::DialectMismatch`] and a removed
+/// temp rather than a published binary that lies. Two installs from *within* one
+/// process share a pid and so share this path too — that is what `wsl`'s
+/// `INSTALL_LOCKS` and `SshManager`'s per-key `ConnSlot` are for, and this is not
+/// a second attempt at their job.
 fn unique_temp(shared: &str) -> String {
     let pid = std::process::id();
     match shared.strip_suffix(".tmp") {
@@ -1695,14 +1712,15 @@ fn connection_label(conn: &SshConnection) -> String {
 /// binary plus a live daemon costs two SSH commands and one SFTP stat, no
 /// download, no prompt.
 ///
-/// The returned path is **absolute and version-qualified**
-/// (`~/.local/share/tty7/bin/tty7-server-<version>`), and the session-channel
-/// fallback must use it rather than the bare name. Nothing puts that directory
-/// on a non-interactive `PATH`, and the file is not even called `tty7-server` —
-/// so `exec tty7-server --stdio` is a `command not found` on a machine where the
-/// install just succeeded.
+/// The returned path is **absolute and never the bare name**
+/// (`~/.local/share/tty7/bin/tty7-server-c<control>p<protocol>`, or the path of a
+/// server already running there that answered with our dialects), and the
+/// session-channel fallback must use it rather than the bare name. Nothing puts
+/// that directory on a non-interactive `PATH`, and the file is not even called
+/// `tty7-server` — so `exec tty7-server --stdio` is a `command not found` on a
+/// machine where the install just succeeded.
 ///
-/// A version mismatch is *not* an error: an older daemon still owns every live
+/// A dialect mismatch is *not* an error: an older daemon still owns every live
 /// pane on that machine, so it keeps serving and the mismatch is recorded for
 /// [`take_mismatched_remote_daemons`] to raise. Only a machine we cannot install
 /// on, cannot verify a download for, or cannot get a daemon running on fails.

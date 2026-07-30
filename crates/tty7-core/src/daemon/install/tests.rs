@@ -519,7 +519,7 @@ fn first_install_runs_all_six_steps() {
 /// **Atomic replacement.** The final path must only ever be produced by
 /// renaming a temp that is *already* executable — never written to directly,
 /// and never chmod'ed after it is visible. Both would leave a window in which a
-/// concurrent connect finds `tty7-server-<ver>` present and unusable.
+/// concurrent connect finds `tty7-server-c<c>p<p>` present and unusable.
 #[test]
 fn the_final_path_is_only_ever_reached_by_renaming_a_ready_temp() {
     let remote = FakeRemote::new();

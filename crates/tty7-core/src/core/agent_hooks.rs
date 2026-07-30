@@ -23,8 +23,9 @@
 //! [`HookTarget`] — the three facts that differ between machines: where `~` is,
 //! which filesystem to write through, and which executable answers
 //! `agent-hook`. Locally that is this binary; remotely it is the
-//! `tty7-server-<version>` the installer published there, which carries the
-//! same emitter for exactly this reason (`crates/tty7-server/src/main.rs`).
+//! `tty7-server-c<control>p<protocol>` the installer published there, which
+//! carries the same emitter for exactly this reason
+//! (`crates/tty7-server/src/main.rs`).
 
 use std::io;
 use std::io::{IsTerminal as _, Read as _};
