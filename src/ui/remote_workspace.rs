@@ -846,15 +846,73 @@ impl Tty7App {
                     return;
                 }
                 let _ = this.update_in(cx, |this, window, cx| {
-                    this.restart_remote_server(mismatch, window, cx);
+                    this.restart_mismatched_remote_server(mismatch, window, cx);
                 });
             })
             .detach();
         }
     }
 
-    /// Carry out "Restart Server": replace the `tty7-server` on a
-    /// machine with this client's build.
+    /// [`Self::restart_remote_server`] for the machine a mismatch names: the
+    /// prompt knows the daemon by the record that reported it, and the record
+    /// has to be turned back into something addressable before anything can be
+    /// asked of it.
+    fn restart_mismatched_remote_server(
+        &mut self,
+        mismatch: crate::daemon::install::MismatchedRemoteDaemon,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let label = mismatch.host.clone();
+        match remote_connect::mismatch_target(&mismatch)
+            .ok_or_else(|| format!("tty7 no longer has a way to reach {label}"))
+        {
+            Ok(target) => self.restart_remote_server(target, label, window, cx),
+            Err(e) => Tty7App::report_restart_failure(&label, &e, window, cx),
+        }
+    }
+
+    /// "Restart Server" for a machine with nothing wrong with it — the
+    /// switcher's machine menu, and where a remote window's "Restart Daemon…"
+    /// lands.
+    ///
+    /// Same outcome and same warning as the two repair paths above; the only
+    /// difference is that nothing is broken, so the wording claims nothing is.
+    /// Confirmed for the reason all three are: every session on that machine
+    /// ends, including the ones other windows are showing.
+    pub(crate) fn confirm_restart_remote_server(
+        &mut self,
+        target: RemoteTarget,
+        label: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Restart tty7's server on \u{201c}{label}\u{201d}?"),
+            Some(&format!(
+                "This stops every session on {label} — anything still running in them \
+                 will be terminated, including sessions this window is not showing. \
+                 Workspaces and layouts are kept and come back with fresh shells."
+            )),
+            &["Cancel", "Restart Server"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            // Index 1 is Restart Server; a dismissed prompt is Cancel.
+            if !matches!(answer.await, Ok(1)) {
+                return;
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.restart_remote_server(target, label, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Carry out "Restart Server": stop the `tty7-server` on a machine and start
+    /// this client's build in its place. The half every entry point shares, past
+    /// whichever prompt asked.
     ///
     /// **This throws work away and says so.** Every pane the old server hosts
     /// dies with it — that is what the prompt the user just answered warns
@@ -864,20 +922,11 @@ impl Tty7App {
     /// layout: same tabs and splits, new shells, nothing running in them.
     fn restart_remote_server(
         &mut self,
-        mismatch: crate::daemon::install::MismatchedRemoteDaemon,
+        target: RemoteTarget,
+        label: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let label = mismatch.host.clone();
-        let target = match remote_connect::mismatch_target(&mismatch)
-            .ok_or_else(|| format!("tty7 no longer has a way to reach {label}"))
-        {
-            Ok(target) => target,
-            Err(e) => {
-                Tty7App::report_restart_failure(&label, &e, window, cx);
-                return;
-            }
-        };
         let header = match remote_connect::control_route(&target, cx) {
             Ok(header) => header.restart_server(),
             Err(e) => {

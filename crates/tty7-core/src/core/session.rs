@@ -296,6 +296,22 @@ impl RemoteTarget {
         }
     }
 
+    /// Whether this machine is reached over SSH.
+    ///
+    /// The question "Restart Server" asks. The other two variants have no
+    /// long-lived daemon on the far side to restart: a WSL distribution's server
+    /// is started by this client, and a `LocalStdio` machine is a child process
+    /// per connection — which is why
+    /// [`router::restart_server`](crate::daemon::router) refuses them. Asked
+    /// here rather than re-spelled at each call site, so the UI that offers the
+    /// verb and the router that carries it out cannot disagree about who has it.
+    pub fn is_ssh(&self) -> bool {
+        matches!(
+            self,
+            RemoteTarget::Profile { .. } | RemoteTarget::Alias { .. } | RemoteTarget::Direct { .. }
+        )
+    }
+
     /// The in-process id this target resolves to.
     ///
     /// This is the **only** bridge between the persisted world and the runtime
@@ -710,6 +726,43 @@ mod tests {
             }
             .connection_key(),
             "wsl:Ubuntu"
+        );
+    }
+
+    /// Which machines can be told to restart their server. The two that cannot
+    /// are not an omission: their server is this client's own doing, so there is
+    /// nothing on the far side to stop and start, and the router refuses the
+    /// action for exactly the same reason. A new variant has to answer this
+    /// question rather than inherit an answer.
+    #[test]
+    fn only_ssh_machines_have_a_server_to_restart() {
+        assert!(
+            RemoteTarget::Profile {
+                id: uuid::Uuid::nil()
+            }
+            .is_ssh()
+        );
+        assert!(
+            RemoteTarget::Alias {
+                alias: "devbox".into()
+            }
+            .is_ssh()
+        );
+        assert!(RemoteTarget::direct("me", "box.local", 22).is_ssh());
+        assert!(
+            !RemoteTarget::Wsl {
+                distro: "Ubuntu".into()
+            }
+            .is_ssh(),
+            "a distribution's server is started by this client"
+        );
+        assert!(
+            !RemoteTarget::LocalStdio {
+                program: "tty7-server".into(),
+                args: vec!["--stdio".into()],
+            }
+            .is_ssh(),
+            "a stdio machine is a child process per connection"
         );
     }
 

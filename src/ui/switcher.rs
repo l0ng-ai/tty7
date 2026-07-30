@@ -1618,7 +1618,7 @@ fn group_menu(
     group: &GroupRef,
     app: gpui::WeakEntity<Tty7App>,
 ) -> gpui_component::menu::PopupMenu {
-    let (a1, a2) = (app.clone(), app);
+    let (a1, a2, a3) = (app.clone(), app.clone(), app);
     let gref = group.clone();
     // A remote machine can only be given a workspace once a handshake has said
     // where its `$HOME` is — `~` guessed from this client would be the wrong
@@ -1637,12 +1637,38 @@ fn group_menu(
         return menu;
     };
     let connected = group.link == Link::Connected;
-    menu.separator().item(
+    let restartable = target.is_ssh();
+    let (label, for_restart) = (group.label.clone(), target.clone());
+    let menu = menu.separator().item(
         PopupMenuItem::new("Disconnect")
             .disabled(!connected)
             .on_click(move |_, _window, cx| {
                 let _ = a2.update(cx, |this, cx| this.switcher_disconnect(&target, cx));
             }),
+    );
+    if !restartable {
+        // A WSL distribution's server is started by this client and a
+        // `LocalStdio` one is a child process per connection, so there is no
+        // daemon over there to restart — the router says the same. Absent rather
+        // than greyed out, for the reason "Disconnect" is absent from the local
+        // group: a permanently disabled row only invites the question.
+        return menu;
+    }
+    // Deliberately not gated on `connected`. A server that has to be restarted
+    // is most often one this client *cannot* reach any more, and the action
+    // opens its own connection to do the work — requiring a live link would
+    // withhold the verb from exactly the machine that needs it.
+    //
+    // And deliberately *not* closing the panel, unlike the row's destructive
+    // items. This panel is where a restart has anything to show — the phase bar
+    // under the machine's header, its rows going dead and coming back — and the
+    // error card's identical button already leaves it open for that reason.
+    menu.item(
+        PopupMenuItem::new("Restart Server…").on_click(move |_, window, cx| {
+            let _ = a3.update(cx, |this, cx| {
+                this.confirm_restart_remote_server(for_restart.clone(), label.clone(), window, cx);
+            });
+        }),
     )
 }
 

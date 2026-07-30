@@ -133,6 +133,21 @@ pub fn available_hosts(cx: &App) -> Vec<HostChoice> {
     out
 }
 
+/// The name the picker shows for `target`.
+///
+/// Not `RemoteTarget`'s `Display`, which for a saved profile is its *uuid* — the
+/// type deliberately cannot reach into the profile store, so anything putting a
+/// machine's name in front of the user has to do this lookup. Falls back to the
+/// `Display` for a machine no longer on file, which is the honest answer: that
+/// is all tty7 still knows about it.
+pub fn label_for(target: &RemoteTarget, cx: &App) -> String {
+    available_hosts(cx)
+        .into_iter()
+        .find(|host| host.target == *target)
+        .map(|host| host.label)
+        .unwrap_or_else(|| target.to_string())
+}
+
 /// The machines matching `query`, best match first.
 ///
 /// A `~/.ssh/config` with fifty `Host` blocks is normal, and a list that long

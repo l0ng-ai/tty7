@@ -1965,9 +1965,44 @@ impl Tty7App {
         .detach();
     }
 
-    /// Restart the persistent background daemon: shut the running one down (which
-    /// stops every live shell) and bring a fresh one up, then rebuild the tabs
-    /// from the just-saved session so the layout returns with fresh shells.
+    /// The "Restart Daemon…" action: restart whichever daemon serves *this*
+    /// window.
+    ///
+    /// A remote window's shells live in another machine's `tty7-server`, and
+    /// [`restart_daemon`](Self::restart_daemon) is about this computer's. Running
+    /// it from a remote window ended every local session in every *other* window
+    /// and left the machine in front of the user untouched — a destructive button
+    /// that did nothing the label promised. So the action asks the window which
+    /// machine it is showing, and the local method keeps meaning the local daemon
+    /// (which is what the Settings button under "Daemon" says it does).
+    pub(crate) fn restart_window_daemon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(remote) = WorkspaceStore::remote_ref(cx, self.workspace) else {
+            self.restart_daemon(window, cx);
+            return;
+        };
+        let target = remote.target.clone();
+        let label = crate::ui::remote_connect::label_for(&target, cx);
+        if !target.is_ssh() {
+            // Nothing to restart *over there*: this client starts the server on
+            // those machines itself. Said rather than silently falling back to
+            // restarting the local daemon, which would end sessions on a machine
+            // the user was not looking at.
+            window.push_notification(
+                format!(
+                    "tty7 can only restart the server on machines it reaches over SSH. \
+                     {label} is served from this computer — end its sessions instead."
+                ),
+                cx,
+            );
+            return;
+        }
+        self.confirm_restart_remote_server(target, label, window, cx);
+    }
+
+    /// Restart the persistent background daemon **on this computer**: shut the
+    /// running one down (which stops every live shell) and bring a fresh one up,
+    /// then rebuild the tabs from the just-saved session so the layout returns
+    /// with fresh shells.
     ///
     /// A general escape hatch for the otherwise invisible, always-on daemon:
     /// picking up a macOS permission granted after it started (Full Disk Access
@@ -4738,7 +4773,7 @@ impl Tty7App {
             OpenDiscord => cx.open_url(DISCORD_URL),
             ReportIssue => cx.open_url(ISSUES_URL),
             Quit => cx.quit(),
-            RestartDaemon => self.restart_daemon(window, cx),
+            RestartDaemon => self.restart_window_daemon(window, cx),
             ToggleSftp => self.toggle_sftp(window, cx),
             ShowSshForwards => self.show_ssh_forwards(window, cx),
             ToggleCodePanel => self.toggle_code_panel(window, cx),
@@ -7077,7 +7112,7 @@ impl Render for Tty7App {
                     this.toggle_settings(window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &RestartDaemon, window, cx| {
-                    this.restart_daemon(window, cx)
+                    this.restart_window_daemon(window, cx)
                 }))
                 .on_action(
                     cx.listener(|this, _: &ToggleSftp, window, cx| this.toggle_sftp(window, cx)),
@@ -7239,7 +7274,21 @@ fn agent_resume_command(
     if !cx.global::<Config>().restore_agent_sessions {
         return None;
     }
-    agent.as_ref()?.resume_command(session_id?, launch_argv)
+    let agent = agent.as_ref()?;
+    // Said out loud, because it is the one step of the restore nobody can
+    // reconstruct afterwards: the pane comes back as a bare shell either way,
+    // and whether that is "no id was ever captured" (hooks not installed on
+    // that machine, or its record lost them) or "the agent declined to resume"
+    // is the whole diagnosis. A leaf that ran no agent at all is the ordinary
+    // case and says nothing.
+    let Some(session_id) = session_id else {
+        log::info!(
+            "{}'s pane had no captured session id; it comes back as a plain shell",
+            agent.display_name()
+        );
+        return None;
+    };
+    agent.resume_command(session_id, launch_argv)
 }
 
 /// Convert a live `Pane` tree into its serializable mirror, reading each

@@ -5528,7 +5528,7 @@ impl Tty7App {
                             .child("Daemon"),
                     )
                     .child(div().text_sm().text_color(muted_fg).child(
-                        "Restart the daemon to pick up a newly granted macOS permission, recover if it stops responding, or start from a clean slate. This ends all running sessions; your tabs and layout reopen with fresh shells.",
+                        "Restart the daemon on this computer to pick up a newly granted macOS permission, recover if it stops responding, or start from a clean slate. This ends all running sessions here; your tabs and layout reopen with fresh shells. A remote machine's server is restarted from its own menu in the workspace switcher.",
                     ))
                     .child(
                         h_flex().child(
