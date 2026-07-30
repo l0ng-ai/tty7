@@ -46,7 +46,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use crate::core::workspace_store::{Attachment, SubscriberId, Subscription, WorkspaceStore};
+use crate::core::machine::{self, Attachment, MachineStore};
 use crate::daemon::control::{
     CONTROL_VERSION, ControlClientMsg, ControlEvent, ControlHello, ControlHelloOk, ControlReply,
     ControlRequest, ControlServerMsg, GIT_STREAM_CHUNK, GIT_STREAM_CHUNK_MAX, LinkShutdown,
@@ -72,15 +72,21 @@ pub const WORKER_LINGER: Duration = Duration::from_secs(10);
 /// would each be answered long after the client's own deadline gave up on them.
 pub const MAX_QUEUED: usize = 1024;
 
-/// `WorkspaceChanged` pushes one connection will let pile up before it starts
-/// dropping them.
+/// `Layout` deltas one connection will let queue before it starts dropping.
 ///
-/// Dropping is safe here in a way it is not for a watch batch: the event says
-/// only "workspace `id` changed, refetch", so a client that has one queued
-/// already learns everything a second one would tell it. The cap exists so a
-/// peer that has stopped reading its socket cannot turn another client's
-/// `WorkspacePut` into unbounded memory.
-pub const WORKSPACE_EVENT_QUEUE: usize = 64;
+/// A delta is *not* self-superseding — a dropped one leaves the peer's
+/// picture of the tree wrong until it re-pulls. The cap is still
+/// right, for the same reason as the watch caps: a peer
+/// that has stopped reading its socket must not turn another client's edit
+/// into unbounded server memory. What makes the drop survivable is that it is
+/// *announced*: the connection is flagged lagged, and the forwarder replaces
+/// the whole superseded backlog with a single
+/// [`ControlEvent::LayoutResync`], so a client that lost one edit re-pulls
+/// instead of silently mirroring a tree it is no longer looking at. A peer too
+/// wedged to hear even that is already inside
+/// [`crate::daemon::control::KEEPALIVE_DEAD_AFTER`] of losing the link, and
+/// every reconnect begins with a full pull.
+pub const LAYOUT_EVENT_QUEUE: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // Entry points
@@ -90,17 +96,16 @@ pub const WORKSPACE_EVENT_QUEUE: usize = 64;
 ///
 /// Separate from the `SharedHost` argument because the two are genuinely
 /// independent roles, and the handshake says so: a box can back a remote
-/// workspace's file tree without owning any workspace records (that is every
-/// server today, and it is what [`Services::default`] produces), and the
-/// `workspace-store` capability bit is advertised only when this actually
-/// carries a store. A client therefore learns from the handshake whether asking
-/// is worth a round trip.
+/// workspace's file tree without owning any workspace tree (which is what
+/// [`Services::default`] produces), and the `machine-tree` capability bit is
+/// advertised only when this actually carries one. A client therefore learns
+/// from the handshake whether asking is worth a round trip.
 #[derive(Clone, Default)]
 pub struct Services {
-    /// The machine's workspace records. `None` answers every `Workspace*`
-    /// request with "this server does not serve the workspace store" — the same
-    /// answer a build from before M5 gives.
-    pub workspaces: Option<Arc<WorkspaceStore>>,
+    /// The machine's own workspace *tree* — the daemon-owned structure the
+    /// semantic operations edit. `None` answers every tree verb with "this
+    /// server does not serve the machine tree".
+    pub machine: Option<Arc<MachineStore>>,
     /// Who currently holds each workspace, and how to reach them. Shared across
     /// every connection this server accepts — that sharing *is* the takeover:
     /// two connections can only displace each other if they are looking at one
@@ -109,15 +114,15 @@ pub struct Services {
 }
 
 impl Services {
-    /// Host RPC only, no workspace store.
+    /// Host RPC only, no machine tree.
     pub fn none() -> Services {
         Services::default()
     }
 
-    /// Host RPC plus the workspace store.
-    pub fn with_workspaces(store: Arc<WorkspaceStore>) -> Services {
+    /// Host RPC plus the machine tree.
+    pub fn with_machine(store: Arc<MachineStore>) -> Services {
         Services {
-            workspaces: Some(store),
+            machine: Some(store),
             attachments: Arc::new(AttachRegistry::default()),
         }
     }
@@ -129,11 +134,11 @@ impl Services {
 
 /// The live half of the attachment record.
 ///
-/// [`Attachment`](crate::core::workspace_store::Attachment) in the store is the
+/// [`Attachment`](crate::core::machine::Attachment) in the machine tree is the
 /// *data* — token, hostname, since — and answers "who holds this workspace".
 /// This is the *handles*: the sink a `Preempted` push goes out on and the
 /// shutdown that closes the displaced session's link. They are separate because
-/// the store lives in `core` and knows nothing about sockets, and because an
+/// the tree lives in `core` and knows nothing about sockets, and because an
 /// attachment must never be written to the file (a stale one on disk would have
 /// the server report a takeover against a client that no longer exists).
 ///
@@ -147,7 +152,7 @@ pub struct AttachRegistry {
     /// Held across *both* tables for the length of one handover.
     ///
     /// A takeover moves two things that live in different places: this
-    /// registry's handles, and the `WorkspaceStore`'s record. Each is
+    /// registry's handles, and the `MachineStore`'s record. Each is
     /// internally locked, and that is not enough — two clients attaching to one
     /// workspace at the same moment can each win a different table, after which
     /// the store names a session the registry has already evicted and no
@@ -391,9 +396,11 @@ where
         }
     };
 
-    // Subscribed before the first request is read, so a change another client
-    // makes while this one is still listing cannot slip through the gap.
-    let workspace_sub = subscribe_workspaces(&services, &sink);
+    // Subscribed before the first request is read, so an edit another client
+    // makes while this one is still pulling cannot slip through the gap: a
+    // full pull issued after this point can race a delta (the client tolerates
+    // that), but an edit can never fall between subscription and first read.
+    let machine_sub = subscribe_machine(&services, &sink);
 
     let conn = Arc::new(Conn {
         host,
@@ -404,8 +411,8 @@ where
         next_watch: AtomicU64::new(1),
         git_streams: Arc::new(AtomicUsize::new(0)),
         pool: Pool::new(),
-        workspaces: services.workspaces.clone(),
-        workspace_origin: workspace_sub.as_ref().map(Subscription::id),
+        machine: services.machine.clone(),
+        machine_origin: machine_sub.as_ref().map(machine::Subscription::id),
         attachments: Arc::clone(&services.attachments),
         id: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
         holder: Holder {
@@ -431,7 +438,7 @@ where
 
     // Teardown, in the order that makes each step meaningful: stop accepting
     // work, drop the watches (which stops the pushes and releases the OS
-    // watchers), release anything this session still holds, drop the workspace
+    // watchers), release anything this session still holds, drop the machine
     // subscription (which ends its forwarder), then close the link so anything
     // still writing fails fast rather than blocking on a peer that is gone.
     conn.pool.close();
@@ -440,7 +447,7 @@ where
         .unwrap_or_else(|e| e.into_inner())
         .clear();
     conn.release_all_workspaces();
-    drop(workspace_sub);
+    drop(machine_sub);
     sink.retire();
     let _ = shutdown.shutdown_link();
 
@@ -492,17 +499,17 @@ fn handshake<R: Read>(
     };
 
     // Advertised from what this server actually carries, not from what the
-    // build can do. A client that sees `workspace-store` missing knows not to
+    // build can do. A client that sees `machine-tree` missing knows not to
     // spend a round trip asking, and — the case that matters — a machine
-    // serving only a file tree does not claim to own workspace records it has
+    // serving only a file tree does not claim to own a workspace tree it has
     // no file for.
     let mut features = vec![
         feature::CONTROL.to_string(),
         feature::HOST_RPC.to_string(),
         feature::STDIO_BRIDGE.to_string(),
     ];
-    if services.workspaces.is_some() {
-        features.push(feature::WORKSPACE_STORE.to_string());
+    if services.machine.is_some() {
+        features.push(feature::MACHINE_TREE.to_string());
     }
 
     sink.send(&ControlServerMsg::HelloOk(ControlHelloOk {
@@ -534,7 +541,7 @@ static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 /// The takeover, server side: claim `workspace` for this connection and
 /// tell whoever held it.
 ///
-/// The order is the whole behaviour. The store's record moves first (so a
+/// The order is the whole behaviour. The tree's record moves first (so a
 /// concurrent `attachment()` never shows the workspace as free), the registry's
 /// handles move under one lock, and only then is the displaced session told —
 /// outside every lock, because writing to a peer that has stopped reading must
@@ -550,17 +557,30 @@ fn attach_workspace(
     workspace: &str,
     dedicated: bool,
 ) -> io::Result<Option<String>> {
-    let store = conn.workspaces()?;
+    // The attach verbs predate the typed tree, so the id arrives as a string.
+    // The data half of the attachment lives in the machine tree; a server
+    // without one answers the refusal a tree-less server always has.
+    if conn.machine.is_none() {
+        return Err(io::Error::other(
+            "this server does not serve the machine tree",
+        ));
+    }
+    let tree_id: Option<crate::core::session::WorkspaceId> = workspace.parse().ok();
     let (displaced, evicted) = {
-        // Both tables move under one lock. Held only across the two moves —
+        // Both tables move under one lock. Held only across the moves —
         // the notice below goes out with nothing held, because writing to a
         // peer that has stopped reading must not hold up the next client's
         // attach.
         let _handover = conn.attachments.handover();
-        let displaced = store.attach(
-            workspace,
-            Attachment::new(conn.holder.token.clone(), conn.holder.hostname.clone()),
-        );
+        let attachment = Attachment::new(conn.holder.token.clone(), conn.holder.hostname.clone());
+        // A workspace the tree does not list (or an id that is not a uuid)
+        // records no data half; the registry's live handles still move, so
+        // the takeover behaviour is identical either way, and the tree's
+        // record appears the moment the workspace does.
+        let displaced = match (&conn.machine, tree_id) {
+            (Some(machine), Some(id)) => machine.attach(id, attachment),
+            _ => None,
+        };
         let evicted = conn
             .attachments
             .claim(workspace, conn.id, &conn.holder, dedicated);
@@ -596,14 +616,21 @@ fn attach_workspace(
 
 /// Release `workspace` if this connection still holds it.
 ///
-/// Token-checked in the store *and* connection-checked in the registry, which
+/// Token-checked in the tree *and* connection-checked in the registry, which
 /// are the same guard seen from both halves: a session that was preempted and
 /// then tidied up must not evict the client that took over from it.
 fn detach_workspace(conn: &Arc<Conn>, workspace: &str) -> io::Result<bool> {
-    let store = conn.workspaces()?;
+    if conn.machine.is_none() {
+        return Err(io::Error::other(
+            "this server does not serve the machine tree",
+        ));
+    }
     let _handover = conn.attachments.handover();
     let released = conn.attachments.release(workspace, conn.id);
-    let forgotten = store.detach(workspace, &conn.holder.token);
+    let forgotten = match (&conn.machine, workspace.parse().ok()) {
+        (Some(machine), Some(id)) => machine.detach(id, &conn.holder.token),
+        _ => false,
+    };
     Ok(released || forgotten)
 }
 
@@ -837,50 +864,6 @@ fn run_request(
             (ReplyOk::Unit, Vec::new())
         }
 
-        // ----- workspace store -----------------------------------------------
-        // Records cross as opaque JSON: the client owns the schema, and a
-        // server that parsed them would drop any field it was too old to know
-        // about on the next write. See `core::workspace_store`.
-        ControlRequest::WorkspaceList => (
-            ReplyOk::Json(serde_json::Value::Array(conn.workspaces()?.list())),
-            Vec::new(),
-        ),
-        ControlRequest::WorkspaceGet { id } => {
-            // `NotFound` rather than a `null` payload: "there is no such
-            // workspace" and "there is one and it is empty" are different
-            // answers, and a client that conflated them would helpfully
-            // overwrite a record it failed to read.
-            let record = conn.workspaces()?.get(&id).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("no workspace {id} on this machine"),
-                )
-            })?;
-            (ReplyOk::Json(record), Vec::new())
-        }
-        ControlRequest::WorkspacePut { id, json } => {
-            conn.workspaces()?.put(&id, json, conn.workspace_origin)?;
-            (ReplyOk::Unit, Vec::new())
-        }
-        ControlRequest::WorkspaceDelete { id } => {
-            // Deleting what is not there is success — a delete that raced
-            // another client's delete has got what it asked for.
-            let store = conn.workspaces()?;
-            {
-                // The store drops its own attachment on delete; the registry
-                // has to be told, and under the same lock, or the two disagree
-                // with no race needed at all. Left behind, the stale `Live`
-                // entry means the *next* client to attach a workspace with this
-                // id evicts a session nobody displaced — and, that entry being
-                // dedicated, closes its whole link, taking every other
-                // workspace on it down too.
-                let _handover = conn.attachments.handover();
-                store.delete(&id, conn.workspace_origin)?;
-                conn.attachments.forget_workspace(&id);
-            }
-            (ReplyOk::Unit, Vec::new())
-        }
-
         // ----- attachment (D8) -----------------------------------
         ControlRequest::WorkspaceAttach { id } => (
             ReplyOk::Attached {
@@ -893,6 +876,157 @@ fn run_request(
             // the same reason a redundant delete is: the caller wanted not to
             // hold it, and it does not.
             detach_workspace(conn, &id)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+
+        // ----- machine tree --------------------------------------------------
+        // Each arm is a thin translation: the store validates, mutates,
+        // persists and broadcasts (with this connection's origin excluded),
+        // and its refusals cross the wire as the client-visible errors they
+        // already are.
+        ControlRequest::MachineGet => (
+            ReplyOk::MachineTree(Box::new(conn.machine()?.machine())),
+            Vec::new(),
+        ),
+        ControlRequest::WorkspaceTree { workspace } => (
+            ReplyOk::WorkspaceTree(Box::new(conn.machine()?.workspace(workspace)?)),
+            Vec::new(),
+        ),
+        ControlRequest::WorkspaceCreate { name, workspace } => (
+            ReplyOk::WorkspaceTree(Box::new(conn.machine()?.workspace_create(
+                workspace,
+                name,
+                conn.machine_origin,
+            )?)),
+            Vec::new(),
+        ),
+        ControlRequest::WorkspaceRename { workspace, name } => {
+            conn.machine()?
+                .workspace_rename(workspace, name, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::WorkspaceRemove { workspace } => {
+            let store = conn.machine()?;
+            let panes = {
+                // The tree drops its own attachment with the workspace; the
+                // attach registry forgets it under the handover lock, or a
+                // stale dedicated entry would one day close an innocent link.
+                let _handover = conn.attachments.handover();
+                let panes = store.workspace_delete(workspace, conn.machine_origin)?;
+                conn.attachments.forget_workspace(&workspace.to_string());
+                panes
+            };
+            (ReplyOk::Panes(panes), Vec::new())
+        }
+        ControlRequest::WorkspaceTouch { workspace } => {
+            conn.machine()?
+                .workspace_touch(workspace, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::WorkspaceSetActiveTab { workspace, tab } => {
+            conn.machine()?
+                .workspace_set_active_tab(workspace, tab, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::TabCreate {
+            workspace,
+            at,
+            pane,
+            tab,
+        } => (
+            ReplyOk::TabTree(Box::new(conn.machine()?.tab_create(
+                workspace,
+                at.map(clamp_usize),
+                pane,
+                tab,
+                conn.machine_origin,
+            )?)),
+            Vec::new(),
+        ),
+        ControlRequest::TabClose { workspace, tab } => (
+            ReplyOk::Panes(
+                conn.machine()?
+                    .tab_close(workspace, tab, conn.machine_origin)?,
+            ),
+            Vec::new(),
+        ),
+        ControlRequest::TabRename {
+            workspace,
+            tab,
+            name,
+        } => {
+            conn.machine()?
+                .tab_rename(workspace, tab, name, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::TabMove { workspace, tab, to } => {
+            conn.machine()?
+                .tab_move(workspace, tab, clamp_usize(to), conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::TabSetGroup {
+            workspace,
+            tab,
+            group,
+        } => {
+            conn.machine()?
+                .tab_set_group(workspace, tab, group, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::PaneSplit {
+            workspace,
+            pane,
+            axis,
+            ratio,
+            new,
+            first,
+        } => {
+            conn.machine()?.pane_split(
+                workspace,
+                pane,
+                axis,
+                ratio,
+                new,
+                first,
+                conn.machine_origin,
+            )?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::PaneClose { workspace, pane } => (
+            ReplyOk::Panes(
+                conn.machine()?
+                    .pane_close(workspace, pane, conn.machine_origin)?,
+            ),
+            Vec::new(),
+        ),
+        ControlRequest::PaneSetRatio {
+            workspace,
+            tab,
+            path,
+            ratio,
+        } => {
+            conn.machine()?
+                .pane_set_ratio(workspace, tab, path, ratio, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::PaneMove {
+            workspace,
+            pane,
+            to,
+            axis,
+            first,
+        } => {
+            conn.machine()?
+                .pane_move(workspace, pane, to, axis, first, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::PaneReplace {
+            workspace,
+            old,
+            new,
+        } => {
+            conn.machine()?
+                .pane_replace(workspace, old, new, conn.machine_origin)?;
             (ReplyOk::Unit, Vec::new())
         }
     })
@@ -939,11 +1073,11 @@ struct Conn {
     /// which gives its slot back on the way out — see [`StreamSlot`].
     git_streams: Arc<AtomicUsize>,
     pool: Pool,
-    /// The machine's workspace records, when this server serves them.
-    workspaces: Option<Arc<WorkspaceStore>>,
-    /// This connection's subscriber id, so its own writes do not come back to
-    /// it as `WorkspaceChanged` pushes. `None` when there is no store.
-    workspace_origin: Option<SubscriberId>,
+    /// The machine's workspace tree, when this server serves it.
+    machine: Option<Arc<MachineStore>>,
+    /// This connection's tree-subscriber id — origin exclusion, so a tree
+    /// operation's own `Layout` delta never comes back to its writer.
+    machine_origin: Option<machine::SubscriberId>,
     /// Shared with every other connection this server accepts — see
     /// [`AttachRegistry`].
     attachments: Arc<AttachRegistry>,
@@ -955,30 +1089,27 @@ struct Conn {
 }
 
 impl Conn {
-    /// The workspace store, or the error a server without one answers.
-    ///
-    /// The message is deliberately the one the unimplemented slots gave before
-    /// M5: a client talking to a file-tree-only server must get the same answer
-    /// whether that server predates the store or simply was not given one.
-    fn workspaces(&self) -> io::Result<&Arc<WorkspaceStore>> {
-        self.workspaces
+    /// The machine tree, or the refusal a server not carrying one answers.
+    /// The client's cue is the `machine-tree` capability bit; this is the
+    /// answer for one that asked anyway.
+    fn machine(&self) -> io::Result<&Arc<MachineStore>> {
+        self.machine
             .as_ref()
-            .ok_or_else(|| io::Error::other("this server does not serve the workspace store"))
+            .ok_or_else(|| io::Error::other("this server does not serve the machine tree"))
     }
 
     /// Give up every workspace this connection still holds, at teardown.
     ///
     /// Connection-scoped, so a workspace that was taken over from this session
     /// earlier is already gone from the registry and is not touched — the exact
-    /// case the store's token check exists for, seen from the other side.
+    /// case the tree's token check exists for, seen from the other side.
     fn release_all_workspaces(&self) {
         let _handover = self.attachments.handover();
         let released = self.attachments.release_conn(self.id);
-        let Some(store) = self.workspaces.as_ref() else {
-            return;
-        };
         for workspace in released {
-            store.detach(&workspace, &self.holder.token);
+            if let (Some(machine), Some(id)) = (&self.machine, workspace.parse().ok()) {
+                machine.detach(id, &self.holder.token);
+            }
         }
     }
 
@@ -1034,7 +1165,7 @@ impl Conn {
             ControlServerMsg::Response { req_id, reply }
         };
         // Encoded before anything is written, so a reply this server cannot put
-        // on the wire — a `SearchHit` whose path is not UTF-8, a `WorkspaceList`
+        // on the wire — a `SearchHit` whose path is not UTF-8, a `MachineGet`
         // grown past `MAX_FRAME` — becomes an error the client *receives*.
         // Dropping it instead leaves the client waiting out the request's whole
         // deadline (20s for a search, and again on the next keystroke) for a
@@ -1260,45 +1391,95 @@ impl Conn {
     }
 }
 
-/// Subscribe this connection to the workspace store's changes, if there is one.
+/// Subscribe this connection to the machine tree's deltas, if there is one.
 ///
 /// Two hops rather than one, and the split is the point. The store's callback
-/// runs on the thread of *whichever connection made the change*, so it does
-/// nothing but enqueue; the forwarder thread is what actually writes, and a
-/// peer that has stopped reading stalls only its own forwarder. Calling
-/// `Sink::send` straight from the callback would have one wedged client hold up
-/// every other client's `WorkspacePut`.
-fn subscribe_workspaces(services: &Services, sink: &Arc<Sink>) -> Option<Subscription> {
-    let store = services.workspaces.as_ref()?;
-    let (tx, rx) = smol::channel::bounded::<String>(WORKSPACE_EVENT_QUEUE);
-    let subscription = store.subscribe(Arc::new(move |id: &str| {
-        // Never blocks. A full queue means this peer is already behind on a
-        // signal that only says "refetch", and the notice sitting in the queue
-        // says it just as well.
-        let _ = tx.try_send(id.to_string());
-    }));
-    spawn_workspace_forwarder(rx, Arc::clone(sink));
+/// runs on the thread of *whichever connection made the change*, so it only
+/// enqueues; the forwarder thread is what actually writes, and a peer that has
+/// stopped reading stalls nothing but its own forwarder. Calling `Sink::send`
+/// straight from the callback would have one wedged client hold up every other
+/// client's edit. The queue-full case is documented on [`LAYOUT_EVENT_QUEUE`].
+fn subscribe_machine(services: &Services, sink: &Arc<Sink>) -> Option<machine::Subscription> {
+    let store = services.machine.as_ref()?;
+    let (tx, rx) = smol::channel::bounded::<(String, machine::LayoutDelta)>(LAYOUT_EVENT_QUEUE);
+    // Set on a drop, consumed by the forwarder: a dropped delta leaves the
+    // peer's mirror wrong forever, so it must be told to re-pull rather than
+    // left to mirror a tree it is no longer looking at.
+    let lagged = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let saw_drop = Arc::clone(&lagged);
+    let subscription = store.subscribe(Arc::new(
+        move |workspace: &str, delta: &machine::LayoutDelta| {
+            if tx.try_send((workspace.to_string(), delta.clone())).is_err() {
+                saw_drop.store(true, Ordering::Release);
+                log::warn!(
+                    "dropping a layout delta for a peer {LAYOUT_EVENT_QUEUE} deltas behind; \
+                     it will be told to resync"
+                );
+            }
+        },
+    ));
+    spawn_layout_forwarder(rx, Arc::clone(sink), lagged);
     Some(subscription)
 }
 
-/// Relay workspace changes to the peer as `WorkspaceChanged` pushes.
+/// Relay tree deltas to the peer as `Layout` pushes — prefixed by a
+/// [`ControlEvent::LayoutResync`] **in place of** everything the queue still
+/// holds, whenever it dropped one.
 ///
-/// Ends on its own when the `Subscription` is dropped: that removes the closure
-/// holding the sender, which closes the channel. Same shape, and the same
-/// reason, as [`spawn_watch_forwarder`].
-fn spawn_workspace_forwarder(rx: smol::channel::Receiver<String>, sink: Arc<Sink>) {
+/// Announcing and then draining the backlog would be worse than not announcing
+/// at all. The queue is FIFO, so a drop discards the *newest* delta and
+/// everything still queued is **older** than the gap: the peer would re-pull the
+/// tree on the resync and then apply a stretch of history from before it,
+/// `TabRestructured` replacing whole tabs with the shapes they had — a window
+/// silently reverting to a layout nobody is looking at, with mirror and window
+/// in agreement so nothing triggers recovery a second time. Every queued delta
+/// is by construction already in the tree the peer is about to pull, so the
+/// backlog is not lost information; it is superseded information.
+///
+/// The flag-then-announce order is safe by construction: `lagged` is only set
+/// when the queue is full, so a delivery always follows a drop and the
+/// announcement never waits on a quiet tree.
+///
+/// Ends on its own when the `Subscription` is dropped: that removes the
+/// closure holding the sender, which closes the channel. Same shape, and the
+/// same reason, as [`spawn_watch_forwarder`].
+fn spawn_layout_forwarder(
+    rx: smol::channel::Receiver<(String, machine::LayoutDelta)>,
+    sink: Arc<Sink>,
+    lagged: Arc<std::sync::atomic::AtomicBool>,
+) {
     let spawned = std::thread::Builder::new()
-        .name("tty7-control-workspace".into())
+        .name("tty7-control-layout".into())
         .spawn(move || {
-            while let Ok(id) = rx.recv_blocking() {
-                let event = ControlEvent::WorkspaceChanged { id };
+            while let Ok((workspace, delta)) = rx.recv_blocking() {
+                if lagged.swap(false, Ordering::AcqRel) {
+                    // This delta and everything behind it predate the gap. Drop
+                    // the lot and send the one event that repairs a peer whose
+                    // history has a hole in it.
+                    let mut superseded = 1;
+                    while rx.try_recv().is_ok() {
+                        superseded += 1;
+                    }
+                    log::info!(
+                        "dropping {superseded} superseded layout delta(s) and asking the peer \
+                         to resync"
+                    );
+                    if sink
+                        .send(&ControlServerMsg::Event(ControlEvent::LayoutResync))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                }
+                let event = ControlEvent::Layout { workspace, delta };
                 if sink.send(&ControlServerMsg::Event(event)).is_err() {
                     return;
                 }
             }
         });
     if let Err(e) = spawned {
-        log::warn!("could not start the workspace-change forwarder: {e}");
+        log::warn!("could not start the layout forwarder: {e}");
     }
 }
 
@@ -1759,10 +1940,9 @@ mod sock {
 
     /// [`serve_listener`], with the extra services every connection gets.
     ///
-    /// One [`WorkspaceStore`](crate::core::workspace_store::WorkspaceStore)
-    /// shared by every connection, which is what makes a change on one visible
-    /// to the others: two stores over one file would each believe their own
-    /// copy and the last save would win silently.
+    /// One [`MachineStore`] shared by every connection, which is what makes a
+    /// change on one visible to the others: two stores over one file would
+    /// each believe their own copy and the last save would win silently.
     pub fn serve_listener_with(listener: UnixListener, host: SharedHost, services: Services) {
         for stream in listener.incoming() {
             match stream {
@@ -1815,6 +1995,140 @@ mod sock {
 #[cfg(unix)]
 pub use sock::{
     bind_control_socket, control_socket_path, serve_listener, serve_listener_with,
+    spawn_control_listener, spawn_control_listener_with,
+};
+
+/// The machine-local control endpoint on Windows, which has no Unix sockets.
+///
+/// The same two-listeners-one-daemon shape as [`sock`], over the transport the
+/// pane dialect already uses on this platform: a loopback `TcpListener` on an
+/// OS-assigned port, recorded in a user-private marker file next to
+/// `daemon.port` together with a 256-bit token every connection must present.
+/// Loopback is reachable by any local process, so the token is the access
+/// boundary here exactly as file permissions are on Unix — see
+/// [`crate::daemon::transport`], whose machinery this reuses rather than
+/// re-deriving.
+///
+/// Its own port and its own token, not the pane listener's: the two dialects are
+/// independent services, and a client that learned one endpoint's token has not
+/// thereby been granted the other.
+#[cfg(windows)]
+mod wsock {
+    use super::*;
+    use crate::daemon::transport;
+    use std::net::TcpListener;
+
+    /// Where the control listener records its port and token, beside the pane
+    /// dialect's `daemon.port`.
+    pub const CONTROL_PORT_FILE: &str = "control.port";
+
+    /// The marker file's path — the Windows answer to `control_socket_path`,
+    /// and what a log line naming the endpoint should print.
+    pub fn control_endpoint_path() -> io::Result<PathBuf> {
+        transport::port_path_named(CONTROL_PORT_FILE).ok_or_else(|| {
+            io::Error::other("no config directory to record the control endpoint in")
+        })
+    }
+
+    /// Bind the control endpoint and serve it on a background thread, one thread
+    /// per connection. Returns the marker file it recorded itself in.
+    ///
+    /// Every accepted connection is authenticated *before* a frame is parsed:
+    /// what is behind this endpoint is `ReadFile` / `WriteFile` / `Git` on
+    /// arbitrary paths as this user, plus the machine's workspace tree.
+    pub fn spawn_control_listener_with(
+        host: SharedHost,
+        services: Services,
+    ) -> io::Result<PathBuf> {
+        let path = control_endpoint_path()?;
+        // Refuse when one is already listening, exactly as
+        // [`bind_control_socket`](sock::bind_control_socket) does — and for a
+        // reason that bites harder here. Binding is what *writes* the marker
+        // file, so a second daemon that goes on to lose the pane-socket race
+        // (`run` bails with "already running") would have pointed every client
+        // on the machine at a listener that is about to exit. A marker left by a
+        // crashed daemon looks exactly like a live one, so the only way to tell
+        // is to connect: the same probe, with the same rare false positive if an
+        // unrelated process has since taken that ephemeral port.
+        if let Ok(live) = transport::connect_endpoint(CONTROL_PORT_FILE) {
+            drop(live);
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!(
+                    "a control server is already listening at {}",
+                    transport::endpoint_display_named(CONTROL_PORT_FILE)
+                ),
+            ));
+        }
+        let (listener, token) =
+            transport::bind_endpoint(CONTROL_PORT_FILE).map_err(io::Error::other)?;
+        std::thread::Builder::new()
+            .name("tty7-control-listener".into())
+            .spawn(move || serve_listener_with(listener, token, host, services))?;
+        Ok(path)
+    }
+
+    /// [`spawn_control_listener_with`] with no extra services — host RPC only.
+    pub fn spawn_control_listener(host: SharedHost) -> io::Result<PathBuf> {
+        spawn_control_listener_with(host, Services::none())
+    }
+
+    /// Serve control connections on `listener` until it fails, one thread per
+    /// connection, rejecting any that cannot present `token`.
+    pub fn serve_listener_with(
+        listener: TcpListener,
+        token: transport::Token,
+        host: SharedHost,
+        services: Services,
+    ) {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut stream) => {
+                    transport::tune(&stream);
+                    let host = Arc::clone(&host);
+                    let services = services.clone();
+                    let spawned = std::thread::Builder::new()
+                        .name("tty7-control-conn".into())
+                        .spawn(move || {
+                            // Before anything else: an unauthenticated peer is
+                            // some other process on this machine, and it gets
+                            // no dialect at all.
+                            if let Err(e) = transport::check_endpoint_token(&mut stream, &token) {
+                                log::warn!("control connection rejected: {e}");
+                                return;
+                            }
+                            if let Err(e) = serve_with(stream, host, services) {
+                                log::warn!("control connection failed: {e}");
+                            }
+                        });
+                    if let Err(e) = spawned {
+                        log::warn!("could not start a control connection thread: {e}");
+                    }
+                }
+                // One bad accept must not take the server down; the daemon's own
+                // listener has behaved this way since it was written.
+                Err(e) => log::warn!("control accept failed: {e}"),
+            }
+        }
+    }
+
+    /// Dial this machine's control endpoint, presenting the token from its
+    /// marker file. The client half of the boundary above; the GUI's local link
+    /// is its only caller.
+    pub fn connect_control() -> io::Result<std::net::TcpStream> {
+        transport::connect_endpoint(CONTROL_PORT_FILE)
+    }
+
+    /// Forget the endpoint marker — the daemon's shutdown path, so a stale file
+    /// does not send the next GUI at a port nobody is listening on.
+    pub fn remove_control_endpoint() {
+        transport::remove_endpoint(CONTROL_PORT_FILE);
+    }
+}
+
+#[cfg(windows)]
+pub use wsock::{
+    CONTROL_PORT_FILE, connect_control, control_endpoint_path, remove_control_endpoint,
     spawn_control_listener, spawn_control_listener_with,
 };
 
@@ -2091,10 +2405,27 @@ mod tests {
         }
     }
 
+    /// Services carrying a fresh machine tree — the shape every attach and
+    /// takeover test runs against, because the tree is where the attachment's
+    /// data half lives.
     fn workspace_services() -> (Services, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = WorkspaceStore::open(dir.path().join("workspaces.json"));
-        (Services::with_workspaces(store), dir)
+        let store = MachineStore::open(dir.path().join(machine::MACHINE_FILE));
+        (Services::with_machine(store), dir)
+    }
+
+    /// A workspace created in `services`' tree, as the string id the attach
+    /// verbs carry. The tree only records an attachment for a workspace it
+    /// lists, so the takeover tests attach to a real one.
+    fn tree_workspace(services: &Services) -> String {
+        services
+            .machine
+            .as_ref()
+            .expect("workspace_services always carries a tree")
+            .workspace_create(None, None, None)
+            .expect("an empty tree accepts a workspace")
+            .id
+            .to_string()
     }
 
     // -----------------------------------------------------------------------
@@ -2575,18 +2906,17 @@ mod tests {
         }
     }
 
-    /// The workspace store's request slots exist on the wire (so M5 is additive)
-    /// but this server does not serve them, and says so instead of answering
-    /// with something that looks like an empty store.
+    /// A server not carrying the machine tree says so instead of answering
+    /// with something that looks like an empty machine.
     #[test]
-    fn the_workspace_store_is_declined_not_faked() {
+    fn the_machine_tree_is_declined_not_faked() {
         let p = pair();
         let err = p
             .host
             .client()
-            .call(ControlRequest::WorkspaceList)
+            .call(ControlRequest::MachineGet)
             .unwrap_err();
-        assert!(err.to_string().contains("workspace store"), "{err}");
+        assert!(err.to_string().contains("machine tree"), "{err}");
     }
 
     // -----------------------------------------------------------------------
@@ -3021,26 +3351,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // The workspace store
+    // Raw-wire helpers
     // -----------------------------------------------------------------------
-
-    /// A store on a temp file, plus the directory keeping it alive.
-    fn temp_store() -> (Arc<WorkspaceStore>, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().unwrap();
-        let store = WorkspaceStore::open(dir.path().join("workspaces.json"));
-        (store, dir)
-    }
-
-    fn ws_record(id: &str, name: &str) -> serde_json::Value {
-        serde_json::json!({
-            "id": id,
-            "name": name,
-            "session": {"active": 0, "tabs": [
-                {"pane": {"Leaf": {"cwd": "/home/me/proj", "pane_id": 3}}}
-            ]},
-            "last_active": 1_753_600_000u64,
-        })
-    }
 
     /// A stream slot is given back on every exit, so the per-connection ceiling
     /// is a limit on *concurrency* and never drifts into a permanent refusal.
@@ -3161,7 +3473,7 @@ mod tests {
     }
 
     /// Issue one request and return its reply, ignoring any pushes that arrive
-    /// first — a `WorkspaceChanged` from another connection can legitimately
+    /// first — a `Layout` delta from another connection can legitimately
     /// interleave with this one's reply.
     fn ask(client: &mut UnixStream, req_id: u64, req: ControlRequest) -> ControlReply {
         ControlClientMsg::Request { req_id, req }
@@ -3179,256 +3491,72 @@ mod tests {
         }
     }
 
-    fn ok_json(reply: ControlReply) -> serde_json::Value {
-        match reply {
-            ControlReply::Ok(ReplyOk::Json(v)) => v,
-            other => panic!("expected a Json reply, got {other:?}"),
-        }
-    }
-
-    /// A server with no store answers the four slots the way it always has, and
-    /// says so in the handshake so a client need not ask to find out.
-    #[test]
-    fn a_server_without_a_store_advertises_nothing_and_refuses_politely() {
-        let (mut client, peer) = raw();
-        assert!(!peer.has_feature(feature::WORKSPACE_STORE));
-        assert!(peer.has_feature(feature::HOST_RPC));
-
-        match ask(&mut client, 1, ControlRequest::WorkspaceList) {
-            ControlReply::Err(e) => {
-                assert_eq!(e.kind, WireErrorKind::Other);
-                assert!(
-                    e.msg.contains("does not serve the workspace store"),
-                    "{e:?}"
-                );
-            }
-            other => panic!("expected an error, got {other:?}"),
-        }
-        // And it is still a perfectly good file server afterwards: an
-        // unsupported request must not poison the connection.
-        assert!(matches!(
-            ask(&mut client, 2, ControlRequest::Ping),
-            ControlReply::Ok(ReplyOk::Pong)
-        ));
-    }
-
-    /// The four RPCs, end to end over the wire, against a real file.
-    #[test]
-    fn the_four_workspace_rpcs_round_trip_over_the_wire() {
-        let (store, dir) = temp_store();
-        let (mut client, peer) = raw_with(Services::with_workspaces(Arc::clone(&store)));
-        assert!(peer.has_feature(feature::WORKSPACE_STORE));
-
-        // Empty to begin with.
-        assert_eq!(
-            ok_json(ask(&mut client, 1, ControlRequest::WorkspaceList)),
-            serde_json::json!([])
-        );
-
-        // Put two.
-        for (i, (id, name)) in [("w-a", "api"), ("w-b", "web")].iter().enumerate() {
-            assert!(matches!(
-                ask(
-                    &mut client,
-                    10 + i as u64,
-                    ControlRequest::WorkspacePut {
-                        id: (*id).to_string(),
-                        json: ws_record(id, name),
-                    },
-                ),
-                ControlReply::Ok(ReplyOk::Unit)
-            ));
-        }
-
-        // Get one back, exactly as it was written.
-        let got = ok_json(ask(
-            &mut client,
-            20,
-            ControlRequest::WorkspaceGet {
-                id: "w-a".to_string(),
-            },
-        ));
-        assert_eq!(got, ws_record("w-a", "api"));
-
-        // List answers an array in file order.
-        let listed = ok_json(ask(&mut client, 21, ControlRequest::WorkspaceList));
-        let ids: Vec<&str> = listed
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v["id"].as_str().unwrap())
-            .collect();
-        assert_eq!(ids, vec!["w-a", "w-b"]);
-
-        // A missing id is `NotFound`, not an empty payload.
-        match ask(
-            &mut client,
-            22,
-            ControlRequest::WorkspaceGet {
-                id: "nope".to_string(),
-            },
-        ) {
-            ControlReply::Err(e) => assert_eq!(e.kind, WireErrorKind::NotFound),
-            other => panic!("expected NotFound, got {other:?}"),
-        }
-
-        // A record whose id disagrees with its key is refused.
-        match ask(
-            &mut client,
-            23,
-            ControlRequest::WorkspacePut {
-                id: "w-a".to_string(),
-                json: ws_record("w-b", "confused"),
-            },
-        ) {
-            ControlReply::Err(e) => assert_eq!(e.kind, WireErrorKind::InvalidInput),
-            other => panic!("expected InvalidInput, got {other:?}"),
-        }
-
-        // Delete, twice — the second is still success.
-        for req_id in [30, 31] {
-            assert!(matches!(
-                ask(
-                    &mut client,
-                    req_id,
-                    ControlRequest::WorkspaceDelete {
-                        id: "w-a".to_string(),
-                    },
-                ),
-                ControlReply::Ok(ReplyOk::Unit)
-            ));
-        }
-
-        // The file on the server's disk is the authority, and it agrees.
-        let text = std::fs::read_to_string(dir.path().join("workspaces.json")).unwrap();
-        assert!(text.contains("w-b"), "{text}");
-        assert!(!text.contains("w-a"), "{text}");
-        assert_eq!(store.len(), 1);
-    }
-
-    /// **What the event exists for.** Two clients on one machine: a change made
-    /// by one has to reach the other, and must not come back to its author as
-    /// news it already has.
-    #[test]
-    fn a_change_reaches_the_other_client_and_not_its_author() {
-        let (store, _dir) = temp_store();
-        let services = Services::with_workspaces(Arc::clone(&store));
-        let (mut writer, _) = raw_with(services.clone());
-        let (mut listener, _) = raw_with(services);
-
-        assert!(matches!(
-            ask(
-                &mut writer,
-                1,
-                ControlRequest::WorkspacePut {
-                    id: "w".to_string(),
-                    json: ws_record("w", "api"),
-                },
-            ),
-            ControlReply::Ok(ReplyOk::Unit)
-        ));
-
-        // The listener is told which workspace to refetch.
-        listener
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        match ControlServerMsg::read(&mut listener).unwrap() {
-            ControlServerMsg::Event(ControlEvent::WorkspaceChanged { id }) => {
-                assert_eq!(id, "w");
-            }
-            other => panic!("expected a WorkspaceChanged push, got {other:?}"),
-        }
-
-        // A delete is a change too.
-        assert!(matches!(
-            ask(
-                &mut writer,
-                2,
-                ControlRequest::WorkspaceDelete {
-                    id: "w".to_string(),
-                },
-            ),
-            ControlReply::Ok(ReplyOk::Unit)
-        ));
-        match ControlServerMsg::read(&mut listener).unwrap() {
-            ControlServerMsg::Event(ControlEvent::WorkspaceChanged { id }) => assert_eq!(id, "w"),
-            other => panic!("expected a WorkspaceChanged push, got {other:?}"),
-        }
-
-        // The author heard nothing about either of its own writes: its next
-        // frame is the reply to a fresh request, not a backlog of echoes.
-        writer
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        ControlClientMsg::Request {
-            req_id: 3,
-            req: ControlRequest::Ping,
-        }
-        .encode(&mut writer)
-        .unwrap();
-        writer.flush().unwrap();
-        match ControlServerMsg::read(&mut writer).unwrap() {
-            ControlServerMsg::Response { req_id: 3, reply } => {
-                assert!(matches!(reply, ControlReply::Ok(ReplyOk::Pong)));
-            }
-            other => panic!("the author was pushed its own change: {other:?}"),
-        }
-    }
+    // -----------------------------------------------------------------------
+    // The machine tree, over the wire
+    // -----------------------------------------------------------------------
 
     /// A subscription is a connection's resource like any other: when the
-    /// connection ends, the store must stop holding a callback into its sink.
+    /// connection ends, the tree must stop holding a callback into its sink.
+    ///
+    /// (A leaked subscriber shows up as a `BrokenPipe` log rather than a
+    /// failure, so the assertion is that a later operation succeeds and lands —
+    /// with the tree's own `Drop`-based unsubscribe doing the work.)
     #[test]
     fn a_closed_connection_stops_being_a_subscriber() {
-        let (store, _dir) = temp_store();
-        let (server, client) = UnixStream::pair().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = MachineStore::open(dir.path().join(machine::MACHINE_FILE));
         let served = {
             let store = Arc::clone(&store);
-            std::thread::spawn(move || {
-                let _ = serve_with(server, LocalHost::new(), Services::with_workspaces(store));
-            })
+            let (server, client) = UnixStream::pair().unwrap();
+            let handle = std::thread::spawn(move || {
+                let _ = serve_with(server, LocalHost::new(), Services::with_machine(store));
+            });
+            // Handshake, then hang up.
+            let mut client = client;
+            ControlClientMsg::Hello(ControlHello::host_rpc("t", "h"))
+                .encode(&mut client)
+                .unwrap();
+            client.flush().unwrap();
+            let _ = ControlServerMsg::read(&mut client).unwrap();
+            drop(client);
+            handle
         };
-        // Handshake, then hang up.
-        let mut client = client;
-        ControlClientMsg::Hello(ControlHello::host_rpc("t", "h"))
-            .encode(&mut client)
-            .unwrap();
-        client.flush().unwrap();
-        let _ = ControlServerMsg::read(&mut client).unwrap();
-        drop(client);
         served.join().unwrap();
 
-        // The store still works, and writing to it does not try to reach a sink
-        // that is gone. (A leaked subscriber would show up as a `BrokenPipe`
-        // log rather than a failure, so the assertion is that the put succeeds
-        // and the record lands.)
-        store.put("w", ws_record("w", "api"), None).unwrap();
-        assert_eq!(store.len(), 1);
+        let ws = store
+            .workspace_create(None, Some("api".into()), None)
+            .unwrap();
+        assert_eq!(store.machine().workspaces.len(), 1);
+        assert_eq!(store.workspace(ws.id).unwrap().name.as_deref(), Some("api"));
     }
 
-    /// A store shared by many connections writing at once: the server has to be
-    /// as safe as the store is, and no request may be lost or answered twice.
+    /// One tree shared by many connections writing at once: the server has to be
+    /// as safe as the store is, and no operation may be lost or answered twice.
+    ///
+    /// Six connections × ten workspaces, which is also the shape the design is
+    /// *for* — several clients editing one machine — rather than the single
+    /// writer the retired record store assumed.
     #[test]
-    fn concurrent_connections_can_all_write_the_store() {
-        let (store, _dir) = temp_store();
-        let services = Services::with_workspaces(Arc::clone(&store));
+    fn concurrent_connections_can_all_write_the_tree() {
+        let (services, _dir) = workspace_services();
+        let store = Arc::clone(services.machine.as_ref().unwrap());
 
         let writers: Vec<_> = (0..6)
-            .map(|c| {
+            .map(|_| {
                 let services = services.clone();
                 std::thread::spawn(move || {
                     let (mut client, _) = raw_with(services);
                     for i in 0..10 {
-                        let id = format!("c{c}-{i}");
                         let reply = ask(
                             &mut client,
                             i as u64 + 1,
-                            ControlRequest::WorkspacePut {
-                                id: id.clone(),
-                                json: ws_record(&id, "x"),
+                            ControlRequest::WorkspaceCreate {
+                                name: Some(format!("w-{i}")),
+                                workspace: None,
                             },
                         );
                         assert!(
-                            matches!(reply, ControlReply::Ok(ReplyOk::Unit)),
+                            matches!(reply, ControlReply::Ok(ReplyOk::WorkspaceTree(_))),
                             "{reply:?}"
                         );
                     }
@@ -3438,7 +3566,64 @@ mod tests {
         for w in writers {
             w.join().unwrap();
         }
-        assert_eq!(store.len(), 60);
+        assert_eq!(
+            store.machine().workspaces.len(),
+            60,
+            "every operation landed exactly once"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Layout delta forwarding
+    // -----------------------------------------------------------------------
+
+    /// A connection whose delta queue dropped something is *told* — and told
+    /// **instead of** being handed the backlog.
+    ///
+    /// Before the announcement existed, the drop was a server-side log line and
+    /// the client mirrored a tree it was no longer looking at, indefinitely.
+    /// Announcing and *then* draining is the subtler version of the same bug:
+    /// the queue is FIFO, so everything in it is older than the gap, and a
+    /// client that re-pulled on the notice would then be walked back through
+    /// history it had already left — `TabRestructured` restoring the shape a tab
+    /// used to have, with the window and its mirror agreeing on the stale
+    /// answer, so nothing recovers a second time.
+    #[test]
+    fn a_lagged_connection_hears_a_resync_instead_of_the_superseded_backlog() {
+        let (server_end, mut client_end) = UnixStream::pair().unwrap();
+        let sink = Arc::new(Sink::new(server_end));
+        let (tx, rx) = smol::channel::bounded::<(String, machine::LayoutDelta)>(8);
+        let lagged = Arc::new(AtomicBool::new(false));
+
+        // A backlog, then the drop that makes every bit of it stale. Queued
+        // before the forwarder starts so nothing can be delivered early.
+        for _ in 0..4 {
+            tx.send_blocking(("ws-1".to_string(), machine::LayoutDelta::WorkspaceDeleted))
+                .unwrap();
+        }
+        lagged.store(true, Ordering::Release);
+        spawn_layout_forwarder(rx, sink, Arc::clone(&lagged));
+
+        assert_eq!(
+            ControlServerMsg::read(&mut client_end).unwrap(),
+            ControlServerMsg::Event(ControlEvent::LayoutResync)
+        );
+        assert!(
+            !lagged.load(Ordering::Acquire),
+            "the flag is consumed: one gap, one resync"
+        );
+
+        // The next frame is the *next* edit, not the four that were queued
+        // behind the gap.
+        tx.send_blocking(("ws-2".to_string(), machine::LayoutDelta::WorkspaceDeleted))
+            .unwrap();
+        match ControlServerMsg::read(&mut client_end).unwrap() {
+            ControlServerMsg::Event(ControlEvent::Layout { workspace, delta }) => {
+                assert_eq!(workspace, "ws-2", "the stale backlog was delivered anyway");
+                assert_eq!(delta, machine::LayoutDelta::WorkspaceDeleted);
+            }
+            other => panic!("expected the post-resync delta, got {other:?}"),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3456,13 +3641,14 @@ mod tests {
     fn a_second_client_takes_the_workspace_and_the_first_is_told() {
         let (services, _dir) = workspace_services();
         let registry = Arc::clone(&services.attachments);
+        let w = tree_workspace(&services);
 
         let ((mut laptop, _), _laptop_served) =
-            raw_hello(services.clone(), hello_for("w", "tok-laptop", "laptop"));
-        await_holder(&registry, "w", "laptop");
+            raw_hello(services.clone(), hello_for(&w, "tok-laptop", "laptop"));
+        await_holder(&registry, &w, "laptop");
 
         let ((mut desktop, _), _desktop_served) =
-            raw_hello(services.clone(), hello_for("w", "tok-desktop", "desktop"));
+            raw_hello(services.clone(), hello_for(&w, "tok-desktop", "desktop"));
 
         // The displaced session hears who took it, and which workspace: one
         // connection can carry several, so a push without the id would leave the
@@ -3470,21 +3656,21 @@ mod tests {
         assert_eq!(
             await_preempted(&mut laptop),
             Some(ControlEvent::Preempted {
-                workspace: "w".to_string(),
+                workspace: w.clone(),
                 by: "desktop".to_string(),
             })
         );
-        assert_eq!(registry.holder("w").map(|(_, h)| h), Some("desktop".into()));
+        assert_eq!(registry.holder(&w).map(|(_, h)| h), Some("desktop".into()));
         assert_eq!(
             services
-                .workspaces
+                .machine
                 .as_ref()
                 .unwrap()
-                .attachment("w")
+                .attachment(w.parse().unwrap())
                 .unwrap()
                 .hostname,
             "desktop",
-            "the store's record moves with the live handles"
+            "the tree's record moves with the live handles"
         );
 
         // And the newcomer is told what it took over from — a takeover the new
@@ -3492,7 +3678,7 @@ mod tests {
         let (reply, _) = round_trip(
             &mut desktop,
             1,
-            ControlRequest::WorkspaceAttach { id: "w".into() },
+            ControlRequest::WorkspaceAttach { id: w.clone() },
         );
         assert_eq!(
             reply,
@@ -3508,11 +3694,12 @@ mod tests {
     #[test]
     fn a_dedicated_connection_is_closed_when_its_workspace_is_taken() {
         let (services, _dir) = workspace_services();
+        let w = tree_workspace(&services);
         let ((mut laptop, _), _l) =
-            raw_hello(services.clone(), hello_for("w", "tok-laptop", "laptop"));
-        await_holder(&services.attachments, "w", "laptop");
+            raw_hello(services.clone(), hello_for(&w, "tok-laptop", "laptop"));
+        await_holder(&services.attachments, &w, "laptop");
         let ((_desktop, _), _d) =
-            raw_hello(services.clone(), hello_for("w", "tok-desktop", "desktop"));
+            raw_hello(services.clone(), hello_for(&w, "tok-desktop", "desktop"));
 
         assert!(await_preempted(&mut laptop).is_some());
         // The push comes first and the close after: the notice is useless if it
@@ -3525,59 +3712,51 @@ mod tests {
         );
     }
 
-    /// Deleting a workspace clears it from *both* tables.
+    /// Removing a workspace clears it from *both* tables.
     ///
-    /// The store drops its own attachment on delete. If the registry keeps its
-    /// handle, the two disagree with no race needed, and the next client to
-    /// attach that id evicts a session nobody displaced — closing its whole
-    /// link, since a dedicated entry takes every other workspace on that
-    /// connection down with it.
+    /// The tree drops its own attachment with the workspace. If the registry
+    /// keeps its handle, the two disagree with no race needed, and the next
+    /// client to attach that id evicts a session nobody displaced — closing
+    /// its whole link, since a dedicated entry takes every other workspace on
+    /// that connection down with it.
     #[test]
-    fn deleting_a_workspace_clears_both_attachment_tables() {
+    fn removing_a_workspace_clears_both_attachment_tables() {
         let (services, _dir) = workspace_services();
         let registry = Arc::clone(&services.attachments);
-        let store = services.workspaces.clone().unwrap();
+        let machine = services.machine.clone().unwrap();
+        let w = tree_workspace(&services);
+        let id: crate::core::session::WorkspaceId = w.parse().unwrap();
 
         let ((mut laptop, _), _l) =
-            raw_hello(services.clone(), hello_for("w", "tok-laptop", "laptop"));
-        await_holder(&registry, "w", "laptop");
-        assert!(store.attachment("w").is_some());
+            raw_hello(services.clone(), hello_for(&w, "tok-laptop", "laptop"));
+        await_holder(&registry, &w, "laptop");
+        assert!(machine.attachment(id).is_some());
 
-        ask(
-            &mut laptop,
-            1,
-            ControlRequest::WorkspacePut {
-                id: "w".to_string(),
-                json: ws_record("w", "the workspace"),
-            },
-        );
         let reply = ask(
             &mut laptop,
-            2,
-            ControlRequest::WorkspaceDelete {
-                id: "w".to_string(),
-            },
+            1,
+            ControlRequest::WorkspaceRemove { workspace: id },
         );
         assert!(
-            matches!(reply, ControlReply::Ok(ReplyOk::Unit)),
+            matches!(reply, ControlReply::Ok(ReplyOk::Panes(_))),
             "{reply:?}"
         );
 
         assert!(
-            store.attachment("w").is_none(),
-            "the store still names a holder for a workspace that is gone"
+            machine.attachment(id).is_none(),
+            "the tree still names a holder for a workspace that is gone"
         );
         assert!(
-            registry.holder("w").is_none(),
+            registry.holder(&w).is_none(),
             "the registry still holds a workspace that is gone"
         );
     }
 
-    /// The store's record and the registry's handle move under **one** lock.
+    /// The tree's record and the registry's handle move under **one** lock.
     ///
     /// They are separate tables with separate locks, and taking them one after
     /// the other is not enough: two clients attaching the same workspace at the
-    /// same instant can each win a different one, after which the store names a
+    /// same instant can each win a different one, after which the tree names a
     /// session the registry has already evicted. No `detach` can clear it — its
     /// token no longer matches — so from then on the workspace reports a
     /// takeover against a client that disconnected hours ago.
@@ -3590,28 +3769,30 @@ mod tests {
     fn an_attach_moves_both_tables_under_one_lock() {
         let (services, _dir) = workspace_services();
         let registry = Arc::clone(&services.attachments);
-        let store = services.workspaces.clone().unwrap();
+        let machine = services.machine.clone().unwrap();
+        let w = tree_workspace(&services);
+        let id: crate::core::session::WorkspaceId = w.parse().unwrap();
 
         let held = registry.handover();
         // The handshake replies before the attach, so this returns rather than
         // blocking on the lock we are holding.
         let ((_laptop, _ok), _served) =
-            raw_hello(services.clone(), hello_for("w", "tok-laptop", "laptop"));
+            raw_hello(services.clone(), hello_for(&w, "tok-laptop", "laptop"));
 
         std::thread::sleep(Duration::from_millis(150));
         assert!(
-            registry.holder("w").is_none(),
+            registry.holder(&w).is_none(),
             "the registry was moved while a handover was in flight"
         );
         assert!(
-            store.attachment("w").is_none(),
-            "the store was moved while a handover was in flight"
+            machine.attachment(id).is_none(),
+            "the tree was moved while a handover was in flight"
         );
 
         drop(held);
-        await_holder(&registry, "w", "laptop");
+        await_holder(&registry, &w, "laptop");
         assert_eq!(
-            store.attachment("w").map(|a| a.token).as_deref(),
+            machine.attachment(id).map(|a| a.token).as_deref(),
             Some("tok-laptop"),
             "both tables have to name the same session once the handover is done"
         );
@@ -3624,16 +3805,18 @@ mod tests {
     fn a_shared_connection_survives_losing_one_of_its_workspaces() {
         let (services, _dir) = workspace_services();
         let registry = Arc::clone(&services.attachments);
+        let w1 = tree_workspace(&services);
+        let w2 = tree_workspace(&services);
 
         let ((mut laptop, _), _l) = raw_hello(
             services.clone(),
             ControlHello::host_rpc("tok-laptop", "laptop"),
         );
-        for (i, id) in ["w1", "w2"].iter().enumerate() {
+        for (i, id) in [&w1, &w2].iter().enumerate() {
             let (reply, _) = round_trip(
                 &mut laptop,
                 i as u64 + 1,
-                ControlRequest::WorkspaceAttach { id: (*id).into() },
+                ControlRequest::WorkspaceAttach { id: (*id).clone() },
             );
             assert_eq!(
                 reply,
@@ -3645,11 +3828,11 @@ mod tests {
         assert_eq!(registry.len(), 2);
 
         let ((_desktop, _), _d) =
-            raw_hello(services.clone(), hello_for("w1", "tok-desktop", "desktop"));
+            raw_hello(services.clone(), hello_for(&w1, "tok-desktop", "desktop"));
         assert_eq!(
             await_preempted(&mut laptop),
             Some(ControlEvent::Preempted {
-                workspace: "w1".to_string(),
+                workspace: w1.clone(),
                 by: "desktop".to_string(),
             })
         );
@@ -3658,11 +3841,11 @@ mod tests {
         let (reply, _) = round_trip(&mut laptop, 9, ControlRequest::Ping);
         assert_eq!(reply, ControlReply::Ok(ReplyOk::Pong));
         assert_eq!(
-            registry.holder("w2").map(|(t, _)| t),
+            registry.holder(&w2).map(|(t, _)| t),
             Some("tok-laptop".into())
         );
         assert_eq!(
-            registry.holder("w1").map(|(t, _)| t),
+            registry.holder(&w1).map(|(t, _)| t),
             Some("tok-desktop".into())
         );
     }
@@ -3674,7 +3857,9 @@ mod tests {
     fn a_displaced_session_tidying_up_does_not_evict_the_new_owner() {
         let (services, _dir) = workspace_services();
         let registry = Arc::clone(&services.attachments);
-        let store = Arc::clone(services.workspaces.as_ref().unwrap());
+        let machine = Arc::clone(services.machine.as_ref().unwrap());
+        let w = tree_workspace(&services);
+        let other = tree_workspace(&services);
 
         let ((mut laptop, _), _l) = raw_hello(
             services.clone(),
@@ -3682,30 +3867,33 @@ mod tests {
         );
         // Two workspaces on one link, which is what a client with two windows
         // on one machine has — and what keeps this link up once `w` is taken.
-        for (i, id) in ["w", "other"].iter().enumerate() {
+        for (i, id) in [&w, &other].iter().enumerate() {
             round_trip(
                 &mut laptop,
                 i as u64 + 1,
-                ControlRequest::WorkspaceAttach { id: (*id).into() },
+                ControlRequest::WorkspaceAttach { id: (*id).clone() },
             );
         }
         let ((_desktop, _), _d) =
-            raw_hello(services.clone(), hello_for("w", "tok-desktop", "desktop"));
+            raw_hello(services.clone(), hello_for(&w, "tok-desktop", "desktop"));
         assert!(await_preempted(&mut laptop).is_some());
 
         // The laptop, which no longer holds anything, tidies up.
         let (reply, _) = round_trip(
             &mut laptop,
             3,
-            ControlRequest::WorkspaceDetach { id: "w".into() },
+            ControlRequest::WorkspaceDetach { id: w.clone() },
         );
         assert_eq!(reply, ControlReply::Ok(ReplyOk::Unit));
         assert_eq!(
-            registry.holder("w").map(|(t, _)| t),
+            registry.holder(&w).map(|(t, _)| t),
             Some("tok-desktop".into()),
             "the displaced session must not release what it no longer holds"
         );
-        assert_eq!(store.attachment("w").unwrap().token, "tok-desktop");
+        assert_eq!(
+            machine.attachment(w.parse().unwrap()).unwrap().token,
+            "tok-desktop"
+        );
     }
 
     /// A connection ending gives its workspaces back, so the next client does
@@ -3714,22 +3902,22 @@ mod tests {
     fn a_closed_connection_releases_what_it_held() {
         let (services, _dir) = workspace_services();
         let registry = Arc::clone(&services.attachments);
-        let store = Arc::clone(services.workspaces.as_ref().unwrap());
+        let machine = Arc::clone(services.machine.as_ref().unwrap());
+        let w = tree_workspace(&services);
         {
-            let ((client, _), served) =
-                raw_hello(services.clone(), hello_for("w", "tok", "laptop"));
-            await_holder(&registry, "w", "laptop");
+            let ((client, _), served) = raw_hello(services.clone(), hello_for(&w, "tok", "laptop"));
+            await_holder(&registry, &w, "laptop");
             drop(client);
             served.join().unwrap();
         }
         assert!(registry.is_empty(), "the registry outlived the connection");
-        assert_eq!(store.attachment("w"), None);
+        assert_eq!(machine.attachment(w.parse().unwrap()), None);
     }
 
-    /// A server with no workspace store has no workspaces to attach to, and
+    /// A server with no machine tree has no workspaces to attach to, and
     /// says so rather than pretending the claim succeeded.
     #[test]
-    fn attaching_to_a_server_without_a_store_is_an_error() {
+    fn attaching_to_a_server_without_a_tree_is_an_error() {
         let (mut client, _) = raw_with(Services::none());
         let (reply, _) = round_trip(
             &mut client,

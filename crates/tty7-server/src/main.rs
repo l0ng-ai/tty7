@@ -144,21 +144,13 @@ fn main() -> ExitCode {
 }
 
 /// Serve panes and control connections until killed.
+///
+/// The whole of it lives in [`tty7_core::daemon::server::run_daemon`], shared
+/// verbatim with `tty7 --daemon`: local and remote machines run the identical
+/// daemon, which is what makes "one machine = one daemon = one workspace tree"
+/// a fact rather than a convention.
 fn run_daemon() -> ExitCode {
-    // Control first, and on its own thread: a machine that cannot host panes
-    // (no pty, a locked-down container) should still be able to back a remote
-    // workspace's files, so a control failure is reported and stepped over
-    // rather than being fatal.
-    #[cfg(unix)]
-    match tty7_core::host::server::spawn_control_listener_with(
-        tty7_core::host::local::LocalHost::shared(),
-        control_services(),
-    ) {
-        Ok(path) => eprintln!("tty7-server: control socket at {}", path.display()),
-        Err(e) => eprintln!("tty7-server: control listener unavailable: {e}"),
-    }
-
-    if let Err(e) = tty7_core::daemon::server::run() {
+    if let Err(e) = tty7_core::daemon::server::run_daemon() {
         eprintln!("tty7-server: daemon exited with error: {e}");
         return ExitCode::FAILURE;
     }
@@ -226,7 +218,7 @@ fn run_stdio(args: &[String]) -> io::Result<()> {
                     // the same rule `bridge_panes` follows one dialect over,
                     // and for the same reason. Two `--stdio` sessions both
                     // falling through to serving in-process would each hold
-                    // their own `WorkspaceStore` over the one file, and
+                    // their own `MachineStore` over the one file, and
                     // `persist` writes the whole document: the second to save
                     // silently drops the first's changes. Their attachment
                     // registries would be separate too, which makes design
@@ -266,7 +258,11 @@ fn run_stdio(args: &[String]) -> io::Result<()> {
                 // Takes stdin/stdout away from the rest of the process before a
                 // single frame is written — see `StdioDuplex::take`.
                 let link = StdioDuplex::take()?;
-                server::serve_with(link, LocalHost::shared(), control_services())
+                server::serve_with(
+                    link,
+                    LocalHost::shared(),
+                    tty7_core::daemon::server::control_services(),
+                )
             }
         }
     }
@@ -375,37 +371,6 @@ fn bridge(upstream: std::os::unix::net::UnixStream) -> io::Result<()> {
     let _ = upstream.shutdown(Shutdown::Both);
     drop(feeder);
     Ok(())
-}
-
-/// What this machine offers over a control connection, beyond its filesystem.
-///
-/// The workspace store is the reason this binary exists on a remote box at all:
-/// the workspace list, the tab/pane tree and each pane's cwd live on
-/// **the machine the panes run on**, so that connecting from a different laptop
-/// shows the same thing. The client's `session.json` keeps only its own view
-/// state.
-///
-/// A machine with no home directory to place the file in still serves files and
-/// panes — it simply says `workspace-store` is not among its capabilities, and
-/// clients see the same "does not serve the workspace store" answer a
-/// pre-M5 server gives.
-fn control_services() -> tty7_core::host::server::Services {
-    use tty7_core::core::workspace_store::WorkspaceStore;
-    match WorkspaceStore::shared() {
-        Ok(store) => {
-            log_stderr(format_args!(
-                "workspace store at {}",
-                store.path().display()
-            ));
-            tty7_core::host::server::Services::with_workspaces(store)
-        }
-        Err(e) => {
-            log_stderr(format_args!(
-                "no workspace store ({e}); serving files and panes only"
-            ));
-            tty7_core::host::server::Services::none()
-        }
-    }
 }
 
 /// `--flag <value>` or `--flag=<value>`, first occurrence wins.

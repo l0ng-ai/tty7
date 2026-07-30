@@ -1,7 +1,7 @@
 //! The window's half of "Connect to Host".
 //!
 //! [`ui::remote_connect`](crate::ui::remote_connect) is the plumbing — SSH
-//! specs, routed control connections, the remote workspace store. This is the
+//! specs, routed control connections, the remote machine's tree. This is the
 //! part that lives on a window: the state the home page renders, the steps that
 //! move between those states, and the guards that keep a window on one machine.
 //!
@@ -19,7 +19,7 @@
 //! |---|---|
 //! | New tab / split | [`Tty7App::spawn_host`] — a remote window refuses to spawn a local shell |
 //! | Reopening a closed tab | [`Tty7App::rebind_host`] clears the closed stack when a window changes machine |
-//! | Restart / session restore | `WorkspaceStore::record`'s storage split — a remote entry never holds a local layout on disk |
+//! | Restart / session restore | the machine's own tree is the only layout source — the client persists no layout at all |
 //!
 //! The fourth path, dragging a tab between windows, does not exist in tty7:
 //! tabs never leave the window they were opened in, so there is nothing to
@@ -661,10 +661,10 @@ impl Tty7App {
                         rows: rows.clone(),
                     },
                 );
-                remote_connect::RemoteConnections::insert(cx, connected.host, home.clone());
+                remote_connect::HostLinks::insert(cx, connected.host, home.clone());
                 self.prompt_remote_daemon_mismatch_later(cx);
                 // Nothing left to *show* about the attempt: the machine is now
-                // in `RemoteConnections` and its group in the switcher fills
+                // in `HostLinks` and its group in the switcher fills
                 // itself from there and from the snapshot above.
                 self.connect = None;
             }
@@ -688,7 +688,8 @@ impl Tty7App {
     ) {
         let host = RemoteRef::new(target, row.id);
         let id = WorkspaceStore::claim_remote(cx, host);
-        WorkspaceStore::apply_remote(cx, id, &row.record);
+        // No record to apply: the machine's tree is pulled when the window
+        // hydrates, which the enter below sets in motion.
         self.enter_remote_workspace(id, window, cx);
     }
 
@@ -711,7 +712,8 @@ impl Tty7App {
         // it from the tabs' repo/cwd, which is the same rule a local workspace
         // follows and the one intended. A workspace that opened in
         // `~` and then had a repo opened in it renames itself for free.
-        self.push_remote_layout(id, cx);
+        // The machine learns about the workspace when the window's hydration
+        // finds nothing under this id and creates it (`WorkspaceCreate`).
         log::info!(
             "new remote workspace on {target} rooted at {}",
             home.display()
@@ -746,44 +748,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Push this window's workspace record to the machine that owns it.
-    ///
-    /// The other half of the storage split: the client keeps `open`, the window
-    /// geometry and the pointer; everything that is a fact about the machine
-    /// goes over there. Fire-and-forget on a background task — a failed push is
-    /// a log line, not a modal, because the record is rewritten on every
-    /// structural change anyway.
-    pub(crate) fn push_remote_layout(&self, id: WorkspaceId, cx: &mut gpui::App) {
-        let Some((host, key, record)) = WorkspaceStore::remote_payload(cx, id) else {
-            return;
-        };
-        let Some(connection) = remote_connect::RemoteConnections::get(cx, host.host_id()) else {
-            // Not connected: the layout is pushed again when it is, and the
-            // remote's own copy is still the last good one.
-            return;
-        };
-        // Marked before the task starts and cleared when it lands, so a
-        // `WorkspaceChanged` that arrives in between does not pull the record
-        // this push is replacing back over the top of it.
-        cx.default_global::<RemoteLinks>().pushing.insert(id);
-        cx.spawn(async move |cx| {
-            cx.background_executor()
-                .spawn(async move {
-                    if let Err(e) = remote_connect::put_remote_layout(&connection, key, record) {
-                        log::warn!(
-                            "could not push the workspace layout to {}: {e}",
-                            host.target
-                        );
-                    }
-                })
-                .await;
-            cx.update(|cx| {
-                cx.default_global::<RemoteLinks>().pushing.remove(&id);
-            });
-        })
-        .detach();
-    }
-
     /// `open: true` remote workspaces reconnect at launch.
     ///
     /// **M6 owns the behaviour**; this owns the seam. Startup opens a window per
@@ -798,7 +762,7 @@ impl Tty7App {
             return;
         };
         remote_connect::register(cx);
-        if remote_connect::RemoteConnections::get(cx, host.host_id()).is_some() {
+        if remote_connect::HostLinks::get(cx, host.host_id()).is_some() {
             // Another window on the same machine got there first. One connection
             // per machine is the point — D7's "connect immediately" is about the
             // *machine*, and a second link to it would be a second SSH session
@@ -1060,15 +1024,6 @@ pub(crate) fn pane_route_for(cx: &gpui::App, workspace: WorkspaceId) -> crate::t
     crate::terminal::PaneRoute::for_workspace(pane_workspace_for(cx, workspace).as_ref())
 }
 
-/// The connection for a remote workspace, if this process has one.
-pub(crate) fn connection_for(
-    cx: &mut gpui::App,
-    workspace: WorkspaceId,
-) -> Option<Arc<RemoteHost>> {
-    let host = WorkspaceStore::remote_ref(cx, workspace)?;
-    remote_connect::RemoteConnections::get(cx, host.host_id())
-}
-
 // ---------------------------------------------------------------------------
 // The supervisor (the connection state machine, running)
 // ---------------------------------------------------------------------------
@@ -1078,12 +1033,12 @@ pub(crate) fn connection_for(
 /// Fast enough that a `Preempted` push turns a window read-only while the user
 /// is still looking at the machine they typed on, slow enough to be free: a tick
 /// is a hash-map walk over the handful of machines a person has open.
-const PUMP_TICK: Duration = Duration::from_millis(250);
+pub(crate) const PUMP_TICK: Duration = Duration::from_millis(250);
 
 /// One machine's link, as the supervisor sees it.
 ///
 /// Per **machine**, not per workspace, because that is the granularity a
-/// connection actually has (`RemoteConnections` is keyed by [`HostId`], and two
+/// connection actually has (`HostLinks` is keyed by [`HostId`], and two
 /// windows on one box share a link). Preemption is the one thing that is
 /// per-workspace, and it is kept separately for exactly that reason.
 struct MachineLink {
@@ -1116,6 +1071,13 @@ pub(crate) struct RemoteLinks {
     /// Workspaces taken over, and by whom. Per **workspace**: one machine can
     /// hold three of them and lose exactly one.
     preempted: std::collections::HashMap<WorkspaceId, String>,
+    /// Workspaces being taken *back*: [`RemoteLinks::retry_now`] cleared their
+    /// preemption and the reconnect is in flight. Remembered because the
+    /// window still shows the pre-takeover layout, and [`finish_attempt`]
+    /// must rebuild it from the tree whole (`Adopt::Replace`) — the IfEmpty
+    /// hydration it runs for an ordinary reconnect skips any non-empty
+    /// window, which is precisely what a preempted window is.
+    reclaiming: std::collections::HashSet<WorkspaceId>,
     /// Machines the user has deliberately disconnected from.
     ///
     /// Without this the supervisor would reconnect on the next tick: it keeps a
@@ -1135,12 +1097,6 @@ pub(crate) struct RemoteLinks {
     /// absent from this map has never been seen before, which is **not** the
     /// same as having restarted — see [`finish_attempt`].
     instances: std::collections::HashMap<HostId, String>,
-    /// Workspaces this client is pushing a layout for right now.
-    ///
-    /// Read by [`refresh_remote_workspace`], which skips them: a record we are
-    /// in the middle of replacing is not one to pull back over the top of
-    /// ourselves.
-    pushing: std::collections::HashSet<WorkspaceId>,
     /// The start-up sheet queue. Lives here because it is part of the
     /// same connection state and has to survive individual windows — the sheet
     /// belongs to a machine, not to whichever window happened to ask first.
@@ -1162,6 +1118,18 @@ impl gpui::Global for RemoteLinks {}
 /// `remote_connect`'s install mailbox uses, for the identical reason.
 static EVENTS: Mutex<Vec<(HostId, ControlEvent)>> = Mutex::new(Vec::new());
 
+/// Point the process-wide control-event observer at [`EVENTS`]. Idempotent
+/// (installing the same closure again is harmless), and shared with the local
+/// link's pump ([`crate::ui::local_link::LocalLink::install`]) — whichever
+/// comes up first, reader threads must never find nobody listening.
+pub(crate) fn install_event_observer() {
+    crate::daemon::control::set_event_observer(Arc::new(|host, event| {
+        if let Ok(mut queue) = EVENTS.lock() {
+            queue.push((host, event));
+        }
+    }));
+}
+
 impl RemoteLinks {
     /// Start the supervisor, and make sure control events have somewhere to go.
     ///
@@ -1169,11 +1137,7 @@ impl RemoteLinks {
     /// (the connect flow, opening one, start-up), because any of them can be the
     /// first.
     pub(crate) fn ensure_running(cx: &mut gpui::App) {
-        crate::daemon::control::set_event_observer(Arc::new(|host, event| {
-            if let Ok(mut queue) = EVENTS.lock() {
-                queue.push((host, event));
-            }
-        }));
+        install_event_observer();
         if cx.default_global::<RemoteLinks>().pumping {
             return;
         }
@@ -1233,7 +1197,12 @@ impl RemoteLinks {
             return;
         };
         let links = cx.default_global::<RemoteLinks>();
-        links.preempted.remove(&workspace);
+        if links.preempted.remove(&workspace).is_some() {
+            // Taking back, not merely reconnecting: the window's layout is
+            // the pre-takeover one, so the attach that lands must rebuild it
+            // from the tree rather than trust what it shows.
+            links.reclaiming.insert(workspace);
+        }
         // Asking to reconnect outranks having asked to disconnect.
         links.suspended.remove(&host.host_id());
         let link = links.machines.entry(host.host_id()).or_insert(MachineLink {
@@ -1273,11 +1242,11 @@ impl RemoteLinks {
         // would keep reading from a socket that is about to be dropped under it.
         for (workspace, _) in workspaces_on(cx, host) {
             release_panes(cx, workspace);
-            cx.default_global::<RemoteLinks>()
-                .preempted
-                .remove(&workspace);
+            let links = cx.default_global::<RemoteLinks>();
+            links.preempted.remove(&workspace);
+            links.reclaiming.remove(&workspace);
         }
-        remote_connect::RemoteConnections::remove(cx, host);
+        remote_connect::HostLinks::remove(cx, host);
         cx.default_global::<RemoteLinks>().machines.remove(&host);
         log::info!("disconnected from a machine at the user's request");
         cx.refresh_windows();
@@ -1317,6 +1286,7 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
         let forgotten = links.machines.len();
         links.machines.clear();
         links.preempted.clear();
+        links.reclaiming.clear();
         links.suspended.clear();
         // Logged because the *state* it leaves behind is indistinguishable from
         // never having connected: `status_of` reads a missing link as
@@ -1338,8 +1308,8 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
         if suspended.contains(&host) {
             continue;
         }
-        let live = remote_connect::RemoteConnections::get(cx, host)
-            .is_some_and(|h| h.client().is_connected());
+        let live =
+            remote_connect::HostLinks::get(cx, host).is_some_and(|h| h.client().is_connected());
         let attempting = cx
             .try_global::<RemoteLinks>()
             .and_then(|l| l.machines.get(&host))
@@ -1356,6 +1326,9 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
             if became {
                 changed = true;
                 log::info!("link to {target} is attached");
+                // A fresh link means whatever the mirror held is history; the
+                // full pull re-bases it before deltas resume advancing it.
+                crate::ui::machine_mirror::MachineMirrors::refresh(cx, host);
             }
             continue;
         }
@@ -1366,8 +1339,8 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
         // The link is down. Drop the dead host object so nothing keeps calling
         // into it — a control connection that has gone is the whole
         // workspace's lifeline, not one failed request.
-        if remote_connect::RemoteConnections::get(cx, host).is_some() {
-            remote_connect::RemoteConnections::remove(cx, host);
+        if remote_connect::HostLinks::get(cx, host).is_some() {
+            remote_connect::HostLinks::remove(cx, host);
             log::info!("lost the control connection to {target}; reconnecting");
         }
 
@@ -1426,7 +1399,7 @@ fn prune_suspended(
 /// window that is not there.
 fn bound_machines(cx: &gpui::App) -> Vec<(HostId, RemoteTarget)> {
     let mut out: Vec<(HostId, RemoteTarget)> = Vec::new();
-    for workspace in &WorkspaceStore::all(cx).workspaces {
+    for workspace in &WorkspaceStore::all(cx).views {
         let Some(host) = workspace.host.as_ref() else {
             continue;
         };
@@ -1445,7 +1418,7 @@ fn bound_machines(cx: &gpui::App) -> Vec<(HostId, RemoteTarget)> {
 /// belong to.
 fn workspaces_on(cx: &gpui::App, host: HostId) -> Vec<(WorkspaceId, String)> {
     WorkspaceStore::all(cx)
-        .workspaces
+        .views
         .iter()
         .filter(|w| w.open)
         .filter_map(|w| {
@@ -1456,14 +1429,11 @@ fn workspaces_on(cx: &gpui::App, host: HostId) -> Vec<(WorkspaceId, String)> {
 }
 
 /// Apply everything the reader threads pushed since the last tick.
-fn drain_events(cx: &mut gpui::App) {
+pub(crate) fn drain_events(cx: &mut gpui::App) {
     let events = match EVENTS.lock() {
         Ok(mut queue) => std::mem::take(&mut *queue),
         Err(_) => return,
     };
-    // Read out before the loop: the pull is one round trip per workspace no
-    // matter how many events asked for it.
-    let stale = stale_workspaces(&events);
     for (host, event) in events {
         match event {
             // The takeover, arriving. The window goes read-only and
@@ -1481,102 +1451,41 @@ fn drain_events(cx: &mut gpui::App) {
                     .preempted
                     .insert(id, by.clone());
                 release_panes(cx, id);
+                // The window's tree-sync state goes with the streams: its
+                // mirror and queue describe a session that just lost the
+                // workspace, and its `informed` licence must not survive into
+                // the take-back (see `tree_sync::on_preempted`).
+                crate::ui::tree_sync::on_preempted(cx, id);
                 cx.refresh_windows();
             }
-            // Handled by `stale_workspaces` above, in one pull per workspace.
-            ControlEvent::WorkspaceChanged { .. } => {}
+            // Another writer edited a workspace tree this client shows: apply
+            // the delta to the mirror and the live window (or re-pull the
+            // workspace when it will not apply cleanly).
+            ControlEvent::Layout { workspace, delta } => {
+                crate::ui::tree_sync::on_layout_delta(cx, host, &workspace, delta);
+            }
+            // The machine dropped deltas for this connection: every mirror of
+            // it is now wrong in a way no later delta repairs. Re-pull the
+            // machine whole and rebuild the windows on it — the recovery an
+            // unappliable delta already uses, here announced by the server
+            // instead of stumbled into.
+            ControlEvent::LayoutResync => {
+                log::info!("{host:?} dropped layout deltas for this client; re-pulling");
+                crate::ui::machine_mirror::MachineMirrors::refresh(cx, host);
+                for (workspace, _) in crate::ui::windows::WindowRegistry::open_windows(cx) {
+                    if WorkspaceStore::host_of(cx, workspace) != host {
+                        continue;
+                    }
+                    // A preempted window stays passive; its take-back re-pulls.
+                    if workspace_is_preempted(cx, workspace) {
+                        continue;
+                    }
+                    crate::ui::tree_sync::resync_window_from_tree(cx, workspace);
+                }
+            }
             other => log::debug!("unhandled control event from {host:?}: {other:?}"),
         }
     }
-    for (host, key) in stale {
-        refresh_remote_workspace(cx, host, key);
-    }
-}
-
-/// The workspaces a batch of events says to re-read, each named once.
-///
-/// The machine's own record changed — another client of ours moved a tab,
-/// renamed a workspace, closed one. The event carries **no record**, only "go
-/// and read it again", and B3 is explicit that losing one of these is safe and
-/// getting two is safe. That is exactly the licence to collapse a burst into one
-/// round trip, and the reason nothing here tries to be incremental: there is no
-/// state to keep, so there is none to get wrong.
-fn stale_workspaces(events: &[(HostId, ControlEvent)]) -> Vec<(HostId, String)> {
-    let mut out: Vec<(HostId, String)> = Vec::new();
-    for (host, event) in events {
-        if let ControlEvent::WorkspaceChanged { id } = event
-            && !out.iter().any(|(h, key)| h == host && key == id)
-        {
-            out.push((*host, id.clone()));
-        }
-    }
-    out
-}
-
-/// Re-read one workspace's record from the machine that owns it and apply it.
-///
-/// # Why this cannot interrupt what the user is doing
-///
-/// It lands in the **store**, not in the window. `apply_remote` writes the three
-/// remote-owned fields of the client's `Workspace` entry (`name`, `session`,
-/// `last_active`) and nothing rebuilds a live window from that entry while the
-/// window is open — a workspace's tabs are built when the window opens or swaps
-/// workspaces, and `claimable_session` scrubs a remote entry's layout even then.
-/// So there is no path from here to a closed tab, a re-spawned pane or a moved
-/// focus; what a user sees change is the workspace's *name*.
-///
-/// That is deliberate rather than incidental. The remote is the
-/// authority for the layout, but the client that has the window open is the one
-/// *living* in it, and rearranging somebody's panes underneath them because
-/// another machine moved a tab is not a refresh, it is a fight. The remote's
-/// layout is what a window opens *from* — on the next connect, reconnect or
-/// reopen — and this keeps the copy it will open from current.
-///
-/// # The one race, and how it is settled
-///
-/// A push of ours can be in flight when an event arrives (the server excludes
-/// the writer, so the event is another client's, but it may describe a moment
-/// before our write). Applying it would briefly show that client's name for a
-/// workspace we are mid-rename of. So a workspace with a push in flight is
-/// skipped: our push is about to become the machine's truth, and B3's "dropping
-/// one is safe" is what makes skipping the right move rather than a queue.
-fn refresh_remote_workspace(cx: &mut gpui::App, host: HostId, store_key: String) {
-    let Some(id) = client_id_for(cx, host, &store_key) else {
-        // A workspace on that machine this client has no window on. Nothing to
-        // refresh; the record is pulled when it is opened.
-        log::debug!("remote workspace {store_key} changed on a machine with no window here");
-        return;
-    };
-    if cx.default_global::<RemoteLinks>().pushing.contains(&id) {
-        log::debug!("skipping the refresh of {id}: this client is mid-push for it");
-        return;
-    }
-    let Some(connection) = remote_connect::RemoteConnections::get(cx, host) else {
-        // Not connected: the next connect pulls the whole list anyway.
-        return;
-    };
-    cx.spawn(async move |cx| {
-        let pulled = cx
-            .background_executor()
-            .spawn(async move { remote_connect::get_remote_layout(&connection, store_key) })
-            .await;
-        match pulled {
-            Ok(record) => {
-                cx.update(|cx| {
-                    WorkspaceStore::apply_remote(cx, id, &record);
-                    cx.refresh_windows();
-                });
-            }
-            // The workspace was deleted on the far side. The window stays open
-            // with what it had — a window is never closed, and least of all
-            // because another machine decided this one was done with it.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                log::info!("remote workspace {id} is gone from its machine; keeping the window");
-            }
-            Err(e) => log::warn!("could not re-read remote workspace {id}: {e}"),
-        }
-    })
-    .detach();
 }
 
 /// Come back to a machine whose server was just replaced.
@@ -1601,7 +1510,7 @@ fn reconnect_after_restart(origin: &str, cx: &mut gpui::App) {
     let Some(host) = remote_connect::origin_host(origin) else {
         return;
     };
-    remote_connect::RemoteConnections::remove(cx, host);
+    remote_connect::HostLinks::remove(cx, host);
     for (workspace, _) in workspaces_on(cx, host) {
         RemoteLinks::retry_now(cx, workspace);
     }
@@ -1669,7 +1578,7 @@ fn launch_attempt(cx: &mut gpui::App, host: HostId, target: RemoteTarget) {
                             log::info!("took workspace {key} back from {who}");
                         }
                         Ok(_) => {}
-                        // A machine that has no workspace store (an older
+                        // A machine that has no machine tree (an older
                         // server) still serves files; the workspace is usable,
                         // it simply cannot be claimed exclusively.
                         Err(e) => log::warn!("could not attach to workspace {key}: {e}"),
@@ -1692,43 +1601,39 @@ fn finish_attempt(
 ) {
     match outcome {
         Ok(connected) => {
-            // The remote's record is the authority for the layout,
-            // so what came back with the connect replaces what this client had.
-            let rows = connected.rows.clone();
-            let instance = connected.host.peer().instance.clone();
             let restarted = server_restarted(cx, host, &connected.host);
             // The home too, not just the connection: this is the path a machine
             // comes back on after a restart or a dropped link, and dropping it
             // here is what left "New Workspace" missing on a machine the panel
             // was quite happily calling connected.
-            remote_connect::RemoteConnections::insert(cx, connected.host, connected.home);
-            for (id, key) in workspaces_on(cx, host) {
-                if let Some(row) = rows.iter().find(|r| r.id.to_string() == key) {
-                    WorkspaceStore::apply_remote(cx, id, &row.record);
-                }
-                cx.default_global::<RemoteLinks>().preempted.remove(&id);
-                // The same question `restarted` answers, asked of the *record*
-                // rather than of this process's memory — and it is the only one
-                // that can answer across a client restart. `instances` is an
-                // in-memory map, so on a cold launch every machine is a first
-                // sighting and `restarted` is false; a server replaced while
-                // this client was closed would sail through, and its recycled
-                // ids would attach to whatever unrelated shells now hold the
-                // numbers. `daemon_instance` is on disk and remembers.
-                let stale = WorkspaceStore::forget_stale_pane_ids(cx, id, &instance);
-                if restarted || stale {
-                    // Every pane id this workspace holds was minted by a process
-                    // that is gone. Re-attaching them would cost one doomed round
-                    // trip each and leave the window exactly as disconnected as
-                    // it is now, so the window is rebuilt from the layout instead
-                    // — the same thing a local daemon restart does.
-                    rebuild_after_server_restart(cx, id);
+            remote_connect::HostLinks::insert(cx, connected.host, connected.home);
+            for (id, _key) in workspaces_on(cx, host) {
+                let reclaimed = {
+                    let links = cx.default_global::<RemoteLinks>();
+                    // The attach that just landed preempts whoever held the
+                    // workspace, so a still-recorded preemption is one this
+                    // reconnect ends — same situation as an explicit Take
+                    // Back, and rebuilt the same way below.
+                    links.preempted.remove(&id).is_some() | links.reclaiming.remove(&id)
+                };
+                if restarted || reclaimed {
+                    // Rebuild from the tree whole. After a server restart
+                    // every pane this window shows lived in a process that is
+                    // gone (a fresh server holds no live panes), so the tree
+                    // lowers each leaf to a revival — fresh shells in the
+                    // recorded cwds, agents resumed. After a take-back the
+                    // panes may well be alive, but the *layout* on screen is
+                    // the pre-takeover one: the IfEmpty hydration below would
+                    // skip this non-empty window and leave it stale — the
+                    // "take back re-pulls whole" the preemption paths promise
+                    // happens here, as a Replace.
+                    crate::ui::tree_sync::resync_window_from_tree(cx, id);
                 } else {
                     relink_panes(cx, id);
-                    // A window that came up before its machine did has no panes to
-                    // relink — it opened empty because there was nothing to route
-                    // to. Now there is.
-                    hydrate_window(cx, id);
+                    // A window that came up before its machine did has no panes
+                    // to relink — it opened empty because there was nothing to
+                    // route to. Now there is: fill it from the tree.
+                    crate::ui::tree_sync::hydrate_window_from_tree(cx, id);
                 }
                 // Same reason the window had no panes: with the machine
                 // unreachable there was nothing to ask for its shells, so the
@@ -1824,55 +1729,6 @@ fn relink_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
     }
 }
 
-/// Build the tabs of a window that opened before its machine was reachable.
-///
-/// This is the other end of [`crate::core::session::WorkspaceStore::claim`]'s
-/// reachability rule. A remote workspace reopened at launch has nowhere to route
-/// to yet — the link is still being built — so it opens empty rather than
-/// spawning a second set of shells beside the ones still running over there.
-/// The layout it *would* have opened from is the entry's cached session, which
-/// [`finish_attempt`] has just refreshed from the machine itself, so by the time
-/// this runs the window is rebuilding from the authority.
-///
-/// # What it will not do
-///
-/// **Only an empty window is touched.** A window with tabs is one the user is
-/// working in; rearranging it because a link came back is the same fight
-/// [`refresh_remote_workspace`] refuses to pick. That also makes this safe to
-/// call on every reconnect — the second one through finds tabs and leaves.
-fn hydrate_window(cx: &mut gpui::App, workspace: WorkspaceId) {
-    let session = match WorkspaceStore::all(cx).get(workspace) {
-        Some(entry) if entry.is_remote() => entry.session.clone(),
-        // Local, or an entry that went away while the connect was in flight.
-        _ => return,
-    };
-    if session.tabs.is_empty() {
-        // Nothing to restore: a workspace that was quit from the home page, or
-        // a brand-new one. Its window is right as it is.
-        return;
-    }
-    let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, workspace) else {
-        return;
-    };
-    let Some(app) =
-        crate::ui::windows::WindowRegistry::app_for(cx, workspace).and_then(|app| app.upgrade())
-    else {
-        return;
-    };
-    if !app.read(cx).tabs.is_empty() {
-        return;
-    }
-    log::info!(
-        "rebuilding {} tab(s) of workspace {workspace} now its machine is reachable",
-        session.tabs.len()
-    );
-    let _ = handle.update(cx, move |_, window, cx| {
-        app.update(cx, |app, cx| {
-            app.adopt_workspace(workspace, session, window, cx)
-        });
-    });
-}
-
 /// Whether the machine we just reconnected to is being served by a *different*
 /// `tty7-server` process than the one we last spoke to.
 ///
@@ -1920,55 +1776,6 @@ fn note_instance(
         }
         _ => false,
     }
-}
-
-/// Rebuild a workspace's window after its machine's server was replaced.
-///
-/// The local analogue is [`Tty7App::restart_daemon_confirmed`], and this is
-/// deliberately the same shape: the layout is the thing that survives, and every
-/// leaf in it comes back as a fresh shell in its saved cwd. What makes it safe
-/// here is only that [`server_restarted`] *knew* — the same rebuild triggered by
-/// a guess would be a way to lose running work.
-///
-/// **The saved pane ids are dropped first**, and that is what makes the resume
-/// work rather than being a tidiness measure. `session_to_pane` keeps a remote
-/// leaf's id unconditionally (its liveness cannot be probed without a round
-/// trip) and lets the attach fail into a spawn *inside* the terminal — by which
-/// point the code that would have sent `claude --resume <id>` has already
-/// decided it wasn't needed. Clearing the ids up here makes the leaf take the
-/// same path a dead local pane takes, so the agent conversation continues.
-///
-/// Unlike [`hydrate_window`] this does **not** skip a window with tabs. Those
-/// tabs are precisely what has to go: every one of them is a pane bound to a
-/// process that no longer exists.
-fn rebuild_after_server_restart(cx: &mut gpui::App, workspace: WorkspaceId) {
-    let mut session = match WorkspaceStore::all(cx).get(workspace) {
-        Some(entry) if entry.is_remote() => entry.session.clone(),
-        _ => return,
-    };
-    if session.tabs.is_empty() {
-        return;
-    }
-    for tab in &mut session.tabs {
-        tty7_core::core::session::blank_pane_ids(&mut tab.pane);
-    }
-    let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, workspace) else {
-        return;
-    };
-    let Some(app) =
-        crate::ui::windows::WindowRegistry::app_for(cx, workspace).and_then(|app| app.upgrade())
-    else {
-        return;
-    };
-    log::info!(
-        "rebuilding {} tab(s) of workspace {workspace}: its machine is serving a new process",
-        session.tabs.len()
-    );
-    let _ = handle.update(cx, move |_, window, cx| {
-        app.update(cx, |app, cx| {
-            app.adopt_workspace(workspace, session, window, cx)
-        });
-    });
 }
 
 /// Ask the window showing `workspace` to refill its "+" dropdown, now that its
@@ -2146,9 +1953,100 @@ pub(crate) fn workspace_accepts_input(cx: &gpui::App, workspace: WorkspaceId) ->
     RemoteLinks::status_of(cx, workspace).is_none_or(|s| s.accepts_input())
 }
 
+/// Whether another client's session currently holds `workspace`. Read by the
+/// delta application, which must leave a preempted window passive — attaching
+/// to the usurper's panes would steal the streams they are typing into.
+pub(crate) fn workspace_is_preempted(cx: &gpui::App, workspace: WorkspaceId) -> bool {
+    cx.try_global::<RemoteLinks>()
+        .is_some_and(|links| links.preempted.contains_key(&workspace))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Take Back is `retry_now` on a preempted workspace, and the window it
+    /// recovers still shows the pre-takeover layout — so clearing the
+    /// preemption must leave a `reclaiming` mark behind for `finish_attempt`
+    /// to read, or the landed attach runs its ordinary IfEmpty hydration,
+    /// skips the non-empty window, and the stale layout survives to roll the
+    /// other client's edits back on the next save.
+    #[gpui::test]
+    fn taking_back_marks_the_workspace_for_a_whole_rebuild(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            // `retry_now` wakes the supervisor, whose first tick resolves the
+            // machine's route off the config global.
+            cx.set_global(crate::core::config::Config::default());
+            let host = RemoteRef::new(
+                RemoteTarget::Alias {
+                    alias: "build-box".into(),
+                },
+                WorkspaceId::new(),
+            );
+            let view = crate::core::session::WindowView {
+                host: Some(host),
+                ..Default::default()
+            };
+            let id = view.id;
+            crate::core::session::WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views: vec![view],
+                    active: None,
+                },
+            );
+            cx.default_global::<RemoteLinks>()
+                .preempted
+                .insert(id, "laptop".into());
+
+            RemoteLinks::retry_now(cx, id);
+
+            let links = cx.default_global::<RemoteLinks>();
+            assert!(
+                !links.preempted.contains_key(&id),
+                "the takeover is being reversed; the read-only state ends now"
+            );
+            assert!(
+                links.reclaiming.contains(&id),
+                "the attach that lands must know to rebuild this window from the tree"
+            );
+        });
+    }
+
+    /// A plain reconnect (never preempted) must not be marked for a rebuild —
+    /// its panes are alive and re-attachable, and a Replace would tear down
+    /// views the relink was about to reuse.
+    #[gpui::test]
+    fn a_plain_reconnect_is_not_marked_for_a_rebuild(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::core::config::Config::default());
+            let host = RemoteRef::new(
+                RemoteTarget::Alias {
+                    alias: "build-box".into(),
+                },
+                WorkspaceId::new(),
+            );
+            let view = crate::core::session::WindowView {
+                host: Some(host),
+                ..Default::default()
+            };
+            let id = view.id;
+            crate::core::session::WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views: vec![view],
+                    active: None,
+                },
+            );
+
+            RemoteLinks::retry_now(cx, id);
+
+            assert!(
+                !cx.default_global::<RemoteLinks>().reclaiming.contains(&id),
+                "nothing was taken over, so nothing needs the Replace path"
+            );
+        });
+    }
 
     #[test]
     fn the_status_strip_speaks_unless_everything_is_working() {
@@ -2261,52 +2159,6 @@ mod tests {
             !note_instance(&mut seen, b, "b1"),
             "box-b never changed; box-a restarting is not its business"
         );
-    }
-
-    /// Every leaf loses its id, at every depth. A `Split` branch that kept its
-    /// ids would leave those panes attaching to a dead process — and, worse,
-    /// skipping the agent resume, because that only fires for a leaf with no id.
-    #[test]
-    fn forgetting_pane_ids_reaches_every_leaf() {
-        use crate::core::session::{SessionAxis, SessionPane};
-
-        fn leaf(id: u64) -> SessionPane {
-            SessionPane::Leaf {
-                cwd: None,
-                pane_id: Some(id),
-                ssh_spec: None,
-                agent: None,
-                agent_session_id: None,
-                agent_launch_argv: None,
-            }
-        }
-        fn ids(pane: &SessionPane, out: &mut Vec<Option<u64>>) {
-            match pane {
-                SessionPane::Leaf { pane_id, .. } => out.push(*pane_id),
-                SessionPane::Split { a, b, .. } => {
-                    ids(a, out);
-                    ids(b, out);
-                }
-            }
-        }
-
-        let mut pane = SessionPane::Split {
-            axis: SessionAxis::Horizontal,
-            ratio: 0.5,
-            a: Box::new(leaf(1)),
-            b: Box::new(SessionPane::Split {
-                axis: SessionAxis::Vertical,
-                ratio: 0.5,
-                a: Box::new(leaf(2)),
-                b: Box::new(leaf(3)),
-            }),
-        };
-        let forgotten = tty7_core::core::session::blank_pane_ids(&mut pane);
-
-        let mut found = Vec::new();
-        ids(&pane, &mut found);
-        assert_eq!(found, vec![None, None, None]);
-        assert_eq!(forgotten, 3, "every dropped claim is counted");
     }
 
     // ── The reconnect schedule (no network) ─────────────────────────────────
@@ -2429,82 +2281,8 @@ mod tests {
         assert_eq!(q.waiting(), 1);
     }
 
-    // ── `WorkspaceChanged` → re-read (B3's push, arriving) ───────────────────
+    // ── The input gate ───────────────────────────────────────────────────────
 
-    /// **A burst of changes costs one round trip per workspace.**
-    ///
-    /// B3's contract for this event is that it means only "read it again", so
-    /// losing one is safe and getting ten is safe. Collapsing them is the whole
-    /// of the logic that rule buys — and the thing that keeps a client with a
-    /// chatty peer from opening a `WorkspaceGet` per keystroke of theirs.
-    #[test]
-    fn a_burst_of_changes_asks_for_each_workspace_once() {
-        let (a, b) = (host("ssh-alias:a"), host("ssh-alias:b"));
-        let changed = |id: &str| ControlEvent::WorkspaceChanged { id: id.into() };
-        let events = vec![
-            (a, changed("w1")),
-            (a, changed("w1")),
-            (b, changed("w1")),
-            (a, changed("w2")),
-            (a, changed("w1")),
-        ];
-        assert_eq!(
-            stale_workspaces(&events),
-            vec![
-                (a, "w1".to_string()),
-                (b, "w1".to_string()),
-                (a, "w2".to_string()),
-            ],
-            "one pull per (machine, workspace), in the order they were heard"
-        );
-    }
-
-    /// The same workspace id on two machines is two workspaces — pane ids and
-    /// store keys are per machine, and merging them would refresh one window
-    /// from another box's record.
-    #[test]
-    fn a_change_is_scoped_to_the_machine_that_reported_it() {
-        let (a, b) = (host("ssh-alias:a"), host("ssh-alias:b"));
-        let events = vec![
-            (a, ControlEvent::WorkspaceChanged { id: "same".into() }),
-            (b, ControlEvent::WorkspaceChanged { id: "same".into() }),
-        ];
-        assert_eq!(stale_workspaces(&events).len(), 2);
-    }
-
-    /// Every other event is somebody else's business. A takeover in particular
-    /// must not also trigger a pull: it is handled on its own path, and the
-    /// record has not changed.
-    #[test]
-    fn only_a_workspace_change_asks_for_a_re_read() {
-        let a = host("ssh-alias:a");
-        let events = vec![
-            (
-                a,
-                ControlEvent::Preempted {
-                    workspace: "w1".into(),
-                    by: "desktop".into(),
-                },
-            ),
-            (
-                a,
-                ControlEvent::PaneExited {
-                    pane_id: 3,
-                    code: None,
-                },
-            ),
-        ];
-        assert!(stale_workspaces(&events).is_empty());
-    }
-
-    // ── The read-only degrade, state by state ───────────────────
-
-    /// The degrade in one table: which states are read-only, what the
-    /// bottom line says, and what the strip offers to do about it.
-    ///
-    /// `Preempted` reads differently on purpose — "not connected" would be a
-    /// lie, because the link is usually fine and the workspace is simply
-    /// somebody else's now.
     #[test]
     fn every_state_says_what_it_means_for_the_keyboard() {
         let cases = [
@@ -2625,7 +2403,7 @@ mod tests {
             crate::ui::windows::WindowRegistry::init(cx);
 
             let (host, target) = machine("build-box");
-            let mut entry = crate::core::session::Workspace::on_remote(RemoteRef::new(
+            let mut entry = crate::core::session::WindowView::on_remote(RemoteRef::new(
                 target,
                 WorkspaceId::new(),
             ));
@@ -2633,8 +2411,8 @@ mod tests {
             let id = entry.id;
             WorkspaceStore::install_for_test(
                 cx,
-                crate::core::session::Workspaces {
-                    workspaces: vec![entry],
+                crate::core::session::WindowViews {
+                    views: vec![entry],
                     active: None,
                 },
             );

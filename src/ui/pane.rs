@@ -716,12 +716,21 @@ impl Pane<PaneSlot> {
                                     window.refresh();
                                 }
                             });
-                            // End the drag on release.
+                            // End the drag on release — and persist the ratio
+                            // it landed on. The drag itself only moves the
+                            // shared cell; without this save the new ratio
+                            // reached disk (and now the machine's tree) only as
+                            // a passenger on some later structural change.
                             window.on_mouse_event({
                                 let dragging = dragging.clone();
-                                move |_ev: &MouseUpEvent, _phase, window, _cx| {
+                                move |_ev: &MouseUpEvent, _phase, window, cx| {
                                     if dragging.get() {
                                         dragging.set(false);
+                                        if let Some(app) =
+                                            crate::ui::windows::WindowRegistry::app_in(cx, window)
+                                        {
+                                            app.update(cx, |app, cx| app.save_session(cx));
+                                        }
                                         window.refresh();
                                     }
                                 }

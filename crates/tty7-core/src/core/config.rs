@@ -963,7 +963,7 @@ pub fn default_config_dir() -> Option<PathBuf> {
 }
 
 /// Resolve a file under the config directory (no `dirs` dep). Shared by every
-/// config-dir file (`config.json`, `session.json`, `history`).
+/// config-dir file (`config.json`, `views.json`, `history`).
 pub fn config_path(file: &str) -> Option<PathBuf> {
     Some(config_dir()?.join(file))
 }
@@ -988,8 +988,30 @@ pub fn strip_bom(text: &str) -> &str {
 /// old file or the new one intact — never a truncated/half-written file that
 /// fails to parse and silently reverts the user's settings to defaults. The temp
 /// lives in the same directory so the rename stays on one filesystem (atomic).
-/// Shared by `Config::save` and `Session::save`.
+/// Shared by `Config::save` and `WindowViews::save`.
 pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_mode(path, bytes, false)
+}
+
+/// [`write_atomic`], with the target owner-only from the first instant its final
+/// name exists.
+///
+/// The mode is set on the *temp* file, before the rename, for the same reason
+/// [`bind_control_socket`](crate::host::server::bind_control_socket) tightens
+/// the umask around its `bind` rather than chmod-ing afterwards: a fix-up on the
+/// next line is a window in which the file is readable, and under a `umask 002`
+/// — the default wherever user-private groups are configured — that window is
+/// group-readable. For documents whose contents are the user's business alone:
+/// `machine.json` names every workspace's directories, SSH users and hosts, and
+/// agent session ids.
+///
+/// A no-op difference on Windows, which has no mode bits: the config directory's
+/// own ACL is the boundary there, as it is for the daemon's port file.
+pub fn write_atomic_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_mode(path, bytes, true)
+}
+
+fn write_atomic_mode(path: &std::path::Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
     use std::io::Write as _;
     let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     // Per-process-unique temp name so two concurrent writers don't clobber the
@@ -1001,7 +1023,16 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
         std::process::id()
     ));
     {
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut open = std::fs::OpenOptions::new();
+        open.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            open.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        let mut f = open.open(&tmp)?;
         f.write_all(bytes)?;
         f.flush()?;
         let _ = f.sync_all();

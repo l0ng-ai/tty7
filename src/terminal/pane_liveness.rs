@@ -32,11 +32,19 @@
 //! probably fine and the *link* is what broke — and rendering it as "stopped"
 //! would tell the user their work is gone every time the network blinks.
 //!
-//! **`Unknown` is never shown for this machine.** A local `List` travels a unix
-//! socket to a daemon whose absence is itself the answer: no daemon, no live
-//! panes. So a local host with no cached answer reads `Stopped`, which is what
+//! **A local `List` failing is not `Unknown`.** It travels a unix socket to a
+//! daemon whose absence is itself the answer: no daemon, no live panes. So a
+//! local host with no cached *liveness* answer reads `Stopped`, which is what
 //! this page has always drawn — the async cache changes remote behaviour and
 //! leaves local pixels alone.
+//!
+//! Not knowing which panes to ask about is a different thing, and it is
+//! `Unknown` on every machine. The ids live in the machine's tree
+//! ([`crate::ui::machine_mirror`]), so until that first pull lands there is no
+//! question to put to the daemon — and "no ids yet" must not be read as "no
+//! sessions", which is a claim about the user's work founded on our own
+//! ignorance. Locally the pull lands within a frame or two of launch; where
+//! there is no control link at all, a muted dot is exactly the truth.
 //!
 //! # How it is filled
 //!
@@ -58,7 +66,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext as _, BorrowAppContext as _};
 
-use crate::core::session::{Workspace, WorkspaceId, WorkspaceStore};
+use crate::core::session::{WindowView, WorkspaceId, WorkspaceStore};
 use crate::terminal::{PaneRoute, RemoteTerminal};
 use crate::ui::host_ops::{HostId, InFlight};
 
@@ -232,10 +240,17 @@ impl PaneLivenessCache {
 /// [`PaneLivenessCache::liveness`] for a whole workspace, read-only.
 ///
 /// The one call the render sites make. It cannot ask the wrong machine: the
-/// host and the ids both come off the same [`Workspace`].
-pub fn liveness_of(cx: &App, workspace: &Workspace) -> Liveness {
+/// host and the ids both come off the same [`WindowView`].
+pub fn liveness_of(cx: &App, workspace: &WindowView) -> Liveness {
     let host = workspace.host_id();
-    let ids = workspace.pane_ids();
+    // The ids live in the machine's tree; its mirror is where they are read. A
+    // machine whose tree has not been pulled leaves us with no question to ask,
+    // which is `Unknown` on any machine — reading it as `Stopped` would tell the
+    // user their sessions are gone on the strength of our own ignorance. See the
+    // module docs for why this is *not* the same as a failed local `List`.
+    let Some(ids) = crate::ui::machine_mirror::pane_ids(cx, workspace) else {
+        return Liveness::Unknown;
+    };
     match cx.try_global::<PaneLivenessCache>() {
         Some(cache) => cache.liveness(host, &ids),
         // Before the app has installed the global. Asked of an empty cache
@@ -264,12 +279,12 @@ pub fn sweep(cx: &mut App) {
     // first so the borrow of the store is released before the probes, which
     // need `cx` mutably.
     let mut targets: Vec<(HostId, WorkspaceId)> = Vec::new();
-    for w in &WorkspaceStore::all(cx).workspaces {
+    for w in &WorkspaceStore::all(cx).views {
         let host = w.host_id();
         if targets.iter().any(|(seen, _)| *seen == host) {
             continue;
         }
-        if w.pane_ids().is_empty() {
+        if crate::ui::machine_mirror::pane_ids(cx, w).is_none_or(|ids| ids.is_empty()) {
             continue;
         }
         targets.push((host, w.id));
@@ -298,10 +313,10 @@ fn probe_host(cx: &mut App, host: HostId, workspace: WorkspaceId) {
     //
     // Recorded as a landed failure rather than returned from: a bare `return`
     // would leave `needs_probe` true, so the next frame would re-decide this,
-    // and `RemoteConnections::get` reaches its global mutably — which notifies,
+    // and `HostLinks::get` reaches its global mutably — which notifies,
     // which repaints, which sweeps. Storing the answer puts the decision behind
     // the same TTL as every other one.
-    if !host.is_local() && crate::ui::remote_connect::RemoteConnections::get(cx, host).is_none() {
+    if !host.is_local() && crate::ui::remote_connect::HostLinks::get(cx, host).is_none() {
         cx.update_global::<PaneLivenessCache, _>(|cache, _| cache.finish_probe(host, None));
         return;
     }

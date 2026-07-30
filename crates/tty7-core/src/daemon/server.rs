@@ -46,6 +46,36 @@ impl Registry {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Never mint an id `machine`'s tree already names — see the caller in
+    /// [`run`] for the aliasing failures this closes. The registry and the
+    /// leaves are checked both: a pane record can outlive its leaf briefly,
+    /// and either one aliased is one too many.
+    fn seed_ids_past(&self, machine: &crate::core::machine::Machine) {
+        let max = machine
+            .panes
+            .iter()
+            .map(|p| p.id)
+            .chain(
+                machine
+                    .workspaces
+                    .iter()
+                    .flat_map(|w| w.tabs.iter())
+                    .flat_map(|t| t.root.pane_ids()),
+            )
+            .max()
+            .unwrap_or(0);
+        // Saturating: a tree (or a hostile seed) naming u64::MAX must not
+        // panic the daemon at startup. The counter parking at the ceiling is
+        // a bounded absurdity; overflowing is a dead process.
+        let next = max.saturating_add(1);
+        // fetch_max rather than store: harmless today (this runs before any
+        // spawn), but a seed must never move the counter backwards.
+        let before = self.next_id.fetch_max(next, Ordering::Relaxed);
+        if next > before {
+            log::info!("pane ids start at {next} (the tree names panes up to {max})");
+        }
+    }
+
     fn insert(&self, pane: Arc<DaemonPane>) {
         self.panes.lock().unwrap().insert(pane.id, pane);
     }
@@ -87,6 +117,59 @@ impl Registry {
     }
 }
 
+/// How often the orphan sweep looks, which doubles as its grace period: a pane
+/// is only reported after it has been unreferenced across two consecutive
+/// looks, so a freshly-spawned pane whose adopting operation is still in
+/// flight is never flagged.
+const ORPHAN_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Periodically report live panes the machine tree does not reference.
+///
+/// **Log-only, on purpose.** An unreferenced pane is not proof of a leak:
+/// a native-SSH pane opened inside a *remote* workspace's window runs in this
+/// (the client's) daemon while belonging to the other machine's tree, so it is
+/// unreferenced here by design — and a reclaim would kill a session the user
+/// is looking at. Until the tree provably references everything legitimate,
+/// the sweep's job is to make leaks observable, not to act on them; killing
+/// can be layered on once the log has shown the false-positive rate is zero.
+fn spawn_orphan_sweep(registry: Arc<Registry>) {
+    let spawned = std::thread::Builder::new()
+        .name("tty7-orphan-sweep".into())
+        .spawn(move || {
+            let mut previous: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            loop {
+                std::thread::sleep(ORPHAN_SWEEP_INTERVAL);
+                // No tree served (a pane-only daemon) means no opinion.
+                let Some(store) = crate::core::machine::observed_store() else {
+                    continue;
+                };
+                let machine = store.machine();
+                let referenced: std::collections::HashSet<u64> = machine
+                    .workspaces
+                    .iter()
+                    .flat_map(|w| w.tabs.iter())
+                    .flat_map(|t| t.root.pane_ids())
+                    .collect();
+                let orphans: std::collections::HashSet<u64> = registry
+                    .list()
+                    .into_iter()
+                    .filter(|p| p.alive && !referenced.contains(&p.pane_id))
+                    .map(|p| p.pane_id)
+                    .collect();
+                for id in orphans.intersection(&previous) {
+                    log::info!(
+                        "pane {id} is running but no workspace tree references it \
+                         (kept; the sweep only reports — see spawn_orphan_sweep)"
+                    );
+                }
+                previous = orphans;
+            }
+        });
+    if let Err(e) = spawned {
+        log::warn!("could not start the orphan-pane sweep: {e}");
+    }
+}
+
 /// Resolve a pane id to its live native-SSH connection, for the SFTP control
 /// handlers. Errors (as a client-facing string) when the pane is unknown or isn't
 /// a native-SSH pane with an established connection (a PTY / compat-`ssh` pane, or
@@ -101,6 +184,82 @@ fn ssh_connection_for(
     pane.ssh_connection().ok_or_else(|| {
         "pane has no native SSH connection (SFTP needs a native-SSH pane)".to_string()
     })
+}
+
+/// Run the *whole* daemon — panes **and** control — until killed. The one
+/// entry point behind both `tty7 --daemon` and `tty7-server --daemon`.
+///
+/// Local and remote are deliberately the same shape: a machine is a machine,
+/// whether the client sits on it or an ocean away, and the design's terminal
+/// state is "one machine = one daemon = one workspace tree". That tree is
+/// served over the control dialect, so the *local* daemon has to speak it too —
+/// which is why this lives here rather than staying a `tty7-server` detail.
+///
+/// Control comes up first, and on its own thread: a machine that cannot host
+/// panes (no pty, a locked-down container) should still be able to back a
+/// workspace's files, so a control failure is logged and stepped over rather
+/// than being fatal. The pane listener then owns this thread until the process
+/// is killed, exactly as [`run`] always has.
+///
+/// Both platforms serve it, over the transport each one's pane socket already
+/// uses: a Unix-domain socket gated by its file permissions, or a loopback
+/// `TcpListener` gated by the token in a user-private marker file. The tree is
+/// what a client's layout *is* now, so a platform without a control listener is
+/// a platform where tabs do not come back — which is not a difference a build
+/// gets to have.
+pub fn run_daemon() -> anyhow::Result<()> {
+    // Reported on **stderr**, not only the log: a headless server's log file is
+    // off unless `TTY7_LOG` asks for it, and the bound path is this daemon's
+    // one observable answer to "where do I connect". The remote-router test
+    // reads this exact line back to prove the client's derivation and the
+    // server's bind agree, so the prefix is part of the contract.
+    #[cfg(any(unix, windows))]
+    match crate::host::server::spawn_control_listener_with(
+        crate::host::local::LocalHost::shared(),
+        control_services(),
+    ) {
+        Ok(path) => eprintln!("tty7-server: control socket at {}", path.display()),
+        Err(e) => eprintln!("tty7-server: control listener unavailable: {e}"),
+    }
+    #[cfg(not(any(unix, windows)))]
+    log::info!("no control listener on this platform; serving panes only");
+
+    run()
+}
+
+/// What this machine offers over a control connection, beyond its filesystem.
+///
+/// The machine tree is why a daemon serves control at all: the workspace
+/// list, the tab/pane tree and each pane's facts live on **the machine the
+/// panes run on**, so that every client of this machine — the GUI on it, a
+/// laptop across the world — sees the same thing. Clients keep only their own
+/// view state.
+///
+/// A machine with no home directory to place the file in still serves files
+/// and panes — it simply omits `machine-tree` from its capabilities, and
+/// clients see the same "does not serve the machine tree" answer a server
+/// without one has always given.
+pub fn control_services() -> crate::host::server::Services {
+    use crate::core::machine::MachineStore;
+    // Reported on stderr as well as the log, like the socket line in
+    // [`run_daemon`]: on a headless box the log file is off by default, and
+    // "does this daemon actually serve the tree" is the first question a
+    // capability mismatch raises.
+    match MachineStore::shared() {
+        Ok(machine) => {
+            eprintln!("machine tree at {}", machine.path().display());
+            // From here on the pane server's own observations — OSC 7 cwds,
+            // agent identities, deaths — land on the tree's pane records, so
+            // what a client revives from is what the machine saw, not what
+            // some client last remembered to write.
+            crate::core::machine::publish_observations(&machine);
+            crate::host::server::Services::with_machine(machine)
+        }
+        Err(e) => {
+            eprintln!("no machine tree ({e}); serving files and panes only");
+            crate::host::server::Services::none()
+        }
+    }
 }
 
 /// Run the daemon: bind the socket and serve connections forever. Returns `Err`
@@ -143,6 +302,29 @@ pub fn run() -> anyhow::Result<()> {
     // HUP each PTY's foreground group and leave background jobs behind.
     #[cfg(unix)]
     serve_sigterm(registry.clone());
+
+    // Pane ids must never alias across restarts: the persisted tree still
+    // names the previous process's panes, and a fresh process minting from 1
+    // would hand a new shell an id some dead leaf claims — at which point the
+    // record's `live` flag flips back on for the wrong pane, revival stalls on
+    // "pane N is already part of this machine's tree", and a window attaching
+    // by the stale id steals an unrelated workspace's stream. Starting past
+    // everything the tree knows makes the id a name, not a slot.
+    if let Some(store) = crate::core::machine::observed_store() {
+        registry.seed_ids_past(&store.machine());
+        // And let the store ask *us* whether a seeded pane is still alive at
+        // registration time — the pane that dies between its spawn and its
+        // adopting operation would otherwise be filed `live: true` with its
+        // death observation already dropped, and nothing left to flip it.
+        let probe = registry.clone();
+        store.set_liveness_probe(Arc::new(move |id| {
+            probe.get(id).is_some_and(|pane| pane.info().alive)
+        }));
+    }
+
+    // Now that the tree has an owner filling it, the daemon can *see* panes
+    // nothing references any more — but it only reports them, deliberately.
+    spawn_orphan_sweep(registry.clone());
 
     for stream in listener.incoming() {
         match stream {
@@ -209,12 +391,29 @@ fn serve_sigterm(registry: Arc<Registry>) {
             if unsafe { libc::sigwait(&set, &mut sig) } == 0 {
                 log::info!("daemon shutting down on SIGTERM");
                 registry.drain_and_kill();
-                transport::remove_stale_endpoint();
-                crate::daemon::pidfile::remove();
+                on_shutdown();
                 std::process::exit(0);
             }
         })
         .ok();
+}
+
+/// What every daemon exit owes the next one.
+///
+/// The tree's observations first: a pane's cwd and its agent session are
+/// deferred by design (`machine::Persist::Soon`) and are exactly what the next
+/// launch revives that pane from, so the last couple of seconds of them are
+/// worth one write on the way out. Then the endpoint markers — **both**
+/// dialects', since on Windows each listener has its own — and the pidfile, so
+/// nothing left on disk points at a process that is gone.
+fn on_shutdown() {
+    if let Some(store) = crate::core::machine::observed_store() {
+        store.flush();
+    }
+    transport::remove_stale_endpoint();
+    #[cfg(windows)]
+    crate::host::server::remove_control_endpoint();
+    crate::daemon::pidfile::remove();
 }
 
 /// Handle one connection start-to-finish. Reads the opening `ClientMsg` and
@@ -366,8 +565,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             // place the daemon terminates itself.
             log::info!("daemon shutting down on client request");
             registry.drain_and_kill();
-            transport::remove_stale_endpoint();
-            crate::daemon::pidfile::remove();
+            on_shutdown();
             std::process::exit(0);
         }
 
@@ -774,6 +972,45 @@ mod tests {
         assert_eq!(reg.alloc_id(), 3);
     }
 
+    /// Pane ids are names, not slots: a fresh process must never re-mint an id
+    /// the persisted tree still references, or a stale leaf aliases a new
+    /// shell — the tree marks the wrong pane live, revival's re-registration
+    /// is refused forever, and an attach by the old id steals another
+    /// workspace's stream.
+    #[test]
+    fn pane_ids_never_alias_what_the_persisted_tree_references() {
+        use crate::core::machine::{MachineStore, PaneSeed};
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = MachineStore::open(dir.path().join("machine.json"));
+        let ws = store.workspace_create(None, None, None).unwrap();
+        store
+            .tab_create(ws.id, None, PaneSeed::bare(7), None, None)
+            .unwrap();
+
+        let reg = Registry::new();
+        reg.seed_ids_past(&store.machine());
+        assert_eq!(reg.alloc_id(), 8, "past the highest id the tree names");
+
+        // A seed can only move the counter forward.
+        reg.seed_ids_past(&store.machine());
+        assert_eq!(reg.alloc_id(), 9);
+    }
+
+    /// A tree naming `u64::MAX` (a corrupted file, an absurd client seed)
+    /// must not panic the daemon at startup: `max + 1` overflowed in a debug
+    /// build, taking every pane on the machine down with a bookkeeping add.
+    #[test]
+    fn a_tree_naming_the_maximum_pane_id_does_not_panic_the_seed() {
+        use crate::core::machine::{Machine, PaneRecord};
+        let reg = Registry::new();
+        reg.seed_ids_past(&Machine {
+            workspaces: Vec::new(),
+            panes: vec![PaneRecord::new(u64::MAX)],
+        });
+        // The counter parks at the ceiling — a bounded absurdity, not a crash.
+        assert_eq!(reg.alloc_id(), u64::MAX);
+    }
+
     #[test]
     fn empty_registry_get_remove_list_are_empty() {
         let reg = Registry::new();
@@ -1006,11 +1243,9 @@ mod tests {
             let (client, server) = UnixStream::pair().unwrap();
             let writer = spawn_writer(rx, server, Arc::new(crate::daemon::pane::OutputGate::new()));
 
-            // Kill the client end first, then hand the writer a message: the
+            // Kill the client end first, then hand the writer messages: an
             // encode hits a broken pipe and the thread must bail on its own.
             drop(client);
-            tx.send(DaemonMsg::Output(b"into the void".to_vec()))
-                .unwrap();
 
             // Bounded poll rather than a bare `join()`: the sender stays alive
             // for the whole wait, so only the write-failure path can finish the
@@ -1020,8 +1255,16 @@ mod tests {
             // running the whole suite in parallel can leave this thread
             // unscheduled for seconds. A tight bound turns that into a flake
             // that says nothing about the behaviour under test.
+            //
+            // Kept fed rather than sent one message: the first write into a
+            // freshly-closed socket can *succeed* (the kernel has not
+            // processed the peer's close yet, especially under load), and a
+            // writer that swallowed it would park in `recv()` for the rest of
+            // the deadline. Only a later write is guaranteed to see the
+            // broken pipe, so the loop keeps offering them.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while !writer.is_finished() && std::time::Instant::now() < deadline {
+                let _ = tx.send(DaemonMsg::Output(b"into the void".to_vec()));
                 thread::sleep(std::time::Duration::from_millis(5));
             }
             assert!(

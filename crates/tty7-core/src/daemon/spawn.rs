@@ -73,17 +73,6 @@ pub fn take_mismatched_daemon() -> Option<MismatchedDaemon> {
 /// identity of a daemon that is no longer the one answering.
 static LOCAL_DAEMON: std::sync::Mutex<Option<DaemonVersion>> = std::sync::Mutex::new(None);
 
-/// The serving daemon's process identity, when it reports one. `None` means
-/// "unknown" (an older daemon, or nothing running) — callers must treat that
-/// as "no instance check possible", never as a mismatch.
-pub fn local_daemon_instance() -> Option<String> {
-    let guard = LOCAL_DAEMON.lock().ok()?;
-    guard
-        .as_ref()
-        .map(|v| v.instance.clone())
-        .filter(|i| !i.is_empty())
-}
-
 /// Whether the serving daemon advertises `feature`
 /// (e.g. [`crate::daemon::protocol::FEATURE_PANE_OWNER`]). `false` when
 /// nothing is known — the safe answer, because every capability gated on this

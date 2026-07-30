@@ -51,6 +51,16 @@ pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 ///
 /// ## History
 ///
+/// - **v4** — the daemon serves the machine tree. `tty7 --daemon` now runs
+///   the shared `run_daemon`: a control listener (carrying the daemon-owned
+///   workspace tree) beside the pane listener. No pane frame changed, so by
+///   the letter of the rule above this is additive — but the *service* is
+///   not: a v3 daemon has no control socket at all, and a GUI from this
+///   build that silently adopted one would connect its control link into the
+///   void forever — every window hydrating from a tree that never answers,
+///   which renders as empty windows with no error anywhere. The bump routes
+///   that meeting into `ensure_running`'s existing keep-or-restart prompt,
+///   where "restart the background service" is the fix.
 /// - **v3** — the [`control`](super::control) dialect (kinds 60-63) and
 ///   [`DaemonVersion::features`]. By the rule above this is *additive* and
 ///   would not earn a bump on its own: a v2 daemon meeting a control frame
@@ -66,7 +76,7 @@ pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 ///   downgrade (a v2 GUI spawns the pane, a v1 GUI later attaches to it), but
 ///   loses it silently. The handshake now catches that skew and asks.
 /// - **v1** — the dialect at the time versioning landed.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Capability string for [`DaemonVersion::features`]: this daemon records
 /// which workspace each pane was spawned for and reports it in `List`'s
@@ -93,13 +103,17 @@ pub struct DaemonVersion {
     /// every user whose daemon happens to predate it.
     #[serde(default)]
     pub features: Vec<String>,
-    /// Identity of this daemon *process*, minted once at startup. Pane ids are
-    /// only meaningful within one daemon process — after a restart the numbers
-    /// start over from 1 and land on unrelated shells — so a client that
-    /// persists pane ids records this next to them and treats a mismatch as
-    /// "every saved id is stale" (see `Workspace::daemon_instance`). Empty for
-    /// daemons that predate the field; the remote `tty7-server` announces the
-    /// same identity through its control hello.
+    /// Identity of this daemon *process*, minted once at startup — the same
+    /// identity the control hello announces
+    /// ([`ControlHelloOk::instance`](crate::daemon::control::ControlHelloOk::instance)),
+    /// which is what reconnect logic actually consults to tell "the link
+    /// blinked" from "a different process answers now". PTYs die with the
+    /// process, so a changed instance means every previously live pane is
+    /// gone; the machine tree records the same fact per pane (`load_machine`
+    /// clears every `live` flag on open), and a daemon carrying a tree seeds
+    /// its pane ids *past* everything the tree names rather than restarting
+    /// from 1, so a stale id can never alias a new shell. Empty for daemons
+    /// that predate the field — "unknown", never "restarted".
     #[serde(default)]
     pub instance: String,
 }
@@ -113,10 +127,11 @@ impl DaemonVersion {
         DaemonVersion {
             protocol: PROTOCOL_VERSION,
             build: env!("CARGO_PKG_VERSION").to_string(),
-            // The local session daemon speaks the pane protocol only. The
-            // control dialect is served by `tty7-server`, which advertises
-            // `control` / `host-rpc` itself; claiming them here would make the
-            // GUI open a control connection this process cannot answer.
+            // This reply describes the *pane* socket only. The control
+            // dialect lives on the daemon's separate control socket, whose
+            // own `ControlHelloOk` announces `control` / `host-rpc` /
+            // `machine-tree` for itself; claiming them here would say the
+            // pane socket speaks frames it does not.
             //
             // `pane-owner` *is* a pane-protocol capability, so every process
             // serving panes from this build advertises it.
@@ -2630,7 +2645,7 @@ mod tests {
     #[test]
     fn the_local_daemon_does_not_claim_the_control_dialect() {
         let v = DaemonVersion::current();
-        assert_eq!(v.protocol, 3);
+        assert_eq!(v.protocol, 4);
         assert!(
             !v.has_feature(crate::daemon::control::feature::CONTROL),
             "the session daemon must not advertise a dialect it cannot serve"

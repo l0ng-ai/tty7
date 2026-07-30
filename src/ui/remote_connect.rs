@@ -15,7 +15,7 @@
 //! | 2 | Resolve one into a self-contained SSH spec | [`spec_for`] |
 //! | 3 | Open a routed control connection through the local daemon | [`connect_blocking`] |
 //! | 4 | Read the machine's own workspace list | [`rows_from_list`] |
-//! | 5 | Hold the connection for the workspaces bound to it | [`RemoteConnections`] |
+//! | 5 | Hold the connection for the workspaces bound to it | [`HostLinks`] |
 //!
 //! ## Machines are configured once
 //!
@@ -42,7 +42,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use gpui::{App, Global};
-use serde_json::Value;
 
 use crate::core::config::Config;
 use crate::core::session::{RemoteTarget, WorkspaceId};
@@ -401,11 +400,11 @@ fn handshake(
 
 /// Ask a connected machine for its workspaces.
 pub fn list_workspaces(host: &Arc<RemoteHost>) -> io::Result<Vec<RemoteWorkspaceRow>> {
-    match host.client().call(ControlRequest::WorkspaceList)? {
-        ReplyOk::Json(Value::Array(list)) => Ok(rows_from_list(&list)),
+    match host.client().call(ControlRequest::MachineGet)? {
+        ReplyOk::MachineTree(machine) => Ok(rows_from_machine(&machine)),
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("the server answered a workspace list with {other:?}"),
+            format!("the server answered a machine tree with {other:?}"),
         )),
     }
 }
@@ -444,38 +443,24 @@ fn client_hostname() -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteWorkspaceRow {
     pub id: WorkspaceId,
-    /// Already resolved through `Workspace::display_name`'s rules, so a record
-    /// with no user-set name still reads as its repo or directory.
+    /// The user-set name when there is one, else derived from the tabs' repo
+    /// groups and cwds — the same precedence `Workspace::display_name` gives a
+    /// local workspace, computed here from the machine's tree.
     pub name: String,
     pub panes: usize,
     pub last_active: u64,
-    /// The raw record, kept so opening the row can `apply_remote_json` it
-    /// without a second round trip.
-    pub record: Value,
 }
 
-/// Turn a `WorkspaceList` payload into picker rows, newest first.
-///
-/// Records the client cannot decode are **skipped, not fatal**: the list is
-/// written by whichever tty7 last touched that machine, and one record from a
-/// newer build must not make every other workspace on the box unreachable.
-pub fn rows_from_list(list: &[Value]) -> Vec<RemoteWorkspaceRow> {
-    let mut rows: Vec<RemoteWorkspaceRow> = list
+/// Turn a machine's tree into picker rows, newest first.
+pub fn rows_from_machine(machine: &tty7_core::core::machine::Machine) -> Vec<RemoteWorkspaceRow> {
+    let mut rows: Vec<RemoteWorkspaceRow> = machine
+        .workspaces
         .iter()
-        .filter_map(|record| {
-            // The remote record is the remote-owned half of a `Workspace`, so it
-            // decodes by merging onto a blank one — which is also what gives us
-            // `display_name` and `pane_count` for free rather than reimplemented.
-            let mut workspace = crate::core::session::Workspace::default();
-            workspace.apply_remote_json(record).ok()?;
-            let id: WorkspaceId = serde_json::from_value(record.get("id")?.clone()).ok()?;
-            Some(RemoteWorkspaceRow {
-                id,
-                name: workspace.display_name(),
-                panes: workspace.pane_count(),
-                last_active: workspace.last_active,
-                record: record.clone(),
-            })
+        .map(|ws| RemoteWorkspaceRow {
+            id: ws.id,
+            name: crate::ui::machine_mirror::display_name_of(ws, &machine.panes),
+            panes: ws.tabs.iter().map(|t| t.root.pane_ids().len()).sum(),
+            last_active: ws.last_active,
         })
         .collect();
     rows.sort_by_key(|row| std::cmp::Reverse(row.last_active));
@@ -486,16 +471,21 @@ pub fn rows_from_list(list: &[Value]) -> Vec<RemoteWorkspaceRow> {
 // 5. Holding the connections
 // ---------------------------------------------------------------------------
 
-/// The live remote machines, by [`HostId`].
+/// The live control links, by [`HostId`] — one per machine, one machine per
+/// entry.
 ///
-/// One entry per *machine*, not per workspace — the same granularity the SSH
-/// connection is pooled at and the same one [`crate::ui::host_registry`] uses,
-/// so two windows on one box share a connection, a host object and a git-status
-/// cache. This table holds the concrete [`RemoteHost`] because pushing a layout
-/// needs its control client; `HostRegistry` holds the same object erased to
-/// `dyn Host` for the panels.
+/// The name says the model: every machine this client talks to is reached
+/// over exactly one control link, and the local machine is a machine like any
+/// other — its link simply lives in its own global
+/// ([`LocalLink`](crate::ui::local_link::LocalLink)) because it is in-process
+/// rather than wire-backed. One entry per *machine*, not per workspace — the
+/// same granularity the SSH connection is pooled at and the same one
+/// [`crate::ui::host_registry`] uses, so two windows on one box share a
+/// connection, a host object and a git-status cache. This table holds the
+/// concrete [`RemoteHost`] because pushing a layout needs its control client;
+/// `HostRegistry` holds the same object erased to `dyn Host` for the panels.
 #[derive(Default)]
-pub struct RemoteConnections {
+pub struct HostLinks {
     hosts: HashMap<HostId, Arc<RemoteHost>>,
     /// Each machine's `$HOME`, as its handshake reported it.
     ///
@@ -511,24 +501,18 @@ pub struct RemoteConnections {
     homes: HashMap<HostId, PathBuf>,
 }
 
-impl Global for RemoteConnections {}
+impl Global for HostLinks {}
 
-impl RemoteConnections {
+impl HostLinks {
     /// The connection to `id`, if this process has one.
     pub fn get(cx: &mut App, id: HostId) -> Option<Arc<RemoteHost>> {
-        cx.default_global::<RemoteConnections>()
-            .hosts
-            .get(&id)
-            .cloned()
+        cx.default_global::<HostLinks>().hosts.get(&id).cloned()
     }
 
     /// Where a *new* workspace on `id` would start: that machine's own `$HOME`,
     /// never this client's.
     pub fn home(cx: &mut App, id: HostId) -> Option<PathBuf> {
-        cx.default_global::<RemoteConnections>()
-            .homes
-            .get(&id)
-            .cloned()
+        cx.default_global::<HostLinks>().homes.get(&id).cloned()
     }
 
     /// Record a connection, and register the same object with the host registry
@@ -540,14 +524,14 @@ impl RemoteConnections {
     pub fn insert(cx: &mut App, host: Arc<RemoteHost>, home: PathBuf) {
         let id = host.id();
         crate::ui::host_registry::HostRegistry::insert(cx, Arc::clone(&host).into_shared());
-        let table = cx.default_global::<RemoteConnections>();
+        let table = cx.default_global::<HostLinks>();
         table.hosts.insert(id, host);
         table.homes.insert(id, home);
     }
 
     /// Drop a machine's connection once nothing is using it.
     pub fn remove(cx: &mut App, id: HostId) {
-        let table = cx.default_global::<RemoteConnections>();
+        let table = cx.default_global::<HostLinks>();
         table.hosts.remove(&id);
         table.homes.remove(&id);
         crate::ui::host_registry::HostRegistry::remove(cx, id);
@@ -555,48 +539,8 @@ impl RemoteConnections {
 
     /// Machines currently connected. Diagnostics and teardown.
     pub fn len(cx: &mut App) -> usize {
-        cx.default_global::<RemoteConnections>().hosts.len()
+        cx.default_global::<HostLinks>().hosts.len()
     }
-}
-
-/// Push a workspace's layout to the machine that owns it (the
-/// remote's `workspaces.json` is the authority). Blocking.
-pub fn put_remote_layout(host: &Arc<RemoteHost>, key: String, record: Value) -> io::Result<()> {
-    host.client()
-        .call(ControlRequest::WorkspacePut {
-            id: key,
-            json: record,
-        })
-        .map(|_| ())
-}
-
-/// Pull one workspace's authoritative record from the machine that owns it.
-/// Blocking.
-///
-/// The read side of the split, and what a
-/// [`ControlEvent::WorkspaceChanged`](crate::daemon::control::ControlEvent)
-/// asks for: the event says only *that* a record moved, so the record itself is
-/// fetched rather than carried. `ErrorKind::NotFound` is a real answer — the
-/// workspace was deleted on the far side — and is deliberately distinguishable
-/// from an empty one.
-pub fn get_remote_layout(host: &Arc<RemoteHost>, key: String) -> io::Result<Value> {
-    match host
-        .client()
-        .call(ControlRequest::WorkspaceGet { id: key })?
-    {
-        ReplyOk::Json(record) => Ok(record),
-        other => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("the server answered a workspace record with {other:?}"),
-        )),
-    }
-}
-
-/// Forget a workspace on the machine that owns it. Blocking.
-pub fn delete_remote_workspace(host: &Arc<RemoteHost>, key: String) -> io::Result<()> {
-    host.client()
-        .call(ControlRequest::WorkspaceDelete { id: key })
-        .map(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -776,7 +720,7 @@ pub fn register(cx: &mut App) {
     crate::daemon::router::set_route_auth_responder(Arc::new(GuiRouteAuth));
     // Touch the globals so the first connect isn't also the first allocation of
     // the table it writes into, on a thread that is holding a socket open.
-    let _ = RemoteConnections::len(cx);
+    let _ = HostLinks::len(cx);
 }
 
 /// The oldest install waiting for an answer, if any.
@@ -1271,54 +1215,47 @@ mod tests {
         assert_eq!(endpoint_label("", "box.local", 22), "box.local");
     }
 
-    /// The picker's rows come from records the *remote* wrote, so they have to
-    /// survive a record this build cannot read: one bad entry may not hide the
-    /// rest of the machine's workspaces.
+    /// The picker's rows come from the machine's tree: newest first, with a
+    /// name derived the way a local workspace's would be when none is set.
     #[test]
-    fn rows_skip_undecodable_records_and_sort_newest_first() {
+    fn rows_from_the_tree_sort_newest_first_and_derive_names() {
+        use tty7_core::core::machine::{Machine, PaneRecord, Tab, Workspace};
         let older = WorkspaceId::new();
         let newer = WorkspaceId::new();
-        let list = vec![
-            serde_json::json!({
-                "id": older.to_string(),
-                "name": "api",
-                "session": { "tabs": [] },
-                "last_active": 100,
-            }),
-            // No `id` at all — unreadable, and skipped rather than fatal.
-            serde_json::json!({ "name": "broken" }),
-            serde_json::json!({
-                "id": newer.to_string(),
-                "name": "web",
-                "session": { "tabs": [] },
-                "last_active": 500,
-            }),
-        ];
-        let rows = rows_from_list(&list);
-        assert_eq!(rows.len(), 2, "the undecodable record is skipped");
+        let machine = Machine {
+            workspaces: vec![
+                Workspace {
+                    id: older,
+                    name: Some("api".into()),
+                    last_active: 100,
+                    tabs: vec![Tab::leaf(1)],
+                    ..Default::default()
+                },
+                Workspace {
+                    id: newer,
+                    name: None,
+                    last_active: 500,
+                    tabs: vec![Tab::leaf(2)],
+                    ..Default::default()
+                },
+            ],
+            panes: vec![
+                PaneRecord::new(1),
+                PaneRecord {
+                    cwd: Some("/srv/checkout".into()),
+                    ..PaneRecord::new(2)
+                },
+            ],
+        };
+        let rows = rows_from_machine(&machine);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].id, newer, "newest first");
-        assert_eq!(rows[0].name, "web");
-        assert_eq!(rows[1].id, older);
-    }
-
-    /// A record with no user-set name falls back to the same derived name a
-    /// local workspace would get, rather than showing a raw uuid.
-    #[test]
-    fn rows_derive_a_name_when_the_record_has_none() {
-        let id = WorkspaceId::new();
-        let list = vec![serde_json::json!({
-            "id": id.to_string(),
-            "session": {
-                "tabs": [{
-                    "pane": { "Leaf": { "cwd": "/srv/checkout" } }
-                }]
-            },
-            "last_active": 1,
-        })];
-        let rows = rows_from_list(&list);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].name, "checkout");
+        assert_eq!(
+            rows[0].name, "checkout",
+            "no user name falls back to the first pane's directory"
+        );
         assert_eq!(rows[0].panes, 1);
+        assert_eq!(rows[1].name, "api", "a user-set name wins");
     }
 
     fn host(label: &str, detail: &str) -> HostChoice {

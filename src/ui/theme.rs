@@ -198,14 +198,19 @@ fn window_menu_items(cx: &App) -> Vec<MenuItem> {
                 items.push(MenuItem::Separator);
             }
         }
+        // From the machine's mirror — the tree owns the layout the name is
+        // derived from. Before the first pull lands the entry reads as the
+        // shared fallback; the menu is rebuilt on every roster change anyway.
+        let name = crate::ui::machine_mirror::display_name(cx, workspace)
+            .unwrap_or_else(|| "Untitled".to_string());
         let label = if *open {
-            workspace.display_name()
+            name
         } else {
             // The age is the useful discriminator among detached ones — several
             // may share a repo name.
             format!(
                 "{}  —  {}",
-                workspace.display_name(),
+                name,
                 crate::ui::home::relative_time(now, workspace.last_active)
             )
         };

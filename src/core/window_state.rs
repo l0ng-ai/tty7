@@ -1,11 +1,10 @@
 //! The gpui-facing half of [`WindowState`].
 //!
 //! The struct itself, its `window.json` IO, and the "is this geometry sane"
-//! guard live in `tty7-core` — `session.json` embeds the geometry in each
-//! [`Workspace`](crate::core::session::Workspace), so it has to parse on a
-//! machine that never links gpui. What is left here is the only part that
-//! genuinely needs gpui: turning the four stored `f32`s into a
-//! [`Bounds<Pixels>`] and back.
+//! guard live in `tty7-core` — `views.json` embeds the geometry in each
+//! [`WindowView`](crate::core::session::WindowView), which is defined there.
+//! What is left here is the only part that genuinely needs gpui: turning the
+//! four stored `f32`s into a [`Bounds<Pixels>`] and back.
 
 use gpui::{Bounds, Pixels, point, px};
 

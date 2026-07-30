@@ -26,10 +26,5 @@ tty7-core = { path = "../tty7-core" }
 # Sandboxes for the suite: an empty directory per case, removed on drop. The
 # server is on this machine, so a local temp dir is a path in its namespace.
 tempfile = "3"
-# Workspace records cross the control wire as opaque JSON, so
-# `tests/workspace_store.rs` has to build and read one. Dev-only: the binary
-# itself still depends on nothing but `tty7-core`.
-serde_json.workspace = true
-
 [lints]
 workspace = true

@@ -25,13 +25,14 @@
 //!
 //! # Where the rows come from
 //!
-//! `session.json` already records remote workspaces (`Workspace::host`), so a
+//! The view store records remote workspaces (`WindowView::host`), so a
 //! machine's workspaces are listed **without connecting to it** — the client
-//! remembers what it saw last time. Connecting only ever *adds*: the remote's
-//! own store is the authority, so its rows are merged in when a link exists and
-//! anything this client had not heard of shows up then (see [`Group::merge`]).
-//! That is what makes "expand a machine" a lazy, cheap gesture rather than a
-//! wizard.
+//! remembers which ones it saw, and their display facts come from the
+//! machine's mirror (`ui::machine_mirror`). Connecting only ever *adds*: the
+//! remote's own tree is the authority, so its rows are merged in when a link
+//! exists and anything this client had not heard of shows up then (see
+//! [`Group::merge`]). That is what makes "expand a machine" a lazy, cheap
+//! gesture rather than a wizard.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -194,7 +195,7 @@ struct Row {
     current: bool,
     /// Set for a workspace that exists on the remote but has no local record
     /// yet: opening it has to claim it first. `None` once it is in
-    /// `session.json` like any other.
+    /// the view store like any other.
     adopt: Option<Box<RemoteWorkspaceRow>>,
     /// This row's id **on its own machine**, for a remote workspace. It is what
     /// the remote's list is matched against — the local [`WorkspaceId`] above is
@@ -217,7 +218,7 @@ pub(crate) struct HostSnapshot {
     /// it could never be given a group to appear in.
     pub target: RemoteTarget,
     /// What the remote said it had. The machine's `$HOME` is deliberately *not*
-    /// here — it lives in `RemoteConnections`, app-wide, because every window
+    /// here — it lives in `HostLinks`, app-wide, because every window
     /// needs it and only one of them ever did the connecting.
     pub rows: Vec<RemoteWorkspaceRow>,
 }
@@ -317,7 +318,7 @@ impl Tty7App {
         {
             let app: &App = cx;
             let store = WorkspaceStore::all(app);
-            for w in &store.workspaces {
+            for w in &store.views {
                 let (key, label, target) = match w.host.as_ref() {
                     None => (String::new(), "This Computer".to_string(), None),
                     Some(r) => {
@@ -341,11 +342,14 @@ impl Tty7App {
                 });
                 groups[slot].rows.push(Row {
                     id: w.id,
-                    name: w.display_name(),
-                    path: w
-                        .dominant_repo()
-                        .or_else(|| w.first_cwd())
-                        .map(|p| crate::ui::home::display_path(&p))
+                    // Both read the machine's mirror — the tree owns the
+                    // layout these used to be derived from. A machine not
+                    // pulled yet (launch's first frames; an unreached remote)
+                    // renders the not-knowing rather than a stale guess.
+                    name: crate::ui::machine_mirror::display_name(app, w)
+                        .unwrap_or_else(|| "Untitled".to_string()),
+                    path: crate::ui::machine_mirror::subject_path(app, w)
+                        .map(|p| crate::ui::home::display_path(std::path::Path::new(&p)))
                         .unwrap_or_default(),
                     when: crate::ui::home::relative_time(now, w.last_active),
                     live: crate::terminal::pane_liveness::liveness_of(app, w),
@@ -450,7 +454,7 @@ impl Tty7App {
             // connect, and every reconnect, records the machine's `$HOME` — and
             // that row is the only way to make a workspace on a machine, so it
             // has no business depending on which window did the connecting.
-            group.home = remote_connect::RemoteConnections::home(cx, id);
+            group.home = remote_connect::HostLinks::home(cx, id);
             if let Some(snapshot) = self.host_snapshots.get(&id) {
                 group.merge(&snapshot.rows, now);
             }
@@ -485,7 +489,7 @@ impl Tty7App {
             }
             _ => {}
         }
-        match remote_connect::RemoteConnections::get(cx, target.host_id()) {
+        match remote_connect::HostLinks::get(cx, target.host_id()) {
             Some(_) => Link::Connected,
             None => Link::Offline,
         }
@@ -558,10 +562,7 @@ impl Tty7App {
     /// window's *current* workspace, because the field it opens is the chip. A
     /// list needs to rename the row that was aimed at, so it gets its own.
     fn switcher_rename(&mut self, id: WorkspaceId, window: &mut Window, cx: &mut Context<Self>) {
-        let current = WorkspaceStore::all(cx)
-            .get(id)
-            .map(|w| w.display_name())
-            .unwrap_or_default();
+        let current = crate::ui::machine_mirror::display_name_for(cx, id).unwrap_or_default();
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
         input.update(cx, |state, cx| state.focus(window, cx));
         let sub = cx.subscribe_in(
@@ -586,7 +587,7 @@ impl Tty7App {
             return;
         };
         let value = input.read(cx).value().trim().to_string();
-        WorkspaceStore::rename(cx, id, (!value.is_empty()).then_some(value));
+        crate::ui::tree_sync::rename_workspace(cx, id, (!value.is_empty()).then_some(value));
         crate::ui::windows::refresh_menu(cx);
         if id == self.workspace {
             self.sync_window_title(window, cx);

@@ -9606,7 +9606,6 @@ dependencies = [
 name = "tty7-server"
 version = "26.7.6"
 dependencies = [
- "serde_json",
  "tempfile",
  "tty7-core",
 ]

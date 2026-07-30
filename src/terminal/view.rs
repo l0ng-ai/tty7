@@ -98,8 +98,8 @@ impl gpui::EventEmitter<AuthPromptReady> for TerminalView {}
 ///
 /// The id arrives asynchronously, on the agent's own hooks, long after
 /// everything that *structurally* changes a window. Nothing else was making the
-/// window save in between, so whether the id reached `session.json` came down
-/// to whether the user happened to open a tab, split a pane or move focus
+/// window save in between, so whether the id reached the persisted layout came
+/// down to whether the user happened to open a tab, split a pane or move focus
 /// afterwards. That is what made resume-after-End-Sessions work sometimes and
 /// not others: the layout on file simply had no agent in it.
 pub struct AgentSessionChanged;
@@ -544,14 +544,14 @@ pub struct TerminalView {
 }
 
 /// A link under the mouse, remembered so the grid can underline its cells. The
-/// `line` is the alacritty grid line (display row minus the scroll offset), which
-/// stays fixed as the viewport scrolls; `start..=end` are the inclusive columns
-/// the link's text spans on that line.
-#[derive(Clone, PartialEq)]
+/// endpoints are alacritty grid points (line = display row minus the scroll
+/// offset), which stay fixed as the viewport scrolls. A link the terminal
+/// wrapped — or a producer split across rows with a hard newline — spans
+/// several rows, so `start` and `end` can sit on different lines.
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct HoveredLink {
-    pub line: i32,
-    pub start: usize,
-    pub end: usize,
+    pub start: Point,
+    pub end: Point,
 }
 
 enum LoopbackOpen {
@@ -1599,7 +1599,7 @@ impl TerminalView {
     /// machine.** The host id comes off the workspace's own `RemoteTarget`,
     /// through the same `connection_key` the connection was opened under — so
     /// the id resolves to the very host object
-    /// [`RemoteConnections::insert`](crate::ui::remote_connect::RemoteConnections::insert)
+    /// [`HostLinks::insert`](crate::ui::remote_connect::HostLinks::insert)
     /// registered, with no second source of truth to drift from it. Setting the
     /// route and setting the host is one operation because a pane that ran its
     /// shell on one machine and its `git` on another would be worse than
@@ -5410,56 +5410,23 @@ impl TerminalView {
         if !cx.global::<Config>().link_url {
             return false;
         }
-        let term = self.terminal.term.lock();
-        let Some(line) = Self::grid_line(&term, row) else {
+        let include_loopback = self.can_forward_loopback(cx);
+        let Some((target, _start, _end)) = self.resolve_link_at(col, row, true, include_loopback)
+        else {
             return false;
         };
-        let cols = term.columns();
-        if col >= cols {
-            return false;
-        }
-
-        // 1) Explicit OSC 8 hyperlink carried on the cell.
-        let cell = &term.grid()[line][Column(col)];
-        if let Some(hl) = cell.hyperlink() {
-            let uri = hl.uri().to_string();
-            drop(term);
-            self.open_url(&uri, window, cx);
-            return true;
-        }
-
-        // 2) Fall back to detecting a bare URL or file path in the row's text.
-        let mut text = String::with_capacity(cols);
-        for c in 0..cols {
-            text.push(term.grid()[line][Column(c)].c);
-        }
-        drop(term);
-        // A relative path in the output is resolved against the cwd and
-        // stat-checked, then handed to the local file opener — so a remote
-        // pane's cwd must not be used. There, only absolute-looking local hits
-        // and URLs remain clickable.
-        let cwd = self.local_cwd();
-        if let Some(link) = super::search::link_at(&text, col, cwd.as_deref(), true) {
-            match link.target {
-                LinkTarget::Url(url) => self.open_url(&url, window, cx),
-                LinkTarget::File { path, line, column } => {
-                    // A configured template (e.g. opening the file in an editor)
-                    // takes precedence; otherwise fall back to the OS opener.
-                    match cx.global::<Config>().link_file_command.as_deref() {
-                        Some(template) => run_file_command(template, &path, line, column),
-                        None => open_file_path(&path),
-                    }
+        match target {
+            LinkTarget::Url(url) => self.open_url(&url, window, cx),
+            LinkTarget::File { path, line, column } => {
+                // A configured template (e.g. opening the file in an editor)
+                // takes precedence; otherwise fall back to the OS opener.
+                match cx.global::<Config>().link_file_command.as_deref() {
+                    Some(template) => run_file_command(template, &path, line, column),
+                    None => open_file_path(&path),
                 }
             }
-            true
-        } else if self.can_forward_loopback(cx)
-            && let Some((_, _, url)) = super::loopback::loopback_url_span_at(&text, col)
-        {
-            self.open_url(&url, window, cx);
-            true
-        } else {
-            false
         }
+        true
     }
 
     fn open_url(&self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -5608,63 +5575,60 @@ impl TerminalView {
         include_files: bool,
         include_loopback: bool,
     ) -> Option<HoveredLink> {
+        self.resolve_link_at(col, row, include_files, include_loopback)
+            .map(|(_, start, end)| HoveredLink { start, end })
+    }
+
+    /// The link under screen cell `(col, row)` and the inclusive grid points it
+    /// spans, shared by hover-underline and click-to-open so both agree on the
+    /// extent. Resolution runs over the *logical* line — soft-wrapped rows plus
+    /// producer hard newlines are stitched back together — so a URL split across
+    /// rows resolves whole instead of stopping at the first row edge.
+    fn resolve_link_at(
+        &self,
+        col: usize,
+        row: usize,
+        include_files: bool,
+        include_loopback: bool,
+    ) -> Option<(LinkTarget, Point, Point)> {
         let term = self.terminal.term.lock();
         let line = Self::grid_line(&term, row)?;
         let cols = term.columns();
         if col >= cols {
             return None;
         }
+        let click = Point::new(line, Column(col));
 
-        // 1) Explicit OSC 8 hyperlink: highlight the whole contiguous run carrying
-        //    the same URI, which may be wider than the visible link text.
+        // 1) Explicit OSC 8 hyperlink: highlight the whole contiguous run
+        //    carrying the same URI, following soft wraps across rows.
         if let Some(hl) = term.grid()[line][Column(col)].hyperlink() {
             let uri = hl.uri().to_string();
-            let same = |c: usize| {
-                term.grid()[line][Column(c)]
-                    .hyperlink()
-                    .is_some_and(|h| h.uri() == uri)
-            };
-            let mut start = col;
-            while start > 0 && same(start - 1) {
-                start -= 1;
+            if let Some((start, end)) = super::smart_select::hyperlink_run(&term, click) {
+                return Some((LinkTarget::Url(uri), start, end));
             }
-            let mut end = col;
-            while end + 1 < cols && same(end + 1) {
-                end += 1;
-            }
-            return Some(HoveredLink {
-                line: line.0,
-                start,
-                end,
-            });
         }
 
-        // 2) Bare URL or file path detected in the row's text.
-        let mut text = String::with_capacity(cols);
-        for c in 0..cols {
-            text.push(term.grid()[line][Column(c)].c);
-        }
+        // 2) Bare URL or file path detected in the logical line. `bridge_hard_wrap`
+        //    is on so a URL a program printed with a literal `\n` mid-way is
+        //    recovered whole, not truncated at the break.
+        let (text, points, click_idx) = super::smart_select::logical_line_at(&term, click, true)?;
         drop(term);
-        // Same gate as the click path above — hover must not underline a link
-        // the click cannot open.
+        // Same gate as the click path — a relative path is resolved against the
+        // cwd and stat-checked, so a remote pane's cwd must not be used.
         let cwd = self.local_cwd();
-        let link =
-            super::search::link_at(&text, col, cwd.as_deref(), include_files).or_else(|| {
+        let link = super::search::link_at(&text, click_idx, cwd.as_deref(), include_files)
+            .or_else(|| {
                 include_loopback.then(|| {
-                    super::loopback::loopback_url_span_at(&text, col).map(|(start, end, url)| {
-                        super::search::LinkMatch {
+                    super::loopback::loopback_url_span_at(&text, click_idx).map(
+                        |(start, end, url)| super::search::LinkMatch {
                             start,
                             end,
                             target: LinkTarget::Url(url),
-                        }
-                    })
+                        },
+                    )
                 })?
             })?;
-        Some(HoveredLink {
-            line: line.0,
-            start: link.start,
-            end: link.end,
-        })
+        Some((link.target, points[link.start], points[link.end]))
     }
 
     /// The inline command line, anchored right where the shell prompt
@@ -8053,7 +8017,7 @@ mod tests {
     /// (which needs a window, a daemon and a pane): the derivation under test is
     /// the target → `HostId` one, and pinning it here is what catches a future
     /// `set_workspace` that forgets the host half. The ids must agree with what
-    /// `RemoteConnections::insert` registered — same `connection_key`, checked
+    /// `HostLinks::insert` registered — same `connection_key`, checked
     /// by `connection_keys_match_the_contract_table` in `tty7-core`.
     #[test]
     fn a_panes_host_is_its_workspaces_machine() {
@@ -8109,6 +8073,27 @@ pub(crate) fn quiet_test_pane(
         .expect("socketpair-backed terminal");
     let view = cx.new(|cx| TerminalView::with_terminal(terminal, pane_id, window, cx));
     (view, daemon_side)
+}
+
+/// [`quiet_test_pane`], marked as a native-SSH pane — the shape a remote
+/// window's local SSH split has. `ssh_spec` is otherwise set only by the real
+/// spawn path, which needs an actual SSH handshake.
+#[cfg(all(test, unix))]
+pub(crate) fn quiet_test_ssh_pane(
+    pane_id: u64,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) -> (gpui::Entity<TerminalView>, std::os::unix::net::UnixStream) {
+    let (view, stream) = quiet_test_pane(pane_id, window, cx);
+    view.update(cx, |view, _| {
+        view.ssh_spec = Some(Box::new(
+            serde_json::from_str(
+                r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
+            )
+            .expect("a minimal NativeSshSpec decodes"),
+        ));
+    });
+    (view, stream)
 }
 
 /// gpui-harness tests: a real (headless) App + Window around a `TerminalView`
@@ -8279,9 +8264,8 @@ mod gpui_tests {
                 view.hover_link_at(0, 23, true, cx);
                 assert_eq!(view.last_hover_cell, Some((0, 23)));
                 view.hovered_link = Some(HoveredLink {
-                    line: 23,
-                    start: 0,
-                    end: 3,
+                    start: Point::new(Line(23), Column(0)),
+                    end: Point::new(Line(23), Column(3)),
                 });
                 // The same geometry again changes nothing...
                 view.set_grid_size(80, 24, px(8.), px(17.));
@@ -9695,19 +9679,19 @@ mod gpui_tests {
         cx: &mut Context<TerminalView>,
     ) -> crate::core::session::WorkspaceId {
         use crate::core::session::{
-            RemoteRef, RemoteTarget, WorkspaceId, WorkspaceStore, Workspaces,
+            RemoteRef, RemoteTarget, WindowViews, WorkspaceId, WorkspaceStore,
         };
         use crate::terminal::PaneWorkspace;
         let host = RemoteRef::new(
             RemoteTarget::direct("me", "build-box", 22),
             WorkspaceId::new(),
         );
-        let entry = crate::core::session::Workspace::on_remote(host.clone());
+        let entry = crate::core::session::WindowView::on_remote(host.clone());
         let id = entry.id;
         WorkspaceStore::install_for_test(
             cx,
-            Workspaces {
-                workspaces: vec![entry],
+            WindowViews {
+                views: vec![entry],
                 active: None,
             },
         );

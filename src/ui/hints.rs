@@ -150,7 +150,7 @@ mod gpui_tests {
         });
         // Inject the zero-tab session (the persisted home-page state) so the
         // app builds without spawning a terminal — and without reading the
-        // on-disk `session.json`.
+        // on-disk view store.
         let window = cx.add_window(|window, cx| {
             Tty7App::with_session(None, Some(Session::default()), window, cx)
         });

@@ -79,7 +79,7 @@ fn spawn_config_watcher(cx: &mut App) {
         let Ok(event) = res else { return };
         // React to events that touch our `config.json`, or a theme file dropped
         // into the `themes/` subfolder — both feed the same registry reload below.
-        // Everything else in the dir (`session.json`, `history`, the daemon
+        // Everything else in the dir (`views.json`, `history`, the daemon
         // socket, and our own `.config.json.tmp.<pid>` / `*.yaml.tmp.<pid>` atomic
         // scratch files, whose extensions aren't theme extensions) is ignored.
         let hit = event
@@ -317,9 +317,13 @@ fn main() {
     // Daemon mode: when launched with `--daemon` we run the headless persistent
     // terminal server and never open a window. This is the backing process the GUI
     // auto-spawns and reconnects to; it owns all PTYs + child shells and outlives
-    // the GUI. Run to completion (the accept loop blocks until killed) then return.
+    // the GUI. It is the *same* daemon `tty7-server --daemon` runs on a remote
+    // box — panes plus the control dialect — because a local machine and a
+    // remote one are the same thing seen from different distances, and the
+    // workspace tree both serve lives behind control. Run to completion (the
+    // accept loop blocks until killed) then return.
     if std::env::args().any(|a| a == "--daemon") {
-        if let Err(e) = crate::daemon::server::run() {
+        if let Err(e) = crate::daemon::server::run_daemon() {
             log::error!("daemon exited with error: {e}");
         }
         return;
@@ -378,10 +382,9 @@ fn main() {
             // theme from it. It has to be read here, off the appearance-observer
             // path — see `ui::theme::SystemAppearance`.
             crate::ui::theme::refresh_system_appearance(cx);
-            // Read `session.json` (migrating a pre-multi-window file) before any
-            // window is built: windows claim their workspace from this store
-            // rather than each parsing the file themselves. It also dedupes
-            // pane claims here, once, instead of per window.
+            // Read `views.json` before any window is built: windows claim
+            // their workspace from this store rather than each parsing the
+            // file themselves.
             crate::core::session::WorkspaceStore::init(cx);
             // The window registry has to exist before the first window opens —
             // `ui::windows::open` registers into it.
@@ -408,20 +411,26 @@ fn main() {
                 })
                 .detach();
             keymap::init(cx);
+            // Hold a control link to this machine's own daemon, exactly as a
+            // remote machine gets one: the daemon owns the workspace tree and
+            // serves it over control, so the local GUI is a control client
+            // like any other. Supervised on its own forever loop — see
+            // `ui::local_link`.
+            crate::ui::local_link::LocalLink::install(cx);
 
             // Come up on the *one* workspace the user was last in, at its own
             // remembered geometry (`ui::windows` owns that logic, since "New
             // Workspace" and the workspace picker need the identical path).
             //
             // Deliberately one window, not one per workspace that was open at
-            // quit: see `Workspaces::workspace_to_restore` for why, and
+            // quit: see `WindowViews::workspace_to_restore` for why, and
             // `WorkspaceStore::restore_one` for what happens to the others (they
             // are detached, not forgotten — panes keep running and the switcher
             // lists them). Quitting with every window closed — or a first run —
             // opens a single window on a fresh workspace.
             let any_saved = {
                 let store = crate::core::session::WorkspaceStore::all(cx);
-                !store.workspaces.is_empty()
+                !store.views.is_empty()
             };
             let reopen = crate::core::session::WorkspaceStore::restore_one(cx);
             // With nothing to reopen, what that one window should hold depends on

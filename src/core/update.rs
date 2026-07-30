@@ -199,7 +199,7 @@ pub fn open_releases_page() {
 }
 
 /// Tiny persisted state for the update checker, stored at `update.json` in the
-/// config dir (alongside `config.json` / `session.json`). Currently just the
+/// config dir (alongside `config.json` / `views.json`). Currently just the
 /// last version we popped the modal for, so we never nag twice for one release.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct UpdateState {

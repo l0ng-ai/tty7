@@ -97,6 +97,22 @@ impl WindowRegistry {
             .or_else(|| registry.windows.first().map(|w| w.workspace))
     }
 
+    /// The `Tty7App` rendered in `window`, if it is one of ours.
+    ///
+    /// For code that runs *inside* a window (an element's event handler) but
+    /// has no line to the app entity — the inverse lookup of
+    /// [`window_for`](Self::window_for), keyed by the handle instead of the
+    /// workspace.
+    pub fn app_in(cx: &mut App, window: &Window) -> Option<gpui::Entity<Tty7App>> {
+        Self::sweep(cx);
+        let handle = window.window_handle();
+        cx.global::<Self>()
+            .windows
+            .iter()
+            .find(|w| w.handle == handle)
+            .and_then(|w| w.app.upgrade())
+    }
+
     /// The `Tty7App` showing `workspace`, if one is open.
     pub fn app_for(cx: &mut App, workspace: WorkspaceId) -> Option<WeakEntity<Tty7App>> {
         Self::sweep(cx);
@@ -163,8 +179,8 @@ impl WindowRegistry {
 }
 
 /// What a *brand-new* workspace's window starts with. Only consulted when the
-/// window is opening on a freshly minted workspace — one restored from
-/// `session.json` always rebuilds its saved tabs.
+/// window is opening on a freshly minted workspace — a known one opens empty
+/// and is filled from its machine's tree.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FreshStart {
     /// A single default terminal, the way every previous launch of tty7 came
@@ -255,8 +271,8 @@ pub const MENU_SLOTS: usize = 9;
 /// visible *somewhere* or it may as well have been deleted.
 pub fn menu_order(cx: &App) -> Vec<(WorkspaceId, bool)> {
     let all = WorkspaceStore::all(cx);
-    let mut open: Vec<_> = all.workspaces.iter().filter(|w| w.open).collect();
-    let mut closed: Vec<_> = all.workspaces.iter().filter(|w| !w.open).collect();
+    let mut open: Vec<_> = all.views.iter().filter(|w| w.open).collect();
+    let mut closed: Vec<_> = all.views.iter().filter(|w| !w.open).collect();
     open.sort_by(|a, b| b.last_active.cmp(&a.last_active));
     closed.sort_by(|a, b| b.last_active.cmp(&a.last_active));
     open.into_iter()
@@ -288,6 +304,11 @@ pub struct PaneCountQuery {
 }
 
 /// Read the inputs for [`live_pane_count`]. Cheap; UI thread only.
+///
+/// `None` when the workspace's machine has never been pulled this session —
+/// the ids to count live only in its tree, and a prompt about to state "N
+/// running sessions will be ended" must say it could not ask rather than
+/// count against a guess.
 pub fn pane_count_query(cx: &App, workspace: WorkspaceId) -> Option<PaneCountQuery> {
     let ws = WorkspaceStore::all(cx).get(workspace)?;
     Some(PaneCountQuery {
@@ -296,7 +317,7 @@ pub fn pane_count_query(cx: &App, workspace: WorkspaceId) -> Option<PaneCountQue
         // whichever *local* panes happen to hold those numbers and put a "3
         // running sessions will be ended" warning on a workspace that has none.
         route: crate::ui::remote_workspace::pane_route_for(cx, workspace),
-        claimed: ws.pane_ids(),
+        claimed: crate::ui::machine_mirror::pane_ids(cx, ws)?,
     })
 }
 
@@ -390,9 +411,7 @@ fn confirm_destructive(
     verb: &'static str,
     act: fn(&mut App, WorkspaceId),
 ) {
-    let name = WorkspaceStore::all(cx)
-        .get(workspace)
-        .map(|w| w.display_name())
+    let name = crate::ui::machine_mirror::display_name_for(cx, workspace)
         .unwrap_or_else(|| "this workspace".to_string());
     let query = pane_count_query(cx, workspace);
     let handle = window.window_handle();
@@ -457,21 +476,23 @@ fn confirm_destructive(
 /// Callers confirm first unless [`live_pane_count`] answered zero; with nothing
 /// running there is nothing to lose.
 pub fn stop_workspace(cx: &mut App, workspace: WorkspaceId) {
-    stop_workspace_keeping(cx, workspace, ClearedLayout::Push);
+    let doomed = doomed_pane_ids(cx, workspace);
+    stop_workspace_keeping(cx, workspace, doomed);
 }
 
-/// What to do with the record once its panes are dead.
-#[derive(Clone, Copy, PartialEq)]
-enum ClearedLayout {
-    /// Send it to the machine that owns it — the workspace is going to be
-    /// reopened, and it must not reopen claiming panes that no longer exist.
-    Push,
-    /// Leave it alone: the caller is about to delete the record outright, and a
-    /// push racing that delete could put the workspace back on the machine.
-    Discard,
+/// The pane ids stopping or deleting `workspace` must kill, per its machine's
+/// mirror. Read this **before** any operation that removes the workspace from
+/// the mirror — `fire_workspace_op(WorkspaceRemove)` folds the removal in
+/// synchronously ([`crate::ui::machine_mirror::MachineMirrors::note_workspace_op`]),
+/// and a list read after it is always empty.
+fn doomed_pane_ids(cx: &App, workspace: WorkspaceId) -> Vec<u64> {
+    WorkspaceStore::all(cx)
+        .get(workspace)
+        .and_then(|ws| crate::ui::machine_mirror::pane_ids(cx, ws))
+        .unwrap_or_default()
 }
 
-fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId, cleared: ClearedLayout) {
+fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId, ids: Vec<u64>) {
     // A remote workspace's panes live on the remote server, and its pane ids are
     // *that* daemon's. Sending them here would not fail — it would succeed
     // against whatever local panes happen to hold those numbers, killing a
@@ -482,10 +503,6 @@ fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId, cleared: Cleared
         .get(workspace)
         .map(|w| w.host_id())
         .unwrap_or(crate::ui::host_ops::HostId::LOCAL);
-    let ids = WorkspaceStore::all(cx)
-        .get(workspace)
-        .map(|ws| ws.pane_ids())
-        .unwrap_or_default();
     if !ids.is_empty() {
         // Off the UI thread: each of these dials `route`, and on a remote
         // workspace that is an SSH channel per pane. Stopping a four-pane
@@ -524,98 +541,39 @@ fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId, cleared: Cleared
     // half-finished action.
     close_window_for(cx, workspace);
     WorkspaceStore::close_window(cx, workspace);
-    // Last, and after the window is gone so nothing records the old layout back
-    // over it: the ids we just killed are dead by our own hand, and a record
-    // that still claims them reopens into panes that cannot be attached to.
-    // Locally that is invisible (`alive_panes_on` asks the daemon and gets the
-    // same answer); on a remote workspace nobody asks, so the stale id is the
-    // whole difference between reopening onto fresh shells with the agent
-    // conversation resumed and reopening onto `tty7 — disconnected`.
-    forget_killed_panes(cx, workspace, cleared);
+    // No client-side bookkeeping about the panes remains to correct: the kills
+    // above end the PTYs, the machine's own pane server observes each death,
+    // and the tree's records flip to `live: false` — exactly the state the
+    // next open reads as "revive with a fresh shell".
     refresh_menu(cx);
-}
-
-/// Drop `workspace`'s pane ids, and tell the machine that owns the record.
-///
-/// The push is not optional for a remote workspace that is being kept: design
-/// The remote's `workspaces.json` is the authority, so reopening pulls
-/// its copy over the client's ([`WorkspaceStore::apply_remote`]) and a
-/// local-only edit would be undone by the next open — which is the open this
-/// exists for.
-fn forget_killed_panes(cx: &mut App, workspace: WorkspaceId, cleared: ClearedLayout) {
-    if !WorkspaceStore::forget_pane_ids(cx, workspace) {
-        return;
-    }
-    if cleared == ClearedLayout::Discard {
-        return;
-    }
-    let Some((host, key, record)) = WorkspaceStore::remote_payload(cx, workspace) else {
-        return;
-    };
-    let Some(connection) = crate::ui::remote_workspace::connection_for(cx, workspace) else {
-        // Not connected, so the panes were not killed either — `kill_pane_on`
-        // needs the same route. The client's copy is still worth clearing: it
-        // is what a reconnect pushes back up.
-        log::info!(
-            "ended sessions on {} without reaching it; the cleared layout goes up on reconnect",
-            host.target
-        );
-        return;
-    };
-    cx.background_executor()
-        .spawn(async move {
-            if let Err(e) = crate::ui::remote_connect::put_remote_layout(&connection, key, record) {
-                log::warn!(
-                    "could not tell {} its workspace's panes are gone: {e}",
-                    host.target
-                );
-            }
-        })
-        .detach();
 }
 
 /// Delete a workspace outright: stop it, then forget it entirely. Irreversible
 /// — nothing about the layout survives.
 pub fn delete_workspace(cx: &mut App, workspace: WorkspaceId) {
-    // Delete it on the machine that owns it first, while the pointer to it is
-    // still on file. Doing this after `WorkspaceStore::remove` would leave the
-    // record stranded on the remote with no way left to name it.
-    delete_on_remote(cx, workspace);
-    // …and the stop that follows must not push the emptied layout back up: the
-    // delete above is in flight on a background task, and a push landing after
-    // it would recreate the record it just removed.
-    stop_workspace_keeping(cx, workspace, ClearedLayout::Discard);
+    let doomed = delete_from_tree(cx, workspace);
+    stop_workspace_keeping(cx, workspace, doomed);
     WorkspaceStore::remove(cx, workspace);
     release_unused_hosts(cx);
     refresh_menu(cx);
 }
 
-/// Forget a remote workspace on the machine that owns it (the
-/// remote's `workspaces.json` is the authority, so deleting only the client's
-/// pointer would leave the workspace there and reappear on the next connect).
+/// The tree half of a delete, in the one order that works: read the kill list
+/// off the machine mirror **before** firing `WorkspaceRemove`, because firing
+/// folds the removal into that mirror on the way out and the list read
+/// afterwards is empty — which is how "N running sessions will be ended" once
+/// ended zero. Answers the panes the caller must kill.
 ///
-/// A no-op for a local workspace, and for a remote one this client is not
-/// currently connected to — there is no way to reach the record, and the delete
-/// is a user action rather than something to queue and replay later.
-fn delete_on_remote(cx: &mut App, workspace: WorkspaceId) {
-    let Some(host) = WorkspaceStore::remote_ref(cx, workspace) else {
-        return;
-    };
-    let Some(connection) = crate::ui::remote_workspace::connection_for(cx, workspace) else {
-        log::info!(
-            "deleting the local pointer to a workspace on {} without reaching it",
-            host.target
-        );
-        return;
-    };
-    let key = host.store_key();
-    cx.background_executor()
-        .spawn(async move {
-            if let Err(e) = crate::ui::remote_connect::delete_remote_workspace(&connection, key) {
-                log::warn!("could not delete the workspace on {}: {e}", host.target);
-            }
-        })
-        .detach();
+/// The op itself still goes before `WorkspaceStore::remove`: the tree is where
+/// every other client (and the next launch) lists workspaces from, and firing
+/// after the entry is gone would leave it stranded with no way to name it.
+fn delete_from_tree(cx: &mut App, workspace: WorkspaceId) -> Vec<u64> {
+    let doomed = doomed_pane_ids(cx, workspace);
+    crate::ui::tree_sync::fire_workspace_op(cx, workspace, |ws| {
+        tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
+    });
+    crate::ui::tree_sync::forget(cx, workspace);
+    doomed
 }
 
 /// Drop the connection to any machine no workspace points at any more.
@@ -625,14 +583,14 @@ fn delete_on_remote(cx: &mut App, workspace: WorkspaceId) {
 /// careful would tear down a live sibling window's host mid-call.
 fn release_unused_hosts(cx: &mut App) {
     let live: Vec<_> = WorkspaceStore::all(cx)
-        .workspaces
+        .views
         .iter()
         .filter(|w| w.is_remote())
         .map(|w| w.host_id())
         .collect();
     for id in crate::ui::host_registry::HostRegistry::ids(cx) {
         if !id.is_local() && !live.contains(&id) {
-            crate::ui::remote_connect::RemoteConnections::remove(cx, id);
+            crate::ui::remote_connect::HostLinks::remove(cx, id);
         }
     }
 }
@@ -657,11 +615,11 @@ fn close_window_for(cx: &mut App, workspace: WorkspaceId) {
         return;
     }
 
-    let (fresh, session) = WorkspaceStore::claim(cx, None);
+    let fresh = WorkspaceStore::claim(cx, None);
     WindowRegistry::rebind(cx, workspace, fresh);
     let _ = handle.update(cx, |_, window, cx| {
         app.update(cx, |app, cx| {
-            app.adopt_workspace(fresh, session, window, cx)
+            app.adopt_workspace(fresh, crate::core::session::Session::default(), window, cx)
         });
     });
 }
@@ -844,5 +802,55 @@ mod tests {
                 "{verb}: {detail:?} states a count it does not have"
             );
         }
+    }
+
+    /// The regression the delete order guards against: `WorkspaceRemove` is
+    /// folded into the machine mirror synchronously on its way out, so a kill
+    /// list read *after* firing it is always empty — the confirm prompt said
+    /// "3 running sessions will be ended" and the delete then ended none.
+    /// `delete_from_tree` must hand back the panes the mirror listed before
+    /// the removal blanked it.
+    #[gpui::test]
+    fn a_delete_reads_its_kill_list_before_the_removal_blanks_the_mirror(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::session::{WindowView, WindowViews};
+        use tty7_core::core::machine::{Machine, PaneRecord, Tab, Workspace as TreeWorkspace};
+
+        cx.update(|cx| {
+            let view = WindowView::default();
+            let id = view.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![view],
+                    active: None,
+                },
+            );
+            crate::ui::machine_mirror::MachineMirrors::install(
+                cx,
+                crate::ui::host_ops::HostId::LOCAL,
+                Machine {
+                    workspaces: vec![TreeWorkspace {
+                        id,
+                        tabs: vec![Tab::leaf(1), Tab::leaf(2), Tab::leaf(3)],
+                        ..TreeWorkspace::default()
+                    }],
+                    panes: vec![PaneRecord::new(1), PaneRecord::new(2), PaneRecord::new(3)],
+                },
+            );
+
+            let doomed = delete_from_tree(cx, id);
+            assert_eq!(
+                doomed,
+                vec![1, 2, 3],
+                "every session the confirm prompt counted must be on the kill list"
+            );
+            assert!(
+                doomed_pane_ids(cx, id).is_empty(),
+                "the removal has been folded into the mirror — which is exactly why \
+                 the list must be read first"
+            );
+        });
     }
 }
