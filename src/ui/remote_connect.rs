@@ -1017,6 +1017,29 @@ pub fn take_pending_auth() -> Option<PendingAuth> {
     AUTH_MAILBOX.lock().ok()?.pop()
 }
 
+/// Whose turn it is to drain [`AUTH_MAILBOX`], for tests only.
+///
+/// The mailbox is process-global, and [`pump_auth_sheets`] takes *every* entry in
+/// one pass — correct for the app, where one tick serves one mailbox, and fatal
+/// in a test binary, where a test waiting for the prompt it just caused shares
+/// that mailbox with every gpui test driving a tick. The prompt gets drained by a
+/// tick that has no idea it was spoken for, and the waiting test never sees it.
+///
+/// So a test that needs its own prompt back claims this first, and the drain
+/// yields while it is held. Compiled out of a release build, where there is one
+/// app, one tick and nothing to arbitrate.
+///
+/// [`pump_auth_sheets`]: crate::ui::remote_workspace::pump_auth_sheets
+#[cfg(test)]
+pub(crate) static MAILBOX_TURN: Mutex<()> = Mutex::new(());
+
+/// Claim [`MAILBOX_TURN`], ignoring poisoning: a test that panicked while holding
+/// it has nothing to corrupt here — the guard protects an ordering, not data.
+#[cfg(test)]
+pub(crate) fn claim_mailbox() -> std::sync::MutexGuard<'static, ()> {
+    MAILBOX_TURN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 // ---------------------------------------------------------------------------
 // 7. Remote daemon version skew
 // ---------------------------------------------------------------------------
@@ -1207,6 +1230,11 @@ mod tests {
     /// were the same thread, and on the pane path they never are.
     #[test]
     fn a_routed_auth_prompt_carries_the_machine_that_raised_it() {
+        // Held for the whole exchange: the prompt this test is about to cause
+        // goes into a process-global mailbox, and `pump_auth_sheets` drains all of
+        // it from any gpui test in this binary that drives a tick. Without the
+        // claim that drain takes this test's prompt and the wait below never ends.
+        let _turn = claim_mailbox();
         while take_pending_auth().is_some() {}
         let target = RemoteTarget::direct("me", "build-box", 22);
         let route =

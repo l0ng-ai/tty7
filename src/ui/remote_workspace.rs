@@ -1822,6 +1822,12 @@ fn release_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
 /// when no workspace is bound to the machine yet) and the supervisor's tick
 /// (start-up and every reconnect, when no picker is open).
 pub(crate) fn pump_auth_sheets(cx: &mut gpui::App) {
+    // Yield the mailbox to a test that is waiting for a prompt it caused itself;
+    // see `remote_connect::MAILBOX_TURN`. Compiled out of a release build, which
+    // has one tick and one mailbox and nothing to arbitrate.
+    #[cfg(test)]
+    let _turn = remote_connect::claim_mailbox();
+
     let mut inbox: Vec<remote_connect::PendingAuth> = Vec::new();
     while let Some(pending) = remote_connect::take_pending_auth() {
         inbox.push(pending);
