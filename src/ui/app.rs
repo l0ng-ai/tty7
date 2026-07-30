@@ -937,7 +937,6 @@ impl Tty7App {
     /// that is no longer on file.
     pub fn for_workspace(
         id: Option<WorkspaceId>,
-        fresh: crate::ui::windows::FreshStart,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -960,19 +959,12 @@ impl Tty7App {
         // A remote workspace hydrates even with restore off: its panes are
         // running sessions on another machine, not a saved layout.
         let hydrate = known && (restore || is_remote);
-        // What the window opens holding is the caller's call for a *brand-new*
-        // workspace: `None` takes the first-run path in `with_session`,
-        // spawning a single default terminal — what `New Workspace` and a
-        // first run both want — while an empty session lands on the home page,
-        // for the launch that exists to show the workspace picker. A known
-        // workspace opens empty (the hydration fills it), or on a fresh shell
-        // when the user turned restore off.
-        let session = match (known, fresh) {
-            (true, _) if hydrate => Some(Session::default()),
-            (true, _) => None,
-            (false, crate::ui::windows::FreshStart::Shell) => None,
-            (false, crate::ui::windows::FreshStart::HomePage) => Some(Session::default()),
-        };
+        // A brand-new workspace takes the first-run path in `with_session`
+        // (`None`), spawning a single default terminal — what `New Workspace`
+        // and a first run both want. A known workspace opens on an empty
+        // session that the hydration fills, or on a fresh shell when the user
+        // turned restore off.
+        let session = hydrate.then(Session::default);
         let app = Self::with_session(Some(workspace), session, window, cx);
         if hydrate {
             // No immediate save: the window is deliberately empty, and racing

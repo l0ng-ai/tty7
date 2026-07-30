@@ -178,34 +178,15 @@ impl WindowRegistry {
     }
 }
 
-/// What a *brand-new* workspace's window starts with. Only consulted when the
-/// window is opening on a freshly minted workspace — a known one opens empty
-/// and is filled from its machine's tree.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum FreshStart {
-    /// A single default terminal, the way every previous launch of tty7 came
-    /// up. What `New Workspace` and a genuine first run want: a window whose
-    /// workspace has nothing in it yet is a window you asked for to work in.
-    Shell,
-    /// No tabs — the home page. Used at launch when there *are* saved
-    /// workspaces but none were open at quit: the picker listing them is the
-    /// whole point of that window, and a shell in front of it would bury it.
-    HomePage,
-}
-
 /// Open a window on `workspace` — or on a brand-new workspace when `None`,
-/// which starts with a single terminal (see [`open_with`] for the other case).
+/// which starts with a single terminal. A known workspace opens empty and is
+/// filled from its machine's tree.
 ///
 /// When that workspace already has a window, this focuses it instead of
 /// opening a second one: two windows on one workspace would both attach the
 /// same daemon panes, and the daemon's single-subscriber model means the
 /// second attach silently kills the first window's terminal.
 pub fn open(cx: &mut App, workspace: Option<WorkspaceId>) {
-    open_with(cx, workspace, FreshStart::Shell);
-}
-
-/// [`open`], with a say in what a brand-new workspace comes up holding.
-pub fn open_with(cx: &mut App, workspace: Option<WorkspaceId>, fresh: FreshStart) {
     if let Some(id) = workspace
         && let Some(handle) = WindowRegistry::window_for(cx, id)
     {
@@ -218,7 +199,7 @@ pub fn open_with(cx: &mut App, workspace: Option<WorkspaceId>, fresh: FreshStart
     // only the root view — so capture it on the way past.
     let mut created: Option<gpui::Entity<Tty7App>> = None;
     let opened = cx.open_window(options, |window, cx| {
-        let app = cx.new(|cx| Tty7App::for_workspace(workspace, fresh, window, cx));
+        let app = cx.new(|cx| Tty7App::for_workspace(workspace, window, cx));
         created = Some(app.clone());
         // Root's own background is fully transparent: `Tty7App`'s root div is
         // the single owner of the window background (solid / gradient / image,

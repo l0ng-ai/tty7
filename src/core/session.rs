@@ -159,11 +159,14 @@ impl WorkspaceStore {
     /// Their panes are untouched — this is exactly the state
     /// [`close_window`](Self::close_window) leaves behind, reached in bulk.
     ///
-    /// Returns `None` when nothing was open, which launch reads as "come up on
-    /// the home page".
+    /// The workspace kept need not have been open at all: quitting with every
+    /// window closed comes back to the one closed last (see
+    /// [`WindowViews::workspace_to_restore`]). `None` means there are no saved
+    /// workspaces whatsoever — a first run.
     pub fn restore_one(cx: &mut gpui::App) -> Option<WorkspaceId> {
         let store = Self::try_store(cx)?;
         let keep = store.views.workspace_to_restore()?;
+        let reattaching = store.views.get(keep).is_some_and(|view| !view.open);
         let mut detached = 0usize;
         for view in &mut store.views.views {
             if view.open && view.id != keep {
@@ -173,7 +176,9 @@ impl WorkspaceStore {
         }
         store.views.active = Some(keep);
         store.views.save();
-        if detached > 0 {
+        if reattaching {
+            log::info!("launch: no window was open at quit; reattaching the last one closed");
+        } else if detached > 0 {
             log::info!("launch: restoring 1 workspace, left {detached} detached");
         }
         Some(keep)

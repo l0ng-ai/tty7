@@ -530,20 +530,41 @@ impl WindowViews {
     /// others are not lost by any measure that matters: their panes never
     /// stopped running in the daemon, and the switcher lists them a click away.
     ///
-    /// [`active`](Self::active) is the answer whenever it is still open, since
-    /// it is written on every focus change and so names the window that had the
-    /// user's attention last. `last_active` is the fallback for a store written
-    /// by a build that did not track focus, or one whose active workspace was
-    /// closed before quitting.
+    /// Three answers, in order:
+    ///
+    /// 1. [`active`](Self::active) while it is still open — written on every
+    ///    focus change, so it names the window that had the user's attention
+    ///    last.
+    /// 2. the most recently active *open* workspace, for a store written by a
+    ///    build that did not track focus, or one whose active workspace was
+    ///    closed before quitting.
+    /// 3. the most recently active workspace of any kind, open or not.
+    ///
+    /// That last one is why closing every window and quitting still comes back
+    /// somewhere. Closing a window here is a *detach*: the panes keep running in
+    /// the daemon, so the workspace behind them is every bit as much "where the
+    /// user left off" as one that still had a window — and `close_window`
+    /// touches it on the way out, which makes the most recent of them the one
+    /// closed last. Only the explicit *Close Workspace* drops an entry from the
+    /// file, and that is the one gesture that means "I am done with this".
+    ///
+    /// `None` therefore means one thing: no workspaces at all, i.e. a first run.
     pub fn workspace_to_restore(&self) -> Option<WorkspaceId> {
         let focused = self
             .active
             .filter(|id| self.get(*id).is_some_and(|w| w.open));
-        focused.or_else(|| {
-            self.open_views()
-                .max_by_key(|w| w.last_active)
-                .map(|w| w.id)
-        })
+        focused
+            .or_else(|| {
+                self.open_views()
+                    .max_by_key(|w| w.last_active)
+                    .map(|w| w.id)
+            })
+            .or_else(|| {
+                self.views
+                    .iter()
+                    .max_by_key(|w| w.last_active)
+                    .map(|w| w.id)
+            })
     }
 
     /// Persist as JSON, creating the parent directory if needed. Any
@@ -876,14 +897,56 @@ mod tests {
         };
         assert_eq!(all.workspace_to_restore(), Some(open_id));
 
-        // Nothing open at all: launch has no workspace to come up on and shows
-        // the home page instead of inventing one.
-        let mut none_open = view();
-        none_open.open = false;
+        // Nothing open at all — the user closed every window before quitting.
+        // Launch still comes back to the one closed last, because a detached
+        // workspace's panes are still running and `close_window` touches it on
+        // the way out.
+        let mut first_closed = view();
+        first_closed.open = false;
+        first_closed.last_active = 100;
+        let mut closed_last = view();
+        closed_last.open = false;
+        closed_last.last_active = 900;
+        let closed_last_id = closed_last.id;
         let all = WindowViews {
             active: None,
-            views: vec![none_open],
+            views: vec![first_closed, closed_last],
         };
-        assert_eq!(all.workspace_to_restore(), None);
+        assert_eq!(all.workspace_to_restore(), Some(closed_last_id));
+
+        // A stale `active` naming a workspace that is gone from the file does
+        // not stop the fallback from answering.
+        let all = WindowViews {
+            active: Some(WorkspaceId::new()),
+            ..all
+        };
+        assert_eq!(all.workspace_to_restore(), Some(closed_last_id));
+
+        // The only `None` left is a genuine first run.
+        assert_eq!(WindowViews::default().workspace_to_restore(), None);
+    }
+
+    /// An open workspace outranks a detached one even when the detached one saw
+    /// activity more recently — the fallback is for when *nothing* is open, not
+    /// a recency race across the two states.
+    ///
+    /// Without this, a background agent touching a detached workspace after the
+    /// user's last keystroke would have launch reopen that one instead of the
+    /// window that was actually on screen at quit.
+    #[test]
+    fn an_open_workspace_outranks_a_more_recently_touched_detached_one() {
+        let mut open_one = view();
+        open_one.open = true;
+        open_one.last_active = 100;
+        let open_id = open_one.id;
+        let mut detached = view();
+        detached.open = false;
+        detached.last_active = 900;
+
+        let all = WindowViews {
+            active: None,
+            views: vec![open_one, detached],
+        };
+        assert_eq!(all.workspace_to_restore(), Some(open_id));
     }
 }

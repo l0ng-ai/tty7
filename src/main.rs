@@ -426,28 +426,15 @@ fn main() {
             // quit: see `WindowViews::workspace_to_restore` for why, and
             // `WorkspaceStore::restore_one` for what happens to the others (they
             // are detached, not forgotten — panes keep running and the switcher
-            // lists them). Quitting with every window closed — or a first run —
-            // opens a single window on a fresh workspace.
-            let any_saved = {
-                let store = crate::core::session::WorkspaceStore::all(cx);
-                !store.views.is_empty()
-            };
+            // lists them). Closing every window before quitting is *not* a
+            // reason to come up empty: those workspaces still hold running
+            // panes, so launch reattaches the one closed last.
+            //
+            // `None` is therefore a first run only, and it opens a single window
+            // on a fresh workspace holding one terminal — exactly as every
+            // pre-multi-window build did.
             let reopen = crate::core::session::WorkspaceStore::restore_one(cx);
-            // With nothing to reopen, what that one window should hold depends on
-            // whether there is anything to come back to: workspaces the user
-            // detached are listed by the home page's picker, so leave it empty
-            // for them. A genuine first run has no picker to show and no reason
-            // to greet the user with a blank page — it opens a terminal, exactly
-            // as every pre-multi-window build did.
-            let fresh = if any_saved {
-                crate::ui::windows::FreshStart::HomePage
-            } else {
-                crate::ui::windows::FreshStart::Shell
-            };
-            match reopen {
-                Some(id) => crate::ui::windows::open(cx, Some(id)),
-                None => crate::ui::windows::open_with(cx, None, fresh),
-            }
+            crate::ui::windows::open(cx, reopen);
         });
 }
 

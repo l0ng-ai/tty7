@@ -231,6 +231,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Closing every window before quitting no longer loses your place** — launch
+  only ever restored a workspace that still had a window at quit, so closing them
+  one by one and relaunching came up on the empty home page, with no hint that
+  four workspaces were sitting there. Closing a window here is a *detach*: its
+  panes keep running in the daemon, which makes that workspace every bit as much
+  "where you left off" as one that still had a window on screen. Launch now falls
+  back to the workspace closed last, and the only launch that comes up on a fresh
+  workspace is a genuine first run. Deleting a workspace still means deleting it —
+  that is the one gesture that drops it from the file.
+
 - **An unsubscribed directory watch stops delivering immediately** — dropping a
   local watch handle now closes its delivery channel rather than only asking the
   OS backend to stand down. Tearing that backend down is not instantaneous, and
