@@ -114,8 +114,14 @@ impl MachineMirrors {
 
     /// Install a freshly pulled tree — for the paths that already hold one
     /// (a window's hydration pulls `MachineGet` anyway).
+    ///
+    /// Repaints, like [`refresh`](Self::refresh)'s landing does: every workspace
+    /// name, pane count and liveness dot on screen reads this global, and a
+    /// pull that lands without a repaint leaves the chrome a frame (or, on a
+    /// quiet screen, indefinitely) behind the tree it is describing.
     pub fn install(cx: &mut App, host: HostId, machine: Machine) {
         cx.default_global::<Self>().machines.insert(host, machine);
+        cx.refresh_windows();
     }
 
     /// Advance `host`'s mirror by one delta about the workspace `key` names.
@@ -322,11 +328,20 @@ fn view_of<'a>(
 }
 
 /// What the picker and the window title call `entry`: the user-set name, else
-/// derived from the tree's repo groups and cwds. `None` while nothing is known
-/// (machine not pulled yet) — the caller picks its own placeholder.
+/// derived from the tree's repo groups and cwds.
+///
+/// Falls back to
+/// [`WindowView::label`](crate::core::session::WindowView::label) — what the
+/// machine last said, before it
+/// stopped answering. The tree wins whenever it answers; the hint is for the
+/// rows the picker exists to offer, on machines that are asleep. `None` only
+/// when this client has never seen the workspace named at all, which is a
+/// brand-new entry and nothing a user is choosing between.
 pub fn display_name(cx: &App, entry: &crate::core::session::WindowView) -> Option<String> {
-    let (ws, panes) = view_of(cx, entry)?;
-    Some(display_name_of(ws, panes))
+    match view_of(cx, entry) {
+        Some((ws, panes)) => Some(display_name_of(ws, panes)),
+        None => entry.label.clone(),
+    }
 }
 
 /// A tree workspace's label: the user-set name, else the repository most of
@@ -377,10 +392,25 @@ pub fn display_name_for(cx: &App, client_ws: WorkspaceId) -> Option<String> {
     display_name(cx, entry)
 }
 
-/// [`subject_path_of`] for a client entry.
+/// [`subject_path_of`] for a client entry, falling back to the stamped hint for
+/// the same reason [`display_name`] does.
 pub fn subject_path(cx: &App, entry: &crate::core::session::WindowView) -> Option<String> {
+    match view_of(cx, entry) {
+        Some((ws, panes)) => subject_path_of(ws, panes).or_else(|| entry.subject.clone()),
+        None => entry.subject.clone(),
+    }
+}
+
+/// The pair a client entry should carry on file, read off its machine's mirror —
+/// for [`WorkspaceStore::record_geometry`](crate::core::session::WorkspaceStore::record_geometry)
+/// to stamp. `None` for a machine that has not answered: a hint is only ever
+/// replaced by something better, never blanked by not knowing.
+pub fn display_hint(
+    cx: &App,
+    entry: &crate::core::session::WindowView,
+) -> Option<(String, Option<String>)> {
     let (ws, panes) = view_of(cx, entry)?;
-    subject_path_of(ws, panes)
+    Some((display_name_of(ws, panes), subject_path_of(ws, panes)))
 }
 
 /// Every pane id `entry`'s tree claims on its machine. `None` when the
@@ -418,6 +448,54 @@ mod tests {
 
     fn leaf_tab(pane: u64) -> Tab {
         Tab::leaf(pane)
+    }
+
+    /// A machine that is not answering still has to produce a row a user can
+    /// choose: the picker's whole job is offering workspaces on machines that
+    /// are asleep, and "Untitled" with a blank subtitle is not an offer. So the
+    /// stamped hint stands in until a pull lands, and the tree wins the moment
+    /// one does.
+    #[gpui::test]
+    fn an_unpulled_machine_falls_back_to_the_stamped_label(cx: &mut gpui::TestAppContext) {
+        use crate::core::session::{WindowView, WindowViews, WorkspaceStore};
+
+        cx.update(|cx| {
+            let mut view = WindowView::default();
+            view.label = Some("api".into());
+            view.subject = Some("/repo/api".into());
+            let id = view.id;
+            let entry = view.clone();
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![view],
+                    active: None,
+                },
+            );
+
+            // Nothing pulled: the hint is what the row says.
+            assert_eq!(display_name(cx, &entry).as_deref(), Some("api"));
+            assert_eq!(subject_path(cx, &entry).as_deref(), Some("/repo/api"));
+            assert!(
+                display_hint(cx, &entry).is_none(),
+                "and a machine that has not answered contributes no new hint"
+            );
+
+            // The tree answers, and outranks it.
+            let mut tree = Workspace {
+                id,
+                name: Some("web".into()),
+                ..Workspace::default()
+            };
+            tree.tabs = vec![leaf_tab(1)];
+            MachineMirrors::install(cx, HostId::LOCAL, machine_with(tree));
+            assert_eq!(display_name(cx, &entry).as_deref(), Some("web"));
+            assert_eq!(
+                display_hint(cx, &entry).map(|(label, _)| label).as_deref(),
+                Some("web"),
+                "which is what the next save stamps"
+            );
+        });
     }
 
     #[test]

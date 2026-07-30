@@ -79,11 +79,11 @@ pub const MAX_QUEUED: usize = 1024;
 /// right, for the same reason as the watch caps: a peer
 /// that has stopped reading its socket must not turn another client's edit
 /// into unbounded server memory. What makes the drop survivable is that it is
-/// *announced*: the connection is flagged lagged, and the forwarder sends
-/// [`ControlEvent::LayoutResync`] ahead of the next delta the peer does
-/// receive, so a client that lost one edit re-pulls instead of silently
-/// mirroring a tree it is no longer looking at. A peer too wedged to hear
-/// even that is already inside
+/// *announced*: the connection is flagged lagged, and the forwarder replaces
+/// the whole superseded backlog with a single
+/// [`ControlEvent::LayoutResync`], so a client that lost one edit re-pulls
+/// instead of silently mirroring a tree it is no longer looking at. A peer too
+/// wedged to hear even that is already inside
 /// [`crate::daemon::control::KEEPALIVE_DEAD_AFTER`] of losing the link, and
 /// every reconnect begins with a full pull.
 pub const LAYOUT_EVENT_QUEUE: usize = 1024;
@@ -1287,12 +1287,22 @@ fn subscribe_machine(services: &Services, sink: &Arc<Sink>) -> Option<machine::S
 }
 
 /// Relay tree deltas to the peer as `Layout` pushes — prefixed by a
-/// [`ControlEvent::LayoutResync`] whenever the queue dropped one, so the peer
-/// re-pulls before applying anything later than the gap.
+/// [`ControlEvent::LayoutResync`] **in place of** everything the queue still
+/// holds, whenever it dropped one.
+///
+/// Announcing and then draining the backlog would be worse than not announcing
+/// at all. The queue is FIFO, so a drop discards the *newest* delta and
+/// everything still queued is **older** than the gap: the peer would re-pull the
+/// tree on the resync and then apply a stretch of history from before it,
+/// `TabRestructured` replacing whole tabs with the shapes they had — a window
+/// silently reverting to a layout nobody is looking at, with mirror and window
+/// in agreement so nothing triggers recovery a second time. Every queued delta
+/// is by construction already in the tree the peer is about to pull, so the
+/// backlog is not lost information; it is superseded information.
 ///
 /// The flag-then-announce order is safe by construction: `lagged` is only set
-/// when the queue is full, so at least [`LAYOUT_EVENT_QUEUE`] deliveries
-/// follow every drop and the announcement never waits on a quiet tree.
+/// when the queue is full, so a delivery always follows a drop and the
+/// announcement never waits on a quiet tree.
 ///
 /// Ends on its own when the `Subscription` is dropped: that removes the
 /// closure holding the sender, which closes the channel. Same shape, and the
@@ -1306,12 +1316,25 @@ fn spawn_layout_forwarder(
         .name("tty7-control-layout".into())
         .spawn(move || {
             while let Ok((workspace, delta)) = rx.recv_blocking() {
-                if lagged.swap(false, Ordering::AcqRel)
-                    && sink
+                if lagged.swap(false, Ordering::AcqRel) {
+                    // This delta and everything behind it predate the gap. Drop
+                    // the lot and send the one event that repairs a peer whose
+                    // history has a hole in it.
+                    let mut superseded = 1;
+                    while rx.try_recv().is_ok() {
+                        superseded += 1;
+                    }
+                    log::info!(
+                        "dropping {superseded} superseded layout delta(s) and asking the peer \
+                         to resync"
+                    );
+                    if sink
                         .send(&ControlServerMsg::Event(ControlEvent::LayoutResync))
                         .is_err()
-                {
-                    return;
+                    {
+                        return;
+                    }
+                    continue;
                 }
                 let event = ControlEvent::Layout { workspace, delta };
                 if sink.send(&ControlServerMsg::Event(event)).is_err() {
@@ -1808,6 +1831,140 @@ mod sock {
 #[cfg(unix)]
 pub use sock::{
     bind_control_socket, control_socket_path, serve_listener, serve_listener_with,
+    spawn_control_listener, spawn_control_listener_with,
+};
+
+/// The machine-local control endpoint on Windows, which has no Unix sockets.
+///
+/// The same two-listeners-one-daemon shape as [`sock`], over the transport the
+/// pane dialect already uses on this platform: a loopback `TcpListener` on an
+/// OS-assigned port, recorded in a user-private marker file next to
+/// `daemon.port` together with a 256-bit token every connection must present.
+/// Loopback is reachable by any local process, so the token is the access
+/// boundary here exactly as file permissions are on Unix — see
+/// [`crate::daemon::transport`], whose machinery this reuses rather than
+/// re-deriving.
+///
+/// Its own port and its own token, not the pane listener's: the two dialects are
+/// independent services, and a client that learned one endpoint's token has not
+/// thereby been granted the other.
+#[cfg(windows)]
+mod wsock {
+    use super::*;
+    use crate::daemon::transport;
+    use std::net::TcpListener;
+
+    /// Where the control listener records its port and token, beside the pane
+    /// dialect's `daemon.port`.
+    pub const CONTROL_PORT_FILE: &str = "control.port";
+
+    /// The marker file's path — the Windows answer to `control_socket_path`,
+    /// and what a log line naming the endpoint should print.
+    pub fn control_endpoint_path() -> io::Result<PathBuf> {
+        transport::port_path_named(CONTROL_PORT_FILE).ok_or_else(|| {
+            io::Error::other("no config directory to record the control endpoint in")
+        })
+    }
+
+    /// Bind the control endpoint and serve it on a background thread, one thread
+    /// per connection. Returns the marker file it recorded itself in.
+    ///
+    /// Every accepted connection is authenticated *before* a frame is parsed:
+    /// what is behind this endpoint is `ReadFile` / `WriteFile` / `Git` on
+    /// arbitrary paths as this user, plus the machine's workspace tree.
+    pub fn spawn_control_listener_with(
+        host: SharedHost,
+        services: Services,
+    ) -> io::Result<PathBuf> {
+        let path = control_endpoint_path()?;
+        // Refuse when one is already listening, exactly as
+        // [`bind_control_socket`](sock::bind_control_socket) does — and for a
+        // reason that bites harder here. Binding is what *writes* the marker
+        // file, so a second daemon that goes on to lose the pane-socket race
+        // (`run` bails with "already running") would have pointed every client
+        // on the machine at a listener that is about to exit. A marker left by a
+        // crashed daemon looks exactly like a live one, so the only way to tell
+        // is to connect: the same probe, with the same rare false positive if an
+        // unrelated process has since taken that ephemeral port.
+        if let Ok(live) = transport::connect_endpoint(CONTROL_PORT_FILE) {
+            drop(live);
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!(
+                    "a control server is already listening at {}",
+                    transport::endpoint_display_named(CONTROL_PORT_FILE)
+                ),
+            ));
+        }
+        let (listener, token) =
+            transport::bind_endpoint(CONTROL_PORT_FILE).map_err(io::Error::other)?;
+        std::thread::Builder::new()
+            .name("tty7-control-listener".into())
+            .spawn(move || serve_listener_with(listener, token, host, services))?;
+        Ok(path)
+    }
+
+    /// [`spawn_control_listener_with`] with no extra services — host RPC only.
+    pub fn spawn_control_listener(host: SharedHost) -> io::Result<PathBuf> {
+        spawn_control_listener_with(host, Services::none())
+    }
+
+    /// Serve control connections on `listener` until it fails, one thread per
+    /// connection, rejecting any that cannot present `token`.
+    pub fn serve_listener_with(
+        listener: TcpListener,
+        token: transport::Token,
+        host: SharedHost,
+        services: Services,
+    ) {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut stream) => {
+                    transport::tune(&stream);
+                    let host = Arc::clone(&host);
+                    let services = services.clone();
+                    let spawned = std::thread::Builder::new()
+                        .name("tty7-control-conn".into())
+                        .spawn(move || {
+                            // Before anything else: an unauthenticated peer is
+                            // some other process on this machine, and it gets
+                            // no dialect at all.
+                            if let Err(e) = transport::check_endpoint_token(&mut stream, &token) {
+                                log::warn!("control connection rejected: {e}");
+                                return;
+                            }
+                            if let Err(e) = serve_with(stream, host, services) {
+                                log::warn!("control connection failed: {e}");
+                            }
+                        });
+                    if let Err(e) = spawned {
+                        log::warn!("could not start a control connection thread: {e}");
+                    }
+                }
+                // One bad accept must not take the server down; the daemon's own
+                // listener has behaved this way since it was written.
+                Err(e) => log::warn!("control accept failed: {e}"),
+            }
+        }
+    }
+
+    /// Dial this machine's control endpoint, presenting the token from its
+    /// marker file. The client half of the boundary above; the GUI's local link
+    /// is its only caller.
+    pub fn connect_control() -> io::Result<std::net::TcpStream> {
+        transport::connect_endpoint(CONTROL_PORT_FILE)
+    }
+
+    /// Forget the endpoint marker — the daemon's shutdown path, so a stale file
+    /// does not send the next GUI at a port nobody is listening on.
+    pub fn remove_control_endpoint() {
+        transport::remove_endpoint(CONTROL_PORT_FILE);
+    }
+}
+
+#[cfg(windows)]
+pub use wsock::{
+    CONTROL_PORT_FILE, connect_control, control_endpoint_path, remove_control_endpoint,
     spawn_control_listener, spawn_control_listener_with,
 };
 
@@ -3053,51 +3210,138 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // The machine tree, over the wire
+    // -----------------------------------------------------------------------
+
+    /// A subscription is a connection's resource like any other: when the
+    /// connection ends, the tree must stop holding a callback into its sink.
+    ///
+    /// (A leaked subscriber shows up as a `BrokenPipe` log rather than a
+    /// failure, so the assertion is that a later operation succeeds and lands —
+    /// with the tree's own `Drop`-based unsubscribe doing the work.)
+    #[test]
+    fn a_closed_connection_stops_being_a_subscriber() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = MachineStore::open(dir.path().join(machine::MACHINE_FILE));
+        let served = {
+            let store = Arc::clone(&store);
+            let (server, client) = UnixStream::pair().unwrap();
+            let handle = std::thread::spawn(move || {
+                let _ = serve_with(server, LocalHost::new(), Services::with_machine(store));
+            });
+            // Handshake, then hang up.
+            let mut client = client;
+            ControlClientMsg::Hello(ControlHello::host_rpc("t", "h"))
+                .encode(&mut client)
+                .unwrap();
+            client.flush().unwrap();
+            let _ = ControlServerMsg::read(&mut client).unwrap();
+            drop(client);
+            handle
+        };
+        served.join().unwrap();
+
+        let ws = store
+            .workspace_create(None, Some("api".into()), None)
+            .unwrap();
+        assert_eq!(store.machine().workspaces.len(), 1);
+        assert_eq!(store.workspace(ws.id).unwrap().name.as_deref(), Some("api"));
+    }
+
+    /// One tree shared by many connections writing at once: the server has to be
+    /// as safe as the store is, and no operation may be lost or answered twice.
+    ///
+    /// Six connections × ten workspaces, which is also the shape the design is
+    /// *for* — several clients editing one machine — rather than the single
+    /// writer the retired record store assumed.
+    #[test]
+    fn concurrent_connections_can_all_write_the_tree() {
+        let (services, _dir) = workspace_services();
+        let store = Arc::clone(services.machine.as_ref().unwrap());
+
+        let writers: Vec<_> = (0..6)
+            .map(|_| {
+                let services = services.clone();
+                std::thread::spawn(move || {
+                    let (mut client, _) = raw_with(services);
+                    for i in 0..10 {
+                        let reply = ask(
+                            &mut client,
+                            i as u64 + 1,
+                            ControlRequest::WorkspaceCreate {
+                                name: Some(format!("w-{i}")),
+                                workspace: None,
+                            },
+                        );
+                        assert!(
+                            matches!(reply, ControlReply::Ok(ReplyOk::WorkspaceTree(_))),
+                            "{reply:?}"
+                        );
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        assert_eq!(
+            store.machine().workspaces.len(),
+            60,
+            "every operation landed exactly once"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Layout delta forwarding
     // -----------------------------------------------------------------------
 
-    /// A connection whose delta queue dropped something is *told*: the
-    /// forwarder announces `LayoutResync` ahead of the next delta it does
-    /// deliver, so the peer re-pulls before applying anything later than the
-    /// gap. Before this, the drop was a server-side log line and the client
-    /// mirrored a tree it was no longer looking at, indefinitely.
+    /// A connection whose delta queue dropped something is *told* — and told
+    /// **instead of** being handed the backlog.
+    ///
+    /// Before the announcement existed, the drop was a server-side log line and
+    /// the client mirrored a tree it was no longer looking at, indefinitely.
+    /// Announcing and *then* draining is the subtler version of the same bug:
+    /// the queue is FIFO, so everything in it is older than the gap, and a
+    /// client that re-pulled on the notice would then be walked back through
+    /// history it had already left — `TabRestructured` restoring the shape a tab
+    /// used to have, with the window and its mirror agreeing on the stale
+    /// answer, so nothing recovers a second time.
     #[test]
-    fn a_lagged_connection_hears_a_resync_before_its_next_delta() {
+    fn a_lagged_connection_hears_a_resync_instead_of_the_superseded_backlog() {
         let (server_end, mut client_end) = UnixStream::pair().unwrap();
         let sink = Arc::new(Sink::new(server_end));
-        let (tx, rx) = smol::channel::bounded::<(String, machine::LayoutDelta)>(4);
+        let (tx, rx) = smol::channel::bounded::<(String, machine::LayoutDelta)>(8);
         let lagged = Arc::new(AtomicBool::new(false));
-        spawn_layout_forwarder(rx, sink, Arc::clone(&lagged));
 
-        // A delta was dropped somewhere behind the queue…
+        // A backlog, then the drop that makes every bit of it stale. Queued
+        // before the forwarder starts so nothing can be delivered early.
+        for _ in 0..4 {
+            tx.send_blocking(("ws-1".to_string(), machine::LayoutDelta::WorkspaceDeleted))
+                .unwrap();
+        }
         lagged.store(true, Ordering::Release);
-        // …and the next one that does go through must ride behind the notice.
-        tx.send_blocking(("ws-1".to_string(), machine::LayoutDelta::WorkspaceDeleted))
-            .unwrap();
+        spawn_layout_forwarder(rx, sink, Arc::clone(&lagged));
 
         assert_eq!(
             ControlServerMsg::read(&mut client_end).unwrap(),
             ControlServerMsg::Event(ControlEvent::LayoutResync)
         );
-        match ControlServerMsg::read(&mut client_end).unwrap() {
-            ControlServerMsg::Event(ControlEvent::Layout { workspace, delta }) => {
-                assert_eq!(workspace, "ws-1");
-                assert_eq!(delta, machine::LayoutDelta::WorkspaceDeleted);
-            }
-            other => panic!("expected the delta after the resync, got {other:?}"),
-        }
         assert!(
             !lagged.load(Ordering::Acquire),
             "the flag is consumed: one gap, one resync"
         );
 
-        // A later, un-lagged delta arrives bare.
-        tx.send_blocking(("ws-1".to_string(), machine::LayoutDelta::WorkspaceDeleted))
+        // The next frame is the *next* edit, not the four that were queued
+        // behind the gap.
+        tx.send_blocking(("ws-2".to_string(), machine::LayoutDelta::WorkspaceDeleted))
             .unwrap();
-        assert!(matches!(
-            ControlServerMsg::read(&mut client_end).unwrap(),
-            ControlServerMsg::Event(ControlEvent::Layout { .. })
-        ));
+        match ControlServerMsg::read(&mut client_end).unwrap() {
+            ControlServerMsg::Event(ControlEvent::Layout { workspace, delta }) => {
+                assert_eq!(workspace, "ws-2", "the stale backlog was delivered anyway");
+                assert_eq!(delta, machine::LayoutDelta::WorkspaceDeleted);
+            }
+            other => panic!("expected the post-resync delta, got {other:?}"),
+        }
     }
 
     // -----------------------------------------------------------------------

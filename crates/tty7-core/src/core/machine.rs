@@ -60,11 +60,27 @@
 //! replaces: the on-disk order is the in-memory order. Deltas are delivered
 //! outside the lock, and a subscriber's callback must only enqueue — a peer
 //! that stopped reading its socket must not stall another peer's edit.
+//!
+//! # Two durabilities, because two kinds of change
+//!
+//! A *structural* edit is persisted before its delta goes out: a change nobody
+//! can re-read must be a change nobody was told about ([`Persist::Now`]).
+//!
+//! An *observation* — a pane's cwd, its agent, its liveness, a workspace's
+//! focus stamp — takes [`Persist::Soon`] instead: the delta goes out at once
+//! and the file catches up within [`FACT_FLUSH_INTERVAL`]. These arrive from
+//! the PTY reader threads, one per OSC 7 report, i.e. once per prompt per pane;
+//! writing the whole document (and `fsync`ing it) on each would put a disk
+//! stall in the pane's own output path and, because the write happens under
+//! `notify_order`, would serialize every other client's edits behind it. What
+//! is risked by deferring is at most [`FACT_FLUSH_INTERVAL`] of observations on
+//! a `SIGKILL`; the layout itself is never deferred.
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -95,6 +111,21 @@ pub const MAX_WORKSPACES: usize = 1024;
 /// Ceiling on panes the registry will hold. Panes are bounded by what a machine
 /// can actually run, so this only ever catches a client gone wrong.
 pub const MAX_PANES: usize = 16 * 1024;
+
+/// How long an observation ([`Persist::Soon`]) may sit in memory before the
+/// flusher writes it out.
+///
+/// Short enough that a crash costs a stale cwd rather than a stale layout, long
+/// enough that a shell looping over directories — a `cd` per iteration, per
+/// pane — costs one write rather than one per iteration.
+#[cfg(not(test))]
+pub const FACT_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Out of reach under test, so the assertions about *what defers* are not also
+/// assertions about how fast the suite runs: a test that wants the write calls
+/// [`MachineStore::flush`], which is the same code path the timer takes.
+#[cfg(test)]
+pub const FACT_FLUSH_INTERVAL: Duration = Duration::from_secs(600);
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -639,6 +670,22 @@ pub struct MachineStore {
     notify_order: Mutex<()>,
     subscribers: Mutex<Vec<(SubscriberId, Notify)>>,
     next_subscriber: AtomicU64,
+    /// Set by a [`Persist::Soon`] mutation, cleared by every write — the
+    /// flusher's whole state. Never a reason to write on its own: a store that
+    /// only ever sees structural edits has no flusher at all.
+    unwritten: AtomicBool,
+    /// Whether the flusher thread has been started, so the first observation
+    /// starts it and the rest cost one atomic load.
+    flushing: AtomicBool,
+}
+
+/// When an operation's change has to be on disk. See the module header.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Persist {
+    /// Before the deltas go out — every structural edit.
+    Now,
+    /// Within [`FACT_FLUSH_INTERVAL`] — the machine's own observations.
+    Soon,
 }
 
 /// The error every invalid operation answers with. `InvalidInput` so the wire
@@ -668,6 +715,8 @@ impl MachineStore {
             notify_order: Mutex::new(()),
             subscribers: Mutex::new(Vec::new()),
             next_subscriber: AtomicU64::new(1),
+            unwritten: AtomicBool::new(false),
+            flushing: AtomicBool::new(false),
         })
     }
 
@@ -815,8 +864,17 @@ impl MachineStore {
     }
 
     /// Stamp a workspace as just-focused.
-    pub fn workspace_touch(&self, id: WorkspaceId, origin: Option<SubscriberId>) -> io::Result<()> {
-        self.mutate(origin, |m| {
+    ///
+    /// An observation, not a structural edit ([`Persist::Soon`]): every window
+    /// focus change on every client lands one, and a picker's ordering is not
+    /// worth a `fsync` per keystroke-of-attention.
+    pub fn workspace_touch(
+        self: &Arc<Self>,
+        id: WorkspaceId,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        self.ensure_flusher();
+        self.mutate_with(origin, Persist::Soon, |m| {
             let ws = find_workspace(m, id)?;
             let now = unix_now();
             ws.last_active = now;
@@ -1193,8 +1251,14 @@ impl MachineStore {
     /// the tree never adopted is not the tree's business). The delta is
     /// attributed to no origin: facts come from the machine, so *every*
     /// client hears them.
-    pub fn note_pane_facts(&self, pane: u64, update: impl FnOnce(&mut PaneRecord)) {
-        let result: io::Result<()> = self.mutate(None, |m| {
+    ///
+    /// Called from the pane reader threads, once per prompt per pane, so the
+    /// write is deferred ([`Persist::Soon`]) while the delta is not: what a
+    /// client renders stays current, and the disk catches up on the flusher's
+    /// tick.
+    pub fn note_pane_facts(self: &Arc<Self>, pane: u64, update: impl FnOnce(&mut PaneRecord)) {
+        self.ensure_flusher();
+        let result: io::Result<()> = self.mutate_with(None, Persist::Soon, |m| {
             let Some(record) = m.panes.iter_mut().find(|p| p.id == pane) else {
                 return Ok(((), Vec::new()));
             };
@@ -1301,18 +1365,33 @@ impl MachineStore {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// [`mutate_with`](Self::mutate_with) at [`Persist::Now`] — every
+    /// structural operation.
+    fn mutate<T>(
+        &self,
+        origin: Option<SubscriberId>,
+        op: impl FnOnce(&mut Machine) -> io::Result<(T, Vec<(WorkspaceId, LayoutDelta)>)>,
+    ) -> io::Result<T> {
+        self.mutate_with(origin, Persist::Now, op)
+    }
+
     /// Run one operation: mutate under the lock, persist, and — only if the
     /// disk said yes — deliver the deltas outside the state lock.
     ///
     /// A failed persist rolls the tree back to the pre-mutation clone, so the
     /// in-memory state never claims something the file does not, and a change
-    /// nobody can re-read is a change nobody is told about.
+    /// nobody can re-read is a change nobody is told about. At
+    /// [`Persist::Soon`] there is no disk to fail: the change is flagged
+    /// unwritten and the flusher carries it, which is sound only because what
+    /// takes that path is the machine re-observable rather than the layout —
+    /// see the module header.
     ///
     /// `notify_order` is held across the whole thing — see the field — so
     /// subscribers receive deltas in exactly the order the mutations landed.
-    fn mutate<T>(
+    fn mutate_with<T>(
         &self,
         origin: Option<SubscriberId>,
+        persist: Persist,
         op: impl FnOnce(&mut Machine) -> io::Result<(T, Vec<(WorkspaceId, LayoutDelta)>)>,
     ) -> io::Result<T> {
         let _order = self.notify_order.lock().unwrap_or_else(|e| e.into_inner());
@@ -1323,7 +1402,13 @@ impl MachineStore {
             let before = m.clone();
             match op(&mut m).and_then(|out| {
                 if *m != before {
-                    self.persist(&m)?;
+                    match persist {
+                        Persist::Now => self.persist(&m)?,
+                        // Ordered with every other write by `notify_order`,
+                        // which the flusher takes too: the file still moves
+                        // through the states the tree moved through.
+                        Persist::Soon => self.unwritten.store(true, Ordering::Release),
+                    }
                 }
                 Ok(out)
             }) {
@@ -1343,15 +1428,72 @@ impl MachineStore {
         Ok(value)
     }
 
+    /// Write out anything a [`Persist::Soon`] mutation left in memory. A no-op
+    /// when there is nothing owed, so it is cheap to call on a timer.
+    ///
+    /// Public for the daemon's shutdown path: the observations of the last two
+    /// seconds are worth one write on the way out.
+    pub fn flush(&self) {
+        if !self.unwritten.load(Ordering::Acquire) {
+            return;
+        }
+        let _order = self.notify_order.lock().unwrap_or_else(|e| e.into_inner());
+        let m = self.locked();
+        // Cleared before the write, not after: a fact landing *during* it is
+        // owed another write, and losing that flag would strand it until the
+        // next one. `persist` failing sets it again below.
+        self.unwritten.store(false, Ordering::Release);
+        if let Err(e) = self.persist(&m) {
+            log::warn!("could not write {}: {e}", self.path.display());
+            self.unwritten.store(true, Ordering::Release);
+        }
+    }
+
+    /// Start the flusher, once, on the first observation that owes a write.
+    ///
+    /// Weak, so the thread is the store's dependent rather than its owner: a
+    /// dropped store (every test that makes one) ends the thread at its next
+    /// tick instead of keeping the file — and the file's handle — alive for the
+    /// process's life.
+    fn ensure_flusher(self: &Arc<Self>) {
+        if self.flushing.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        let spawned = std::thread::Builder::new()
+            .name("tty7-machine-flush".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(FACT_FLUSH_INTERVAL);
+                    let Some(store) = weak.upgrade() else { return };
+                    store.flush();
+                }
+            });
+        if let Err(e) = spawned {
+            // Fall back to writing observations synchronously: the flag says
+            // one is owed, and clearing `flushing` lets the next one retry the
+            // spawn. Slow beats silently losing every cwd on the machine.
+            log::warn!("could not start the machine-tree flusher ({e}); writing facts inline");
+            self.flushing.store(false, Ordering::Release);
+            self.flush();
+        }
+    }
+
     /// Serialize the whole document and replace the file atomically. The
     /// pretty form, so a human can read and repair it — this file is the
     /// machine's memory of every workspace on it.
+    ///
+    /// Owner-only: the document names every workspace's directories, the SSH
+    /// user and host of every native-SSH pane, and each agent's session id. A
+    /// remote box running `tty7-server` is exactly where other logins are
+    /// likeliest, so the file must not be created world-readable and fixed up
+    /// afterwards — see [`write_atomic_private`](crate::core::config::write_atomic_private).
     fn persist(&self, m: &Machine) -> io::Result<()> {
         let bytes = serde_json::to_vec_pretty(m).map_err(io::Error::other)?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        crate::core::config::write_atomic(&self.path, &bytes)
+        crate::core::config::write_atomic_private(&self.path, &bytes)
     }
 
     /// Fan the deltas out, skipping the subscriber that caused them. Called
@@ -1567,8 +1709,25 @@ fn quarantine_by_rename(path: &Path) {
     }
 }
 
+/// Where a file we are about to stop honouring is kept.
+///
+/// `machine.json.corrupt` when that name is free, `…corrupt.1`, `…corrupt.2` …
+/// when it is not: the second corruption in a machine's life must not overwrite
+/// the rescue copy of the first, which is the one with the user's tree in it.
+/// After [`MAX_QUARANTINED`] the oldest name is reused — an unbounded fan of
+/// files nobody reads is its own kind of mess.
 fn quarantine_path(path: &Path) -> PathBuf {
-    path.with_extension("json.corrupt")
+    /// How many quarantined generations to keep before reusing the base name.
+    const MAX_QUARANTINED: u32 = 8;
+
+    let base = path.with_extension("json.corrupt");
+    if !base.exists() {
+        return base;
+    }
+    (1..MAX_QUARANTINED)
+        .map(|n| path.with_extension(format!("json.corrupt.{n}")))
+        .find(|candidate| !candidate.exists())
+        .unwrap_or(base)
 }
 
 /// `<data-dir>/machine.json`.
@@ -2271,7 +2430,12 @@ mod tests {
 
         // Attachments describe live connections; a restarted daemon has none.
         store.attach(ws, Attachment::new("secret-token", "laptop"));
-        store.workspace_touch(ws, None).unwrap(); // force a persist
+        // A structural op that really changes something, to force the write:
+        // `workspace_touch` is an observation (deferred to the flusher), and an
+        // op that changes nothing does not write at all.
+        store
+            .workspace_rename(ws, Some("web".into()), None)
+            .unwrap();
         let text = std::fs::read_to_string(dir.path().join(MACHINE_FILE)).unwrap();
         assert!(!text.contains("secret-token"), "{text}");
         assert_eq!(
@@ -2308,6 +2472,87 @@ mod tests {
         }
     }
 
+    // ── Durability ─────────────────────────────────────────────────────────
+
+    /// An observation reaches every client at once but does **not** write the
+    /// file: these arrive per prompt per pane from the PTY reader threads, and
+    /// a whole-document `fsync` each would put a disk stall in the pane's own
+    /// output path and serialize every other client's edit behind it. The
+    /// flusher (or the next structural edit, or an explicit `flush`) carries
+    /// it to disk.
+    #[test]
+    fn an_observation_is_broadcast_at_once_and_written_a_little_later() {
+        let (store, dir, ws, _tab) = store_with_tab();
+        let path = dir.path().join(MACHINE_FILE);
+        let (_sub, heard) = recorded(&store);
+
+        store.note_pane_facts(1, |p| p.cwd = Some("/work/deeper".into()));
+        assert_eq!(
+            heard.lock().unwrap().len(),
+            1,
+            "the client hears the fact immediately; only the disk waits"
+        );
+        assert!(
+            !std::fs::read_to_string(&path).unwrap().contains("deeper"),
+            "an observation must not write the document synchronously"
+        );
+
+        store.flush();
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("deeper"),
+            "…and the flush is what puts it on disk"
+        );
+        // Nothing owed, nothing written: the flusher's tick is free on an idle
+        // machine.
+        let before = std::fs::metadata(&path).unwrap().len();
+        store.flush();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), before);
+
+        // A structural edit persists the whole document, deferred facts and
+        // all — so an observation can never outlive the layout change after it.
+        // (Renamed to something it is not already called: an operation that
+        // changes nothing writes nothing, which every path here goes through.)
+        store.note_pane_facts(1, |p| p.cwd = Some("/work/deepest".into()));
+        store
+            .workspace_rename(ws, Some("web".into()), None)
+            .unwrap();
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("deepest"),
+            "a structural write carries whatever the facts left unwritten"
+        );
+    }
+
+    /// The layout itself is never deferred: a structural edit is on disk before
+    /// its delta goes out, so a client can never be told about a change a
+    /// restart would lose.
+    #[test]
+    fn a_structural_edit_is_on_disk_before_anyone_hears_about_it() {
+        let (store, dir) = store();
+        let path = dir.path().join(MACHINE_FILE);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let path_in_callback = path.clone();
+        let _sub = store.subscribe(Arc::new(move |_ws: &str, _delta: &LayoutDelta| {
+            // Read from *inside* the delivery: the file has to already say
+            // what this delta is about.
+            sink.lock()
+                .unwrap()
+                .push(std::fs::read_to_string(&path_in_callback).unwrap_or_default());
+        }));
+
+        let ws = store
+            .workspace_create(None, Some("api".into()), None)
+            .unwrap();
+        let _ = ws;
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(
+            seen[0].contains("api"),
+            "the delta arrived before the file said so: {}",
+            seen[0]
+        );
+    }
+
     // ── Corruption ─────────────────────────────────────────────────────────
 
     #[test]
@@ -2321,6 +2566,39 @@ mod tests {
         store.workspace_create(None, None, None).unwrap();
         let aside = std::fs::read_to_string(path.with_extension("json.corrupt")).unwrap();
         assert_eq!(aside, "{ this is not json");
+
+        // A second corruption gets its own name. Overwriting would spend the
+        // rescue copy that has the user's tree in it on one that has garbage.
+        std::fs::write(&path, b"corrupt again").unwrap();
+        let store = MachineStore::open(&path);
+        store.workspace_create(None, None, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("json.corrupt")).unwrap(),
+            "{ this is not json",
+            "the first rescue copy is still the first one"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("json.corrupt.1")).unwrap(),
+            "corrupt again"
+        );
+    }
+
+    /// The document names directories, SSH users and hosts, and agent session
+    /// ids. On a shared box — which a `tty7-server` machine is likeliest to be
+    /// — that is nobody else's business, and it must be private from the first
+    /// instant the file exists rather than chmod-ed on the next line.
+    #[cfg(unix)]
+    #[test]
+    fn the_document_is_written_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (store, dir) = store();
+        store.workspace_create(None, None, None).unwrap();
+        let mode = std::fs::metadata(dir.path().join(MACHINE_FILE))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
     }
 
     /// An *unreadable* file gets the same isolation as an unparseable one.

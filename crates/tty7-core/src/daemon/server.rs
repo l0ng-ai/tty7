@@ -201,17 +201,19 @@ fn ssh_connection_for(
 /// than being fatal. The pane listener then owns this thread until the process
 /// is killed, exactly as [`run`] always has.
 ///
-/// The control listener stays `#[cfg(unix)]`: the control dialect rides a
-/// Unix-domain socket, and the Windows pane path (token-checked loopback TCP)
-/// has no control listener yet. On Windows this is therefore [`run`] plus a
-/// log line — the pane protocol is untouched.
+/// Both platforms serve it, over the transport each one's pane socket already
+/// uses: a Unix-domain socket gated by its file permissions, or a loopback
+/// `TcpListener` gated by the token in a user-private marker file. The tree is
+/// what a client's layout *is* now, so a platform without a control listener is
+/// a platform where tabs do not come back — which is not a difference a build
+/// gets to have.
 pub fn run_daemon() -> anyhow::Result<()> {
     // Reported on **stderr**, not only the log: a headless server's log file is
     // off unless `TTY7_LOG` asks for it, and the bound path is this daemon's
     // one observable answer to "where do I connect". The remote-router test
     // reads this exact line back to prove the client's derivation and the
     // server's bind agree, so the prefix is part of the contract.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     match crate::host::server::spawn_control_listener_with(
         crate::host::local::LocalHost::shared(),
         control_services(),
@@ -219,7 +221,7 @@ pub fn run_daemon() -> anyhow::Result<()> {
         Ok(path) => eprintln!("tty7-server: control socket at {}", path.display()),
         Err(e) => eprintln!("tty7-server: control listener unavailable: {e}"),
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     log::info!("no control listener on this platform; serving panes only");
 
     run()
@@ -389,12 +391,29 @@ fn serve_sigterm(registry: Arc<Registry>) {
             if unsafe { libc::sigwait(&set, &mut sig) } == 0 {
                 log::info!("daemon shutting down on SIGTERM");
                 registry.drain_and_kill();
-                transport::remove_stale_endpoint();
-                crate::daemon::pidfile::remove();
+                on_shutdown();
                 std::process::exit(0);
             }
         })
         .ok();
+}
+
+/// What every daemon exit owes the next one.
+///
+/// The tree's observations first: a pane's cwd and its agent session are
+/// deferred by design (`machine::Persist::Soon`) and are exactly what the next
+/// launch revives that pane from, so the last couple of seconds of them are
+/// worth one write on the way out. Then the endpoint markers — **both**
+/// dialects', since on Windows each listener has its own — and the pidfile, so
+/// nothing left on disk points at a process that is gone.
+fn on_shutdown() {
+    if let Some(store) = crate::core::machine::observed_store() {
+        store.flush();
+    }
+    transport::remove_stale_endpoint();
+    #[cfg(windows)]
+    crate::host::server::remove_control_endpoint();
+    crate::daemon::pidfile::remove();
 }
 
 /// Handle one connection start-to-finish. Reads the opening `ClientMsg` and
@@ -546,8 +565,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             // place the daemon terminates itself.
             log::info!("daemon shutting down on client request");
             registry.drain_and_kill();
-            transport::remove_stale_endpoint();
-            crate::daemon::pidfile::remove();
+            on_shutdown();
             std::process::exit(0);
         }
 

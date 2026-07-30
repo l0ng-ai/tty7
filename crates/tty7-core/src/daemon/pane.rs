@@ -1256,8 +1256,24 @@ impl DaemonPane {
                             let probed_cwd = poll_now.then(&foreground_cwd_fn).flatten();
 
                             let tr1 = trace.then(std::time::Instant::now);
+                            // Whether this chunk carries anything that *could*
+                            // move a fact the tree records. An ordinary output
+                            // chunk carries none of them, and must not pay for
+                            // two snapshots and a compare per read: a build's
+                            // worth of stdout is thousands of chunks and no
+                            // facts at all.
+                            let may_change_facts = signals.cwd.is_some()
+                                || !signals.agent_events.is_empty()
+                                || signals.notification.is_some()
+                                // A prompt boundary: on Windows the agent
+                                // identity rides the `133;C` capture, and
+                                // everywhere the OSC 7 cwd travels with it.
+                                || !signals.shell.is_empty()
+                                || remote.is_some()
+                                || agent.is_some()
+                                || probed_cwd.is_some();
                             let mut st = state.lock().unwrap();
-                            let facts_before = observed_facts(&st);
+                            let facts_before = may_change_facts.then(|| observed_facts(&st));
                             st.ring.append(bytes);
                             if let Some(sub) = &st.subscriber {
                                 // A send error just means the client is gone; ignore
@@ -1283,11 +1299,13 @@ impl DaemonPane {
                                 tr_disp_t += tr1.elapsed();
                             }
                             // Publish what this chunk changed to the machine
-                            // tree — outside the state lock, because a changed
-                            // fact persists a file and this thread's stalls
-                            // are the child's write stalls. Gated on a real
-                            // change so the per-chunk cost is two clones and a
-                            // compare, not a store mutation per chunk.
+                            // tree — outside the state lock, because the store
+                            // broadcasts to every client of this machine and
+                            // this thread's stalls are the child's write
+                            // stalls. Gated twice over: `may_change_facts`
+                            // keeps plain output free, and the compare below
+                            // keeps a re-reported cwd from becoming a store
+                            // mutation.
                             let pane = st.id;
                             // Read *with* the facts, not assumed: on Windows
                             // the exit monitor can report the death (flipping
@@ -1296,10 +1314,12 @@ impl DaemonPane {
                             // is latched — a "proof of life" published here
                             // after it would mark a dead pane live forever.
                             let alive = st.alive;
-                            let facts_after = observed_facts(&st);
+                            let facts_after = may_change_facts.then(|| observed_facts(&st));
                             drop(st);
-                            if facts_changed(&facts_before, &facts_after) {
-                                let (cwd, agent) = facts_after;
+                            if let (Some(before), Some(after)) = (facts_before, facts_after)
+                                && facts_changed(&before, &after)
+                            {
+                                let (cwd, agent) = after;
                                 crate::core::machine::observe_pane(pane, |p| {
                                     // An unknown cwd never clears a seeded one:
                                     // the spawn directory in the record is
@@ -1972,16 +1992,24 @@ fn facts_changed(
     before: &(Option<String>, Option<crate::core::machine::AgentFacts>),
     after: &(Option<String>, Option<crate::core::machine::AgentFacts>),
 ) -> bool {
-    let strip = |facts: &(Option<String>, Option<crate::core::machine::AgentFacts>)| {
-        (
-            facts.0.clone(),
-            facts.1.clone().map(|mut agent| {
-                agent.status = None;
-                agent
-            }),
-        )
-    };
-    strip(before) != strip(after)
+    before.0 != after.0 || agent_facts_changed(before.1.as_ref(), after.1.as_ref())
+}
+
+/// [`facts_changed`]'s agent half: equality over every field but the status.
+/// Compared field by field rather than by cloning-and-blanking, because this
+/// runs on the pane's reader thread and the argv it would clone is a `Vec` of
+/// `String`s.
+fn agent_facts_changed(
+    before: Option<&crate::core::machine::AgentFacts>,
+    after: Option<&crate::core::machine::AgentFacts>,
+) -> bool {
+    match (before, after) {
+        (None, None) => false,
+        (Some(a), Some(b)) => {
+            a.agent != b.agent || a.session_id != b.session_id || a.launch_argv != b.launch_argv
+        }
+        _ => true,
+    }
 }
 
 /// Apply sniffed signals to the shared state and notify the subscriber of any cwd

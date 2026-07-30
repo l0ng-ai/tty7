@@ -23,6 +23,12 @@
 //!   `authenticate` rejects any connection that doesn't match — so only a process
 //!   that could read the user-private file gets in. See [`imp_windows`].
 //!
+//! One daemon serves two dialects on two listeners — panes and control — which
+//! on Unix are two socket files and here are two port files, each with its own
+//! ephemeral port and its own token (`bind_endpoint`). The control listener's is
+//! `control.port`; [`crate::host::server`] owns it, since that is where the
+//! dialect lives.
+//!
 //! All endpoint state lives under the (config-dir-aware) config directory, so
 //! `--config-dir` / `cargo dev` isolation reaches the daemon on every platform.
 
@@ -376,8 +382,16 @@ mod imp_windows {
     /// Length of the per-daemon auth token, in bytes. 256 bits from the OS CSPRNG:
     /// unguessable without reading the (user-private) port file, so possessing it
     /// proves the connecting process runs as the same user.
-    const TOKEN_LEN: usize = 32;
-    type Token = [u8; TOKEN_LEN];
+    pub const TOKEN_LEN: usize = 32;
+    pub type Token = [u8; TOKEN_LEN];
+
+    /// The pane dialect's endpoint marker.
+    ///
+    /// Named, because one daemon serves two dialects on two listeners — the
+    /// same shape it has on Unix, where they are two socket files — and each
+    /// records its own port and mints its own token. See
+    /// [`bind_endpoint`].
+    const PANE_PORT_FILE: &str = "daemon.port";
 
     /// This daemon's auth token, minted once at [`bind`] and checked by
     /// [`authenticate`] on every accepted connection. A process global because the
@@ -446,12 +460,21 @@ mod imp_windows {
     /// "endpoint exists" marker, and — being under the user-private config dir —
     /// its contents (the token) are readable only by the same user.
     fn port_path() -> Option<PathBuf> {
-        config::config_path("daemon.port")
+        port_path_named(PANE_PORT_FILE)
+    }
+
+    /// [`port_path`] for any of this daemon's endpoints.
+    pub fn port_path_named(file: &str) -> Option<PathBuf> {
+        config::config_path(file)
     }
 
     /// Read the recorded loopback port + token, if the port file exists and parses.
     fn read_port_file() -> Option<(u16, Token)> {
-        let path = port_path()?;
+        read_port_file_named(PANE_PORT_FILE)
+    }
+
+    fn read_port_file_named(file: &str) -> Option<(u16, Token)> {
+        let path = port_path_named(file)?;
         let contents = std::fs::read_to_string(path).ok()?;
         parse_port_file(&contents)
     }
@@ -488,6 +511,13 @@ mod imp_windows {
         let expected = DAEMON_TOKEN
             .get()
             .ok_or_else(|| io::Error::other("daemon auth token not initialized"))?;
+        authenticate_with(stream, expected)
+    }
+
+    /// [`authenticate`] for a connection on one of this daemon's *other*
+    /// endpoints, whose token its listener holds rather than reading from the
+    /// process global.
+    pub fn check_endpoint_token(stream: &mut Stream, expected: &Token) -> io::Result<()> {
         authenticate_with(stream, expected)
     }
 
@@ -531,8 +561,27 @@ mod imp_windows {
     /// this daemon's freshly-minted auth token — in the port file so the GUI can
     /// find *and* authenticate to it. Ensures the config dir exists first.
     pub fn bind() -> anyhow::Result<Listener> {
-        let path = port_path()
-            .ok_or_else(|| anyhow::anyhow!("could not resolve daemon port path (no config dir)"))?;
+        // Mint the pane dialect's token once for this daemon's lifetime;
+        // `authenticate` checks against the same value.
+        let token = *DAEMON_TOKEN.get_or_init(make_token);
+        let (listener, _) = bind_named(PANE_PORT_FILE, token)?;
+        Ok(listener)
+    }
+
+    /// [`bind`] for a second dialect in this same daemon: its own ephemeral
+    /// port, its own token, its own marker file beside `daemon.port`.
+    ///
+    /// Answers the token as well as the listener, because a second endpoint has
+    /// nowhere process-global to keep it — its accept loop holds it and checks
+    /// each connection with [`check_endpoint_token`]. One token per endpoint, so
+    /// a client that learned one cannot present it to the other.
+    pub fn bind_endpoint(file: &str) -> anyhow::Result<(Listener, Token)> {
+        bind_named(file, make_token())
+    }
+
+    fn bind_named(file: &str, token: Token) -> anyhow::Result<(Listener, Token)> {
+        let path = port_path_named(file)
+            .ok_or_else(|| anyhow::anyhow!("could not resolve {file} path (no config dir)"))?;
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -544,19 +593,43 @@ mod imp_windows {
             .local_addr()
             .map_err(|e| anyhow::anyhow!("could not read bound port: {e}"))?
             .port();
-        // Mint the token once for this daemon's lifetime; `authenticate` checks
-        // against the same value. Written to the port file so a client that can
-        // read it (same user) can present it back.
-        let token = DAEMON_TOKEN.get_or_init(make_token);
-        let contents = format!("{port}\n{}", encode_token(token));
+        // Written to the marker file so a client that can read it (same user)
+        // can present it back.
+        let contents = format!("{port}\n{}", encode_token(&token));
         std::fs::write(&path, contents)
             .map_err(|e| anyhow::anyhow!("could not write port file {}: {e}", path.display()))?;
-        Ok(listener)
+        Ok((listener, token))
+    }
+
+    /// [`connect`] to one of the daemon's other endpoints, presenting the token
+    /// its marker file records. `NotFound` means nothing is listening there — the
+    /// same "nobody home" every caller treats as "not running".
+    pub fn connect_endpoint(file: &str) -> io::Result<Stream> {
+        let (port, token) = read_port_file_named(file)
+            .filter(|(p, _)| *p != 0)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no {file} file")))?;
+        let mut stream = TcpStream::connect(loopback(port))?;
+        tune(&stream);
+        stream.write_all(&token)?;
+        Ok(stream)
+    }
+
+    /// Remove another endpoint's marker file. Best effort, like
+    /// [`remove_stale_endpoint`].
+    pub fn remove_endpoint(file: &str) {
+        if let Some(path) = port_path_named(file) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     /// A human-readable description of the endpoint, for log messages.
     pub fn endpoint_display() -> String {
-        match read_port_file() {
+        endpoint_display_named(PANE_PORT_FILE)
+    }
+
+    /// [`endpoint_display`] for another of this daemon's endpoints.
+    pub fn endpoint_display_named(file: &str) -> String {
+        match read_port_file_named(file) {
             Some((port, _)) => format!("127.0.0.1:{port}"),
             None => "127.0.0.1:<unbound>".to_string(),
         }
@@ -663,6 +736,61 @@ mod imp_windows {
             let (mut server_side2, _) = listener.accept().unwrap();
             assert!(authenticate_with(&mut server_side2, &token).is_err());
             bad.join().unwrap();
+        }
+
+        /// The daemon's *second* endpoint — the control dialect's, bound by
+        /// [`crate::host::server`] — is a separate port with a separate token,
+        /// recorded in a separate file. Two listeners, two boundaries: a client
+        /// that learned the pane endpoint's token has not thereby been given the
+        /// one behind which the whole workspace tree lives.
+        #[test]
+        fn a_second_endpoint_gets_its_own_port_and_token() {
+            // The name `host::server` uses; spelled out rather than imported so
+            // the transport does not depend on the dialect above it.
+            const CONTROL: &str = "control.port";
+
+            let dir = std::env::temp_dir().join(format!("tty7-wintok-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).ok();
+            config::set_config_dir(dir);
+            remove_endpoint(CONTROL);
+
+            let (listener, token) = bind_endpoint(CONTROL).expect("bind the second endpoint");
+            let port = listener.local_addr().unwrap().port();
+            let recorded =
+                std::fs::read_to_string(port_path_named(CONTROL).unwrap()).expect("marker file");
+            let (file_port, file_token) = parse_port_file(&recorded).expect("marker file parses");
+            assert_eq!(file_port, port, "the file records the port actually bound");
+            assert_eq!(
+                file_token, token,
+                "and the token the listener will check for"
+            );
+
+            // A client that could read the file gets in — that read is the whole
+            // proof of same-user, which is what filesystem permissions give the
+            // Unix socket for free.
+            let good = std::thread::spawn(move || connect_endpoint(CONTROL).unwrap());
+            let (mut server_side, _) = listener.accept().unwrap();
+            assert!(check_endpoint_token(&mut server_side, &token).is_ok());
+            let _keep = good.join().unwrap();
+
+            // Anything else is refused before a frame is parsed — including the
+            // other endpoint's token, which is why they are minted separately.
+            let mut foreign = token;
+            foreign[0] ^= 0xff;
+            let bad = std::thread::spawn(move || {
+                let mut s = TcpStream::connect(loopback(port)).unwrap();
+                let _ = s.write_all(&foreign);
+            });
+            let (mut server_side, _) = listener.accept().unwrap();
+            assert_eq!(
+                check_endpoint_token(&mut server_side, &token)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            bad.join().unwrap();
+
+            remove_endpoint(CONTROL);
         }
 
         /// Full wiring over the real config-dir path: `bind` writes a parseable

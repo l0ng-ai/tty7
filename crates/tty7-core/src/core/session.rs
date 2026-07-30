@@ -403,6 +403,23 @@ pub struct WindowView {
     /// machine — see [`RemoteRef`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<RemoteRef>,
+    /// What this workspace was *called* the last time its machine answered, and
+    /// the path it was about — the picker's two lines.
+    ///
+    /// **A render hint, never an authority.** The machine's tree owns both (it
+    /// derives them from the tabs' repo groups and its panes' cwds), and
+    /// whenever the tree answers, the tree wins. This copy exists because the
+    /// picker's whole job is choosing among machines that are *not* answering:
+    /// a laptop that has been shut since Friday still has to be listed as
+    /// "tty7 — ~/repo/tty7" rather than as "Untitled" with a blank subtitle,
+    /// which is a row nobody can act on. Stamped on every save (and on the way
+    /// out, when a window closes), so what is on file is the last thing the
+    /// user actually saw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// The subject path behind [`label`](Self::label) — see there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
 }
 
 impl Default for WindowView {
@@ -413,6 +430,8 @@ impl Default for WindowView {
             open: true,
             last_active: now_secs(),
             host: None,
+            label: None,
+            subject: None,
         }
     }
 }

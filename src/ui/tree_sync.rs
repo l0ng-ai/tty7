@@ -1056,6 +1056,13 @@ pub(crate) fn forget(cx: &mut App, client_ws: WorkspaceId) {
 /// Fire one workspace-level operation (rename, touch, remove) at the machine
 /// that owns `client_ws`'s tree. Fire-and-forget: these ops are idempotent
 /// label writes with no ordering relationship to the structural queue.
+///
+/// Unsent is not the same for all of them, which is what
+/// [`unsendable`] is about: a rename or a touch that misses
+/// its machine is a cosmetic loss the next one supersedes, while a
+/// `WorkspaceRemove` that misses it leaves the workspace — and, after the
+/// caller's kills, a set of dead leaves — on a machine no picker here lists any
+/// more. That one gets said out loud.
 pub(crate) fn fire_workspace_op(
     cx: &mut App,
     client_ws: WorkspaceId,
@@ -1073,21 +1080,41 @@ pub(crate) fn fire_workspace_op(
     let client = match tree_control_for(cx, host) {
         TreeLink::Ready(client) => client,
         TreeLink::Unserved => {
-            log::warn!("{request:?} not sent: this machine's server does not serve the tree");
+            unsendable(
+                &request,
+                "this machine's server does not serve the workspace tree",
+            );
             return;
         }
         TreeLink::Down => {
-            log::debug!("no control link to send {request:?}; the machine keeps its copy");
+            unsendable(&request, "there is no control link to its machine");
             return;
         }
     };
     cx.background_executor()
         .spawn(async move {
             if let Err(e) = client.call(request.clone()) {
-                log::warn!("workspace operation {request:?} was not accepted: {e}");
+                unsendable(&request, &format!("the machine refused it: {e}"));
             }
         })
         .detach();
+}
+
+/// Report a workspace operation that did not reach its machine, at the volume
+/// its consequences deserve.
+///
+/// A dropped `WorkspaceRemove` is the one with a lasting cost: this client has
+/// already forgotten the workspace, so nothing here will ever name it again, and
+/// the machine keeps it. Everything else is a label that the next edit resends.
+fn unsendable(request: &ControlRequest, why: &str) {
+    match request {
+        ControlRequest::WorkspaceRemove { workspace } => log::warn!(
+            "workspace {workspace} was deleted here but not on its machine ({why}); \
+             its entry stays in that machine's tree, where another client will still \
+             see it — delete it again from a client that can reach the machine"
+        ),
+        other => log::debug!("{other:?} not sent ({why}); the next edit carries it"),
+    }
 }
 
 /// Set (or clear, with `None`) a workspace's user-chosen name. The name is

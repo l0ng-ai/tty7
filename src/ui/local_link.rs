@@ -21,8 +21,8 @@
 //!
 //! A remote control connection dials the local daemon's *pane* socket and asks
 //! it to route (the GUI never speaks SSH). This machine needs no routing — the
-//! daemon's control socket (`control_socket_path`) is right here, so the link
-//! is a plain Unix connect plus a `ControlHello`.
+//! daemon's control endpoint is right here, so the link is a plain connect plus
+//! a `ControlHello`.
 //!
 //! # Its own pump
 //!
@@ -38,11 +38,15 @@
 //! queue and machines differ only by id, which is the same-shape-everywhere
 //! the whole design is after.
 //!
-//! Unix-only, like the control listener it dials: on Windows the daemon serves
-//! panes over loopback TCP and no control socket exists yet, so the loop spins
-//! down to a supervision no-op there (the drain still runs, harmlessly).
-
-#![cfg_attr(windows, allow(dead_code))]
+//! # Both platforms
+//!
+//! The dial is the one part that differs, and only in its first line: a Unix
+//! socket where there are Unix sockets, and the same token-checked loopback
+//! endpoint the pane dialect uses on Windows (see
+//! [`tty7_core::daemon::transport`]). Everything above `connect_blocking` —
+//! supervision, backoff, the event queue, the tree sync that rides this link —
+//! is one code path, because a machine's tree is what a window's layout *is*
+//! and a platform without it is a platform where tabs do not come back.
 
 use std::sync::Arc;
 
@@ -106,14 +110,6 @@ impl LocalLink {
     /// One supervision step: notice a dead link, drop it, and schedule or
     /// launch the next attempt on the backoff.
     fn tick(cx: &mut App) {
-        #[cfg(unix)]
-        Self::tick_unix(cx);
-        #[cfg(not(unix))]
-        let _ = cx;
-    }
-
-    #[cfg(unix)]
-    fn tick_unix(cx: &mut App) {
         let now = std::time::Instant::now();
         let link = cx.default_global::<LocalLink>();
         if link.attempting {
@@ -180,19 +176,16 @@ impl LocalLink {
     }
 }
 
-/// Dial the local daemon's control socket and shake hands. **Blocking**; runs
+/// Dial the local daemon's control endpoint and shake hands. **Blocking**; runs
 /// on the background executor.
 ///
 /// `ensure_running` first, because the daemon is the GUI's own child in the
 /// common case: on a cold start this races the daemon binding its listener,
 /// and the backoff absorbs the one or two attempts that lose the race.
-#[cfg(unix)]
 fn connect_blocking() -> std::io::Result<Arc<ControlClient>> {
     use tty7_core::daemon::control::ControlHello;
-    use tty7_core::host::server::control_socket_path;
 
     crate::daemon::spawn::ensure_running().map_err(std::io::Error::other)?;
-    let sock = std::os::unix::net::UnixStream::connect(control_socket_path()?)?;
     let hello = ControlHello::host_rpc(
         uuid::Uuid::new_v4().to_string(),
         // Its own label rather than this machine's hostname: if this session
@@ -200,13 +193,24 @@ fn connect_blocking() -> std::io::Result<Arc<ControlClient>> {
         // the hostname would name the machine the user is already at.
         "this computer",
     );
-    let client = ControlClient::over_unix(sock, &hello, Box::new(local_event_sink))?;
+    let sink: tty7_core::daemon::control::EventSink = Box::new(local_event_sink);
+    // The one platform difference: which kind of stream carries the dialect.
+    #[cfg(unix)]
+    let client = ControlClient::over_unix(
+        std::os::unix::net::UnixStream::connect(tty7_core::host::server::control_socket_path()?)?,
+        &hello,
+        sink,
+    )?;
+    // Loopback TCP with the daemon's token as a preamble — the access boundary
+    // Windows has instead of socket permissions; `connect_control` presents it.
+    #[cfg(windows)]
+    let client =
+        ControlClient::over_tcp(tty7_core::host::server::connect_control()?, &hello, sink)?;
     Ok(Arc::new(client))
 }
 
 /// Local daemon pushes land in the same process-wide observer as every remote
 /// machine's, attributed to [`HostId::LOCAL`](tty7_core::host::HostId::LOCAL).
-#[cfg(unix)]
 fn local_event_sink(event: tty7_core::daemon::control::ControlEvent) {
     tty7_core::daemon::control::observe_event(tty7_core::host::HostId::LOCAL, event);
 }

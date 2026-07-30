@@ -100,11 +100,19 @@ impl WorkspaceStore {
     /// Record a window's geometry and persist. Called on every structural
     /// change (the same funnel the tree sync rides), so reopening the
     /// workspace lands where the user left it.
+    ///
+    /// The display hint rides along for the same reason the geometry does: it is
+    /// what the picker needs about a workspace whose machine is *not* answering,
+    /// and the moment to capture it is while it still is. Read before the store
+    /// is borrowed — the answer comes from another global.
     pub fn record_geometry(
         cx: &mut gpui::App,
         id: WorkspaceId,
         window: crate::core::window_state::WindowState,
     ) {
+        let hint = Self::all(cx)
+            .get(id)
+            .and_then(|view| crate::ui::machine_mirror::display_hint(cx, view));
         let Some(store) = Self::try_store(cx) else {
             return;
         };
@@ -114,6 +122,12 @@ impl WorkspaceStore {
             return;
         };
         view.window = Some(window);
+        // Only ever replaced by something better: a machine that has gone quiet
+        // must not blank the label it gave us while it was up.
+        if let Some((label, subject)) = hint {
+            view.label = Some(label);
+            view.subject = subject;
+        }
         store.views.save();
     }
 
@@ -168,12 +182,23 @@ impl WorkspaceStore {
     /// Detach a workspace: its window is gone, but the panes keep running in
     /// the daemon and the entry stays for the picker to reopen.
     pub fn close_window(cx: &mut gpui::App, id: WorkspaceId) {
+        // The last moment this client can see what the machine calls the
+        // workspace — and a detached workspace is precisely what the picker
+        // lists, so the hint matters most here. Read before the borrow, as in
+        // [`record_geometry`](Self::record_geometry).
+        let hint = Self::all(cx)
+            .get(id)
+            .and_then(|view| crate::ui::machine_mirror::display_hint(cx, view));
         let Some(store) = Self::try_store(cx) else {
             return;
         };
         if let Some(view) = store.views.get_mut(id) {
             view.open = false;
             view.touch();
+            if let Some((label, subject)) = hint {
+                view.label = Some(label);
+                view.subject = subject;
+            }
         }
         store.views.save();
     }

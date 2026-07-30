@@ -802,12 +802,16 @@ pub enum ControlEvent {
     /// The server dropped at least one [`Layout`](Self::Layout) push for this
     /// connection (its per-connection delta queue overflowed — see
     /// [`crate::host::server::LAYOUT_EVENT_QUEUE`]): the peer's mirrors are
-    /// now wrong in a way no later delta repairs. Sent *before* the next
-    /// delta the connection does receive, so the client re-pulls the machine
-    /// whole and resyncs its windows — the identical recovery a delta that
-    /// will not apply already triggers, just server-announced instead of
+    /// now wrong in a way no later delta repairs. So the client re-pulls the
+    /// machine whole and resyncs its windows — the identical recovery a delta
+    /// that will not apply already triggers, just server-announced instead of
     /// stumbled into. Connection-wide, because drops happen at the queue, not
     /// per workspace; the watch dialect's `WatchOverflow` is the precedent.
+    ///
+    /// It arrives *instead of* the deltas the queue was still holding, not
+    /// ahead of them: those are older than the gap and already inside the tree
+    /// the client is about to pull, so delivering them after the pull would
+    /// walk the client backwards through history it has already left behind.
     LayoutResync,
 }
 

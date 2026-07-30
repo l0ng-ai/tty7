@@ -60,6 +60,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The machine that runs your panes now owns their layout** — the workspace,
+  tab and pane tree has moved out of the app and into the background service, so
+  one machine has one tree that every client of it reads: the window on it, a
+  laptop connected to it across the world, and (next) the session CLI. Clients
+  send named edits ("split this pane", "rename that tab") and receive the
+  incremental changes other clients make, which is what lets two windows on one
+  machine both land their work instead of the last one to save winning. A pane's
+  working directory, its coding agent and whether it is still running are now
+  observed by the service that owns the PTY rather than remembered by whichever
+  client last wrote a file — so after a service restart every pane is *known*
+  dead and revives into its recorded directory with its agent conversation
+  resumed, with no guessing about which saved ids survived.
+
+  Two consequences worth knowing before you upgrade:
+
+  - **Saved layouts do not carry over.** The tree is a new file
+    (`~/.local/share/tty7/machine.json`) and the old `session.json` is not read;
+    the upgrade also replaces the background service, which ends the panes it was
+    holding. The first launch after upgrading comes up on a fresh workspace, and
+    tabs from before it are not recoverable. `views.json` (window geometry and
+    which workspaces you had open) replaces `session.json` for the client's own
+    half; the old file is left on disk, unread.
+  - **Windows keeps its panes but not its layout, for now.** The tree is served
+    over the same control channel remote machines use, and that channel is
+    Unix-socket-only today, so on Windows tabs do not come back across a restart.
+    Panes, splits, agents and shell integration are unaffected within a session.
+    (#260)
+
 - **The prompt editor's soft newline is now a rebindable action** — `Shift+Enter`
   and `Alt+Enter` have inserted a literal newline into the command editor since
   the multi-line prompt editor landed, but the chords were hardcoded in the key

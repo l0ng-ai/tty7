@@ -32,11 +32,19 @@
 //! probably fine and the *link* is what broke — and rendering it as "stopped"
 //! would tell the user their work is gone every time the network blinks.
 //!
-//! **`Unknown` is never shown for this machine.** A local `List` travels a unix
-//! socket to a daemon whose absence is itself the answer: no daemon, no live
-//! panes. So a local host with no cached answer reads `Stopped`, which is what
+//! **A local `List` failing is not `Unknown`.** It travels a unix socket to a
+//! daemon whose absence is itself the answer: no daemon, no live panes. So a
+//! local host with no cached *liveness* answer reads `Stopped`, which is what
 //! this page has always drawn — the async cache changes remote behaviour and
 //! leaves local pixels alone.
+//!
+//! Not knowing which panes to ask about is a different thing, and it is
+//! `Unknown` on every machine. The ids live in the machine's tree
+//! ([`crate::ui::machine_mirror`]), so until that first pull lands there is no
+//! question to put to the daemon — and "no ids yet" must not be read as "no
+//! sessions", which is a claim about the user's work founded on our own
+//! ignorance. Locally the pull lands within a frame or two of launch; where
+//! there is no control link at all, a muted dot is exactly the truth.
 //!
 //! # How it is filled
 //!
@@ -235,16 +243,13 @@ impl PaneLivenessCache {
 /// host and the ids both come off the same [`WindowView`].
 pub fn liveness_of(cx: &App, workspace: &WindowView) -> Liveness {
     let host = workspace.host_id();
-    // The ids live in the machine's tree; its mirror is where they are read.
-    // A machine not pulled yet is exactly the "could not check" state — except
-    // locally, where the pull lands within a frame and `Unknown` is never
-    // shown (see the module docs).
+    // The ids live in the machine's tree; its mirror is where they are read. A
+    // machine whose tree has not been pulled leaves us with no question to ask,
+    // which is `Unknown` on any machine — reading it as `Stopped` would tell the
+    // user their sessions are gone on the strength of our own ignorance. See the
+    // module docs for why this is *not* the same as a failed local `List`.
     let Some(ids) = crate::ui::machine_mirror::pane_ids(cx, workspace) else {
-        return if host.is_local() {
-            Liveness::Stopped
-        } else {
-            Liveness::Unknown
-        };
+        return Liveness::Unknown;
     };
     match cx.try_global::<PaneLivenessCache>() {
         Some(cache) => cache.liveness(host, &ids),
