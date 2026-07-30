@@ -187,7 +187,7 @@ impl std::str::FromStr for WorkspaceId {
 /// | [`Profile`](RemoteTarget::Profile) | A saved [`SshProfile`](crate::core::ssh_profile::SshProfile), by its stable uuid | `ssh-profile:<uuid>` |
 /// | [`Alias`](RemoteTarget::Alias) | A `Host` stanza in `~/.ssh/config` | `ssh-alias:<alias>` |
 /// | [`Direct`](RemoteTarget::Direct) | A typed `user@host:port` (QuickConnect) | `ssh-direct:<user>@<host>:<port>` |
-/// | [`Wsl`](RemoteTarget::Wsl) | A WSL distro — **M8**, defined only so the key table has no hole | `wsl:<distro>` |
+/// | [`Wsl`](RemoteTarget::Wsl) | A distribution installed on this computer, as `wsl.exe -l -q` names it | `wsl:<distro>` |
 ///
 /// Persisted, unlike [`HostId`](crate::host::HostId): this is what survives a
 /// restart, and the id is derived from it at connect time.
@@ -212,9 +212,13 @@ pub enum RemoteTarget {
         #[serde(default = "default_ssh_port")]
         port: u16,
     },
-    /// A WSL distribution. **M8 owns the behaviour**; the variant exists now so
-    /// that [`connection_key`](RemoteTarget::connection_key) is a total function
-    /// over the table rather than one that grows a case later.
+    /// A WSL distribution, named exactly as `wsl -d` takes it.
+    ///
+    /// **The one machine that is configured zero times**: it is reached by
+    /// spawning `wsl.exe`, so there is no address, no credential and no host
+    /// key to spell out anywhere. The picker
+    /// (`ui::remote_connect::available_hosts`) therefore offers every
+    /// distribution installed on this computer rather than reading a store.
     Wsl { distro: String },
     /// A `tty7-server --stdio` child process on *this* machine — the workspace
     /// mirror of [`RouteTarget::LocalStdio`](crate::daemon::router::RouteTarget::LocalStdio),

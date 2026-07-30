@@ -573,8 +573,7 @@ pub(super) enum LoopbackPlan {
     Direct,
     /// A remote whose `localhost` *is* the client's — WSL shares the network
     /// namespace with its Windows host (the exception). No forward is
-    /// built; the original URL already resolves. Wired now so M8 only has to
-    /// start constructing `RemoteTarget::Wsl`.
+    /// built; the original URL already resolves.
     NoForwardNeeded,
     /// A native-SSH pane ("连一下"): forward on the pane's own connection, owned
     /// by the pane, torn down with it.
@@ -7161,7 +7160,7 @@ mod tests {
 
     /// **The WSL exception.** WSL shares `localhost` with its
     /// Windows host, so the URL already resolves — building a forward would be
-    /// pure overhead. Wired now; M8 supplies the target.
+    /// pure overhead.
     #[test]
     fn wsl_workspace_needs_no_forward() {
         let w = ws(
