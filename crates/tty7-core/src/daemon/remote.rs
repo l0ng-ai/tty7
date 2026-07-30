@@ -82,7 +82,6 @@ pub(crate) fn parse_ssh_invocation(argv: &[String]) -> Option<SshInvocation> {
 
     let target = target?;
     if i < argv.len() {
-        // Remote command present. Do not try to reuse this invocation for `-N`.
         return None;
     }
 
@@ -147,7 +146,6 @@ fn platform_foreground_argv(pid: i32) -> Option<Vec<String>> {
     }
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
     let mut len = 0usize;
-    // SAFETY: first sysctl call requests the required buffer length.
     if unsafe {
         libc::sysctl(
             mib.as_mut_ptr(),
@@ -163,7 +161,6 @@ fn platform_foreground_argv(pid: i32) -> Option<Vec<String>> {
         return None;
     }
     let mut buf = vec![0u8; len];
-    // SAFETY: buffer is allocated to the size returned by sysctl above.
     if unsafe {
         libc::sysctl(
             mib.as_mut_ptr(),

@@ -1,39 +1,14 @@
-//! File logger — the `log::` records that otherwise go nowhere.
-//!
-//! tty7 depends on the `log` facade but shipped no backend, so every
-//! `log::info!` / `log::warn!` in the tree was compiled in and then discarded.
-//! That is survivable for the GUI, which can put a failure on screen. It is not
-//! survivable for the **daemon**: [`crate::daemon::spawn`] detaches it with its
-//! stdio pointed at `/dev/null`, so a remote install that refused, a connection
-//! that dropped, or a pane that died left no trace anywhere — the only artifact
-//! the process could produce was `crash.log`, and only if it panicked.
-//!
-//! So: one append-only file next to `crash.log`, same size cap and same
-//! best-effort discipline. Logging must never be the reason something fails.
-//!
-//! ## Level
-//!
-//! `TTY7_LOG` (or `RUST_LOG`) sets it — `off` / `error` / `warn` / `info` /
-//! `debug` / `trace`. **Default `off`**: this writes to a user's disk forever,
-//! and a terminal that logs by default is a terminal that fills a disk while
-//! nobody is watching. Ask for it when diagnosing, which is also the only time
-//! the records are worth anything.
-
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use log::{LevelFilter, Log, Metadata, Record};
 
-/// Rewrite the log once it passes this. Same cap as `crash.log`, larger because
-/// a debug session produces many small lines rather than a few big backtraces.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 struct FileLogger {
     role: &'static str,
     path: PathBuf,
-    /// Serializes writes so two threads cannot interleave halves of a line.
-    /// Contended only while logging is on, which is not the default.
     lock: Mutex<()>,
 }
 
@@ -63,15 +38,6 @@ impl Log for FileLogger {
     fn flush(&self) {}
 }
 
-/// Install the logger for this process, if the environment asks for one.
-///
-/// `role` labels the records, since the GUI and the daemon it spawns share one
-/// config dir and therefore one log file — the same convention `crash.log`
-/// uses, and the reason a line can be attributed at all.
-///
-/// Idempotent and silent on failure: a second call, a missing config dir, or a
-/// read-only disk all leave the process running with no logger, which is
-/// exactly what it had before.
 pub fn install(role: &'static str) {
     let level = level_from_env();
     if level == LevelFilter::Off {
@@ -80,10 +46,6 @@ pub fn install(role: &'static str) {
     let Some(path) = log_path() else {
         return;
     };
-    // A `static` rather than `set_boxed_logger`, which needs `log`'s `std`
-    // feature — not enabled here, and not worth enabling for one allocation
-    // that lives for the whole process anyway. `OnceLock` is also what makes a
-    // second call harmless.
     static LOGGER: OnceLock<FileLogger> = OnceLock::new();
     let logger = LOGGER.get_or_init(|| FileLogger {
         role,
@@ -95,12 +57,6 @@ pub fn install(role: &'static str) {
     }
 }
 
-/// `TTY7_LOG` first, then `RUST_LOG` — the former so turning on tty7's logging
-/// does not also turn on every library that reads `RUST_LOG`.
-///
-/// Only a bare level is understood, not `RUST_LOG`'s per-module syntax: a
-/// half-supported filter language is worse than an obvious one, because
-/// `TTY7_LOG=tty7_core::daemon=debug` would silently mean "off".
 fn level_from_env() -> LevelFilter {
     let raw = std::env::var("TTY7_LOG")
         .or_else(|_| std::env::var("RUST_LOG"))
@@ -139,9 +95,6 @@ fn log_path() -> Option<PathBuf> {
     crate::core::config::config_path("tty7.log")
 }
 
-/// `HH:MM:SS.mmm` — the time of day, which is what you compare against "I
-/// clicked it just now". The date is in `crash.log`'s records and in the file's
-/// own mtime; repeating it on every line would cost more than it tells.
 fn timestamp() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -161,18 +114,11 @@ mod tests {
     use super::*;
     use log::Level;
 
-    /// The default has to be `Off`. A terminal that logs to disk unasked fills
-    /// a disk on a machine nobody is watching — and the daemon outlives every
-    /// window, so there is no session boundary to bound it.
     #[test]
     fn logging_is_off_unless_asked_for() {
-        // Not via the environment: mutating it is `unsafe` in edition 2024 and
-        // races every other test in the binary. The parser is the whole
-        // decision, so it is what gets tested.
         assert_eq!(parse_level(""), LevelFilter::Off);
         assert_eq!(parse_level("   "), LevelFilter::Off);
         assert_eq!(parse_level("nonsense"), LevelFilter::Off);
-        // `RUST_LOG`'s per-module syntax is deliberately *not* half-supported.
         assert_eq!(parse_level("tty7_core::daemon=debug"), LevelFilter::Off);
     }
 
@@ -185,8 +131,6 @@ mod tests {
         assert_eq!(parse_level("TRACE"), LevelFilter::Trace);
     }
 
-    /// A run away log must not grow without bound: past the cap the file is
-    /// rewritten rather than appended to.
     #[test]
     fn the_file_is_rewritten_once_it_passes_the_cap() {
         let path = std::env::temp_dir().join(format!("tty7-logfile-{}.log", std::process::id()));
@@ -205,9 +149,6 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Records name which process wrote them: the GUI and the daemon it spawns
-    /// share one config dir, so an unattributed line is ambiguous exactly when
-    /// it matters (which side dropped the connection?).
     #[test]
     fn a_record_names_its_role_and_target() {
         let path = std::env::temp_dir().join(format!("tty7-logrec-{}.log", std::process::id()));

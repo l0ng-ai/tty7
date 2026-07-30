@@ -1,24 +1,3 @@
-//! The russh client [`Handler`]: host-key verification, auth banners, and
-//! incoming forwarded channels.
-//!
-//! russh invokes `check_server_key` during the handshake (once per connection —
-//! reused connections never re-run it) and `auth_banner` if the server sends one.
-//! Both route through the [`PromptBroker`] so the *GUI* makes the trust decision
-//! and sees the banner; the daemon owns the `known_hosts` storage per PRD §3.4.
-//!
-//! `server_channel_open_forwarded_tcpip` implements the Remote-forward
-//! (`tcpip-forward`) receive side (WS4): incoming channels are matched against the
-//! connection's [`RemoteForwardTable`] and bridged to a local socket.
-//!
-//! **X11 seam (P1, FR-X2 — deferred).** WS2 carries `NativeSshSpec.x11` but never
-//! requests `x11-req` on the shell channel, so no X11 channels arrive and the
-//! default `server_channel_open_x11` (auto-reject on drop) is correct. Wiring X11
-//! would add: `channel.request_x11(..)` at shell start (with a MIT-MAGIC-COOKIE-1
-//! cookie), a `server_channel_open_x11` override here that resolves the local
-//! display (`$DISPLAY` → `/tmp/.X11-unix/X<n>` unix socket or `localhost:6000+n`),
-//! and `forward::bridge` to that socket — mirroring the forwarded-tcpip path below.
-//! Left unimplemented deliberately (macOS needs XQuartz; low priority).
-
 use std::sync::Arc;
 
 use russh::Channel;
@@ -38,17 +17,10 @@ pub struct ClientHandler {
     pub verify_host_keys: bool,
     pub skip_banner: bool,
     pub broker: Arc<PromptBroker>,
-    /// The connection's Remote-forward bindings (WS4). Shared with its
-    /// [`super::session::SshConnection`]; incoming `forwarded-tcpip` channels are
-    /// matched against it and bridged to the registered local target.
     pub remote_forwards: RemoteForwardTable,
 }
 
 impl ClientHandler {
-    /// Turn a GUI host-key decision into an accept/reject, appending to
-    /// `known_hosts` when the user chose to remember it. A remember-append failure
-    /// is logged but does not veto the (already-granted) session — the user
-    /// approved this key for this connection either way.
     fn apply_decision(&self, resp: AuthResponse, key: &PublicKey) -> bool {
         match resp {
             AuthResponse::HostKeyDecision {
@@ -62,7 +34,6 @@ impl ClientHandler {
                 }
                 true
             }
-            // Explicit reject, a cancel, or a mismatched response kind: refuse.
             _ => false,
         }
     }
@@ -75,10 +46,6 @@ impl russh::client::Handler for ClientHandler {
         &mut self,
         server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
-        // A per-profile / global opt-out (FR-S4): trust without prompting — but
-        // still honor `@revoked` markers, like OpenSSH under
-        // `StrictHostKeyChecking no`: an explicitly revoked key is never
-        // acceptable, opt-out or not.
         if !self.verify_host_keys {
             let revoked = matches!(
                 known_hosts::check(&self.host, self.port, server_public_key),
@@ -99,7 +66,6 @@ impl russh::client::Handler for ClientHandler {
 
         match known_hosts::check(&self.host, self.port, server_public_key) {
             HostKeyStatus::Known => Ok(true),
-            // A revoked key is a hard reject — never even offer to trust it.
             HostKeyStatus::Revoked => Ok(false),
             HostKeyStatus::Unknown => {
                 let resp = self
@@ -142,11 +108,6 @@ impl russh::client::Handler for ClientHandler {
         Ok(())
     }
 
-    /// An incoming connection on a Remote (`tcpip-forward`) binding. Match it
-    /// against this connection's registered forwards; on a hit, accept the channel
-    /// and bridge it to a fresh local TCP connection to the target. An unmatched
-    /// channel is rejected (dropping `reply` rejects) — a remote forward we don't
-    /// own must not be tunneled anywhere.
     async fn server_channel_open_forwarded_tcpip(
         &mut self,
         channel: Channel<Msg>,
@@ -164,7 +125,6 @@ impl russh::client::Handler for ClientHandler {
             log::info!(
                 "rejecting unmatched forwarded-tcpip channel on {connected_address}:{connected_port}"
             );
-            // Dropping `reply` rejects the channel.
             return Ok(());
         };
         reply.accept().await;

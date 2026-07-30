@@ -1,10 +1,3 @@
-//! The Settings tab UI (Cmd+,): a sidebar of sections beside a scrollable
-//! content pane. This module owns the panel's *state types* and its *rendering*
-//! only; the lifecycle (opening/closing the tab, committing the font family,
-//! applying theme/font changes) lives in `app.rs`, where it can touch the
-//! shell's tabs and panes. The render methods extend `Tty7App` from here so the
-//! window shell stays focused on tab/pane orchestration.
-
 use gpui::{
     AnyElement, App, Context, Div, Entity, FontWeight, Image, ImageFormat, KeyDownEvent,
     MouseButton, SharedString, Stateful, Subscription, Window, div, img, prelude::*, px, relative,
@@ -43,23 +36,6 @@ use crate::ui::presets;
 use crate::ui::rounding;
 use crate::ui::rounding::RoundedCorners as _;
 
-/// Which section of the settings panel is currently selected in the sidebar.
-/// Sections are named for the *object* being configured (the appearance, the
-/// terminal, the window) — never for a property class like "Behavior", which
-/// reads fine but predicts nothing about what's inside.
-///
-/// Two of these were rearranged because the old split didn't survive contact
-/// with a user asking "which page is that on?":
-///
-/// * **Shell** used to be its own page holding three settings, and nothing
-///   distinguished "the Terminal page" from "the Shell page" from the outside.
-///   Its rows are now Terminal's first group — the program a pane launches is a
-///   property of the terminal, not a peer of it. (It also freed the word
-///   "Shell", which the menu bar was simultaneously using for its File menu.)
-/// * **Input** is new. Completion, history search, the Option/Meta split and
-///   selection/clipboard behaviour were scattered through the bottom of the
-///   Terminal page under four headers; they're the app's most distinctive
-///   surface and they now have a name you can look for.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsSection {
     Appearance,
@@ -73,9 +49,6 @@ pub(crate) enum SettingsSection {
 }
 
 impl SettingsSection {
-    /// Every section, in nav order. The single source of truth for "what
-    /// sections exist" — [`best_matching_section`] used to carry its own
-    /// hand-written copy of this list and had silently fallen two behind.
     pub(crate) const ALL: [SettingsSection; 8] = [
         SettingsSection::Appearance,
         SettingsSection::Terminal,
@@ -87,8 +60,6 @@ impl SettingsSection {
         SettingsSection::About,
     ];
 
-    /// A `&'static` label for `TTY7_PROFILE` aggregation, so each section's build
-    /// cost and rebuild rate report under their own line.
     fn profile_label(self) -> &'static str {
         match self {
             SettingsSection::Appearance => "settings:appearance",
@@ -103,24 +74,15 @@ impl SettingsSection {
     }
 }
 
-/// One searchable setting for the settings-search box: the row's display title,
-/// the section it lives in, and a bag of extra keywords/synonyms so a search
-/// lands even when the user's word isn't in the visible label. Matching is
-/// case-insensitive substring over `title` + `keywords`.
 struct SearchEntry {
     section: SettingsSection,
     title: &'static str,
     keywords: &'static str,
 }
 
-/// The static index the settings search matches against — one entry per notable
-/// setting, mirroring the rows each `render_settings_*` builds. Keywords carry
-/// synonyms the visible label omits (e.g. "meta" → the Option/Alt row, "color"
-/// → the theme) so intent-based searches still resolve to the right section.
 fn settings_search_entries() -> &'static [SearchEntry] {
     use SettingsSection::*;
     &[
-        // ── Appearance ──────────────────────────────────────────────────────
         SearchEntry {
             section: Appearance,
             title: "Theme",
@@ -196,7 +158,6 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             title: "ANSI colors",
             keywords: "palette 16 terminal colours theme",
         },
-        // ── Terminal ────────────────────────────────────────────────────────
         SearchEntry {
             section: Terminal,
             title: "Program",
@@ -257,7 +218,6 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             title: "Open files with",
             keywords: "links file editor command external app path line column",
         },
-        // ── Input ───────────────────────────────────────────────────────────
         SearchEntry {
             section: Input,
             title: "Tab completion",
@@ -288,7 +248,6 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             title: "Trim trailing spaces on copy",
             keywords: "clipboard whitespace copy",
         },
-        // ── SSH ─────────────────────────────────────────────────────────────
         SearchEntry {
             section: Ssh,
             title: "Hosts",
@@ -310,10 +269,6 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             title: "Port forwarding",
             keywords: "ssh tunnel local remote dynamic socks forward rule",
         },
-        // ── Agents ──────────────────────────────────────────────────────────
-        // Titles mirror `HookAgent::display_name()`, which is what each row is
-        // rendered with; the mechanism word (hooks/plugin/extension) lives in
-        // `keywords`. Pinned by `agent_rows_are_in_the_search_index`.
         SearchEntry {
             section: Agents,
             title: "Claude Code",
@@ -344,7 +299,6 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             title: "Grok Build",
             keywords: "agent integration hooks install xai grok build",
         },
-        // ── Window & Tabs ───────────────────────────────────────────────────
         SearchEntry {
             section: WindowTabs,
             title: "Startup window",
@@ -363,9 +317,6 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         SearchEntry {
             section: WindowTabs,
             title: "Confirm before closing the last window",
-            // Both spellings of the chord: the prompt this turns off is reached
-            // by ⌘W on macOS and Ctrl-W everywhere else, and the user types
-            // whichever one their own keyboard just used.
             keywords: "close quit confirm prompt dialog ask again warn last window cmd-w ctrl-w",
         },
         SearchEntry {
@@ -403,7 +354,6 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             title: "Notify threshold",
             keywords: "notification alert seconds duration long command delay",
         },
-        // ── Keybindings / About ─────────────────────────────────────────────
         SearchEntry {
             section: Keybindings,
             title: "Keybindings",
@@ -422,14 +372,10 @@ fn settings_search_entries() -> &'static [SearchEntry] {
     ]
 }
 
-/// Does this entry match the (already lowered, trimmed) query? Matches on the
-/// visible title or any of its synonym keywords, so intent-based searches land.
 fn entry_matches(entry: &SearchEntry, query: &str) -> bool {
     entry.title.to_lowercase().contains(query) || entry.keywords.contains(query)
 }
 
-/// How many of `section`'s settings match `query` — the `(N)` shown beside each
-/// section link while a search is active. `query` must already be lowered/trimmed.
 pub(crate) fn section_match_count(section: SettingsSection, query: &str) -> usize {
     settings_search_entries()
         .iter()
@@ -437,171 +383,75 @@ pub(crate) fn section_match_count(section: SettingsSection, query: &str) -> usiz
         .count()
 }
 
-/// The section a search should jump to: the one with the most matches, ties
-/// broken by nav order (the first section wins). `None` when nothing matches, so
-/// the caller leaves the current selection alone.
-///
-/// Driven by [`SettingsSection::ALL`] rather than a hand-written list: the old
-/// literal here omitted SSH and Agents, so searching "claude" or "known hosts"
-/// annotated the nav with a match count and then refused to go there.
 pub(crate) fn best_matching_section(query: &str) -> Option<SettingsSection> {
     SettingsSection::ALL
         .into_iter()
         .map(|s| (s, section_match_count(s, query)))
         .filter(|(_, n)| *n > 0)
-        // `>` (not `>=`) so an equal later section never displaces the earlier one.
         .reduce(|best, cur| if cur.1 > best.1 { cur } else { best })
         .map(|(s, _)| s)
 }
 
-/// The in-app color editor for the active *editable* theme: one color picker per
-/// seed color (background/foreground/accent/cursor/selection) and per ANSI slot,
-/// each wired to write its change straight back to the theme's YAML file. Rebuilt
-/// by `Tty7App::rebuild_theme_editor` whenever the active theme changes, so it
-/// always targets (and reflects) the theme on screen.
 pub(crate) struct ThemeEditor {
-    /// The id the pickers were built for (which theme they edit).
     #[allow(dead_code)]
     pub(crate) for_id: String,
-    /// Seed-color pickers: `(edit target, row label, picker state)`.
     pub(crate) seed: Vec<(ThemeEdit, String, Entity<ColorPickerState>)>,
-    /// One picker per ANSI slot 0–15.
     pub(crate) ansi: Vec<(ThemeEdit, String, Entity<ColorPickerState>)>,
-    /// Background-image opacity slider; present only while the theme has an
-    /// image (wired to `Tty7App::set_theme_image_opacity`).
     pub(crate) image_opacity_slider: Option<Entity<SliderState>>,
     pub(crate) _subs: Vec<Subscription>,
 }
 
-/// Live state for the settings panel (Cmd+,). Holds the panel's focus owner
-/// (so Esc closes it), the currently selected sidebar section, and the
-/// font-family text input plus its commit subscriptions.
 pub(crate) struct SettingsState {
     pub(crate) focus_handle: gpui::FocusHandle,
     pub(crate) section: SettingsSection,
-    /// Live query for the settings search box in the nav header. While non-empty
-    /// the nav rail lists matching settings (across every section) instead of the
-    /// six section links; picking one jumps to its section.
     pub(crate) search: Entity<InputState>,
     pub(crate) font_select: Entity<SelectState<SearchableVec<String>>>,
-    /// Bold / italic face pickers. Their first row is the `FONT_DEFAULT_LABEL`
-    /// sentinel, meaning "reuse the primary face with synthesized emphasis".
     pub(crate) font_bold_select: Entity<SelectState<SearchableVec<String>>>,
     pub(crate) font_italic_select: Entity<SelectState<SearchableVec<String>>>,
-    /// Shell program override (empty = the platform default shell).
     pub(crate) shell_program_input: Entity<InputState>,
-    /// Shell launch arguments, space-separated (e.g. `-l`).
     pub(crate) shell_args_input: Entity<InputState>,
-    /// Custom working-directory path (used when the strategy is `Custom`).
     pub(crate) wd_path_input: Entity<InputState>,
-    /// Command template run when ⌘/Ctrl-clicking a file link (Links section). Empty
-    /// clears the override, restoring the built-in "open in default app".
     pub(crate) link_file_command_input: Entity<InputState>,
-    /// Mouse-scroll multiplier slider (Terminal section).
     pub(crate) scroll_slider: Entity<SliderState>,
-    /// Global window-opacity slider (Appearance's Window section). Shows the
-    /// effective value; dragging sets the config override.
     pub(crate) window_opacity_slider: Entity<SliderState>,
-    /// The color editor for the effective (on-screen) theme, or `None` when
-    /// that theme is read-only (a built-in / import).
     pub(crate) theme_editor: Option<ThemeEditor>,
-    /// Whether the theme picker panel is open beside the content pane
-    /// (Appearance section only). Toggled from the theme card(s).
     pub(crate) theme_panel_open: bool,
-    /// Which theme choice the open picker panel writes to (see [`ThemeSlot`]).
-    /// Set by the card that opened the panel.
     pub(crate) theme_panel_slot: ThemeSlot,
-    /// Live filter for the theme picker panel's list.
     pub(crate) theme_search: Entity<InputState>,
-    /// `Some` while a Keybindings row is capturing a new shortcut: the action
-    /// being rebound plus the live keystroke interceptor that swallows and
-    /// records the next keypress (see `Tty7App::start_recording_key`).
     pub(crate) recording: Option<Recording>,
-    /// A transient one-line note under the Keybindings header — e.g. after a
-    /// captured key was already taken and its previous owner was unbound.
-    /// Cleared when the next capture starts.
     pub(crate) rebinding_note: Option<String>,
-    /// The SSH-profile edit form, when a profile in the SSH section is being
-    /// added or edited. `None` shows just the saved-profile list. Its widgets
-    /// (inputs) are built lazily when a profile is selected and rebuilt (a fresh
-    /// input set) each time, so the section never carries N profiles' worth of
-    /// inputs up front. See `SshProfileForm`.
     pub(crate) ssh_form: Option<SshProfileForm>,
-    /// Which detail the SSH section's right (detail) pane is showing. The section
-    /// is a two-column master-detail: the left column lists profiles, and this
-    /// tracks the selected one. `Profile(id)` pairs with `ssh_form` (the loaded
-    /// edit form); `None` shows the empty state (the "pick a profile" hint plus
-    /// the two global security toggles).
     pub(crate) ssh_detail: SshDetail,
-    /// Live filter for the SSH master list. Non-empty narrows the list to hosts
-    /// whose name or address matches, and force-expands every group — results
-    /// hiding inside a collapsed group is the same as not finding them.
     pub(crate) ssh_filter: Entity<InputState>,
-    /// Group keys (see [`ssh_group_key`]) whose section in the master list is
-    /// collapsed. Empty = everything expanded.
     pub(crate) ssh_collapsed_groups: std::collections::HashSet<String>,
-    /// The `user@host[:port]` box in the SSH section's empty state. An empty
-    /// pane whose only content is "select something" wastes the widest column on
-    /// the page; connecting is what someone opening this section came to do.
     pub(crate) ssh_quick_connect: Entity<InputState>,
-    /// Which machine the Agents section is showing and acting on.
-    /// [`HostId::LOCAL`] until the user picks one of the connected remotes.
     pub(crate) agent_hooks_host: HostId,
-    /// Install state of each agent's hook integration on
-    /// [`Self::agent_hooks_host`]. Cached — captured when the panel opens,
-    /// re-read when the section or the machine is selected, and updated after
-    /// each install/uninstall — because reading it is a file read per agent,
-    /// and on a remote machine that is a round trip per agent.
     pub(crate) agent_hooks_states: AgentHooksView,
-    /// Discriminates the load whose answer is allowed to land. Switching
-    /// machines while a read is in flight would otherwise let the old
-    /// machine's rows arrive under the new machine's name.
     pub(crate) agent_hooks_seq: u64,
-    /// Outcome of the last Agents-section hook action (install summary or
-    /// error), shown under that agent's row. Replaced by the next action.
     pub(crate) agent_hooks_note: Option<(crate::core::agent_hooks::HookAgent, String)>,
     pub(crate) _subs: Vec<Subscription>,
 }
 
-/// What Settings → Agents has to show for the machine it is pointed at.
-///
-/// Three states rather than a `Vec` that is empty when it doesn't know: reading
-/// a remote machine's install state is a round trip per agent, so "still asking"
-/// and "asked, nothing installed" are genuinely different answers and rendering
-/// them the same is how a page silently lies for a second.
 #[derive(Clone)]
 pub(crate) enum AgentHooksView {
-    /// The read is in flight.
     Loading,
-    /// One row per hook-capable agent, in
-    /// [`crate::core::agent_hooks::HookAgent::ALL`] order.
     Ready(Vec<AgentHookRow>),
-    /// The machine can't be acted on, and the sentence says which hop gave up
-    /// (a failure is a resting state, not a blank).
     Unavailable(String),
 }
 
-/// One agent's row, as read off a particular machine.
 #[derive(Clone)]
 pub(crate) struct AgentHookRow {
     pub(crate) agent: crate::core::agent_hooks::HookAgent,
     pub(crate) state: crate::core::agent_hooks::HooksState,
-    /// The file the integration lives in *on that machine*, `~`-abbreviated.
-    /// Resolved in the background with the rest of the read — it depends on the
-    /// machine's own home directory and separator, which render cannot ask for.
     pub(crate) target: String,
 }
 
-/// One entry in the Agents section's machine picker.
 #[derive(Clone)]
 pub(crate) struct AgentHooksMachine {
     pub(crate) host: HostId,
     pub(crate) label: String,
 }
 
-/// The theme choice a picker card / the picker panel targets. `Manual` is the
-/// single `Config::theme_preset` (sync-with-system off); `Light` / `Dark` are
-/// the two follow-system slots (`Config::theme_preset_light` / `_dark`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ThemeSlot {
     Manual,
@@ -609,30 +459,17 @@ pub(crate) enum ThemeSlot {
     Dark,
 }
 
-/// The SSH section's right-pane selection (see [`SettingsState::ssh_detail`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SshDetail {
-    /// Nothing selected — the right pane shows the quick-connect empty state.
     None,
-    /// The settings every host inherits. Its own row at the top of the master
-    /// list rather than a block pinned under the form: "each host starts from
-    /// these and can override one" is a thing the list's shape can say, and a
-    /// paragraph under an unrelated form cannot.
     Defaults,
-    /// A profile's edit form (paired with `ssh_form`, keyed by the profile id).
     Profile(Uuid),
 }
 
-/// The master list's bucket for `profile.group`: imported aliases first, then
-/// any user-defined group, then the ungrouped ones. The key is the raw `group`
-/// value (`""` for ungrouped) so it can key the collapsed-set directly.
 fn ssh_group_key(p: &SshProfile) -> &str {
     p.group.as_deref().unwrap_or("")
 }
 
-/// The header text for a group key. The import bucket is labelled by the file
-/// it mirrors — `Imported from ssh_config` describes a past action, and this
-/// group is a live link to a file the user edits elsewhere.
 fn ssh_group_label(key: &str) -> &str {
     match key {
         crate::core::ssh_config::IMPORTED_GROUP => "~/.ssh/config",
@@ -641,8 +478,6 @@ fn ssh_group_label(key: &str) -> &str {
     }
 }
 
-/// Sort rank for a group key: imported first, ungrouped last, custom groups in
-/// between (alphabetical among themselves).
 fn ssh_group_rank(key: &str) -> u8 {
     match key {
         crate::core::ssh_config::IMPORTED_GROUP => 0,
@@ -651,10 +486,6 @@ fn ssh_group_rank(key: &str) -> u8 {
     }
 }
 
-/// Whether a profile survives the master list's filter. `query` is already
-/// trimmed and lowercased. Matches the name and the address separately rather
-/// than the rendered `user@host:port` line, so typing a port still finds the
-/// host but typing `@` doesn't match everything.
 fn ssh_row_matches(p: &SshProfile, query: &str) -> bool {
     if query.is_empty() {
         return true;
@@ -663,40 +494,25 @@ fn ssh_row_matches(p: &SshProfile, query: &str) -> bool {
     hit(&p.name) || hit(&p.host) || hit(&p.user) || hit(&p.port.to_string())
 }
 
-/// The live edit-form state for one SSH profile, folded into Settings → SSH.
-/// A single reusable input set, rebuilt (via `Tty7App::ssh_form_load`) each time
-/// a profile is selected. Edits are committed to `Config::ssh_profiles` only on
-/// Save, so the form can be abandoned freely. Mirrors the four-core-fields +
-/// collapsible jump / forwards / advanced disclosure the old standalone editor
-/// exposed.
 pub(crate) struct SshProfileForm {
-    /// The profile id being edited. A *new* (unsaved) profile carries a freshly
-    /// minted id here and is only written to config on Save.
     editing: Uuid,
-    /// The group / credential_ref carried over from the profile being edited, so
-    /// a Save round-trips fields the form doesn't expose.
     carry_group: Option<String>,
     carry_credential_ref: Option<CredentialRef>,
 
-    // Section expansion (progressive disclosure).
     show_jump: bool,
     show_forwards: bool,
     show_advanced: bool,
 
-    // Core fields.
     name: Entity<InputState>,
     host: Entity<InputState>,
     port: Entity<InputState>,
     user: Entity<InputState>,
     auth: AuthMode,
 
-    // Jump host (a profile name; empty = none).
     jump: Entity<InputState>,
 
-    // Port forwards, one row of inputs per rule (see [`ForwardRuleForm`]).
     forwards: Vec<ForwardRuleForm>,
 
-    // Advanced text inputs.
     identity_files: Entity<InputState>,
     proxy_command: Entity<InputState>,
     socks: Entity<InputState>,
@@ -711,7 +527,6 @@ pub(crate) struct SshProfileForm {
     connect_timeout: Entity<InputState>,
     login_scripts: Entity<InputState>,
 
-    // Advanced booleans / tri-states.
     agent_forward: bool,
     x11: bool,
     skip_banner: bool,
@@ -719,17 +534,9 @@ pub(crate) struct SshProfileForm {
     verify_host_keys: Option<bool>,
     warn_on_close: Option<bool>,
 
-    /// Keeps the inputs' change subscriptions alive for this form; dropped (and
-    /// re-created) whenever the form is rebuilt for another profile.
     _subs: Vec<Subscription>,
 }
 
-/// One port-forward rule as live inputs.
-///
-/// The whole set used to be a single multi-line text box in which each rule had
-/// to be typed as `L bind_host:port target_host:port [description]` — a syntax
-/// nothing on the page taught, and the only field in this form that could
-/// silently drop what you entered (an unparsable line was skipped on save).
 pub(crate) struct ForwardRuleForm {
     pub(crate) kind: ForwardKind,
     pub(crate) bind_host: Entity<InputState>,
@@ -740,9 +547,6 @@ pub(crate) struct ForwardRuleForm {
 }
 
 impl ForwardRuleForm {
-    /// Read the row back into a rule, or `None` when it is too incomplete to
-    /// connect: a listener needs a port, and everything but Dynamic needs a
-    /// target. The UI flags such a row rather than dropping it quietly.
     fn collect(&self, cx: &App) -> Option<ForwardRule> {
         let val = |e: &Entity<InputState>| e.read(cx).value().trim().to_string();
         let bind_port: u16 = val(&self.bind_port).parse().ok().filter(|p| *p > 0)?;
@@ -765,8 +569,6 @@ impl ForwardRuleForm {
         })
     }
 
-    /// Whether the row has anything typed in it at all. An untouched row added
-    /// by "Add rule" is not an error — it just hasn't been filled in yet.
     fn is_blank(&self, cx: &App) -> bool {
         [
             &self.bind_host,
@@ -780,36 +582,19 @@ impl ForwardRuleForm {
     }
 }
 
-/// In-progress capture of a new shortcut for one action (click a Keybindings
-/// row). The interceptor lives here so it stays active only while recording;
-/// dropping it (capture done / Esc) removes the key swallow.
 pub(crate) struct Recording {
-    /// The action name whose shortcut is being captured.
     pub(crate) action: String,
-    /// The chords captured so far, each a config spec (e.g. `["ctrl-b", "x"]`).
-    /// A single chord is the common case; more than one records a sequence like
-    /// the tmux preset's `ctrl-b x`. Committed (joined by spaces) after a short
-    /// pause with no further keys.
     pub(crate) chords: Vec<String>,
-    /// Keeps the keystroke interceptor alive for the duration of the capture.
     pub(crate) _intercept: Subscription,
 }
 
-/// Sentinel first row in the bold/italic font pickers meaning "no distinct face
-/// — reuse the primary family with synthesized emphasis". Chosen to be an
-/// unlikely real font name.
 pub(crate) const FONT_DEFAULT_LABEL: &str = "Default (match primary)";
 
-/// How the link-click modifier is spelled in the Links copy. It's gpui's
-/// `secondary` (see `Modifiers::secondary`), so it must read ⌘ on macOS and
-/// Ctrl on Windows/Linux — same split `key_tokens` uses for keycaps.
 #[cfg(target_os = "macos")]
 const LINK_MODIFIER_LABEL: &str = "⌘";
 #[cfg(not(target_os = "macos"))]
 const LINK_MODIFIER_LABEL: &str = "Ctrl";
 
-/// Humanize a CamelCase action name for display: "CloseActiveTab" → "Close
-/// Active Tab".
 pub(crate) fn humanize_action(action: &str) -> String {
     let mut out = String::new();
     for (i, ch) in action.chars().enumerate() {
@@ -821,9 +606,6 @@ pub(crate) fn humanize_action(action: &str) -> String {
     out
 }
 
-// ── SSH-profile form parsing helpers (moved here from the standalone editor) ──
-
-/// Parse a `host:port` fragment into a [`HostPort`], or `None` when empty/blank.
 fn parse_host_port(s: &str) -> Option<HostPort> {
     let s = s.trim();
     if s.is_empty() {
@@ -835,14 +617,12 @@ fn parse_host_port(s: &str) -> Option<HostPort> {
     }
 }
 
-/// Render a `HostPort` back to `host:port` for the form (empty string for `None`).
 fn host_port_text(hp: &Option<HostPort>) -> String {
     hp.as_ref()
         .map(|h| format!("{}:{}", h.host, h.port))
         .unwrap_or_default()
 }
 
-/// Split a comma/whitespace list into non-empty items (algorithms, etc.).
 fn split_list(s: &str) -> Vec<String> {
     s.split([',', ' ', '\n'])
         .map(str::trim)
@@ -851,7 +631,6 @@ fn split_list(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Split a multiline input into non-empty trimmed lines.
 fn split_lines(s: &str) -> Vec<String> {
     s.lines()
         .map(str::trim)
@@ -860,8 +639,6 @@ fn split_lines(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// The five inputs of a forward row, in tab order. Used to subscribe the row
-/// (and nothing else needs to know the field names).
 fn forward_row_inputs(row: &ForwardRuleForm) -> [&Entity<InputState>; 5] {
     [
         &row.bind_host,
@@ -872,8 +649,6 @@ fn forward_row_inputs(row: &ForwardRuleForm) -> [&Entity<InputState>; 5] {
     ]
 }
 
-/// Build one forward row's inputs, seeded from `rule`. Port `0` seeds an empty
-/// box rather than a literal `0` — the stored default for "unset".
 fn seed_forward_row(
     window: &mut Window,
     cx: &mut Context<Tty7App>,
@@ -890,8 +665,6 @@ fn seed_forward_row(
     }
 }
 
-/// [`seed_input`] with a placeholder — the forward rows carry no labels of
-/// their own, so the hint text is what says which box is which.
 fn seed_hinted(
     window: &mut Window,
     cx: &mut Context<Tty7App>,
@@ -906,8 +679,6 @@ fn seed_hinted(
     })
 }
 
-/// Build an `InputState` seeded with `value` (single- or multi-line). A free
-/// function so `window` auto-reborrows cleanly at each call site.
 fn seed_input(
     window: &mut Window,
     cx: &mut Context<Tty7App>,
@@ -923,15 +694,11 @@ fn seed_input(
 }
 
 impl Tty7App {
-    /// Build the settings tab body: a fixed left sidebar (section nav) beside a
-    /// scrollable content area for the selected section. Esc closes the tab.
     pub(crate) fn render_settings(
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        // Copy the palette out (Hsla is Copy) so this borrow doesn't outlive into
-        // `render_settings_search_results` below, which needs `cx` mutably.
         let theme = cx.theme();
         let (background, foreground, header_muted) =
             (theme.background, theme.foreground, theme.muted_foreground);
@@ -943,25 +710,14 @@ impl Tty7App {
                 s.theme_panel_open,
                 s.search.clone(),
             ),
-            None => return div(), // not a settings tab; nothing to render
+            None => return div(),
         };
-        // Live settings-search query (trimmed, lowered). Non-empty swaps the six
-        // section links for a cross-section list of matching settings.
         let query = search.read(cx).value().trim().to_lowercase();
-        // The theme picker panel only makes sense beside its own page.
         let show_theme_panel = theme_panel_open && section == SettingsSection::Appearance;
 
-        // `TTY7_PROFILE`: time this section's whole element build and, via the
-        // aggregated call rate, expose whether the panel is rebuilding once (on a
-        // real change) or in a tight `notify` loop. Labelled per section so
-        // Appearance's cost stands apart from the lighter pages.
         let prof = crate::ui::perf::enabled()
             .then(|| (std::time::Instant::now(), section.profile_label()));
 
-        // Sidebar nav item that activates a section on click. While a search is
-        // active it also carries a trailing `(N)` count of that section's matching
-        // settings — the full section nav stays put and is annotated with
-        // per-section hit counts, rather than collapsing into a flat result list.
         let nav_item = |label: &'static str, target: SettingsSection, icon: Icon| {
             let view = cx.entity();
             let count = if query.is_empty() {
@@ -987,17 +743,12 @@ impl Tty7App {
             }
         };
 
-        // The section links stay put during search — only their `(N)` suffixes
-        // change — so the nav never collapses out from under the user.
         let nav_body = SidebarMenu::new()
             .child(nav_item(
                 "Appearance",
                 SettingsSection::Appearance,
                 Icon::new(IconName::Palette),
             ))
-            // The `>_` prompt glyph for Terminal, which now owns the shell
-            // program; the "Aa" glyph is the closest thing the icon set has to
-            // a keyboard for Input.
             .child(nav_item(
                 "Terminal",
                 SettingsSection::Terminal,
@@ -1023,16 +774,11 @@ impl Tty7App {
                 SettingsSection::WindowTabs,
                 Icon::new(IconName::WindowRestore),
             ))
-            // The icon set ships no keyboard glyph; CaseSensitive ("Aa")
-            // is the closest key-ish cue available.
             .child(nav_item(
                 "Keybindings",
                 SettingsSection::Keybindings,
                 Icon::new(IconName::CaseSensitive),
             ))
-            // Not `IconName::Info`: `icons/info.svg` is overridden app-wide with
-            // the detail panel's "panel with two lines" glyph, which reads as a
-            // document, not as *About*. This row keeps the circled `i`.
             .child(nav_item(
                 "About",
                 SettingsSection::About,
@@ -1041,20 +787,12 @@ impl Tty7App {
 
         let sidebar = Sidebar::new("settings-sidebar")
             .collapsible(SidebarCollapsible::None)
-            // Match the tab sidebar's default width (`default_sidebar_width`, 220px)
-            // so toggling the settings overlay over the vertical rail doesn't shift
-            // the left column — narrower than the stock 255px too, which three short
-            // items don't need and which reads more native/less hollow.
             .w(px(220.))
             .header(
                 v_flex()
                     .w_full()
                     .px_2()
                     .gap_2()
-                    // Reserve the title-bar height at the top so the nav rail
-                    // reaches the very top of the window (the macOS traffic lights
-                    // rest on its surface) with the header clearing them — matching
-                    // the tab rail's top zone.
                     .pt(px(crate::ui::app::TITLE_BAR_HEIGHT))
                     .pb_1()
                     .child(
@@ -1064,30 +802,10 @@ impl Tty7App {
                             .text_color(header_muted)
                             .child("SETTINGS"),
                     )
-                    // Settings search: type a setting or a synonym and each section
-                    // below shows how many of its settings match, with the
-                    // best-matching section auto-selected (see the search input's
-                    // change subscription in `app.rs`). Styled like the tab sidebar's
-                    // search — a leading magnifier + a borderless input sitting flush
-                    // on the rail surface, no box, so the header reads clean.
                     .child(
                         h_flex()
                             .items_center()
-                            // Laid out to land on the nav rows below it rather than
-                            // on the header's own inset: a `SidebarMenuItem` is
-                            // `p_2` + a 16px icon + `gap_x_2`, so its label starts
-                            // 32px into the rail. Matching that takes all three of
-                            // these — the magnifier at the rows' 16px (not `small`,
-                            // which is 14 and left the glyph reading a size below
-                            // the column it heads), the same 8px gap after it, and
-                            // `pl_0` on the input, which otherwise adds `input_px`
-                            // (12px at the default size) whether or not it draws a
-                            // box. Without them the placeholder sat 6px right of
-                            // every label under it.
                             .gap_2()
-                            // Stock magnifier, not tty7's: this page's glyphs run at
-                            // 16px, where the detail panel's redraw reads thin and
-                            // its handle stubby. See `assets::STOCK_PREFIX`.
                             .child(
                                 Icon::empty()
                                     .path("stock/icons/search.svg")
@@ -1115,19 +833,6 @@ impl Tty7App {
             SettingsSection::About => self.render_settings_about(cx),
         };
 
-        // One continuous, flat sheet (no cards) — one document: bold section
-        // headers and full-width rules carry the structure, so settings read as a
-        // unified document rather than a widget floating in empty space.
-        //
-        // The SSH section is the exception: it is its own two-column master-detail
-        // that fills the pane height, with each column owning its scroll — so it
-        // bypasses the shared padded, single-scroll wrapper (which would otherwise
-        // give the whole section one outer scrollbar and no definite height for the
-        // columns to fill) and is dropped in flush instead.
-        // A `flex_1` pane still defaults to `min-width: auto`, so on a narrow
-        // window it refuses to shrink below its content's intrinsic width and
-        // shoves the fixed 300px theme panel (and its close `×`) off the right
-        // edge. `min_w_0` lets the pane yield so the panel stays fully on-screen.
         let content_pane = if section == SettingsSection::Ssh {
             v_flex()
                 .id("settings-content")
@@ -1148,10 +853,6 @@ impl Tty7App {
                     div()
                         .px_10()
                         .py_8()
-                        // Cap the column tight enough (640px) that a row's
-                        // right-aligned control stays visually paired with its
-                        // label — the cap is what makes `settings_row`'s
-                        // space-between layout safe.
                         .child(div().w_full().max_w(px(640.)).child(content)),
                 )
         };
@@ -1169,17 +870,8 @@ impl Tty7App {
                     this.close_settings(window, cx);
                 }
             }))
-            // The Sidebar draws its own right border; no wrapper border here, or
-            // the two stack into one thick rule.
             .child(sidebar)
             .child(content_pane)
-            // The overlay covers the real title bar, so the window's own drag
-            // region is buried. Restore it: a transparent strip across the top
-            // band (the height the title bar reserved) that moves the window on
-            // drag and zooms it on double-click, exactly like the title bar it
-            // stands in for. `window_move_gesture` owns the gesture and the
-            // reasoning behind it; the #221 failure was worst here, because this
-            // strip *is* the whole top band with no immune caption beside it.
             .child(
                 crate::ui::app::window_move_gesture(
                     div()
@@ -1196,20 +888,8 @@ impl Tty7App {
                 .on_double_click(|_, window, _| window.titlebar_double_click()),
             )
             .when(show_theme_panel, |r| r.child(self.render_theme_panel(cx)))
-            // Close affordance at the page's top-right corner (Esc and Cmd+, also
-            // close) — the intuitive "close this page" spot, and clear of the
-            // macOS traffic lights (top-left) and the window controls' zone.
-            // Hidden while the theme panel is open: it docks at the same right edge
-            // and carries its own ✕, so keeping this one would stack two ✕ there.
             .when(!show_theme_panel, |r| {
                 r.child(
-                    // A full chrome tile, because it stands in the same corner as
-                    // the title bar's own: a `small` icon button is 24px, which
-                    // reads undersized next to the 34px window-control tiles this
-                    // spot belongs to. `right` is the window-control zone's own
-                    // margin rather than the content inset — what this has to
-                    // clear here is the controls, not a text column. `top`
-                    // centres it in the title bar's band.
                     div()
                         .absolute()
                         .top(px((TITLE_BAR_HEIGHT - TILE_SIZE) / 2.))
@@ -1219,9 +899,6 @@ impl Tty7App {
                             Button::new("settings-close")
                                 .icon(Icon::new(IconName::Close))
                                 .ghost()
-                                // Sizing the button, not the icon: `Button::render`
-                                // overwrites whatever size the icon was handed.
-                                // See `BUTTON_ICON_SCALE`.
                                 .with_size(px(
                                     TILE_GLYPH_LINE / crate::ui::tab_strip::BUTTON_ICON_SCALE
                                 ))
@@ -1241,8 +918,6 @@ impl Tty7App {
         root
     }
 
-    /// Just the styled section title (no margin). Shared by `section_header` and
-    /// `section_intro` so the two can never drift in size, weight, or color.
     fn header_text(&self, title: &str, cx: &Context<Self>) -> Div {
         div()
             .text_base()
@@ -1251,19 +926,10 @@ impl Tty7App {
             .child(title.to_string())
     }
 
-    /// A bold section header that introduces a group of settings.
-    /// With no cards, the header *is* the unit of grouping — it tells the eye
-    /// where one set of related controls begins.
     pub(crate) fn section_header(&self, title: &str, cx: &Context<Self>) -> Div {
         self.header_text(title, cx).mb_4()
     }
 
-    /// A section header paired with its one-line intro as a single unit: the
-    /// subtitle sits tight under the title (`gap_1`) and the block leaves a
-    /// consistent gap before the first control (`mb_4`). Replaces the ad-hoc
-    /// "header, then a loose paragraph" pattern that stranded the subtitle 16px
-    /// below its own title (glued instead to the controls) and used a different
-    /// bottom margin — `mb_1` here, `mb_2` there — in every section.
     fn section_intro(&self, title: &str, desc: impl Into<String>, cx: &Context<Self>) -> Div {
         v_flex()
             .mb_4()
@@ -1277,22 +943,10 @@ impl Tty7App {
             )
     }
 
-    /// A full-width hairline between sections, so the page reads as one
-    /// continuous sheet rather than stacked boxes.
     pub(crate) fn section_rule(&self, cx: &Context<Self>) -> Div {
         div().h(px(1.)).my_7().bg(cx.theme().border)
     }
 
-    /// One labelled settings row, shared by every section: title + description
-    /// on the left, control right-aligned. Space-between is safe here only
-    /// because both hosting columns are capped — the main content column at
-    /// 640px and the SSH detail pane at 720px — so the two never stretch apart
-    /// into a dead gap the way they did on an uncapped pane; widen either cap
-    /// and every row inside it stretches with it. A soft full-row
-    /// hover fill makes each row read as one scannable unit — the same quiet
-    /// highlight the sidebar and menus use; negative side margins let that fill
-    /// bleed past the text edge while labels stay aligned with the section
-    /// headers above.
     pub(crate) fn settings_row(
         &self,
         label: impl Into<String>,
@@ -1322,8 +976,6 @@ impl Tty7App {
                             .text_color(theme.foreground)
                             .child(label.into()),
                     )
-                    // Rows without a description (the theme color editor) stay
-                    // single-line instead of carrying an empty text child.
                     .when(!desc.is_empty(), |col| {
                         col.child(
                             div()
@@ -1336,30 +988,6 @@ impl Tty7App {
             .child(h_flex().flex_shrink_0().child(control))
     }
 
-    /// A segmented control for a small set of mutually-exclusive options — the
-    /// refined stand-in for a raw row of radio circles, which read as an unstyled
-    /// form beside the sheet's tuned steppers and chips. Joined segments in a
-    /// single outlined track, one of them filled, speak the same segmented
-    /// language as the −│value│+ stepper right beside them; the 24px height
-    /// matches the selects in the same rows. `selected` is the active index;
-    /// `on_pick` fires with the newly chosen one.
-    ///
-    /// # Why this is hand-rolled
-    ///
-    /// It used to be gpui-component's `ButtonGroup::outline()` with
-    /// `Button::selected`, and that is what issue #197 was reported against. That
-    /// path derives the selected segment's fill from `Theme::input` and gives it
-    /// the *same* border and the *same* label color as its unselected siblings —
-    /// so the entire selection signal was one fill, and that fill came from a
-    /// grey unrelated to the active theme. On Dracula it measured **1.03:1**.
-    ///
-    /// `Theme::input` is now themed (see `ui::theme::apply_theme`), which fixes
-    /// the stock control for inputs and selects. But a segmented control is the
-    /// one place in the app where several options sit visibly side by side with a
-    /// *static* selection, so it is precisely where a fill alone is not enough
-    /// (see `presets::Surface`) — and the stock button exposes no way to vary the
-    /// label's weight. Owning the 30 lines is cheaper than a fork patch, and it
-    /// puts the control on the same ladder every hand-rolled surface reads.
     pub(crate) fn segmented(
         &self,
         id: impl Into<SharedString>,
@@ -1372,11 +1000,6 @@ impl Tty7App {
         self.segmented_on(sf, id, options, selected, cx, on_pick)
     }
 
-    /// [`Self::segmented`] for a control that does *not* sit on the settings
-    /// sheet. The track paints its own opaque ground, so it has to be told which
-    /// one: dropped on the right panel's sunk rail, a window-surface track reads
-    /// as a faintly darker box cut out of the column it sits in — and every rung
-    /// above it was derived against the wrong ground.
     pub(crate) fn segmented_on(
         &self,
         sf: presets::Surface,
@@ -1387,8 +1010,6 @@ impl Tty7App {
         on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
         let border = cx.theme().border;
-        // Taken by name rather than as a `&'static str` so per-row controls (the
-        // forward rules) can carry an id derived from their index.
         let id: SharedString = id.into();
         let on_pick = std::rc::Rc::new(on_pick);
         let count = options.len();
@@ -1398,30 +1019,14 @@ impl Tty7App {
             .rounded(rounding::TRACK_RADIUS)
             .border_1()
             .border_color(border)
-            // The track paints its own ground rather than letting the sheet show
-            // through. Every rung of the ladder was derived against this colour,
-            // so painting it is what makes those ratios true — a control that
-            // leaves its ground to whatever it happens to be composited over is
-            // the shape of the bug this whole change is about.
             .bg(gpui::rgb(sf.base))
-            // A backstop for content overflow, and nothing more. This used to be
-            // what shaped the end segments' fills to the track's rounding, and it
-            // cannot do that: gpui's overflow mask is a square, unantialiased
-            // scissor (issue #236, see `ui::rounding`). The segments carry their
-            // own radii below.
             .overflow_hidden()
             .children(options.iter().enumerate().map(|(i, label)| {
                 let active = i == selected;
                 let on_pick = on_pick.clone();
-                // The two end segments cap the track, so their fills have to draw
-                // the corner themselves — one border-width tighter than the
-                // track's own radius, so the arc nests inside the border instead
-                // of bulging past it into the square clip.
                 let corners =
                     rounding::segment_corners(i, count, rounding::TRACK_RADIUS, rounding::HAIRLINE);
                 h_flex()
-                    // A per-segment id keeps each one unique across the several
-                    // segmented controls on the page.
                     .id(gpui::ElementId::NamedInteger(id.clone(), i as u64))
                     .items_center()
                     .justify_center()
@@ -1430,14 +1035,7 @@ impl Tty7App {
                     .text_sm()
                     .cursor_pointer()
                     .rounded_corners(corners)
-                    // Hairlines *between* segments only — the track already owns
-                    // its outer edge, and a border on the first segment would
-                    // double it.
                     .when(i > 0, |s| s.border_l_1().border_color(border))
-                    // Both channels, every time. The fill locates the selection in
-                    // the row; the label color and weight say it is the one — and
-                    // keep saying it on a translucent window, where the fill is
-                    // washing over whatever is behind the sheet.
                     .when(active, |s| {
                         s.bg(gpui::rgb(sf.selected))
                             .text_color(gpui::rgb(sf.text_selected))
@@ -1447,8 +1045,6 @@ impl Tty7App {
                         s.text_color(gpui::rgb(sf.text_resting))
                             .hover(|h| h.bg(gpui::rgb(sf.hover)))
                     })
-                    // Pressed reads past selected, so pushing the segment that is
-                    // already chosen still acknowledges the click.
                     .active(|s| s.bg(gpui::rgb(sf.pressed)))
                     .child(*label)
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1458,14 +1054,10 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// Appearance section: theme, font size, font family.
     fn render_settings_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let foreground = theme.foreground;
         let border = theme.border;
-        // Hover comes off the ladder; `stepper_bg` stays a soft resting tint —
-        // it decorates a container rather than signalling a state, which is the
-        // one job an alpha-multiplied grey is still fine for.
         let hover_bg = gpui::rgb(cx.global::<presets::Surfaces>().window.hover);
         let stepper_bg = theme.secondary.opacity(0.35);
         let font_size = self.font_size;
@@ -1488,18 +1080,6 @@ impl Tty7App {
                     .any(|(tag, value)| tag == "liga" && *value != 0)
         });
 
-        // Unified −/value/+ stepper plus a quiet Reset. `slot` is the glyph's
-        // place in the three-slot track (−│value│+): it draws the internal
-        // hairline, and — because a hover fill in an end slot would otherwise
-        // square off the track's corner (issue #236) — the corner radii.
-        //
-        // `h_full` rather than `py_1` is load-bearing for that second job. A
-        // padded, auto-height glyph box measures 31px (14px text × gpui's φ line
-        // height, plus 8px of padding) against a 22px content box, so the track's
-        // `items_center` centres it and `overflow_hidden` crops the overhang —
-        // the fill still reaches the corner, but the box's own rounded corner is
-        // 4½px outside the visible strip, where it does nothing. Pinning the box
-        // to the track's content height puts the arc back where the corner is.
         let step = move |id: &'static str, glyph: &'static str, slot: usize| {
             let corners =
                 rounding::segment_corners(slot, 3, rounding::TRACK_RADIUS, rounding::HAIRLINE);
@@ -1517,15 +1097,7 @@ impl Tty7App {
                 .hover(|h| h.bg(hover_bg))
                 .child(glyph)
         };
-        // One shared height for every small control in this section (matches
-        // gpui-component's own Size::Small button height) so the stepper pill
-        // and the font-family select sit at the same visual weight instead of
-        // each defaulting to its own padding.
         let control_h = px(24.);
-        // The −│value│+ pill plus its quiet Reset — one shape shared by the
-        // font-size and line-height rows; callers hand in the wired buttons.
-        // Reset sits *before* the pill: with controls right-aligned, the pill
-        // holds the row's hard right edge and the quiet action tucks inboard.
         let stepper_row =
             move |dec: Stateful<Div>, value: String, inc: Stateful<Div>, reset: Button| {
                 h_flex()
@@ -1540,16 +1112,11 @@ impl Tty7App {
                             .bg(stepper_bg)
                             .border_1()
                             .border_color(border)
-                            // Overflow backstop only — `step` rounds its own
-                            // corners, because this clip is square (see
-                            // `ui::rounding`).
                             .overflow_hidden()
                             .child(dec)
                             .child(
                                 div()
                                     .min_w(px(40.))
-                                    // Hairline on the value's left edge so both internal
-                                    // seams read (−│value│+); the `+` supplies the right one.
                                     .border_l_1()
                                     .border_color(border)
                                     .py_1()
@@ -1592,17 +1159,12 @@ impl Tty7App {
                 .on_click(cx.listener(|this, _, _w, cx| this.reset_line_height(cx))),
         );
 
-        // One font dropdown, shared shape for primary / bold / italic pickers.
         let font_dropdown = |state: &Entity<SelectState<SearchableVec<String>>>| {
             Select::new(state)
                 .small()
                 .w(px(180.))
                 .h(control_h)
                 .search_placeholder("Search fonts…")
-                // Cap the popup's own height so browsing doesn't dump the
-                // OS's entire font catalog on screen at once — it just
-                // scrolls from here. Every font is still in the list and
-                // reachable by typing; this only trims what's shown.
                 .menu_max_h(px(224.))
                 .into_any_element()
         };
@@ -1633,8 +1195,6 @@ impl Tty7App {
                 this.set_cursor_style(style, cx);
             },
         );
-        // Blink lives here beside the shape — one Cursor home, not "shape is
-        // appearance, blink is behavior" split across two pages.
         let blink_switch = crate::ui::theme::switch("cursor-blink", cx)
             .checked(cursor_blink)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_cursor_blink(*on, cx)))
@@ -1647,9 +1207,6 @@ impl Tty7App {
                 cx,
             ))
             .child(self.render_theme_selection(cx))
-            // Custom-theme management (duplicate / edit colors / open folder) is
-            // *about* themes, so it lives with the picker rather than stranded at
-            // the foot of the page after Cursor.
             .child(self.render_custom_themes(cx))
             .child(self.section_rule(cx))
             .child(self.render_window_section(cx))
@@ -1708,12 +1265,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// Window section (Appearance): the global opacity slider and blur switch
-    /// that apply to every theme, then the inactive-pane dimming switch. The
-    /// first two are config *overrides* — until touched they follow the active
-    /// theme's own `opacity`/`blur`, and "Follow theme" clears them back to that
-    /// state; the dimming switch is a plain flag no theme carries a value for,
-    /// so it sits below that button and "Follow theme" leaves it alone.
     fn render_window_section(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(slider) = self
             .active_settings()
@@ -1753,9 +1304,6 @@ impl Tty7App {
             .into_any_element();
 
         v_flex()
-            // Not "Window": Settings → Window & Tabs owns that word for the
-            // window's lifecycle, and two groups called Window on two pages is
-            // how a user ends up on the wrong one.
             .child(self.section_header("Transparency", cx))
             .child(self.settings_row(
                 "Opacity",
@@ -1770,8 +1318,6 @@ impl Tty7App {
                 blur_switch,
                 cx,
             ))
-            // Only offered while an override is active; otherwise the values
-            // already follow the theme and the button would be a no-op.
             .when(overridden, |this| {
                 this.child(
                     h_flex().mt_2().child(
@@ -1784,8 +1330,6 @@ impl Tty7App {
                     ),
                 )
             })
-            // Below "Follow theme", which resets the two rows above it and not
-            // this one — a plain setting with no theme value behind it.
             .child(self.settings_row(
                 "Dim inactive panes",
                 "Fade unfocused panes in a split so the active one stands out.",
@@ -1795,9 +1339,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// Custom themes section. On an editable theme, the color editor; on a
-    /// read-only built-in / import, a "Duplicate to edit" button that forks it
-    /// into an editable file. The folder button is always available.
     fn render_custom_themes(&self, cx: &mut Context<Self>) -> AnyElement {
         let editor = self.active_settings().and_then(|s| s.theme_editor.as_ref());
 
@@ -1807,7 +1348,6 @@ impl Tty7App {
             .on_click(cx.listener(|this, _, _w, cx| this.open_themes_folder(cx)));
 
         if let Some(editor) = editor {
-            // Snapshot the picker handles so the render borrow of `self` ends.
             let seed: Vec<_> = editor
                 .seed
                 .iter()
@@ -1820,8 +1360,6 @@ impl Tty7App {
                 .collect();
             let image_opacity_slider = editor.image_opacity_slider.clone();
 
-            // The theme's current image, for the filename label and the
-            // opacity readout (the slider owns its own thumb position).
             let theme = presets::by_id(cx, &crate::ui::theme::effective_preset_id(cx));
             let image = theme.image.clone();
             let image_name = image.as_ref().map(|i| {
@@ -1915,8 +1453,6 @@ impl Tty7App {
                 .into_any_element();
         }
 
-        // Read-only theme (built-in or import): offer to duplicate it into an
-        // editable copy, plus the folder affordance.
         v_flex()
             .mt_5()
             .child(self.section_intro(
@@ -1929,9 +1465,6 @@ impl Tty7App {
                 h_flex()
                     .gap_3()
                     .child(
-                        // Plain (not `.primary()`): a solid near-black fill reads
-                        // far too heavy against this soft, mostly-outline sheet —
-                        // it matches the "Open themes folder" button beside it.
                         Button::new("duplicate-theme")
                             .label("Duplicate to edit")
                             .small()
@@ -1944,9 +1477,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// One color-editor row: a label paired with its picker. The picker's own
-    /// `Change` event (wired in `rebuild_theme_editor`) writes the edit to the
-    /// theme file, so the row itself is purely presentational.
     fn render_theme_color_row(
         &self,
         label: String,
@@ -1957,23 +1487,12 @@ impl Tty7App {
         self.settings_row(label, "", control, cx)
     }
 
-    /// SSH section: saved connection profiles plus the global security toggles
-    /// (host-key verification default and warn-on-close; a per-profile override
-    /// still wins where set).
-    ///
-    /// A two-column master-detail (like the theme picker): the **left** column is
-    /// a fixed-width, self-scrolling master — Import / Add on top, then the profile
-    /// list; the **right** column is the flex-1, self-scrolling detail pane showing
-    /// the selected profile's edit form (or a "pick a profile" hint) with the
-    /// global security defaults always below. Selection is tracked in
-    /// [`SettingsState::ssh_detail`].
     fn render_settings_ssh(&self, cx: &mut Context<Self>) -> AnyElement {
         let border = cx.theme().border;
         h_flex()
             .size_full()
             .items_start()
             .child(
-                // LEFT (master): fixed width, its own scroll, a right divider.
                 v_flex()
                     .id("ssh-master")
                     .flex_shrink_0()
@@ -1985,15 +1504,12 @@ impl Tty7App {
                     .child(self.render_ssh_master(cx)),
             )
             .child(
-                // RIGHT (detail): flex-1, its own scroll.
                 v_flex()
                     .id("ssh-detail")
                     .flex_1()
                     .h_full()
                     .overflow_y_scroll()
                     .child(
-                        // Clear the title-bar drag strip / close ✕ up top, and cap
-                        // the detail width so the form stays readable on wide panes.
                         div()
                             .pt(px(crate::ui::app::TITLE_BAR_HEIGHT))
                             .px_8()
@@ -2009,17 +1525,8 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// The left (master) column: a Hosts header carrying the add / overflow
-    /// affordances, a live filter, then the list — `Defaults` pinned on top and
-    /// every saved host bucketed by group into a collapsible section.
-    ///
-    /// The filter leads, and Add / Import shrank to icon affordances, because
-    /// that is the order the column is actually used in: past a dozen hosts,
-    /// finding one *is* the job. Two full-width buttons on top read as a page
-    /// header while pushing the content that matters below the fold.
     fn render_ssh_master(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        // Rows in this list paint on the settings sheet, i.e. the window surface.
         let sf = cx.global::<presets::Surfaces>().window;
         let profiles = cx.global::<Config>().ssh_profiles.clone();
         let (filter, collapsed, detail) = match self.active_settings() {
@@ -2031,78 +1538,53 @@ impl Tty7App {
             None => return div().into_any_element(),
         };
         let query = filter.read(cx).value().trim().to_lowercase();
-        // Which profiles have a connected pane right now: each row's dot, and the
-        // count a collapsed group header keeps showing.
         let live = self.live_ssh_profiles(cx);
         let menu_app = cx.entity().downgrade();
 
-        let header = v_flex()
-            .gap_2()
-            .child(
-                // The same weight every other section leads with. Tried as the nav
-                // rail's small-caps label instead, and it read as a sub-header of
-                // the nav rather than the title of a column: every other page in
-                // Settings opens with a title at this size, and this column is
-                // where this page starts. So it gets the line to itself.
-                self.header_text("Hosts", cx),
-            )
-            .child(
-                // One toolbar row: the filter, then the two affordances that act on
-                // the list. The borderless magnifier-then-input is the nav header's
-                // settings search, laid out the same way — a boxed field would be
-                // the only outlined control on a sheet that has none, and would read
-                // as a different kind of search from the one two columns to its left.
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        // Stock magnifier, not tty7's: at this size the redraw
-                        // reads thin and its handle stubby. See `assets::STOCK_PREFIX`.
-                        Icon::empty()
-                            .path("stock/icons/search.svg")
-                            .size(px(16.))
-                            .text_color(muted),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(&filter).appearance(false).pl_0()),
-                    )
-                    .child(
-                        h_flex()
-                            .flex_shrink_0()
-                            .gap_0p5()
-                            .child(
-                                Button::new("ssh-profiles-add")
-                                    .icon(Icon::new(IconName::Plus))
-                                    .ghost()
-                                    .small()
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.add_new_profile(window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("ssh-profiles-more")
-                                    // Stock `⋯`, not tty7's: the redraw's filled
-                                    // `r=2` dots smear at this size. See the row
-                                    // menu below and `assets::STOCK_PREFIX`.
-                                    .icon(Icon::empty().path("stock/icons/ellipsis.svg"))
-                                    .ghost()
-                                    .small()
-                                    .dropdown_menu_with_anchor(
-                                        gpui::Anchor::TopRight,
-                                        move |menu, _window, _cx| {
-                                            Self::ssh_master_menu(menu, &menu_app)
-                                        },
-                                    ),
-                            ),
-                    ),
-            );
+        let header = v_flex().gap_2().child(self.header_text("Hosts", cx)).child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Icon::empty()
+                        .path("stock/icons/search.svg")
+                        .size(px(16.))
+                        .text_color(muted),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&filter).appearance(false).pl_0()),
+                )
+                .child(
+                    h_flex()
+                        .flex_shrink_0()
+                        .gap_0p5()
+                        .child(
+                            Button::new("ssh-profiles-add")
+                                .icon(Icon::new(IconName::Plus))
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_new_profile(window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("ssh-profiles-more")
+                                .icon(Icon::empty().path("stock/icons/ellipsis.svg"))
+                                .ghost()
+                                .small()
+                                .dropdown_menu_with_anchor(
+                                    gpui::Anchor::TopRight,
+                                    move |menu, _window, _cx| {
+                                        Self::ssh_master_menu(menu, &menu_app)
+                                    },
+                                ),
+                        ),
+                ),
+        );
 
-        // Bucket by group, keeping each group's config order. Filtering happens
-        // before bucketing, so a group the query empties drops out whole instead
-        // of leaving a header standing over nothing.
         let mut groups: Vec<(String, Vec<SshProfile>)> = Vec::new();
         for p in profiles.iter().filter(|p| ssh_row_matches(p, &query)) {
             let key = ssh_group_key(p).to_string();
@@ -2117,9 +1599,6 @@ impl Tty7App {
                 .then_with(|| a.0.cmp(&b.0))
         });
 
-        // Defaults sits above the groups and outside the filter: it owns the
-        // security toggles, and hiding those behind a query nobody thinks to type
-        // is how a setting becomes undiscoverable.
         let mut list = v_flex().gap_0p5().w_full().child(self.render_ssh_row(
             "ssh-defaults-row",
             "Defaults",
@@ -2151,8 +1630,6 @@ impl Tty7App {
         }
 
         for (key, bucket) in groups {
-            // A live query force-expands every group: a match hiding inside a
-            // collapsed section is the same as no match at all.
             let is_collapsed = query.is_empty() && collapsed.contains(&key);
             let live_here = bucket.iter().filter(|p| live.contains(&p.id)).count();
             list = list.child(self.render_ssh_group_header(
@@ -2179,16 +1656,12 @@ impl Tty7App {
         v_flex()
             .p_2()
             .gap_2()
-            // Clear the title-bar drag strip up top so the buttons stay clickable.
             .pt(px(crate::ui::app::TITLE_BAR_HEIGHT))
             .child(header)
             .child(list)
             .into_any_element()
     }
 
-    /// The master column's overflow menu: the `~/.ssh/config` link lives here
-    /// rather than on a permanent full-width button, because it is a once-in-a-
-    /// while action and the list beneath it is not.
     fn ssh_master_menu(menu: PopupMenu, app: &gpui::WeakEntity<Self>) -> PopupMenu {
         menu.min_w(px(200.))
             .item(PopupMenuItem::new("Import from ~/.ssh/config").on_click({
@@ -2210,9 +1683,6 @@ impl Tty7App {
             }))
     }
 
-    /// One collapsible group header in the master list. Collapsed, it keeps
-    /// showing how many of its hosts are connected — folding a section away
-    /// should hide the rows, not the fact that something in there is live.
     fn render_ssh_group_header(
         &self,
         key: &str,
@@ -2265,7 +1735,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// One host row: status dot, name over `user@host:port`, and a hover `⋯`.
     fn render_ssh_host_row(
         &self,
         p: &SshProfile,
@@ -2305,9 +1774,6 @@ impl Tty7App {
         )
     }
 
-    /// The shared shape of a master-list row (Defaults and every host). `dot`
-    /// is `None` for rows that can't be connected; `menu_for` adds the hover `⋯`
-    /// and right-click menu for a saved profile.
     #[allow(clippy::too_many_arguments)]
     fn render_ssh_row(
         &self,
@@ -2337,8 +1803,6 @@ impl Tty7App {
             .py_2()
             .px_2()
             .rounded_md()
-            // The window ladder, both channels — see issue #197: multiplying a
-            // soft grey by alpha is how a fill silently disappears.
             .when(selected, |r| r.bg(gpui::rgb(sf.selected)))
             .when(!selected, |r| r.hover(|s| s.bg(gpui::rgb(sf.hover))))
             .on_mouse_down(MouseButton::Left, move |ev, window, cx| {
@@ -2352,9 +1816,6 @@ impl Tty7App {
                         .size(px(6.))
                         .rounded_full()
                         .when(live, |d| d.bg(success))
-                        // A hollow ring when idle, so the dot column reads as a
-                        // status slot rather than appearing only for live hosts
-                        // and shunting every other row's text left.
                         .when(!live, |d| d.border_1().border_color(border)),
                 )
             })
@@ -2367,9 +1828,6 @@ impl Tty7App {
                         div()
                             .text_sm()
                             .truncate()
-                            // The label channel: a selected row steps up in colour
-                            // and weight, so which row is loaded reads from the
-                            // type and not from the fill alone.
                             .when(selected, |d| {
                                 d.text_color(gpui::rgb(sf.text_selected))
                                     .font_weight(FontWeight::MEDIUM)
@@ -2386,19 +1844,13 @@ impl Tty7App {
                     ),
             );
 
-        // `.context_menu()` wraps the row in a different element type, so the two
-        // cases can't be a `when_some` — they're branched into `AnyElement` here.
         let Some(id) = menu_for else {
             return row.into_any_element();
         };
-        // Weak handles so the hover `⋯` dropdown and the right-click menu drive
-        // the same handlers.
         let menu_app = cx.entity().downgrade();
         let ctx_app = cx.entity().downgrade();
         let row_idx = id.as_u128() as usize;
         row.child(
-            // The wrapper swallows the mouse-down so opening the menu never also
-            // fires the row's select click.
             div()
                 .flex_shrink_0()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -2424,8 +1876,6 @@ impl Tty7App {
         .into_any_element()
     }
 
-    /// Saved profiles with a connected pane open right now, by id. Read off the
-    /// live panes rather than tracked separately, so it can't go stale.
     fn live_ssh_profiles(&self, cx: &App) -> std::collections::HashSet<Uuid> {
         use crate::daemon::protocol::SshPhase;
         let mut live = std::collections::HashSet::new();
@@ -2447,7 +1897,6 @@ impl Tty7App {
         live
     }
 
-    /// Point the detail pane at the global defaults, dropping any open edit form.
     pub(crate) fn select_ssh_defaults(&mut self, cx: &mut Context<Self>) {
         if let Some(s) = self.active_settings_mut() {
             s.ssh_form = None;
@@ -2456,12 +1905,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Collapse / expand one group of the master list.
-    ///
-    /// Collapsing the group that holds the current selection hands the detail
-    /// pane back to Defaults: otherwise the form stays open on a host whose row
-    /// is no longer anywhere on screen, and nothing on the page says which host
-    /// is being edited.
     fn toggle_ssh_group(&mut self, key: String, cx: &mut Context<Self>) {
         let selected_here = match self.active_settings().map(|s| s.ssh_detail) {
             Some(SshDetail::Profile(id)) => cx
@@ -2486,10 +1929,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// The right (detail) pane: a selected profile's edit form, or — with nothing
-    /// selected — a "pick a profile" hint. The global security defaults render
-    /// below either state: tucked into the empty state alone they vanished the
-    /// moment a profile was selected, so they were easy to never discover.
     fn render_ssh_detail(&self, cx: &mut Context<Self>) -> AnyElement {
         let detail = self
             .active_settings()
@@ -2502,16 +1941,10 @@ impl Tty7App {
             {
                 self.render_ssh_profile_form(cx)
             }
-            // No selection (or a stale profile whose form is gone).
             _ => self.render_ssh_empty_state(cx),
         }
     }
 
-    /// The detail pane with nothing selected: a quick-connect box, and — when
-    /// `~/.ssh/config` holds aliases tty7 hasn't linked — an offer to link them.
-    ///
-    /// This replaces a one-line "select a profile to edit" hint that left the
-    /// widest column on the page doing nothing.
     fn render_ssh_empty_state(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let Some(input) = self.active_settings().map(|s| s.ssh_quick_connect.clone()) else {
@@ -2521,9 +1954,6 @@ impl Tty7App {
         let parsed = crate::core::ssh_profile::parse_quick_connect(&target);
         let saved = cx.global::<Config>().ssh_profiles.len();
 
-        // How many `~/.ssh/config` aliases aren't in the list yet. Read on render:
-        // the file is small, this section is not on a hot path, and a stale count
-        // would advertise work that is already done.
         let unlinked = {
             let known: std::collections::HashSet<String> = cx
                 .global::<Config>()
@@ -2563,9 +1993,6 @@ impl Tty7App {
                             .label("Connect")
                             .primary()
                             .small()
-                            // Off until the box holds something that parses: a
-                            // Connect that can only fail is worse than one that
-                            // says it isn't ready.
                             .disabled(parsed.is_none())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.ssh_quick_connect_from_settings(window, cx)
@@ -2611,13 +2038,9 @@ impl Tty7App {
             );
         }
 
-        // No extra top padding: the detail pane already clears the title bar, and
-        // the heading here has to land on the same baseline as `Hosts` beside it.
         body.into_any_element()
     }
 
-    /// Connect the empty state's quick-connect target, closing Settings first so
-    /// the new session is what's on screen.
     fn ssh_quick_connect_from_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self
             .active_settings()
@@ -2632,9 +2055,6 @@ impl Tty7App {
         self.quick_connect(qc, window, cx);
     }
 
-    /// The `Defaults` row's detail: what every host inherits, plus the state of
-    /// the `~/.ssh/config` link. Its own page rather than a block pinned under
-    /// the profile form, where it read as part of whichever host was open.
     fn render_ssh_defaults_detail(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let imported = cx
@@ -2687,11 +2107,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// Build the per-profile overflow menu shared by the hover ⋯ dropdown and the
-    /// row's right-click context menu: Connect, Copy address, Duplicate, then the
-    /// destructive Delete — rendered last, set apart by a separator and drawn in
-    /// danger red. Each item drives the same `Tty7App` handler the old inline
-    /// buttons did, via the weak `app` handle.
     fn ssh_profile_row_menu(
         menu: PopupMenu,
         id: Uuid,
@@ -2735,7 +2150,6 @@ impl Tty7App {
             }))
             .separator();
 
-        // Destructive, last, in danger red and set apart by the separator above.
         menu.item(
             PopupMenuItem::element(move |_window, _cx| div().text_color(danger).child("Delete"))
                 .on_click({
@@ -2747,9 +2161,6 @@ impl Tty7App {
         )
     }
 
-    /// Security block: the global host-key verification default and warn-on-close
-    /// toggle (both overridable per profile). Always visible in the detail pane,
-    /// under the form or the empty-state hint.
     fn render_ssh_security_block(&self, cx: &mut Context<Self>) -> AnyElement {
         let verify = cx.global::<Config>().verify_host_keys;
         let verify_switch = crate::ui::theme::switch("ssh-verify-host-keys", cx)
@@ -2787,16 +2198,10 @@ impl Tty7App {
             .into_any_element()
     }
 
-    // ── SSH profile edit form (folded into Settings → SSH) ───────────────────
-
-    /// The open SSH edit form, mutably (for section toggles / auth / switches).
     fn ssh_form_mut(&mut self) -> Option<&mut SshProfileForm> {
         self.active_settings_mut().and_then(|s| s.ssh_form.as_mut())
     }
 
-    /// Build the edit-form inputs seeded from `profile` and open the form. A fresh
-    /// input set each call (the old set drops with the previous form), so the SSH
-    /// section never carries every profile's inputs at once.
     pub(crate) fn ssh_form_load(
         &mut self,
         profile: &SshProfile,
@@ -2872,10 +2277,6 @@ impl Tty7App {
         );
         let login_scripts = seed_input(window, cx, &profile.login_scripts.join("\n"), true);
 
-        // Every input in the form is subscribed, not just the few whose values
-        // are echoed elsewhere: the header's Save button is enabled by comparing
-        // the whole form against the saved profile, so any field going stale
-        // would leave Save claiming there is nothing to write.
         let mut subs = Vec::new();
         let mut watch = vec![
             &name,
@@ -2948,15 +2349,11 @@ impl Tty7App {
         let editing = form.editing;
         if let Some(s) = self.active_settings_mut() {
             s.ssh_form = Some(form);
-            // Loading a form selects that profile in the master-detail layout, so
-            // its row highlights and the detail pane shows the form.
             s.ssh_detail = SshDetail::Profile(editing);
         }
         cx.notify();
     }
 
-    /// Read the edit form back into an [`SshProfile`], preserving the id and the
-    /// carried-over group / credential_ref.
     fn ssh_form_collect(&self, cx: &App) -> Option<SshProfile> {
         let form = self.active_settings()?.ssh_form.as_ref()?;
         let id = form.editing;
@@ -3008,7 +2405,6 @@ impl Tty7App {
         })
     }
 
-    /// Save the edit form into `Config::ssh_profiles` (upsert by id).
     pub(crate) fn save_editing_profile(&mut self, cx: &mut Context<Self>) -> Option<Uuid> {
         let profile = self.ssh_form_collect(cx)?;
         let id = profile.id;
@@ -3022,17 +2418,11 @@ impl Tty7App {
         Some(id)
     }
 
-    /// Save the form, leaving it open on the same host.
-    ///
-    /// It used to close back to an empty pane. With the host list permanently
-    /// beside the form that reads as the selection being thrown away; staying
-    /// put also lets the now-disabled Save double as the "saved" acknowledgement.
     pub(crate) fn save_ssh_form(&mut self, cx: &mut Context<Self>) {
         self.save_editing_profile(cx);
         cx.notify();
     }
 
-    /// Save the current form, then close Settings and connect the saved profile.
     pub(crate) fn save_and_connect_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.save_editing_profile(cx) {
             self.close_settings(window, cx);
@@ -3040,13 +2430,11 @@ impl Tty7App {
         }
     }
 
-    /// Add a fresh blank profile and open it in the edit form.
     pub(crate) fn add_new_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let profile = SshProfile::new(String::new());
         self.ssh_form_load(&profile, window, cx);
     }
 
-    /// Duplicate a saved profile (new id, "… (copy)" name) and edit the copy.
     pub(crate) fn duplicate_profile(
         &mut self,
         id: Uuid,
@@ -3068,7 +2456,6 @@ impl Tty7App {
         self.ssh_form_load(&profile, window, cx);
     }
 
-    /// Delete a saved profile and its frecency entry.
     pub(crate) fn delete_profile(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| {
             cfg.ssh_profiles.retain(|p| p.id != id);
@@ -3077,15 +2464,12 @@ impl Tty7App {
         let editing_deleted =
             self.active_settings().map(|s| s.ssh_detail) == Some(SshDetail::Profile(id));
         if let Some(s) = self.active_settings_mut().filter(|_| editing_deleted) {
-            // The deleted profile was selected: drop its form and clear the
-            // selection back to the empty state.
             s.ssh_form = None;
             s.ssh_detail = SshDetail::None;
         }
         cx.notify();
     }
 
-    /// Import `~/.ssh/config` aliases as profiles (idempotent upsert by name).
     pub(crate) fn import_ssh_config_profiles(&mut self, cx: &mut Context<Self>) {
         let imported = crate::core::ssh_config::import_profiles();
         if imported.is_empty() {
@@ -3097,7 +2481,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Copy a saved profile's `user@host:port` to the clipboard (FR-P5).
     pub(crate) fn copy_profile_connect_string(&mut self, id: Uuid, cx: &mut Context<Self>) {
         if let Some(profile) = cx
             .global::<Config>()
@@ -3110,11 +2493,6 @@ impl Tty7App {
         }
     }
 
-    /// Remove any keychain-stored password for this profile's endpoint
-    /// (`user@host:port`). The profile itself is untouched — the next connect will
-    /// prompt again. A no-op if nothing was stored. Returns a status line for the
-    /// caller to surface as a notification. Credentials are keyed by endpoint, not
-    /// profile, so this only matches when the profile pins an explicit user.
     pub(crate) fn forget_profile_password(
         &mut self,
         id: Uuid,
@@ -3136,8 +2514,6 @@ impl Tty7App {
         )
     }
 
-    /// The inline edit form: four core fields + collapsible jump / forwards /
-    /// advanced, rendered below the profile list for the selected profile.
     fn render_ssh_profile_form(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(form) = self.active_settings().and_then(|s| s.ssh_form.as_ref()) else {
             return div().into_any_element();
@@ -3146,9 +2522,6 @@ impl Tty7App {
         let muted = cx.theme().muted_foreground;
         let success = cx.theme().success;
 
-        // The header identifies the host and offers the one action this page
-        // exists for. It used to say "Edit profile" beside a ‹ Back — a title
-        // that named the *screen*, on a screen whose subject is a machine.
         let saved = cx
             .global::<Config>()
             .ssh_profiles
@@ -3156,8 +2529,6 @@ impl Tty7App {
             .find(|p| p.id == editing)
             .cloned();
         let collected = self.ssh_form_collect(cx);
-        // A never-saved profile is always dirty; otherwise compare field by field
-        // so Save reads as "there is something to save".
         let dirty = collected != saved;
         let address = collected
             .as_ref()
@@ -3219,15 +2590,10 @@ impl Tty7App {
                         Button::new("ssh-form-save")
                             .label("Save")
                             .small()
-                            // Off with nothing to write: the button is the page's
-                            // unsaved-changes indicator, so it has to be honest.
                             .disabled(!dirty)
                             .on_click(cx.listener(|this, _, _w, cx| this.save_ssh_form(cx))),
                     )
                     .child(
-                        // The one action this page exists for, so it carries the
-                        // solid fill — unlike the master column's Add, which sits
-                        // over a list and would shout.
                         Button::new("ssh-form-connect")
                             .label("Connect")
                             .primary()
@@ -3244,9 +2610,6 @@ impl Tty7App {
                 self.settings_row(
                     "Name",
                     "A label for this connection.",
-                    // Explicit widths on every text control: `settings_row` right-aligns
-                    // the control in a shrink-to-fit slot, so a bare Input has no
-                    // definite width to fill. 260px matches the Shell section's inputs.
                     div()
                         .w(px(260.))
                         .child(Input::new(&form.name).small())
@@ -3258,7 +2621,6 @@ impl Tty7App {
                 self.settings_row(
                     "Host",
                     "Hostname or IP address.",
-                    // Host + port split the shared 260px control width.
                     h_flex()
                         .gap_2()
                         .child(div().w(px(172.)).child(Input::new(&form.host).small()))
@@ -3313,7 +2675,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// A collapsible section header (▸/▾ label + summary), toggling `open`.
     fn disclosure_header(
         &self,
         id: &'static str,
@@ -3437,8 +2798,6 @@ impl Tty7App {
                 ),
             )
             .child(
-                // The direction letters carry the whole meaning of a rule, and
-                // `L`/`R` are the one pair people reliably mix up.
                 h_flex()
                     .gap_3()
                     .pt_1()
@@ -3451,7 +2810,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// One forward rule: direction, listener, target, description, remove.
     fn render_forward_rule_row(
         &self,
         idx: usize,
@@ -3460,23 +2818,14 @@ impl Tty7App {
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let danger = cx.theme().danger;
-        // Dynamic listens locally and proxies wherever the client asks, so it has
-        // no fixed target. The boxes stay in place (dimmed) rather than
-        // disappearing, so switching direction doesn't reflow the row.
         let needs_target = row.kind != ForwardKind::Dynamic;
         let kind_idx = match row.kind {
             ForwardKind::Local => 0,
             ForwardKind::Remote => 1,
             ForwardKind::Dynamic => 2,
         };
-        // Filled in but not connectable — flagged here rather than dropped
-        // silently on save, which is what the old text box did.
         let incomplete = row.collect(cx).is_none() && !row.is_blank(cx);
 
-        // `xsmall` rather than the sheet's usual `small`: five controls share this
-        // row, and 24px is the height the segmented track beside them is fixed at.
-        // The row reads as one compact table cell — that internal alignment beats
-        // matching the full-width single inputs in the rows above.
         let endpoint = |host: &Entity<InputState>, port: &Entity<InputState>| {
             h_flex()
                 .gap_1()
@@ -3545,7 +2894,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// Append a blank forward rule to the open form and subscribe its inputs.
     fn add_forward_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let row = seed_forward_row(window, cx, &ForwardRule::default());
         let subs: Vec<_> = forward_row_inputs(&row)
@@ -3566,7 +2914,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Drop one forward rule from the open form.
     fn remove_forward_rule(&mut self, idx: usize, cx: &mut Context<Self>) {
         if let Some(f) = self.ssh_form_mut()
             && idx < f.forwards.len()
@@ -3606,8 +2953,6 @@ impl Tty7App {
             this.settings_row(
                 label.to_string(),
                 desc.to_string(),
-                // Same explicit control width as the core fields above — a bare
-                // Input has nothing to fill in the row's right-aligned slot.
                 div()
                     .w(px(260.))
                     .child(Input::new(input).small())
@@ -3616,7 +2961,6 @@ impl Tty7App {
             )
         };
 
-        // Verify host keys / warn-on-close tri-states (Default / On / Off).
         let on_off = |b: bool| if b { "on" } else { "off" };
         let vhk_default = on_off(cx.global::<Config>().verify_host_keys);
         let woc_default = on_off(cx.global::<Config>().ssh_warn_on_close);
@@ -3789,9 +3133,6 @@ impl Tty7App {
             )
             .child(self.settings_row(
                 "Verify host keys",
-                // Name the value `Default` actually resolves to. "Overrides the
-                // global setting" tells you a mechanism exists but not what it
-                // currently does, which is the only part worth reading here.
                 format!("Default follows Defaults, which is {vhk_default}."),
                 self.segmented(
                     "ssh-form-vhk",
@@ -3835,17 +3176,6 @@ impl Tty7App {
         section.into_any_element()
     }
 
-    /// The Shell group at the top of the Terminal section: the program tty7
-    /// launches in each new pane, its launch arguments, and where a fresh shell
-    /// starts. All apply to *newly spawned* panes/tabs — existing shells keep
-    /// running until closed. An empty program falls back to the platform default
-    /// (the login shell on Unix; PowerShell 7 when installed, else Windows
-    /// PowerShell, on Windows).
-    ///
-    /// This used to be a section of its own, which left a three-row page and no
-    /// way for a user to guess whether a given knob was filed under "Terminal"
-    /// or under "Shell". The program a pane runs is a property of the terminal,
-    /// so it opens the Terminal page instead.
     fn render_shell_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted_fg = cx.theme().muted_foreground;
         let (program_input, args_input, wd_path_input) = match self.active_settings() {
@@ -3858,8 +3188,6 @@ impl Tty7App {
         };
         let wd_strategy = cx.global::<Config>().working_directory.strategy;
 
-        // Name what an empty Program field falls back to, so the default
-        // behaviour is legible without the user having to know it.
         let platform_default = if cfg!(windows) {
             "PowerShell"
         } else {
@@ -3895,7 +3223,6 @@ impl Tty7App {
                 this.set_working_directory_strategy(s, cx);
             },
         );
-        // The custom path input only matters for `Custom`; show it there.
         let wd_path_control = if wd_strategy == WdStrategy::Custom {
             div()
                 .w(px(260.))
@@ -3949,16 +3276,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// Terminal section: what a pane runs and how the terminal surface itself
-    /// behaves — the shell, scrolling, the mouse, the bell, links. Plain
-    /// switches and segmented controls driven straight off the `Config` global
-    /// (each control's handler mutates + saves it). Small groups on purpose:
-    /// each header names exactly what it contains, so it doubles as the landmark
-    /// you scan for.
-    ///
-    /// Typing, selection and the clipboard used to live down here too, under
-    /// four more headers; they moved to their own Input section, which is both
-    /// findable by name and short enough to read in one screen.
     fn render_settings_terminal(&self, cx: &mut Context<Self>) -> AnyElement {
         let foreground = cx.theme().foreground;
         let cfg = cx.global::<Config>();
@@ -3969,8 +3286,6 @@ impl Tty7App {
         let scroll_mult = cfg.mouse_scroll_multiplier;
         let mouse_reporting = cfg.mouse_reporting;
         let bell = cfg.bell;
-        // Map the persisted scrollback depth onto its preset radio index (default
-        // to 10k's slot for any off-preset value a hand-edit might leave).
         let scrollback_idx = match cfg.scrollback_limit {
             n if n <= 1_000 => 0,
             n if n <= 10_000 => 1,
@@ -4045,7 +3360,6 @@ impl Tty7App {
                 this.set_bell_mode(mode, cx);
             },
         );
-        // Slider + a live readout of the current multiplier beside it.
         let scroll_control = h_flex()
             .items_center()
             .gap_3()
@@ -4132,15 +3446,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// Input section: everything about putting text *in* and taking text *out* —
-    /// the completion and history menus at the prompt, the Option/Meta split,
-    /// and how selection reaches the clipboard.
-    ///
-    /// A section of its own because these are the settings that distinguish tty7
-    /// from a plain terminal, and they were previously the last four groups of a
-    /// seven-group Terminal page — findable only by scrolling past everything
-    /// else, and not findable by search at all (completion and history search
-    /// had no index entries).
     fn render_settings_input(&self, cx: &mut Context<Self>) -> AnyElement {
         let cfg = cx.global::<Config>();
         let option_as_alt = cfg.macos_option_as_alt;
@@ -4170,8 +3475,6 @@ impl Tty7App {
             .checked(clip_trim)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_clipboard_trim(*on, cx)))
             .into_any_element();
-        // macOS only: the Option/special-character split this toggle resolves
-        // doesn't exist on other platforms, where Alt always carries Meta.
         let option_alt_row = cfg!(target_os = "macos").then(|| {
             let switch = crate::ui::theme::switch("term-option-as-alt", cx)
                 .checked(option_as_alt)
@@ -4237,14 +3540,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// Agents section: a machine picker, then one row per hook-capable agent on
-    /// that machine — install state + actions per row, copy kept terse.
-    ///
-    /// The picker is first because everything under it is *about* the chosen
-    /// machine: the paths, the states, and what Install writes. An agent running
-    /// in a remote workspace's pane runs on the remote box and reads that box's
-    /// `~/.claude/settings.json`, so installing here and expecting status there
-    /// was the whole gap this page closes.
     fn render_settings_agents(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::core::agent_hooks::HooksState;
 
@@ -4270,9 +3565,6 @@ impl Tty7App {
         page = page.children(self.agent_hooks_machine_picker(selected_host, cx));
 
         match view {
-            // A spinner would be four agents' worth of motion for a read that is
-            // usually instant; the page just says what it is doing and keeps its
-            // shape, so nothing jumps when the rows arrive.
             AgentHooksView::Loading => {
                 return page
                     .child(
@@ -4284,8 +3576,6 @@ impl Tty7App {
                     )
                     .into_any_element();
             }
-            // A resting state that says which hop gave up and what to do
-            // next, rather than rows that would silently write nowhere.
             AgentHooksView::Unavailable(reason) => {
                 return page
                     .child(div().py_4().text_sm().text_color(warning).child(reason))
@@ -4294,15 +3584,11 @@ impl Tty7App {
             AgentHooksView::Ready(rows) => {
                 for (i, row) in rows.into_iter().enumerate() {
                     let agent = row.agent;
-                    // Status: a colored dot + one word; the dot is the only color
-                    // on the page, so state reads at a glance.
                     let (dot_color, status_text) = match row.state {
                         HooksState::NotInstalled => (muted_fg, "Not installed"),
                         HooksState::Installed => (success, "Installed"),
                         HooksState::Outdated => (warning, "Outdated"),
                     };
-                    // The primary action reads as what it will *do* from this
-                    // state.
                     let primary_label = match row.state {
                         HooksState::NotInstalled => "Install",
                         HooksState::Installed => "Reinstall",
@@ -4313,8 +3599,6 @@ impl Tty7App {
                         .filter(|(for_agent, _)| *for_agent == agent)
                         .map(|(_, text)| text.clone());
 
-                    // items_end: the whole stack shares the row's right edge, so
-                    // status, buttons, and note line up across every agent row.
                     let control = v_flex()
                         .gap_2()
                         .items_end()
@@ -4347,9 +3631,6 @@ impl Tty7App {
                                     )
                                 }),
                         )
-                        // Width-capped so a long note (error text) wraps instead
-                        // of inflating the shrink-proof control column and
-                        // crushing the label to zero width.
                         .when_some(row_note, |col, text| {
                             col.child(
                                 div()
@@ -4374,17 +3655,6 @@ impl Tty7App {
         page.into_any_element()
     }
 
-    /// The Agents section's machine picker: this computer plus every connected
-    /// remote, one chosen at a time.
-    ///
-    /// `None` when this computer is the only machine there is — a picker with a
-    /// single choice is a control that asks a question with one answer, and the
-    /// page below it already says where the files go.
-    ///
-    /// Hand-rolled rather than [`Self::segmented`] because the options are
-    /// machines, not a fixed `&'static [&'static str]` — but it reads off the
-    /// same interaction ladder, so it is the same control the rest of the sheet
-    /// speaks.
     fn agent_hooks_machine_picker(&self, selected: HostId, cx: &mut Context<Self>) -> Option<Div> {
         let sf = cx.global::<presets::Surfaces>().window;
         let border = cx.theme().border;
@@ -4417,10 +3687,6 @@ impl Tty7App {
                                 .bg(rgb(sf.base))
                                 .text_sm()
                                 .cursor_pointer()
-                                // Both channels, every time: the fill locates the
-                                // selection, the label colour and weight say it is
-                                // the one — and keep saying it on a translucent
-                                // window, where the fill washes over the desktop.
                                 .when(active, |s| {
                                     s.bg(rgb(sf.selected))
                                         .text_color(rgb(sf.text_selected))
@@ -4437,10 +3703,6 @@ impl Tty7App {
                                 }))
                         })),
                 )
-                // A saved machine that isn't connected is absent from the row above,
-                // and an absence explains nothing. Say the count and the next move
-                // rather than listing fifty `~/.ssh/config` aliases, most of which
-                // are git transports that could never host a workspace anyway.
                 .when(offline > 0, |col| {
                     col.child(div().text_xs().text_color(muted_fg).child(format!(
                         "{offline} more saved machine{} not connected — open a workspace on one to \
@@ -4451,7 +3713,6 @@ impl Tty7App {
         )
     }
 
-    /// Window & Tabs section: the app window's lifecycle and tab placement.
     fn render_settings_window_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
         let cfg = cx.global::<Config>();
         let startup_idx = match cfg.startup_mode {
@@ -4476,16 +3737,11 @@ impl Tty7App {
             crate::core::config::SidebarGrouping::Repo => 0,
             crate::core::config::SidebarGrouping::None => 1,
         };
-        // Notifications are app-level, not terminal-level: the tray menu already
-        // exposed the same `NotifyMode` at the top of its own menu while the
-        // setting itself sat at the bottom of the Terminal page.
         let notify_idx = match cfg.notify_on_command_finish {
             NotifyMode::Never => 0,
             NotifyMode::Unfocused => 1,
             NotifyMode::Always => 2,
         };
-        // Map the persisted threshold onto its preset radio index (nearest slot
-        // for any off-preset value a hand-edit might leave).
         let threshold_idx = match cfg.notify_threshold_secs {
             n if n <= 5 => 0,
             n if n <= 10 => 1,
@@ -4494,8 +3750,6 @@ impl Tty7App {
         };
         let notify_radio = self.segmented(
             "wt-notify",
-            // Same order and casing as the tray's Notifications submenu, which
-            // writes this very setting — the two used to disagree on both.
             &["Never", "When Unfocused", "Always"],
             notify_idx,
             cx,
@@ -4615,19 +3869,12 @@ impl Tty7App {
                 remember_window_switch,
                 cx,
             ))
-            // "Session" already means "a shell running in the background" all
-            // over this app; using it here for "the saved arrangement of tabs"
-            // made the one word mean two things on the same page. The thing
-            // being restored is the layout.
             .child(self.settings_row(
                 "Restore last layout",
                 "Reopen the last window's tabs, splits, and directories on launch. Off starts with a single fresh terminal.",
                 restore_switch,
                 cx,
             ))
-            // Phrased around what stays true either way: the prompt is there to
-            // teach that closing isn't ending, so the row that turns it off is
-            // the last chance to say so.
             .child(self.settings_row(
                 "Confirm before closing the last window",
                 "Ask first, since that close also quits tty7. Off closes straight away — \
@@ -4663,9 +3910,6 @@ impl Tty7App {
                 sidebar_grouping_radio,
                 cx,
             ))
-            // Phrased around what *stays*: the worry this row answers is "will
-            // turning it off cost me the branch and the numbers", and the
-            // answer is no — only the click goes.
             .child(self.settings_row(
                 "Open diff preview from sidebar counts",
                 "Click a row's +N −N to open the working-tree diff in an overlay. Off keeps the \
@@ -4690,22 +3934,11 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// Theme gallery: one clickable card per theme (built-ins + user files), each
-    /// a mini-terminal preview painted in its own colors. The selected card gets a
-    /// soft ring + a check; clicking switches the active theme live via
-    /// `set_preset`.
-    /// The mini terminal preview for a theme: thin "lines of code" bars in the
-    /// theme's own colors over its background. Fills its container's width, so a
-    /// narrow "Current theme" card and the wider picker panel reuse one shape.
     fn theme_preview(&self, p: &presets::Theme) -> Div {
         let to_u32 = |(r, g, b): (u8, u8, u8)| (r as u32) << 16 | (g as u32) << 8 | b as u32;
         let accent = rgb(p.accent);
         let ansi = |i: usize| rgb(to_u32(p.ansi16[i]));
         let fg = rgb(p.foreground);
-        // A "line of code": thin rounded bars whose widths are *fractions* of the
-        // preview, so the same shape reads well in the narrow "Current theme" card
-        // and the wider picker instead of clustering at the left edge. Rows stay
-        // ragged-right like real terminal text.
         let bar = |frac: f32, color: gpui::Rgba| {
             div().h(px(4.)).w(relative(frac)).rounded(px(1.5)).bg(color)
         };
@@ -4746,9 +3979,6 @@ impl Tty7App {
             )
     }
 
-    /// The theme choice block on the Appearance page: the "Sync with system"
-    /// switch, then either the single manual-theme card or — while following
-    /// the OS — one card per light/dark slot.
     fn render_theme_selection(&self, cx: &mut Context<Self>) -> AnyElement {
         let follow = cx.global::<Config>().theme_follow_system;
         let follow_switch = crate::ui::theme::switch("theme-follow-system", cx)
@@ -4773,11 +4003,6 @@ impl Tty7App {
         }
     }
 
-    /// One compact theme card: a preview of the slot's theme beside its caption
-    /// (kind + light/dark mode for the manual card, the slot's role for the
-    /// follow-system cards), its name, and its six chromatic ANSI swatches; the
-    /// whole row a click target that opens the picker panel on the right,
-    /// aimed at this slot.
     fn render_theme_card(&self, slot: ThemeSlot, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let border = theme.border;
@@ -4794,7 +4019,6 @@ impl Tty7App {
         };
         let active = presets::by_id(cx, &active_id);
         let name = active.name.clone();
-        // A user file (duplicated or dropped in the themes folder) vs a built-in.
         let kind = if active.path.is_some() {
             "Custom"
         } else {
@@ -4805,8 +4029,6 @@ impl Tty7App {
                 let mode = if active.dark { "Dark" } else { "Light" };
                 format!("{kind} · {mode}")
             }
-            // The slot cards are captioned by their role; the one matching the
-            // current OS appearance is the theme actually on screen.
             ThemeSlot::Light if !crate::ui::theme::system_dark(cx) => {
                 format!("Light mode · {kind} · Active")
             }
@@ -4816,9 +4038,6 @@ impl Tty7App {
             }
             ThemeSlot::Dark => format!("Dark mode · {kind}"),
         };
-        // The six chromatic ANSI slots (red…cyan) as tiny swatches — the part of
-        // a theme the mini preview's few bars can't show, and what actually
-        // distinguishes two same-background themes at a glance.
         let to_u32 = |(r, g, b): (u8, u8, u8)| (r as u32) << 16 | (g as u32) << 8 | b as u32;
         let swatches = h_flex().gap_1().mt_1p5().children((1..=6).map(|i| {
             div()
@@ -4881,16 +4100,11 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// The theme picker: a right-hand column of searchable preview
-    /// cards. Opened from the "Current theme" card; applying a theme keeps the
-    /// panel open (with its own `×`) so several looks can be tried in a row.
     fn render_theme_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let border = theme.border;
         let foreground = theme.foreground;
         let muted_fg = theme.muted_foreground;
-        // A hair off the content pane (like the settings rail) so the panel reads
-        // as its own surface rather than an extension of the page.
         let bg = theme.sidebar;
 
         let (search, query, slot) = match self.active_settings() {
@@ -4902,9 +4116,6 @@ impl Tty7App {
             None => return div().into_any_element(),
         };
         let config = cx.global::<Config>();
-        // Guard against a slot that no longer exists in the current mode (the
-        // sync switch flipped while the panel was open re-aims it, but stale
-        // state must still render something sensible).
         let slot = match (config.theme_follow_system, slot) {
             (false, _) => ThemeSlot::Manual,
             (true, ThemeSlot::Manual) => {
@@ -4936,15 +4147,6 @@ impl Tty7App {
                     .child("Themes"),
             )
             .child(
-                // The panel is docked to the window's top edge, so this `×` sits
-                // inside the settings overlay's stand-in title-bar strip — an
-                // absolute `WindowControlArea::Drag` band across the top 40px
-                // (see `root` below). On Windows that band is `HTCAPTION`, and
-                // unless something on top registers a mouse-blocking hitbox the
-                // OS takes the press as a window-drag and the button's `on_click`
-                // never fires. `occlude()` stops hit-testing here, the same way
-                // the tab-strip chips and the page's own `×` do. No-op elsewhere;
-                // the rest of the header still drags the window.
                 div().occlude().child(
                     Button::new("theme-panel-close")
                         .icon(IconName::Close)
@@ -4965,22 +4167,14 @@ impl Tty7App {
                 ThemeSlot::Dark => "Choose the theme for dark mode.",
             });
 
-        // Plain text input, the same shape the Shell section uses — our own
-        // field, not a bespoke pill. The Input fills its parent, but a percent
-        // width needs a *definite* one to resolve against, so the wrapper is sized
-        // explicitly (panel 300 − px_4 gutters). Placeholder labels it as search;
-        // a leading magnifier keeps that reading at a glance.
         let search_box = div().px_4().pb_3().child(
             div().w(px(268.)).child(
-                Input::new(&search)
-                    .small()
-                    // Stock magnifier — same reason as the page header's.
-                    .prefix(
-                        Icon::empty()
-                            .path("stock/icons/search.svg")
-                            .small()
-                            .text_color(muted_fg),
-                    ),
+                Input::new(&search).small().prefix(
+                    Icon::empty()
+                        .path("stock/icons/search.svg")
+                        .small()
+                        .text_color(muted_fg),
+                ),
             ),
         );
 
@@ -4991,11 +4185,6 @@ impl Tty7App {
             }
             let id = p.id.clone();
             let is_active = active_id == id;
-            // Here the preview sits *flush* inside the card's border (the
-            // "Current theme" card pads it, so it keeps its own 8px there). Flush
-            // means its corner has to nest one hairline inside the card's, or it
-            // bulges past the border into the square overflow clip — the corner
-            // then reads as a hard step instead of an arc (issue #236).
             let preview = self.theme_preview(&p).rounded(rounding::inner_radius(
                 rounding::TRACK_RADIUS,
                 rounding::HAIRLINE,
@@ -5007,10 +4196,6 @@ impl Tty7App {
                     .gap_1p5()
                     .cursor_pointer()
                     .child(
-                        // Percent width (`w_full` in the preview) only resolves
-                        // against a *definite* parent, so pin the card to the
-                        // panel's content width (300 − px_4 gutters) — same reason
-                        // the search box above is sized explicitly.
                         div()
                             .w(px(268.))
                             .rounded(rounding::TRACK_RADIUS)
@@ -5074,7 +4259,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// Keybindings section: the effective shortcut list (defaults + overrides).
     fn render_settings_keybindings(&self, cx: &mut Context<Self>) -> AnyElement {
         let (foreground, muted, border, kbd_bg, accent) = {
             let t = cx.theme();
@@ -5087,8 +4271,6 @@ impl Tty7App {
             )
         };
 
-        // Config-derived state, read into owned values so the `cx` borrow is
-        // free for `effective_bindings` and the click listeners below.
         let (preset, prefix, overridden) = {
             let cfg = cx.global::<Config>();
             let overridden: std::collections::HashSet<String> =
@@ -5102,8 +4284,6 @@ impl Tty7App {
         let tmux = preset == "tmux";
         let effective = crate::ui::keymap::effective_bindings(cx);
 
-        // The row currently capturing a shortcut (action + chords so far), and
-        // any pending takeover note.
         let recording = self
             .active_settings()
             .and_then(|s| s.recording.as_ref())
@@ -5112,7 +4292,6 @@ impl Tty7App {
             .active_settings()
             .and_then(|s| s.rebinding_note.clone());
 
-        // One key glyph as a small keycap, so a shortcut reads like real keys.
         let keycap = move |tok: String| {
             div()
                 .flex()
@@ -5130,12 +4309,6 @@ impl Tty7App {
                 .child(tok)
         };
 
-        // Preset and prefix are each a one-of-two choice among visible siblings —
-        // a segmented control, and now built as one. They used to be loose
-        // `Button::selected` pairs, which put them on gpui-component's
-        // `tokens.button_active`: another field nothing set, so the "on" button
-        // wore a stock grey with no relation to the theme (issue #197's failure
-        // mode, in a different corner of the same page).
         let preset_control = self.segmented(
             "kb-preset",
             &["Default", "tmux"],
@@ -5194,9 +4367,6 @@ impl Tty7App {
             let is_recording = recording.as_ref().is_some_and(|(a, _)| a == &action);
             let is_overridden = overridden.contains(&action);
 
-            // Keycap clusters for a spec: one cluster per whitespace-separated
-            // chord (a sequence like `ctrl-b x` draws as two clusters), with a
-            // wider gap between clusters than within one.
             let keycaps = |spec: &str| {
                 h_flex().gap_2().children(
                     crate::ui::keymap::key_chords(spec)
@@ -5205,8 +4375,6 @@ impl Tty7App {
                 )
             };
 
-            // Right side: the live capture (chords so far + hint), the keycap
-            // sequence, or "—".
             let captured: gpui::AnyElement = if is_recording {
                 let chords = recording
                     .as_ref()
@@ -5234,7 +4402,6 @@ impl Tty7App {
                 keycaps(&key).into_any_element()
             };
 
-            // The whole right cell is clickable to start capturing this row.
             let action_for_click = action.clone();
             let capture = div()
                 .id(SharedString::from(format!("kb-{action}")))
@@ -5314,20 +4481,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// "How sessions work": the four-line explanation of the app's own model —
-    /// what closing a window does, what Stop does, what Delete does, what Quit
-    /// does.
-    ///
-    /// This is tty7's central idea and the thing that most surprises a user
-    /// arriving from another terminal, and until now it was explained *only*
-    /// inside the confirmation dialogs — that is, at the moment the user is
-    /// already committing to an action, and never before. Stating it once, in
-    /// the one page that describes what the app is, means the dialogs confirm a
-    /// model the user has already met instead of teaching it under pressure.
-    ///
-    /// Deliberately a plain definition list rather than settings rows: nothing
-    /// here is configurable, and giving it switch-shaped chrome would suggest
-    /// otherwise.
     fn render_session_model(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (foreground, muted_fg) = (theme.foreground, theme.muted_foreground);
@@ -5383,13 +4536,10 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// About section: app identity and stack.
     fn render_settings_about(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (foreground, muted_fg) = (theme.foreground, theme.muted_foreground);
 
-        // Startup update check (see `core::update`): a newer release, if one was
-        // found, plus the toggle that controls whether we look at all.
         let update = cx
             .try_global::<crate::core::update::UpdateStatus>()
             .and_then(|s| s.available.clone());
@@ -5433,8 +4583,6 @@ impl Tty7App {
                 v_flex()
                     .mt_5()
                     .gap_2()
-                    // Mirrors the README's positioning line and stack sub-line, so
-                    // the app and the repo describe tty7 in the same words.
                     .child(
                         div()
                             .text_sm()
@@ -5452,9 +4600,6 @@ impl Tty7App {
                     ),
             )
             .child(self.render_session_model(cx))
-            // Updates: the startup check drops a newer version here if it found
-            // one. We never self-update — "Download" just opens the Releases
-            // page; the toggle turns the check off (see `core::update`).
             .child(
                 v_flex()
                     .mt_6()
@@ -5476,9 +4621,6 @@ impl Tty7App {
                                     format!("Version {} is available.", upd.version),
                                 ))
                                 .child(
-                                    // Match the sibling "Restart daemon…" button
-                                    // (default style, not the dark `.primary()`
-                                    // fill) so About reads as one panel.
                                     Button::new("download-update")
                                         .label("Download")
                                         .small()
@@ -5510,11 +4652,6 @@ impl Tty7App {
                             ),
                     ),
             )
-            // Manage that daemon. A fresh process is the only way to pick up a
-            // macOS permission granted after it started (e.g. Full Disk Access),
-            // to recover if it wedges, or to start clean — quitting/reopening the
-            // window alone never restarts it. Ends every running session, so the
-            // action confirms first.
             .child(
                 v_flex()
                     .mt_6()
@@ -5549,9 +4686,6 @@ impl Tty7App {
 mod tests {
     use super::*;
 
-    /// Every section must carry at least one index entry, or the search box can
-    /// annotate the nav with a count it can never jump to — and, worse, a whole
-    /// page of settings becomes unreachable by search.
     #[test]
     fn every_section_has_search_entries() {
         for section in SettingsSection::ALL {
@@ -5567,8 +4701,6 @@ mod tests {
         }
     }
 
-    /// `best_matching_section` must be able to reach every section — it used to
-    /// be driven by a hand-written list that had fallen behind by two.
     #[test]
     fn best_matching_section_can_reach_every_section() {
         for section in SettingsSection::ALL {
@@ -5586,8 +4718,6 @@ mod tests {
         }
     }
 
-    /// Settings that had no index entry at all before this pass — searching for
-    /// any of them returned an empty result on a page that plainly had the knob.
     #[test]
     fn previously_unsearchable_settings_are_findable() {
         use SettingsSection::*;
@@ -5614,13 +4744,8 @@ mod tests {
         }
     }
 
-    /// The close-confirmation toggle is the one people go looking for *after*
-    /// the dialog has annoyed them, so it has to be reachable by what they'd
-    /// type in that moment — not just by its own title.
     #[test]
     fn close_confirmation_toggle_is_findable() {
-        // Not a bare "confirm": SSH's own close warning owns that word just as
-        // legitimately, and the nav's per-section counts are what disambiguate.
         for query in [
             "ask again",
             "closing the last window",
@@ -5636,10 +4761,6 @@ mod tests {
         }
     }
 
-    /// The index names rows, so a title that no longer matches the rendered row
-    /// sends the user to the right page and then leaves them hunting. This
-    /// pins the ones that had drifted (the index said "Working directory"; the
-    /// row says "Start in").
     #[test]
     fn index_titles_match_rendered_row_labels() {
         for title in [
@@ -5662,12 +4783,6 @@ mod tests {
         }
     }
 
-    /// The Agents rows are titled by [`HookAgent::display_name`], so the index
-    /// is derived rather than pinned: every hook-capable agent must have an
-    /// Agents-section entry under exactly that name. Adding an agent to
-    /// `HookAgent::ALL` without indexing it — how Grok Build became
-    /// unsearchable — fails here, as does renaming an agent without moving its
-    /// index entry.
     #[test]
     fn agent_rows_are_in_the_search_index() {
         for agent in crate::core::agent_hooks::HookAgent::ALL {
@@ -5691,8 +4806,6 @@ mod tests {
         assert_eq!(humanize_action("Quit"), "Quit");
     }
 
-    /// A host is findable by every part of the address it is displayed with,
-    /// not just its name — an imported alias often *is* its hostname.
     #[test]
     fn the_host_filter_matches_name_address_and_port() {
         let mut p = SshProfile::new("prod-web");
@@ -5708,8 +4821,6 @@ mod tests {
         assert!(!ssh_row_matches(&p, "staging"));
     }
 
-    /// The filter is case-insensitive on a lowercased query, which is what the
-    /// master column hands it.
     #[test]
     fn the_host_filter_ignores_case() {
         let mut p = SshProfile::new("Prod-Web");
@@ -5718,8 +4829,6 @@ mod tests {
         assert!(ssh_row_matches(&p, "example.com"));
     }
 
-    /// Imported aliases lead, ungrouped hosts trail, and anything the user named
-    /// sits between them — so the `~/.ssh/config` bucket is never buried.
     #[test]
     fn group_buckets_sort_imported_first_and_ungrouped_last() {
         let mut keys = vec!["", "Work", crate::core::ssh_config::IMPORTED_GROUP];
@@ -5730,8 +4839,6 @@ mod tests {
         );
     }
 
-    /// The import bucket is labelled by the file it mirrors: it is a live link
-    /// to something edited elsewhere, not a record of a past import.
     #[test]
     fn group_labels_name_the_file_and_the_app() {
         assert_eq!(
@@ -5742,8 +4849,6 @@ mod tests {
         assert_eq!(ssh_group_label("Work"), "Work");
     }
 
-    /// A profile's bucket comes off its own `group`, with `None` collapsing to
-    /// the same key the ungrouped section uses.
     #[test]
     fn group_key_falls_back_to_the_ungrouped_bucket() {
         let mut p = SshProfile::new("a");
@@ -5758,7 +4863,6 @@ mod tests {
         let hp = parse_host_port("example.com:2222").unwrap();
         assert_eq!(hp.host, "example.com");
         assert_eq!(hp.port, 2222);
-        // No colon → host only, port 0.
         assert_eq!(parse_host_port("host").unwrap().port, 0);
     }
 }
@@ -5778,8 +4882,6 @@ mod gpui_tests {
             cx.set_global(Config::default());
             crate::ui::keymap::init(cx);
         });
-        // Wrapped in a `Root` like `main.rs` does — the gpui-component widgets on
-        // the settings sheet reach for it on the window.
         let window = cx.add_window(|window, cx| {
             let app =
                 cx.new(|cx| Tty7App::with_session(None, Some(Session::default()), window, cx));
@@ -5798,18 +4900,6 @@ mod gpui_tests {
         (app, vcx)
     }
 
-    /// Appearance is where issue #236's controls live: the cursor-shape segmented
-    /// track, the −/value/+ steppers and the theme picker's flush previews all
-    /// compute their own corner radii now (`ui::rounding`) instead of leaning on
-    /// `overflow_hidden`, and the stepper's glyph boxes were re-laid-out to
-    /// `h_full` so those radii land on the track's content box.
-    ///
-    /// gpui's test platform lays out and paints but never rasterizes, so this
-    /// cannot assert what the corners *look* like. What it can do is put the page
-    /// through a real layout and paint pass — twice, at two widths, so the tracks
-    /// are measured more than once — which is the cheapest seam that catches a
-    /// panic or a broken constraint in that arithmetic before a human ever sees
-    /// the window.
     #[gpui::test]
     fn appearance_section_lays_out_with_its_rounded_controls(cx: &mut TestAppContext) {
         let (app, mut vcx) = harness(cx);
@@ -5820,17 +4910,12 @@ mod gpui_tests {
         vcx.simulate_resize(size(px(1100.), px(800.)));
         vcx.run_until_parked();
 
-        // The flush-mounted theme previews only render with the picker docked
-        // open, so the page has to be paint-tested in both states to reach every
-        // site this change touched.
         app.update_in(&mut vcx, |app, _, cx| {
             if let Some(s) = app.active_settings_mut() {
                 s.theme_panel_open = true;
             }
             cx.notify();
         });
-        // Narrow enough that the theme list re-measures against a different
-        // available width than the pass above.
         vcx.simulate_resize(size(px(720.), px(560.)));
         vcx.run_until_parked();
 

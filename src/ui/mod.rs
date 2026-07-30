@@ -1,10 +1,3 @@
-//! The GPUI view layer: the window shell (`app`), the split-pane tree (`pane`),
-//! the command palette (`palette`), the settings panel (`settings`), and the
-//! menu-bar / keymap / theme wiring (`keymap`, `theme`).
-//!
-//! Everything here may depend on `core` and `terminal`; nothing in those layers
-//! depends back on `ui`.
-
 pub mod app;
 pub mod assets;
 pub mod code_editor;
@@ -13,10 +6,6 @@ pub mod file_tree;
 pub mod forwards;
 pub mod hints;
 pub mod home;
-// The `Host` layer's GUI half. The facade and the registry land ahead of the
-// call sites that consume
-// them — the six views move over to `HostOps` as a separate change — so they
-// read as dead code until that merges.
 #[allow(dead_code)]
 pub mod host_ops;
 #[allow(dead_code)]

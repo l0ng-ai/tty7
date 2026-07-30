@@ -1,15 +1,3 @@
-//! The authentication flow for a native SSH connection.
-//!
-//! Ordering follows the Tabby reference (brief §2): a leading `none` probe (which
-//! also learns the server's remaining methods), then — for `Auto` — gssapi-with-mic
-//! (matching OpenSSH's default preference), publickey, agent, password,
-//! keyboard-interactive; a non-`Auto` mode restricts attempts to
-//! that one family. The server's advertised remaining-methods set gates which
-//! families are worth trying and is refreshed after each failure (only when the
-//! server actually sends a non-empty set). Passwords/passphrases come from the
-//! spec (pre-resolved from the keychain by the GUI) or, failing that, from the
-//! [`PromptBroker`]. Secrets are never logged.
-
 #[cfg(unix)]
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -27,8 +15,6 @@ use crate::daemon::protocol::{AuthPromptKind, AuthResponse, KiPrompt, NativeSshS
 use super::broker::PromptBroker;
 use super::handler::ClientHandler;
 
-/// Attempt authentication. `Ok(())` = authenticated; `Err(reason)` carries a
-/// user-facing reason for `SshStatus::Failed` (never a secret).
 pub async fn authenticate(
     handle: &mut Handle<ClientHandler>,
     spec: &NativeSshSpec,
@@ -36,8 +22,6 @@ pub async fn authenticate(
 ) -> Result<(), String> {
     let user = spec.user.clone();
 
-    // A `none` probe: some servers accept it, and either way it learns the
-    // server's advertised remaining methods.
     let mut remaining = match handle
         .authenticate_none(&user)
         .await
@@ -52,8 +36,6 @@ pub async fn authenticate(
     let mut last_reason = "authentication failed".to_string();
 
     for family in method_order(spec.auth_mode) {
-        // Respect the server's advertised set when it told us one: skip families
-        // it won't accept. An empty set means "unknown" — try anyway.
         if !remaining.is_empty() && !remaining.contains(&family) {
             continue;
         }
@@ -62,8 +44,6 @@ pub async fn authenticate(
             MethodKind::PublicKey => try_publickeys(handle, spec, broker).await,
             MethodKind::KeyboardInteractive => try_keyboard_interactive(handle, spec, broker).await,
             MethodKind::Password => try_password(handle, spec, broker).await,
-            // Agent is folded into the publickey pass below via a distinct marker;
-            // handled in `method_order` expansion.
             _ => Outcome::Skipped,
         };
         match outcome {
@@ -88,10 +68,6 @@ pub async fn authenticate(
     Err(last_reason)
 }
 
-/// The ordered families to try for a given auth mode. `Agent` is represented as a
-/// publickey attempt (it *is* publickey, signed by the agent), so it isn't a
-/// separate `MethodKind`; `try_publickeys` covers both files and agent for `Auto`
-/// and for the explicit `Agent`/`PublicKey` modes via `spec.auth_mode`.
 fn method_order(mode: SshAuthMode) -> Vec<MethodKind> {
     match mode {
         SshAuthMode::Auto => vec![
@@ -189,10 +165,6 @@ impl GssapiAuthenticator for GssapiClient {
                 mic: Some(mic.to_vec()),
             })
         } else {
-            // An incomplete context that produced no token to send is a stalled
-            // exchange; claiming completion here would send the server a MIC-less
-            // exchange-complete it will reject with an opaque failure. Error out
-            // instead so the real cause reaches the user.
             let Some(token) = output else {
                 return Err(GssapiAuthError::Other(
                     "gssapi context stalled: incomplete with no output token".to_string(),
@@ -297,16 +269,6 @@ fn gssapi_service_hosts_blocking(host: &str) -> Vec<String> {
     gssapi_service_hosts_with_lookup(host, reverse_lookup_addr)
 }
 
-/// Which host names to request a `host/<name>` Kerberos service ticket for: the
-/// host as typed, plus its reverse-DNS name when it was typed as a bare IP.
-///
-/// Deliberately gated on `unix` alone, **not** on `feature = "gssapi"`. It needs
-/// nothing from libgssapi — the caller injects the resolver — and gating it also
-/// gated its two unit tests, which then only ran because the GUI package enables
-/// `gssapi` and cargo unifies features across a `--workspace` test run. Narrowing
-/// to `cargo test -p tty7-core` (a bisect, a single-crate iteration) silently
-/// dropped them: green run, test never compiled. Without the feature the only
-/// caller is the test module below, hence the `allow`.
 #[cfg(unix)]
 #[cfg_attr(not(feature = "gssapi"), allow(dead_code))]
 fn gssapi_service_hosts_with_lookup(
@@ -433,8 +395,6 @@ fn set_sockaddr_in6_len(addr: &mut libc::sockaddr_in6) {
 #[cfg(all(unix, feature = "gssapi"))]
 fn set_sockaddr_in6_len(_addr: &mut libc::sockaddr_in6) {}
 
-/// Try identity files (unless mode is `Agent`) then the ssh-agent (unless mode is
-/// `PublicKey`), in that order.
 async fn try_publickeys(
     handle: &mut Handle<ClientHandler>,
     spec: &NativeSshSpec,
@@ -490,8 +450,6 @@ async fn try_identity_file(
         Err(e) => return failed(format!("cannot read identity file {path}: {e}")),
     };
 
-    // `.pub` misconfiguration: if the file parses as a *public* key, the user
-    // pointed us at the public half. Skip it with a warning rather than fail.
     if PublicKey::from_openssh(contents.trim()).is_ok() {
         log::warn!("identity file {path} is a public key; skipping");
         return Outcome::Skipped;
@@ -500,8 +458,6 @@ async fn try_identity_file(
     let key = match russh::keys::decode_secret_key(&contents, None) {
         Ok(k) => k,
         Err(russh::keys::Error::KeyIsEncrypted) => {
-            // Prefer a GUI-provided passphrase (keyed by the path as listed), else
-            // prompt for one.
             let provided = spec
                 .key_passphrases
                 .as_ref()
@@ -551,28 +507,20 @@ async fn try_identity_file(
 }
 
 async fn try_agent(handle: &mut Handle<ClientHandler>, spec: &NativeSshSpec) -> Outcome {
-    // Agent transport is per-platform: a Unix-domain socket named by
-    // SSH_AUTH_SOCK, or Windows OpenSSH's named pipe. The identity loop below
-    // is shared via `try_agent_identities`, generic over the stream.
     #[cfg(unix)]
     {
         let agent = match AgentClient::connect_env().await {
             Ok(a) => a,
-            // No agent available (SSH_AUTH_SOCK unset / unreachable): just skip.
             Err(_) => return Outcome::Skipped,
         };
         try_agent_identities(handle, spec, agent).await
     }
     #[cfg(windows)]
     {
-        // Windows OpenSSH's agent listens on a fixed named pipe; honor
-        // SSH_AUTH_SOCK as an override for nonstandard setups. (A Cygwin/MSYS
-        // socket *file* in that variable simply fails to open → skip.)
         let pipe = std::env::var("SSH_AUTH_SOCK")
             .unwrap_or_else(|_| r"\\.\pipe\openssh-ssh-agent".to_string());
         let agent = match AgentClient::connect_named_pipe(&pipe).await {
             Ok(a) => a,
-            // No agent available: just skip.
             Err(_) => return Outcome::Skipped,
         };
         try_agent_identities(handle, spec, agent).await
@@ -595,7 +543,6 @@ where
     for identity in identities {
         let pubkey: PublicKey = match &identity {
             AgentIdentity::PublicKey { key, .. } => key.clone(),
-            // Certificate identities aren't handled in v1's agent path.
             AgentIdentity::Certificate { .. } => continue,
         };
         let hash_alg = rsa_hash_alg(&pubkey.algorithm());
@@ -607,7 +554,6 @@ where
             Ok(AuthResult::Failure {
                 remaining_methods, ..
             }) => last = Some(remaining_methods),
-            // A signing error with this identity — try the next one.
             Err(_) => continue,
         }
     }
@@ -622,20 +568,14 @@ async fn try_password(
     spec: &NativeSshSpec,
     broker: &Arc<PromptBroker>,
 ) -> Outcome {
-    // Try a spec-provided (keychain-resolved) password first.
     if let Some(pw) = &spec.password {
         match handle.authenticate_password(&spec.user, pw.clone()).await {
             Ok(AuthResult::Success) => return Outcome::Authenticated,
-            Ok(AuthResult::Failure { .. }) => {
-                // The stored password was explicitly rejected (FR-A6): re-prompt.
-                // The GUI can treat a fresh prompt after a provided password as
-                // "stored password rejected" and offer to overwrite it.
-            }
+            Ok(AuthResult::Failure { .. }) => {}
             Err(e) => return failed(format!("password auth error: {e}")),
         }
     }
 
-    // Prompt the user (possibly after a rejected stored password).
     let resp = broker
         .prompt(AuthPromptKind::Password {
             user: spec.user.clone(),
@@ -671,11 +611,6 @@ async fn try_keyboard_interactive(
         Err(e) => return failed(format!("keyboard-interactive start error: {e}")),
     };
 
-    // Cap the round count (OpenSSH keeps a similar client-side device cap): a
-    // hostile or looping server must not be able to spin this task forever with
-    // zero-prompt or auto-filled requests. The stored password is auto-filled
-    // once only — a server re-asking means it was rejected (PAM retries), so
-    // later rounds fall through to prompting the user for the real one.
     const MAX_ROUNDS: u32 = 16;
     let mut rounds = 0u32;
     let mut stored_password_used = false;
@@ -699,7 +634,6 @@ async fn try_keyboard_interactive(
                 instructions,
                 prompts,
             } => {
-                // Zero-prompt request (OpenSSH quirk): reply with an empty answer.
                 if prompts.is_empty() {
                     resp = match handle
                         .authenticate_keyboard_interactive_respond(Vec::new())
@@ -738,11 +672,6 @@ async fn try_keyboard_interactive(
     }
 }
 
-/// Answer a keyboard-interactive info-request. When *every* prompt is a
-/// password-type field and a spec password is available (and this round may
-/// still use it — the first only; a re-ask means the server rejected it),
-/// auto-fill without bothering the GUI; otherwise surface the whole prompt set
-/// to the GUI.
 async fn collect_ki_answers(
     spec: &NativeSshSpec,
     broker: &Arc<PromptBroker>,
@@ -776,15 +705,11 @@ async fn collect_ki_answers(
         .await;
     match resp {
         AuthResponse::Secrets(v) if v.len() == prompts.len() => Some(v),
-        // A single-secret reply to a single prompt is also accepted.
         AuthResponse::Secret(s) if prompts.len() == 1 => Some(vec![s]),
         _ => None,
     }
 }
 
-/// RSA keys must be offered with a modern signature hash; russh maps `None` to
-/// legacy SHA-1 for RSA, so pick SHA-256. For all other key types `hash_alg` is
-/// ignored, so `None` is correct.
 fn rsa_hash_alg(algorithm: &Algorithm) -> Option<HashAlg> {
     if matches!(algorithm, Algorithm::Rsa { .. }) {
         Some(HashAlg::Sha256)
@@ -793,7 +718,6 @@ fn rsa_hash_alg(algorithm: &Algorithm) -> Option<HashAlg> {
     }
 }
 
-/// Expand an identity-file path: `%h`→host, `%r`→user, and a leading `~/` → home.
 fn expand_identity_path(path: &str, host: &str, user: &str) -> String {
     let substituted = path.replace("%h", host).replace("%r", user);
     if let Some(rest) = substituted.strip_prefix("~/") {
@@ -820,7 +744,6 @@ mod tests {
 
     #[test]
     fn identity_path_expands_tokens_and_tilde() {
-        // Tokens expand regardless of home resolution.
         let p = expand_identity_path("/keys/%r@%h/id", "example.com", "deploy");
         assert_eq!(p, "/keys/deploy@example.com/id");
     }
@@ -850,9 +773,6 @@ mod tests {
         );
     }
 
-    // `#[cfg(unix)]`, not `#[cfg(all(unix, feature = "gssapi"))]`: these exercise
-    // pure host-list logic, so they must run under a plain
-    // `cargo test -p tty7-core` too. See `gssapi_service_hosts_with_lookup`.
     #[cfg(unix)]
     #[test]
     fn gssapi_service_hosts_keep_original_host_before_reverse_dns() {

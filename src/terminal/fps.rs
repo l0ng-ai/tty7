@@ -1,38 +1,15 @@
-//! Optional per-frame paint timing. Disabled unless `TTY7_FPS` is set to a
-//! non-empty, non-`0` value (e.g. `TTY7_FPS=1 cargo run`).
-//!
-//! gpui repaints *on demand* — it only paints when something is marked dirty
-//! via `cx.notify()`. So this deliberately does NOT report a steady 120fps
-//! while the terminal is idle; idle frames are zero by design, and that's the
-//! whole point of the architecture. What it measures is:
-//!   - how fast a single paint is on the CPU side (`paint avg/max`), and
-//!   - the frame rate actually achieved during *continuous* output or
-//!     scrolling (e.g. `yes`, `cat bigfile`), which is where "do we hit the
-//!     display's refresh rate?" is a meaningful question.
-//!
-//! Note this is the CPU-side cost of building the frame and enqueuing draw
-//! commands; it does not include GPU execution. For true end-to-end frame
-//! rate, pair this with Instruments → Core Animation FPS / Metal System Trace.
-
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Whether timing is on. Read once from `TTY7_FPS` and cached.
 pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| flag_enables(std::env::var("TTY7_FPS").ok().as_deref()))
 }
 
-/// Whether a `TTY7_FPS` value (or its absence) turns timing on: any non-empty
-/// value except `0`. Split from `enabled` so the semantics are testable without
-/// depending on the ambient process environment.
 fn flag_enables(value: Option<&str>) -> bool {
     value.is_some_and(|v| !v.is_empty() && v != "0")
 }
 
-/// Length of one aggregation window of wall-clock time *in which painting
-/// happened* (an idle gap just stretches the reported window, so it reads
-/// honestly rather than as a low frame rate).
 const WINDOW: Duration = Duration::from_secs(1);
 
 struct Meter {
@@ -52,9 +29,6 @@ impl Meter {
         }
     }
 
-    /// Fold one frame in; when `now` crosses the window boundary, return the
-    /// aggregate report line and start a fresh window anchored at `now`. The
-    /// clock is injected so tests can cross windows without sleeping.
     fn record(&mut self, now: Instant, paint: Duration) -> Option<String> {
         self.frames += 1;
         self.paint_total += paint;
@@ -82,15 +56,11 @@ fn meter() -> &'static Mutex<Option<Meter>> {
     M.get_or_init(|| Mutex::new(None))
 }
 
-/// Record one frame's CPU-side paint duration. Emits an aggregate stderr line
-/// roughly once per `WINDOW` of painting time.
 pub fn record(paint: Duration) {
     let now = Instant::now();
     let mut guard = meter().lock().unwrap();
     let m = guard.get_or_insert_with(|| Meter::new(now));
     if let Some(line) = m.record(now, paint) {
-        // Direct to stderr: the app never initialises a `log` backend, so
-        // `log::info!` here would be silently dropped.
         eprintln!("{line}");
     }
 }
@@ -135,8 +105,6 @@ mod tests {
             m.record(start + Duration::from_millis(200), Duration::from_millis(6))
                 .is_none()
         );
-        // Crossing the window boundary flushes the aggregate: 3 frames over
-        // 1.5s = 2.0 fps, paint avg (2+6+4)/3 = 4ms, max 6ms.
         let flush_at = start + Duration::from_millis(1500);
         let line = m
             .record(flush_at, Duration::from_millis(4))
@@ -145,7 +113,6 @@ mod tests {
             line,
             "[fps] 2.0 fps over 1.50s (3 frames) | paint avg 4.00ms max 6.00ms"
         );
-        // The flush starts a fresh window anchored at the flush instant.
         assert_eq!(m.frames, 0);
         assert_eq!(m.paint_total, Duration::ZERO);
         assert_eq!(m.paint_max, Duration::ZERO);
@@ -154,8 +121,6 @@ mod tests {
 
     #[test]
     fn meter_flushes_exactly_on_the_window_boundary() {
-        // `elapsed == WINDOW` counts as crossing (the check is `<`), so a frame
-        // landing exactly on the boundary flushes rather than being held over.
         let start = Instant::now();
         let mut m = Meter::new(start);
         let line = m.record(start + WINDOW, Duration::from_millis(1));

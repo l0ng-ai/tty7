@@ -1,21 +1,6 @@
-//! Tray bitmap rendering: the bundled SVGs rasterized with `resvg` (gpui's
-//! own SVG path only yields a tinted alpha mask, so the tray draws its own).
-//!
-//! Per platform:
-//! - macOS: the outline terminal glyph (`tray.svg`) as a *template* image —
-//!   the system recolors its alpha for light/dark menu bars, permanently.
-//!   Attention never touches the bitmap (template images can't carry color,
-//!   and leaving template mode made the glyph illegible); the tooltip and
-//!   menu carry agent status instead (see `native.rs`).
-//! - Windows / Linux: the colored app icon (`app-icon.svg`); attention
-//!   punches a transparent ring into the corner and fills an amber badge, so
-//!   the badge separates from the orange tile behind it.
-
 use resvg::tiny_skia;
 use resvg::usvg;
 
-/// Straight (unpremultiplied) RGBA, the format both `tray_icon::Icon` and
-/// (after a byte shuffle) `ksni::Icon` want.
 pub(super) struct RgbaImage {
     pub data: Vec<u8>,
     pub width: u32,
@@ -27,23 +12,14 @@ const GLYPH_SVG: &[u8] = include_bytes!("../../../assets/tray.svg");
 #[cfg(not(target_os = "macos"))]
 const GLYPH_SVG: &[u8] = include_bytes!("../../../assets/app-icon.svg");
 
-/// Physical pixel size. On macOS the bitmap is 36 px (retina-crisp at 18 pt);
-/// native.rs then overrides the NSImage to 22 pt so the glyph fills the menu
-/// bar. Windows tray slots are 16–32 px; 32 downsamples cleanly.
 #[cfg(target_os = "macos")]
 const SIZE: u32 = 36;
 #[cfg(not(target_os = "macos"))]
 const SIZE: u32 = 32;
 
-/// The `Waiting` amber, same hue as the in-window status dot
-/// (`AgentStatus::dot_rgb`).
 #[cfg(not(target_os = "macos"))]
 const AMBER: (u8, u8, u8) = (0xF5, 0x9E, 0x0B);
 
-/// Render the tray icon: the template outline glyph, always — attention
-/// never touches the bitmap, so the icon stays a template image the system
-/// keeps legible on any bar. `None` only on a malformed bundled SVG, i.e.
-/// never in practice — callers treat it as "no icon change".
 #[cfg(target_os = "macos")]
 pub(super) fn render() -> Option<RgbaImage> {
     let tree = usvg::Tree::from_data(GLYPH_SVG, &usvg::Options::default()).ok()?;
@@ -52,10 +28,6 @@ pub(super) fn render() -> Option<RgbaImage> {
     Some(to_rgba(&pixmap))
 }
 
-/// Render the tray icon. `attention` = some agent is blocked on the user —
-/// stamps the amber badge into the colored app icon. `None` only on a
-/// malformed bundled SVG, i.e. never in practice — callers treat it as "no
-/// icon change".
 #[cfg(not(target_os = "macos"))]
 pub(super) fn render(attention: bool) -> Option<RgbaImage> {
     let tree = usvg::Tree::from_data(GLYPH_SVG, &usvg::Options::default()).ok()?;
@@ -69,23 +41,16 @@ pub(super) fn render(attention: bool) -> Option<RgbaImage> {
     Some(to_rgba(&pixmap))
 }
 
-/// The tray-menu row avatar for an agent pane: the tab avatar's visual
-/// language translated to a menu icon — brand-colored disc, the brand mark as
-/// a white silhouette (geometry only, same as the tab renders it), and the
-/// status dot in the bottom-right corner. `None` only if the brand SVG fails
-/// to resolve/parse, which the caller treats as "text-only row".
 pub(super) fn agent_avatar(
     agent: crate::core::cli_agent::CLIAgent,
     status: crate::core::cli_agent::AgentStatus,
 ) -> Option<tiny_skia::Pixmap> {
     use gpui::AssetSource as _;
 
-    // 16 pt at 2× — the size native menus render item icons at.
     const SIZE: u32 = 32;
     let s = SIZE as f32;
     let mut pixmap = tiny_skia::Pixmap::new(SIZE, SIZE)?;
 
-    // Brand-colored disc.
     let accent = agent.accent_rgb();
     let mut paint = tiny_skia::Paint {
         anti_alias: true,
@@ -108,10 +73,6 @@ pub(super) fn agent_avatar(
         None,
     );
 
-    // Brand mark as a white silhouette, centered at ~60% of the disc — the
-    // same "tinted alpha mask" treatment the tab avatar gets from gpui. The
-    // SVG resolves through the app's asset source, so the generic `bot`
-    // fallback for unbranded agents comes along for free.
     let svg = crate::ui::assets::Assets
         .load(agent.icon_path())
         .ok()
@@ -131,8 +92,6 @@ pub(super) fn agent_avatar(
         None,
     );
 
-    // Status dot, bottom-right, ringed by transparency so it reads against
-    // the disc — the same composition as the tab avatar's dot. Idle has none.
     if let Some(rgb) = status.dot_rgb() {
         let (cx, cy, r) = (s * 0.80, s * 0.80, s * 0.17);
         let circle = |radius: f32| {
@@ -166,10 +125,6 @@ pub(super) fn agent_avatar(
     Some(pixmap)
 }
 
-/// Scale-to-fit + center transform for rendering an SVG into a square
-/// `size`×`size` bitmap — a non-square SVG would otherwise hug the top-left
-/// corner. (Both bundled icons are square today; this keeps that an
-/// aesthetic fact, not a correctness assumption.)
 fn fit_center(tree: &usvg::Tree, size: u32) -> tiny_skia::Transform {
     let (w, h) = (tree.size().width(), tree.size().height());
     let scale = size as f32 / w.max(h);
@@ -179,8 +134,6 @@ fn fit_center(tree: &usvg::Tree, size: u32) -> tiny_skia::Transform {
     )
 }
 
-/// Un-premultiply a tiny-skia pixmap into straight RGBA (what
-/// `tray_icon::Icon`/`muda::Icon` want).
 pub(super) fn to_rgba(pixmap: &tiny_skia::Pixmap) -> RgbaImage {
     let mut data = Vec::with_capacity(pixmap.data().len());
     for p in pixmap.pixels() {
@@ -194,13 +147,10 @@ pub(super) fn to_rgba(pixmap: &tiny_skia::Pixmap) -> RgbaImage {
     }
 }
 
-/// Repaint every covered pixel to `rgb`, keeping coverage (alpha) intact —
-/// turns the glyph into a flat single-color mark.
 fn recolor(pixmap: &mut tiny_skia::Pixmap, rgb: (u8, u8, u8)) {
     for p in pixmap.pixels_mut() {
         let a = p.alpha();
         let mul = |c: u8| ((c as u16 * a as u16) / 255) as u8;
-        // from_rgba only rejects components > alpha; mul() guarantees not.
         if let Some(np) =
             tiny_skia::PremultipliedColorU8::from_rgba(mul(rgb.0), mul(rgb.1), mul(rgb.2), a)
         {
@@ -209,9 +159,6 @@ fn recolor(pixmap: &mut tiny_skia::Pixmap, rgb: (u8, u8, u8)) {
     }
 }
 
-/// Stamp the amber attention badge in the top-right corner: first clear a
-/// slightly larger disc so the badge is ringed by transparency (separating it
-/// from whatever the glyph or a colored tile puts behind it), then fill.
 #[cfg(not(target_os = "macos"))]
 fn badge(pixmap: &mut tiny_skia::Pixmap) {
     let s = SIZE as f32;
@@ -250,7 +197,6 @@ fn badge(pixmap: &mut tiny_skia::Pixmap) {
     }
 }
 
-/// The same bitmap in `ksni::Icon`'s wire format: ARGB32, network byte order.
 #[cfg(target_os = "linux")]
 pub(super) fn render_argb(attention: bool) -> Option<(Vec<u8>, u32)> {
     let img = render(attention)?;
@@ -266,9 +212,6 @@ mod tests {
     use super::*;
     use crate::core::cli_agent::{AgentStatus, CLIAgent};
 
-    /// `recolor` must keep coverage (alpha) and produce premultiplied
-    /// components that `PremultipliedColorU8` accepts (component ≤ alpha) —
-    /// the invariant the `from_rgba` in its body relies on.
     #[test]
     fn recolor_keeps_alpha_and_flattens_color() {
         let mut pm = tiny_skia::Pixmap::new(2, 2).unwrap();
@@ -284,15 +227,12 @@ mod tests {
         recolor(&mut pm, (0xFF, 0xFF, 0xFF));
         for (p, a) in pm.pixels().iter().zip(alphas) {
             assert_eq!(p.alpha(), a);
-            // White at coverage a premultiplies to ~a on every channel.
             assert!(p.red().abs_diff(a) <= 1, "red {} vs alpha {a}", p.red());
             assert_eq!(p.red(), p.green());
             assert_eq!(p.green(), p.blue());
         }
     }
 
-    /// `to_rgba` un-premultiplies: a half-covered red pixel comes back as
-    /// full red with the original alpha.
     #[test]
     fn to_rgba_demultiplies() {
         let mut pm = tiny_skia::Pixmap::new(1, 1).unwrap();
@@ -312,7 +252,6 @@ mod tests {
         assert_eq!((px[1], px[2]), (0, 0));
     }
 
-    /// The template glyph renders at the declared size with visible coverage.
     #[cfg(target_os = "macos")]
     #[test]
     fn render_produces_template_glyph() {
@@ -323,8 +262,6 @@ mod tests {
         assert!(covered > 0, "icon rendered fully transparent");
     }
 
-    /// Both tray states render at the declared size with visible coverage,
-    /// and the attention badge actually changes the bitmap.
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn render_produces_both_states() {
@@ -339,29 +276,14 @@ mod tests {
         assert_ne!(normal.data, attention.data);
     }
 
-    /// Every avatar renders, with and without the status dot. Run over the
-    /// whole roster rather than one branded and one fallback agent, because
-    /// this is the only test that puts the bundled SVGs through resvg: the
-    /// asset-source test next door proves the bytes resolve, not that they
-    /// parse into visible geometry. Vendor marks arrive in whatever shape the
-    /// vendor publishes — stylesheets, nested groups, features usvg quietly
-    /// drops — and a mark that parses to nothing shows up as a bare accent
-    /// disc, which nothing else here would catch.
     #[test]
     fn agent_avatar_renders_brand_and_fallback() {
         for agent in CLIAgent::ALL {
             let idle = agent_avatar(agent, AgentStatus::Idle).unwrap();
             let waiting = agent_avatar(agent, AgentStatus::Waiting).unwrap();
             assert_eq!((idle.width(), idle.height()), (32, 32));
-            // The disc leaves the very corners transparent…
             assert_eq!(idle.pixel(0, 0).unwrap().alpha(), 0);
-            // …and the center is covered (disc + glyph).
             assert!(idle.pixel(16, 16).unwrap().alpha() > 0);
-            // The glyph actually drew something. The disc under it is a flat
-            // accent fill, so every opaque pixel shares one colour unless the
-            // white mark landed on top — one colour means resvg handed back an
-            // empty canvas, which is what a silently-unsupported SVG feature
-            // looks like from here.
             let shades: std::collections::HashSet<_> = idle
                 .pixels()
                 .iter()
@@ -373,13 +295,10 @@ mod tests {
                 "{} rendered as a bare disc — its glyph drew nothing",
                 agent.display_name()
             );
-            // The status dot changes the bottom-right corner.
             assert_ne!(idle.data(), waiting.data());
         }
     }
 
-    /// ksni wants ARGB32 in network byte order — verify the shuffle against
-    /// the RGBA source.
     #[cfg(target_os = "linux")]
     #[test]
     fn render_argb_reorders_bytes() {

@@ -1,26 +1,7 @@
-//! Persisted last-window geometry, stored at `window.json` in the config dir
-//! (alongside `config.json` / `views.json`). The quit hook in `ui::app`
-//! writes the window's final bounds here unconditionally; startup reads it
-//! back only when `Config::remember_window_size` is on, so toggling the
-//! setting off and on again still restores the most recent quit's geometry.
-//! Same durability contract as the other config-dir files: missing/malformed
-//! reads fall back to "nothing remembered", writes are atomic.
-//!
-//! The geometry is four plain `f32`s here rather than a `gpui::Bounds` because
-//! [`WindowView`](super::session::WindowView) embeds it and `views.json` is
-//! parsed in this gpui-free crate. Converting to and from `Bounds` is the GUI
-//! crate's job — see its `core::window_state::WindowGeometry` extension trait.
-
 use serde::{Deserialize, Serialize};
 
-/// Don't restore a window smaller than this (logical px) — a corrupt or
-/// hand-edited file shouldn't reopen tty7 as a sliver.
 const MIN_SIZE: f32 = 200.0;
 
-/// Last known window geometry, in gpui's global coordinate space (logical
-/// pixels; origins can be negative or beyond the primary display on
-/// multi-monitor setups). For a fullscreen window this records the *restore*
-/// bounds, so the next normal launch isn't screen-sized.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct WindowState {
     pub x: f32,
@@ -34,9 +15,6 @@ impl WindowState {
         crate::core::config::config_path("window.json")
     }
 
-    /// Load the remembered geometry; `None` when nothing usable is on disk
-    /// (never saved, unreadable, malformed, or degenerate values), in which
-    /// case the caller falls back to the centered default.
     pub fn load() -> Option<Self> {
         let path = Self::path()?;
         let text = std::fs::read_to_string(&path).ok()?;
@@ -46,8 +24,6 @@ impl WindowState {
         state.is_usable().then_some(state)
     }
 
-    /// A geometry worth restoring: all values finite and the size at least
-    /// [`MIN_SIZE`] each way.
     fn is_usable(&self) -> bool {
         [self.x, self.y, self.width, self.height]
             .iter()
@@ -56,8 +32,6 @@ impl WindowState {
             && self.height >= MIN_SIZE
     }
 
-    /// Persist the geometry; IO / serialization errors are logged and swallowed
-    /// (worst case the next launch opens at the default size).
     pub fn save(&self) {
         let Some(path) = Self::path() else {
             return;

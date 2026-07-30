@@ -1,42 +1,16 @@
-//! OpenSSH `known_hosts` reading + trust decisions for the native russh path.
-//!
-//! Scope (v1, per PRD §3.4 — WS3 hardens this later): read `~/.ssh/known_hosts`,
-//! decide trust for **plaintext** hosts, **hashed** hosts (`|1|salt|hash`, HMAC-
-//! SHA1), and `@revoked` lines (hard reject). `@cert-authority` lines are skipped
-//! (treated as no-match) so a CA entry never produces a false "changed key"
-//! warning — the connection just falls through to the unknown-host confirmation.
-//!
-//! The parser **never rewrites** the file: [`append_trusted`] only appends a
-//! single new line, preserving every existing line (comments, hashed entries, CA
-//! and revoked markers) byte-for-byte.
-//!
-//! SHA-1 / HMAC-SHA1 / base64 are hand-rolled here rather than pulled in as
-//! dependencies: it keeps host-key matching self-contained and unit-testable
-//! against RFC vectors, and the volume (one HMAC per known_hosts line at connect
-//! time) is trivial.
-
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use russh::keys::ssh_key::{HashAlg, PublicKey};
 
-/// The outcome of checking a presented host key against `known_hosts`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostKeyStatus {
-    /// An entry for this host + key type matches this exact key: trusted.
     Known,
-    /// No entry for this host + key type: a first connection (confirm + maybe add).
     Unknown,
-    /// An entry for this host + key type exists but the key differs: possible MITM.
-    Changed {
-        /// SHA256 fingerprint of the stored (old) key, for the warning UI.
-        old_fingerprint_sha256: String,
-    },
-    /// A matching `@revoked` line: reject hard, never offer to trust.
+    Changed { old_fingerprint_sha256: String },
     Revoked,
 }
 
-/// The default OpenSSH user known_hosts path, `~/.ssh/known_hosts`.
 pub fn default_path() -> Option<PathBuf> {
     home_dir().map(|h| h.join(".ssh").join("known_hosts"))
 }
@@ -55,8 +29,6 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// The host token OpenSSH keys a `known_hosts` entry under: the bare host for the
-/// default port 22, else the bracketed `[host]:port` form.
 pub fn host_token(host: &str, port: u16) -> String {
     if port == 22 {
         host.to_string()
@@ -65,7 +37,6 @@ pub fn host_token(host: &str, port: u16) -> String {
     }
 }
 
-/// Check `host:port`'s presented `key` against the default known_hosts file.
 pub fn check(host: &str, port: u16, key: &PublicKey) -> HostKeyStatus {
     match default_path() {
         Some(path) => check_in_file(&path, host, port, key),
@@ -73,8 +44,6 @@ pub fn check(host: &str, port: u16, key: &PublicKey) -> HostKeyStatus {
     }
 }
 
-/// Check against a specific file (the testable core of [`check`]). A missing or
-/// unreadable file means "no entries" → `Unknown`.
 pub fn check_in_file(path: &Path, host: &str, port: u16, key: &PublicKey) -> HostKeyStatus {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -83,15 +52,10 @@ pub fn check_in_file(path: &Path, host: &str, port: u16, key: &PublicKey) -> Hos
     check_in_str(&contents, host, port, key)
 }
 
-/// Trust decision over the text of a known_hosts file. Split out so the matcher
-/// is unit-testable against fixture strings without touching the filesystem.
 pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> HostKeyStatus {
     let token = host_token(host, port);
     let our_alg = key.algorithm();
 
-    // First pass — revocation wins outright. A `@revoked` line matching this exact
-    // key anywhere in the file rejects it, even if a trusted line for the same
-    // host+key appears earlier: a revoked key must never read as trusted.
     for line in contents.lines() {
         let Some(entry) = KnownHostsLine::parse(line) else {
             continue;
@@ -106,7 +70,6 @@ pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> H
         }
     }
 
-    // Second pass — normal known/changed resolution (revocation already handled).
     let mut changed: Option<String> = None;
     let mut changed_other_alg: Option<String> = None;
     for line in contents.lines() {
@@ -117,20 +80,11 @@ pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> H
             continue;
         }
         match entry.marker {
-            // A host-CA line certifies keys signed by this CA; russh doesn't do
-            // host-cert verification here, so skip rather than mis-flag it as a
-            // changed key (PRD §3.4). Falls through to Unknown → confirm.
             Some(Marker::CertAuthority) => continue,
-            // Revocation was resolved in the first pass; ignore here.
             Some(Marker::Revoked) => continue,
             None => {
                 let Some(stored) = entry.key() else { continue };
                 if stored.algorithm() != our_alg {
-                    // The host is known, just via a different key type. If no
-                    // same-type line resolves this below, report Changed, like
-                    // OpenSSH: a MITM can present a key of an algorithm absent
-                    // from the file precisely to downgrade the changed-key
-                    // warning to a benign first-connect prompt.
                     if changed_other_alg.is_none() {
                         changed_other_alg = Some(fingerprint_sha256(&stored));
                     }
@@ -139,9 +93,6 @@ pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> H
                 if &stored == key {
                     return HostKeyStatus::Known;
                 }
-                // Same host + key type, different key: a candidate "changed"
-                // result — but keep scanning in case a later line matches
-                // exactly (a host can list several keys of the same type).
                 if changed.is_none() {
                     changed = Some(fingerprint_sha256(&stored));
                 }
@@ -157,9 +108,6 @@ pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> H
     }
 }
 
-/// Append a trust line for `host:port` + `key` to the default known_hosts file,
-/// creating `~/.ssh` (mode 0700) and the file (0600) if needed. Never rewrites
-/// existing lines — a plain append.
 pub fn append_trusted(host: &str, port: u16, key: &PublicKey) -> std::io::Result<()> {
     let path = default_path().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "no home dir for known_hosts")
@@ -167,7 +115,6 @@ pub fn append_trusted(host: &str, port: u16, key: &PublicKey) -> std::io::Result
     append_trusted_to(&path, host, port, key)
 }
 
-/// The testable core of [`append_trusted`]: append to a specific path.
 pub fn append_trusted_to(
     path: &Path,
     host: &str,
@@ -185,16 +132,12 @@ pub fn append_trusted_to(
     let key_openssh = key
         .to_openssh()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    // `to_openssh` yields `<algo> <base64>` (with the key's comment, if any). Take
-    // just the algo + base64 so the appended line is a clean host entry.
     let mut parts = key_openssh.split_whitespace();
     let algo = parts.next().unwrap_or_default();
     let b64 = parts.next().unwrap_or_default();
     let token = host_token(host, port);
     let line = format!("{token} {algo} {b64}\n");
 
-    // Make sure we start on a fresh line so we never join onto a file that lacks a
-    // trailing newline (which would corrupt the last existing entry).
     let needs_leading_newline = match std::fs::read(path) {
         Ok(bytes) => !bytes.is_empty() && bytes.last() != Some(&b'\n'),
         Err(_) => false,
@@ -215,15 +158,12 @@ pub fn append_trusted_to(
     Ok(())
 }
 
-/// SHA256 fingerprint of a public key in OpenSSH `SHA256:base64` form.
 pub fn fingerprint_sha256(key: &PublicKey) -> String {
     key.fingerprint(HashAlg::Sha256).to_string()
 }
 
 pub use crate::daemon::protocol::{KnownHostEntry, KnownHostId};
 
-/// List every parseable entry in the default `known_hosts` file, in file order.
-/// A missing/unreadable file lists as empty.
 pub fn list() -> Vec<KnownHostEntry> {
     match default_path() {
         Some(path) => match std::fs::read_to_string(&path) {
@@ -234,7 +174,6 @@ pub fn list() -> Vec<KnownHostEntry> {
     }
 }
 
-/// The testable core of [`list`]: parse entries out of file text.
 pub fn list_in_str(contents: &str) -> Vec<KnownHostEntry> {
     let mut out = Vec::new();
     for line in contents.lines() {
@@ -263,10 +202,6 @@ pub fn list_in_str(contents: &str) -> Vec<KnownHostEntry> {
     out
 }
 
-/// Delete the entry matching `id` from the default `known_hosts` file. Every
-/// other line — comments, blanks, unrelated entries, and the file's exact line
-/// endings — is preserved verbatim. A no-op (Ok) when the file is absent or the
-/// entry isn't found.
 pub fn delete(id: &KnownHostId) -> std::io::Result<()> {
     let Some(path) = default_path() else {
         return Ok(());
@@ -274,7 +209,6 @@ pub fn delete(id: &KnownHostId) -> std::io::Result<()> {
     delete_in_file(&path, id)
 }
 
-/// The testable core of [`delete`]: rewrite `path` without the matching entry.
 pub fn delete_in_file(path: &Path, id: &KnownHostId) -> std::io::Result<()> {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -285,11 +219,6 @@ pub fn delete_in_file(path: &Path, id: &KnownHostId) -> std::io::Result<()> {
     if !removed {
         return Ok(());
     }
-    // Write a sibling temp then rename over the original: an in-place truncating
-    // write would leave a truncated known_hosts behind a crash mid-write. (A
-    // concurrent O_APPEND from another connection's TOFU accept can still be
-    // lost to the read-modify-write window — data-loss only; a lost entry fails
-    // toward re-prompting, never toward trusting.)
     let tmp = path.with_extension("tty7-tmp");
     std::fs::write(&tmp, new_contents)?;
     #[cfg(unix)]
@@ -302,18 +231,11 @@ pub fn delete_in_file(path: &Path, id: &KnownHostId) -> std::io::Result<()> {
     })
 }
 
-/// Remove the line matching `id` from `contents`, preserving all other lines and
-/// their exact terminators byte-for-byte. Returns the new text and whether a line
-/// was removed. Only the first matching line is dropped (ids are unique in
-/// practice).
 pub fn delete_in_str(contents: &str, id: &KnownHostId) -> (String, bool) {
     let mut out = String::with_capacity(contents.len());
     let mut removed = false;
-    // Split keeping terminators so we never alter unrelated bytes (CRLF, a
-    // missing final newline, blank lines, comment spacing).
     for segment in split_keep_terminators(contents) {
         if !removed {
-            // Match against the line's text without its terminator/leading space.
             let line = segment.trim_end_matches(['\n', '\r']);
             if let Some(entry) = KnownHostsLine::parse(line) {
                 if entry.hosts == id.host
@@ -330,9 +252,6 @@ pub fn delete_in_str(contents: &str, id: &KnownHostId) -> (String, bool) {
     (out, removed)
 }
 
-/// Split text into segments that each still carry their trailing `\n` (and any
-/// `\r`), so rejoining is byte-identical to the input. The final segment has no
-/// terminator when the file doesn't end in a newline.
 fn split_keep_terminators(text: &str) -> Vec<&str> {
     let mut segments = Vec::new();
     let mut start = 0;
@@ -355,8 +274,6 @@ enum Marker {
     Revoked,
 }
 
-/// One parsed known_hosts line: an optional marker, the host field (raw), and the
-/// key type + base64 blob. Comment/whitespace/blank lines parse to `None`.
 struct KnownHostsLine<'a> {
     marker: Option<Marker>,
     hosts: &'a str,
@@ -377,7 +294,6 @@ impl<'a> KnownHostsLine<'a> {
             marker = Some(match m {
                 "cert-authority" => Marker::CertAuthority,
                 "revoked" => Marker::Revoked,
-                // Unknown marker: skip the whole line rather than misinterpret it.
                 _ => return None,
             });
             rest = tail.trim_start();
@@ -385,7 +301,6 @@ impl<'a> KnownHostsLine<'a> {
         let (hosts, tail) = rest.split_once(char::is_whitespace)?;
         let tail = tail.trim_start();
         let (keytype, keyblob) = tail.split_once(char::is_whitespace)?;
-        // The blob may carry a trailing comment; keep only the base64 token.
         let keyblob = keyblob.split_whitespace().next().unwrap_or(keyblob);
         Some(Self {
             marker,
@@ -395,22 +310,10 @@ impl<'a> KnownHostsLine<'a> {
         })
     }
 
-    /// Reconstruct the stored public key (`<type> <base64>`), or `None` if it
-    /// doesn't parse (an entry we can't compare against).
     fn key(&self) -> Option<PublicKey> {
         PublicKey::from_openssh(&format!("{} {}", self.keytype, self.keyblob)).ok()
     }
 
-    /// Does this line's host field cover `token`? Handles plaintext host lists
-    /// (comma-separated), OpenSSH glob patterns (`*` / `?`), `!` negations, and
-    /// the `|1|salt|hash` hashed form.
-    ///
-    /// OpenSSH semantics: the field is a comma-separated pattern list; a leading
-    /// `!` negates. If *any* negated pattern matches the host, the line does not
-    /// apply at all (even when a positive pattern also matches); otherwise the
-    /// line applies iff at least one positive pattern matches. Hostname matching
-    /// is case-insensitive. A hashed entry carries exactly one host and never
-    /// globs.
     fn matches_host(&self, token: &str) -> bool {
         let mut matched = false;
         for pattern in self.hosts.split(',') {
@@ -429,8 +332,6 @@ impl<'a> KnownHostsLine<'a> {
             };
             if hit {
                 if negated {
-                    // A negated match disqualifies the whole line, regardless of
-                    // any positive match elsewhere on it.
                     return false;
                 }
                 matched = true;
@@ -440,10 +341,6 @@ impl<'a> KnownHostsLine<'a> {
     }
 }
 
-/// Match a single OpenSSH host pattern (which may contain `*` / `?` wildcards)
-/// against a host token, case-insensitively. `*` matches any run of characters
-/// (including empty), `?` matches exactly one character — OpenSSH's `match_pattern`
-/// glob, not a regex. Wildcard-free patterns are a plain case-insensitive compare.
 fn host_glob_matches(pattern: &str, token: &str) -> bool {
     if !pattern.as_bytes().iter().any(|&b| b == b'*' || b == b'?') {
         return pattern.eq_ignore_ascii_case(token);
@@ -451,8 +348,6 @@ fn host_glob_matches(pattern: &str, token: &str) -> bool {
     glob_match(pattern.as_bytes(), token.as_bytes())
 }
 
-/// Iterative backtracking glob for `*`/`?`, ASCII-case-insensitive (host names
-/// fold case in OpenSSH). Linear-ish with a single backtrack pointer for `*`.
 fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
     let (mut p, mut t) = (0usize, 0usize);
     let mut star: Option<usize> = None;
@@ -466,7 +361,6 @@ fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
             star_t = t;
             p += 1;
         } else if let Some(sp) = star {
-            // Backtrack: let the last `*` swallow one more character.
             p = sp + 1;
             star_t += 1;
             t = star_t;
@@ -480,8 +374,6 @@ fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
     p == pattern.len()
 }
 
-/// Check a `|1|salt|hash` hashed-host field (base64 salt + base64 HMAC-SHA1)
-/// against a host token: OpenSSH stores `HMAC-SHA1(key=salt, msg=token)`.
 fn hashed_host_matches(hashed: &str, token: &str) -> bool {
     let Some((salt_b64, hash_b64)) = hashed.split_once('|') else {
         return false;
@@ -491,8 +383,6 @@ fn hashed_host_matches(hashed: &str, token: &str) -> bool {
     };
     hmac_sha1(&salt, token.as_bytes()).as_slice() == hash.as_slice()
 }
-
-// --- SHA-1 (FIPS 180-1) --------------------------------------------------
 
 fn sha1(data: &[u8]) -> [u8; 20] {
     let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
@@ -571,8 +461,6 @@ fn hmac_sha1(key: &[u8], msg: &[u8]) -> [u8; 20] {
     sha1(&outer)
 }
 
-// --- standard base64 decode (for the hashed-host salt/hash fields) -------
-
 fn base64_decode(s: &str) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u8> {
         match c {
@@ -619,7 +507,6 @@ mod tests {
 
     #[test]
     fn hmac_sha1_matches_rfc2202_vector() {
-        // RFC 2202 test case 1: key = 0x0b*20, data = "Hi There".
         let key = [0x0bu8; 20];
         assert_eq!(
             hex(&hmac_sha1(&key, b"Hi There")),
@@ -629,7 +516,6 @@ mod tests {
 
     #[test]
     fn base64_decode_round_trips_openssh_salt() {
-        // "hello" -> aGVsbG8=
         assert_eq!(base64_decode("aGVsbG8=").unwrap(), b"hello");
         assert_eq!(base64_decode("").unwrap(), b"");
     }
@@ -640,7 +526,6 @@ mod tests {
         assert_eq!(host_token("example.com", 2222), "[example.com]:2222");
     }
 
-    // A fixed ed25519 public key and a second, different one, both valid OpenSSH.
     const KEY_A: &str =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPXO/kBX63iuiTczoR6uNdl3wAFK7tGWz70jCKkKlw5r";
     const KEY_B: &str =
@@ -672,16 +557,12 @@ mod tests {
 
     #[test]
     fn different_key_type_for_a_known_host_reports_changed_not_unknown() {
-        // The host is known via ed25519 only; a presented ECDSA key must raise
-        // the changed-key warning, not the benign first-connect prompt — a MITM
-        // can pick an algorithm absent from the file to get the softer dialog.
         const KEY_ECDSA: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCdv5xfuuCGyVbYZSTqcFjQWE7YtIsx8fqlXF1+v728j1RUnELLVrmgsC6gZ0zObXAzJ39JEynaQv9tf/v16V58=";
         let file = format!("example.com {KEY_A}\n");
         match check_in_str(&file, "example.com", 22, &key(KEY_ECDSA)) {
             HostKeyStatus::Changed { .. } => {}
             other => panic!("expected Changed, got {other:?}"),
         }
-        // A same-type exact match elsewhere still wins over the mismatch.
         let file = format!("example.com {KEY_A}\nexample.com {KEY_ECDSA}\n");
         assert_eq!(
             check_in_str(&file, "example.com", 22, &key(KEY_ECDSA)),
@@ -697,7 +578,6 @@ mod tests {
             check_in_str(&file, "example.com", 2222, &ka),
             HostKeyStatus::Known
         );
-        // Same host on the default port is a different token → unknown.
         assert_eq!(
             check_in_str(&file, "example.com", 22, &ka),
             HostKeyStatus::Unknown
@@ -716,8 +596,6 @@ mod tests {
 
     #[test]
     fn revoked_takes_precedence_over_an_earlier_trusted_line() {
-        // A trusted line for the exact key appears FIRST, then a `@revoked` line
-        // for the same host+key. Revocation must win — the key is never trusted.
         let ka = key(KEY_A);
         let file = format!("example.com {KEY_A}\n@revoked example.com {KEY_A}\n");
         assert_eq!(
@@ -729,8 +607,6 @@ mod tests {
     #[test]
     fn cert_authority_line_is_skipped_not_flagged_as_changed() {
         let ka = key(KEY_A);
-        // A CA line whose key differs from the presented key must NOT read as
-        // "changed" — it should fall through to Unknown.
         let file = format!("@cert-authority example.com {KEY_B}\n");
         assert_eq!(
             check_in_str(&file, "example.com", 22, &ka),
@@ -750,10 +626,8 @@ mod tests {
 
     #[test]
     fn hashed_host_matches_via_hmac_sha1() {
-        // Build a hashed entry the way OpenSSH would: salt is arbitrary bytes,
-        // hash = HMAC-SHA1(salt, token). Encode both with our base64.
         let token = "example.com";
-        let salt = b"0123456789abcdef1234"; // 20 bytes
+        let salt = b"0123456789abcdef1234";
         let hash = hmac_sha1(salt, token.as_bytes());
         let line = format!("|1|{}|{} {KEY_A}\n", b64(salt), b64(&hash),);
         let ka = key(KEY_A);
@@ -772,16 +646,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tty7-kh-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("known_hosts");
-        // Pre-seed a file WITHOUT a trailing newline to prove we don't corrupt it.
         std::fs::write(&path, format!("first.com {KEY_B}")).unwrap();
 
         let ka = key(KEY_A);
         append_trusted_to(&path, "example.com", 2222, &ka).unwrap();
 
         let contents = std::fs::read_to_string(&path).unwrap();
-        // The original line is intact...
         assert!(contents.contains(&format!("first.com {KEY_B}")));
-        // ...and the new host is trusted at its bracketed token.
         assert_eq!(
             check_in_str(&contents, "example.com", 2222, &ka),
             HostKeyStatus::Known
@@ -801,7 +672,6 @@ mod tests {
             check_in_str(&file, "a.b.example.com", 22, &ka),
             HostKeyStatus::Known
         );
-        // `*` does not cross into a different domain suffix.
         assert_eq!(
             check_in_str(&file, "web1.example.org", 22, &ka),
             HostKeyStatus::Unknown
@@ -813,7 +683,6 @@ mod tests {
         let ka = key(KEY_A);
         let file = format!("host? {KEY_A}\n");
         assert_eq!(check_in_str(&file, "host1", 22, &ka), HostKeyStatus::Known);
-        // `?` is exactly one char — "host" (zero) and "host12" (two) don't match.
         assert_eq!(check_in_str(&file, "host", 22, &ka), HostKeyStatus::Unknown);
         assert_eq!(
             check_in_str(&file, "host12", 22, &ka),
@@ -824,8 +693,6 @@ mod tests {
     #[test]
     fn negated_pattern_disqualifies_the_line() {
         let ka = key(KEY_A);
-        // Matches the whole domain except the negated host — even though the
-        // positive `*.example.com` would otherwise cover it.
         let file = format!("*.example.com,!secret.example.com {KEY_A}\n");
         assert_eq!(
             check_in_str(&file, "web.example.com", 22, &ka),
@@ -871,8 +738,6 @@ mod tests {
 
     #[test]
     fn delete_removes_only_the_matching_entry_byte_for_byte() {
-        // A file with CRLF, a comment, a blank line, and no trailing newline on
-        // the last entry — deletion must preserve every unrelated byte.
         let contents =
             format!("# my hosts\r\nkeep.example.com {KEY_B}\n\ndrop.example.com {KEY_A}");
         let entries = list_in_str(&contents);
@@ -884,10 +749,8 @@ mod tests {
             .clone();
         let (after, removed) = delete_in_str(&contents, &target);
         assert!(removed);
-        // Everything except the dropped line is preserved exactly.
         let expected = format!("# my hosts\r\nkeep.example.com {KEY_B}\n\n");
         assert_eq!(after, expected);
-        // And the dropped host is now unknown.
         let ka = key(KEY_A);
         assert_eq!(
             check_in_str(&after, "drop.example.com", 22, &ka),
@@ -923,7 +786,6 @@ mod tests {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    // A minimal standard-base64 encoder for the test fixtures only.
     fn b64(data: &[u8]) -> String {
         const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut out = String::new();

@@ -1,34 +1,3 @@
-//! A per-machine mirror of each daemon's workspace tree, for the surfaces that
-//! read *about* workspaces without showing them.
-//!
-//! The machine's tree is the layout authority, so anything the client used to
-//! answer from its own saved layout — a picker row's name, the "3 panes"
-//! count, which pane ids a workspace claims — has to come from the tree now.
-//! The windows that *show* a workspace already hold a per-window mirror
-//! ([`crate::ui::tree_sync`]); this global is the read model for everything
-//! else: the switcher, the Window menu, the title bar, the liveness sweep.
-//!
-//! # How it stays current
-//!
-//! One [`Machine`] per [`HostId`], filled by a `MachineGet` when a machine's
-//! control link comes up and advanced from there by the same
-//! [`LayoutDelta`] stream the windows consume — plus
-//! [`note_synced_workspace`], because origin exclusion means this client never
-//! hears its **own** operations back, and the per-window mirror they advanced
-//! is the only other record of what they did.
-//!
-//! A delta that will not apply (a machine the pull has not answered for yet, a
-//! tab it never heard of) marks nothing broken: the mirror re-pulls the whole
-//! machine, exactly like a drifted window does.
-//!
-//! # It may be behind, and that is allowed
-//!
-//! Against the local daemon the first pull lands within milliseconds of
-//! launch, so the picker's loading gap is about one frame. A machine that is
-//! unreachable keeps its last pulled state for the rest of the process — stale
-//! names beat no names — and a machine never reached this session simply has
-//! no entry, which readers render as the not-knowing they are in.
-
 use std::collections::HashMap;
 
 use gpui::{App, Global};
@@ -38,38 +7,24 @@ use tty7_core::host::HostId;
 
 use crate::core::session::WorkspaceId;
 
-/// Every machine's last known tree, by the machine.
 #[derive(Default)]
 pub struct MachineMirrors {
     machines: HashMap<HostId, Machine>,
-    /// Hosts with a `MachineGet` in flight, so a burst of triggers costs one
-    /// round trip.
     pulling: Vec<HostId>,
 }
 
 impl Global for MachineMirrors {}
 
 impl MachineMirrors {
-    /// The last pulled tree for `host`, or `None` when no pull has answered
-    /// yet this session. Read-only; renders may call it every frame.
     pub fn machine(cx: &App, host: HostId) -> Option<&Machine> {
         cx.try_global::<Self>()?.machines.get(&host)
     }
 
-    /// Whether `host`'s tree has been pulled at all — the "loading" /
-    /// "known but empty" distinction a picker wants to draw.
     pub fn ready(cx: &App, host: HostId) -> bool {
         Self::machine(cx, host).is_some()
     }
 
-    /// Pull `host`'s whole tree in the background and install it. Cheap to
-    /// call whenever a link comes up or a delta refuses to apply; concurrent
-    /// triggers coalesce into one round trip.
     pub fn refresh(cx: &mut App, host: HostId) {
-        // A peer that does not advertise `machine-tree` (a server with no
-        // home directory for one) has no tree to pull; asking anyway costs a
-        // round trip per trigger to hear the same refusal. Reads keep their
-        // "never pulled" answer, which renders as not knowing.
         let client = match crate::ui::tree_sync::tree_control_for(cx, host) {
             crate::ui::tree_sync::TreeLink::Ready(client) => client,
             crate::ui::tree_sync::TreeLink::Unserved => {
@@ -112,23 +67,11 @@ impl MachineMirrors {
         .detach();
     }
 
-    /// Install a freshly pulled tree — for the paths that already hold one
-    /// (a window's hydration pulls `MachineGet` anyway).
-    ///
-    /// Repaints, like [`refresh`](Self::refresh)'s landing does: every workspace
-    /// name, pane count and liveness dot on screen reads this global, and a
-    /// pull that lands without a repaint leaves the chrome a frame (or, on a
-    /// quiet screen, indefinitely) behind the tree it is describing.
     pub fn install(cx: &mut App, host: HostId, machine: Machine) {
         cx.default_global::<Self>().machines.insert(host, machine);
         cx.refresh_windows();
     }
 
-    /// Advance `host`'s mirror by one delta about the workspace `key` names.
-    ///
-    /// A delta that names state the mirror does not hold re-pulls the machine
-    /// whole; a delta arriving before the first pull is dropped, because that
-    /// pull's answer already includes it.
     pub fn apply_delta(cx: &mut App, host: HostId, key: &str, delta: &LayoutDelta) {
         let Ok(id) = key.parse::<WorkspaceId>() else {
             return;
@@ -143,10 +86,6 @@ impl MachineMirrors {
         }
     }
 
-    /// Record the post-state of this client's own operations on `machine_ws` —
-    /// the half of the history origin exclusion keeps out of the delta stream.
-    /// A workspace the mirror has not seen is created; `None` tabs leave the
-    /// structure alone (a label-only op).
     pub fn note_synced_workspace(
         cx: &mut App,
         host: HostId,
@@ -171,9 +110,6 @@ impl MachineMirrors {
         ws.active_tab = active;
     }
 
-    /// Fold in a workspace-level operation this client just fired
-    /// ([`crate::ui::tree_sync::fire_workspace_op`]) — same reason as
-    /// [`note_synced_workspace`]: the writer never hears its own echo.
     pub fn note_workspace_op(cx: &mut App, host: HostId, request: &ControlRequest) {
         let Some(machine) = cx.default_global::<Self>().machines.get_mut(&host) else {
             return;
@@ -197,10 +133,7 @@ impl MachineMirrors {
     }
 }
 
-/// Advance one machine's copy by one delta. `false` means the delta names
-/// state the mirror does not hold and the caller should re-pull.
 fn apply(machine: &mut Machine, workspace: WorkspaceId, delta: &LayoutDelta) -> bool {
-    // The two deltas that do not require the workspace to exist yet.
     match delta {
         LayoutDelta::WorkspaceCreated { workspace: ws } => {
             machine.workspaces.retain(|w| w.id != ws.id);
@@ -211,9 +144,6 @@ fn apply(machine: &mut Machine, workspace: WorkspaceId, delta: &LayoutDelta) -> 
             machine.workspaces.retain(|w| w.id != workspace);
             return true;
         }
-        // Facts about a pane are registry-wide; the workspace key only says
-        // who referenced it. Upserted rather than matched, because the record
-        // may have been born from another client's op this mirror never saw.
         LayoutDelta::PaneFacts { pane } => {
             match machine.panes.iter_mut().find(|p| p.id == pane.id) {
                 Some(record) => *record = pane.clone(),
@@ -243,10 +173,6 @@ fn apply(machine: &mut Machine, workspace: WorkspaceId, delta: &LayoutDelta) -> 
             true
         }
         LayoutDelta::TabCreated { at, tab } => {
-            // Deltas and full pulls have no ordering barrier: a create that
-            // straddles a pull arrives *after* the snapshot that already
-            // carries its tab. Replace-by-id (the `WorkspaceCreated` retain
-            // above is the precedent) rather than insert twice.
             ws.tabs.retain(|t| t.id != tab.id);
             let at = (*at).min(ws.tabs.len());
             ws.tabs.insert(at, tab.clone());
@@ -310,13 +236,6 @@ fn apply(machine: &mut Machine, workspace: WorkspaceId, delta: &LayoutDelta) -> 
     }
 }
 
-// ---------------------------------------------------------------------------
-// Reading a client entry's display facts off its machine's mirror
-// ---------------------------------------------------------------------------
-
-/// The tree workspace a client entry points at, with the pane registry it
-/// reads records from. `None` while the machine has not been pulled (or no
-/// longer lists the workspace).
 fn view_of<'a>(
     cx: &'a App,
     entry: &crate::core::session::WindowView,
@@ -327,16 +246,6 @@ fn view_of<'a>(
     Some((ws, &machine.panes))
 }
 
-/// What the picker and the window title call `entry`: the user-set name, else
-/// derived from the tree's repo groups and cwds.
-///
-/// Falls back to
-/// [`WindowView::label`](crate::core::session::WindowView::label) — what the
-/// machine last said, before it
-/// stopped answering. The tree wins whenever it answers; the hint is for the
-/// rows the picker exists to offer, on machines that are asleep. `None` only
-/// when this client has never seen the workspace named at all, which is a
-/// brand-new entry and nothing a user is choosing between.
 pub fn display_name(cx: &App, entry: &crate::core::session::WindowView) -> Option<String> {
     match view_of(cx, entry) {
         Some((ws, panes)) => Some(display_name_of(ws, panes)),
@@ -344,8 +253,6 @@ pub fn display_name(cx: &App, entry: &crate::core::session::WindowView) -> Optio
     }
 }
 
-/// A tree workspace's label: the user-set name, else the repository most of
-/// its tabs live in, else the first pane's directory, else `"Untitled"`.
 pub fn display_name_of(ws: &Workspace, panes: &[PaneRecord]) -> String {
     if let Some(name) = ws.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
         return name.to_string();
@@ -360,9 +267,6 @@ pub fn display_name_of(ws: &Workspace, panes: &[PaneRecord]) -> String {
         .unwrap_or_else(|| "Untitled".to_string())
 }
 
-/// The path a workspace is *about*: the repo group most tabs belong to (ties
-/// toward the earliest tab), else the first pane's cwd. What the picker's dim
-/// subtitle shows, and what [`display_name_of`] takes the basename of.
 pub fn subject_path_of(ws: &Workspace, panes: &[PaneRecord]) -> Option<String> {
     let mut counts: Vec<(&str, usize)> = Vec::new();
     for group in ws.tabs.iter().filter_map(|t| t.sidebar_group.as_deref()) {
@@ -385,15 +289,11 @@ pub fn subject_path_of(ws: &Workspace, panes: &[PaneRecord]) -> Option<String> {
     dominant.or(first_cwd).map(str::to_string)
 }
 
-/// [`display_name`] looked up by the client's workspace id, with the shared
-/// not-knowing fallback — for the sites that hold an id rather than an entry.
 pub fn display_name_for(cx: &App, client_ws: WorkspaceId) -> Option<String> {
     let entry = crate::core::session::WorkspaceStore::all(cx).get(client_ws)?;
     display_name(cx, entry)
 }
 
-/// [`subject_path_of`] for a client entry, falling back to the stamped hint for
-/// the same reason [`display_name`] does.
 pub fn subject_path(cx: &App, entry: &crate::core::session::WindowView) -> Option<String> {
     match view_of(cx, entry) {
         Some((ws, panes)) => subject_path_of(ws, panes).or_else(|| entry.subject.clone()),
@@ -401,10 +301,6 @@ pub fn subject_path(cx: &App, entry: &crate::core::session::WindowView) -> Optio
     }
 }
 
-/// The pair a client entry should carry on file, read off its machine's mirror —
-/// for [`WorkspaceStore::record_geometry`](crate::core::session::WorkspaceStore::record_geometry)
-/// to stamp. `None` for a machine that has not answered: a hint is only ever
-/// replaced by something better, never blanked by not knowing.
 pub fn display_hint(
     cx: &App,
     entry: &crate::core::session::WindowView,
@@ -413,22 +309,15 @@ pub fn display_hint(
     Some((display_name_of(ws, panes), subject_path_of(ws, panes)))
 }
 
-/// Every pane id `entry`'s tree claims on its machine. `None` when the
-/// machine's tree has not been pulled — which a caller about to state a fact
-/// ("3 running sessions will be ended") must render as not knowing, not as
-/// zero.
 pub fn pane_ids(cx: &App, entry: &crate::core::session::WindowView) -> Option<Vec<u64>> {
     let (ws, _) = match view_of(cx, entry) {
         Some(view) => view,
-        // A pulled machine that no longer lists the workspace *is* an answer:
-        // it claims nothing.
         None if MachineMirrors::ready(cx, entry.host_id()) => return Some(Vec::new()),
         None => return None,
     };
     Some(ws.tabs.iter().flat_map(|t| t.root.pane_ids()).collect())
 }
 
-/// How many terminals `entry` holds across every tab, per its machine's tree.
 pub fn pane_count(cx: &App, entry: &crate::core::session::WindowView) -> Option<usize> {
     pane_ids(cx, entry).map(|ids| ids.len())
 }
@@ -450,11 +339,6 @@ mod tests {
         Tab::leaf(pane)
     }
 
-    /// A machine that is not answering still has to produce a row a user can
-    /// choose: the picker's whole job is offering workspaces on machines that
-    /// are asleep, and "Untitled" with a blank subtitle is not an offer. So the
-    /// stamped hint stands in until a pull lands, and the tree wins the moment
-    /// one does.
     #[gpui::test]
     fn an_unpulled_machine_falls_back_to_the_stamped_label(cx: &mut gpui::TestAppContext) {
         use crate::core::session::{WindowView, WindowViews, WorkspaceStore};
@@ -473,7 +357,6 @@ mod tests {
                 },
             );
 
-            // Nothing pulled: the hint is what the row says.
             assert_eq!(display_name(cx, &entry).as_deref(), Some("api"));
             assert_eq!(subject_path(cx, &entry).as_deref(), Some("/repo/api"));
             assert!(
@@ -481,7 +364,6 @@ mod tests {
                 "and a machine that has not answered contributes no new hint"
             );
 
-            // The tree answers, and outranks it.
             let mut tree = Workspace {
                 id,
                 name: Some("web".into()),
@@ -553,9 +435,6 @@ mod tests {
         );
     }
 
-    /// Deltas and full pulls have no ordering barrier: a `TabCreated` that
-    /// straddles a `MachineGet` arrives after a snapshot that already carries
-    /// its tab. Applying it must replace by id, not insert a second copy.
     #[test]
     fn a_tab_created_delta_that_straddled_a_pull_lands_once() {
         let ws = Workspace::default();
@@ -590,7 +469,6 @@ mod tests {
             ),
             "an unappliable delta must say so, so the caller re-pulls"
         );
-        // …and so does one about a workspace the machine does not list.
         assert!(!apply(
             &mut machine,
             WorkspaceId::new(),
@@ -620,8 +498,6 @@ mod tests {
         assert!(machine.panes[0].live);
     }
 
-    /// The precedence `Workspace::display_name` always had, read off the tree:
-    /// user name, then the dominant repo group, then the first pane's cwd.
     #[test]
     fn display_names_derive_from_the_tree_with_the_session_precedence() {
         let mut ws = Workspace::default();

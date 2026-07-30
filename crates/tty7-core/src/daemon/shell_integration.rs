@@ -1,84 +1,6 @@
-//! Shell integration: inject a small startup snippet into the shell tty7 spawns
-//! so the shell *actively reports* its state — prompt boundaries, command
-//! start/finish, exit codes, and cwd — instead of us guessing from the outside.
-//!
-//! This is the foundation the inline input editor builds on. The reporting
-//! protocol is the FinalTerm / iTerm2 **OSC 133** semantic-prompt standard, so it
-//! interoperates with the wider ecosystem rather than a bespoke scheme:
-//!   - `OSC 133 ; A ST`            prompt start
-//!   - `OSC 133 ; B ST`            prompt end / command input begins
-//!   - `OSC 133 ; C [; <cmd>] ST`  command output begins; all four integrations
-//!     append the submitted command line percent-encoded (tty7 extension — the
-//!     Windows coding-agent detection input, see `core::cli_agent`)
-//!   - `OSC 133 ; D ; <exit> ST`   command finished, with its exit code
-//!   - `OSC 133 ; V ; 0/1 ST`      tty7 extension: shell edit mode
-//!
-//! plus `OSC 7` to report the cwd precisely (many login shells don't emit it
-//! unless they think they're in Terminal.app).
-//!
-//! Supports zsh, bash, fish and PowerShell; each needs a different injection
-//! mechanism because the shells disagree on how much control they hand an
-//! integrator:
-//!   - **zsh** has `ZDOTDIR`, an env var that retargets *all* of its startup
-//!     files at once — the cleanest hook of the four. See [`zsh_redirectors`].
-//!   - **fish** has no such redirect, but its `-C`/`--init-command` flag runs
-//!     extra commands after fish's own (unmodified) config load — no throwaway
-//!     directory needed at all. See [`setup_fish`].
-//!   - **bash** has neither: no env var retargets its rc file, and `--rcfile`
-//!     (the only override it does have) is silently ignored for *login*
-//!     shells, which is how terminals normally spawn it. So we spawn bash as a
-//!     plain non-login shell instead and have our rcfile manually replay the
-//!     login-shell startup-file chain (`/etc/profile`, `~/.bash_profile` &
-//!     co.) before layering hooks on top — see [`setup_bash`] and
-//!     [`Injection::replaces_argv`]. Bash also has no native precmd/preexec,
-//!     so the hook body vendors the relevant parts of
-//!     [bash-preexec](https://github.com/rcaloras/bash-preexec) (MIT), the
-//!     same shim VS Code relies on for this. This path covers Git Bash too —
-//!     the msys2 bash Git for Windows ships is spawned as `bash.exe` by
-//!     absolute path, and needs only its rcfile path spelled with forward
-//!     slashes (see [`bash_path`]).
-//!   - **WSL** is not a shell but a launcher: `wsl.exe` starts a shell *inside*
-//!     a distro, so the integration has to reach through it. We probe the
-//!     distro's login shell, write the matching rcfile on the Windows side, and
-//!     pass its path in via `WSLENV`, which translates it to the distro's view
-//!     of the filesystem. See [`setup_wsl`]. Only bash is wired up so far.
-//!   - **PowerShell** (the Windows default, and any `pwsh`) has no dotfile
-//!     redirect either, but `-EncodedCommand` runs a script *after* its own
-//!     profiles load — like fish's `-C`, no file on disk. It has no
-//!     precmd/preexec, so — following VS Code — the body wraps two
-//!     host hooks: the `prompt` function (for the A/B/D marks + cwd) and
-//!     `PSConsoleHostReadLine`, PSReadLine's line reader (the closest thing to
-//!     a preexec, for the C mark). See [`setup_powershell`].
-//!
-//! Across all of them: **the user's own dotfiles are never modified** — the
-//! mechanisms above only affect shells tty7 itself launches.
-//!
-//! All of the above configure a *local* process spawn. Native-SSH panes have no
-//! spawn to configure — only the command string an `exec` channel request
-//! carries — so they take a different route to the same place: probe the remote
-//! for its login shell, then send a script that recreates these very files on
-//! the remote side and `exec`s through them. See [`remote`].
-//!
-//! **cmd** stays unintegrated by design, not omission. It exposes exactly one
-//! hook, the `PROMPT` env var, which can emit the `A`/`B` marks but not `C` or
-//! `D`: it has no preexec/postexec, and `PROMPT` is expanded when it is *set*,
-//! so even `%ERRORLEVEL%` is out of reach. Since only `C` clears `at_prompt`
-//! (see `pane::handle_osc133`), an A/B-only shell would leave the line editor
-//! owning the keyboard for the whole of every command — worse than no
-//! integration at all.
-//!
-//! The install-guard sentinel (`TTY7_SHELL_INTEGRATION`, see [`setup`]) does
-//! not cross into WSL, and deliberately isn't listed in `WSLENV`: only vars
-//! named there cross, so a distro shell always starts with it unset — which is
-//! correct, since it *is* a fresh top-level interactive shell. Its own
-//! descendants inside the distro then see the `1` it exports, as on any Linux.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// The zsh integration body, sourced from our injected `.zshrc` after the user's
-/// own `.zshrc` has run. Guarded so it installs exactly once per interactive
-/// shell. See the module docs for the OSC 133 semantics.
 const ZSH_INTEGRATION: &str = r#"
 # --- tty7 shell integration (zsh) ---
 if [[ -o interactive ]] && [[ -z "$TTY7_SHELL_INTEGRATION" ]]; then
@@ -180,16 +102,6 @@ fi
 # --- end tty7 shell integration ---
 "#;
 
-/// The fish integration body, passed verbatim as a `-C`/`--init-command`
-/// argument (see [`setup_fish`]) — fish has already loaded the user's *real*
-/// `config.fish` by the time this runs, so unlike zsh/bash there's nothing here
-/// to source manually.
-///
-/// fish has no event that fires *after* the prompt is drawn, so the B marker
-/// (prompt end / input begins) can't be emitted from an `--on-event` handler
-/// the way A/C/D are — it has to be spliced into `fish_prompt` itself. We
-/// capture whatever `fish_prompt` already is (the user's own, or a prompt
-/// framework's) and wrap it: call the original, then emit B right after.
 const FISH_INTEGRATION: &str = r#"
 # --- tty7 shell integration (fish) ---
 # Guard on *emptiness* (`test -z`), not definedness (`set -q`): `setup()` resets the
@@ -254,23 +166,6 @@ end
 # --- end tty7 shell integration ---
 "#;
 
-/// The bash integration body, appended after the replayed login-file chain
-/// (see [`setup_bash`]). Bash has no native precmd/preexec, so this vendors the
-/// core mechanism from [bash-preexec](https://github.com/rcaloras/bash-preexec)
-/// (MIT) — the same shim VS Code uses — trimmed of everything but the
-/// precmd/preexec plumbing: a `DEBUG` trap infers "a command is genuinely about
-/// to run interactively" (as opposed to firing mid-completion, mid readline
-/// binding, or for a piece of `PROMPT_COMMAND` itself), and `PROMPT_COMMAND`
-/// runs registered precmd functions before each prompt.
-///
-/// If the user's own `.bashrc` already loaded bash-preexec (several prompt
-/// frameworks bundle it) we don't install it a second time — re-running the
-/// install sequence would clear and never restore the already-installed
-/// `DEBUG` trap. We detect that via bash-preexec's own `bash_preexec_imported`
-/// sentinel and, either way, register our hooks through its public extension
-/// points (`precmd_functions` / `preexec_functions`) rather than the "function
-/// literally named `precmd`/`preexec`" convenience, which could collide with
-/// the user's own.
 const BASH_INTEGRATION: &str = r#"
 # --- tty7 shell integration (bash) ---
 if [[ $- == *i* ]] && [[ -z "$TTY7_SHELL_INTEGRATION" ]]; then
@@ -536,32 +431,6 @@ fi
 # --- end tty7 shell integration ---
 "#;
 
-/// The PowerShell integration body, base64-encoded (see
-/// [`powershell_encoded_command`]) and passed as `-EncodedCommand`, which
-/// PowerShell runs *after* loading the user's profiles — so, like fish's `-C`,
-/// it layers hooks on top of the user's own prompt without a file on disk and
-/// without touching their config.
-///
-/// PowerShell has no precmd/preexec, so — mirroring VS Code — we wrap
-/// two host hooks:
-///   - **`prompt`** runs before each prompt is drawn. It emits `133;D` (the
-///     last command's exit code) and the `OSC 7` cwd as side effects, then
-///     returns the user's own prompt wrapped in `133;A` … `133;B`. The byte
-///     order is therefore `[D][cwd][A]prompt[B]`, exactly what the daemon's
-///     sniffer keys `at_prompt` off (see `daemon::pane::handle_osc133`).
-///   - **`PSConsoleHostReadLine`** is PSReadLine's line reader — the closest
-///     thing PowerShell has to a preexec. After it returns the submitted line,
-///     before the command runs, we emit `133;C;<command>` (command output
-///     begins), carrying the submitted line percent-encoded as a tty7
-///     extension. That capture is the Windows coding-agent detection input:
-///     ConPTY has no foreground process group for the daemon's process-table
-///     poll to read an `argv` from, so — like Warp — the daemon learns what
-///     runs from the line the shell itself reported (see
-///     `core::cli_agent::CLIAgent::detect_from_command_with`).
-///
-/// `$?` must be captured as the very first statement of `prompt` (an
-/// assignment sets `$?` to true, clobbering it), and is restored before the
-/// user's own prompt runs so a status-aware prompt still sees the real result.
 const POWERSHELL_INTEGRATION: &str = r#"
 # --- tty7 shell integration (PowerShell) ---
 if (-not $env:TTY7_SHELL_INTEGRATION) {
@@ -663,30 +532,7 @@ if (-not $env:TTY7_SHELL_INTEGRATION) {
 # --- end tty7 shell integration ---
 "#;
 
-/// The redirector files written into our throwaway `ZDOTDIR`. zsh reads its
-/// startup files from `$ZDOTDIR`, so for zsh to reach all four of ours we must
-/// keep `ZDOTDIR` pointing at *our* dir at every hand-off between files. But
-/// while each redirector actually *sources the user's real file* — and once the
-/// live session begins — `ZDOTDIR` has to point at the user's real config dir
-/// instead: a whole ecosystem of zsh tooling (Zim, oh-my-zsh, `compinit`'s
-/// `.zcompdump`) locates its own state via `${ZDOTDIR:-$HOME}`, and if that
-/// resolved to our *empty* throwaway dir it would reinstall / rebuild from
-/// scratch on every new pane — the 3-second stall and Zim "Installed" spam of
-/// issue #15. So each redirector swaps `ZDOTDIR` to the real dir around the
-/// `source`, then swaps our dir back so zsh still reaches the next redirector;
-/// the integration body ([`ZSH_INTEGRATION`]) restores the real dir for good
-/// once every startup file has run.
-///
-/// The source is done at top level (never wrapped in a function) so the user's
-/// config keeps its normal global scope.
 fn zsh_redirectors() -> [(&'static str, String); 4] {
-    // Run the user's file of the same name with ZDOTDIR aimed at their *real*
-    // config dir, then restore ours so zsh reads the next redirector. The real
-    // dir is `TTY7_USER_ZDOTDIR`, captured into the env before launch; when it's
-    // absent we *unset* ZDOTDIR (not fall back to $HOME) so the file sees exactly
-    // what a real launch gives it — an unset ZDOTDIR — and the classic relocate
-    // idiom `: ${ZDOTDIR:=~/.config/zsh}` still fires. `tail` runs after the
-    // source but before the restore.
     let redirect = |name: &str, tail: &str| {
         format!(
             "__tty7_ztmp=$ZDOTDIR\n\
@@ -697,18 +543,11 @@ fn zsh_redirectors() -> [(&'static str, String); 4] {
         )
     };
     [
-        // The user's own .zshenv may itself relocate ZDOTDIR — the classic tiny
-        // `~/.zshenv` that does `ZDOTDIR=~/.config/zsh`. Capture wherever it points
-        // *after* sourcing as the real dir for the later redirectors (and nested
-        // tty7); otherwise they'd look under $HOME and miss the user's real config.
         (
             ".zshenv",
             redirect(".zshenv", "export TTY7_USER_ZDOTDIR=${ZDOTDIR:-$HOME}\n"),
         ),
         (".zprofile", redirect(".zprofile", "")),
-        // Our integration is appended *after* the user's .zshrc (and after ZDOTDIR
-        // is restored to ours) so it extends — not gets clobbered by — the user's
-        // PROMPT / hooks.
         (
             ".zshrc",
             format!("{}{ZSH_INTEGRATION}", redirect(".zshrc", "")),
@@ -717,40 +556,15 @@ fn zsh_redirectors() -> [(&'static str, String); 4] {
     ]
 }
 
-/// Environment overrides + spawn adjustments produced by `setup`.
 pub struct Injection {
-    /// Env vars to add to the child shell's environment.
     pub env: HashMap<String, String>,
-    /// Extra argv entries to append after the program (e.g. bash's
-    /// `--rcfile <path>`, fish's `-C <script>`). Empty for zsh, which needs no
-    /// spawn-time changes at all. When [`replaces_argv`](Self::replaces_argv)
-    /// is set these are the *whole* argv, not an addition to it.
     pub args: Vec<String>,
-    /// If set, [`args`](Self::args) replace the argv the caller would otherwise
-    /// have used, rather than extending it. Only offered when the caller can
-    /// freely choose the spawn invocation (i.e. no user-configured custom shell
-    /// args to preserve). Two integrations need it, for different reasons:
-    ///
-    ///   - **bash**, because `--rcfile` is ignored for a *login* shell, so the
-    ///     caller's login invocation has to become a plain one (the rcfile
-    ///     replays the login chain itself — see the module docs).
-    ///   - **WSL**, because the launch flags and the command must be reordered
-    ///     around a `--` separator, which appending cannot express.
     pub replaces_argv: bool,
-    /// The throwaway dir we created, if any; the terminal owns it and removes
-    /// it on drop so it doesn't accumulate across sessions. `None` for fish,
-    /// which needs no files on disk at all.
     pub dir: Option<PathBuf>,
 }
 
-/// Prefix of the throwaway redirector dirs we create under the temp dir (see
-/// `setup`). Used to recognize *our own* `ZDOTDIR` when it's inherited.
 const ZDOTDIR_PREFIX: &str = "tty7-zdotdir-";
 
-/// True if `path` is one of our own redirector dirs (by basename). When tty7 is
-/// launched from inside a tty7 shell, the inherited `ZDOTDIR` already points at
-/// such a dir — chaining to it would source a `.zshrc` that doesn't hold the
-/// user's real config, dropping their dotfiles (oh-my-zsh, aliases, prompt).
 fn is_our_zdotdir(path: &str) -> bool {
     Path::new(path)
         .file_name()
@@ -758,13 +572,6 @@ fn is_our_zdotdir(path: &str) -> bool {
         .is_some_and(|n| n.starts_with(ZDOTDIR_PREFIX))
 }
 
-/// Resolve the user's *real* ZDOTDIR for the redirectors to source from,
-/// surviving nested tty7 launches:
-///   1. An outer tty7 may have already exported `TTY7_USER_ZDOTDIR` (the real
-///      one it resolved) — trust it, keeping the chain anchored to the user.
-///   2. Otherwise use the inherited `ZDOTDIR`, but only if it isn't one of *our*
-///      throwaway dirs (which would have no user dotfiles).
-///   3. Otherwise `None` → the redirectors fall back to `$HOME`, as zsh would.
 fn real_user_zdotdir() -> Option<String> {
     if let Ok(z) = std::env::var("TTY7_USER_ZDOTDIR") {
         if !z.is_empty() {
@@ -776,17 +583,11 @@ fn real_user_zdotdir() -> Option<String> {
         .filter(|z| !z.is_empty() && !is_our_zdotdir(z))
 }
 
-/// Detected interactive shell kind, resolved from the program tty7 is actually
-/// about to spawn (falling back to `$SHELL` when the caller doesn't know it,
-/// e.g. because it'll be resolved from the passwd database at spawn time).
 enum ShellKind {
     Zsh,
     Bash,
     Fish,
     PowerShell,
-    /// `wsl.exe`, the Windows-side launcher. Not a shell itself — the
-    /// integration has to reach *through* it to the distro's own shell. See
-    /// [`setup_wsl`].
     Wsl,
 }
 
@@ -795,12 +596,6 @@ fn shell_kind(program: Option<&str>) -> Option<ShellKind> {
         Some(p) => p.to_string(),
         None => std::env::var("SHELL").ok()?,
     };
-    // Lowercase the basename and drop any `.exe`: Windows program names are
-    // case-insensitive and carry the suffix, so `PowerShell.exe` and `pwsh`
-    // must both match — as must Git Bash, which tty7 launches by its absolute
-    // `...\Git\bin\bash.exe` path (`core::shells::find_git_bash`). The Unix
-    // shells are conventionally lowercase and suffix-free already, so this only
-    // ever normalizes the Windows spellings.
     let base = Path::new(&owned)
         .file_name()?
         .to_str()?
@@ -816,15 +611,6 @@ fn shell_kind(program: Option<&str>) -> Option<ShellKind> {
     }
 }
 
-/// The distro named by a `wsl.exe` argv, if any. tty7's own launch args spell it
-/// `--distribution <name>` (`core::shells::detect_shells`); `-d` is the short
-/// form a user-configured shell may use. Absent means "the default distro",
-/// which is also what `wsl.exe` does with no flag — so `None` is a valid answer,
-/// not a failure.
-///
-/// Shared with `pane::wsl_remote_context`, which names the same distro in the
-/// pane's [`RemoteContext`](crate::daemon::protocol::RemoteContext) from the
-/// same argv: two parsers for one flag would be free to disagree.
 pub(crate) fn wsl_distro(args: &[String]) -> Option<String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -838,13 +624,6 @@ pub(crate) fn wsl_distro(args: &[String]) -> Option<String> {
     None
 }
 
-/// Add our entries to a `WSLENV` value, preserving whatever was already there.
-///
-/// `WSLENV` is a colon-separated list of variable names, each optionally
-/// suffixed with flags — `/p` meaning "translate this value as a path when it
-/// crosses the boundary", which is how the rcfile's Windows path becomes a
-/// `/mnt/c/...` one the distro can read. Overwriting it wholesale would silently
-/// drop the user's own entries, so append and de-duplicate by name.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn wslenv_with(existing: Option<&str>, additions: &[&str]) -> String {
     let mut out: Vec<String> = existing
@@ -855,8 +634,6 @@ fn wslenv_with(existing: Option<&str>, additions: &[&str]) -> String {
         .collect();
     for add in additions {
         let name = add.split('/').next().unwrap_or(add);
-        // A name already present wins whatever flags the user gave it; ours is
-        // additive, not a correction of their configuration.
         if !out.iter().any(|e| e.split('/').next().unwrap_or(e) == name) {
             out.push((*add).to_string());
         }
@@ -864,29 +641,13 @@ fn wslenv_with(existing: Option<&str>, additions: &[&str]) -> String {
     out.join(":")
 }
 
-/// Whether a Windows `bash` program path is the msys bash that Git for Windows
-/// (or msys2) ships, as opposed to `C:\Windows\System32\bash.exe` — the WSL
-/// launcher, which exists on any machine with WSL and normally sits ahead of
-/// `Git\bin` on PATH.
-///
-/// The asymmetry is why this fails closed: getting it wrong in the WSL
-/// direction is destructive, because `--rcfile` *replaces* `~/.bashrc` rather
-/// than supplementing it and the path we pass does not exist inside the distro
-/// — the user silently loses aliases, prompt, and PATH. Getting it wrong in the
-/// Git Bash direction merely costs them shell integration, which they did not
-/// have before it was implemented. So anything not positively identifiable as
-/// msys is declined, including a bare `bash` / `bash.exe` whose PATH lookup we
-/// cannot predict.
-///
-/// Always `true` off Windows: `cfg!(windows)` gates the only call site, and
-/// keeping the body platform-neutral lets the tests run everywhere.
 fn is_msys_bash(program: &str) -> bool {
     if !cfg!(windows) {
         return true;
     }
     let normalized = program.replace('/', "\\").to_ascii_lowercase();
     let Some((dir, _)) = normalized.rsplit_once('\\') else {
-        return false; // bare name — resolved through PATH at spawn time
+        return false;
     };
     let system_root = std::env::var("SystemRoot")
         .unwrap_or_else(|_| r"C:\Windows".to_string())
@@ -896,13 +657,6 @@ fn is_msys_bash(program: &str) -> bool {
     !(dir == system_root || dir.starts_with(&format!("{system_root}\\")))
 }
 
-/// A unique throwaway dir under the OS temp dir, prefixed for later
-/// recognition (see `is_our_zdotdir`), one *per pane*. We avoid Date/random by
-/// combining the process id with a monotonic counter: the daemon is one
-/// long-lived process that spawns many panes, so keying on pid alone would
-/// have every pane share a single dir, and the first pane's cleanup (removed
-/// on drop) would yank the integration files out from under all the others
-/// still running.
 fn throwaway_dir(prefix: &str) -> Option<PathBuf> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -920,12 +674,6 @@ fn setup_zsh() -> Option<Injection> {
     }
 
     let mut env = HashMap::new();
-    // Preserve the user's real ZDOTDIR so our redirectors can source from it;
-    // when unset they fall back to $HOME, as zsh itself would. Crucially this
-    // resolves correctly under *nested* tty7 (launching tty7 from a tty7 shell):
-    // the inherited ZDOTDIR there points at an outer redirector dir of ours, not
-    // the user's config — `real_user_zdotdir` sees through that. We always
-    // (re)export it so deeper nesting stays anchored to the same real dir.
     if let Some(user_zdotdir) = real_user_zdotdir() {
         env.insert("TTY7_USER_ZDOTDIR".to_string(), user_zdotdir);
     }
@@ -939,9 +687,6 @@ fn setup_zsh() -> Option<Injection> {
     })
 }
 
-/// fish reads `-C`/`--init-command` after its own (untouched) `config.fish`, so
-/// there's nothing to write to disk or redirect — the whole body is just an
-/// extra argv entry.
 fn setup_fish() -> Option<Injection> {
     Some(Injection {
         env: HashMap::new(),
@@ -951,14 +696,6 @@ fn setup_fish() -> Option<Injection> {
     })
 }
 
-/// PowerShell reads `-EncodedCommand` after loading its own profiles, so — like
-/// fish — the whole body is just extra argv, with nothing on disk. We pass it
-/// base64-encoded rather than as a plain `-Command` string so an arbitrary
-/// script (quotes, `$`, newlines) survives the Windows command line intact, and
-/// because an encoded command isn't subject to the script-file execution policy
-/// that would otherwise block a dot-sourced `.ps1` on a stock Windows install.
-/// `-NoLogo` drops the startup banner; `-NoExit` keeps the session interactive
-/// after the command runs.
 fn setup_powershell() -> Option<Injection> {
     Some(Injection {
         env: HashMap::new(),
@@ -973,15 +710,11 @@ fn setup_powershell() -> Option<Injection> {
     })
 }
 
-/// Encode a PowerShell script for `-EncodedCommand`, which expects base64 of the
-/// command's UTF-16LE bytes. Hand-rolled (both steps) rather than pulling in a
-/// base64 crate for this single call site.
 fn powershell_encoded_command(script: &str) -> String {
     let utf16le: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     base64_encode(&utf16le)
 }
 
-/// Standard base64 (RFC 4648) with `=` padding.
 fn base64_encode(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
@@ -1006,9 +739,6 @@ fn base64_encode(input: &[u8]) -> String {
     out
 }
 
-/// Bash rcfile content: replay the login-shell startup-file chain (since we're
-/// about to force a non-login spawn so `--rcfile` takes effect at all — see the
-/// module docs), then append the integration body.
 fn bash_rcfile() -> String {
     format!(
         r#"
@@ -1028,14 +758,6 @@ if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi
     )
 }
 
-/// Render a path for bash's own consumption. The only bash reachable on
-/// Windows is the msys2 one Git for Windows ships: its runtime does accept a
-/// native `C:\...` path, but the backslashes then survive into any bash string
-/// context that path is later interpolated into (`$BASH_SOURCE`, an error
-/// message re-evaluated by a user's `PROMPT_COMMAND`) where they *are* escape
-/// characters. Forward slashes are accepted just as readily by the msys
-/// runtime and carry no such second meaning, so normalize to them. No-op on
-/// Unix, where the separator is already `/`.
 fn bash_path(path: &Path) -> String {
     let s = path.to_string_lossy().into_owned();
     if cfg!(windows) {
@@ -1045,12 +767,6 @@ fn bash_path(path: &Path) -> String {
     }
 }
 
-/// Force a non-login bash with our rcfile, replaying the login-file chain
-/// ourselves inside it (see [`bash_rcfile`]) since `--rcfile` only takes effect
-/// on non-login shells in the first place. Only offered when the caller has no
-/// user-configured custom args to preserve (`setup`'s `has_custom_args`) — we
-/// can't safely guess how `--rcfile <path> -i` should combine with arbitrary
-/// user-supplied bash args.
 fn setup_bash() -> Option<Injection> {
     let dir = throwaway_dir("tty7-bashrc-")?;
     let rcfile = dir.join("bashrc");
@@ -1058,35 +774,14 @@ fn setup_bash() -> Option<Injection> {
 
     Some(Injection {
         env: HashMap::new(),
-        // `--rcfile` (a GNU long option) must precede `-i`: bash 3.2 — still
-        // macOS's shipped `/bin/bash` — refuses to parse a long option once a
-        // short one has been seen.
         args: vec!["--rcfile".to_string(), bash_path(&rcfile), "-i".to_string()],
         replaces_argv: true,
         dir: Some(dir),
     })
 }
 
-/// Env var carrying the rcfile path across the Windows/WSL boundary. Listed in
-/// `WSLENV` with the `/p` flag so WSL rewrites it to the distro's view of the
-/// path (`C:\Users\…` -> `/mnt/c/Users/…`), which is why we don't hardcode the
-/// `/mnt` automount root ourselves — it is configurable in `/etc/wsl.conf`.
 const WSL_RCFILE_ENV: &str = "TTY7_RC";
 
-/// Pick the distro's shell and exec it, *inside the distro*.
-///
-/// Deliberately not a Windows-side probe. Spawning `wsl.exe` to ask which shell
-/// a distro uses blocks the whole spawn path: the client waits synchronously for
-/// the daemon's `Spawn` reply (see `terminal::remote::spawn`), so on a cold WSL
-/// start — seconds, while the distro boots — the entire window freezes. Folding
-/// the decision into the one `wsl.exe` invocation we were always going to make
-/// costs nothing and cannot block, because there is no second invocation.
-///
-/// `$SHELL` rather than `getent passwd`: WSL populates it from the user's passwd
-/// entry, so inside the distro it already *is* the login shell of record — the
-/// same source `shell_kind` trusts on Unix. Written without a variable
-/// assignment so the whole thing stays one `case`, which keeps it robust to the
-/// layers of quoting between here and `sh`.
 const WSL_EXEC_SCRIPT: &str = concat!(
     r#"case "${SHELL:-}" in "#,
     r#"*/bash) exec "$SHELL" --rcfile "$TTY7_RC" -i ;; "#,
@@ -1094,29 +789,6 @@ const WSL_EXEC_SCRIPT: &str = concat!(
     "esac"
 );
 
-/// Reach through `wsl.exe` to the distro's own shell.
-///
-/// `wsl.exe` is a launcher, not a shell: injecting into it directly would never
-/// reach the thing that draws the prompt. So we write the integration rcfile on
-/// the Windows side and hand `wsl.exe` a command that starts the distro's shell
-/// with it — the distro's own startup chain replayed inside it exactly as on any
-/// other bash.
-///
-/// The argv shape is `[<launch flags>] -- sh -c <script>` rather than
-/// `-- <shell> --rcfile <path>` because the path only exists as an env var
-/// *inside* the distro after `WSLENV` translation, and `wsl.exe` execs its
-/// command directly without a shell to expand it. The one-shot `sh` costs a
-/// process and `exec`s away immediately.
-///
-/// Only bash is wired up. A distro on zsh or fish falls through to
-/// [`WSL_EXEC_SCRIPT`]'s second arm and launches as a plain login shell — the
-/// behavior every WSL pane had before this, just reached one `exec` later. They
-/// are integrable the same way (`ZDOTDIR` would need translating too; fish's
-/// `-C` needs no file at all), but each needs its own verification pass.
-///
-/// The rcfile is written unconditionally, before we know the shell — it is a
-/// local write into a throwaway dir the terminal already cleans up on drop, and
-/// paying it always is what buys the decision being free.
 #[cfg(windows)]
 fn setup_wsl(args: &[String]) -> Option<Injection> {
     let distro = wsl_distro(args);
@@ -1124,9 +796,6 @@ fn setup_wsl(args: &[String]) -> Option<Injection> {
     let rcfile = dir.join("bashrc");
     std::fs::write(&rcfile, bash_rcfile()).ok()?;
 
-    // Rebuild the launch flags rather than appending to them: `--` must come
-    // last, and everything after it is the command. Preserve the distro and
-    // `--cd` the caller asked for.
     let mut argv: Vec<String> = Vec::new();
     if let Some(d) = &distro {
         argv.push("--distribution".to_string());
@@ -1162,9 +831,6 @@ fn setup_wsl(args: &[String]) -> Option<Injection> {
     })
 }
 
-/// The `--cd` value from a `wsl.exe` argv. tty7's own launch args pass `--cd ~`
-/// so the shell lands in the distro's home rather than a translated Windows path
-/// (`core::shells::detect_shells`).
 #[cfg_attr(not(windows), allow(dead_code))]
 fn wsl_cd(args: &[String]) -> Option<String> {
     let mut it = args.iter();
@@ -1179,20 +845,6 @@ fn wsl_cd(args: &[String]) -> Option<String> {
     None
 }
 
-/// Set up shell integration for a shell tty7 is about to spawn. `program` is
-/// the resolved program path/name if the caller already knows it (e.g. the
-/// user's configured custom shell, or the default shell resolved from the
-/// passwd database) — passing it, rather than relying on `$SHELL`, is what
-/// makes detection correct when they disagree. `has_custom_args` should be
-/// `true` when the caller is about to pass user-configured shell args it can't
-/// safely override (only affects bash — see [`setup_bash`]).
-///
-/// `args` are the launch args the caller would otherwise use; only the WSL path
-/// reads them (for the distro), and only on Windows.
-///
-/// Returns the env/arg overrides and the temp dir to clean up, or `None` when
-/// the shell isn't supported or anything goes wrong — in which case the
-/// terminal launches bare, exactly as before (integration is best-effort).
 #[cfg_attr(not(windows), allow(unused_variables))]
 pub fn setup(program: Option<&str>, args: &[String], has_custom_args: bool) -> Option<Injection> {
     let mut injection = match shell_kind(program)? {
@@ -1200,29 +852,13 @@ pub fn setup(program: Option<&str>, args: &[String], has_custom_args: bool) -> O
         ShellKind::Fish => setup_fish(),
         ShellKind::Bash if !has_custom_args => setup_bash(),
         ShellKind::Bash => None,
-        // PowerShell's `-EncodedCommand` is mutually exclusive with a
-        // user-supplied `-Command`/`-File`, so — like bash — don't second-guess
-        // a custom-arg invocation; launch it bare.
         ShellKind::PowerShell if !has_custom_args => setup_powershell(),
         ShellKind::PowerShell => None,
-        // WSL rebuilds the argv around a `--` separator, so — like bash — it
-        // can't be reconciled with args the user wrote.
         #[cfg(windows)]
         ShellKind::Wsl if !has_custom_args => setup_wsl(args),
         ShellKind::Wsl => None,
     }?;
 
-    // Reset the install-guard sentinel for the shell we're about to spawn. Each
-    // integration body sets e.g. `TTY7_SHELL_INTEGRATION=1` and *exports* it, so
-    // it leaks to every child process — including a tty7 launched from inside a
-    // tty7 shell, and (crucially) the persistent daemon, which inherits it and
-    // would otherwise hand it to every shell it spawns. Since the PTY child
-    // inherits our process env, that stale `1` makes the guard skip the install
-    // → no OSC 133 → no inline line editor. Every shell tty7 spawns is a
-    // fresh top-level interactive shell that *should* install the hooks, so we
-    // blank the sentinel at this spawn boundary (empty still satisfies the
-    // guard's emptiness check); the body re-exports `1` for that shell's own
-    // descendants.
     injection
         .env
         .insert("TTY7_SHELL_INTEGRATION".to_string(), String::new());
@@ -1230,66 +866,15 @@ pub fn setup(program: Option<&str>, args: &[String], has_custom_args: bool) -> O
     Some(injection)
 }
 
-/// Reaching a shell on *another machine* — the native-SSH panes (`daemon::ssh`).
-///
-/// Everything above this point injects by arranging a *local* process spawn: we
-/// write files into a throwaway dir and hand the child an env var or an argv
-/// entry pointing at them. None of that is available over SSH, where the only
-/// lever is the one string the `exec` channel request carries — sshd runs it as
-/// `$SHELL -c <string>` and that is the whole interface.
-///
-/// So the remote path inverts the mechanism: instead of *configuring* a spawn,
-/// we send a short script that **materializes the same files on the remote side
-/// and then `exec`s the real shell through them**. The shell that comes out the
-/// other end is configured exactly as a local one — same `ZDOTDIR` redirector
-/// chain, same bash rcfile replaying the login-file chain, same fish `-C` — so
-/// the integration bodies above are reused verbatim rather than forked.
-///
-/// **Why probe first.** The bootstrap script cannot be shell-agnostic: sshd
-/// hands it to the user's *login* shell, so a POSIX script is parsed by fish (a
-/// syntax error) and a fish script by zsh. Warp solves this with a single
-/// expression contorted to parse identically in sh/bash/zsh/fish; we instead
-/// spend one cheap round-trip on [`PROBE_COMMAND`] — deliberately written to be
-/// valid in all of them because it contains no substitution, no assignment and
-/// no grouping — and then emit a script in the dialect we now know we're
-/// talking to. The result reads like ordinary shell code instead of a puzzle,
-/// and it also tells us when to keep our hands off entirely: a remote whose
-/// login shell isn't one of the three (or isn't POSIX at all — a Windows
-/// `cmd.exe`, where the probe echoes a literal `$SHELL`) parses as `None` and
-/// the caller falls back to a plain shell request. That negative answer is the
-/// load-bearing half: it is what keeps a non-Unix remote from being handed a
-/// script it would choke on, and it's why the probe exists rather than us just
-/// sending a bootstrap and hoping.
-///
-/// The probe's cost is paid once per *connection*, not once per pane — the
-/// caller caches it on the connection registry key, so extra tabs to a host
-/// already open cost nothing.
 pub mod remote {
     use super::{FISH_INTEGRATION, bash_rcfile, zsh_redirectors};
 
-    /// Asks the remote for the login shell it would have started.
-    ///
-    /// Runs under whatever that shell is, so it is restricted to the
-    /// intersection of sh/bash/zsh/fish/csh syntax: two `echo`s and a `;`.
-    /// Notably absent is any command substitution — fish only learned `$(…)` in
-    /// 3.4 and csh never had it — and any assignment, which fish spells
-    /// differently from everyone else.
-    ///
-    /// The marker line is what makes the answer parseable rather than guessed:
-    /// a remote `.zshenv`/`config.fish` that prints something of its own (banner,
-    /// version-manager chatter) is ignored, because we only read the line that
-    /// follows the marker. See [`parse_probe`].
     pub const PROBE_COMMAND: &str = "echo __tty7_shell; echo $SHELL";
 
-    /// The line [`PROBE_COMMAND`] prints immediately before the shell path.
     const PROBE_MARKER: &str = "__tty7_shell";
 
-    /// Heredoc delimiter for the rc files the bootstrap writes remotely. Quoted
-    /// at the use site (`<<'…'`) so the bodies are copied *literally* — they are
-    /// full of `$`, backticks and backslashes that must reach the file intact.
     const HEREDOC: &str = "__TTY7_RC_EOF__";
 
-    /// A remote login shell we know how to integrate.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum RemoteShell {
         Zsh,
@@ -1308,20 +893,12 @@ pub mod remote {
         }
     }
 
-    /// Read [`PROBE_COMMAND`]'s output: the first non-empty line after the
-    /// marker is the remote's `$SHELL`.
-    ///
-    /// Returns `None` — meaning "launch a plain shell, inject nothing" — unless
-    /// that line is an absolute path to a shell we support. The absolute-path
-    /// requirement is what rejects a non-POSIX remote: `cmd.exe` echoes the
-    /// string `$SHELL` back unexpanded, and PowerShell prints an empty line, so
-    /// neither can be mistaken for an answer.
     pub fn parse_probe(output: &str) -> Option<(RemoteShell, String)> {
         let mut lines = output
             .lines()
             .map(|l| l.trim_end_matches('\r').trim())
             .skip_while(|l| *l != PROBE_MARKER);
-        lines.next()?; // the marker itself
+        lines.next()?;
         let path = lines.find(|l| !l.is_empty())?;
         if !path.starts_with('/') {
             return None;
@@ -1329,12 +906,6 @@ pub mod remote {
         RemoteShell::from_path(path).map(|shell| (shell, path.to_string()))
     }
 
-    /// The script to send as the channel's `exec` request: it sets the remote up
-    /// for integration and `exec`s `shell_path` as the session's shell.
-    ///
-    /// Every arm ends in an `exec` of the user's own shell, and every arm
-    /// reaches that `exec` even if its setup failed — a remote with a full or
-    /// read-only `$TMPDIR` loses the integration, never the session.
     pub fn bootstrap_command(shell: RemoteShell, shell_path: &str) -> String {
         match shell {
             RemoteShell::Zsh => zsh_bootstrap(shell_path),
@@ -1343,26 +914,14 @@ pub mod remote {
         }
     }
 
-    /// Quote for a POSIX-family shell (zsh/bash): wrap in single quotes and
-    /// spell an embedded quote the only way single-quoting allows.
     fn shell_quote(s: &str) -> String {
         format!("'{}'", s.replace('\'', r"'\''"))
     }
 
-    /// Quote for fish, whose single quotes — unlike POSIX's fully literal ones —
-    /// honour exactly two escapes, `\\` and `\'`. Both need doubling up, and
-    /// nothing else may be touched: the fish body is dense with `\e`, `\a` and
-    /// `$argv`, all of which must survive verbatim.
     fn fish_quote(s: &str) -> String {
         format!("'{}'", s.replace('\\', r"\\").replace('\'', r"\'"))
     }
 
-    /// `command cat > <dir>/<name> <<'EOF' … EOF`, the remote-side equivalent of
-    /// the local `std::fs::write`.
-    ///
-    /// `command` bypasses any alias or function the remote's own startup files
-    /// have put in the way — sshd's `$SHELL -c` still reads `.zshenv`, so we are
-    /// not running in a pristine environment.
     fn write_file(out: &mut String, name: &str, body: &str) {
         out.push_str(&format!(
             "command cat > \"$__tty7_d/{name}\" <<'{HEREDOC}'\n{}\n{HEREDOC}\n",
@@ -1370,15 +929,6 @@ pub mod remote {
         ));
     }
 
-    /// Recreate the local `ZDOTDIR` redirector dir on the remote, point `ZDOTDIR`
-    /// at it, and exec zsh as a login shell — the same shape as [`setup_zsh`],
-    /// with the throwaway dir built by a script instead of by `std::fs`.
-    ///
-    /// `ZDOTDIR` is only exported once every redirector is confirmed written:
-    /// pointing zsh at a half-populated dir would silently cost the user their
-    /// dotfiles, which is far worse than not integrating at all.
-    ///
-    /// [`setup_zsh`]: super::setup_zsh
     fn zsh_bootstrap(shell_path: &str) -> String {
         let mut out = String::new();
         out.push_str("__tty7_d=${TMPDIR:-/tmp}/tty7-zdotdir-$$\n");
@@ -1386,8 +936,6 @@ pub mod remote {
 
         let mut guard = String::new();
         for (name, contents) in zsh_redirectors() {
-            // The cleanup hook rides along in .zshrc, after the integration body
-            // — see ZSH_CLEANUP_HOOK for why it can't be a plain `rm` here.
             let body = if name == ".zshrc" {
                 format!("{contents}{ZSH_CLEANUP_HOOK}")
             } else {
@@ -1403,12 +951,6 @@ pub mod remote {
         out
     }
 
-    /// Write the rcfile and exec bash *non-login* through it, exactly as
-    /// [`setup_bash`] does locally and for the same reason: `--rcfile` is
-    /// silently ignored for a login shell, so the rcfile replays the login-file
-    /// chain itself.
-    ///
-    /// [`setup_bash`]: super::setup_bash
     fn bash_bootstrap(shell_path: &str) -> String {
         let quoted = shell_quote(shell_path);
         let mut out = String::new();
@@ -1427,8 +969,6 @@ pub mod remote {
         out
     }
 
-    /// fish needs nothing on disk at either end: `-C` runs the body after the
-    /// user's own `config.fish`, so the whole bootstrap is one `exec`.
     fn fish_bootstrap(shell_path: &str) -> String {
         format!(
             "exec {} -C {} -l\n",
@@ -1437,24 +977,6 @@ pub mod remote {
         )
     }
 
-    /// Remove the throwaway rc dir once the shell has finished reading it.
-    ///
-    /// Unlike a local pane — where the terminal owns the dir and deletes it on
-    /// drop — nothing on the tty7 side can reach the remote filesystem, so the
-    /// shell has to clean up after itself. The deletion can't happen in the
-    /// bootstrap script (zsh hasn't read the files yet) nor at the end of the
-    /// rc file (zsh still has `.zlogin` to read), so it hangs off the first
-    /// `precmd`: by the time a prompt is drawn every startup file has been read,
-    /// and unlinking them is invisible to the running shell.
-    ///
-    /// The path arrives in an exported `TTY7_RM_DIR` because a quoted heredoc
-    /// copies its body literally — there is no interpolation to splice a Rust
-    /// value into. It's immediately demoted to a plain shell variable so it
-    /// doesn't leak into every child process.
-    ///
-    /// The hook doesn't unregister itself, unlike its neighbours: re-running a
-    /// two-line no-op each prompt is cheaper than the array surgery removing it
-    /// would cost.
     const ZSH_CLEANUP_HOOK: &str = r#"
 # --- tty7 remote cleanup (zsh) ---
 if [[ -n "$TTY7_RM_DIR" ]]; then
@@ -1471,16 +993,6 @@ fi
 # --- end tty7 remote cleanup ---
 "#;
 
-    /// The bash counterpart of [`ZSH_CLEANUP_HOOK`], registered through the
-    /// `precmd_functions` array that the integration body's vendored
-    /// bash-preexec drives.
-    ///
-    /// This sits *outside* that body's install guard, so on a remote that
-    /// already has tty7 integration in its own `.bashrc` the guard skips the
-    /// install and no `precmd_functions` ever runs — the dir then outlives the
-    /// session. That is the one case we let leak: a few KB under `/tmp` on a
-    /// host the user has explicitly set up, versus the alternative of an `EXIT`
-    /// trap that would clobber whatever trap their dotfiles installed.
     const BASH_CLEANUP_HOOK: &str = r#"
 # --- tty7 remote cleanup (bash) ---
 if [[ -n "$TTY7_RM_DIR" ]]; then
@@ -1507,8 +1019,6 @@ fi
                 parse_probe("__tty7_shell\n/bin/zsh\n"),
                 Some((RemoteShell::Zsh, "/bin/zsh".to_string()))
             );
-            // Startup chatter ahead of the marker is ignored — a remote
-            // `.zshenv` that echoes a banner must not be read as the answer.
             assert_eq!(
                 parse_probe("Welcome to prod!\n__tty7_shell\n/usr/local/bin/fish\n"),
                 Some((RemoteShell::Fish, "/usr/local/bin/fish".to_string()))
@@ -1521,21 +1031,15 @@ fi
 
         #[test]
         fn probe_declines_anything_that_isnt_a_shell_we_know() {
-            // cmd.exe echoes the variable back unexpanded; PowerShell prints
-            // nothing. Neither may be mistaken for a POSIX remote.
             assert_eq!(parse_probe("__tty7_shell\n$SHELL\n"), None);
             assert_eq!(parse_probe("__tty7_shell\n\n"), None);
-            // A shell we have no integration body for.
             assert_eq!(parse_probe("__tty7_shell\n/bin/ksh\n"), None);
-            // No marker at all: the command never ran as intended.
             assert_eq!(parse_probe("/bin/zsh\n"), None);
         }
 
         #[test]
         fn zsh_bootstrap_gates_zdotdir_on_every_redirector_landing() {
             let script = bootstrap_command(RemoteShell::Zsh, "/bin/zsh");
-            // Pointing zsh at a partially-written dir would drop the user's
-            // dotfiles, so all four files are checked before ZDOTDIR is set.
             for name in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
                 assert!(
                     script.contains(&format!("[ -s \"$__tty7_d/{name}\" ] &&")),
@@ -1545,16 +1049,11 @@ fi
             let export = script.find("export ZDOTDIR=").expect("exports ZDOTDIR");
             let exec = script.find("exec '/bin/zsh' -l").expect("execs zsh");
             assert!(export < exec);
-            // The integration body must actually reach the remote .zshrc.
             assert!(script.contains("__tty7_report_cwd"));
         }
 
         #[test]
         fn file_writing_bootstraps_end_in_a_bare_exec_of_the_users_shell() {
-            // The last thing either script does is hand over an unintegrated
-            // shell, so a remote where the setup failed loses the integration
-            // and nothing else. (fish writes no files and so has no failure
-            // path to fall out of — it is a single `exec`, checked below.)
             for (shell, path) in [
                 (RemoteShell::Zsh, "/bin/zsh"),
                 (RemoteShell::Bash, "/bin/bash"),
@@ -1572,8 +1071,6 @@ fi
         #[test]
         fn bash_bootstrap_forces_a_non_login_shell_through_the_rcfile() {
             let script = bootstrap_command(RemoteShell::Bash, "/bin/bash");
-            // `--rcfile` is ignored for login shells, so the integrated arm must
-            // be `-i`, with the rcfile replaying the login chain itself.
             assert!(script.contains("exec '/bin/bash' --rcfile \"$__tty7_d/bashrc\" -i"));
             assert!(script.contains("source /etc/profile"));
         }
@@ -1581,18 +1078,10 @@ fi
         #[test]
         fn fish_bootstrap_is_one_exec_carrying_the_escaped_body() {
             let script = bootstrap_command(RemoteShell::Fish, "/usr/bin/fish");
-            // The whole bootstrap is a single (multi-line) command: fish reads
-            // `-C` after its own config.fish, so there is nothing to write to
-            // disk and no failure path to fall out of.
             assert!(script.starts_with("exec '/usr/bin/fish' -C '"));
             assert!(script.trim_end().ends_with("' -l"));
             assert!(!script.contains("mkdir"));
 
-            // fish single quotes honour exactly \\ and \', so both must be
-            // doubled up on the way in. The body's `printf '\e]%s\a' $argv[1]`
-            // therefore arrives with its quotes escaped *and* its backslashes
-            // doubled — get either wrong and fish sees a terminated string or
-            // an escape sequence instead of the literal text.
             assert!(script.contains(r"printf \'\\e]%s\\a\' $argv[1]"));
         }
 
@@ -1604,26 +1093,12 @@ fi
 
         #[test]
         fn heredoc_delimiter_cannot_appear_in_a_body_it_delimits() {
-            // A body containing the delimiter on its own line would end the
-            // heredoc early and spill shell code into the script.
             for body in [ZSH_INTEGRATION, BASH_INTEGRATION, FISH_INTEGRATION] {
                 assert!(!body.contains(HEREDOC));
             }
             assert!(!bash_rcfile().contains(HEREDOC));
         }
 
-        /// Parse `script` with the real shell, without running it. Returns
-        /// `None` when that shell isn't installed here, which is a skip and not
-        /// a failure — these tests are a local safety net, not a CI dependency.
-        ///
-        /// Unix-only, and not merely for convenience: on Windows a bare `bash`
-        /// resolves through `PATH` to `C:\Windows\System32\bash.exe` — the WSL
-        /// launcher, not a shell — which on a machine with no distro installed
-        /// exits non-zero with an empty stderr and is indistinguishable from a
-        /// rejected script. (`is_msys_bash` above exists for the same trap on
-        /// the production path.) Nothing is lost by skipping: these scripts are
-        /// destined for a remote POSIX host, so their syntax has nothing to do
-        /// with the platform running the test, and the Unix CI jobs cover them.
         #[cfg(unix)]
         fn parse_check(
             shell: &str,
@@ -1653,19 +1128,6 @@ fi
             ))
         }
 
-        /// The bootstrap scripts, and the rc files they carry, must parse under
-        /// the shells they're written for.
-        ///
-        /// This is worth a real subprocess where the local paths' unit tests
-        /// aren't, because a syntax error costs far more here: a local shell
-        /// with a broken rcfile still opens (bash just complains), but a remote
-        /// one takes the whole `exec` request down with it and the user gets a
-        /// session that dies on connect. Quoting is also doing much more work
-        /// on this path — a heredoc, two escaping dialects, and a body that
-        /// travels as an argv entry — so there is correspondingly more to break.
-        ///
-        /// Skipped where the shell isn't installed; `-n` / `--no-execute` parse
-        /// without running anything, so this never spawns a shell session.
         #[cfg(unix)]
         #[test]
         fn bootstrap_scripts_parse_under_their_real_shells() {
@@ -1682,8 +1144,6 @@ fi
             }
         }
 
-        /// A quoted heredoc's body is data, so the check above never parses the
-        /// rc files it writes — they have to be fed to the shell separately.
         #[cfg(unix)]
         #[test]
         fn heredoc_bodies_parse_under_their_real_shells() {
@@ -1711,19 +1171,11 @@ mod tests {
 
     #[test]
     fn edit_mode_detection_survives_rebound_escape_and_inputrc() {
-        // zsh: plugins like zsh-vi-mode rebind `^[` to their own widgets
-        // (`zvm_readkeys_handler`), so sniffing the Esc widget for
-        // `vi-cmd-mode` misses them. The `main` keymap link is durable: both
-        // plain `bindkey -v` and zsh-vi-mode link main to viins, and emacs
-        // mode links it to emacs (`bindkey -A viins main` vs `-A emacs main`).
         assert!(
             ZSH_INTEGRATION.contains("bindkey -lL main"),
             "zsh edit-mode detection must key off the main keymap link"
         );
         assert!(ZSH_INTEGRATION.contains("viins"));
-        // bash: `[[ -o vi ]]` misses vi mode set only via ~/.inputrc
-        // (`set editing-mode vi` flips readline but not the shell option);
-        // `bind -v` reports readline's actual mode either way.
         assert!(
             BASH_INTEGRATION.contains("editing-mode vi"),
             "bash edit-mode detection must read readline's mode via bind -v"
@@ -1732,29 +1184,14 @@ mod tests {
 
     #[test]
     fn is_our_zdotdir_matches_only_our_prefix() {
-        // A dir we created (basename carries the tty7 prefix) is recognized.
         assert!(is_our_zdotdir("/tmp/tty7-zdotdir-1234-0"));
         assert!(is_our_zdotdir("tty7-zdotdir-x"));
-        // The user's real dirs and unrelated paths are not ours.
         assert!(!is_our_zdotdir("/home/alice/.config/zsh"));
         assert!(!is_our_zdotdir("/tmp/other-zdotdir"));
         assert!(!is_our_zdotdir(""));
-        // A component that only contains the prefix mid-name is not a match.
         assert!(!is_our_zdotdir("/tmp/not-tty7-zdotdir-1"));
     }
 
-    /// Drive a real shell over a real PTY through `injection`, submit one
-    /// failing command, and return everything it wrote up to the `D` mark.
-    ///
-    /// Shared by the Git Bash and WSL end-to-end tests. Two ConPTY behaviors
-    /// are baked in and must not be "simplified" away:
-    ///
-    ///   - the writer is held for the whole call, because closing a ConPTY's
-    ///     input side raises a console control event that kills the shell with
-    ///     `STATUS_CONTROL_C_EXIT` before it ever reaches a prompt; and
-    ///   - draining happens on a worker thread against a deadline, because a
-    ///     ConPTY master does not reliably EOF when its child exits, so an
-    ///     inline read would block forever rather than fail.
     #[cfg(windows)]
     fn prompt_cycle_over_pty(program: &str, injection: &Injection) -> String {
         use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -1777,8 +1214,6 @@ mod tests {
 
         let mut writer = pty.master.take_writer().expect("writer");
         let mut reader = pty.master.try_clone_reader().expect("reader");
-        // `false` gives D a non-zero exit code to carry, so a hardcoded 0 in
-        // the report path can't pass these tests.
         writer.write_all(b"false\n").expect("write");
         writer.flush().expect("flush");
 
@@ -1810,8 +1245,6 @@ mod tests {
         String::from_utf8_lossy(&out).into_owned()
     }
 
-    /// The OSC 7 cwd a captured PTY transcript reported, decoded by the
-    /// daemon's own parser so emitter and consumer are proven to agree.
     #[cfg(windows)]
     fn reported_cwd(text: &str) -> PathBuf {
         let payload = text
@@ -1823,13 +1256,6 @@ mod tests {
             .unwrap_or_else(|| panic!("daemon could not parse OSC 7 payload {payload:?}"))
     }
 
-    /// End-to-end on a real PTY: spawn the actual Git Bash through the actual
-    /// `setup` output and assert the full A/B/C/D cycle comes back. Guards the
-    /// parts no pure test can see — that msys2 bash accepts the rcfile path we
-    /// hand it, that our hooks survive Git Bash's own `/etc/profile` (which
-    /// installs a `PROMPT_COMMAND` of its own), and that bash-preexec's DEBUG
-    /// trap actually fires under a Windows pty. Skips when Git for Windows
-    /// isn't installed, so it's a no-op on a machine without it.
     #[cfg(windows)]
     #[test]
     fn git_bash_reports_the_full_prompt_cycle_over_a_real_pty() {
@@ -1838,8 +1264,6 @@ mod tests {
             return;
         };
         let bash = bash.to_string_lossy().into_owned();
-        // `has_custom_args: false` — the dropdown's `-i -l` are tty7's own, so
-        // the real spawn path reaches setup_bash with them overridable.
         let injection = setup(Some(&bash), &[], false).expect("bash integration");
         let text = prompt_cycle_over_pty(&bash, &injection);
 
@@ -1849,11 +1273,6 @@ mod tests {
                 "Git Bash must report {mark}; got:\n{text}"
             );
         }
-        // cwd reporting rides along on the same hooks. Assert the *decoded*
-        // path, not just the marker's presence: Git Bash's `$PWD` is an msys
-        // path (`/c/Users/x`) that Windows resolves drive-relative to a
-        // non-existent `C:\c\Users\x`, which silently disables the git-status
-        // probe and breaks split/new-tab.
         let cwd = reported_cwd(&text);
         assert!(
             cwd.exists(),
@@ -1862,18 +1281,6 @@ mod tests {
         );
     }
 
-    /// End-to-end on a real PTY, through `wsl.exe` into an actual distro.
-    /// This is the only thing that can show the injection survives the whole
-    /// chain: `WSLENV` translating the rcfile path to the distro's view of the
-    /// filesystem, `wsl.exe` passing our `sh -c` through without a shell to
-    /// mangle its quoting, and the distro's own `/etc/profile` + `~/.bashrc`
-    /// running before our hooks layer on top.
-    ///
-    /// Also covers the in-distro shell pick: this machine's distro runs bash, so
-    /// reaching the marks at all means [`WSL_EXEC_SCRIPT`]'s `case` took its
-    /// bash arm after surviving Windows argv quoting.
-    ///
-    /// Skips when WSL isn't installed, so it's a no-op on a machine without it.
     #[cfg(windows)]
     #[test]
     fn wsl_reports_the_full_prompt_cycle_over_a_real_pty() {
@@ -1881,7 +1288,6 @@ mod tests {
             eprintln!("skipping: no WSL distributions installed");
             return;
         };
-        // Exactly the args the new-tab dropdown produces for this distro.
         let args: Vec<String> = vec![
             "--distribution".into(),
             distro.clone(),
@@ -1897,10 +1303,6 @@ mod tests {
                 "WSL ({distro}) must report {mark}; got:\n{text}"
             );
         }
-        // The distro's cwd is a *Linux* path, and must stay one — translating it
-        // to something Windows-resolvable would be wrong, not helpful. What
-        // matters is that the pane is tagged so nothing local consumes it; that
-        // tagging is asserted in `pane`'s `wsl_remote_context` tests.
         let cwd = reported_cwd(&text);
         assert!(
             cwd.to_string_lossy().starts_with('/'),
@@ -1920,10 +1322,6 @@ mod tests {
             shell_kind(Some("/usr/local/bin/fish")),
             Some(ShellKind::Fish)
         ));
-        // PowerShell, in every spelling: bare and `.exe`, Windows PowerShell and
-        // pwsh 7+, and case-insensitively (Windows program names ignore case).
-        // Paths use `/` so `Path::file_name` splits them the same on every host;
-        // backslash separators are `std::path`'s job and only split on Windows.
         for prog in [
             "powershell.exe",
             "powershell",
@@ -1937,25 +1335,12 @@ mod tests {
                 "{prog} should map to PowerShell"
             );
         }
-        // Unknown shells (and absolute paths to them) resolve to None.
         assert!(shell_kind(Some("/bin/sh")).is_none());
-        // cmd has no preexec hook of any kind, so it stays unsupported on
-        // purpose (see the module docs).
         assert!(shell_kind(Some("cmd.exe")).is_none());
-        // `wsl.exe` is the launcher, not a shell — it maps to its own kind so
-        // `setup` can reach through it into the distro.
         assert!(matches!(shell_kind(Some("wsl.exe")), Some(ShellKind::Wsl)));
         assert!(matches!(shell_kind(Some("wsl")), Some(ShellKind::Wsl)));
     }
 
-    /// Regression: `setup_wsl` used to probe the distro's login shell with a
-    /// synchronous `wsl.exe` call. The client waits for the daemon's `Spawn`
-    /// reply (`terminal::remote::spawn`), so on a cold WSL start — seconds,
-    /// while the distro boots — that froze the entire window.
-    ///
-    /// Naming a distro that cannot exist is the deterministic form of the
-    /// check: if anything asked the distro a question, this could not succeed.
-    /// A timing bound would only catch it on a cold machine.
     #[cfg(windows)]
     #[test]
     fn wsl_setup_never_contacts_the_distro() {
@@ -1968,8 +1353,6 @@ mod tests {
         let inj = setup(Some("wsl.exe"), &args, false)
             .expect("setup must not depend on reaching the distro");
 
-        // The launch flags are rebuilt, not appended to, and the command sits
-        // after `--`.
         let sep = inj.args.iter().position(|a| a == "--").expect("`--`");
         assert_eq!(
             &inj.args[..sep],
@@ -1982,7 +1365,6 @@ mod tests {
         );
         assert_eq!(inj.args[sep + 1], "sh");
         assert_eq!(inj.args[sep + 2], "-c");
-        // The shell decision is inside the script, not resolved out here.
         assert!(inj.args[sep + 3].contains("$SHELL"));
         assert!(inj.args[sep + 3].contains("--rcfile"));
         assert!(inj.replaces_argv);
@@ -2008,29 +1390,21 @@ mod tests {
         assert_eq!(wsl_distro(&eq).as_deref(), Some("Arch"));
         assert_eq!(wsl_cd(&eq).as_deref(), Some("/tmp"));
 
-        // No distro flag is a valid answer — `wsl.exe` then picks the default.
         assert_eq!(wsl_distro(&[]), None);
-        // A trailing flag with no value must not panic.
         assert_eq!(wsl_distro(&["--distribution".to_string()]), None);
     }
 
     #[test]
     fn wslenv_preserves_the_users_own_entries() {
-        // Regression guard: overwriting `WSLENV` silently drops whatever the
-        // user configured, breaking *their* Windows->WSL variable passing.
         assert_eq!(
             wslenv_with(Some("MYVAR/p:OTHER"), &["TTY7_RC/p"]),
             "MYVAR/p:OTHER:TTY7_RC/p"
         );
         assert_eq!(wslenv_with(None, &["TTY7_RC/p"]), "TTY7_RC/p");
         assert_eq!(wslenv_with(Some(""), &["TTY7_RC/p"]), "TTY7_RC/p");
-        // Already present: left exactly as the user spelled it, not duplicated.
         assert_eq!(wslenv_with(Some("TTY7_RC/l"), &["TTY7_RC/p"]), "TTY7_RC/l");
     }
 
-    /// Git Bash is spawned by its absolute `bash.exe` path, so `.exe` must be
-    /// stripped for *every* shell and not just PowerShell — otherwise the one
-    /// bash reachable on Windows silently gets no integration.
     #[test]
     fn shell_kind_strips_exe_for_non_powershell_shells() {
         for prog in [
@@ -2042,7 +1416,6 @@ mod tests {
                 "{prog} should map to Bash"
             );
         }
-        // Off Windows the guard is inert, so the bare spellings still resolve.
         if !cfg!(windows) {
             for prog in ["bash.exe", "BASH.EXE", "bash"] {
                 assert!(matches!(shell_kind(Some(prog)), Some(ShellKind::Bash)));
@@ -2050,11 +1423,6 @@ mod tests {
         }
     }
 
-    /// `C:\Windows\System32\bash.exe` is the WSL launcher, not a shell we can
-    /// inject into: `--rcfile` replaces `~/.bashrc` rather than adding to it,
-    /// and the Windows path we pass does not exist inside the distro, so the
-    /// user would silently lose their whole bash config. It also normally sits
-    /// ahead of `Git\bin` on PATH, which is why a bare name is declined too.
     #[test]
     #[cfg(windows)]
     fn shell_kind_declines_the_wsl_bash_launcher() {
@@ -2070,8 +1438,6 @@ mod tests {
                 "{prog} is the WSL launcher and must not be treated as Bash"
             );
         }
-        // A bare name resolves through PATH at spawn time, where System32
-        // usually wins — unpredictable, so fail closed.
         for prog in ["bash", "bash.exe", "BASH.EXE"] {
             assert!(
                 shell_kind(Some(prog)).is_none(),
@@ -2080,8 +1446,6 @@ mod tests {
         }
     }
 
-    /// The rcfile path is handed to msys2 bash, which reads `\` as an escape in
-    /// the string contexts the path can later reach — see [`bash_path`].
     #[test]
     fn bash_rcfile_path_uses_forward_slashes_on_windows() {
         let rendered = bash_path(Path::new(
@@ -2093,8 +1457,6 @@ mod tests {
                 "C:/Users/a/AppData/Local/Temp/tty7-bashrc-1-0/bashrc"
             );
         }
-        // Unix paths are already separator-correct and must pass through
-        // untouched on every host.
         assert_eq!(
             bash_path(Path::new("/tmp/tty7-bashrc-1-0/bashrc")),
             "/tmp/tty7-bashrc-1-0/bashrc"
@@ -2108,9 +1470,6 @@ mod tests {
         let names: Vec<&str> = files.iter().map(|(n, _)| *n).collect();
         assert_eq!(names, [".zshenv", ".zprofile", ".zshrc", ".zlogin"]);
         for (name, body) in &files {
-            // Every redirector sources the user's real file of the same name,
-            // resolved via the captured real ZDOTDIR (`$TTY7_USER_ZDOTDIR`, or
-            // $HOME when the user never set one).
             assert!(
                 body.contains("$TTY7_USER_ZDOTDIR"),
                 "{name} should reference the user's real ZDOTDIR"
@@ -2118,7 +1477,6 @@ mod tests {
             assert!(body.contains(name), "{name} should source its own name");
             assert!(body.contains("source"), "{name} should source");
         }
-        // Only .zshrc carries our integration body (so it extends the user's PROMPT).
         let zshrc = &files[2].1;
         assert!(zshrc.contains("__tty7_precmd"));
         assert!(zshrc.contains("133;A"));
@@ -2127,12 +1485,6 @@ mod tests {
 
     #[test]
     fn zsh_redirectors_point_zdotdir_at_the_real_dir_only_while_sourcing() {
-        // Issue #15: ZDOTDIR must resolve to the user's *real* config dir while
-        // their startup files run — Zim/oh-my-zsh/compinit key their install state
-        // off ${ZDOTDIR:-$HOME}, and our throwaway dir is empty, so leaving ZDOTDIR
-        // pointed there makes them reinstall on every pane. Each redirector must:
-        //   1. stash our dir, 2. aim ZDOTDIR at the real dir, 3. source, then
-        //   4. restore our dir so zsh still finds the *next* redirector.
         for (name, body) in zsh_redirectors() {
             let save = body.find("__tty7_ztmp=$ZDOTDIR").expect("stashes our dir");
             let aim = body
@@ -2156,11 +1508,6 @@ mod tests {
 
     #[test]
     fn zshenv_recaptures_a_user_relocated_zdotdir() {
-        // The canonical layout is a tiny ~/.zshenv that does `ZDOTDIR=~/.config/zsh`,
-        // with the real config living there. After sourcing the user's .zshenv we
-        // must capture wherever ZDOTDIR now points so the .zprofile/.zshrc/.zlogin
-        // redirectors source from the *relocated* dir (and nested tty7 sees it too),
-        // rather than falling back to $HOME and dropping the user's config.
         let files = zsh_redirectors();
         let zshenv = &files[0].1;
         let source = zshenv.find("source \"${ZDOTDIR:-$HOME}/.zshenv\"").unwrap();
@@ -2172,7 +1519,6 @@ mod tests {
             source < recapture && recapture < restore,
             "recapture must run after sourcing the user's .zshenv, before we restore our dir"
         );
-        // Only .zshenv recaptures; the other three just source and restore.
         for (name, body) in &files[1..] {
             assert!(
                 !body.contains("export TTY7_USER_ZDOTDIR"),
@@ -2183,10 +1529,6 @@ mod tests {
 
     #[test]
     fn zsh_integration_restores_real_zdotdir_after_startup() {
-        // With every startup file read, the integration body must hand ZDOTDIR back
-        // to the user's real dir for the live session (runtime ${ZDOTDIR:-$HOME}
-        // lookups, a nested plain `zsh`). It's a one-shot precmd hook that unhooks
-        // itself so it doesn't re-fire on every prompt.
         assert!(ZSH_INTEGRATION.contains("__tty7_restore_zdotdir"));
         assert!(ZSH_INTEGRATION.contains("ZDOTDIR=${TTY7_USER_ZDOTDIR:-$HOME}"));
         assert!(
@@ -2201,21 +1543,12 @@ mod tests {
         assert!(rc.contains("/etc/profile"));
         assert!(rc.contains("~/.bash_profile"));
         assert!(rc.contains("~/.bashrc"));
-        // Our integration (bash-preexec derived) is appended.
         assert!(rc.contains("__tty7"));
         assert!(rc.contains("133;"));
     }
 
     #[test]
     fn every_integration_guards_install_on_empty_sentinel() {
-        // `setup()` resets TTY7_SHELL_INTEGRATION to an empty-but-exported "" at each
-        // spawn boundary (never *unsets* it), so every shell's install-once guard must
-        // key off the sentinel being *empty*, i.e. the `-z "$TTY7_SHELL_INTEGRATION"`
-        // idiom shared by zsh/bash. Fish once used `not set -q TTY7_SHELL_INTEGRATION`
-        // (definedness), and fish reports an empty exported var as *set* — so the guard
-        // was false on every launch and OSC 133 never armed. All three must share the
-        // emptiness test so the reset installs a fresh top-level shell while an inherited
-        // `1` still blocks re-install.
         for (shell, body) in [
             ("zsh", ZSH_INTEGRATION),
             ("bash", BASH_INTEGRATION),
@@ -2227,8 +1560,6 @@ mod tests {
                  (matching setup()'s empty-string reset), not on its mere definedness",
             );
         }
-        // Fish specifically must not regress to the definedness test that broke it: an
-        // empty exported sentinel reads as *set*, which would skip the install.
         assert!(
             !FISH_INTEGRATION.contains("set -q TTY7_SHELL_INTEGRATION"),
             "fish must guard on emptiness (`test -z`), never `set -q`",
@@ -2237,13 +1568,6 @@ mod tests {
 
     #[test]
     fn d_emitter_is_prepended_ahead_of_user_precmd_hooks() {
-        // The app only switches back to prompt-editing mode when `133;D` arrives.
-        // If D waited for the user's whole precmd chain (git-status prompts,
-        // conda — easily 100ms+), keys typed right after a command finished
-        // would be passed raw to the PTY and kernel-echoed into the grid — the
-        // stray-char + PROMPT_SP `%` artifact. So zsh/bash must emit D from a
-        // dedicated hook *prepended* to precmd_functions, while the rest of the
-        // bookkeeping (cwd, A, the PS1 B marker) stays appended/last.
         assert!(
             ZSH_INTEGRATION.contains("precmd_functions=(__tty7_precmd_d $precmd_functions)"),
             "zsh must prepend the D emitter (add-zsh-hook can only append)"
@@ -2253,8 +1577,6 @@ mod tests {
                 .contains(r#"precmd_functions=(__tty7_precmd_d "${precmd_functions[@]}")"#),
             "bash must prepend the D emitter"
         );
-        // D comes from exactly one hook per shell — a second emission site would
-        // double-fire on every prompt.
         for (shell, body) in [
             ("zsh", ZSH_INTEGRATION),
             ("bash", BASH_INTEGRATION),
@@ -2270,11 +1592,6 @@ mod tests {
 
     #[test]
     fn every_cwd_report_escapes_literal_percent() {
-        // Regression: the daemon percent-DECODES the OSC 7 payload, so the
-        // reporters must escape a literal `%` in `$PWD` as %25 — otherwise a
-        // real dir like `/tmp/a%20b` is recorded as `/tmp/a b` (and `%2F`
-        // rewrites the path *structure*), breaking cwd-inheriting new tabs and
-        // session restore.
         for (shell, body, escape) in [
             ("zsh", ZSH_INTEGRATION, r"${PWD//\%/%25}"),
             ("bash", BASH_INTEGRATION, r"${PWD//\%/%25}"),
@@ -2293,21 +1610,12 @@ mod tests {
                 "{shell} must not emit the raw $PWD in its OSC 7 report"
             );
         }
-        // bash's msys branch reports `pwd -W` output rather than $PWD, so it
-        // needs the same escaping on its own variable.
         assert!(
             BASH_INTEGRATION.contains(r"${d//\%/%25}"),
             "bash's msys OSC 7 reporter must %-escape the literal percent too"
         );
     }
 
-    /// Under Git Bash `$PWD` is an msys path (`/c/Users/x`). Windows reads that
-    /// as drive-relative, so it would land on `C:\c\Users\x` — a directory that
-    /// does not exist, silently killing the git-status probe and path completion,
-    /// and actively breaking split/new-tab (the client cwd wins over every
-    /// fallback in `pane::initial_working_directory`, so the next shell is
-    /// spawned with a bogus working directory). `pwd -W` is msys's translation
-    /// to the real Windows path.
     #[test]
     fn bash_reports_a_windows_path_under_msys() {
         let s = BASH_INTEGRATION;
@@ -2319,17 +1627,10 @@ mod tests {
             s.contains("builtin pwd -W"),
             "bash's msys branch must translate the cwd with `pwd -W`"
         );
-        // `pwd -W` yields `C:/Users/x` with no leading slash; a file: URI needs
-        // one so the daemon's `strip_uri_drive_slash` recognises the drive.
         assert!(
             s.contains(r#"file://%s/%s"#),
             "bash's msys branch must make the translated path URI-absolute"
         );
-        // `pwd -W` is the identity for msys-only virtual mounts (`/proc`,
-        // `/dev`), which have no Windows path at all. Requiring a drive letter
-        // is what separates a translated path from an untranslated one — a
-        // leading-slash test cannot. Falling back to `$PWD` would defeat the
-        // whole point, so silence is the only safe answer here.
         assert!(
             s.contains(r#"[[ "$d" == ?:* ]] || return 0"#),
             "bash's msys branch must report nothing when `pwd -W` yields no drive"
@@ -2340,9 +1641,6 @@ mod tests {
         );
     }
 
-    /// The payload the msys branch builds must survive the daemon's own parser
-    /// and come out as a path Windows can actually use — the shape assertions
-    /// above cannot see that. Mirrors what `__tty7_report_cwd` emits.
     #[test]
     fn msys_payload_round_trips_through_parse_osc7() {
         let parse = |payload: &str| {
@@ -2353,7 +1651,6 @@ mod tests {
             ("C:/Users/thoma/repo", "C:/Users/thoma/repo"),
             ("C:/", "C:/"),
             ("D:/work/a b", "D:/work/a b"),
-            // The `%` the reporter escapes must survive the round trip.
             ("C:/tmp/a%25c", "C:/tmp/a%c"),
         ] {
             let got = parse(&format!("7;file://localhost/{translated}"));
@@ -2365,9 +1662,6 @@ mod tests {
             assert_eq!(got, want, "payload for {translated}");
         }
 
-        // And the shape the guard exists to suppress: an untranslated msys path
-        // parses fine but yields a drive-relative path Windows resolves against
-        // the current drive, which is how `/c/Users/x` became `C:\c\Users\x`.
         if cfg!(windows) {
             let got = parse("7;file://localhost/c/Users/thoma");
             assert_ne!(got, PathBuf::from("C:/Users/thoma"));
@@ -2387,7 +1681,6 @@ mod tests {
         assert!(inj.args[1].contains("133;"));
         assert!(inj.env.is_empty());
         assert!(!inj.replaces_argv);
-        // fish needs no throwaway dir on disk.
         assert!(inj.dir.is_none());
     }
 
@@ -2395,19 +1688,16 @@ mod tests {
     fn setup_zsh_writes_redirectors_and_points_zdotdir_at_them() {
         let inj = setup_zsh().expect("zsh setup should succeed");
         let dir = inj.dir.clone().expect("zsh needs a throwaway dir");
-        // ZDOTDIR points the shell at our throwaway dir.
         assert_eq!(
             inj.env.get("ZDOTDIR").map(String::as_str),
             Some(dir.to_string_lossy().as_ref())
         );
         assert!(!inj.replaces_argv);
         assert!(inj.args.is_empty());
-        // All four redirector files landed on disk with the expected content.
         for (name, body) in zsh_redirectors() {
             let written = std::fs::read_to_string(dir.join(name)).expect("redirector written");
             assert_eq!(written, body);
         }
-        // The dir basename is recognizable as ours (so a nested launch skips it).
         assert!(is_our_zdotdir(&dir.to_string_lossy()));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2416,11 +1706,9 @@ mod tests {
     fn setup_bash_writes_rcfile_and_forces_non_login() {
         let inj = setup_bash().expect("bash setup should succeed");
         let dir = inj.dir.clone().expect("bash needs a throwaway dir");
-        // argv is `--rcfile <path> -i`, in that order.
         assert_eq!(inj.args[0], "--rcfile");
         assert_eq!(inj.args[2], "-i");
         assert!(inj.replaces_argv);
-        // The rc file on disk matches the generated template.
         let rc = std::fs::read_to_string(&inj.args[1]).expect("rcfile written");
         assert_eq!(rc, bash_rcfile());
         let _ = std::fs::remove_dir_all(&dir);
@@ -2428,7 +1716,6 @@ mod tests {
 
     #[test]
     fn setup_dispatches_by_shell_and_sets_sentinel() {
-        // zsh → an injection carrying the "already active" sentinel (empty value).
         let inj = setup(Some("zsh"), &[], false).expect("zsh setup");
         assert_eq!(
             inj.env.get("TTY7_SHELL_INTEGRATION").map(String::as_str),
@@ -2438,13 +1725,9 @@ mod tests {
             let _ = std::fs::remove_dir_all(d);
         }
 
-        // fish → same sentinel, no files.
         let inj = setup(Some("fish"), &[], false).expect("fish setup");
         assert!(inj.env.contains_key("TTY7_SHELL_INTEGRATION"));
 
-        // bash without custom args → full injection with non-login override.
-        // On Windows only a path identifiable as msys counts as Bash, since a
-        // bare name could resolve to the WSL launcher — see `is_msys_bash`.
         let bash = if cfg!(windows) {
             "C:/Program Files/Git/bin/bash.exe"
         } else {
@@ -2457,34 +1740,25 @@ mod tests {
             let _ = std::fs::remove_dir_all(d);
         }
 
-        // bash WITH custom args → we must not second-guess the user: no injection.
         assert!(setup(Some(bash), &[], true).is_none());
 
-        // PowerShell without custom args → encoded-command injection, no files.
         let inj = setup(Some("powershell.exe"), &[], false).expect("powershell setup");
         assert!(inj.env.contains_key("TTY7_SHELL_INTEGRATION"));
         assert!(inj.dir.is_none());
         assert!(!inj.replaces_argv);
 
-        // PowerShell WITH custom args → `-EncodedCommand` would collide with the
-        // user's own `-Command`/`-File`, so we launch bare.
         assert!(setup(Some("pwsh"), &[], true).is_none());
 
-        // Unknown shell → no integration at all.
         assert!(setup(Some("/bin/sh"), &[], false).is_none());
     }
 
     #[test]
     fn setup_powershell_injects_encoded_command_without_files() {
         let inj = setup_powershell().expect("powershell injection is infallible");
-        // `-NoLogo -NoExit -EncodedCommand <base64>`, in that order — the encoded
-        // command must come last, since PowerShell treats it as the value.
         assert_eq!(inj.args[0], "-NoLogo");
         assert_eq!(inj.args[1], "-NoExit");
         assert_eq!(inj.args[2], "-EncodedCommand");
         assert_eq!(inj.args.len(), 4);
-        // The payload is pure base64 (so it survives the Windows command line and
-        // needs no quoting) and decodes, as UTF-16LE, back to our script.
         let b64 = &inj.args[3];
         assert!(
             b64.bytes()
@@ -2492,7 +1766,6 @@ mod tests {
             "encoded command must be pure base64"
         );
         assert_eq!(decode_utf16le_base64(b64), POWERSHELL_INTEGRATION);
-        // No throwaway dir, no forced spawn mode, no env of its own.
         assert!(inj.env.is_empty());
         assert!(inj.dir.is_none());
         assert!(!inj.replaces_argv);
@@ -2501,44 +1774,30 @@ mod tests {
     #[test]
     fn powershell_integration_emits_every_osc_133_mark_and_cwd() {
         let s = POWERSHELL_INTEGRATION;
-        // A/B wrap the returned prompt; C from the readline hook; D with the exit
-        // code from the prompt hook; plus the OSC 7 cwd report.
         assert!(s.contains("]133;A"));
         assert!(s.contains("]133;B"));
         assert!(s.contains("]133;C"));
         assert!(s.contains("]133;D;$code"));
         assert!(s.contains("]7;file://"));
-        // Guarded on the empty sentinel like the other shells (PowerShell's own
-        // idiom for "unset or empty"), so an inherited `1` blocks re-install.
         assert!(s.contains("if (-not $env:TTY7_SHELL_INTEGRATION)"));
-        // $? must be captured before $LASTEXITCODE — an assignment resets $?.
         let ok_at = s.find("$ok = $?").expect("captures $?");
         let exit_at = s.find("$lastExit = $LASTEXITCODE").expect("captures exit");
         assert!(ok_at < exit_at, "$? must be read before the exit code");
-        // The user's own prompt is preserved and called through, not replaced.
         assert!(s.contains("$global:__Tty7OrigPrompt = $function:prompt"));
         assert!(s.contains("& $global:__Tty7OrigPrompt"));
-        // The literal `%` in the cwd is escaped before the payload is built.
         assert!(s.contains(".Replace('%', '%25')"));
     }
 
     #[test]
     fn powershell_integration_sets_an_osc_title() {
         let s = POWERSHELL_INTEGRATION;
-        // Without an OSC 0/2 title every Windows tab stays generic (PowerShell
-        // profiles, unlike macOS's default zsh, set no title). The prompt hook
-        // must emit an OSC 0 "user@host:dir" title.
         assert!(s.contains("]0;$($env:USERNAME)@$($env:COMPUTERNAME):"));
-        // Home is abbreviated to `~`, matching how the other shells' titles read.
         assert!(s.contains("$titlePath = '~'"));
-        // The title path uses forward slashes so the tab-label parser (which splits
-        // on `/`) can take the last path segment on Windows too.
         assert!(s.contains("$titlePath = $fsPath.Replace('\\', '/')"));
     }
 
     #[test]
     fn base64_encode_matches_rfc4648_vectors() {
-        // The canonical RFC 4648 §10 test vectors, covering both padding cases.
         assert_eq!(base64_encode(b""), "");
         assert_eq!(base64_encode(b"f"), "Zg==");
         assert_eq!(base64_encode(b"fo"), "Zm8=");
@@ -2550,7 +1809,6 @@ mod tests {
 
     #[test]
     fn powershell_encoded_command_round_trips_utf16le() {
-        // A string with a multi-byte char to exercise the UTF-16LE step.
         let script = "Write-Host 'héllo ✓'";
         assert_eq!(
             decode_utf16le_base64(&powershell_encoded_command(script)),
@@ -2558,9 +1816,6 @@ mod tests {
         );
     }
 
-    /// Decode a base64 UTF-16LE string back to a Rust `String` — the inverse of
-    /// [`powershell_encoded_command`], used to check the encoder round-trips
-    /// without a PowerShell interpreter.
     fn decode_utf16le_base64(b64: &str) -> String {
         fn val(c: u8) -> Option<u32> {
             match c {
@@ -2576,7 +1831,7 @@ mod tests {
         let mut acc = 0u32;
         let mut nbits = 0;
         for c in b64.bytes() {
-            let Some(v) = val(c) else { continue }; // skip padding
+            let Some(v) = val(c) else { continue };
             acc = (acc << 6) | v;
             nbits += 6;
             if nbits >= 8 {
@@ -2595,7 +1850,6 @@ mod tests {
     fn throwaway_dir_is_unique_per_call() {
         let a = throwaway_dir("tty7-test-").expect("dir a");
         let b = throwaway_dir("tty7-test-").expect("dir b");
-        // The monotonic counter guarantees distinct dirs even within one process.
         assert_ne!(a, b);
         assert!(
             a.file_name()

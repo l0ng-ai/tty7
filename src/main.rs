@@ -1,5 +1,3 @@
-// Hide the console window on Windows release builds; keep it in debug builds
-// so println!/eprintln! output remains visible while developing.
 #![cfg_attr(
     all(target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"
@@ -15,10 +13,6 @@ use crate::ui::assets::Assets;
 use crate::ui::keymap;
 use gpui::*;
 
-/// Register the bundled Hack monospace faces with gpui's text system so the
-/// default `font_family` ("Hack") renders identically on every machine, with no
-/// dependency on the user having the font installed (the app bundles its
-/// own copy). The four faces cover regular / bold / italic / bold-italic.
 fn register_bundled_fonts(cx: &mut App) {
     use std::borrow::Cow;
     let fonts = vec![
@@ -32,63 +26,28 @@ fn register_bundled_fonts(cx: &mut App) {
     }
 }
 
-/// Watch `config.json` and hot-reload the app when it changes on disk, so
-/// hand-edits (or an external tool rewriting the file) take effect live — no
-/// restart. We watch the config *directory*, not the file: editors and our own
-/// [`Config::save`] replace `config.json` via a temp-file + rename (atomic
-/// write), which severs any watch bound to the original inode. Watching the
-/// parent and filtering to `config.json` events survives the swap.
-///
-/// The `notify` callback fires on a background OS thread, which can't touch GPUI
-/// state. We bridge to the app (main) thread the same way the daemon reader does
-/// (see `terminal::remote`): a `smol::channel` carries a bare "something changed"
-/// ping, and a `cx.spawn` task on the foreground executor drains it and does the
-/// reload with a real `&mut App`.
-///
-/// Scope note: this re-applies theme + colors live (via `apply_theme`, which
-/// reads the freshly-loaded `Config` global). Font size / line height / font
-/// family are cached in `Tty7App`'s fields and pushed into each `TerminalView`,
-/// so a live change to *those* keys needs a hook in `ui::app` (owned elsewhere);
-/// they still take effect for newly-opened tabs and on restart. Font *family*
-/// changes need no font re-registration: `add_fonts` is only for bundled/custom
-/// face files (we ship Hack, registered once at startup); any other family is a
-/// system font gpui resolves by name at render time.
 fn spawn_config_watcher(cx: &mut App) {
     use notify::{RecursiveMode, Watcher};
 
-    // Resolve the file we care about and the directory we actually watch. If the
-    // config dir doesn't resolve (no override/env/$HOME) there's nothing to do.
     let Some(config_file) = crate::core::config::config_path("config.json") else {
         return;
     };
     let Some(dir) = crate::core::config::config_dir_path() else {
         return;
     };
-    // The dir may not exist yet on a first run; watching a missing path errors.
-    // Create it so the watch attaches (harmless — the daemon/save would too).
     let _ = std::fs::create_dir_all(&dir);
 
-    // Coalesce a save's burst of events (truncate → write → rename can fire
-    // several times) into a single reload: on the first ping we wait out a short
-    // quiet period, drain anything queued, then reload once.
     const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
 
     let (tx, rx) = smol::channel::unbounded::<()>();
     let watched_file = config_file.clone();
     let handler = move |res: notify::Result<notify::Event>| {
         let Ok(event) = res else { return };
-        // React to events that touch our `config.json`, or a theme file dropped
-        // into the `themes/` subfolder — both feed the same registry reload below.
-        // Everything else in the dir (`views.json`, `history`, the daemon
-        // socket, and our own `.config.json.tmp.<pid>` / `*.yaml.tmp.<pid>` atomic
-        // scratch files, whose extensions aren't theme extensions) is ignored.
         let hit = event
             .paths
             .iter()
             .any(|p| p.file_name() == watched_file.file_name() || is_theme_file(p));
         if hit {
-            // try_send: a full channel just means a reload is already pending;
-            // one ping is enough to trigger the (idempotent) reload.
             let _ = tx.try_send(());
         }
     };
@@ -100,8 +59,6 @@ fn spawn_config_watcher(cx: &mut App) {
             return;
         }
     };
-    // Recursive so the `themes/` subfolder is covered too (it may not exist yet;
-    // FSEvents picks up subdirs created later). The handler filters the noise.
     if let Err(e) = watcher.watch(&dir, RecursiveMode::Recursive) {
         log::warn!(
             "config hot-reload disabled: failed to watch {}: {e}",
@@ -109,58 +66,25 @@ fn spawn_config_watcher(cx: &mut App) {
         );
         return;
     }
-    // The `RecommendedWatcher` owns the background watch thread; dropping it stops
-    // watching. It has to live for the whole app, so we intentionally leak it
-    // rather than thread a handle through app state (there's exactly one, for the
-    // process lifetime, so a one-off leak is the simplest correct choice).
     Box::leak(Box::new(watcher));
 
     cx.spawn(async move |cx| {
         while rx.recv().await.is_ok() {
-            // Debounce: let the save settle, then swallow the rest of the burst so
-            // we reload exactly once.
             cx.background_executor().timer(DEBOUNCE).await;
             while rx.try_recv().is_ok() {}
 
             cx.update(|cx| {
-                // `Config::load` clamps/validates and falls back to defaults on a
-                // parse error (a half-written file mid-edit), so a bad reload can
-                // never crash the renderer — worst case we momentarily show
-                // defaults until the next (valid) save re-triggers this.
                 cx.set_global(Config::load());
-                // Reload the theme registry too, so edits to (or new) theme files
-                // in the themes folder take effect on the same hot-reload path.
                 crate::ui::presets::load_registry(cx);
                 crate::ui::theme::apply_cursor_hide_mode(cx);
-                // Re-paint theme + colors from the new config. We have no window
-                // handle in this global task, but `apply_theme` accepts `None`:
-                // it still updates the `Theme`/palette globals (what actually
-                // repaints). The window-bound effects — the Transparent↔Blurred
-                // background flip and traffic-light re-pinning — are covered by
-                // `Tty7App::reload_from_config`, which observes the `Config`
-                // global with its window and re-runs `apply_theme(Some(window))`.
                 crate::ui::theme::apply_theme(None, cx);
-                // Schedule every window to redraw so the new palette shows at once.
                 cx.refresh_windows();
             });
         }
-        // Loop only ends if every `Sender` drops — but the sole sender lives in
-        // the leaked watcher's handler, so in practice this runs for the app's
-        // lifetime.
     })
     .detach();
-
-    // Note on feedback loops: our own `Config::save` (theme toggle, font zoom)
-    // rewrites `config.json` and will trip this watcher. That's benign — the
-    // reload reads back the same content we just wrote and re-applies it
-    // idempotently, so it can't oscillate; it's at worst one redundant repaint.
 }
 
-/// Whether `p` is a theme file living directly in the `themes/` subfolder — a
-/// `*.yaml` / `*.yml` / `*.itermcolors` whose parent directory is named `themes`.
-/// The parent check keeps a stray yaml elsewhere in the config dir from tripping
-/// a theme reload, and the extension check excludes the `*.tmp.<pid>` scratch
-/// files atomic writes leave behind mid-save.
 fn is_theme_file(p: &std::path::Path) -> bool {
     p.parent().and_then(|d| d.file_name()) == Some(std::ffi::OsStr::new("themes"))
         && p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
@@ -170,9 +94,6 @@ fn is_theme_file(p: &std::path::Path) -> bool {
         })
 }
 
-/// Parse `--config-dir <path>` (or `--config-dir=<path>`) from the CLI and pin
-/// it as the process config directory before anything reads config. Lets a dev
-/// build keep its state in a throwaway folder — see the `dev` cargo alias.
 fn apply_config_dir_arg() {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -189,8 +110,6 @@ fn apply_config_dir_arg() {
     }
 }
 
-/// Merge two `:`-separated PATH lists, primary entries first, deduped, empties
-/// dropped. Pure so it can be unit-tested; the env write stays in the caller.
 #[cfg(unix)]
 fn merge_paths(primary: &str, secondary: &str) -> String {
     let mut seen = std::collections::HashSet::new();
@@ -202,19 +121,9 @@ fn merge_paths(primary: &str, secondary: &str) -> String {
         .join(":")
 }
 
-/// GUI apps launched from Finder/Dock inherit Launch Services' minimal PATH
-/// (`/usr/bin:/bin:/usr/sbin:/sbin`), not the user's shell PATH — so the
-/// completion engine's `$PATH` scan (`terminal::completion`) can't see
-/// Homebrew/cargo/… executables and command candidates silently vanish. Ask the
-/// user's login shell for its PATH once and merge it in front of ours (current
-/// entries are kept: terminal launches may carry extras like direnv paths).
-/// Login-but-not-interactive (`-l -c`) keeps it cheap: zsh reads .zprofile, not
-/// .zshrc. Shells spawned by the daemon are unaffected either way — they are
-/// login shells and rebuild PATH themselves.
 #[cfg(unix)]
 fn enrich_path_from_login_shell() {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    // fish prints `$PATH` space-separated; ask it to join with ':' explicitly.
     let cmd = if std::path::Path::new(&shell).file_name() == Some("fish".as_ref()) {
         "string join ':' $PATH"
     } else {
@@ -239,15 +148,9 @@ fn enrich_path_from_login_shell() {
         return;
     }
     let merged = merge_paths(&login_path, &std::env::var("PATH").unwrap_or_default());
-    // SAFETY: called from `main` before any thread is spawned, so no concurrent
-    // getenv can race the write.
     unsafe { std::env::set_var("PATH", merged) };
 }
 
-/// A bare (non-bundled) binary — `cargo dev` / `cargo run` — has no
-/// `Info.plist` pointing the Dock at `tty7.icns`, so macOS shows the generic
-/// executable icon. Feed the Dock the bundled logo at runtime in that case;
-/// launches from the real `.app` keep the `.icns` and skip this.
 #[cfg(target_os = "macos")]
 fn set_dock_icon_for_bare_binary() {
     use objc2::{AnyThread, MainThreadMarker};
@@ -261,16 +164,12 @@ fn set_dock_icon_for_bare_binary() {
     if bundled {
         return;
     }
-    // gpui's `run` closure executes on the main thread; bail defensively
-    // rather than panic if that ever stops holding.
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
     static ICON_PNG: &[u8] = include_bytes!("../assets/app-icon.png");
     let data = NSData::with_bytes(ICON_PNG);
     if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
-        // SAFETY: passing a valid NSImage on the main thread; AppKit copies the
-        // reference, no ownership transferred.
         unsafe {
             NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image));
         }
@@ -278,11 +177,6 @@ fn set_dock_icon_for_bare_binary() {
 }
 
 fn main() {
-    // Agent-hook mode: `tty7 agent-hook <agent> <event>` is the tiny emitter
-    // Claude Code's hooks invoke (see `core::agent_hooks`). It reads the hook
-    // payload from stdin, writes one OSC sequence to the controlling terminal,
-    // and exits — never touching config, the daemon, or the GUI. Checked first
-    // so a hook can never accidentally boot a window.
     {
         let args: Vec<String> = std::env::args().skip(1).take(3).collect();
         if args.first().map(String::as_str) == Some("agent-hook") {
@@ -293,35 +187,16 @@ fn main() {
         }
     }
 
-    // Resolve the config directory override (if any) up front, before any code
-    // path touches config/session/history files (the daemon socket path resolves
-    // under this dir too, so the order matters).
     apply_config_dir_arg();
 
-    // Panics inside gpui's `extern "C"` input callbacks abort instead of
-    // unwinding, and the OS crash report then holds the abort rather than the
-    // panic — no message, no location. Record those to `crash.log` in the config
-    // dir. Installed here, right after the config dir resolves, so both the GUI
-    // and the daemon below are covered from their first line of real work.
     let role = if std::env::args().any(|a| a == "--daemon") {
         "daemon"
     } else {
         "gui"
     };
     crate::core::crash::install(role);
-    // And the ordinary `log::` records, which otherwise go nowhere at all —
-    // the daemon's stdio is `/dev/null` by the time it is detached. Off unless
-    // `TTY7_LOG` asks for it; see `core::logfile`.
     crate::core::logfile::install(role);
 
-    // Daemon mode: when launched with `--daemon` we run the headless persistent
-    // terminal server and never open a window. This is the backing process the GUI
-    // auto-spawns and reconnects to; it owns all PTYs + child shells and outlives
-    // the GUI. It is the *same* daemon `tty7-server --daemon` runs on a remote
-    // box — panes plus the control dialect — because a local machine and a
-    // remote one are the same thing seen from different distances, and the
-    // workspace tree both serve lives behind control. Run to completion (the
-    // accept loop blocks until killed) then return.
     if std::env::args().any(|a| a == "--daemon") {
         if let Err(e) = crate::daemon::server::run_daemon() {
             log::error!("daemon exited with error: {e}");
@@ -329,33 +204,14 @@ fn main() {
         return;
     }
 
-    // Stop mode: `--stop-daemon` shuts the persistent daemon down (hanging up
-    // every shell) and returns without ever opening a window. On Windows the
-    // detached daemon is the running image of `tty7.exe`, so it locks the file
-    // and blocks an upgrade/uninstall from replacing it; the installer runs this
-    // first to release the lock. Harmless when no daemon is running.
     if std::env::args().any(|a| a == "--stop-daemon") {
         crate::daemon::spawn::stop();
         return;
     }
 
-    // GUI path: repair the starved Launch Services PATH before anything reads it
-    // (completion scans it per keystroke; the daemon we spawn below inherits it).
     #[cfg(unix)]
     enrich_path_from_login_shell();
 
-    // Make sure the persistent daemon is up before we open a window, so the
-    // very first RemoteTerminal can connect. This auto-spawns a detached
-    // daemon if none is running (sharing our config dir). Failure is non-fatal —
-    // we log and continue; a still-absent daemon will surface later when a
-    // RemoteTerminal fails to connect, rather than blocking startup here.
-    //
-    // When session restore is off, start the daemon *fresh* instead of reusing a
-    // live one: this launch won't re-attach to the previous session's panes, so
-    // reusing the daemon would leave those shells running orphaned (unreachable,
-    // never hung up). `restart()` hangs up every old shell then spawns a clean
-    // daemon — and is safe (equivalent to a plain spawn) when none is running.
-    // Read straight off disk; the `Config` global isn't set until inside `run`.
     let restore_session = crate::core::config::Config::load().restore_session;
     let daemon_result = if restore_session {
         crate::daemon::spawn::ensure_running()
@@ -366,8 +222,6 @@ fn main() {
         log::error!("failed to ensure daemon is running: {e}");
     }
 
-    // Register the bundled icon/font asset source so gpui-component `Icon`s
-    // (tab glyphs, sidebar icons, etc.) can actually load their SVGs.
     gpui_platform::application()
         .with_assets(Assets)
         .run(move |cx| {
@@ -376,63 +230,22 @@ fn main() {
             cx.activate(true);
             #[cfg(target_os = "macos")]
             set_dock_icon_for_bare_binary();
-            // Load user config once and stash it as a global for views to read.
             cx.set_global(Config::load());
-            // Seed the cached OS light/dark appearance before anything resolves a
-            // theme from it. It has to be read here, off the appearance-observer
-            // path — see `ui::theme::SystemAppearance`.
             crate::ui::theme::refresh_system_appearance(cx);
-            // Read `views.json` before any window is built: windows claim
-            // their workspace from this store rather than each parsing the
-            // file themselves.
             crate::core::session::WorkspaceStore::init(cx);
-            // The window registry has to exist before the first window opens —
-            // `ui::windows::open` registers into it.
             crate::ui::windows::WindowRegistry::init(cx);
-            // Build the theme registry (built-ins + user theme files) before the
-            // first window paints its theme.
             crate::ui::presets::load_registry(cx);
-            // Honor `mouse_hide_while_typing` from the start.
             crate::ui::theme::apply_cursor_hide_mode(cx);
-            // Start watching `config.json` so edits hot-reload theme/colors live.
             spawn_config_watcher(cx);
-            // Ask GitHub (once, in the background) whether a newer release exists;
-            // if so, Settings → About surfaces a download prompt. Fails soft and
-            // is a no-op when `check_for_updates` is disabled.
             crate::core::update::spawn_check(cx);
-            // If any agent's installed hooks point at a moved/stale tty7
-            // binary (the app updated or relocated since they were
-            // installed), rewrite them in place — off the startup path, since
-            // it reads (and rarely writes) the agents' config files. No-op in
-            // debug builds and when hooks are absent or already current.
             cx.background_executor()
                 .spawn(async {
                     crate::core::agent_hooks::refresh_hooks_at_launch();
                 })
                 .detach();
             keymap::init(cx);
-            // Hold a control link to this machine's own daemon, exactly as a
-            // remote machine gets one: the daemon owns the workspace tree and
-            // serves it over control, so the local GUI is a control client
-            // like any other. Supervised on its own forever loop — see
-            // `ui::local_link`.
             crate::ui::local_link::LocalLink::install(cx);
 
-            // Come up on the *one* workspace the user was last in, at its own
-            // remembered geometry (`ui::windows` owns that logic, since "New
-            // Workspace" and the workspace picker need the identical path).
-            //
-            // Deliberately one window, not one per workspace that was open at
-            // quit: see `WindowViews::workspace_to_restore` for why, and
-            // `WorkspaceStore::restore_one` for what happens to the others (they
-            // are detached, not forgotten — panes keep running and the switcher
-            // lists them). Closing every window before quitting is *not* a
-            // reason to come up empty: those workspaces still hold running
-            // panes, so launch reattaches the one closed last.
-            //
-            // `None` is therefore a first run only, and it opens a single window
-            // on a fresh workspace holding one terminal — exactly as every
-            // pre-multi-window build did.
             let reopen = crate::core::session::WorkspaceStore::restore_one(cx);
             crate::ui::windows::open(cx, reopen);
         });
@@ -448,7 +261,6 @@ mod tests {
             merge_paths("/opt/homebrew/bin:/usr/bin", "/usr/bin:/bin:"),
             "/opt/homebrew/bin:/usr/bin:/bin"
         );
-        // A starved LS PATH gains the login entries up front.
         assert_eq!(
             merge_paths(
                 "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",

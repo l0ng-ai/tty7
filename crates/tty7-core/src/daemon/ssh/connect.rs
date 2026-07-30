@@ -1,17 +1,3 @@
-//! Transport construction and russh `Config` for the native SSH engine.
-//!
-//! Every transport is reduced to a single [`Transport`] value implementing
-//! `AsyncRead + AsyncWrite`, which `russh::client::connect_stream` accepts:
-//!
-//! - **Direct** — a plain `TcpStream`.
-//! - **ProxyCommand** — spawn the command; its stdio is the transport. tty7
-//!   substitutes `%h`/`%p`/`%r` itself (the gap Tabby left, PRD FR-C1 / #11058).
-//! - **SOCKS5 / HTTP CONNECT** — a `TcpStream` to the proxy, handshaked up to the
-//!   target (no-auth SOCKS5; bare HTTP `CONNECT`), then used directly.
-//! - **Jump host** — a `direct-tcpip` channel opened on an already-authenticated
-//!   jump [`SshConnection`], turned into a stream. Multi-level chains fall out of
-//!   the manager establishing the jump connection recursively before calling here.
-
 use std::borrow::Cow;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -25,8 +11,6 @@ use crate::daemon::protocol::{NativeSshSpec, SshAlgorithms, SshProxy};
 
 use super::session::SshConnection;
 
-/// A concrete transport stream for `connect_stream`. An enum (rather than a boxed
-/// trait object) so each variant's `AsyncRead`/`AsyncWrite` is a direct delegate.
 pub enum Transport {
     Tcp(TcpStream),
     Process(ProcessStream),
@@ -77,30 +61,13 @@ impl AsyncWrite for Transport {
     }
 }
 
-/// A spawned `ProxyCommand`'s stdio as one duplex stream. `kill_on_drop` reaps the
-/// process when the transport is dropped.
 pub struct ProcessStream {
-    // Held so the child is reaped on drop; not otherwise read.
     _child: tokio::process::Child,
-    /// `Option` so `poll_shutdown` can *drop* it.
-    ///
-    /// This is the only way to half-close a pipe. `ChildStdin`'s own
-    /// `poll_shutdown` returns `Ready(Ok(()))` without touching the file
-    /// descriptor, so the child never sees EOF and keeps waiting for input that
-    /// will never come — a `tty7-server --stdio` bridge would hang there
-    /// forever instead of exiting. Closing the write half is a real operation
-    /// and has to be modelled as one.
     stdin: Option<tokio::process::ChildStdin>,
     stdout: tokio::process::ChildStdout,
 }
 
 impl ProcessStream {
-    /// Assemble one from an already-spawned child and its taken pipes.
-    ///
-    /// The fields stay private — a `ProcessStream` whose `_child` did not
-    /// produce its own `stdin`/`stdout` would reap the wrong process on drop.
-    /// `daemon::remote_link` needs this to wrap a `tty7-server --stdio` child
-    /// the same way the `ProxyCommand` path wraps its own.
     pub fn from_parts(
         child: tokio::process::Child,
         stdin: tokio::process::ChildStdin,
@@ -113,7 +80,6 @@ impl ProcessStream {
         }
     }
 
-    /// The write half, or a "already closed" error once it has been shut down.
     fn stdin_mut(&mut self) -> std::io::Result<&mut tokio::process::ChildStdin> {
         self.stdin.as_mut().ok_or_else(|| {
             std::io::Error::new(
@@ -148,16 +114,10 @@ impl AsyncWrite for ProcessStream {
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match self.get_mut().stdin_mut() {
             Ok(stdin) => Pin::new(stdin).poll_flush(cx),
-            // Nothing buffered can remain once the half is closed.
             Err(_) => Poll::Ready(Ok(())),
         }
     }
 
-    /// Flush, then **close** the write half by dropping the pipe.
-    ///
-    /// Delegating to `ChildStdin::poll_shutdown` would be a no-op — it does not
-    /// close the descriptor — so the peer would never reach EOF. Dropping is
-    /// what actually closes it, which is why `stdin` is an `Option`.
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
         let Some(stdin) = this.stdin.as_mut() else {
@@ -177,9 +137,6 @@ impl AsyncWrite for ProcessStream {
     }
 }
 
-/// Build the transport for `spec`, given an already-established `jump` connection
-/// when the spec chains through one. Precedence mirrors OpenSSH/Tabby:
-/// ProxyCommand > jump host > SOCKS5 > HTTP > direct.
 pub async fn build_transport(
     spec: &NativeSshSpec,
     jump: Option<Arc<SshConnection>>,
@@ -209,7 +166,6 @@ pub async fn build_transport(
             let stream = http_connect(host, *port, &spec.host, spec.port).await?;
             Ok(Transport::Tcp(stream))
         }
-        // None (or Command, handled above): direct.
         _ => {
             let stream = TcpStream::connect((spec.host.as_str(), spec.port))
                 .await
@@ -238,9 +194,6 @@ fn spawn_proxy_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
         .kill_on_drop(true);
-    // The daemon is detached and has no console to lend this child, so without
-    // the flag a `ProxyCommand` (`ssh -W`, `connect.exe`, `cloudflared`) gets a
-    // console of its own that stays up for the whole session.
     crate::core::proc::hide_console_tokio(&mut cmd);
     let mut child = cmd
         .spawn()
@@ -258,9 +211,6 @@ fn spawn_proxy_command(
     )))
 }
 
-/// Split a ProxyCommand template into argv and substitute the OpenSSH tokens
-/// `%h` (host), `%p` (port), `%r` (remote user), and `%%` (a literal `%`). Public
-/// for unit testing.
 pub fn proxy_command_argv(template: &str, host: &str, port: u16, user: &str) -> Vec<String> {
     shell_split(template)
         .into_iter()
@@ -278,7 +228,6 @@ fn substitute_tokens(tok: &str, host: &str, port: u16, user: &str) -> String {
                 Some('p') => out.push_str(&port.to_string()),
                 Some('r') => out.push_str(user),
                 Some('%') => out.push('%'),
-                // Unknown token: keep both characters verbatim.
                 Some(other) => {
                     out.push('%');
                     out.push(other);
@@ -292,8 +241,6 @@ fn substitute_tokens(tok: &str, host: &str, port: u16, user: &str) -> String {
     out
 }
 
-/// A minimal POSIX-ish word splitter for ProxyCommand: honors single quotes,
-/// double quotes, and backslash escaping; splits on unquoted whitespace.
 fn shell_split(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -336,7 +283,6 @@ fn shell_split(s: &str) -> Vec<String> {
     out
 }
 
-/// SOCKS5 CONNECT (no authentication) to `target:target_port` via `proxy`.
 async fn socks5_connect(
     proxy_host: &str,
     proxy_port: u16,
@@ -348,14 +294,12 @@ async fn socks5_connect(
         .map_err(|e| {
             anyhow::anyhow!("connect to SOCKS proxy {proxy_host}:{proxy_port} failed: {e}")
         })?;
-    // Greeting: VER=5, one method, 0x00 = no auth.
     s.write_all(&[0x05, 0x01, 0x00]).await?;
     let mut reply = [0u8; 2];
     s.read_exact(&mut reply).await?;
     if reply[0] != 0x05 || reply[1] != 0x00 {
         anyhow::bail!("SOCKS5 proxy refused no-auth (got {reply:?})");
     }
-    // CONNECT request with a domain-name address (ATYP=3).
     let host_bytes = target.as_bytes();
     if host_bytes.len() > 255 {
         anyhow::bail!("SOCKS5 target host too long");
@@ -364,7 +308,6 @@ async fn socks5_connect(
     req.extend_from_slice(host_bytes);
     req.extend_from_slice(&target_port.to_be_bytes());
     s.write_all(&req).await?;
-    // Reply: VER, REP, RSV, ATYP, BND.ADDR, BND.PORT.
     let mut head = [0u8; 4];
     s.read_exact(&mut head).await?;
     if head[1] != 0x00 {
@@ -380,12 +323,11 @@ async fn socks5_connect(
         }
         other => anyhow::bail!("SOCKS5 unexpected bound ATYP {other}"),
     };
-    let mut discard = vec![0u8; addr_len + 2]; // address + port
+    let mut discard = vec![0u8; addr_len + 2];
     s.read_exact(&mut discard).await?;
     Ok(s)
 }
 
-/// HTTP `CONNECT` tunnel to `target:target_port` via `proxy`.
 async fn http_connect(
     proxy_host: &str,
     proxy_port: u16,
@@ -401,8 +343,6 @@ async fn http_connect(
         "CONNECT {target}:{target_port} HTTP/1.1\r\nHost: {target}:{target_port}\r\nProxy-Connection: keep-alive\r\n\r\n"
     );
     s.write_all(req.as_bytes()).await?;
-    // Read until the end of headers (\r\n\r\n). Bounded so a hostile proxy can't
-    // make us buffer without limit.
     let mut buf = Vec::with_capacity(256);
     let mut byte = [0u8; 1];
     loop {
@@ -428,8 +368,6 @@ async fn http_connect(
     Ok(s)
 }
 
-/// Build the russh client config from the spec: keepalive, and algorithm
-/// preferences (empty list per family = russh's secure default for that family).
 pub fn build_config(spec: &NativeSshSpec) -> Arc<russh::client::Config> {
     let mut cfg = russh::client::Config {
         preferred: build_preferred(&spec.algorithms),
@@ -444,10 +382,6 @@ pub fn build_config(spec: &NativeSshSpec) -> Arc<russh::client::Config> {
     Arc::new(cfg)
 }
 
-/// Start from russh's default preference and override only the families the user
-/// specified. Unparseable entries are dropped; if a user list parses to nothing,
-/// that family keeps the default rather than becoming empty (which would offer no
-/// algorithms and fail negotiation).
 fn build_preferred(a: &SshAlgorithms) -> russh::Preferred {
     let mut p = russh::Preferred::DEFAULT;
     if !a.kex.is_empty() {
@@ -540,7 +474,6 @@ mod tests {
     fn build_preferred_keeps_defaults_for_empty_lists() {
         let a = SshAlgorithms::default();
         let p = build_preferred(&a);
-        // Empty spec → unchanged russh default.
         assert_eq!(p.kex, russh::Preferred::DEFAULT.kex);
         assert_eq!(p.cipher, russh::Preferred::DEFAULT.cipher);
     }
@@ -552,7 +485,6 @@ mod tests {
             ..Default::default()
         };
         let p = build_preferred(&a);
-        // The unknown entry is filtered; only the known one is applied.
         let aes = russh::cipher::Name::try_from("aes256-ctr").unwrap();
         assert_eq!(p.cipher.as_ref(), &[aes]);
     }

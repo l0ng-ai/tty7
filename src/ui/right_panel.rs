@@ -1,20 +1,3 @@
-//! The right detail panel: a docked column showing what the active pane *is*,
-//! rather than what it's printing — session facts, its working-tree diff, and
-//! its file tree.
-//!
-//! Its tab row has two homes. On macOS it is the panel's own title-bar-height top
-//! zone, level with the window's chrome, so the column runs unbroken from the top
-//! of the window. Off macOS the title bar has to span the panel (the window
-//! controls live at its right end), so the row drops to the panel's second line —
-//! Cursor-style — while the caption row above is painted in the panel's surface
-//! so the column still reads as one colour.
-//! Either way the tiles themselves are built in
-//! [`tab_strip`](crate::ui::tab_strip), beside the rest of the window's tiles.
-//!
-//! No new source of truth: Info reads the same `TerminalView`/`Tab` accessors the
-//! sidebar row does, Changes probes the same `git_diff` the diff overlay does, and
-//! Files renders the same rows as the code panel's tree.
-
 use gpui::{AnyElement, Context, Window, div, prelude::*, px};
 use gpui_component::button::Button;
 use gpui_component::input::Input;
@@ -33,110 +16,37 @@ use crate::ui::app::{
 };
 use crate::ui::scrollbar::with_vertical_scrollbar;
 
-/// Bounds for the panel's width, mirroring the rail's: a floor so the tree never
-/// becomes an ellipsis parade, and a ceiling as a fraction of the window so a
-/// persisted value can't swallow the terminal.
-///
-/// The floor is also what has to seat the panel's top row on macOS, which is the
-/// binding constraint: four chrome tiles, the panel toggle and the "⋯" — six
-/// 32px boxes, five 2px gaps and the two glyph-aligned insets — need **214px**.
-/// A tighter floor doesn't make the panel narrower, it makes that row overflow;
-/// the alternative (shrinking the tabs to body scale) was tried and reads as the
-/// panel's own navigation being demoted below the two buttons beside it. 216
-/// leaves the row a hair of slack and is still narrower than any window this
-/// panel is usable in.
 pub(crate) const MIN_WIDTH: f32 = 216.;
 pub(crate) const MAX_WIDTH_RATIO: f32 = 0.5;
 
-/// Width (px) of the resize handle's invisible hit-area, centered on the panel's
-/// left border — same geometry as the tab rail's.
 const RESIZE_HANDLE_WIDTH: f32 = 8.;
 
-/// Panel state that isn't a user preference (those live in `Config`): the cached
-/// diff for the Changes tab and the body's scroll position.
 #[derive(Default)]
 pub(crate) struct RightPanelState {
-    /// The machine and cwd `diff` was probed from — compared against the active
-    /// pane's host and cwd to decide whether the cached snapshot is still about
-    /// the right repository. The host is half the identity: the same path on two
-    /// machines is two repositories.
     pub(crate) diff_cwd: Option<(crate::ui::host_ops::HostId, PathBuf)>,
-    /// Last completed probe. `Some(None)` and `None` are different answers:
-    /// "probed, not a work tree" versus "never probed". Shared with the diff
-    /// overlay rather than a second copy of the same tree — see
-    /// [`Tty7App::spawn_shared_diff_probe`].
     pub(crate) diff: Option<Option<Arc<DiffSnapshot>>>,
-    /// The machine-and-cwd this panel is waiting on a probe for; keeps the
-    /// render path from spawning a second one. A key rather than a flag because
-    /// the shared probe (see [`Tty7App::spawn_shared_diff_probe`]) lands per
-    /// repo: the panel has to know *which* answer clears its wait, or a probe
-    /// for the repo it just navigated away from would leave it stuck on
-    /// "Loading…".
     pub(crate) diff_pending: Option<(crate::ui::host_ops::HostId, PathBuf)>,
-    /// The pane `procs` describes, so a pane switch invalidates it rather than
-    /// showing the previous pane's processes under the new pane's name.
     pub(crate) procs_pane: Option<u64>,
-    /// Last completed process/port query for `procs_pane`.
     pub(crate) procs: Option<PaneProcs>,
-    /// A poll cycle is live — a query is in flight *or* the inter-tick timer is
-    /// waiting between ticks. The render path checks this before starting the
-    /// loop, so a re-render never starts a second chain. It must stay set across
-    /// the timer too: clearing it the instant a query returned let every repaint
-    /// in the 2s gap kick off another query, collapsing the interval into a tight
-    /// query→notify→repaint→query loop that made the list flicker.
     pub(crate) procs_loading: bool,
-    /// Bumped on every pane switch to retire the in-flight poll loop: a tick whose
-    /// generation no longer matches drops its result and stops rescheduling, so the
-    /// freshly started loop for the new pane is the only one left running.
     pub(crate) procs_gen: u64,
-    /// Whether the current pane also wants its SSH forwards re-listed on the
-    /// procs tick. Kept here rather than only captured by the running loop
-    /// because it can flip *without* a pane switch — a native-SSH pane you are
-    /// already watching finishes connecting — and the loop reads this on each
-    /// reschedule so it picks the change up on the next tick.
-    /// How the Forwards band's requests reach the daemon while this poll loop
-    /// runs, or `None` when the pane on screen has nothing to forward over.
-    ///
-    /// A route rather than a `bool` because a remote workspace's forwards belong
-    /// to the *workspace*, not the pane: the pane id alone cannot
-    /// say which of the two owners to ask, and the reschedule below re-reads
-    /// this rather than carrying the decision forward.
     pub(crate) procs_forwards: Option<crate::ui::app::ForwardRoute>,
-    /// Scroll position of the shared body container (Info / Outline / Changes),
-    /// owned here rather than left to gpui's element-id state so the overlay
-    /// scrollbar has a handle to read the offset from and to drag.
     pub(crate) scroll: gpui::ScrollHandle,
-    /// The Files tab's local tree scrolls in its own container (it carries the
-    /// tree's focus handle and key bindings), so it needs its own handle.
     pub(crate) tree_scroll: gpui::ScrollHandle,
 }
 
-/// How often the Info tab re-queries processes and ports while it's open. Fast
-/// enough that starting a dev server shows up as you tab over, slow enough that
-/// the process-table walk stays off the profile.
 const PROCS_POLL: std::time::Duration = std::time::Duration::from_millis(2000);
 
 impl Tty7App {
-    /// Whether the right panel is docked open. The title bar's tab row, the body
-    /// column and the code overlay's right inset all derive from this.
     pub(crate) fn right_panel_open(&self, _cx: &gpui::App) -> bool {
         self.right_panel_visible && !self.tabs.is_empty()
     }
 
-    /// The panel's live width, re-clamped to the window the same way the rail's
-    /// is, so a persisted value from a larger display can't take over.
-    /// Named `_px` rather than `_width` because the field it reads is
-    /// `right_panel_width`; a method of the same name would shadow it awkwardly
-    /// at every call site.
     pub(crate) fn right_panel_px(&self, window: &Window, _cx: &gpui::App) -> f32 {
         let max = (window.viewport_size().width.as_f32() * MAX_WIDTH_RATIO).max(MIN_WIDTH);
-        // The live cell, not the config: a drag in progress writes only here, and
-        // persists to the config on release.
         self.right_panel_width.get().clamp(MIN_WIDTH, max)
     }
 
-    /// `ToggleRightPanel` (⌘J). Flips this window's panel; the config write is
-    /// only what the *next* window will start with — see the field's doc comment.
     pub(crate) fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
         let next = !self.right_panel_visible;
         self.right_panel_visible = next;
@@ -144,8 +54,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Select a tab. Opens the panel if it was closed, so the title bar's tab
-    /// tiles double as "show me this" rather than being inert while hidden.
     pub(crate) fn set_right_panel_tab(&mut self, tab: RightPanelTab, cx: &mut Context<Self>) {
         self.right_panel_tab = tab;
         self.right_panel_visible = true;
@@ -156,29 +64,12 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// The docked column, or `None` while the panel is closed.
     pub(crate) fn render_right_panel(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let panel_open = self.right_panel_open(cx);
-        // The remote browser follows the detail pane on *every* paint, not only
-        // while Files is on screen. Opening it is the Files tab's job (no point
-        // listing a directory nobody asked to see), but retiring it can't be:
-        // the transfers footer below is pane-scoped and rides under all four
-        // tabs, so a pane switch made from Info has to drop the old pane's
-        // browser too — otherwise the footer would report a transfer belonging
-        // to a pane you're no longer looking at.
-        //
-        // This runs *before* the closed-panel bail, and treats a closed panel as
-        // "not looking at that pane": the browser owns a 500ms transfer poll that
-        // only ends when the browser does, so leaving it open behind a closed
-        // panel would keep a daemon round-trip (and a full re-render) running
-        // twice a second for a column nobody can see. The poll loop makes the
-        // same check on its own tick (`sftp_start_polling`) so its lifetime
-        // doesn't rest on this function being called every frame; retiring here
-        // as well just gets it done a frame sooner instead of up to 500ms later.
         if let Some(open) = self.sftp_panel.open_pane_id
             && (!panel_open || self.remote_files_pane(window, cx).map(|(id, _)| id) != Some(open))
         {
@@ -206,48 +97,16 @@ impl Tty7App {
                 .w(px(width))
                 .h_full()
                 .child(backing)
-                // The sunk sidebar surface, like the tab rail: both are chrome
-                // around the terminal, so they read as the same material.
                 .bg(cx.theme().sidebar)
                 .border_l_1()
                 .border_color(cx.theme().sidebar_border)
-                // A title-bar-height top zone of its own, exactly like the rail's.
-                // This is what makes the panel read as one column instead of a box
-                // bolted under the title bar: its surface runs the full height of
-                // the window, and the tab row sits *on* it rather than on the
-                // terminal's bar above a seam.
-                //
-                // macOS only. Off macOS the bar spans the panel — it has to, or the
-                // window controls end up stranded mid-window (see `app::render`) —
-                // and a row of tiles under that caption row was one chrome row too
-                // many: the panel opened with three stacked headers (caption chrome,
-                // tab tiles, section title) before any content. So there the tiles
-                // move into the section header instead (`panel_title`), which is a
-                // row the panel was drawing anyway.
                 .children(cfg!(target_os = "macos").then(|| {
                     let row = h_flex()
                         .id("right-panel-titlebar-drag")
                         .flex_none()
                         .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
-                        // gpui-component's `TitleBar` centres its content inside a
-                        // `border_b_1` box — border-box shrinks the content height
-                        // by that 1px, nudging its centred glyphs up half a pixel.
-                        // The corner chrome (⋯, panel toggle) lives in *both* the
-                        // title bar and here, so mirror that hidden border to keep
-                        // its centre line identical; without it the glyphs jump
-                        // down a physical pixel the moment the panel opens.
                         .border_b_1()
                         .border_color(cx.theme().transparent);
-                    // The top zone sits level with the real `TitleBar`, but the
-                    // bar only spans the terminal column — so, exactly like the
-                    // rail's top strip (`tab_sidebar`), make this one act like
-                    // the title bar it aligns with: drag to move, double-click
-                    // to zoom. A press arms a flag and the first *move* starts
-                    // the window move, so a plain click on a tab — and a
-                    // double-click — still lands intact; the tabs and corner
-                    // chrome take their own. `window_move_gesture` holds that
-                    // flag in element state, so a repaint between the press and
-                    // the first move can't disarm it (#221).
                     crate::ui::app::window_move_gesture(
                         row,
                         "right-panel-titlebar-drag",
@@ -257,32 +116,18 @@ impl Tty7App {
                     .on_double_click(|_, window, _| window.titlebar_double_click())
                     .items_center()
                     .gap(px(2.))
-                    // Chrome scale, like the corner controls this row ends with
-                    // (`right_panel_tabs`): the leading inset lines the *glyph*
-                    // up on `CONTENT_INSET`, so it subtracts the 32px tile's own
-                    // padding rather than a 24px one's.
                     .pl(px(tile_trailing_inset()))
                     .children(self.right_panel_tabs(cx))
                     .child(div().flex_1())
-                    // The panel is what reaches the window's right edge while
-                    // it's open, so it carries the corner chrome.
                     .child(self.window_chrome(window, cx))
                 }))
                 .child(body)
-                // The transfers footer is a sibling of the body, not part of any
-                // tab: an SFTP transfer belongs to the pane, so reading Info or
-                // Changes must not make a running upload vanish.
                 .children(self.sftp_transfers_footer(cx))
                 .child(handle)
                 .into_any_element(),
         )
     }
 
-    /// The panel's resize drag: a measuring canvas that installs window-level
-    /// mouse listeners while held, plus the handle itself. Mirrors the tab rail's
-    /// (`tab_sidebar.rs`) with the axis flipped — this panel is anchored to the
-    /// window's right edge, so width grows as the pointer moves *left*, measured
-    /// from the panel's own right edge rather than its origin.
     fn right_panel_resize(&self, cx: &mut Context<Self>) -> (AnyElement, AnyElement) {
         use gpui::{Bounds, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, canvas};
         use std::cell::Cell as StdCell;
@@ -342,11 +187,6 @@ impl Tty7App {
         .size_full()
         .into_any_element();
 
-        // `occlude()` for the same reason as the rail's handle (`tab_sidebar`):
-        // it spans the panel's full height, so its top band lies over a
-        // `WindowControlArea::Drag` row — the macOS top zone, and `panel_title`
-        // below it — and a non-blocking hitbox lets a press arm that row's window
-        // move alongside the resize.
         let active = self.right_panel_dragging.get();
         let handle = div()
             .group("right-panel-resize")
@@ -379,40 +219,6 @@ impl Tty7App {
         (backing, handle)
     }
 
-    /// A tab's header: the name in a weightier small-caps than the old faint
-    /// label, plus an optional live count trailing it (files, commands, changed
-    /// files) so the header states scale at a glance, and an optional control on
-    /// the right. The count is the quiet mono tally the sidebar group headers use.
-    /// `trailing` carries a tab's own controls where it has any, so they sit on
-    /// the label's line rather than earning a second header row.
-    ///
-    /// Off macOS this row is also the panel's tab switcher: the four tiles ride
-    /// at its trailing edge, and the row takes the full title-bar height with a
-    /// hairline under it. The panel there hangs below a caption row that already
-    /// carries chrome (see `render_right_panel`), and a tile row of its own on top
-    /// of this one meant three stacked headers before a single line of content —
-    /// so the two that were saying "this is a header" merge into one that also
-    /// says which tab you are on.
-    ///
-    /// **On macOS it draws nothing unless a tab passes `trailing`.** The panel
-    /// there has its own tile row in its top zone, which already says which tab
-    /// you are on — restating it in words underneath was a whole row spent on
-    /// something the selected tile and the content below both already answer
-    /// (a file tree is Files, a diff is Changes). What it did cost was the row:
-    /// the panel opened with tiles, then a title, then a search box, before one
-    /// line of content. The counts it used to carry move into the tab tooltips.
-    /// A tab that has its own control still gets the row, because that control
-    /// has nowhere else to go.
-    ///
-    /// When it *does* draw, it is grabbable, like every header in the window (see
-    /// [`crate::ui::app::window_move_gesture`]): it sits above the panel's scroll
-    /// container, not inside it, so a drag here has nothing else to mean. The
-    /// label and its count take no hit box, so the row stays grabbable straight
-    /// through them however long the text gets — the same rule the "duo" mark
-    /// established in #202. Anything in `trailing` is a control and must carry
-    /// its own `occlude()`, or Windows' HTCAPTION eats its clicks. The gesture is
-    /// armed *after* the empty-row early return, so the macOS zero-height case
-    /// never becomes an invisible drag area.
     pub(crate) fn panel_title(
         &self,
         text: &str,
@@ -433,8 +239,6 @@ impl Tty7App {
             cx,
         );
         row.flex_none()
-            // Tall enough to seat the chrome-scale tiles when it carries them;
-            // otherwise the compact label line it has always been.
             .h(px(if tabs.is_some() {
                 crate::ui::app::TITLE_BAR_HEIGHT
             } else {
@@ -442,18 +246,11 @@ impl Tty7App {
             }))
             .items_center()
             .pl(px(CONTENT_INSET))
-            // Trailing tiles align on the glyph like every other control in the
-            // window; a label-only header just takes the plain inset. `_SM` for a
-            // tab's own control, whose glyph sits a different distance inside its
-            // box than the chrome-scale tab tiles do.
             .pr(px(match (&tabs, has_trailing) {
                 (Some(_), _) => tile_trailing_inset(),
                 (None, true) => tile_trailing_inset_sm(),
                 (None, false) => CONTENT_INSET,
             }))
-            // The line that separates the header from the tab's content. Only
-            // where the header is the switcher: a label alone doesn't need ruling
-            // off from the band it introduces.
             .when(tabs.is_some(), |this| {
                 this.border_b_1().border_color(cx.theme().sidebar_border)
             })
@@ -487,8 +284,6 @@ impl Tty7App {
                         .flex_shrink_0()
                         .items_center()
                         .gap(px(2.))
-                        // Clear of a tab's own control where there is one; flush
-                        // against the label's spring where there isn't.
                         .when(has_trailing, |this| this.ml(px(6.)))
                         .children(tiles),
                 )
@@ -496,11 +291,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// A tab's filter box — the same borderless magnifier + input the tab rail
-    /// uses, so everything in the window searches the same way. Sits under the
-    /// header rather than in it: it's a full-width control, not a trailing tile.
-    /// Takes the input so the local tree and the remote browser can each keep
-    /// their own query while sharing the one appearance.
     pub(crate) fn panel_search(
         &self,
         input: &gpui::Entity<gpui_component::input::InputState>,
@@ -526,8 +316,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// The body's scrolling area, so every tab shares one scroll container and
-    /// one content inset.
     fn panel_scroll(&self, inner: AnyElement, title: AnyElement) -> AnyElement {
         let body = div()
             .id("right-panel-body")
@@ -548,13 +336,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// A quiet "nothing to show" line, used wherever a tab has no data yet,
-    /// with an optional second line saying what would fill it.
-    ///
-    /// The hint is the point. An empty state that only reports the absence
-    /// ("No changes.") leaves the user to work out whether the panel is broken,
-    /// still loading, or simply pointed at the wrong thing; one that names the
-    /// condition turns a dead end into an instruction.
     fn panel_empty(&self, text: &str, hint: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         v_flex()
@@ -573,21 +354,11 @@ impl Tty7App {
             .into_any_element()
     }
 
-    // ── Info ────────────────────────────────────────────────────────────────
-
-    /// Session facts for the active pane, as a two-column key/value list. Every
-    /// row comes from an accessor the sidebar already uses, so the panel can
-    /// never disagree with the row that spawned it.
     fn render_panel_info(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let title = self.panel_title("Info", None, None, window, cx);
         let mut rows: Vec<(&'static str, String)> = Vec::new();
-        // Held aside from `rows` because they're not key/value lines: the actions
-        // hang off the cwd, and the two lists get their own sub-headers below.
         let mut cwd_for_actions: Option<PathBuf> = None;
         let mut pane_id: Option<u64> = None;
-        // Set only for a *connected native* SSH pane — the one kind that can carry
-        // forwards. A foreground `ssh` typed into a local shell has no connection
-        // to forward over, and a still-connecting one has nothing to list yet.
         let mut forwards_pane: Option<u64> = None;
 
         if let Some(tab) = self.tabs.get(self.active) {
@@ -602,9 +373,6 @@ impl Tty7App {
                     rows.push(("cwd", compact_path(&cwd)));
                     cwd_for_actions = Some(cwd);
                 }
-                // A pane that named no shell took its machine's default — which
-                // for a remote workspace is the *far* machine's, not this
-                // computer's `$SHELL`.
                 let shell = match view.shell_spec().map(|s| s.program.clone()) {
                     Some(program) => crate::core::shells::default_shell_name(Some(&program)),
                     None => self.default_shell_label(cx),
@@ -613,13 +381,6 @@ impl Tty7App {
                 if let Some(ssh) = view.ssh_spec() {
                     rows.push(("ssh", ssh.host.clone()));
                 }
-                // Two ways a pane has something to forward over: it *is* an
-                // SSH session, or it belongs to a remote workspace, whose
-                // forwards run on the workspace's own connection.
-                // The second arm is empty in this build — nothing binds a pane
-                // to a workspace yet — which is deliberate: the band stays
-                // empty rather than offering an add that would have nowhere to
-                // go.
                 let connected_ssh = view
                     .remote_context()
                     .is_some_and(|c| c.kind == crate::daemon::protocol::RemoteKind::NativeSsh)
@@ -656,9 +417,6 @@ impl Tty7App {
             );
         }
 
-        // Keep the process/port query pointed at the pane on screen, and keep it
-        // ticking while this tab is the one being looked at. The same tick carries
-        // the pane's forwards when it has any to carry.
         let route = forwards_pane.map(|id| self.forward_route(id, cx));
         self.sync_procs(pane_id, route, cx);
 
@@ -679,9 +437,6 @@ impl Tty7App {
                             .child(k),
                     )
                     .child(
-                        // The value is the datum — a path, a branch, a host, a
-                        // count — so it takes the mono face, set apart from the
-                        // sans key beside it.
                         div()
                             .flex_1()
                             .min_w_0()
@@ -694,9 +449,6 @@ impl Tty7App {
         }
 
         let inner = v_flex()
-            // Three labelled bands — Session / Processes / Ports — instead of one
-            // flat column, so the pane's facts, what it's running, and what it's
-            // listening on read as distinct groups.
             .child(self.panel_subtitle("Session", false, None, cx))
             .child(list)
             .when_some(cwd_for_actions, |this, cwd| {
@@ -704,18 +456,11 @@ impl Tty7App {
             })
             .children(self.procs_section(pane_id, cx))
             .children(self.ports_section(pane_id, cx))
-            // Ports says what this pane listens on locally; Forwards says what it
-            // routes across the connection. Same family of fact, so it reads as
-            // the band after it rather than a feature bolted on.
             .children(self.forwards_section(forwards_pane, cx))
             .into_any_element();
         self.panel_scroll(inner, title)
     }
 
-    /// The "open this cwd in…" row under the Info list. Deliberately only the
-    /// destinations that need no configuration — a system reveal and the
-    /// clipboard. An "open in $EDITOR" button would need a picker, a stored
-    /// choice and a settings page to change it; that's a feature, not a row.
     fn cwd_actions(&self, cwd: PathBuf, cx: &mut Context<Self>) -> AnyElement {
         let reveal_label = reveal_label();
         h_flex()
@@ -756,13 +501,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// A small-caps band label inside a tab's body, for the sub-lists that hang
-    /// off the Info tab. Lighter than [`panel_title`], which is the tab's own
-    /// header. `divider` draws a hairline above it, so the second and third bands
-    /// separate from the one before; the first band passes `false`. `trailing`
-    /// carries a band's own control where it has one — the same slot
-    /// [`panel_title`](Self::panel_title) gives a tab, so a band's `+` sits on its
-    /// label's line instead of earning a row.
     pub(crate) fn panel_subtitle(
         &self,
         text: &str,
@@ -777,16 +515,11 @@ impl Tty7App {
             .items_center()
             .justify_between()
             .pl(px(CONTENT_INSET))
-            // A trailing tile aligns on its glyph, not its hit box — same
-            // correction the tab header makes.
             .pr(px(if trailing.is_some() {
                 CONTENT_INSET - crate::ui::app::TILE_PAD
             } else {
                 CONTENT_INSET
             }))
-            // A tile is 24px tall against a ~15px label, so the band's own top
-            // padding would push its glyph off the label's line; give the padding
-            // back as a shorter lead when one is present.
             .pt(px(match (divider, trailing.is_some()) {
                 (true, false) => 12.,
                 (true, true) => 8.,
@@ -805,9 +538,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// The pane's process tree, indented by depth. Returns nothing at all when
-    /// the pane is just a shell sitting at its prompt: a one-row "processes"
-    /// section that always says `zsh` is a header earning its keep zero times.
     fn procs_section(&self, pane_id: Option<u64>, cx: &mut Context<Self>) -> Option<AnyElement> {
         let procs = &self.procs(pane_id)?.procs;
         if procs.len() < 2 {
@@ -825,8 +555,6 @@ impl Tty7App {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            // Indent by depth so the tree reads without drawing
-                            // connector glyphs into a 260px column.
                             .pl(px(f32::from(p.depth) * 10.))
                             .text_size(px(12.))
                             .font_family(mono.clone())
@@ -853,8 +581,6 @@ impl Tty7App {
         )
     }
 
-    /// TCP ports the pane's processes are listening on — the answer to "what
-    /// port did that dev server pick?", next to the pane that started it.
     fn ports_section(&self, pane_id: Option<u64>, cx: &mut Context<Self>) -> Option<AnyElement> {
         let ports = &self.procs(pane_id)?.ports;
         if ports.is_empty() {
@@ -893,30 +619,11 @@ impl Tty7App {
         )
     }
 
-    /// The cached query, but only when it describes `pane_id` — the pane the
-    /// Info tab is currently rendering. `sync_procs` already drops the answer on
-    /// a pane switch, so this is belt-and-braces; without the argument the doc
-    /// claimed a guarantee the body didn't actually make.
     fn procs(&self, pane_id: Option<u64>) -> Option<&PaneProcs> {
         (pane_id.is_some() && self.right_panel.procs_pane == pane_id)
             .then_some(self.right_panel.procs.as_ref())?
     }
 
-    /// Point the process query at `pane_id` and make sure the poll is running.
-    /// Called from the Info tab's render, so the loop starts when the tab is
-    /// looked at and dies when it isn't — see [`spawn_procs_query`].
-    ///
-    /// `forwards` asks the same tick to re-list the pane's SSH forwards. It rides
-    /// this loop rather than owning one because it wants the identical lifetime
-    /// (Info on screen, this pane) and because a forward can change state without
-    /// the UI touching it — a remote bind that loses its listener goes to `Error`
-    /// on the daemon, and only a re-list finds out. Off for a non-SSH pane, so a
-    /// local shell doesn't pay for a round-trip that can only answer "none".
-    ///
-    /// It's recorded on the state as well as passed down because it can flip
-    /// while the loop is already running — a pane you're watching on Info
-    /// finishes connecting, and neither the pane id nor the generation changes,
-    /// so nothing would otherwise tell the loop to start asking.
     fn sync_procs(
         &mut self,
         pane_id: Option<u64>,
@@ -927,15 +634,8 @@ impl Tty7App {
         self.right_panel.procs_forwards = forwards.clone();
         if self.right_panel.procs_pane != Some(pane_id) {
             self.right_panel.procs_pane = Some(pane_id);
-            // Drop the previous pane's answer rather than showing it under the new
-            // pane's heading until the first tick lands.
             self.right_panel.procs = None;
-            // Same for the forwards: the list is one pane's, and the rows filter by
-            // pane id anyway, so leaving the old pane's in place would only flash
-            // them under the new pane's band until the tick lands.
             self.loopback_panel.managed.clear();
-            // Retire the old pane's loop and free the guard so the new pane's loop
-            // can start below; the retired tick bows out on the generation check.
             self.right_panel.procs_gen += 1;
             self.right_panel.procs_loading = false;
         }
@@ -946,9 +646,6 @@ impl Tty7App {
         }
     }
 
-    /// One query, then reschedule — the poll loop. It reschedules only while the
-    /// panel is open on Info, so the loop is self-terminating: close the panel or
-    /// switch tabs and the next completion simply doesn't queue another.
     fn spawn_procs_query(
         &mut self,
         pane_id: u64,
@@ -956,11 +653,7 @@ impl Tty7App {
         forwards: Option<crate::ui::app::ForwardRoute>,
         cx: &mut Context<Self>,
     ) {
-        // `procs_loading` is set by the caller (`sync_procs`) and deliberately
-        // stays set across the whole cycle, including the timer wait below.
         cx.spawn(async move |this, cx| {
-            // Both round-trips on the one background hop, so the tick costs one
-            // scheduling slot rather than two.
             let route = forwards.clone();
             let (procs, managed) = cx
                 .background_executor()
@@ -972,8 +665,6 @@ impl Tty7App {
                 .await;
             let keep_polling = this
                 .update(cx, |app, cx| {
-                    // A pane switch while we flew bumped the generation: drop this
-                    // answer and leave the guard to whoever owns the new one.
                     if app.right_panel.procs_gen != generation {
                         return false;
                     }
@@ -982,12 +673,9 @@ impl Tty7App {
                         app.loopback_panel.managed = managed;
                     }
                     cx.notify();
-                    // This window's own panel state, not the config's: another
-                    // window closing its panel must not stop our poll.
                     let wanted =
                         app.right_panel_visible && app.right_panel_tab == RightPanelTab::Info;
                     if !wanted {
-                        // Loop ends here; release the guard so reopening restarts it.
                         app.right_panel.procs_loading = false;
                     }
                     wanted
@@ -998,16 +686,11 @@ impl Tty7App {
             }
             cx.background_executor().timer(PROCS_POLL).await;
             let _ = this.update(cx, |app, cx| {
-                // Re-check rather than trusting the pre-sleep decision: two seconds
-                // is plenty of time to switch panes or close the panel.
                 if app.right_panel.procs_gen != generation {
                     return;
                 }
                 let wanted = app.right_panel_visible && app.right_panel_tab == RightPanelTab::Info;
                 if wanted {
-                    // Re-read rather than carrying the flag forward: the pane may
-                    // have finished connecting since this cycle started, which is
-                    // the one way it changes without a pane switch to retire us.
                     let forwards = app.right_panel.procs_forwards.clone();
                     app.spawn_procs_query(pane_id, generation, forwards, cx);
                 } else {
@@ -1018,17 +701,7 @@ impl Tty7App {
         .detach();
     }
 
-    // ── Outline ─────────────────────────────────────────────────────────────
-
-    /// The pane's commands, newest first, each scrolling the terminal back to
-    /// where it ran. Positions come from the OSC 133 marks the reader thread
-    /// records — see [`crate::terminal::marks`].
-    ///
-    /// Newest first because that's the end you came from: you scrolled past the
-    /// thing you want, and the list should start where your attention is.
     fn render_panel_outline(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        // This panel is a sunk rail (see the `sidebar` fill on its container), so
-        // its rows read the sidebar ladder.
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let Some(leaf) = self
             .tabs
@@ -1045,13 +718,8 @@ impl Tty7App {
                 title,
             );
         };
-        // Count first (a cheap getter) so the borrow ends before `panel_title`
-        // needs `&mut cx`; the list re-borrows the marks below.
         let count = leaf.read(cx).command_marks().len();
         if count == 0 {
-            // Two very different causes, one honest sentence: nothing has run
-            // yet, or this shell never reported OSC 133 (no integration, a bare
-            // `sh`, a nested PTY that eats the marks).
             let title = self.panel_title("Outline", None, None, window, cx);
             return self.panel_scroll(
                 self.panel_empty(
@@ -1072,9 +740,6 @@ impl Tty7App {
             let leaf = leaf.clone();
             let failed = mark.exit.is_some_and(|c| c != 0);
             let running = !mark.done;
-            // A leading status marker reads as a shape first: a hollow ring for a
-            // clean finish, a filled dot while it runs, and — the only tinted one
-            // — a danger dot for a nonzero exit. The failure is what you scan for.
             let dot = {
                 let d = div().flex_none().size(px(7.)).rounded_full();
                 if failed {
@@ -1107,8 +772,6 @@ impl Tty7App {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            // Commands are code: the mono face sets them apart from
-                            // the sans labels and lines the list up like a log.
                             .text_size(px(12.))
                             .font_family(mono.clone())
                             .text_color(if failed {
@@ -1118,9 +781,6 @@ impl Tty7App {
                             })
                             .child(one_line(&mark.text)),
                     )
-                    // Only nonzero exits earn a badge. Annotating every success
-                    // with a `0` would make the failures harder to spot, not
-                    // easier — the whole point of the column.
                     .when_some(mark.exit.filter(|c| *c != 0), |this, code| {
                         this.child(
                             div()
@@ -1136,23 +796,8 @@ impl Tty7App {
         self.panel_scroll(list.into_any_element(), title)
     }
 
-    // ── Changes ─────────────────────────────────────────────────────────────
-
-    /// The working-tree diff as a compact file list — path plus `+N −M` — not the
-    /// diff overlay's hunk cards, which need far more than 260px to be readable.
-    /// Clicking a row opens the full overlay on that repo.
-    ///
-    /// Bounded the same way the overlay is
-    /// ([`MAX_RENDERED_FILES`](crate::terminal::git_diff::MAX_RENDERED_FILES),
-    /// one constant so the two views agree): the rows are not virtualized, so a
-    /// working tree with thousands of changed files is one row per file rebuilt
-    /// on the UI thread every frame — the stall issue #239 is about, reached
-    /// through this panel instead of the overlay.
     fn render_panel_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
-        // The pane's own host, and the cwd it resolved its git line through —
-        // so the Changes list describes the same repository the sidebar's
-        // `+N −M` does, on the same machine.
         let target = self
             .tabs
             .get(self.active)
@@ -1177,25 +822,15 @@ impl Tty7App {
                 title,
             );
         };
-        // Probe on first paint for this cwd, and whenever the pane moves to a
-        // different repository. Refreshes ride the same git-status observer the
-        // sidebar counts do (see `right_panel_refresh_changes`), which re-probes
-        // *in place* — the list only blanks when the repository itself changes.
         let key = (host.id(), cwd.clone());
         if self.right_panel.diff_cwd.as_ref() != Some(&key) {
             self.right_panel.diff_cwd = Some(key);
             self.right_panel.diff = None;
             self.spawn_right_panel_diff(host.clone(), cwd.clone(), cx);
         } else if self.right_panel.diff.is_none() && self.right_panel.diff_pending.is_none() {
-            // Nothing cached and nothing in flight: a probe for a previous cwd
-            // landed after we had already moved on and dropped its result, so
-            // no one is left to answer for this one. Without this the tab would
-            // sit on "Loading…" until some unrelated event nudged it.
             self.spawn_right_panel_diff(host.clone(), cwd.clone(), cx);
         }
 
-        // Count of changed files for the header tally — computed before the title
-        // so the diff borrow ends before `panel_title` takes `&mut cx`.
         let count = match &self.right_panel.diff {
             Some(Some(snap)) => {
                 let n = snap.files.len() + snap.untracked_count();
@@ -1220,33 +855,12 @@ impl Tty7App {
                     cx,
                 ),
             Some(Some(snap)) => {
-                // A refcount bump, not a copy of the file list: the loop below
-                // needs the borrow on `self.right_panel` to be over before
-                // `cx.listener` hands it back, which used to mean collecting
-                // every `(path, +N, −N)` into a Vec on every frame of this
-                // panel, on the UI thread. Sharing the snapshot made that a
-                // deep clone of the whole diff for nothing.
                 let snap = Arc::clone(snap);
-                // The count, not the paths: this used to clone every untracked
-                // path String on every frame of this panel, on the UI thread,
-                // for two `len()`/`is_empty()` reads — the same cost class the
-                // `Arc` switch removed from the probe path.
                 let untracked = snap.untracked_count();
                 let focused = self.diff_overlay_focus(host.id(), &cwd).map(str::to_string);
-                // The overlay's ceiling, deliberately the same number: this list
-                // is not virtualized either, so a whole-repo reformat means one
-                // row per changed file built from scratch every frame. The tally
-                // in the header above still counts every file — capping what is
-                // *rendered* must not change what is *reported*, the same rule
-                // `untracked_count` and `DiffSnapshot::totals` follow.
                 let shown = snap.files.len().min(MAX_RENDERED_FILES);
-                // Rows inset themselves rather than the list, so the hover and
-                // selected capsules bleed a little past the text into the same
-                // 12px gutter the tab rail's rows use.
                 let mut list = v_flex().px(px(CONTENT_INSET - 4.)).py(px(2.)).gap(px(1.));
                 for file in snap.files.iter().take(shown) {
-                    // Owned per *rendered* row — bounded by `shown` — because the
-                    // element id and the click listener both outlive this frame.
                     let path = file.path.clone();
                     let (added, removed) = (file.added, file.removed);
                     let selected = focused.as_deref() == Some(path.as_str());
@@ -1259,11 +873,6 @@ impl Tty7App {
                             .py(px(3.))
                             .rounded(px(5.))
                             .cursor_pointer()
-                            // The rail's own ladder. Hover used to be this fill at
-                            // 55% alpha, which on a light theme is a tint nobody
-                            // can see — the same mistake `chrome_tile_variant_for`
-                            // already documents having fixed in the title bar, made
-                            // again here because there was nothing to reuse.
                             .hover(|s| s.bg(gpui::rgb(sf.hover)))
                             .when(selected, |s| s.bg(gpui::rgb(sf.selected)))
                             .on_click({
@@ -1271,9 +880,6 @@ impl Tty7App {
                                 let cwd = cwd.clone();
                                 let path = path.clone();
                                 cx.listener(move |this, _, window, cx| {
-                                    // Toggling on the same row closes the overlay,
-                                    // so a row is a switch for "show me this diff",
-                                    // not a one-way door.
                                     this.toggle_diff_overlay_at(
                                         host_id,
                                         cwd.clone(),
@@ -1283,8 +889,6 @@ impl Tty7App {
                                     );
                                 })
                             })
-                            // A neutral status letter, kind by glyph not by hue —
-                            // tracked edits are `M`; untracked get `U` below.
                             .child(git_badge("M", cx.theme().muted_foreground, &mono))
                             .child(
                                 div()
@@ -1296,9 +900,6 @@ impl Tty7App {
                                     .text_color(cx.theme().foreground)
                                     .child(path),
                             )
-                            // +N / −M keep the terminal-git greens and reds, the
-                            // one place hue earns its keep; a zero side is dropped
-                            // rather than shown as `+0`.
                             .when(added > 0, |this| {
                                 this.child(
                                     div()
@@ -1321,9 +922,6 @@ impl Tty7App {
                             }),
                     );
                 }
-                // The tail the cap cut, the way the overlay's file list and its
-                // untracked section already report theirs — a truncated list
-                // that says nothing reads as files having vanished.
                 if snap.files.len() > shown {
                     let rest = snap.files.len() - shown;
                     list = list.child(
@@ -1364,13 +962,6 @@ impl Tty7App {
         self.panel_scroll(inner, title)
     }
 
-    /// Off-thread `git diff` for the panel — the *same* probe the diff overlay
-    /// uses. This used to be its own `git_diff::probe` call keeping its own
-    /// `DiffSnapshot`, so a repo with both open generated, parsed and stored
-    /// its full diff twice (issue #239, finding 5). Now both go through
-    /// [`Tty7App::spawn_shared_diff_probe`], which dedupes by machine-and-cwd
-    /// and installs one `Arc` into whoever is watching — including this panel,
-    /// which is why there is no result handler left here.
     fn spawn_right_panel_diff(
         &mut self,
         host: crate::ui::host_ops::SharedHost,
@@ -1384,31 +975,16 @@ impl Tty7App {
         self.spawn_shared_diff_probe(host, cwd, cx);
     }
 
-    /// Re-probe the Changes list when the shared status cache learned something
-    /// newer than what's shown — called from the app's
-    /// `observe_global::<GitStatusCache>` hook, the same trigger that refreshes
-    /// the sidebar's `+N −M` and the diff overlay.
-    ///
-    /// Deliberately *not* "drop the cache and let the next paint re-probe":
-    /// that observer fires on every landed probe, including unrelated repos', so
-    /// dropping the cache blanked the list to "Loading…" and spawned a fresh
-    /// `git diff` several times a second while a pane was producing output.
-    /// Comparing branch + totals first keeps the quiet case free, and re-probing
-    /// in place leaves the rows on screen until the new snapshot lands.
     pub(crate) fn right_panel_refresh_changes(&mut self, cx: &mut Context<Self>) {
         if self.right_panel.diff_pending.is_some() {
             return;
         }
         let Some((id, cwd)) = self.right_panel.diff_cwd.clone() else {
-            return; // never probed — the render path owns the first one
+            return;
         };
-        // The host object itself has to come from the registry: only the id is
-        // cached, and a machine that has gone away has no diff to re-probe.
         let Some(host) = crate::ui::host_registry::HostRegistry::get(cx, id) else {
             return;
         };
-        // `Some(None)` (probed, not a work tree) stays put: a status entry for a
-        // non-repo can't appear, so there's nothing to disagree with.
         let Some(Some(snap)) = &self.right_panel.diff else {
             return;
         };
@@ -1424,27 +1000,13 @@ impl Tty7App {
         }
     }
 
-    // ── Files ───────────────────────────────────────────────────────────────
-
-    /// The project tree, reusing the code panel's rows verbatim — same expand
-    /// state, same click-to-open, so the panel and the editor overlay are two
-    /// views of one tree rather than two trees.
-    /// The Files tab follows the pane: a local pane gets its repository tree, a
-    /// connected native-SSH pane gets that machine's filesystem over SFTP. One tab,
-    /// because "the files this pane is working in" is one idea — where they
-    /// physically live is a property of the pane, not a second feature.
     fn render_panel_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let remote = self.remote_files_pane(window, cx);
         let host = remote.as_ref().map(|(_, host)| host.clone());
-        // Point the browser at this pane, or tear it down when the tab has moved
-        // back to a local one. Returns whether to render the remote mode.
         if self.sftp_sync_pane(remote.map(|(id, _)| id), window, cx) {
             return self.render_panel_sftp(host.unwrap_or_default(), window, cx);
         }
 
-        // No header control: the tree's one view option (dotfiles) is a
-        // right-click away in the tree itself (`file_tree::dotfiles_menu_item`),
-        // which is where you are when you want it.
         let title = self.panel_title("Files", None, None, window, cx);
         let search = self.panel_search(&self.file_search.clone(), cx);
         let rows = self.render_file_tree_rows(window, cx);
@@ -1457,10 +1019,6 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// The detail pane and its host name when it's a *connected native* SSH pane —
-    /// the gate for the Files tab's remote mode. A foreground `ssh` typed into a
-    /// local shell has no connection to browse, and a still-connecting one has
-    /// nothing to list, so both keep the local tree.
     fn remote_files_pane(
         &self,
         window: &mut Window,
@@ -1479,9 +1037,6 @@ impl Tty7App {
     }
 }
 
-/// A small status letter (`M`/`U`/…) for a change row. The *kind* is told by the
-/// glyph in the mono face, not by colour, so the list stays monochrome; callers
-/// pass a muted tone and reserve real hue for the `+N −M` counts beside it.
 pub(crate) fn git_badge(letter: &str, color: gpui::Hsla, mono: &gpui::SharedString) -> AnyElement {
     div()
         .flex_none()
@@ -1495,8 +1050,6 @@ pub(crate) fn git_badge(letter: &str, color: gpui::Hsla, mono: &gpui::SharedStri
         .into_any_element()
 }
 
-/// A pid / port pill: a mono number on the soft-grey capsule the rest of the
-/// chrome uses, so a numeric datum reads as a tag rather than loose text.
 pub(crate) fn info_chip(
     text: &str,
     bg: gpui::Hsla,
@@ -1516,10 +1069,6 @@ pub(crate) fn info_chip(
         .into_any_element()
 }
 
-/// The label for revealing a path in the OS file manager: only macOS has a
-/// "Finder", so everywhere else it's the generic "Open Folder". Shared by the
-/// Info row, the file-tree context menu and the SFTP job list so the action
-/// carries one name per platform.
 pub fn reveal_label() -> &'static str {
     if cfg!(target_os = "macos") {
         "Reveal in Finder"
@@ -1528,7 +1077,6 @@ pub fn reveal_label() -> &'static str {
     }
 }
 
-/// The one-word status the Info row shows next to the agent's name.
 fn agent_status_label(status: crate::core::cli_agent::AgentStatus) -> &'static str {
     use crate::core::cli_agent::AgentStatus::*;
     match status {
@@ -1539,14 +1087,10 @@ fn agent_status_label(status: crate::core::cli_agent::AgentStatus) -> &'static s
     }
 }
 
-/// Flatten a possibly-multiline command to one row: newlines and tabs become
-/// spaces, runs of whitespace collapse. A heredoc or a `for` loop typed across
-/// lines is still recognizable, and the list keeps one row per command.
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// `~`-shorten a path for the Info list, which has ~180px to play with.
 fn compact_path(path: &std::path::Path) -> String {
     let s = path.to_string_lossy().to_string();
     match std::env::var("HOME") {

@@ -1,51 +1,11 @@
-//! Native box-drawing: the U+2500–U+257F box characters and U+2580–U+259F
-//! block elements, drawn as geometry sized to the actual cell instead of as
-//! font glyphs.
-//!
-//! Why the font can't do this job: a glyph fills (at most) the font's own line
-//! height, but the cell it paints into is `font_size × Config::line_height` —
-//! 1.4 by default. At any line height above 1.0 a `│` covers only the middle of
-//! its cell, so every vertical run of box characters breaks into dashes with a
-//! gap at each row boundary: a two-line shell prompt's `╭`/`╰` no longer
-//! connect, a TUI frame is perforated down both sides. Horizontal continuity
-//! has the same problem in miniature whenever a fallback face's advance
-//! disagrees with the cell width.
-//!
-//! Drawing the range natively pins every stroke to the cell's real edges, so
-//! adjacent cells join seamlessly at any line height, any font, any fallback
-//! chain. This is the same special case every terminal with a line-height
-//! setting ships (kitty, alacritty, WezTerm, iTerm2), and the same approach the
-//! Powerline separators in `element.rs` already use — they skip fonts entirely.
-//!
-//! [`glyph`] returns the character's ink as rectangles and filled paths in cell
-//! coordinates; `paint_glyphs` fills them with the cell's foreground. A char
-//! outside the range returns `None` and falls back to the font.
-
 use gpui::{Bounds, Pixels, point, px, size};
 
-/// One paintable piece of a box-drawing glyph.
 pub(crate) enum Ink {
-    /// A solid rectangle in the cell's foreground color.
     Rect(Bounds<Pixels>),
-    /// A rectangle at a fraction of the foreground's alpha — the ░▒▓ shades,
-    /// which fake their dither by translucency exactly as WezTerm does.
     Shade(Bounds<Pixels>, f32),
-    /// A filled path — rounded corners and diagonals, the two shapes a
-    /// rectangle can't express.
     Path(gpui::Path<Pixels>),
 }
 
-/// The ink for `c` sized to `bounds`, or `None` for anything that isn't a
-/// box-drawing/block character (which then renders through the font).
-///
-/// `scale` is the window's device scale factor. Every straight stroke is
-/// snapped to the *device pixel* grid it implies — not for crispness alone,
-/// but for continuity: a cell boundary at a fractional device pixel gets an
-/// antialiasing ramp on both sides, and two abutting 50%-coverage edges
-/// composite to 75% opacity, which perforated every multi-row `│` with a
-/// lighter band at each row boundary. Snapped edges rasterize with no ramp at
-/// all, so adjacent cells butt into one continuous solid — the same reason
-/// kitty's cell-aligned box bitmaps tile seamlessly.
 pub(crate) fn glyph(c: char, bounds: Bounds<Pixels>, scale: f32) -> Option<Vec<Ink>> {
     if !('\u{2500}'..='\u{259f}').contains(&c) {
         return None;
@@ -61,7 +21,6 @@ pub(crate) fn glyph(c: char, bounds: Bounds<Pixels>, scale: f32) -> Option<Vec<I
         .or_else(|| g.blocks(c))
 }
 
-/// The weight of one arm (centre → edge) of a box character.
 #[derive(Clone, Copy, PartialEq)]
 enum Arm {
     None,
@@ -69,8 +28,6 @@ enum Arm {
     Heavy,
 }
 
-/// Cell geometry in f32, plus the light stroke thickness `t` (see
-/// [`light_thickness`] for how that one is chosen).
 struct Cell {
     x0: f32,
     y0: f32,
@@ -82,24 +39,6 @@ struct Cell {
     scale: f32,
 }
 
-/// The light stroke thickness for a cell `cell_width` wide, in logical pixels.
-///
-/// Two rules, in order:
-///
-/// 1. Derive from the cell *width* — a pure font-size proxy — never the height:
-///    the height carries the line-height stretch, and a `─` that fattens when
-///    the user opens up their line spacing would look broken.
-/// 2. Then quantise so the result covers a whole number of device pixels.
-///
-/// Rule 2 keeps the nominal weight and the painted weight in agreement:
-/// [`Cell::vstroke`] lays a stroke off in whole device pixels, and everything
-/// positioned relative to `t` (the arm overshoot, the double-line separation,
-/// `heavy = 2 × light`) should be reasoning about the same value the rasteriser
-/// will actually produce.
-///
-/// Rounding the logical value *first* is what keeps 1x and 2x byte-identical to
-/// what this module shipped with — those are the scales it was tuned and
-/// visually verified at, so the fractional-scale fix must not disturb them.
 fn light_thickness(cell_width: f32, scale: f32) -> f32 {
     let logical = (cell_width * 0.15).round().max(1.);
     (logical * scale).round().max(1.) / scale
@@ -124,16 +63,10 @@ impl Cell {
         }
     }
 
-    /// Snap a logical coordinate onto the device pixel grid.
     fn snap(&self, v: f32) -> f32 {
         (v * self.scale).round() / self.scale
     }
 
-    /// A rectangle with every edge snapped to device pixels (see [`glyph`]).
-    /// Snapping the two edges — not origin + size — is what keeps a shared
-    /// cell boundary shared: both cells snap the same coordinate to the same
-    /// pixel line, so consecutive `│` cells tile with zero gap and zero
-    /// overlap whatever the window position.
     fn rectb(&self, x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
         let (sx0, sy0) = (self.snap(x), self.snap(y));
         let (sx1, sy1) = (self.snap(x + w), self.snap(y + h));
@@ -144,31 +77,10 @@ impl Cell {
         Ink::Rect(self.rectb(x, y, w, h))
     }
 
-    /// A logical thickness as a whole number of device pixels, back in logical
-    /// units. Never zero: a stroke that rounds away is worse than one that is
-    /// a touch too thick.
     fn stroke_px(&self, w: f32) -> f32 {
         (w * self.scale).round().max(1.) / self.scale
     }
 
-    /// A vertical stroke of logical width `w`, centred on `x`, spanning
-    /// `ya..yb`.
-    ///
-    /// The two *ends* snap like any other edge, so a stroke that runs to a cell
-    /// boundary still shares that boundary exactly with the cell beyond it —
-    /// the tiling property [`rectb`](Self::rectb) exists for.
-    ///
-    /// The *width* is deliberately not a second pair of independent snaps. Two
-    /// edges `w` apart land `w × scale` device pixels apart, and unless that is
-    /// exactly a whole number the two `round`s straddle it — rounding apart in
-    /// some cells and together in others, which made vertical rules alternate
-    /// thin/thick across the columns of a TUI table at Windows' default 125% /
-    /// 150% scaling. [`light_thickness`] picks `w` so the product is integral,
-    /// but `f32` cannot always represent it exactly (a `1.5×` scale gives
-    /// `2/1.5 × 1.5 = 2.0000001`), and a coordinate landing on a `.5` tie then
-    /// rounds whichever way the error points. Laying the width off from the
-    /// snapped near edge sidesteps the tie entirely: same weight everywhere,
-    /// by construction rather than by luck.
     fn vstroke(&self, x: f32, w: f32, ya: f32, yb: f32) -> Ink {
         let (x0, y0, y1) = (self.snap(x - w / 2.), self.snap(ya), self.snap(yb));
         Ink::Rect(Bounds::new(
@@ -177,8 +89,6 @@ impl Cell {
         ))
     }
 
-    /// A horizontal stroke of logical width `w`, centred on `y`, spanning
-    /// `xa..xb`. See [`vstroke`](Self::vstroke).
     fn hstroke(&self, y: f32, w: f32, xa: f32, xb: f32) -> Ink {
         let (y0, x0, x1) = (self.snap(y - w / 2.), self.snap(xa), self.snap(xb));
         Ink::Rect(Bounds::new(
@@ -187,14 +97,6 @@ impl Cell {
         ))
     }
 
-    /// The light/heavy arm combinations: one rectangle per arm, each running
-    /// from its cell edge to just past the centre.
-    ///
-    /// The overshoot (`m`, half the thickest arm) is what makes a corner: two
-    /// perpendicular strokes that merely *meet* at the centre point leave a
-    /// notch at the outside of the turn. Same-color opaque overlap costs
-    /// nothing, so every arm overshoots by the same amount and any combination
-    /// of weights joins solid.
     fn arms(&self, u: Arm, d: Arm, l: Arm, r: Arm) -> Vec<Ink> {
         let w = |a: Arm| match a {
             Arm::None => 0.,
@@ -219,20 +121,9 @@ impl Cell {
         ink
     }
 
-    /// The double-line set (U+2550–U+256C), spelled out stroke by stroke.
-    ///
-    /// Doubles can't reuse the [`arms`](Self::arms) overshoot trick: their
-    /// junctions are *open* — ╬ is four corner pieces around a hole, ╠'s inner
-    /// stroke breaks where the branch leaves — so each character lists exactly
-    /// the segments the Unicode chart draws, with endpoints snapped half a
-    /// stroke past the line they join so corners close without crossing the
-    /// gap.
     fn doubles(&self, c: char) -> Option<Vec<Ink>> {
         let t = self.t;
         let h = t / 2.;
-        // The parallel strokes sit at centre ± d. At the 1px thickness of
-        // ordinary font sizes this leaves a 3px gap — wide enough to survive
-        // subpixel placement without the two strokes bleeding into one.
         let d = (t * 1.5).max(2.0);
         let (x0, x1, y0, y1, cx, cy) = (self.x0, self.x1, self.y0, self.y1, self.cx, self.cy);
         let (va, vb) = (cx - d, cx + d);
@@ -326,17 +217,6 @@ impl Cell {
         })
     }
 
-    /// The rounded corners ╭ ╮ ╯ ╰ — two straight stubs to the cell edges plus
-    /// a quarter-circle band between them. `sx`/`sy` name the quadrant the arms
-    /// leave through: ╭ runs down (+1) and right (+1).
-    ///
-    /// The band is a fan of small convex quads, one per arc step, NOT a single
-    /// outer-arc/inner-arc outline. That outline is concave, and gpui fills a
-    /// path as a triangle fan from its first vertex — a concave contour gets
-    /// its whole hollow covered, which rendered every corner as a solid
-    /// quarter-disc blob the first time around. Each quad is convex, so each
-    /// fills exactly itself, and at stroke widths of a few pixels twelve steps
-    /// are indistinguishable from a true arc.
     fn rounded(&self, c: char) -> Option<Vec<Ink>> {
         let (sx, sy): (f32, f32) = match c {
             '╭' => (1., 1.),
@@ -346,16 +226,9 @@ impl Cell {
             _ => return None,
         };
         let h = self.t / 2.;
-        // The largest radius that keeps the arc inside the cell on its short
-        // axis; the straight stubs cover whatever the long axis has left over.
         let r = ((self.x1 - self.x0).min(self.y1 - self.y0) / 2.).max(h * 2.);
         let (cx, cy) = (self.cx, self.cy);
         let mut ink = Vec::new();
-        // Straight stubs from the arc's ends to the cell edges (zero-length
-        // when the radius already spans the half-axis). Each stub reaches one
-        // device pixel *into* the arc band: the stub is pixel-snapped, the arc
-        // isn't, and without the overlap that mismatch reopens a hairline
-        // seam exactly where they hand off.
         let lap = 1. / self.scale;
         if sy > 0. {
             ink.push(self.vstroke(cx, self.t, cy + r - lap, self.y1));
@@ -367,31 +240,6 @@ impl Cell {
         } else {
             ink.push(self.hstroke(cy, self.t, self.x0, cx - r + lap));
         }
-        // The arc band, from the vertical stub (θ=0) to the horizontal one
-        // (θ=π/2) around the arc centre one radius into the quadrant.
-        //
-        // How this renders decides whether the corner looks like kitty's or
-        // not, and gpui's pipeline dictates the shape (learned the hard way,
-        // twice):
-        //
-        // * A path contour is filled as a triangle FAN from its start vertex,
-        //   and coverage in the intermediate texture only accumulates — there
-        //   is no winding cancellation. A whole-band outline is concave, so
-        //   its fan covered the hollow and every corner rendered as a solid
-        //   quarter-disc blob. Each contour must therefore be *star-shaped
-        //   from its start vertex*: 30° slices of a thin band are, a 90° band
-        //   is not.
-        // * All contours ride in ONE Path. Paths composite as premultiplied
-        //   sprites, so two separately painted segments overlap their
-        //   antialiased edges at 75% opacity — the seam at every joint of the
-        //   first polyline attempt. Within a single path the 4x-MSAA samples
-        //   partition cleanly across shared edges instead.
-        // * The outer edge is a real quadratic (`curve_to`), which the shader
-        //   antialiases *analytically* (Loop–Blinn signed distance) — the
-        //   smooth continuous ramp kitty gets from supersampling. The inner
-        //   edge can't be a curve: with no winding, a concave-side bulge can
-        //   only over-cover. It is a fine polyline instead, whose chord error
-        //   at 7.5° steps (< 0.1px at cell sizes) hides inside the MSAA.
         let (ax, ay) = (cx + sx * r, cy + sy * r);
         let at = |radius: f32, theta: f32| {
             let (x, y) = (
@@ -415,8 +263,6 @@ impl Cell {
                 }
                 None => path.insert(gpui::Path::new(start)),
             };
-            // Control point at the tangents' intersection: the exact
-            // quadratic through both endpoints for this arc slice.
             let ctrl = at((r + h) / (step / 2.).cos(), (t0 + t1) / 2.);
             p.curve_to(at(r + h, t1), ctrl);
             p.line_to(at(r - h, t1));
@@ -430,9 +276,6 @@ impl Cell {
         Some(ink)
     }
 
-    /// The dashed lines: n dashes, each 70% of its slot, centred. Deliberately
-    /// *not* edge-to-edge — a dashed line is supposed to read as broken, and
-    /// this matches how the font glyphs space them.
     fn dashed(&self, c: char) -> Option<Vec<Ink>> {
         let (n, heavy, vertical) = match c {
             '╌' => (2, false, false),
@@ -470,10 +313,6 @@ impl Cell {
         Some(ink)
     }
 
-    /// The diagonals ╱ ╲ ╳ as corner-to-corner parallelograms. The offset is
-    /// vertical (not perpendicular) so every vertex stays inside the cell; its
-    /// length is scaled so the *perpendicular* stroke width still comes out at
-    /// the light thickness.
     fn diagonal(&self, c: char) -> Option<Vec<Ink>> {
         let (w, hgt) = (self.x1 - self.x0, self.y1 - self.y0);
         let v = self.t * (w * w + hgt * hgt).sqrt() / w;
@@ -493,9 +332,6 @@ impl Cell {
         })
     }
 
-    /// The block elements U+2580–U+259F: eighths, halves, quadrants, and the
-    /// ░▒▓ shades (a full-cell wash at a quarter / half / three quarters of the
-    /// foreground's alpha).
     fn blocks(&self, c: char) -> Option<Vec<Ink>> {
         let (x0, x1, y0, y1, cx, cy) = (self.x0, self.x1, self.y0, self.y1, self.cx, self.cy);
         let (w, hgt) = (x1 - x0, y1 - y0);
@@ -506,13 +342,11 @@ impl Cell {
         let lr = || r(cx, cy, x1 - cx, y1 - cy);
         Some(match c {
             '▀' => vec![r(x0, y0, w, hgt / 2.)],
-            // ▁ (1/8) through █ (the full block): lower k eighths.
             '▁'..='█' => {
                 let k = (c as u32 - 0x2580) as f32;
                 let hh = hgt * k / 8.;
                 vec![r(x0, y1 - hh, w, hh)]
             }
-            // ▉ (7/8) through ▏ (1/8): left k eighths.
             '▉'..='▏' => {
                 let k = (0x2590 - c as u32) as f32;
                 vec![r(x0, y0, w * k / 8., hgt)]
@@ -538,9 +372,6 @@ impl Cell {
     }
 }
 
-/// Decode the light/heavy arm combinations: the solid lines, corners, tees and
-/// crosses of U+2500–U+254B, and the half/mixed lines of U+2574–U+257F. Order
-/// is (up, down, left, right).
 fn arms_of(c: char) -> Option<(Arm, Arm, Arm, Arm)> {
     use Arm::{Heavy as H, Light as L, None as N};
     Some(match c {
@@ -632,13 +463,10 @@ fn arms_of(c: char) -> Option<(Arm, Arm, Arm, Arm)> {
 mod tests {
     use super::*;
 
-    /// A cell with the proportions the bug shipped in: a 15px font's ~9px
-    /// advance stretched to a 21px line by `line_height: 1.4`.
     fn cell() -> Bounds<Pixels> {
         Bounds::new(point(px(10.), px(20.)), size(px(9.), px(21.)))
     }
 
-    /// min_x / max_x / min_y / max_y over every rect corner and path vertex.
     fn extents(ink: &[Ink]) -> (f32, f32, f32, f32) {
         let (mut nx, mut xx, mut ny, mut xy) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
         let mut visit = |x: f32, y: f32| {
@@ -664,10 +492,6 @@ mod tests {
         (nx, xx, ny, xy)
     }
 
-    /// Every character in U+2500–U+259F must decode to native ink — one that
-    /// silently falls through to the font reintroduces the row-boundary gap
-    /// for exactly that character, which is worse than uniform behavior in
-    /// either direction.
     #[test]
     fn the_whole_range_is_covered() {
         for cp in 0x2500u32..=0x259f {
@@ -679,13 +503,6 @@ mod tests {
         }
     }
 
-    /// Nothing may paint outside its own cell: box characters tile, and one
-    /// cell's overshoot is its neighbor's artifact.
-    ///
-    /// The tolerance is half a pixel, not exact: a quadratic's *control point*
-    /// sits slightly outside the ink it bounds (tangent-intersection, ~3.5%
-    /// past the arc radius), and `extents` reads raw vertices. The curve
-    /// itself never leaves the cell.
     #[test]
     fn ink_stays_inside_the_cell() {
         let b = cell();
@@ -702,10 +519,6 @@ mod tests {
         }
     }
 
-    /// The regression this module exists for: every arm must reach its cell
-    /// edge *exactly*, so vertical runs connect across the line-height gap and
-    /// horizontal runs connect across cells. Checked for the whole arms table
-    /// — including the mixed and half lines — not just `│`.
     #[test]
     fn arms_reach_their_edges() {
         let b = cell();
@@ -732,14 +545,11 @@ mod tests {
         }
     }
 
-    /// Same edge guarantee for the shapes that aren't plain arms: the doubles,
-    /// the rounded corners, and the diagonals all tile too.
     #[test]
     fn doubles_rounded_and_diagonals_reach_their_edges() {
         let b = cell();
         let (x0, y0) = (b.origin.x.as_f32(), b.origin.y.as_f32());
         let (x1, y1) = (x0 + b.size.width.as_f32(), y0 + b.size.height.as_f32());
-        // (char, up, down, left, right)
         let expect = [
             ('═', false, false, true, true),
             ('║', true, true, false, false),
@@ -771,8 +581,6 @@ mod tests {
         }
     }
 
-    /// ╬ is four corner pieces around an open centre — the one double junction
-    /// where "just extend everything through the middle" would visibly lie.
     #[test]
     fn double_cross_keeps_its_open_centre() {
         let b = cell();
@@ -791,8 +599,6 @@ mod tests {
         }
     }
 
-    /// Blocks: the full block is the full cell, the halves are exact halves,
-    /// and the shades wash the whole cell at their nominal alpha.
     #[test]
     fn blocks_cover_their_nominal_area() {
         let b = cell();
@@ -804,8 +610,6 @@ mod tests {
             (x0, x0 + w, y0, y0 + h),
             "█ isn't the full cell"
         );
-        // Interior edges (the half-cell split) may sit up to half a device
-        // pixel from nominal after snapping; the outer edges stay exact.
         let (_, _, ny, xy) = extents(&glyph('▀', b, 1.).unwrap());
         assert_eq!(ny, y0, "▀ doesn't reach the top");
         assert!((xy - (y0 + h / 2.)).abs() <= 0.5, "▀ isn't the top half");
@@ -823,8 +627,6 @@ mod tests {
         }
     }
 
-    /// Heavy strokes must actually be heavier than light ones, and a light
-    /// stroke never vanishes (≥ 1px) however small the cell.
     #[test]
     fn stroke_weights_are_ordered_and_visible() {
         let light = {
@@ -841,7 +643,6 @@ mod tests {
         };
         assert!(light >= 1., "light stroke thinner than a pixel");
         assert!(heavy > light, "heavy stroke isn't heavier");
-        // A pathologically narrow cell still yields visible ink.
         let tiny = Bounds::new(point(px(0.), px(0.)), size(px(2.), px(4.)));
         let Ink::Rect(r) = &glyph('│', tiny, 1.).unwrap()[0] else {
             panic!()
@@ -849,22 +650,16 @@ mod tests {
         assert!(r.size.width.as_f32() >= 1.);
     }
 
-    /// The seam regression: with the window at a fractional device-pixel
-    /// offset, every straight stroke must still land on whole device pixels.
-    /// An unsnapped edge rasterizes an antialiasing ramp, and two abutting
-    /// ramps composite to 75% opacity — the perforated `│` runs this module
-    /// was reported for a second time over.
     #[test]
     fn straight_strokes_snap_to_device_pixels() {
         let scale = 2.0;
-        // Deliberately misaligned: fractional origin and cell width.
         let b = Bounds::new(point(px(10.37), px(20.11)), size(px(9.03), px(21.)));
         let on_grid = |v: f32| ((v * scale).round() - v * scale).abs() < 1e-3;
         for cp in 0x2500u32..=0x259f {
             let c = char::from_u32(cp).unwrap();
             for i in glyph(c, b, scale).unwrap() {
                 let (Ink::Rect(r) | Ink::Shade(r, _)) = i else {
-                    continue; // arcs and diagonals antialias on purpose
+                    continue;
                 };
                 let (x, y) = (r.origin.x.as_f32(), r.origin.y.as_f32());
                 let (x2, y2) = (x + r.size.width.as_f32(), y + r.size.height.as_f32());
@@ -875,28 +670,14 @@ mod tests {
                 );
             }
         }
-        // And two vertically adjacent `│` cells must share their boundary
-        // exactly — same coordinate in, same snapped pixel line out.
         let below = Bounds::new(point(px(10.37), px(41.11)), size(px(9.03), px(21.)));
         let bottom = extents(&glyph('│', b, scale).unwrap()).3;
         let top = extents(&glyph('│', below, scale).unwrap()).2;
         assert_eq!(bottom, top, "adjacent │ cells no longer tile");
     }
 
-    /// Every column must draw `│` at the *same* weight, and every row must draw
-    /// `─` at the same weight, at any scale factor — not just the integer ones.
-    ///
-    /// Note what the test above does *not* catch: it asserts each edge lands on
-    /// the device grid, which a 1-device-pixel stroke and a 2-device-pixel
-    /// stroke both satisfy. Windows' default 125%/150% display scaling put a
-    /// 1-logical-pixel stroke a non-integer number of device pixels wide, and
-    /// the two independent edge snaps then rounded apart in some columns and
-    /// together in others: vertical rules alternated thin/thick across a TUI
-    /// table, horizontal rules alternated down it. Both 1x and 2x are blind to
-    /// it by construction, so the earlier fixtures could never have failed.
     #[test]
     fn stroke_weight_is_uniform_across_cells_at_any_scale() {
-        // Realistic cell metrics: a 13/15/16px font's advance, line_height 1.4.
         for (cw, lh) in [(7.8f32, 18.0f32), (9.03, 21.0), (9.6, 22.0), (10.8, 25.0)] {
             for scale in [1.0f32, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
                 let widths: Vec<f32> = (0..24)
@@ -941,9 +722,6 @@ mod tests {
         }
     }
 
-    /// Quantising the thickness in device space must not change what 1x and 2x
-    /// already rendered — those are the two scales the module was tuned and
-    /// visually verified at.
     #[test]
     fn integer_scales_keep_their_previous_thickness() {
         for (cw, lh) in [(7.8f32, 18.0f32), (9.03, 21.0), (9.6, 22.0), (10.8, 25.0)] {
@@ -954,7 +732,6 @@ mod tests {
                     previous,
                     "cell_width {cw} at scale {scale} changed weight"
                 );
-                // And heavy stays exactly twice light, as `arms` assumes.
                 let b = Bounds::new(point(px(0.), px(0.)), size(px(cw), px(lh)));
                 let Ink::Rect(l) = &glyph('│', b, scale).unwrap()[0] else {
                     panic!()

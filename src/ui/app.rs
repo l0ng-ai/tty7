@@ -1,6 +1,3 @@
-//! The window shell: a transparent unified title bar carrying the tab strip,
-//! with the active terminal filling the rest. Owns all tabs (each its own PTY).
-
 use gpui::{
     App, Axis, Bounds, Context, Entity, Focusable, Pixels, PromptLevel, Subscription, Window, div,
     img, prelude::*, px,
@@ -40,8 +37,6 @@ use crate::ui::settings::{
 };
 use crate::ui::theme::{apply_theme, set_menus, window_background};
 
-/// One editable color of a user theme, targeted by the in-app color editor. Maps
-/// a picker to the seed field (or ANSI slot) it writes back to the theme's file.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ThemeEdit {
     Background,
@@ -52,138 +47,58 @@ pub(crate) enum ThemeEdit {
     Ansi(usize),
 }
 
-/// Convert a picked `Hsla` to a `0xRRGGBB` value (alpha dropped) for storage in a
-/// theme file.
 fn hsla_to_u32(color: gpui::Hsla) -> u32 {
     let rgba: gpui::Rgba = color.into();
     let to = |f: f32| (f.clamp(0.0, 1.0) * 255.0).round() as u32;
     (to(rgba.r) << 16) | (to(rgba.g) << 8) | to(rgba.b)
 }
 
-/// Global font-size bounds and step for the live zoom actions.
 const FONT_SIZE_MIN: f32 = 6.0;
 const FONT_SIZE_MAX: f32 = 48.0;
 pub(crate) const FONT_SIZE_STEP: f32 = 1.0;
 
-/// Line-height multiplier bounds and step for the Typography setting. 1.0 packs
-/// rows flush against each other; 2.0 is very airy. 1.35 is the default.
 const LINE_HEIGHT_MIN: f32 = 1.0;
 const LINE_HEIGHT_MAX: f32 = 2.0;
 pub(crate) const LINE_HEIGHT_STEP: f32 = 0.05;
 
-/// Cap on the recently-closed-tab stack, bounding memory and the JSON we'd
-/// otherwise keep growing without limit.
 const MAX_CLOSED_TABS: usize = 20;
 
-/// How much one resize step nudges a split's ratio (see `resize_pane`). Matches
-/// the divider's clamp band granularity in `pane.rs`.
 const RESIZE_STEP: f32 = 0.05;
 
-/// Quiet window after the last captured chord before a recorded shortcut is
-/// committed (see `schedule_recording_commit`). Long enough to type a second
-/// chord of a sequence (`ctrl-b x`), short enough that a single chord commits
-/// promptly.
 const RECORD_COMMIT_DELAY_MS: u64 = 650;
 
-/// Height (px) of the unified title bar. Shared by `render` (the strip's height),
-/// the settings overlay's nav-sidebar top zone, and the tab rail's top zone so
-/// they all line up (and reach the very top of the window).
 pub(crate) const TITLE_BAR_HEIGHT: f32 = 40.;
 
-/// The chrome tile rhythm: a square hit box centred on a glyph, in two sizes —
-/// the chrome's controls (title bar, rail, panel tabs, code header), and the
-/// smaller ones that sit *inside* a panel's body, which have to read as
-/// subordinate to the header above them.
-///
-/// The glyph sizes are nominal — the viewBox, not the mark. What they were
-/// picked to land is ~10.8pt of actual *ink*, measured off a screenshot against
-/// the macOS traffic lights (12pt across) in the same frame. That is a hair under
-/// VS Code / Windsurf, which measure 12pt the same way, and well over the 8.4pt
-/// these tiles drew before [`crate::ui::tab_strip::BUTTON_ICON_SCALE`] — the size
-/// they had been pinned to regardless of what any call site asked for.
 pub(crate) const TILE_SIZE: f32 = 32.;
 pub(crate) const TILE_GLYPH: f32 = 13.;
 pub(crate) const TILE_SIZE_SM: f32 = 24.;
 pub(crate) const TILE_GLYPH_SM: f32 = 11.;
 
-/// Line-art glyphs need a bigger nominal size than framed ones to draw the same
-/// ink: in lucide's 24-unit box `plus` spans 5→19 where `panel-left` spans 3→21,
-/// so at one shared size the "+" reads a fifth smaller than the tile beside it.
-/// Sized off the measured ratios (58% against 72%), not the viewBox arithmetic.
-/// (No `_SM` counterpart: every body-scale tile currently carries a framed mark.)
 pub(crate) const TILE_GLYPH_LINE: f32 = 16.;
 
-/// Distance from a tile's edge to the glyph inside it — what anything lining a
-/// tile up with text or with the window edge subtracts from the inset it wants,
-/// so the *glyph* lands on the line rather than the invisible hit box around it.
-///
-/// Deliberately the nominal gap, not the distance to the glyph's ink. Counting
-/// the transparent margin lucide leaves inside the mark is more accurate about
-/// where the ink is, and useless: it makes `TILE_PAD` bigger than
-/// [`CONTENT_INSET`], which drove [`tile_trailing_inset`] to under a pixel and
-/// left the hover capsule looking sheared off against the window edge. The
-/// capsule is a thing you can see; it can't be pushed off screen to put the
-/// glyph a truer 2px to the right.
 pub(crate) const TILE_PAD: f32 = (TILE_SIZE - TILE_GLYPH) / 2.;
 pub(crate) const TILE_PAD_SM: f32 = (TILE_SIZE_SM - TILE_GLYPH_SM) / 2.;
 
-/// Help-menu destinations. The README already points people at these; the app
-/// itself offered none of them, so the only in-product way to reach the docs or
-/// the chat was to already know the URL.
 const DOCS_URL: &str = "https://github.com/l0ng-ai/tty7#readme";
 const DISCORD_URL: &str = "https://discord.gg/s3dethqz2V";
 const ISSUES_URL: &str = "https://github.com/l0ng-ai/tty7/issues/new";
 
-/// The one content inset the whole window aligns to: the rail's text and icons,
-/// the title bar's chrome glyphs, and the side panels all start (or end) here, so
-/// every vertical edge in the chrome falls on one of two lines rather than the
-/// five slightly different ones each surface used to pick for itself.
 pub(crate) const CONTENT_INSET: f32 = 12.;
 
-/// Smallest gap between a tile's hit box — the capsule its hover and selected
-/// states paint — and the window edge it sits against.
-///
-/// A floor, because the two rules that set that gap disagree once a tile is big
-/// relative to [`CONTENT_INSET`]: aligning the glyph wants the box pushed out by
-/// [`TILE_PAD`], and at `TILE_SIZE` 32 against an inset of 12 that leaves the
-/// capsule flush with the edge, reading as clipped rather than aligned. Where
-/// they conflict the visible thing wins.
 const TILE_EDGE_GAP: f32 = 5.;
 
-/// Trailing inset for a group of tiles that ends on the window's right edge: the
-/// glyph on [`CONTENT_INSET`] where there is room for it, never closer to the
-/// edge than [`TILE_EDGE_GAP`].
 pub(crate) fn tile_trailing_inset() -> f32 {
     (CONTENT_INSET - TILE_PAD).max(TILE_EDGE_GAP)
 }
 
-/// The same floor for the body-scale tiles inside a panel.
 pub(crate) fn tile_trailing_inset_sm() -> f32 {
     (CONTENT_INSET - TILE_PAD_SM).max(TILE_EDGE_GAP)
 }
 
-/// What gpui-component's `TitleBar` already insets its content by, to clear the
-/// window controls: 80px on macOS (traffic lights on the left), 12px elsewhere
-/// (controls on the right). Anything laid out *inside* the bar therefore starts
-/// here, not at the window edge.
 pub(crate) const TITLE_BAR_LEAD: f32 = if cfg!(target_os = "macos") { 80. } else { 12. };
 
-/// What the bar reserves at its *trailing* edge for the window controls: three
-/// 34px tiles (─ ▢ ✕) off macOS, nothing on macOS (the traffic lights are on the
-/// left, and `TITLE_BAR_LEAD` covers them). Anything in the bar that has to line
-/// up with a column below it measures from the window edge minus this.
 pub(crate) const WINDOW_CONTROLS_W: f32 = if cfg!(target_os = "macos") { 0. } else { 102. };
 
-/// Left offset for the tile group that sits beside the window controls.
-///
-/// On macOS the thing that can collide with the traffic lights is the tile's
-/// *hit box* — it paints a background on hover and when selected, [`TILE_PAD`]
-/// wider than the glyph on each side — so this aligns the box, not the glyph, and the
-/// bar's own 80px lead is already exactly the clearance macOS defines for that.
-/// Hence zero: pulling back into the reserve to "hug" the lights only made the
-/// hover capsule touch them. Off macOS the controls are on the right, nothing is
-/// there to clear, and the group aligns its glyph to the content inset like the
-/// rest of the chrome.
 pub(crate) fn title_bar_hug_offset() -> f32 {
     if cfg!(target_os = "macos") {
         0.
@@ -192,44 +107,8 @@ pub(crate) fn title_bar_hug_offset() -> f32 {
     }
 }
 
-/// Edge of the brand mark that anchors the window's leading corner off macOS
-/// (see [`window_mark`]). Between a chrome tile's 32px hit box and its 13px
-/// glyph: the mark paints no hover capsule, so what has to sit level with the
-/// tiles beside it is its *ink* — and solid art reads heavier than line work at
-/// equal size, hence short of the tile box rather than matching it.
 pub(crate) const WINDOW_MARK_SIZE: f32 = 20.;
 
-/// The "duo" mark — the same art the app icon and the About page carry — drawn
-/// at the leading edge of the title-bar row, or `None` on macOS.
-///
-/// macOS owns that corner: the traffic lights sit there, and [`TITLE_BAR_LEAD`]
-/// reserves them 80px. Everywhere else it is empty. The row's contents are the
-/// rail's controls at its *right* end and the window chrome at the far side, so
-/// the window's leading corner — the slot Windows reads as the app's identity,
-/// filled by Explorer, VS Code and Zed alike — held nothing at all, which comes
-/// across as unfinished rather than restrained.
-///
-/// Drawn, never clicked. It is not a menu button, so it stays out of the tile
-/// rhythm (no hover capsule) and deliberately takes no `occlude()`: the row it
-/// lives in is a `WindowControlArea::Drag`, and letting the mark fall through to
-/// that keeps the strip grabbable instead of punching a dead 20px hole in it.
-/// Make a row that stands in for the title bar behave like one: drag it to move
-/// the window, double-click it to zoom.
-///
-/// Three rows do this. The rail's top zone sits level with the real bar but
-/// outside it (the bar only spans the column beside the rail), and the code and
-/// diff overlays each cover the bar with a header of their own drawn to its line.
-/// Without this they are all dead strips: 40px across the top of the window that
-/// look exactly like the caption and do nothing when you grab them.
-///
-/// Driven the way gpui-component's own `TitleBar` drives it — a press arms a
-/// flag and the first *move* starts the window move — so a plain click, and a
-/// double-click, still land intact. Note that on Windows the drag area maps to
-/// HTCAPTION and the OS claims the press before gpui hit-tests, so every button
-/// inside one of these rows needs an `occlude()` wrapper to get its clicks back.
-///
-/// `key` must be unique among the stand-in rows that can be on screen together
-/// — see [`window_move_gesture`], which owns the arming and explains why.
 pub(crate) fn title_bar_drag(
     row: gpui::Stateful<gpui::Div>,
     key: &'static str,
@@ -237,14 +116,6 @@ pub(crate) fn title_bar_drag(
     cx: &mut gpui::App,
 ) -> gpui::Stateful<gpui::Div> {
     window_move_gesture(row, key, window, cx).on_double_click(|_, window, _| {
-        // gpui only implements `titlebar_double_click` on macOS — the trait
-        // method is an empty default everywhere else, so on Linux this row
-        // swallowed the double-click and nothing zoomed. `zoom_window` is the
-        // maximise toggle there (x11 `_NET_WM_STATE_MAXIMIZED_*`, wayland
-        // `set_maximized`), and what gpui-component's own `TitleBar` calls on
-        // Linux for exactly this reason. Windows needs neither: the row is a
-        // drag area, which maps to HTCAPTION, and the OS has already restored
-        // or maximised the window before this could run.
         if cfg!(target_os = "linux") {
             window.zoom_window();
         } else {
@@ -253,96 +124,10 @@ pub(crate) fn title_bar_drag(
     })
 }
 
-/// The armed flag behind [`window_move_gesture`]. A single bool, but *where* it
-/// lives is the whole point — see there.
 pub(crate) struct WindowMoveArm {
     should_move: bool,
 }
 
-// ── Every header in tty7 is draggable ────────────────────────────────────────
-//
-// A standing rule, not a per-surface feature: a user should never have to learn
-// which of this window's headers happen to move it. Any row that reads as a
-// header, caption or title — the caption strip, the rail's and the detail
-// panel's top zones, an overlay's header, the panel's section title — moves the
-// window when you drag it. New headers are expected to arrive that way.
-//
-// Three things that takes, in the order they bite:
-//
-// 1. **Arm it with [`window_move_gesture`]**, never a fresh `Rc<Cell>` per
-//    render. That function's doc explains why (#221).
-// 2. **Non-controls take no hit box.** Anything drawn inside a header that is not
-//    an interactive control — a label, a count, a brand mark, an icon — gets no
-//    `.id()` and no `occlude()`, so the drag falls straight through it and the
-//    row stays grabbable however long its text runs. This is the rule #202
-//    established for the "duo" mark. Its converse binds too: anything that *is* a
-//    control needs an `occlude()` wrapper, or Windows' HTCAPTION claims the press
-//    before gpui hit-tests and the button never fires.
-// 3. **A flexible spacer needs a minimum.** Where a header's contents *do* take
-//    hit boxes by design — the tab strip, whose chips are draggable for reorder —
-//    the bare spacer beside them is the only grab region there is, and
-//    `flex-basis: 0` means it collapses to nothing the moment the row fills up.
-//    See `tab_strip::GRAB_HANDLE_W`.
-//
-// What the rule does *not* reach is a row that only reads like a header. Where
-// the press already means something else, it keeps that meaning, so these being
-// undraggable is a decision rather than a backlog: tab chips (a drag reorders
-// them), the SFTP breadcrumb (a navigation control), settings section and
-// disclosure headings (typography, and click-to-expand rows inside a scrolling
-// form), diff file-card headers (click-to-collapse rows inside a scroll list),
-// and the command palette (a transient modal over a dismiss-on-press scrim).
-//
-// One region stops satisfying the rule near one edge of its size range, and
-// that is an accepted limitation rather than an oversight to tidy up later. The
-// detail panel's macOS top zone is every-child-occluded (four tab tiles plus the
-// corner chrome), and that fixed footprint lands within a couple of pixels of
-// `right_panel::MIN_WIDTH` — so the spacer between them is a real handle at any
-// comfortable panel width and effectively nothing at the panel's floor.
-//
-// The row below only partly covers that. The panel's section title
-// (`right_panel::panel_title`) is draggable and sits immediately under the top
-// zone, but on macOS it draws nothing for a tab that passes no `trailing`, which
-// is every tab except the remote SFTP browser. So the adjacent handle is there
-// off macOS (where that row is the panel's tab switcher and always drawn) and on
-// macOS for SFTP; for Info, Outline, Changes and Files on macOS, a panel dragged
-// to its floor has no header of its own to grab.
-//
-// Left that way by explicit decision: `MIN_WIDTH` stays where it is rather than
-// trading a real capability — narrowing the panel — for a grab handle, and no
-// control moves off that row either. The window still moves from the caption
-// strip and the rail's top zone at every panel width.
-
-/// Arm-on-press / move-on-first-move window dragging for a row that stands in
-/// for the title bar. [`title_bar_drag`] is this plus the double-click-to-zoom
-/// half; the settings page and the detail panel's top zone take this alone
-/// because their double-click differs.
-///
-/// **The arm has to outlive the frame it was set in (#221).** This used to hold
-/// `should_move` in an `Rc<Cell<bool>>` built inside the render function, which
-/// meant every repaint handed the *next* frame's listeners a fresh, zeroed cell
-/// while the press had written to the old one. Any redraw between the press and
-/// the first drag event silently disarmed the hold — and the press itself
-/// schedules one, because `on_double_click` makes gpui call `window.refresh()`
-/// on mouse-down. So a drag only survived if the first move beat the next vsync:
-/// ≤16ms at 60Hz, ≤8ms on ProMotion. A mouse press nudges the pointer and often
-/// wins that race; a trackpad press is a finger pushing down without translating
-/// and almost never does, which is exactly the "success rate is very low, and
-/// only with the trackpad" the issue reported. The terminal's cursor blink
-/// (`cx.notify()` every 530ms) disarms it on its own even without a press.
-///
-/// `window.use_keyed_state` puts the flag in gpui element state instead, which
-/// survives across frames — the same place gpui-component's own `TitleBar` keeps
-/// it, which is why the ordinary caption strip never had this bug. Keyed rather
-/// than `use_state` because one builder serves several call sites: `use_state`
-/// derives its id from the *caller's* `CodeLocation`, so two of these rows on
-/// screen at once (the rail's top zone plus the code overlay's header is a real
-/// combination) would share one arm. `key` must therefore be unique among the
-/// rows that can coexist.
-///
-/// Releasing outside the row disarms too. With a per-frame cell that never
-/// mattered — the flag died with the frame regardless — but a flag that persists
-/// would otherwise stay armed after a press that wandered off the row, and then
-/// start a window move on a later *hover* over it.
 pub(crate) fn window_move_gesture(
     row: gpui::Stateful<gpui::Div>,
     key: &'static str,
@@ -388,9 +173,6 @@ pub(crate) fn window_mark() -> Option<impl IntoElement> {
     if cfg!(target_os = "macos") {
         return None;
     }
-    // Decoded once and shared: the title bar re-renders on every cursor blink,
-    // and building a fresh `Image` per frame would re-copy the PNG and miss
-    // gpui's image cache, which is keyed on the image's identity.
     static LOGO: std::sync::OnceLock<Arc<gpui::Image>> = std::sync::OnceLock::new();
     let logo = LOGO
         .get_or_init(|| {
@@ -403,64 +185,17 @@ pub(crate) fn window_mark() -> Option<impl IntoElement> {
     Some(img(logo).size(px(WINDOW_MARK_SIZE)).flex_shrink_0())
 }
 
-/// One tab: a split-pane tree plus an optional user-assigned name. Settings is
-/// no longer a tab — it's a full-window overlay (`Tty7App::settings`), so every
-/// tab is a real terminal tab.
 pub struct Tab {
-    /// The tab's split-pane tree (one or more terminals).
     pub pane: Pane,
-    /// User-set custom name (via "Rename Tab"). `None` → derive the label from
-    /// the focused terminal's title at render time.
     pub name: Option<String>,
-    /// Entity id of the pane that last held focus in this tab. Recorded when we
-    /// leave the tab (see `remember_active_pane`) and restored on return, so
-    /// switching away and back keeps the active pane instead of jumping to the
-    /// first leaf. `None` for a tab never left, or after its focused pane closed
-    /// — both fall back to `first_leaf()`.
     last_focused: Option<gpui::EntityId>,
-    /// `Some` while this tab has the working-tree diff overlay open (clicked
-    /// from a sidebar row's git line). Per-tab so switching away hides it and
-    /// switching back restores it; closing the tab drops it. Only the active
-    /// tab's overlay is rendered. See [`crate::ui::diff_overlay`].
     pub(crate) diff_overlay: Option<crate::ui::diff_overlay::DiffOverlayState>,
-    /// This tab's code panel (file tree + editor overlay): open files, tree
-    /// roots/expansion, and visibility. Same per-tab contract as
-    /// `diff_overlay` — switching away hides it, switching back restores it,
-    /// closing the tab drops it. Shared caches (directory listings, gitignore
-    /// matchers, watchers) live on [`Tty7App`]. `None` until the panel is
-    /// first opened in this tab.
     pub(crate) code: Option<Box<crate::ui::code_editor::TabCode>>,
-    /// The sidebar group this tab last *definitively* belonged to: the
-    /// repository home of its first pane's cwd — the main checkout's root, so
-    /// linked worktrees of one repo share a group (deliberately not the
-    /// focused pane's cwd — switching focus between splits must not relocate
-    /// the row), or `None` for outside any repo (the "Scratch" group). Sticky
-    /// on purpose: it only moves when
-    /// the git cache has a landed answer for the current cwd
-    /// ([`GitStatusCache::known_repo_for`](crate::terminal::git_status::GitStatusCache::known_repo_for)
-    /// returns `Some`), so a cd whose probe is still in flight — or a pane
-    /// with no cwd reported yet — keeps the row where it was instead of
-    /// flickering through the Scratch group and back. A `RefCell` because the
-    /// sidebar refreshes it during render, which only has `&Tab`.
     pub(crate) sidebar_group: std::cell::RefCell<Option<std::path::PathBuf>>,
-    /// Which of the two full-column overlays (code panel, diff) was raised last.
-    /// They deliberately have no fixed precedence: whichever the user just acted
-    /// on paints on top, so opening a diff over the editor shows the diff, and
-    /// clicking a file in the tree behind it brings the editor back — the same
-    /// "click it, it comes forward" rule as window stacking.
     pub(crate) overlay_top: OverlayTop,
-    /// This tab's identity in the daemon's machine tree — the id every
-    /// semantic operation about it carries. Minted here (the daemon keeps a
-    /// client-minted id, see `ControlRequest::TabCreate`), so the tab can be
-    /// addressed before its create has round-tripped. A `Cell` because the
-    /// sync layer re-points it at an existing daemon tab when it recognizes
-    /// one by its panes (`tree_sync::adopt_tab_ids`), and that pass runs with
-    /// the same shared borrow every save runs under.
     pub(crate) tree_id: std::cell::Cell<tty7_core::core::machine::TabId>,
 }
 
-/// Stacking order for the two overlays that cover the whole column. See
-/// [`Tab::overlay_top`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum OverlayTop {
     #[default]
@@ -482,9 +217,6 @@ impl Tab {
         }
     }
 
-    /// A tab mirroring one the daemon's tree already holds — labels and
-    /// identity from the tree, the pane views from `pane` (built by the delta
-    /// application, which attaches or reuses them).
     pub(crate) fn from_tree(tree: &tty7_core::core::machine::Tab, pane: Pane) -> Self {
         Self {
             pane,
@@ -500,8 +232,6 @@ impl Tab {
         }
     }
 
-    /// The pane to focus when this tab becomes active: the last-focused leaf if
-    /// it still exists, otherwise the first leaf.
     fn focus_target(&self) -> Option<crate::ui::pane::PaneSlot> {
         match self.last_focused {
             Some(id) => self.pane.leaf_matching_or_first(|l| l.entity_id() == id),
@@ -509,13 +239,6 @@ impl Tab {
         }
     }
 
-    /// The pane the right panel's detail should describe. Not simply the
-    /// focused leaf: opening the panel, the diff overlay or the editor moves
-    /// focus off the terminal entirely, and `focused_or_first` would then fall
-    /// back to the *first* pane — so a split's second pane would silently swap
-    /// the panel's cwd the moment you interacted with the panel. Falling back to
-    /// `focus_target` uses the pane that held focus when it left instead, which
-    /// is the one the user still thinks of as active.
     pub(crate) fn detail_pane(
         &self,
         window: &Window,
@@ -527,13 +250,6 @@ impl Tab {
             .and_then(|slot| slot.terminal().cloned())
     }
 
-    /// The title used to derive the tab label: the pane the tab is working in.
-    /// Only the *active* tab has a live focused pane, so for an inactive tab
-    /// (which holds no window focus) we fall back to the pane it last had
-    /// focused (`focus_target`) rather than always its first leaf — otherwise a
-    /// background tab's label would snap to its first pane. Without a `window`
-    /// (e.g. the command palette) the same `focus_target` is the best we have.
-    /// Empty when there's no terminal or no title yet.
     pub(crate) fn leaf_title(&self, window: Option<&Window>, cx: &App) -> String {
         let leaf = match window {
             Some(window) => self
@@ -547,12 +263,6 @@ impl Tab {
             .unwrap_or_default()
     }
 
-    /// The git snapshot (branch + working-tree diff) of the tab's label-driving
-    /// terminal — the focused leaf with a `window`, else the first — for the
-    /// sidebar row's branch line (the branch and change count shown under the
-    /// title). Read through the shared per-repo cache, so tabs in one work
-    /// tree always agree. `None` when that leaf isn't inside a git work tree,
-    /// or before the repo's first probe lands.
     pub(crate) fn git_status(
         &self,
         window: Option<&Window>,
@@ -565,10 +275,6 @@ impl Tab {
         leaf.read(cx).git_status(cx)
     }
 
-    /// The coding agent running in this tab, or `None`. Any leaf counts (a
-    /// split with a shell on the left and Claude on the right is an agent
-    /// tab); the first agent leaf in tree order wins. Drives the tab avatar's
-    /// brand mark.
     pub(crate) fn agent(&self, cx: &App) -> Option<crate::core::cli_agent::CLIAgent> {
         self.pane
             .terminals()
@@ -576,12 +282,6 @@ impl Tab {
             .find_map(|l| l.read(cx).agent())
     }
 
-    /// The tab's most urgent agent status across its leaves — waiting beats
-    /// working beats done beats idle — or `None` when no leaf runs an agent.
-    /// The green `Done` state always shows (a finished turn stays visible until
-    /// the next one); [`agent_unread_count`](Self::agent_unread_count) then
-    /// says how many of those finished turns are unread. Drives the avatar dot
-    /// and the sidebar counts.
     pub(crate) fn agent_status(&self, cx: &App) -> Option<crate::core::cli_agent::AgentStatus> {
         use crate::core::cli_agent::AgentStatus;
         let urgency = |s: AgentStatus| match s {
@@ -603,12 +303,6 @@ impl Tab {
             .max_by_key(|s| urgency(*s))
     }
 
-    /// How many of the tab's panes hold an *unread* finished turn — a `Done`
-    /// the user hasn't looked at since. Drives the avatar dot's unread form:
-    /// the green dot swells into a count badge (a split tab can finish several
-    /// turns while you're away), and shrinks back to a plain dot once every
-    /// pane has been seen. Zero when the shown status isn't `Done` — a busier
-    /// pane (working/waiting) owns the corner until it settles.
     pub(crate) fn agent_unread_count(&self, cx: &App) -> usize {
         use crate::core::cli_agent::AgentStatus;
         if self.agent_status(cx) != Some(AgentStatus::Done) {
@@ -626,396 +320,150 @@ impl Tab {
     }
 }
 
-/// In-progress inline rename of a tab (double-click a tab label). Holds the
-/// gpui-component text input plus the subscriptions that commit it on Enter/Blur.
 pub(crate) struct Renaming {
-    /// Index of the tab being renamed, in `Tty7App::tabs`.
     pub(crate) index: usize,
     pub(crate) input: Entity<InputState>,
     _subs: Vec<Subscription>,
 }
 
-/// In-flight inline rename of the current workspace (the title-bar chip turns
-/// into a text field). Mirrors [`Renaming`], but keyed to nothing — there is
-/// only ever one current workspace per window.
 pub(crate) struct WorkspaceRename {
     pub(crate) input: Entity<InputState>,
     _subs: Vec<Subscription>,
 }
 
 pub(crate) struct LoopbackForwardPanelState {
-    /// The pane whose add/edit form is expanded under the Info tab's Forwards
-    /// band, or `None` while the band is just its list. Per-pane rather than a
-    /// bare flag so switching panes with a form open doesn't offer the new pane
-    /// a form half-filled with the old one's values.
     pub(crate) form_pane_id: Option<u64>,
-    /// The unified forwards list (Local/Remote/Dynamic, including auto localhost
-    /// forwards) for the pane the Info tab is showing (WS4).
     pub(crate) managed: Vec<crate::daemon::protocol::ManagedForward>,
-    /// Add-forward form state (native-SSH panes only).
     pub(crate) mf_kind: crate::daemon::protocol::SshForwardKind,
     pub(crate) mf_bind_host: Entity<InputState>,
     pub(crate) mf_bind_port: Entity<InputState>,
     pub(crate) mf_target_host: Entity<InputState>,
     pub(crate) mf_target_port: Entity<InputState>,
     pub(crate) mf_description: Entity<InputState>,
-    /// When editing an existing forward, the id being edited — the form shows
-    /// Save/Cancel and re-establishes the forward on save. `None` = adding.
     pub(crate) mf_editing: Option<u64>,
 }
 
 pub struct Tty7App {
-    /// The open tabs; each owns a split-pane tree and an optional name.
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
-    /// Current global font size (px), applied to every pane in every tab.
     pub(crate) font_size: f32,
-    /// Current global line-height multiplier, applied to every pane.
     pub(crate) line_height: f32,
-    /// Currently-applied font family. Tracked (not just read from config on
-    /// demand) so the `Config`-global observer can tell a hot-reloaded family
-    /// change from the far more common no-op re-notify.
     pub(crate) font_family: String,
-    /// Currently-applied distinct bold/italic faces (`None` = synthesized), also
-    /// tracked so the hot-reload observer can diff them like `font_family`.
     pub(crate) font_family_bold: Option<String>,
     pub(crate) font_family_italic: Option<String>,
-    /// Currently-applied OpenType features for terminal fonts. `None` means the
-    /// terminal-safe default (ligatures disabled).
     pub(crate) font_features: Option<gpui::FontFeatures>,
-    /// Currently-applied terminal-emulator defaults. Tracked so hot-reload can
-    /// push only the alacritty-backed options that actually changed.
     terminal_cursor_style: ConfigCursorStyle,
     terminal_scrollback_limit: usize,
-    /// Keeps the `observe_global::<Config>` subscription alive for the app's
-    /// lifetime so external edits to `config.json` (swapped in by the watcher in
-    /// `main.rs`) live-apply font size / line height / family. Never read.
     _config_watch: Subscription,
-    /// Keeps the keystroke interceptor alive: any real keypress cancels the
-    /// held-⌘/Ctrl tab badges (and any pending reveal), so a chord like ⌘C
-    /// never shows them — only a bare hold does. An *interceptor* (fires
-    /// pre-dispatch) rather than an observer because the terminal consumes
-    /// most keys with `stop_propagation`, which suppresses observers. Never read.
     _keystroke_watch: Subscription,
-    /// Keeps the window-activation observer alive: any active-status flip also
-    /// cancels the badges. Deactivating mid-hold (⌘-Tab, Spotlight, a click
-    /// into another app) sends the modifier *release* to whatever app is key
-    /// by then — this window never gets that `ModifiersChanged`, so without
-    /// this the badges stuck on until some later keypress. Never read.
     _activation_watch: Subscription,
-    /// Keeps the `observe_global::<GitStatusCache>` subscription alive: a git
-    /// probe landing (from *any* pane) repaints the sidebar, so every row in
-    /// the same repo shows the just-refreshed branch/diff line, not a stale
-    /// per-row copy. Never read.
     _git_status_watch: Subscription,
-    /// Keeps the `observe_global::<PaneLivenessCache>` subscription alive: a
-    /// machine's answer about which panes it still has lands on a background
-    /// task, so nothing in this window would otherwise redraw the picker row or
-    /// menu row that asked for it. Never read.
     _pane_liveness_watch: Subscription,
-    /// Keeps the window-appearance observer alive: while
-    /// `Config::theme_follow_system` is on, an OS light/dark flip re-resolves
-    /// the theme slot and repaints. Never read.
     _appearance_watch: Subscription,
-    /// `Some` while the command palette overlay is open; `None` when closed.
-    /// The view owns its search input, filtered list and keyboard handling and
-    /// emits a `PaletteEvent`; we build the catalog and run the chosen command.
     palette: Option<Entity<PaletteView>>,
-    /// Keeps the open palette's event subscription alive; dropped on close.
     palette_sub: Option<Subscription>,
-    /// Stack of recently closed tabs (most recent on top) for Cmd+Shift+T.
-    /// Stored serialized so each entry carries the panes' cwd + name at close.
-    /// `pub(crate)` so the home page can surface the top entry as its
-    /// "reopen what you just closed" hint.
     pub(crate) closed: Vec<SessionTab>,
-    /// `Some` while a tab label is being renamed inline; `None` otherwise.
     pub(crate) renaming: Option<Renaming>,
-    /// `Some` while the "New Worktree Tab" sheet is open (see
-    /// `ui::worktree_prompt`); `None` otherwise.
     pub(crate) worktree_prompt: Option<crate::ui::worktree_prompt::WorktreePrompt>,
-    /// When `Some`, the active tab renders only this one leaf full-window
-    /// (Cmd+Shift+Enter maximize). Cleared on any structural / navigation change.
     pub(crate) maximized: Option<Entity<TerminalView>>,
-    /// Whether the tab chips currently show their ⌘1…⌘9 switch badges
-    /// (shown while bare ⌘/Ctrl is held; see `hints::on_modifiers_changed`).
     pub(crate) mod_hint_badges: bool,
-    /// Generation counter for the delayed badge reveal: bumped on every
-    /// modifier transition and keypress so a stale timer can't fire.
     pub(crate) mod_hint_gen: u64,
-    /// Generation counter for the keybinding-capture commit timer: bumped on
-    /// every captured chord, cancel, and start, so a stale pause-to-commit
-    /// timer can't fire after the sequence changed or capture ended.
     record_gen: u64,
-    /// Focus target for the home page (the zero-tab state; see `ui::home`).
-    /// Keeping something focused keeps keystrokes flowing through the window's
-    /// dispatch path, so ⌘T & friends still reach the root action handlers.
     pub(crate) home_focus: gpui::FocusHandle,
-    /// The shells of the machine **this window is bound to**, listed in the "+"
-    /// dropdown. Fetched once per machine off the UI thread — empty until that
-    /// lands (and while a remote machine is unreachable), when the dropdown
-    /// offers just the default entry.
-    ///
-    /// Not "this computer's shells": a remote workspace's window opens its tabs
-    /// on the far machine, and a menu built here would offer paths that only
-    /// exist locally. See [`Tty7App::refresh_shells`].
     pub(crate) shells: ShellInventory,
-    /// Which machine [`Self::shells`] describes, so a landing fetch for a
-    /// machine the window has since left can be discarded, and so the menu knows
-    /// whether the local config's `shell` override applies to it.
     pub(crate) shells_host: HostId,
-    /// Pane-contextual SSH loopback forward UI state. The controls render only
-    /// over the active SSH pane, but the input/editing state is app-owned so it
-    /// is not tied to the Settings tab.
     pub(crate) loopback_panel: LoopbackForwardPanelState,
-    /// Pane-contextual SFTP file panel (WS5), bound to a focused native-SSH pane.
     pub(crate) sftp_panel: crate::ui::sftp::SftpPanelState,
-    /// Right detail panel (info / changes / files) docked beside the terminal.
     pub(crate) right_panel: crate::ui::right_panel::RightPanelState,
-    /// Repositories with a `git diff HEAD` probe in flight, keyed by machine
-    /// *and* working directory — the same path on two hosts is two different
-    /// work trees. One probe answers everyone: the diff overlay on any number of
-    /// tabs and the Changes panel all read the same result, instead of each
-    /// running its own copy of the same invocation and parse. See
-    /// [`Tty7App::spawn_shared_diff_probe`](crate::ui::app::Tty7App::spawn_shared_diff_probe).
     pub(crate) diff_probes_inflight:
         std::collections::HashSet<(crate::ui::host_ops::HostId, std::path::PathBuf)>,
-    /// Repositories whose in-flight probe was already stale when someone asked
-    /// again, so it has to be re-run the moment that one lands.
-    ///
-    /// Deduping by repo is what makes one `git diff` answer every watcher, but a
-    /// probe describes the tree at the moment it *started*. A refresh triggered
-    /// after that — a command finished, an agent turn ended — folds into the
-    /// running probe and would otherwise be answered with a snapshot already
-    /// known to be out of date, with nothing left to trigger another look: the
-    /// overlay re-checks only on a `GitStatusCache` change, and that one has
-    /// been spent. See
-    /// [`Tty7App::spawn_shared_diff_probe`](crate::ui::app::Tty7App::spawn_shared_diff_probe).
     pub(crate) diff_probes_restale:
         std::collections::HashSet<(crate::ui::host_ops::HostId, std::path::PathBuf)>,
-    /// Local project file tree (left column of the body).
     pub(crate) file_tree: crate::ui::file_tree::FileTreeState,
-    /// Code-editor panel (right column of the body).
     pub(crate) editor: crate::ui::code_editor::EditorPanelState,
-    /// Vertical tab sidebar width (px), held in a shared `Cell` so the resize
-    /// drag's window-level mouse listener can mutate it without the entity handle
-    /// (mirrors the split divider's `ratio`). Seeded from `Config::sidebar_width`
-    /// and persisted back when a drag ends.
     pub(crate) sidebar_width: Rc<Cell<f32>>,
-    /// Whether the sidebar's resize handle is currently held.
     pub(crate) sidebar_dragging: Rc<Cell<bool>>,
-    /// Right detail panel width (px) and drag state, held in shared `Cell`s for
-    /// exactly the reason `sidebar_width` is — see there.
     pub(crate) right_panel_width: Rc<Cell<f32>>,
     pub(crate) right_panel_dragging: Rc<Cell<bool>>,
-    /// Which chrome this *window* is showing: is the detail panel docked open,
-    /// which of its tabs is selected, and is the tab rail collapsed.
-    ///
-    /// Window-level rather than `Config`, which is a global: with one window the
-    /// two were indistinguishable, but with several, reading the config meant
-    /// opening the detail panel in one window opened it in every other one too.
-    /// A window is a *view* — what it has on screen is its own. The config
-    /// fields of the same names survive as what a newly opened window starts
-    /// with, written back on each toggle so a new window (and the next launch)
-    /// inherits the last thing the user actually chose.
     pub(crate) right_panel_visible: bool,
     pub(crate) right_panel_tab: RightPanelTab,
     pub(crate) sidebar_collapsed: bool,
-    /// Scroll handle for the sidebar's row list, so activating a tab scrolls its
-    /// row into view — and so the rail's overlay scrollbar has an offset to
-    /// track and drag (see [`crate::ui::scrollbar`]).
     pub(crate) sidebar_scroll: gpui::ScrollHandle,
-    /// `Some` while a tab / group is being dragged to a new position, in either
-    /// the strip or the rail: the frozen geometry the live preview reflow is
-    /// computed against (see [`crate::ui::reorder`]). Shared by `Rc` because the
-    /// `on_drag` that opens it only gets `&mut App`, not the entity. Cleared on
-    /// the first frame after gpui ends the drag.
     pub(crate) reorder: Rc<RefCell<Option<crate::ui::reorder::Reorder>>>,
-    /// Filter box in the sidebar's top control bar ("Search tabs…"); its text
-    /// narrows the visible rows by fuzzy-ish substring match on the tab label.
     pub(crate) sidebar_search: Entity<InputState>,
-    /// Live filter for the detail panel's Files tab (its own box, so filtering
-    /// the tree never disturbs the tab list's filter and vice versa).
     pub(crate) file_search: Entity<InputState>,
-    /// Re-renders the sidebar on each search keystroke so results narrow live.
     _sidebar_search_sub: Subscription,
     _file_search_sub: Subscription,
-    /// `Some` while the settings page is open. Settings is a full-window overlay
-    /// (not a tab), so it covers the tab rail / title bar and never clutters the
-    /// tab list. Holds all the settings widget state + its subscriptions.
     settings: Option<SettingsState>,
-    /// In-pane native-SSH auth / host-key sheet state (WS3). Holds the active
-    /// prompt (keyed to the pane that raised it), its input widgets, and
-    /// dismissable banners. Empty when no prompt is pending.
     pub(crate) ssh_prompt: crate::ui::ssh_prompt::SshPromptState,
-    /// In-pane "confirm close of a live SSH session" state (PRD FR-E3): the close
-    /// action awaiting confirmation, or `None` when no prompt is up.
     pub(crate) ssh_close_confirm: Option<SshCloseKind>,
-    /// Latest window geometry (the restore bounds while fullscreen), kept
-    /// current by a bounds observer so the quit hook can persist it to
-    /// `window.json` — at quit time no `&Window` is in reach to ask directly.
     window_bounds: Bounds<Pixels>,
-    /// Which persistent workspace this window is showing. The window is the
-    /// transient view; the workspace is the identity that survives closing it
-    /// and shows up in the home-page picker. Every `save_session` writes back
-    /// under this id, so two windows never overwrite each other's tabs.
     pub(crate) workspace: WorkspaceId,
-    /// `Some` while the title-bar workspace chip is being renamed inline.
-    /// Separate from `renaming` (tabs) because the two live in different
-    /// widgets and can't be in flight at once anyway.
     pub(crate) workspace_rename: Option<WorkspaceRename>,
-    /// Last title pushed to the OS window, so the common case (nothing
-    /// changed) skips the platform call. `RefCell` because the sync runs from
-    /// `focus_active`, which only takes `&self`.
     window_title: std::cell::RefCell<String>,
-    /// The home page's "Connect to Host" flow, or `None` when it isn't running
-    ///. Lives on the window rather than on the app because a
-    /// window is what a remote workspace ends up bound to — two windows can be
-    /// reaching two different machines at once.
     pub(crate) connect: Option<crate::ui::remote_workspace::ConnectFlow>,
-    /// The workspace switcher overlay, or `None` when it is closed.
     pub(crate) switcher: Option<crate::ui::switcher::Switcher>,
-    /// What each machine's handshake reported, kept past the connect flow so
-    /// the switcher can show several connected machines at once (the flow only
-    /// ever holds one).
     pub(crate) host_snapshots: std::collections::HashMap<
         crate::ui::host_registry::HostId,
         crate::ui::switcher::HostSnapshot,
     >,
 }
 
-/// Which close action a live-SSH close-confirmation is gating (PRD FR-E3).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SshCloseKind {
-    /// Close the whole tab at this index.
     Tab(usize),
-    /// Close the focused pane.
     Pane,
 }
 
-/// Where a forked agent session lands. The placement is not a preference but a
-/// consequence of *where the user asked from* (issue #211): a pane-level ask is
-/// spatial, so the pane menu offers the four directions; a tab-level ask is
-/// not, so the tab menu — and the bare action behind the palette / menu bar —
-/// opens a new tab with no placement question.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ForkPlacement {
     NewTab,
-    /// Split the source pane along `axis`, the fork taking the second slot —
-    /// or the first when `before`, which is Split Left / Split Up.
-    Split {
-        axis: Axis,
-        before: bool,
-    },
+    Split { axis: Axis, before: bool },
 }
 
-/// What the agent-session menu rows need to know about a tab, read at
-/// menu-open time (like `tab_cwd`) so enablement can't go stale between render
-/// and click.
 pub(crate) struct TabAgentSession {
-    /// The fork row's label, or `None` when tty7 has no verified fork command
-    /// for this agent — then no fork row is offered at all, rather than a
-    /// disabled one promising a capability that doesn't exist.
     pub(crate) fork_label: Option<&'static str>,
-    /// The agent's native session id, absent until its hooks report one.
     pub(crate) session_id: Option<String>,
-    /// A remote pane. Forking shells a *local* agent binary, which would branch
-    /// the wrong machine's session, so the row disables there.
     pub(crate) remote: bool,
 }
 
 impl TabAgentSession {
-    /// Whether a fork can actually run right now: the agent has a fork command,
-    /// tty7 has seen its session id, and the pane is local.
     pub(crate) fn forkable(&self) -> bool {
         self.fork_label.is_some() && self.session_id.is_some() && !self.remote
     }
 }
 
 impl Tty7App {
-    /// A window on `id`'s workspace — reopening one from the picker — or on a
-    /// fresh workspace when `id` is `None` (New Workspace) or names a workspace
-    /// that is no longer on file.
     pub fn for_workspace(
         id: Option<WorkspaceId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Claiming marks the workspace open; the store stays the single
-        // writer of the view file.
         let restore = cx.global::<Config>().restore_session;
         let known = id.is_some_and(|id| WorkspaceStore::all(cx).get(id).is_some());
         let workspace = WorkspaceStore::claim(cx, id);
-        // A workspace's layout lives in its machine's tree, so a restore
-        // *asks* rather than reads: the window opens empty and
-        // `hydrate_window_from_tree` rebuilds it the moment the pull answers —
-        // against the local daemon that is milliseconds, so the empty state is
-        // effectively one frame; against a remote machine it is however long
-        // the link takes, which is the shape remote windows always had. A
-        // remote machine still unreachable when the hydration gives up is
-        // re-hydrated by the supervisor's reconnect.
         let is_remote = WorkspaceStore::all(cx)
             .get(workspace)
             .is_some_and(|w| w.is_remote());
-        // A remote workspace hydrates even with restore off: its panes are
-        // running sessions on another machine, not a saved layout.
         let hydrate = known && (restore || is_remote);
-        // A brand-new workspace takes the first-run path in `with_session`
-        // (`None`), spawning a single default terminal — what `New Workspace`
-        // and a first run both want. A known workspace opens on an empty
-        // session that the hydration fills, or on a fresh shell when the user
-        // turned restore off.
         let session = hydrate.then(Session::default);
         let app = Self::with_session(Some(workspace), session, window, cx);
         if hydrate {
-            // No immediate save: the window is deliberately empty, and racing
-            // the pull with a diff that reads as "close everything" is exactly
-            // what the informed gate exists to prevent.
             crate::ui::tree_sync::hydrate_window_from_tree(cx, workspace);
         } else {
-            // A local window that skipped hydration shows what the user chose
-            // (a fresh shell, restore off): its state is the intended layout,
-            // and its sync may speak for the whole tree. A remote window that
-            // lands here has *not* seen its machine's tree yet, so it stays
-            // additive until a hydration informs it.
             if !is_remote {
                 crate::ui::tree_sync::mark_window_informed(cx, workspace);
             }
-            // Persist right away. The leaves just spawned (or reattached) now
-            // carry daemon pane ids, and nothing else writes them until the
-            // next *structural* change — so a crash before the user happens to
-            // open a tab would strand every one of those panes in the daemon.
             app.save_session(cx);
         }
-        // If startup reused a daemon that speaks a different wire protocol
-        // (an app upgrade while the old service kept running), the sessions
-        // just restored above are living on that old dialect. Surface the
-        // keep-or-restart choice now that there's a window to ask in.
         Self::prompt_daemon_version_mismatch(window, cx);
-        // The same question for any *remote* server this client already found
-        // at a different build, and the consent handler that the install path
-        // asks before writing a binary onto someone else's machine.
         crate::ui::remote_connect::register(cx);
-        // Enumerate this computer's WSL distributions once at startup so the
-        // first switcher open already lists them, rather than filling them in a
-        // beat later. Backgrounded; a no-op off Windows.
         crate::ui::remote_connect::sweep_wsl(cx);
         Self::prompt_remote_daemon_mismatch(window, cx);
-        // A window that came back on a remote workspace has its last-pulled
-        // layout but no connection yet. Reconnecting is M6's; this is the seam
-        // it hooks into, and the reason nothing on the launch path had to learn
-        // whether a workspace is local.
         app.reopen_remote_at_startup(cx);
         app
     }
 
-    /// Ask what to do about a protocol-mismatched daemon that
-    /// `spawn::ensure_running` deliberately left running (rather than silently
-    /// killing every persisted session at startup): keep using it — sessions
-    /// survive, features whose wire shape changed may misbehave — or restart
-    /// the service clean via the shared
-    /// [`restart_daemon_confirmed`](Self::restart_daemon_confirmed) path
-    /// (tabs reopen with fresh shells). Keeping is the default: dismissing
-    /// the prompt changes nothing.
     fn prompt_daemon_version_mismatch(window: &mut Window, cx: &mut Context<Self>) {
         let Some(mismatch) = crate::daemon::spawn::take_mismatched_daemon() else {
             return;
@@ -1038,9 +486,6 @@ impl Tty7App {
                  running in them is terminated."
                 .to_string(),
         };
-        // Phrased as the question it is, like every other prompt in the app —
-        // this one used to be a bare statement of fact with two verbs under it.
-        // The version details it used to carry in the title are in the body.
         let answer = window.prompt(
             PromptLevel::Warning,
             "Restart Daemon?",
@@ -1049,8 +494,6 @@ impl Tty7App {
             cx,
         );
         cx.spawn(async move |this, cx| {
-            // Index 1 == "Restart"; "Keep Sessions" or a dismissed prompt leave
-            // the old daemon (and every session) untouched.
             if !matches!(answer.await, Ok(1)) {
                 return;
             }
@@ -1059,26 +502,14 @@ impl Tty7App {
         .detach();
     }
 
-    /// The whole constructor behind `new`, with the saved session injected
-    /// instead of read from disk. The headless tests build the app through
-    /// this seam (a zero-tab session → the home page, no terminal spawned)
-    /// so every subscription and window hook runs exactly as in production
-    /// without touching `~/.config` or a daemon.
     pub(crate) fn with_session(
         workspace: Option<WorkspaceId>,
         session: Option<Session>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Tests build a window without going through the store; give them a
-        // detached identity rather than requiring the global to be installed.
         let workspace = workspace.unwrap_or_default();
-        // The route every pane this window opens will take. Resolved once, here,
-        // rather than per pane: the window's machine cannot change under it, and
-        // a per-pane lookup is a per-pane chance to disagree. `None` for a local
-        // workspace, which is every window that existed before M5.
         let pane_ws = crate::ui::remote_workspace::pane_workspace_for(cx, workspace);
-        // Font size from config (borrow ends before the mutable theme apply).
         let (
             font_size,
             line_height,
@@ -1106,7 +537,6 @@ impl Tty7App {
         let sftp_panel = crate::ui::sftp::SftpPanelState::new(window, cx);
         let file_tree = crate::ui::file_tree::FileTreeState::new(window, cx);
         let editor = crate::ui::code_editor::EditorPanelState::new(window, cx);
-        // Managed-forward add-form inputs (native-SSH panes).
         let mf_bind_host = cx.new(|cx| InputState::new(window, cx).default_value("127.0.0.1"));
         let mf_bind_port = cx.new(|cx| InputState::new(window, cx).placeholder("8080"));
         let mf_target_host = cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1"));
@@ -1114,111 +544,52 @@ impl Tty7App {
         let mf_description = cx.new(|cx| InputState::new(window, cx).placeholder("description"));
         let sidebar_width = cx.global::<Config>().sidebar_width;
         let right_panel_width = cx.global::<Config>().right_panel_width;
-        // The config's copies are this window's *starting* chrome; from here on
-        // the window owns them (see the fields' doc comment).
         let right_panel_visible = cx.global::<Config>().right_panel_visible;
         let right_panel_tab = cx.global::<Config>().right_panel_tab;
         let sidebar_collapsed = cx.global::<Config>().sidebar_collapsed;
-        // Live-apply hot-reloaded config: the watcher in `main.rs` swaps the
-        // `Config` global on every `config.json` change, which fires this. The
-        // window-aware variant so the reload can re-run `apply_theme` with the
-        // window (blur flip, traffic-light pinning) and re-sync the Appearance
-        // opacity slider — the watcher task itself has no window handle.
         let config_watch = cx.observe_global_in::<Config>(window, |this, window, cx| {
             this.reload_from_config(window, cx)
         });
-        // Repaint when any pane's git probe lands in the shared cache — the
-        // sidebar's branch/diff lines read from it, and the probing pane's own
-        // notify wouldn't re-render rows belonging to *other* panes. The open
-        // diff overlay rides the same signal: if the landed numbers disagree
-        // with what it shows, it re-probes the full diff.
         cx.default_global::<crate::terminal::git_status::GitStatusCache>();
         let git_status_watch =
             cx.observe_global::<crate::terminal::git_status::GitStatusCache>(|this, cx| {
                 this.maybe_refresh_diff_overlay(cx);
-                // Same trigger, same freshness: the right panel's Changes list is
-                // the sidebar's `+N −M` expanded, so it re-probes whenever those
-                // numbers do rather than going stale behind them.
                 this.right_panel_refresh_changes(cx);
                 cx.notify();
             });
-        // The same shape for pane liveness: the picker and the workspace menu
-        // read a per-machine cache that is filled off the UI thread, so the
-        // frame that *asked* is long gone by the time an answer lands and
-        // nothing else would repaint it.
         cx.default_global::<crate::terminal::pane_liveness::PaneLivenessCache>();
         let pane_liveness_watch = cx
             .observe_global::<crate::terminal::pane_liveness::PaneLivenessCache>(|_this, cx| {
                 cx.notify();
             });
-        // Any real keypress means "chord, not a bare hold": cancel the held-⌘
-        // tab badges and whatever reveal is pending (see `ui::hints`).
         let this = cx.weak_entity();
         let keystroke_watch = cx.intercept_keystrokes(move |_ev, _window, cx| {
             let _ = this.update(cx, |this, cx| this.dismiss_mod_hint(cx));
         });
-        // Losing key status mid-hold (⌘-Tab, Spotlight, a click into another
-        // app) means the modifier release is delivered elsewhere and never
-        // reaches this window — the activation flip is the only signal left,
-        // so treat it like a release. Dismissing on *both* flips also keeps a
-        // reveal scheduled just before the switch from popping the badges up
-        // in a window the user already left.
         let activation_watch = cx.observe_window_activation(window, |this, window, cx| {
             this.dismiss_mod_hint(cx);
-            // The panes' link-modifier tracking loses the release the same
-            // way, and a stale "⌘ held" is worse than missing badges: a
-            // plain unmodified click would open links. Treat the flip as a
-            // release; holding ⌘ again re-arms it via `on_modifiers_changed`.
             this.set_link_modifier(false, cx);
-            // Coming back is the only cue we get that the working tree may
-            // have moved while the user was elsewhere: an edit in another
-            // editor, a `git` command in another app, an agent in another
-            // window. None of those reach a pane's poll loop, so without this
-            // the sidebar's `+N −N` would keep showing pre-alt-tab numbers
-            // until the user happened to run a command in the pane.
             if window.is_window_active() {
-                // Whichever window the user last brought forward is the one to
-                // focus on the next launch — `claim` only ever records the
-                // *last opened* workspace, which is a different thing.
                 WorkspaceStore::focus(cx, this.workspace);
                 this.refresh_git_status_all(cx);
             }
         });
-        // Follow OS light/dark flips live: while "sync with system" is on, an
-        // appearance change re-resolves the theme slot and repaints. While it's
-        // off the appearance only ever changes because `apply_theme` pinned it
-        // to the theme — skip, or the pin would re-trigger a redundant apply.
         let this = cx.weak_entity();
         let appearance_watch = window.observe_window_appearance(move |window, cx| {
-            // This is the only place the OS flip is observed, so cache it here —
-            // from the *window*, never `cx.window_appearance()`, which would
-            // re-enter gpui's already-borrowed Linux client and panic. Before the
-            // early return, so a flip that happens while following is off still
-            // lands. See `ui::theme::SystemAppearance`.
             crate::ui::theme::note_system_appearance(window, cx);
             if !cx.global::<Config>().theme_follow_system {
                 return;
             }
             apply_theme(Some(window), cx);
             let _ = this.update(cx, |this, cx| {
-                // The editor targets the on-screen theme, and with no global
-                // override the opacity slider follows it — keep both in step.
                 this.rebuild_theme_editor(window, cx);
                 this.sync_window_opacity_slider(window, cx);
                 cx.notify();
             });
         });
-        // Paint the configured color theme (defaults to a light one) and build
-        // the menu bar.
         apply_theme(Some(window), cx);
         set_menus(cx);
-        // A session with zero tabs is a real state — the user quit from
-        // the home page — and restores back to it; only a *missing/unreadable*
-        // session (first run) falls back to spawning a default terminal.
         let (tabs, active) = match session {
-            // First run (no session file): the very first terminal has no
-            // predecessor to inherit from, so start in the app's current
-            // directory (None → default behavior).
             None => match new_terminal(
                 pane_ws.clone(),
                 Some(workspace),
@@ -1230,21 +601,13 @@ impl Tty7App {
                 cx,
             ) {
                 Ok(first) => (vec![Tab::new(Pane::leaf(first))], 0),
-                // The daemon we just tried to start isn't answering. A window
-                // with no tabs is a legal state (it shows the home page), and
-                // far better than taking the launch down over it.
                 Err(e) => {
                     log::error!("first terminal failed to start: {e}");
                     (Vec::new(), 0)
                 }
             },
-            // A saved session (with tabs, or an empty home-page state): rebuild it
-            // the same way a daemon restart does.
             some => tabs_from_session(pane_ws.as_ref(), workspace, some, font_size, window, cx),
         };
-        // Sidebar tab filter. Each keystroke re-renders the (cheap) row list so
-        // results narrow as you type — the same live-filter wiring the theme
-        // picker uses.
         let sidebar_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search tabs…"));
         let sidebar_search_sub =
             cx.subscribe_in(&sidebar_search, window, |_this, _i, ev, _w, cx| {
@@ -1328,63 +691,22 @@ impl Tty7App {
             switcher: None,
             host_snapshots: std::collections::HashMap::new(),
         };
-        // Bring the system tray up (icon + agent menu + poll loop) — but only
-        // for the *first* window: the tray is one app-wide icon, and letting
-        // every window register its own would stack N icons in the status bar.
-        // `register` happens after `open_window` returns, so during the first
-        // window's construction the registry is still empty.
-        //
-        // Skipped in tests: the headless harness has no native status bar to
-        // register with, and the poll task would just spin against the mocked
-        // clock.
         if !cfg!(test) && crate::ui::windows::WindowRegistry::count(cx) == 0 {
             crate::ui::tray::init(cx);
         }
-        // Fill the "+" dropdown from the machine this window is bound to.
         app.refresh_shells(cx);
-        // Persist the session one last time as the app quits. This captures the
-        // latest state — including a plain `cd` that changed a pane's cwd but
-        // triggered no structural change — so the next launch restores where the
-        // user actually left off. The callback gets the live `Tty7App`, reads
-        // every pane's current cwd, and writes the file synchronously; the empty
-        // future just satisfies the hook's async signature. The subscription is
-        // detached to live for the app's lifetime (its weak handle keeps it safe
-        // after teardown).
         cx.on_app_quit(|app, cx| {
             app.save_session(cx);
-            // Also persist the window's final geometry so the next launch can
-            // reopen there (`remember_window_size`). Written unconditionally —
-            // startup gates on the config — so toggling the setting back on
-            // restores the most recent quit, not some stale pre-toggle state.
             crate::core::window_state::WindowState::from_bounds(app.window_bounds).save();
             async move {}
         })
         .detach();
 
-        // Keep `window_bounds` tracking the live window: moves and resizes both
-        // fire this observer, and `window_bounds()` reports the *restore* bounds
-        // while fullscreen, so a fullscreen quit doesn't record a screen-sized
-        // window for the next normal launch.
         cx.observe_window_bounds(window, |this, window, _cx| {
             this.window_bounds = window.window_bounds().get_bounds();
         })
         .detach();
 
-        // Closing a window *detaches* its workspace: the panes keep running in
-        // the daemon, and the workspace drops into the home-page picker to be
-        // reopened later. So closing one of several windows is cheap and needs
-        // no confirmation — the user can see the others and get this one back.
-        //
-        // The last window is different: closing it also quits the app (a
-        // windowless process left in the Dock no longer responds to being
-        // clicked — #147), so that one keeps the reassuring prompt by default.
-        // We veto the immediate close (return `false`), show it, and quit only
-        // if the user picks "Close"; a one-shot flag lets that post-confirm
-        // close through instead of looping the prompt.
-        //
-        // `confirm_window_close` turns the prompt off for users who have learned
-        // the model — it is teaching, not protection (⌘Q never asked), so it has
-        // to be escapable.
         let close_confirmed = std::rc::Rc::new(std::cell::Cell::new(false));
         let weak_app = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
@@ -1396,17 +718,12 @@ impl Tty7App {
                 .upgrade()
                 .is_some_and(|app| app.read(cx).tabs.is_empty());
 
-            // Any window but the last, an empty one with nothing to reassure
-            // about, or a user who has turned the prompt off: detach and go.
-            // Prompting here would be friction.
             let confirm = cx.global::<Config>().confirm_window_close;
             if !last_window || empty || !confirm {
                 if let Some(app) = weak_app.upgrade() {
                     app.update(cx, |app, cx| app.detach_workspace(cx));
                 }
                 if last_window {
-                    // Deferred onto the next tick so the close itself completes
-                    // first, same as the confirmed path below.
                     cx.spawn(async move |cx| {
                         let _ = cx.update(|cx| cx.quit());
                     })
@@ -1418,17 +735,6 @@ impl Tty7App {
             let answer = window.prompt(
                 PromptLevel::Info,
                 "Close Window?",
-                // What this promises has to match what the next launch does.
-                // Closing the last window *detaches* its workspace rather than
-                // ending it: the panes keep running in the daemon, but tty7
-                // comes back on the home page with the workspace waiting in the
-                // picker — it no longer reopens it unasked, so promising it
-                // would be restored would be a promise the app doesn't keep.
-                //
-                // Points at the title bar's workspace menu, not the macOS
-                // Window menu: there is no menu bar on Windows or Linux, and
-                // the corner chip is the one place that lists workspaces on
-                // every platform.
                 Some(
                     "Your sessions keep running in the background. This \
                      workspace will be waiting on the home page, and in the \
@@ -1441,8 +747,6 @@ impl Tty7App {
             let close_confirmed = close_confirmed.clone();
             let weak_app = weak_app.clone();
             cx.spawn(async move |cx| {
-                // Index 1 == "Close"; index 0 (Cancel) and a dismissed prompt
-                // both leave the window open.
                 if let Ok(1) = answer.await {
                     close_confirmed.set(true);
                     let _ = cx.update(|cx| {
@@ -1461,19 +765,7 @@ impl Tty7App {
         app
     }
 
-    /// Push this window's structure to its machine's tree (and its geometry to
-    /// the view file). Called after every structural change — the name
-    /// predates the tree migration, and it remains the single funnel.
     pub(crate) fn save_session(&self, cx: &mut App) {
-        // Tripwire for the write this sync must never make: a pane created
-        // for one workspace being recorded under another. Each view remembers
-        // the workspace whose window created it; if that and the id this save
-        // records under have come apart, the window's tabs and its identity
-        // are describing two different workspaces — the exact corruption that
-        // once copied one workspace's whole layout into another's record and
-        // resumed its agents twice. Shout with everything a bug report needs;
-        // the save still runs, because refusing it would silently stop
-        // persisting the user's layout on the strength of one tripped check.
         for view in self.tabs.iter().flat_map(|tab| tab.pane.terminals()) {
             let Some(owner) = view.read(cx).owner_workspace() else {
                 continue;
@@ -1488,10 +780,6 @@ impl Tty7App {
                 );
             }
         }
-        // The layout goes nowhere near the view file: the machine that owns it
-        // hears about the change as the semantic operations it amounts to,
-        // local and remote alike. What this client persists is only the
-        // geometry, ridden on the same funnel so reopening lands where we are.
         WorkspaceStore::record_geometry(
             cx,
             self.workspace,
@@ -1500,35 +788,13 @@ impl Tty7App {
         crate::ui::tree_sync::sync_window(self, cx);
     }
 
-    /// This window is going away: capture its final state (a plain `cd` may
-    /// have moved a pane's cwd with no structural change to trigger a save),
-    /// mark the workspace closed so the home-page picker lists it, and drop it
-    /// from the registry so "is this the last window?" stays accurate.
-    ///
-    /// A *detach*, not a teardown — the daemon panes keep running and reattach
-    /// when the workspace is reopened.
     pub(crate) fn detach_workspace(&self, cx: &mut App) {
         self.save_session(cx);
-        // An empty workspace has nothing to come back to, so it is dropped
-        // outright instead of accumulating as a blank row in the picker —
-        // every `New Workspace` the user closes without using would leave one.
-        //
-        // Unless the emptiness is *this client's* ignorance rather than the
-        // machine's answer. Every window opens empty and waits for its tree
-        // pull, so a window opened while the box was asleep and then closed —
-        // there was nothing in it to work on — would take the entry with it:
-        // its `RemoteRef` and its geometry, while its panes are still running
-        // over there. Nothing would reconnect it and nothing would offer it
-        // again; the only way back is re-adding the machine by hand.
         let answered = WorkspaceStore::machine_is_connected(cx, self.workspace);
         if self.tabs.is_empty()
             && answered
             && crate::ui::tree_sync::window_is_informed(cx, self.workspace)
         {
-            // Same as the picker swap: an empty workspace being dropped takes
-            // its (empty) tree on the machine with it. Only an informed window
-            // may say so — one still waiting on its hydration is empty because
-            // the pull has not answered, not because the workspace is.
             crate::ui::tree_sync::fire_workspace_op(cx, self.workspace, |ws| {
                 tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
             });
@@ -1537,21 +803,10 @@ impl Tty7App {
             WorkspaceStore::close_window(cx, self.workspace);
         }
         crate::ui::windows::WindowRegistry::unregister(cx, self.workspace);
-        // The window's tree-sync bookkeeping goes with the window; the
-        // machine's tree itself keeps the workspace, which is the detach.
         crate::ui::tree_sync::forget(cx, self.workspace);
-        // The workspace just moved from "on screen" to "detached" — the Window
-        // menu is the only place that says so.
         crate::ui::windows::refresh_menu(cx);
     }
 
-    /// The other half: a workspace's forwards belong to the workspace,
-    /// so stopping it has to end them — nothing else will. A pane's forwards
-    /// need no equivalent; the daemon drops those with the pane.
-    ///
-    /// Best effort and silent. The window is on its way out either way, and a
-    /// forward that could not be torn down (the connection already dropped) is
-    /// already gone with the connection that carried it.
     pub(crate) fn teardown_workspace_forwards(&self, cx: &gpui::App) {
         let Some(route) = self
             .tabs
@@ -1568,13 +823,6 @@ impl Tty7App {
         else {
             return;
         };
-        // Off the UI thread. `teardown` dials the daemon, which resolves the
-        // workspace's SSH connection and waits for the server to acknowledge a
-        // `cancel_tcpip_forward` — on a machine that has gone unreachable, which
-        // is exactly when someone reaches for Stop Workspace, that never comes
-        // back inside the request timeout. `ForwardRoute::list` is already
-        // backgrounded for the same reason; this was the one that was not, and
-        // it ran while the window was being torn down.
         cx.background_executor()
             .spawn(async move {
                 let left = route.teardown();
@@ -1585,14 +833,6 @@ impl Tty7App {
             .detach();
     }
 
-    /// Stop a workspace — kill its sessions and close its window — confirming
-    /// first when something is still running. Its layout stays on file, so it
-    /// can be started again later.
-    ///
-    /// Deliberately not called "close": the red traffic light closes a window
-    /// and only detaches, while this ends the shells. Two actions that sit near
-    /// each other need two different verbs, or the menu reads as if they were
-    /// variations on one thing.
     pub(crate) fn stop_workspace(
         &mut self,
         id: WorkspaceId,
@@ -1603,7 +843,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Delete a workspace: stop it *and* discard the saved layout.
     pub(crate) fn delete_workspace(
         &mut self,
         id: WorkspaceId,
@@ -1614,9 +853,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Show the workspace in the Window menu's slot `index`. A stale slot (the
-    /// menu was built before a workspace was stopped) is a no-op rather than an
-    /// error — the menu is rebuilt right after any such change anyway.
     pub(crate) fn select_workspace_slot(
         &mut self,
         index: usize,
@@ -1629,15 +865,6 @@ impl Tty7App {
         self.reveal_workspace(id, window, cx);
     }
 
-    /// Show `id`'s workspace.
-    ///
-    /// One workspace is shown by exactly one window, so this either focuses the
-    /// window it already has or opens a new one for it — never swaps it into
-    /// *this* window, which would leave the workspace already here without one.
-    ///
-    /// The single exception is a window that is empty (the home page): reusing
-    /// it beats opening a second window and stranding a blank frame, and there
-    /// is no workspace to displace.
     pub(crate) fn reveal_workspace(
         &mut self,
         id: WorkspaceId,
@@ -1655,12 +882,6 @@ impl Tty7App {
         }
     }
 
-    /// Swap this window over to `id`'s workspace in place, rebuilding its tabs.
-    ///
-    /// This is what the home-page picker does: the window running it is empty
-    /// (the picker only shows on the home page), so opening a *second* window
-    /// would strand this blank one. The outgoing workspace is dropped rather
-    /// than detached for the same reason.
     pub(crate) fn switch_workspace(
         &mut self,
         id: WorkspaceId,
@@ -1671,14 +892,7 @@ impl Tty7App {
         if previous == id {
             return;
         }
-        // Only an *informed* empty window proves the workspace is blank: one
-        // still waiting on its hydration is empty because the pull has not
-        // answered, and dropping the workspace then would delete a populated
-        // tree on the strength of our own ignorance.
         if self.tabs.is_empty() && crate::ui::tree_sync::window_is_informed(cx, previous) {
-            // Dropping the blank workspace here, so the machine's tree drops
-            // its (equally blank) copy — otherwise every visit to the picker
-            // would leave an empty workspace behind on the daemon.
             crate::ui::tree_sync::fire_workspace_op(cx, previous, |ws| {
                 tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
             });
@@ -1693,25 +907,11 @@ impl Tty7App {
 
         let claimed = WorkspaceStore::claim(cx, Some(id));
         crate::ui::windows::WindowRegistry::rebind(cx, previous, claimed);
-        // A pick from the switcher is one of the ways a remote workspace comes
-        // back, so it owes the supervisor the same call the launch path makes —
-        // see `RemoteLinks::supervise` for what skipping it leaves on screen.
-        // The outgoing workspace needs no counterpart: `pump_tick` drops a
-        // machine the moment its last open workspace goes.
         crate::ui::remote_workspace::RemoteLinks::supervise(cx, claimed);
-        // The machine's tree is the layout's only home now, so an explicit
-        // pick from the switcher always hydrates — restore-off governs what
-        // *launch* comes back to, not what a deliberate open shows. The window
-        // swaps to empty and the pull rebuilds it, for the local daemon within
-        // milliseconds.
         self.adopt_workspace(claimed, Session::default(), window, cx);
         crate::ui::tree_sync::hydrate_window_from_tree(cx, claimed);
     }
 
-    /// Take over an *already claimed* workspace: rebuild this window's tabs
-    /// from `session` and retitle it. Split from [`Self::switch_workspace`]
-    /// because `ui::windows::close_workspace` gets here having already
-    /// destroyed the outgoing workspace — there is nothing left to detach.
     pub(crate) fn adopt_workspace(
         &mut self,
         id: WorkspaceId,
@@ -1721,11 +921,7 @@ impl Tty7App {
     ) {
         let previous_host = self.spawn_host(cx);
         self.workspace = id;
-        // The closed-tab stack is per *window* and survives a workspace swap,
-        // so it is the one thing that could carry a tab across machines.
         self.rebind_host(previous_host, cx);
-        // So does the "+" dropdown's shell list — and unlike the closed stack it
-        // is rebuilt rather than dropped, from the machine now in front of us.
         self.refresh_shells(cx);
         let font_size = self.font_size;
         let pane_ws = self.window_workspace(cx);
@@ -1740,17 +936,12 @@ impl Tty7App {
         self.tabs = tabs;
         self.active = active;
         self.maximized = None;
-        // Same reason as `for_workspace`: capture the reattached/spawned pane
-        // ids now rather than waiting for a structural change.
         self.save_session(cx);
         crate::ui::windows::refresh_menu(cx);
         self.focus_active(window, cx);
         cx.notify();
     }
 
-    /// Reopen the most recently closed tab (Cmd+Shift+T). Rebuilds its pane
-    /// tree (restoring each terminal's saved cwd), inserts it after the active
-    /// tab, and focuses it. No-op when the stack is empty.
     fn reopen_closed_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(st) = self.closed.pop() else {
             return;
@@ -1766,14 +957,10 @@ impl Tty7App {
             window,
             cx,
         ) else {
-            // Nothing came back (an unreachable daemon). Put the entry back so
-            // the tab is still reopenable once the daemon is up again.
             window.push_notification("Could not reopen the tab: no terminal started", cx);
             self.closed.push(st);
             return;
         };
-        // Leaving the current tab for the reopened one; snapshot its focused
-        // pane so switching back restores it (same as `activate`).
         self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
@@ -1786,8 +973,6 @@ impl Tty7App {
                 diff_overlay: None,
                 code: None,
                 overlay_top: OverlayTop::default(),
-                // Keep the group it had when closed — the row reappears where
-                // it lived instead of flashing through Scratch.
                 sidebar_group: std::cell::RefCell::new(st.sidebar_group),
                 tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
             },
@@ -1798,11 +983,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    // ── System tray (`ui::tray`) ────────────────────────────────────────────
-
-    /// Whether this window hosts the pane with `leaf_id`. The tray's reveal
-    /// carries a gpui entity id, which is unique app-wide, so this is how a
-    /// click finds the one window that can act on it.
     pub(crate) fn owns_leaf(&self, leaf_id: u64) -> bool {
         self.tabs.iter().any(|t| {
             t.pane
@@ -1812,11 +992,6 @@ impl Tty7App {
         })
     }
 
-    /// This window's agent panes, unsorted: brand name, status, and a "where"
-    /// line (cwd directory name + git branch). Unsorted because the tray is a
-    /// single icon for the whole app — it concatenates every window's rows and
-    /// sorts once, most urgent first, so the pane that needs the user tops the
-    /// menu.
     pub(crate) fn agent_rows(&self, cx: &App) -> Vec<crate::ui::tray::AgentRow> {
         use crate::core::cli_agent::AgentStatus;
         let mut agents = Vec::new();
@@ -1835,8 +1010,6 @@ impl Tty7App {
                 let detail = match (dir, branch) {
                     (Some(dir), Some(branch)) => format!("{dir} @ {branch}"),
                     (Some(dir), None) => dir,
-                    // No cwd yet (pane still spawning) — the agent name alone
-                    // still identifies the row.
                     (None, _) => String::new(),
                 };
                 agents.push(crate::ui::tray::AgentRow {
@@ -1850,8 +1023,6 @@ impl Tty7App {
         agents
     }
 
-    /// Apply a tray menu click. Runs on the foreground executor with the
-    /// window in hand (see `tray::init`'s action pump).
     pub(crate) fn handle_tray_action(
         &mut self,
         action: crate::ui::tray::TrayAction,
@@ -1859,12 +1030,6 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         use crate::ui::tray::TrayAction;
-        // Tray clicks arrive while another app is frontmost — that's the
-        // tray's whole premise. `activate_window` alone only orders our
-        // window front within the app (macOS: `makeKeyAndOrderFront:`); the
-        // *application* must also be activated or the reveal — and any
-        // window-modal prompt we show next — stays buried behind the app the
-        // user clicked from.
         fn surface_window(window: &mut Window, cx: &mut App) {
             cx.activate(true);
             window.activate_window();
@@ -1872,9 +1037,6 @@ impl Tty7App {
         match action {
             TrayAction::ShowWindow => surface_window(window, cx),
             TrayAction::RevealPane { leaf_id } => {
-                // Resolve the leaf against the *live* tree — the menu the user
-                // clicked may predate a tab close; a vanished pane is a no-op
-                // (the window still comes forward).
                 let tab_ix = self.tabs.iter().position(|t| {
                     t.pane
                         .leaves()
@@ -1883,11 +1045,6 @@ impl Tty7App {
                 });
                 if let Some(ix) = tab_ix {
                     self.activate(ix, window, cx);
-                    // The reveal must actually show the pane: a sibling leaf
-                    // maximized in this tab would otherwise keep the target
-                    // off-screen while we hand it keyboard focus. The target
-                    // itself staying maximized is fine — it's already the
-                    // visible one.
                     if self
                         .maximized
                         .as_ref()
@@ -1917,26 +1074,14 @@ impl Tty7App {
             }
             TrayAction::CheckForUpdates => {
                 surface_window(window, cx);
-                // Same path as the App menu's "Check for Updates…" — the tray
-                // used to carry its own copy of this, and was for a while the
-                // only place in the app offering the check at all.
                 self.check_for_updates_now(window, cx);
             }
-            // Same as ⌘Q: sessions keep running in the daemon.
             TrayAction::Quit => cx.quit(),
             TrayAction::QuitStopSessions => self.quit_stop_sessions(window, cx),
         }
     }
 
-    /// Tray "Quit and Stop Daemon": confirm, shut the daemon down (which
-    /// hangs up every shell — the whole point of picking this over plain
-    /// quit), then quit. The stop runs off the UI thread; like
-    /// `--stop-daemon` it can take a beat while children get their grace
-    /// period.
     fn quit_stop_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // The prompt is window-modal and the click came from the tray with
-        // another app frontmost — activate the app AND the window, or the
-        // user never sees the question.
         cx.activate(true);
         window.activate_window();
         let answer = window.prompt(
@@ -1952,7 +1097,6 @@ impl Tty7App {
             cx,
         );
         cx.spawn(async move |_this, cx| {
-            // Index 1 == "Quit and Stop"; Cancel or a dismissed prompt do nothing.
             if !matches!(answer.await, Ok(1)) {
                 return;
             }
@@ -1963,16 +1107,6 @@ impl Tty7App {
         .detach();
     }
 
-    /// The "Restart Daemon…" action: restart whichever daemon serves *this*
-    /// window.
-    ///
-    /// A remote window's shells live in another machine's `tty7-server`, and
-    /// [`restart_daemon`](Self::restart_daemon) is about this computer's. Running
-    /// it from a remote window ended every local session in every *other* window
-    /// and left the machine in front of the user untouched — a destructive button
-    /// that did nothing the label promised. So the action asks the window which
-    /// machine it is showing, and the local method keeps meaning the local daemon
-    /// (which is what the Settings button under "Daemon" says it does).
     pub(crate) fn restart_window_daemon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(remote) = WorkspaceStore::remote_ref(cx, self.workspace) else {
             self.restart_daemon(window, cx);
@@ -1981,10 +1115,6 @@ impl Tty7App {
         let target = remote.target.clone();
         let label = crate::ui::remote_connect::label_for(&target, cx);
         if !target.is_ssh() {
-            // Nothing to restart *over there*: this client starts the server on
-            // those machines itself. Said rather than silently falling back to
-            // restarting the local daemon, which would end sessions on a machine
-            // the user was not looking at.
             window.push_notification(
                 format!(
                     "tty7 can only restart the server on machines it reaches over SSH. \
@@ -1997,20 +1127,6 @@ impl Tty7App {
         self.confirm_restart_remote_server(target, label, window, cx);
     }
 
-    /// Restart the persistent background daemon **on this computer**: shut the
-    /// running one down (which stops every live shell) and bring a fresh one up,
-    /// then rebuild the tabs from the just-saved session so the layout returns
-    /// with fresh shells.
-    ///
-    /// A general escape hatch for the otherwise invisible, always-on daemon:
-    /// picking up a macOS permission granted after it started (Full Disk Access
-    /// and the like only reach it on a fresh process), recovering if it wedges, or
-    /// just starting from a clean slate — none of which quitting/reopening the GUI
-    /// achieves, since that leaves the detached daemon untouched. Guarded by a
-    /// confirmation because it ends running sessions. The shutdown + respawn runs
-    /// off the UI thread (the daemon hangs up each child with a short grace, so it
-    /// can take a beat); the tab rebuild hops back to the main thread, where it has
-    /// the `Window`.
     pub(crate) fn restart_daemon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let answer = window.prompt(
             PromptLevel::Warning,
@@ -2024,8 +1140,6 @@ impl Tty7App {
             cx,
         );
         cx.spawn(async move |this, cx| {
-            // Index 1 == "Restart"; Cancel or a dismissed prompt leave everything
-            // running untouched.
             if !matches!(answer.await, Ok(1)) {
                 return;
             }
@@ -2034,16 +1148,8 @@ impl Tty7App {
         .detach();
     }
 
-    /// The restart itself, past any confirmation — shared by
-    /// [`restart_daemon`](Self::restart_daemon)'s prompt and the startup
-    /// version-mismatch prompt
-    /// ([`prompt_daemon_version_mismatch`](Self::prompt_daemon_version_mismatch)).
     fn restart_daemon_confirmed(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            // Persist the current layout + cwds, then tear the live terminals down
-            // *before* the daemon dies: dropping each `RemoteTerminal` detaches its
-            // socket, so no reader thread is mid-read when the daemon exits. The
-            // window briefly shows the empty home page while the daemon restarts.
             if this
                 .update_in(cx, |this, _window, cx| {
                     this.save_session(cx);
@@ -2056,27 +1162,14 @@ impl Tty7App {
             {
                 return;
             }
-            // Shut the old daemon down and spawn a fresh one off the UI thread.
             let restarted = cx
                 .background_spawn(async move { crate::daemon::spawn::restart() })
                 .await;
-            // Rebuild from the saved session. The fresh daemon has no live panes,
-            // so every leaf spawns a new shell in its saved cwd and the tab/split
-            // layout returns exactly as it was.
             let _ = this.update_in(cx, |this, window, cx| {
                 match &restarted {
-                    // Rebuild from the machine's tree, which survived the
-                    // restart on disk: the fresh daemon force-cleared every
-                    // pane's live flag, so the resync revives each leaf as a
-                    // fresh shell in its recorded cwd (agents resumed) —
-                    // exactly the semantics the old saved-session rebuild
-                    // hand-rolled. The pull waits out the local link coming
-                    // back up to the fresh daemon.
                     Ok(()) => {
                         crate::ui::tree_sync::resync_window_from_tree(cx, this.workspace);
                     }
-                    // The fresh daemon never came up. Stay on the home page and
-                    // leave a breadcrumb rather than crash — the user can retry.
                     Err(e) => {
                         log::error!("restart background service failed, staying on home page: {e}");
                     }
@@ -2088,9 +1181,6 @@ impl Tty7App {
         .detach();
     }
 
-    /// Apply `size` (clamped) as the new global font size across every pane.
-    /// The element re-measures cell geometry next frame, so the grid reflows
-    /// automatically once each view is notified.
     fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
         let size = size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
         self.font_size = size;
@@ -2103,7 +1193,6 @@ impl Tty7App {
                 });
             }
         }
-        // Persist so the zoom level survives a restart.
         let cfg = cx.global_mut::<Config>();
         cfg.font_size = size;
         cfg.save();
@@ -2114,17 +1203,10 @@ impl Tty7App {
         self.set_font_size(self.font_size + delta, cx);
     }
 
-    /// Reset the global font size back to the built-in default. We use the
-    /// compiled-in default rather than `config.font_size`, because the latter now
-    /// tracks the live zoom level (persisted on every change), so it no longer
-    /// serves as a stable reset target.
     pub(crate) fn reset_font_size(&mut self, cx: &mut Context<Self>) {
         self.set_font_size(Config::default().font_size, cx);
     }
 
-    /// Apply `mul` (clamped) as the new global line-height multiplier across every
-    /// pane. Like `set_font_size`, the element re-derives row height next frame, so
-    /// the grid reflows once each view is notified.
     fn set_line_height(&mut self, mul: f32, cx: &mut Context<Self>) {
         let mul = mul.clamp(LINE_HEIGHT_MIN, LINE_HEIGHT_MAX);
         self.line_height = mul;
@@ -2136,7 +1218,6 @@ impl Tty7App {
                 });
             }
         }
-        // Persist so the spacing survives a restart.
         let cfg = cx.global_mut::<Config>();
         cfg.line_height = mul;
         cfg.save();
@@ -2147,16 +1228,10 @@ impl Tty7App {
         self.set_line_height(self.line_height + delta, cx);
     }
 
-    /// Reset the line-height multiplier back to the built-in default (see the note
-    /// on `reset_font_size`: config now tracks the live value, not a reset target).
     pub(crate) fn reset_line_height(&mut self, cx: &mut Context<Self>) {
         self.set_line_height(Config::default().line_height, cx);
     }
 
-    /// Switch the active color theme by id, repaint, and persist the choice so
-    /// it survives a restart. The theme carries its own dark/light brightness.
-    /// While the system is being followed, the choice lands in the slot for the
-    /// *current* OS appearance (the theme visibly on screen changes either way).
     pub(crate) fn set_preset(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let dark_now = crate::ui::theme::system_dark(cx);
         let cfg = cx.global_mut::<Config>();
@@ -2170,9 +1245,6 @@ impl Tty7App {
         self.after_theme_change(window, cx);
     }
 
-    /// Set the theme for one follow-system slot explicitly (the Light / Dark
-    /// cards in Settings). Only visibly changes anything when that slot is the
-    /// one currently on screen; either way the choice is persisted.
     pub(crate) fn set_slot_preset(
         &mut self,
         dark_slot: bool,
@@ -2189,12 +1261,6 @@ impl Tty7App {
         self.after_theme_change(window, cx);
     }
 
-    /// Turn "sync with system appearance" on/off (the Appearance switch).
-    /// Turning it off never visibly changes the theme: whatever is on screen
-    /// is adopted as the manual choice. Turning it on seeds the slot matching
-    /// the manual theme's own brightness with that theme — so the look only
-    /// changes when the OS is currently in the *other* mode, where switching
-    /// to that mode's slot is exactly what the feature promises.
     pub(crate) fn set_theme_follow_system(
         &mut self,
         on: bool,
@@ -2212,16 +1278,12 @@ impl Tty7App {
                 cfg.theme_preset_light = manual;
             }
         } else {
-            // Resolve while following is still on (the pin is released, so
-            // this reads the real OS appearance).
             let effective = crate::ui::theme::effective_preset_id(cx);
             let cfg = cx.global_mut::<Config>();
             cfg.theme_follow_system = false;
             cfg.theme_preset = effective;
         }
         self.after_theme_change(window, cx);
-        // Re-aim an open picker panel at a slot that exists in the new mode —
-        // after the apply above, so `system_dark` reads the unpinned OS value.
         let slot = if on {
             if crate::ui::theme::system_dark(cx) {
                 crate::ui::settings::ThemeSlot::Dark
@@ -2236,23 +1298,15 @@ impl Tty7App {
         }
     }
 
-    /// The shared tail of every theme-selection change: repaint, persist, and
-    /// keep the dependent Settings widgets in step.
     fn after_theme_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         apply_theme(Some(window), cx);
         set_menus(cx);
         cx.global::<Config>().save();
-        // The editor targets the active theme, so its pickers must track a switch.
         self.rebuild_theme_editor(window, cx);
-        // With no global override, the effective opacity follows the theme — keep
-        // the Appearance slider's thumb on it.
         self.sync_window_opacity_slider(window, cx);
         cx.notify();
     }
 
-    /// Show/hide the theme picker panel beside the Appearance page. Clicking
-    /// the card whose slot the open panel already targets closes it; clicking
-    /// another card re-aims the open panel at that slot.
     pub(crate) fn toggle_theme_panel(
         &mut self,
         slot: crate::ui::settings::ThemeSlot,
@@ -2269,7 +1323,6 @@ impl Tty7App {
         }
     }
 
-    /// Close the theme picker panel (its `×`).
     pub(crate) fn close_theme_panel(&mut self, cx: &mut Context<Self>) {
         if let Some(s) = self.active_settings_mut() {
             s.theme_panel_open = false;
@@ -2277,8 +1330,6 @@ impl Tty7App {
         }
     }
 
-    /// Open the user themes folder (`~/.config/tty7/themes`) in the system file
-    /// browser, creating it first so there's always somewhere to drop a theme.
     pub(crate) fn open_themes_folder(&self, cx: &mut Context<Self>) {
         if let Some(dir) = crate::ui::presets::themes_dir() {
             let _ = std::fs::create_dir_all(&dir);
@@ -2286,25 +1337,18 @@ impl Tty7App {
         }
     }
 
-    /// Duplicate the active theme into an editable YAML file, switch to the copy,
-    /// and open the color editor on it. This is the entry point for customizing a
-    /// read-only built-in (or an imported iTerm scheme).
     pub(crate) fn fork_active_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = crate::ui::theme::effective_preset_id(cx);
         let theme = crate::ui::presets::by_id(cx, &id);
         match crate::ui::presets::fork_to_file(&theme) {
             Ok(new_id) => {
                 crate::ui::presets::load_registry(cx);
-                // Switches to the copy (applies + persists + rebuilds the editor).
                 self.set_preset(&new_id, window, cx);
             }
             Err(e) => log::warn!("failed to duplicate theme: {e}"),
         }
     }
 
-    /// Apply one edit to the active (editable) theme: mutate it, write the
-    /// theme's file, reload the registry, and repaint live. The shared tail of
-    /// every in-app theme edit (color pickers, opacity slider, blur switch).
     fn mutate_active_theme(
         &mut self,
         mutate: impl FnOnce(&mut crate::ui::presets::Theme),
@@ -2326,7 +1370,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Apply one color edit to the active (editable) theme.
     pub(crate) fn edit_active_theme(
         &mut self,
         edit: ThemeEdit,
@@ -2349,16 +1392,12 @@ impl Tty7App {
         );
     }
 
-    /// The window opacity currently in effect: the global config override when
-    /// set, else the active theme's own value, else fully opaque.
     pub(crate) fn effective_window_opacity(cx: &App) -> f32 {
         let config = cx.global::<Config>();
         let theme = crate::ui::presets::by_id(cx, &crate::ui::theme::effective_preset_id(cx));
         config.window_opacity.or(theme.opacity).unwrap_or(1.0)
     }
 
-    /// Set the global window-opacity override from the Appearance slider. Applies
-    /// to every theme (persisted in the config, not the theme file).
     pub(crate) fn set_window_opacity(
         &mut self,
         v: f32,
@@ -2371,7 +1410,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Set the global window-blur override from the Appearance switch.
     pub(crate) fn set_window_blur(
         &mut self,
         on: bool,
@@ -2384,8 +1422,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Clear both window overrides so opacity/blur follow the active theme again
-    /// (the Appearance section's "Follow theme" action).
     pub(crate) fn reset_window_overrides(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         {
             let config = cx.global_mut::<Config>();
@@ -2398,9 +1434,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Snap the Appearance opacity slider's thumb to the value now in effect.
-    /// Needed whenever that value changes for a reason other than the user
-    /// dragging it (theme switch, "Follow theme" reset).
     pub(crate) fn sync_window_opacity_slider(
         &mut self,
         window: &mut Window,
@@ -2415,8 +1448,6 @@ impl Tty7App {
         }
     }
 
-    /// Set the active (editable) theme's background image from a native file
-    /// picker, keeping the existing image opacity (or the schema default).
     pub(crate) fn pick_theme_image(&mut self, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
@@ -2437,8 +1468,6 @@ impl Tty7App {
                             window,
                             cx,
                         );
-                        // The editor gains/loses the image-opacity slider with
-                        // the image itself.
                         this.rebuild_theme_editor(window, cx);
                     });
                 }
@@ -2447,13 +1476,11 @@ impl Tty7App {
         .detach();
     }
 
-    /// Remove the active theme's background image.
     pub(crate) fn remove_theme_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.mutate_active_theme(|theme| theme.image = None, window, cx);
         self.rebuild_theme_editor(window, cx);
     }
 
-    /// Set the active theme's background-image opacity from the editor slider.
     pub(crate) fn set_theme_image_opacity(
         &mut self,
         v: f32,
@@ -2471,11 +1498,6 @@ impl Tty7App {
         );
     }
 
-    /// (Re)build the settings tab's color-editor pickers for the current active
-    /// theme. If no settings tab is open or the active theme isn't an editable
-    /// file, the editor is cleared. Called after every theme switch / duplicate
-    /// and when opening settings, so the pickers always reflect (and target) the
-    /// theme currently on screen.
     pub(crate) fn rebuild_theme_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings.is_none() {
             return;
@@ -2490,7 +1512,6 @@ impl Tty7App {
         }
 
         let neutrals = theme.neutrals();
-        // (edit target, row label, current 0xRRGGBB value) for each seed color.
         let seed_specs: [(ThemeEdit, &str, u32); 5] = [
             (
                 ThemeEdit::Background,
@@ -2543,10 +1564,6 @@ impl Tty7App {
             })
             .collect();
 
-        // Background-image opacity slider, present only while the theme has an
-        // image (choosing/removing one rebuilds the editor). Emits `Change`
-        // continuously while dragging; each tick writes the theme file and
-        // repaints, so the mix is live under the thumb.
         let image_opacity_slider = theme.image.as_ref().map(|img| {
             let slider = cx.new(|_| {
                 SliderState::new()
@@ -2578,9 +1595,6 @@ impl Tty7App {
         }
     }
 
-    /// Toggle terminal font ligatures through the generic `font_features`
-    /// config. On enables the common programming-font features; off restores
-    /// tty7's terminal-safe default (contextual ligatures disabled).
     pub(crate) fn set_font_ligatures(&mut self, on: bool, cx: &mut Context<Self>) {
         let features = on.then(|| {
             crate::core::config::FontFeatures(Arc::new(vec![
@@ -2588,7 +1602,6 @@ impl Tty7App {
                 ("liga".to_string(), 1),
             ]))
         });
-        // The config holds the gpui-free representation; the views want gpui's.
         let gpui_features = features
             .as_ref()
             .map(crate::core::config::gpui_font_features);
@@ -2616,8 +1629,6 @@ impl Tty7App {
         }
     }
 
-    /// Switch the default cursor shape, update each pane's terminal defaults,
-    /// and repaint. App-requested DECSCUSR shapes still override this at runtime.
     pub(crate) fn set_cursor_style(&mut self, style: ConfigCursorStyle, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.cursor_style = style);
         let cfg = cx.global::<Config>().clone();
@@ -2626,17 +1637,6 @@ impl Tty7App {
         self.apply_terminal_config_to_panes(&cfg, cx);
     }
 
-    // ── Config setters (Terminal / Window & Tabs / Cursor settings) ─────────
-    // Each goes through `update_config` (mutate the global, persist, repaint).
-    // Effect points read the global live (blink task, `poll_foreground`, link
-    // gates, `new_tab_insert_at`), so there's nothing to push into the panes —
-    // except cursor blink, which must un-hide a cursor a prior blink cycle may
-    // have left dark.
-
-    /// Shared tail of every config setter: mutate the global `Config`, persist
-    /// it, and repaint so the control reflects the new value. Keeping the
-    /// persist/notify contract here means a future change (e.g. debounced
-    /// saves) lands in one place.
     pub(crate) fn update_config(
         &mut self,
         cx: &mut Context<Self>,
@@ -2656,23 +1656,14 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.ssh_loopback_forward = on);
     }
 
-    /// Global default for native-SSH host-key verification (WS3, FR-S4). A
-    /// per-profile override still wins where set.
     pub(crate) fn set_verify_host_keys(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.verify_host_keys = on);
     }
 
-    /// Global default for confirming before closing a live SSH session (FR-E3).
-    /// A per-profile `warn_on_close` override still wins where set.
     pub(crate) fn set_ssh_warn_on_close(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.ssh_warn_on_close = on);
     }
 
-    /// How a forward on `pane_id` reaches the daemon.
-    ///
-    /// Looked up across every tab's leaves rather than off the focused one: the
-    /// Forwards band tracks the pane the *panel* is showing, which is not
-    /// necessarily the pane with keyboard focus.
     pub(crate) fn forward_route(&self, pane_id: u64, cx: &gpui::App) -> ForwardRoute {
         let workspace = self
             .tabs
@@ -2685,13 +1676,11 @@ impl Tty7App {
         ForwardRoute { pane_id, workspace }
     }
 
-    /// Refresh the managed (Local/Remote/Dynamic) forwards for `pane_id` (WS4).
     pub(crate) fn refresh_managed_forwards(&mut self, pane_id: u64, cx: &mut Context<Self>) {
         self.loopback_panel.managed = self.forward_route(pane_id, cx).list();
         cx.notify();
     }
 
-    /// Pick the kind for the add-forward form (native-SSH panes).
     pub(crate) fn set_managed_forward_kind(
         &mut self,
         kind: crate::daemon::protocol::SshForwardKind,
@@ -2701,9 +1690,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Establish the add-form's managed forward on `pane_id`'s connection, then
-    /// clear the form. A blank/invalid bind port is ignored; Dynamic forwards need
-    /// no target.
     pub(crate) fn add_managed_forward(
         &mut self,
         pane_id: u64,
@@ -2749,7 +1735,6 @@ impl Tty7App {
             .trim()
             .parse::<u16>()
             .unwrap_or(0);
-        // Local/Remote require a target; Dynamic (SOCKS) does not.
         if kind != SshForwardKind::Dynamic && (target_host.is_empty() || target_port == 0) {
             return;
         }
@@ -2768,18 +1753,12 @@ impl Tty7App {
             target_port,
             description: (!description.is_empty()).then_some(description),
         };
-        // Editing an existing forward = re-establish it: drop the old one first so
-        // its listener frees the (possibly reused) bind port before the new one binds.
         let route = self.forward_route(pane_id, cx);
         if let Some(old_id) = self.loopback_panel.mf_editing.take() {
             let _ = route.remove(old_id);
         }
         self.loopback_panel.managed = route.add(rule);
-        // The new row *is* the confirmation, so the form folds away rather than
-        // sitting there re-inviting an add nobody asked for. (Only on the success
-        // path — every validation failure above returns early with it still open.)
         self.loopback_panel.form_pane_id = None;
-        // Reset the value-carrying fields; keep bind host default.
         for input in [
             &self.loopback_panel.mf_bind_port,
             &self.loopback_panel.mf_target_host,
@@ -2791,8 +1770,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Load an existing forward's values into the add form for editing
-    /// (VSCode-style: change the port/target, Save re-establishes it).
     pub(crate) fn edit_managed_forward(
         &mut self,
         forward: crate::daemon::protocol::ManagedForward,
@@ -2801,8 +1778,6 @@ impl Tty7App {
     ) {
         self.loopback_panel.mf_kind = forward.kind;
         self.loopback_panel.mf_editing = Some(forward.id);
-        // Clicking a row is the only way in, and the form is where the values
-        // land — so expand it on the row's own pane.
         self.loopback_panel.form_pane_id = Some(forward.pane_id);
         let target_port = if forward.target_port == 0 {
             String::new()
@@ -2831,7 +1806,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Leave edit mode without saving; clear the form back to the add defaults.
     pub(crate) fn cancel_managed_forward_edit(
         &mut self,
         window: &mut Window,
@@ -2852,7 +1826,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Tear down one managed forward by id (native-SSH panes).
     pub(crate) fn remove_managed_forward(
         &mut self,
         pane_id: u64,
@@ -2863,14 +1836,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// `ShowSshForwards` / the palette's "SSH: Port Forwarding": land on the
-    /// pane's forwards wherever you were. The band lives on the Info tab, so this
-    /// opens the panel there and expands the add form — the one entry point that
-    /// works with the panel closed, which is why it exists at all.
-    ///
-    /// A no-op on anything but a connected native-SSH pane: without a connection
-    /// there is nothing to forward over, and opening an empty form on a local
-    /// shell would only be a puzzle.
     pub(crate) fn show_ssh_forwards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((pane_id, _)) = self.active_connected_native_ssh_pane(window, cx) else {
             return;
@@ -2881,9 +1846,6 @@ impl Tty7App {
         }
     }
 
-    /// The Forwards band's `+`: expand the add form for `pane_id`, or collapse it
-    /// if it's already this pane's. Collapsing goes through the same reset as
-    /// Cancel, so a form abandoned mid-edit can't come back still in edit mode.
     pub(crate) fn toggle_managed_forward_form(
         &mut self,
         pane_id: u64,
@@ -2899,7 +1861,6 @@ impl Tty7App {
         self.refresh_managed_forwards(pane_id, cx);
     }
 
-    /// Collapse the add/edit form, clearing it back to the add defaults.
     pub(crate) fn close_managed_forward_form(
         &mut self,
         window: &mut Window,
@@ -2909,19 +1870,9 @@ impl Tty7App {
         self.cancel_managed_forward_edit(window, cx);
     }
 
-    /// Route a typed "SSH: Add Connection…" line to the native engine (PRD §3.1/
-    /// §3.3). The input is parsed as best-effort into a transient profile — a
-    /// `user@host[:port]` target plus the trivially-mappable flags (`-p`, `-i`,
-    /// `-l`, `-J`, `-o User=`/`-o Port=`). A line that can't be parsed into a host
-    /// surfaces a diagnosable inline notice rather than silently shelling out.
     fn open_typed_ssh_connect(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
         match parse_ssh_connect_input(input) {
             Ok(parsed) => {
-                // `ssh` semantics: a target naming a `~/.ssh/config` alias
-                // resolves through it, with typed flags overriding the config's
-                // values. (After parsing, a port of 22 is indistinguishable
-                // from "not given", so an explicit `-p 22` can't override a
-                // config port — the one caveat of this overlay.)
                 let (profile, proxy_jump) =
                     match ssh_config::resolve_alias_to_profile(&parsed.profile.host) {
                         Some(resolved) => {
@@ -2953,23 +1904,16 @@ impl Tty7App {
         }
     }
 
-    /// Toggle the startup update check (Settings → About). Takes effect on the
-    /// next launch — this only persists the preference; it doesn't run or cancel
-    /// an in-flight check.
     pub(crate) fn set_check_for_updates(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.check_for_updates = on);
     }
 
-    /// Toggle inactive-pane dimming. Applies on the next render — `update_config`
-    /// notifies, and this view's render is what hands the flag to the pane tree.
     pub(crate) fn set_dim_inactive_panes(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.dim_inactive_panes = on);
     }
 
     pub(crate) fn set_cursor_blink(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.cursor_blink = on);
-        // Turning blink off mid-cycle could leave the cursor in its hidden phase;
-        // force every pane's cursor back on so it doesn't stick invisible.
         if !on {
             for tab in &self.tabs {
                 for leaf in tab.pane.terminals() {
@@ -2983,8 +1927,6 @@ impl Tty7App {
     }
 
     pub(crate) fn set_scrollback_limit(&mut self, lines: usize, cx: &mut Context<Self>) {
-        // Callers pass fixed in-range presets, but clamp anyway so a future caller
-        // can't smuggle in a degenerate value.
         self.update_config(cx, |cfg| {
             cfg.scrollback_limit = lines.clamp(100, crate::core::config::MAX_SCROLLBACK)
         });
@@ -2998,15 +1940,10 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.new_tab_position = pos);
     }
 
-    /// Set where the tab bar is rendered (Settings → Window & Tabs). Persists the
-    /// choice; the layout re-derives from the `Config` global on the next render.
     pub(crate) fn set_tab_bar_position(&mut self, pos: TabBarPosition, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.tab_bar_position = pos);
     }
 
-    /// Set how the vertical tab sidebar arranges its rows (Settings → Window &
-    /// Tabs): grouped per git repo or one flat list. Persists the choice; the
-    /// sidebar re-derives from the `Config` global on the next render.
     pub(crate) fn set_sidebar_grouping(
         &mut self,
         grouping: crate::core::config::SidebarGrouping,
@@ -3015,16 +1952,10 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.sidebar_grouping = grouping);
     }
 
-    /// Set whether the sidebar's `+N −N` counts open the diff overlay
-    /// (Settings → Window & Tabs). The counts themselves are unaffected either
-    /// way — this only governs the click. Persists the choice; the sidebar
-    /// re-derives from the `Config` global on the next render.
     pub(crate) fn set_sidebar_diff_preview(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.sidebar_diff_preview = on);
     }
 
-    /// `ToggleTabSidebar`: flip the tab bar between the horizontal title-bar strip
-    /// (`Top`) and the vertical left sidebar (`Left`), persisting the choice.
     pub(crate) fn toggle_tab_sidebar(&mut self, cx: &mut Context<Self>) {
         let next = match cx.global::<Config>().tab_bar_position {
             TabBarPosition::Top => TabBarPosition::Left,
@@ -3033,14 +1964,9 @@ impl Tty7App {
         self.set_tab_bar_position(next, cx);
     }
 
-    /// `ToggleLeftPanel` (⌘B): collapse/expand the left rail in place, persisting
-    /// the choice. In `Top` mode there is no rail to collapse, so this switches to
-    /// `Left` and shows it — the shortcut always means "give me the sidebar".
     pub(crate) fn toggle_left_panel(&mut self, cx: &mut Context<Self>) {
         let (pos, collapsed) = match cx.global::<Config>().tab_bar_position {
             TabBarPosition::Top => (TabBarPosition::Left, false),
-            // This window's own collapse state — collapsing one window's rail
-            // must not collapse every other window's. See `sidebar_collapsed`.
             TabBarPosition::Left => (TabBarPosition::Left, !self.sidebar_collapsed),
         };
         self.sidebar_collapsed = collapsed;
@@ -3051,9 +1977,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Whether the left rail is actually on screen: `Left` mode, not collapsed,
-    /// and at least one tab (the home page has no rail). The layout, the title
-    /// strip and the collapse button all derive from this one predicate.
     pub(crate) fn left_panel_open(&self, cx: &gpui::App) -> bool {
         matches!(cx.global::<Config>().tab_bar_position, TabBarPosition::Left)
             && !self.sidebar_collapsed
@@ -3068,15 +1991,10 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.notify_on_command_finish = mode);
     }
 
-    /// Set the "long command" floor (seconds) a foreground command must exceed
-    /// to be eligible for a completion notification. Read live where the alert
-    /// is posted, so nothing needs pushing to open panes.
     pub(crate) fn set_notify_threshold(&mut self, secs: u64, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.notify_threshold_secs = secs.clamp(1, 3600));
     }
 
-    /// Switch how the terminal bell is signalled. Read live in each pane's bell
-    /// handler, so there's nothing to push.
     pub(crate) fn set_bell_mode(
         &mut self,
         mode: crate::core::config::BellMode,
@@ -3085,36 +2003,24 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.bell = mode);
     }
 
-    /// Toggle session restore. Takes effect on the next launch (this only
-    /// persists the preference); the current window is untouched.
     pub(crate) fn set_restore_session(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.restore_session = on);
     }
 
-    /// Toggle the system tray icon. The tray's poll loop re-reads the flag
-    /// every second, so the icon appears/disappears without a restart.
     pub(crate) fn set_show_tray_icon(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.show_tray_icon = on);
     }
 
-    /// Toggle the "Close Window?" prompt on the last window. The close handler
-    /// reads the flag when it fires, so this applies to the very next ⌘W with no
-    /// restart and nothing to push to open windows.
     pub(crate) fn set_confirm_window_close(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.confirm_window_close = on);
     }
 
-    // ── Input / Mouse setters ───────────────────────────────────────────────
-
-    /// Takes effect on the next keystroke — the terminal reads the flag per
-    /// key event, so nothing needs pushing to open panes.
     pub(crate) fn set_macos_option_as_alt(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.macos_option_as_alt = on);
     }
 
     pub(crate) fn set_mouse_hide_while_typing(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.mouse_hide_while_typing = on);
-        // Push the new policy to GPUI right away (same call the hot-reload uses).
         crate::ui::theme::apply_cursor_hide_mode(cx);
     }
 
@@ -3122,9 +2028,6 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.focus_follows_mouse = on);
     }
 
-    /// Toggle whether mouse events reach full-screen apps. The gates are cached
-    /// per view, so this pushes the new value into every open pane (like the
-    /// font setters) in addition to persisting it.
     pub(crate) fn set_mouse_reporting(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.mouse_reporting = on);
         for tab in &self.tabs {
@@ -3175,13 +2078,6 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.remember_window_size = on);
     }
 
-    /// Name the OS window after its workspace, so ⌘` and Mission Control can
-    /// tell several tty7 windows apart. Reads the *saved* workspace, which
-    /// every structural change writes just before focus lands here — a title
-    /// one beat behind is invisible, and it keeps this off the render path.
-    ///
-    /// An empty workspace has no subject yet, so it falls back to the app name
-    /// rather than showing "Untitled".
     pub(crate) fn sync_window_title(&self, window: &mut Window, cx: &App) {
         let title = WorkspaceStore::all(cx)
             .get(self.workspace)
@@ -3196,26 +2092,15 @@ impl Tty7App {
     }
 
     pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut App) {
-        // Focus moves after every structural change, which is exactly when the
-        // window's subject may have changed too.
         self.sync_window_title(window, cx);
-        // While the settings overlay is open it owns focus (so Esc-to-close and
-        // keybinding capture keep working); tab operations behind it don't steal
-        // it. `close_settings` refocuses the active terminal on the way out.
         if let Some(settings) = self.settings.as_ref() {
             window.focus(&settings.focus_handle, cx);
             return;
         }
         let Some(tab) = self.tabs.get(self.active) else {
-            // No tabs → the home page is showing; keep something focused so
-            // keystrokes stay on the window's dispatch path (⌘T etc. must still
-            // reach the root action handlers).
             window.focus(&self.home_focus, cx);
             return;
         };
-        // A tab showing its diff overlay gives the overlay focus (Esc-to-close
-        // must keep working when switching back to it); `close_diff_overlay`
-        // re-runs this after clearing the slot to land on the terminal.
         if let Some(overlay) = tab.diff_overlay.as_ref() {
             window.focus(&overlay.focus_handle, cx);
             return;
@@ -3226,10 +2111,6 @@ impl Tty7App {
         }
     }
 
-    /// Snapshot which pane currently holds focus in the active tab into that
-    /// tab's `last_focused`, so `focus_active` can restore it when we come back.
-    /// Call this before any transition that moves focus off the active tab
-    /// (switching tabs, opening a focus-stealing overlay).
     pub(crate) fn remember_active_pane(&mut self, window: &Window, cx: &App) {
         let active = self.active;
         if let Some(tab) = self.tabs.get_mut(active) {
@@ -3244,11 +2125,6 @@ impl Tty7App {
         window.focus(&handle, cx);
     }
 
-    /// Put a finished (or failed) remote pane back into the tree.
-    ///
-    /// `slot_id` is the *placeholder's* id, which is what the tree still holds:
-    /// the terminal that just arrived has an identity of its own and has never
-    /// been in the tree.
     fn land_pane(
         &mut self,
         slot_id: gpui::EntityId,
@@ -3260,21 +2136,11 @@ impl Tty7App {
     ) {
         let parts = match parts {
             Ok(parts) => parts,
-            // The slot keeps its place and says what went wrong. It does
-            // not collapse the split under the user, and it does not close the
-            // tab — both would throw away a layout because a network blinked.
             Err(reason) => {
                 pending.update(cx, |p, cx| p.fail(reason, cx));
                 return;
             }
         };
-        // The pane or its tab may have been closed while the connect was in the
-        // air. Checked *before* the view is built, because the answer decides
-        // whether to build one at all — and because the pane on the other
-        // machine is real and running either way, so a slot that is gone means
-        // killing it rather than leaking it. Nothing on this client can reach
-        // it any more, and closing the slot is the user saying they do not want
-        // it (unlike a quit, where panes are deliberately detached and kept).
         let still_there = self
             .tabs
             .iter()
@@ -3288,13 +2154,7 @@ impl Tty7App {
             kill_pane_off_thread(route, parts.pane_id, cx);
             return;
         }
-        // Whether the user was sitting on this pane while it connected. Read
-        // before the swap, since the placeholder leaves the tree in it.
         let was_focused = pending.read(cx).focus_handle.contains_focused(window, cx);
-        // The saved id was gone and this is a fresh shell in its cwd, so the
-        // agent that was running in it has to be resumed by hand — the same
-        // thing a local pane's restore does, deferred to here because only the
-        // machine could say whether the attach took.
         let resume = (!parts.restored)
             .then(|| {
                 let spawn = &pending.read(cx).spawn;
@@ -3317,32 +2177,16 @@ impl Tty7App {
         if was_focused {
             self.focus_leaf(&slot, window, cx);
         }
-        // The pane has a real `pane_id` now, which is what restore matches on.
         self.save_session(cx);
         cx.notify();
     }
 
-    /// Ask every pane in the window to re-probe its git status. Called when the
-    /// window regains focus: the sidebar shows a git line for *every* tab, not
-    /// just the active one, so refreshing only the focused pane would leave the
-    /// rest of the list stale — which is exactly the list the user is scanning
-    /// right after switching back.
-    ///
-    /// Panes sharing a cwd fold into one probe in the shared cache, and the
-    /// throttle there counts per repo rather than per cwd, so once the cache
-    /// knows where each pane lives the cost of a window with many panes is
-    /// bounded by the number of distinct repos — not by the number of
-    /// subdirectories they happen to sit in, which would be the same full-repo
-    /// `git diff` asked several times over.
     fn refresh_git_status_all(&mut self, cx: &mut Context<Self>) {
         for leaf in self.tabs.iter().flat_map(|tab| tab.pane.terminals()) {
             leaf.update(cx, |view, cx| view.refresh_git_status_now(cx));
         }
     }
 
-    /// Where a freshly opened tab should be inserted, per `new_tab_position`:
-    /// right after the active tab, or appended at the end. Clamped to the tab
-    /// count so the zero-tab home state (active 0, no tabs) inserts at 0.
     fn new_tab_insert_at(&self, cx: &App) -> usize {
         match cx.global::<Config>().new_tab_position {
             NewTabPosition::AfterCurrent => (self.active + 1).min(self.tabs.len()),
@@ -3354,29 +2198,15 @@ impl Tty7App {
         self.new_tab_with_shell(None, window, cx);
     }
 
-    /// Open a new tab running `shell` — a pick from the "+" dropdown — or the
-    /// default shell when `None` (the plain "+" click / Cmd+T path).
     pub(crate) fn new_tab_with_shell(
         &mut self,
         shell: Option<ShellSpec>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A window is one machine. A remote workspace's window must
-        // not open a shell on *this* computer, so the refusal happens before
-        // anything is spawned rather than after a local pane is already in the
-        // tab strip.
         if !self.guard_local_spawn(window, cx) {
             return;
         }
-        // Inherit the cwd of the active tab's focused terminal so the new tab
-        // opens in the same directory the user is currently working in. The new
-        // tab takes this window's route, so it lands on the same machine the
-        // source pane's shell is on — which is what `spawnable_cwd` gates on. A
-        // pane whose shell is somewhere else entirely (a native-SSH or WSL pane
-        // in an otherwise local window) declines, because an inherited cwd wins
-        // over every fallback in `pane::initial_working_directory` and would go
-        // straight to the spawn as a working directory.
         let cwd = self.tabs.get(self.active).and_then(|t| {
             t.pane
                 .focused_or_first(window, cx)
@@ -3400,8 +2230,6 @@ impl Tty7App {
                 return;
             }
         };
-        // Leaving the current tab for the new one; snapshot its focused pane
-        // so switching back restores it (same as `activate`).
         self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
@@ -3412,10 +2240,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Open a new tab running a native (russh) SSH session for the resolved
-    /// `spec` (PRD FR-C1). The caller (`ui::ssh_connect`) has already pulled any
-    /// keychain secrets into `spec`. Mirrors `new_tab_with_shell` but for the
-    /// native backend.
     pub(crate) fn open_native_ssh_tab(
         &mut self,
         spec: Box<crate::daemon::protocol::NativeSshSpec>,
@@ -3435,8 +2259,6 @@ impl Tty7App {
                 return;
             }
         };
-        // Leaving the current tab for the new one; snapshot its focused pane
-        // so switching back restores it (same as `activate`).
         self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
@@ -3448,9 +2270,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Respawn a native SSH pane **in place** (same tab / split slot), replacing a
-    /// dead pane's view with a fresh native connection for `spec` (PRD FR-E4). The
-    /// daemon re-establishes the profile's preconfigured forwards on connect.
     pub(crate) fn respawn_native_ssh_in_place(
         &mut self,
         dead: &Entity<TerminalView>,
@@ -3467,7 +2286,6 @@ impl Tty7App {
                 return;
             }
         };
-        // Swap the fresh leaf into the dead one's position across every tab.
         for tab in &mut self.tabs {
             if tab
                 .pane
@@ -3482,11 +2300,7 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Split the focused pane in the active tab, focusing the new terminal.
     pub(crate) fn split(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
-        // Capture the target leaf BEFORE creating the new terminal: constructing
-        // a TerminalView focuses it, which would otherwise make us lose track of
-        // which pane to split (nested splits would always hit the first leaf).
         let Some(target) = self
             .tabs
             .get(self.active)
@@ -3494,20 +2308,10 @@ impl Tty7App {
         else {
             return;
         };
-        // The new pane inherits the cwd — and the shell, when the pane being
-        // split was opened with an explicit pick (a WSL/fish tab splits into
-        // more WSL/fish, not back to the default). Same rule as a new tab: the
-        // split takes this window's route, so `spawnable_cwd` is the cwd the
-        // machine it lands on can actually chdir into. (The native-SSH branch
-        // below has the daemon discard it regardless.)
         if !self.guard_local_spawn(window, cx) {
             return;
         }
         let cwd = target.read(cx).spawnable_cwd();
-        // Splitting a native-SSH pane opens another SSH pane on the same
-        // connection rather than dropping back to a local shell. Re-resolve the
-        // persisted (secret-free) spec from its saved profile so keychain
-        // secrets are re-applied, mirroring the reconnect path.
         let ssh_spec = target.read(cx).ssh_spec();
         let new = if let Some(spec) = ssh_spec {
             let resolved = crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
@@ -3552,10 +2356,7 @@ impl Tty7App {
         }
     }
 
-    /// Close the focused pane. If it was the tab's only pane, close the tab.
     fn close_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // FR-E3: if the focused pane is a live SSH session flagged warn-on-close,
-        // raise the in-pane confirm sheet instead of closing outright.
         if self.ssh_close_confirm.is_none() && self.focused_pane_is_warn_ssh(window, cx) {
             self.ssh_close_confirm = Some(SshCloseKind::Pane);
             cx.notify();
@@ -3563,17 +2364,11 @@ impl Tty7App {
         }
         self.ssh_close_confirm = None;
         self.maximized = None;
-        // Capture the focused leaf before closing: if a split collapses, that
-        // leaf is destroyed with no reopen path, so we kill its daemon pane. Owned
-        // clones from `leaves()` end the borrow before the `&mut` close below.
         let focused = self.tabs.get(self.active).and_then(|tab| {
             tab.pane
                 .leaves()
                 .into_iter()
                 .find(|l| l.contains_focused(window, cx))
-                // A pane still connecting has no daemon pane to kill; the
-                // spawn that is in the air for it is handled where it lands
-                // (`land_pane` finds no slot and kills it there).
                 .and_then(|l| l.terminal().cloned())
         });
         let outcome = match self.tabs.get_mut(self.active) {
@@ -3582,15 +2377,9 @@ impl Tty7App {
         };
         match outcome {
             CloseOutcome::RemoveSelf => {
-                // The focused leaf *is* the tab's only pane: close the tab, which
-                // kills its panes itself.
                 self.close_tab(self.active, window, cx);
             }
             CloseOutcome::NotFound => {
-                // No terminal leaf in the active tab holds focus (focus is in the
-                // rename input / settings / drifted). Only fall back to closing the
-                // tab when it's a single pane — never silently destroy a multi-pane
-                // split whose target the user can't see.
                 let single = self
                     .tabs
                     .get(self.active)
@@ -3610,13 +2399,6 @@ impl Tty7App {
         }
     }
 
-    /// Close the pane whose shell just exited on its own (`ChildExited` from
-    /// the view — `exit`, Ctrl-D, a crashed shell): collapse its split, or
-    /// close its tab when it was the only pane. Unlike `close_pane` this
-    /// targets the *emitting* leaf, not the focused one — the exit can happen
-    /// in a background tab. The daemon pane is killed even though its child is
-    /// already dead: the daemon still lists it for reattach, and killing is
-    /// what drops it from the session.
     fn on_child_exited(
         &mut self,
         view: Entity<TerminalView>,
@@ -3629,23 +2411,14 @@ impl Tty7App {
             .iter()
             .position(|tab| tab.pane.leaves().iter().any(|l| l.entity_id() == id))
         else {
-            return; // already closed (e.g. by the user racing the exit)
+            return;
         };
-        // A native-SSH pane lingers instead of closing (PRD FR-C2/E4): a failed
-        // connect's diagnostic must stay readable, and a dropped session's pane
-        // is the anchor for the in-pane reconnect (`restart_ssh_session`) —
-        // auto-close would make both unreachable. Only local shells fall through
-        // to the close below.
         if view.read(cx).ssh_disconnected() {
             cx.notify();
             return;
         }
         match self.tabs[index].pane.close_leaf(view.entity_id()) {
-            // The exited pane was the tab's only leaf: close the whole tab
-            // (which snapshots it for reopen and kills its daemon panes).
             CloseOutcome::RemoveSelf => self.close_tab(index, window, cx),
-            // Unreachable — containment was just checked — but never close a
-            // tab we failed to locate the leaf in.
             CloseOutcome::NotFound => {}
             CloseOutcome::Collapsed => {
                 kill_pane_off_thread(view.read(cx).pane_route(), view.read(cx).pane_id, cx);
@@ -3659,10 +2432,7 @@ impl Tty7App {
         }
     }
 
-    /// Cycle focus among the panes of the active tab.
     fn cycle_pane(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        // `leaves()` returns owned clones, so the immutable borrow of `self.tabs`
-        // ends here — letting us mutate `self.maximized` just below.
         let leaves = match self.tabs.get(self.active) {
             Some(tab) => tab.pane.leaves(),
             None => return,
@@ -3685,8 +2455,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Move focus to the pane adjacent to the focused one in `dir` (tmux
-    /// directional focus). A no-op when there's no neighbor that way.
     fn focus_pane_dir(&mut self, dir: Dir, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self
             .tabs
@@ -3700,9 +2468,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Grow/shrink the focused pane along `dir` by one step, adjusting its
-    /// nearest matching-axis split. Persists the new layout. A no-op when no
-    /// split matches (e.g. a single-pane tab, or no divider on that axis).
     fn resize_pane(&mut self, dir: Dir, window: &mut Window, cx: &mut Context<Self>) {
         let changed = self
             .tabs
@@ -3714,9 +2479,6 @@ impl Tty7App {
         }
     }
 
-    /// Swap the focused pane with its next / previous sibling in leaf order
-    /// (tmux `prefix }` / `prefix {`). The terminals trade tree positions;
-    /// focus rides along with the moved terminal. Needs at least two panes.
     fn swap_pane(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         let (from, len) = match self.tabs.get(self.active) {
             Some(tab) => (tab.pane.focused_index(window, cx), tab.pane.leaves().len()),
@@ -3740,8 +2502,6 @@ impl Tty7App {
         }
     }
 
-    /// Switch to the next / previous tab, wrapping around (tmux `prefix n/p`).
-    /// A no-op with fewer than two tabs.
     fn cycle_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         let n = self.tabs.len();
         if n < 2 {
@@ -3757,21 +2517,12 @@ impl Tty7App {
 
     pub(crate) fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.tabs.len() && index != self.active {
-            // Remember the pane we're leaving focused so returning to this tab
-            // restores it instead of jumping to the first leaf.
             self.remember_active_pane(window, cx);
             self.maximized = None;
             self.active = index;
-            // The incoming tab may have a diff overlay that went stale while
-            // hidden (its repo changed underneath); re-probe if the status
-            // cache disagrees with the shown snapshot.
             self.maybe_refresh_diff_overlay(cx);
-            // In sidebar mode, pull the newly active row into view (a no-op when
-            // the strip is horizontal — the handle tracks no painted list then).
             self.sidebar_scroll.scroll_to_item(index);
             if self.code_panel_visible() {
-                // The incoming tab has its own panel open: refresh its roots
-                // (pane cwds may have changed) and keep focus on the panel.
                 self.file_tree_refresh_roots(window, cx);
                 self.file_tree.focus_handle.focus(window, cx);
             } else {
@@ -3782,10 +2533,6 @@ impl Tty7App {
         }
     }
 
-    /// Toggle maximize on the active tab's focused pane (Cmd+Shift+Enter). When a
-    /// pane is maximized the tab renders only that leaf full-window; toggling again
-    /// (or any structural change) restores the split layout. A no-op when the
-    /// active tab has a single pane (nothing to maximize).
     fn toggle_maximize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.maximized.is_some() {
             self.maximized = None;
@@ -3809,13 +2556,9 @@ impl Tty7App {
     }
 
     pub(crate) fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        // Closing the last tab is allowed: zero tabs is the home page (see
-        // `ui::home`), and `focus_active`/`render` both handle it.
         if index >= self.tabs.len() {
             return;
         }
-        // FR-E3: confirm before closing a tab that holds a live warn-on-close SSH
-        // session (unless this call is the confirmation itself).
         let already_confirming = self.ssh_close_confirm == Some(SshCloseKind::Tab(index));
         if !already_confirming && self.tab_has_warn_ssh(index, cx) {
             self.ssh_close_confirm = Some(SshCloseKind::Tab(index));
@@ -3824,32 +2567,18 @@ impl Tty7App {
         }
         self.ssh_close_confirm = None;
         self.maximized = None;
-        // A rename in progress stores a fixed tab index; removing a tab shifts
-        // indices and would let the pending edit commit onto the wrong tab. Drop it.
         self.renaming = None;
-        // Capture the tab's cwd *before* its panes are killed (the daemon can't
-        // report it afterwards): if it sat in a tty7-managed worktree, the
-        // cleanup offer below needs it.
         let worktree_cwd = self.tab_host_cwd(index, window, cx);
-        // Snapshot the tab (layout + each pane's current cwd + name) onto the
-        // recently-closed stack so Cmd+Shift+T can bring it back.
         let snapshot = tab_to_session(&self.tabs[index], cx);
         self.closed.push(snapshot);
         if self.closed.len() > MAX_CLOSED_TABS {
             self.closed.remove(0);
         }
-        // Explicitly closing a tab kills its daemon panes (matching the old
-        // in-process behavior: closing ends the shells). This is distinct from
-        // *quitting* the app, where panes are detached and kept alive so the
-        // next launch can re-attach. Reopen-closed-tab then spawns fresh in the
-        // saved cwd, just like before the daemon split.
         for leaf in self.tabs[index].pane.terminals() {
             kill_pane_off_thread(leaf.read(cx).pane_route(), leaf.read(cx).pane_id, cx);
         }
         self.tabs.remove(index);
         if self.tabs.is_empty() {
-            // Home page: keep `active` at a stable 0 (every access goes through
-            // `tabs.get`, which yields None until a tab exists again).
             self.active = 0;
         } else if self.active >= self.tabs.len() {
             self.active = self.tabs.len() - 1;
@@ -3859,31 +2588,15 @@ impl Tty7App {
         self.focus_active(window, cx);
         self.save_session(cx);
         cx.notify();
-        // The tab is gone; if it lived in a tty7-managed worktree, offer to
-        // clean the checkout up rather than letting them pile up silently.
         self.offer_worktree_cleanup(worktree_cwd, cx);
     }
 
-    /// After closing a tab that sat in a tty7-managed worktree (see
-    /// [`crate::core::worktree::managed`]), offer to remove the checkout: a
-    /// clean worktree gets a plain keep/remove prompt; one with uncommitted
-    /// changes defaults to keeping and makes discarding explicit. Removal also
-    /// deletes the branch when it carries no unmerged commits (`branch -d`).
-    /// No offer while any surviving pane still has its cwd inside the checkout
-    /// (new tabs inherit the current cwd, so shared worktrees are common) —
-    /// removal would yank the directory out from under a live shell.
-    /// Detection, the dirty probe, and removal all run off the UI thread.
     fn offer_worktree_cleanup(
         &mut self,
         cwd: Option<(crate::ui::host_ops::SharedHost, std::path::PathBuf)>,
         cx: &mut Context<Self>,
     ) {
         let Some((host, cwd)) = cwd else { return };
-        // Every leaf of every surviving tab, not just focused panes — a shell
-        // tucked away in a split occupies the worktree all the same. Only panes
-        // on the *same* host count: this list is what stops a worktree being
-        // removed out from under a live shell, and a cwd on another machine can
-        // neither occupy this worktree nor be compared against it meaningfully.
         let id = host.id();
         let open_cwds: Vec<std::path::PathBuf> = self
             .tabs
@@ -3894,10 +2607,6 @@ impl Tty7App {
                 (view.host_id() == id).then(|| view.host_cwd())?
             })
             .collect();
-        // Two host round trips with a *user decision* between them, so it is two
-        // `HostOps` calls rather than one long background block: resolve what
-        // was closed, ask, then remove. Nothing here touches the host from the
-        // UI thread, and the prompt is awaited between the two.
         let remove_host = host.clone();
         crate::ui::host_ops::HostOps::run(
             host,
@@ -3963,11 +2672,6 @@ impl Tty7App {
         );
     }
 
-    /// Close every tab except `index` ("Close Other Tabs"). Iterates from the
-    /// end so removals never shift an index still to visit. Tabs holding a live
-    /// warn-on-close SSH session are skipped outright — the per-tab confirm
-    /// sheet is keyed by index, which a bulk close would immediately
-    /// invalidate — so they simply survive the sweep.
     pub(crate) fn close_other_tabs(
         &mut self,
         index: usize,
@@ -3985,9 +2689,6 @@ impl Tty7App {
         }
     }
 
-    /// Close every tab after `index` ("Close Tabs to the Right" / "Close Tabs
-    /// Below" in the sidebar). Same end-first iteration and warn-SSH skip as
-    /// [`close_other_tabs`](Self::close_other_tabs).
     pub(crate) fn close_tabs_right_of(
         &mut self,
         index: usize,
@@ -4002,12 +2703,6 @@ impl Tty7App {
         }
     }
 
-    /// "Mark as Unread" (tab context menu): re-flag every finished (`Done`)
-    /// agent turn in the tab as unread, so the avatar's green dot swells back
-    /// into its count badge until the user next looks at those panes. The
-    /// active tab's focus target is told the dismissed menu is about to hand
-    /// focus back to it, so that focus-in doesn't immediately re-read the mark
-    /// (see `TerminalView::mark_agent_result_unread`).
     pub(crate) fn mark_tab_unread(&mut self, index: usize, cx: &mut Context<Self>) {
         use crate::core::cli_agent::AgentStatus;
         let Some(tab) = self.tabs.get(index) else {
@@ -4027,9 +2722,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// The cwd of the tab's label-driving terminal (focused leaf, else first) —
-    /// what the tab context menu's "Copy Working Directory" copies and "New
-    /// Worktree Tab" derives the repo from.
     pub(crate) fn tab_cwd(
         &self,
         index: usize,
@@ -4043,24 +2735,12 @@ impl Tty7App {
             .and_then(|leaf| leaf.read(cx).cwd())
     }
 
-    /// Copy the active tab's working directory to the clipboard — the
-    /// `CopyWorkingDirectory` action behind the File menu, the palette, and the
-    /// tab context menu's row of the same name. A no-op when the pane has yet to
-    /// report a cwd, which is also when the context-menu row renders disabled.
     pub(crate) fn copy_active_cwd(&mut self, window: &Window, cx: &mut Context<Self>) {
         if let Some(cwd) = self.tab_cwd(self.active, window, cx) {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(cwd.display().to_string()));
         }
     }
 
-    /// What the tab's agent-session menu rows ("Fork Session" and "Copy Session
-    /// ID") need, together with the pane they were read from, or `None` when
-    /// the tab's label-driving pane runs no coding agent — then neither row is
-    /// offered. Reads the same leaf `tab_cwd` does, so all three rows agree on
-    /// which pane a tab-level action means. The pane comes back with the state
-    /// because the fork row has to *act* on it: by click time the popup menu
-    /// holds focus and sits outside every terminal's focus path, so resolving
-    /// the pane again there would fall back to the tab's first leaf.
     pub(crate) fn tab_agent_session(
         &self,
         index: usize,
@@ -4078,9 +2758,6 @@ impl Tty7App {
         Some((leaf, session))
     }
 
-    /// "Copy Session ID": put the agent's native session id on the clipboard —
-    /// the id `codex resume` / `claude --resume` take. A no-op when no agent
-    /// has reported one, which is also when the menu row renders disabled.
     pub(crate) fn copy_agent_session_id(
         &mut self,
         index: usize,
@@ -4095,30 +2772,6 @@ impl Tty7App {
         }
     }
 
-    /// "Fork Session" (issue #211): branch the agent session running in
-    /// `source` — a leaf of tab `index` — into a second, independent one,
-    /// landing it per `placement`.
-    ///
-    /// The source pane is the caller's to resolve, because *when* it is
-    /// resolved differs by surface. The action paths (palette, menu bar,
-    /// keybinding, pane right-click menu) dispatch through the terminal's own
-    /// `action_context`, so the focused leaf read at dispatch time is the pane
-    /// the user is pointing at — [`fork_active_pane_session`](Self::fork_active_pane_session)
-    /// does that for them. The tab / sidebar context menu can't: by the time
-    /// its row is clicked the popup holds focus, so it captures the pane its
-    /// row was labelled for at menu-open time and hands it in here.
-    ///
-    /// The fork itself is entirely the agent's own — tty7 spawns a pane and
-    /// types the agent's fork command into it (`codex fork <id>`, `claude
-    /// --resume <id> --fork-session`, …), exactly as session restore types a
-    /// resume command. tty7 never reads or writes the agent's transcript files,
-    /// so a change to their on-disk format costs at most a visible shell error
-    /// in the new pane.
-    ///
-    /// Every reason a fork can't happen surfaces as a notification rather than
-    /// a silent no-op: the menu rows disable themselves for the same reasons,
-    /// but the action is also reachable from the palette, the menu bar and a
-    /// bound key, where there is no row to grey out.
     pub(crate) fn fork_agent_session(
         &mut self,
         index: usize,
@@ -4131,18 +2784,10 @@ impl Tty7App {
             return;
         };
 
-        // A split acts on the *active* tab's focused pane, so bring the
-        // right-clicked tab forward first — a no-op when it already is, and the
-        // same order the context menu's own Split rows use. Done before the
-        // terminal is created, since constructing one steals focus.
         if matches!(placement, ForkPlacement::Split { .. }) {
             self.activate(index, window, cx);
         }
 
-        // The fork inherits the source pane's directory and shell pick, like
-        // every other tty7 spawn. Deliberately *not* passed to the agent as a
-        // `--cd`: Codex has its own resume/fork cwd preference and this must
-        // not override the setting the user chose there.
         let (cwd, shell) = {
             let view = source.read(cx);
             (view.local_cwd(), view.shell_spec())
@@ -4164,13 +2809,6 @@ impl Tty7App {
                 return;
             }
         };
-        // Same hand-off session restore uses: the bytes queue in the PTY until
-        // the (still starting) shell reads them.
-        //
-        // A slot that is still connecting has no terminal to hand the command
-        // to. Forking gates on a *local* pane, so this is unreachable in
-        // practice — but say so rather than placing a pane that silently never
-        // forks.
         let Some(terminal) = new.terminal() else {
             log::error!("fork spawn produced a pane that is still connecting");
             window.push_notification("Could not fork: the pane is still connecting", cx);
@@ -4203,13 +2841,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Fork the active tab's focused pane (else its first) per `placement` —
-    /// every surface that dispatches an action rather than clicking a captured
-    /// menu row. Those all route through the terminal's `action_context`, so
-    /// the focused leaf resolved here is the pane the user is pointing at.
-    /// Silently a no-op for a tab with no terminal; every other reason a fork
-    /// can't run is a notification from
-    /// [`agent_fork_command`](Self::agent_fork_command).
     pub(crate) fn fork_active_pane_session(
         &mut self,
         placement: ForkPlacement,
@@ -4226,9 +2857,6 @@ impl Tty7App {
         self.fork_agent_session(self.active, source, placement, window, cx);
     }
 
-    /// Fork the active tab's focused pane into a split beside it — the pane
-    /// right-click menu's placement pick, and what a bound key means (the
-    /// focused pane is the one the user is pointing at).
     pub(crate) fn fork_focused_pane_session(
         &mut self,
         axis: Axis,
@@ -4239,8 +2867,6 @@ impl Tty7App {
         self.fork_active_pane_session(ForkPlacement::Split { axis, before }, window, cx);
     }
 
-    /// The fork command to type into a new pane for `source`'s agent session,
-    /// or `None` after telling the user why there isn't one.
     fn agent_fork_command(
         &self,
         source: &Entity<TerminalView>,
@@ -4278,10 +2904,6 @@ impl Tty7App {
             window.push_notification(format!("{name}'s session id isn't a plain token"), cx);
             return None;
         };
-        // Agents fork from the *persisted* transcript, so a turn still in
-        // flight is simply absent from the fork (Codex documents that an
-        // in-progress turn cannot even be a fork point). Harmless — the parent
-        // is untouched — but the user must not have to discover it.
         if session.status == AgentStatus::Working {
             window.push_notification(
                 format!("{name} is mid-turn — the fork won't include the turn in flight"),
@@ -4291,22 +2913,11 @@ impl Tty7App {
         Some(cmd)
     }
 
-    /// An explicit "check now", from the App menu or the tray. Forced, so it
-    /// works even with the startup check turned off — "I asked" outranks "don't
-    /// ask on my behalf" — and it opens About, where the result lands.
     pub(crate) fn check_for_updates_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         crate::core::update::spawn_check_forced(cx);
         self.open_settings_section(SettingsSection::About, window, cx);
     }
 
-    /// [`tab_cwd`](Self::tab_cwd) paired with the host that can answer for it —
-    /// for the worktree operations, which run `git` on the machine the
-    /// repository is actually on. `None` when the tab's pane has no cwd its own
-    /// host could be asked about (see
-    /// [`TerminalView::host_cwd`](crate::terminal::view::TerminalView::host_cwd)).
-    ///
-    /// "Copy Working Directory" deliberately keeps using `tab_cwd`: copying a
-    /// remote pane's remote path is exactly what the user wants there.
     fn tab_host_cwd(
         &self,
         index: usize,
@@ -4318,17 +2929,6 @@ impl Tty7App {
         Some((view.host(cx)?, view.host_cwd()?))
     }
 
-    /// Whether tab `index` sits inside a git repository — what gates the
-    /// context menu's "New Worktree Tab" entry.
-    ///
-    /// Read from the shared [`GitStatusCache`](crate::terminal::git_status::GitStatusCache)
-    /// rather than probed: menus are built synchronously on the UI thread, and
-    /// asking a host is a blocking call that on a remote machine is a round
-    /// trip. The cache already holds this answer — the pane's git line is
-    /// derived from the same probe — so the entry appears exactly when the
-    /// branch line does. `Some(None)` is a probe that answered "not a repo";
-    /// `None` is "no probe has landed yet", which reads as no entry rather than
-    /// as an entry that would immediately fail.
     pub(crate) fn tab_is_in_repo(&self, index: usize, window: &Window, cx: &App) -> bool {
         let Some(leaf) = self
             .tabs
@@ -4338,12 +2938,6 @@ impl Tty7App {
             return false;
         };
         let view = leaf.read(cx);
-        // `git_status_cwd`, not the live `host_cwd`: the cache is *keyed* by
-        // the cwd the last probe was launched for, so asking it about the
-        // pane's current foreground cwd would miss for the whole window
-        // between a `cd` and the next probe landing — and the entry would
-        // vanish from the menu exactly when the user just navigated into a
-        // repository.
         let Some(cwd) = view.git_status_cwd() else {
             return false;
         };
@@ -4353,11 +2947,6 @@ impl Tty7App {
             .is_some()
     }
 
-    /// "New Worktree Tab": probe the repository containing the tab's cwd for
-    /// defaults (a fresh generated name, the current branch as start point) on
-    /// the background executor, then open the confirmation sheet
-    /// (`ui::worktree_prompt`) where name/branch/base can be edited before
-    /// anything is created. Failure to probe lands as a notification.
     pub(crate) fn new_worktree_tab(
         &mut self,
         index: usize,
@@ -4368,9 +2957,6 @@ impl Tty7App {
             window.push_notification("This tab has no working directory yet", cx);
             return;
         };
-        // The sheet keeps the host the defaults were probed from, so the create
-        // it eventually submits cannot end up on a different machine than the
-        // branch list it was filled from.
         let sheet_host = host.clone();
         let probe_cwd = cwd.clone();
         crate::ui::host_ops::HostOps::run_in(
@@ -4385,10 +2971,6 @@ impl Tty7App {
         );
     }
 
-    /// Open the tab for a just-created worktree: a default-shell terminal in
-    /// the worktree directory, with the tab pre-named after its branch so a
-    /// strip of parallel worktrees stays tellable-apart. Mirrors
-    /// `new_tab_with_shell`, minus the cwd inheritance (the cwd *is* the point).
     pub(crate) fn open_worktree_tab(
         &mut self,
         wt: crate::core::worktree::NewWorktree,
@@ -4424,17 +3006,10 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Rearrange the whole tab vector into `order` (old indices in their new
-    /// order) — the single path by which a drag-reorder lands, used by the
-    /// sidebar where a single visual move can imply a larger permutation
-    /// (relocating a tab inside its group without disturbing the group order,
-    /// or moving an entire group). Keeps the same tab active and re-persists.
     pub(crate) fn apply_tab_order(&mut self, order: &[usize], cx: &mut Context<Self>) {
         if order.len() != self.tabs.len() || order.iter().enumerate().all(|(i, &o)| i == o) {
             return;
         }
-        // Reordering shifts indices: a rename pending on a fixed one would
-        // commit onto the wrong tab.
         self.renaming = None;
         let was_active = self.active;
         let mut slots: Vec<Option<Tab>> = std::mem::take(&mut self.tabs)
@@ -4447,8 +3022,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Begin an inline rename of the tab at `index`: spawn a focused text input
-    /// pre-filled with the current label, committing on Enter or blur.
     pub(crate) fn start_rename(
         &mut self,
         index: usize,
@@ -4477,8 +3050,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Turn the title-bar workspace chip into a text field, seeded with the
-    /// current name. Committing on Enter or blur mirrors the tab rename.
     pub(crate) fn start_workspace_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current =
             crate::ui::machine_mirror::display_name_for(cx, self.workspace).unwrap_or_default();
@@ -4498,9 +3069,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Commit the workspace rename. An empty value clears the custom name, so
-    /// the chip falls back to the derived repo name — the same "clear to
-    /// revert" contract the tab rename has.
     pub(crate) fn commit_workspace_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rename) = self.workspace_rename.take() else {
             return;
@@ -4514,10 +3082,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Commit the in-progress rename: a non-empty value becomes the tab's custom
-    /// name; an empty value clears it (reverting to the title-derived label).
-    /// Taking `renaming` first makes the focus change below re-entrancy-safe (the
-    /// input's resulting Blur finds no active rename and returns).
     fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(renaming) = self.renaming.take() else {
             return;
@@ -4532,13 +3096,7 @@ impl Tty7App {
         cx.notify();
     }
 
-    // ----- Command palette -------------------------------------------------
-
-    /// Build the full command catalog: the static commands plus one
-    /// "Switch to Tab: …" entry per open tab (label matches the tab strip).
     fn palette_commands(&self, cx: &App) -> Vec<Command> {
-        // This window's own chrome state, not the config's copy of it — see
-        // `ChromeState`.
         let mut commands = Command::base_commands(
             cx,
             ChromeState {
@@ -4547,8 +3105,6 @@ impl Tty7App {
             },
         );
 
-        // Saved SSH profiles, ordered by frecency then name (PRD FR-P3). Each row
-        // connects (natively) on Enter and edits on ⌘⏎ / →.
         let cfg = cx.global::<Config>();
         let now = crate::core::config::unix_now();
         let mut profiles: Vec<&crate::core::ssh_profile::SshProfile> =
@@ -4582,16 +3138,7 @@ impl Tty7App {
             );
         }
 
-        // Saved profiles are the palette's *only* SSH listing: `~/.ssh/config`
-        // hosts appear here after Settings → SSH → "Import from ~/.ssh/config"
-        // turns them into profiles, never as a parallel live-discovered source
-        // (two lists of the same hosts with different behaviors confused more
-        // than it helped). Typing an alias into "SSH: Add Connection…" still
-        // resolves it against ssh_config on the spot.
-
         for (i, tab) in self.tabs.iter().enumerate() {
-            // Skip the active tab — "switch to the tab you're already on" is a
-            // no-op that only pads the list.
             if i == self.active {
                 continue;
             }
@@ -4607,15 +3154,11 @@ impl Tty7App {
         commands
     }
 
-    /// Open the palette if closed, or close it if already open (Cmd+P toggles).
     fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() {
             self.close_palette(window, cx);
             return;
         }
-        // Build the catalog and hand it to a fresh palette view; it owns the
-        // search input, filtering and keyboard nav, and emits a `PaletteEvent`
-        // when the user confirms or dismisses.
         let commands = self.palette_commands(cx);
         let view = cx.new(|cx| PaletteView::new(commands, window, cx));
         self.palette_sub = Some(cx.subscribe_in(&view, window, Self::on_palette_event));
@@ -4623,7 +3166,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Run the confirmed command (or just close on dismiss) for the open palette.
     fn on_palette_event(
         &mut self,
         _view: &Entity<PaletteView>,
@@ -4641,7 +3183,6 @@ impl Tty7App {
         }
     }
 
-    /// Close the palette and hand focus back to the active terminal.
     pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = None;
         self.palette_sub = None;
@@ -4649,17 +3190,12 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// The focused terminal of the active tab, for palette commands that act on
-    /// the pane rather than the shell. The palette has already closed by the
-    /// time these run, so focus is back where the user left it.
     fn focused_leaf(&self, window: &Window, cx: &App) -> Option<Entity<TerminalView>> {
         self.tabs
             .get(self.active)
             .and_then(|t| t.pane.focused_or_first(window, cx))
     }
 
-    /// Record that a palette command was run, for the palette's Recent band.
-    /// Only commands with a stable id are tracked (see `CommandKind::id`).
     fn bump_command_frecency(&mut self, kind: &CommandKind, cx: &mut Context<Self>) {
         let Some(id) = kind.id() else { return };
         self.update_config(cx, |cfg| {
@@ -4669,7 +3205,6 @@ impl Tty7App {
         });
     }
 
-    /// Run a palette command by dispatching to the matching tab/pane operation.
     fn run_command(&mut self, kind: CommandKind, window: &mut Window, cx: &mut Context<Self>) {
         use CommandKind::*;
         self.bump_command_frecency(&kind, cx);
@@ -4703,8 +3238,6 @@ impl Tty7App {
             ToggleRightPanel => self.toggle_right_panel(cx),
             ShowRightPanel(tab) => self.set_right_panel_tab(tab, cx),
             ResetFontSize => self.reset_font_size(cx),
-            // Pane-scoped commands act on the terminal the closing palette just
-            // handed focus back to.
             FindInTerminal => {
                 if let Some(leaf) = self.focused_leaf(window, cx) {
                     leaf.update(cx, |view, cx| view.open_search(window, cx));
@@ -4727,8 +3260,6 @@ impl Tty7App {
             }
             CopyText => {
                 if let Some(leaf) = self.focused_leaf(window, cx) {
-                    // `false`: a menu/palette copy leaves the highlight up. Only
-                    // the dual-purpose ⌃C chord has to consume the selection.
                     leaf.update(cx, |view, cx| {
                         view.copy_contextual(false, cx);
                     });
@@ -4793,18 +3324,11 @@ impl Tty7App {
             OpenSshProfiles => self.open_settings_section(SettingsSection::Ssh, window, cx),
             SendSelectionToAgent => self.send_selection_to_agent(window, cx),
             SendGitDiffToAgent => self.send_git_diff_to_agent(window, cx),
-            // Handled inside `PaletteView` (opens a sub-list); these never emit a
-            // `Confirm` for this variant, so they never reach here.
             OpenThemePicker | OpenSshConnectInput => {}
             ActivateTab(i) => self.activate(i, window, cx),
         }
     }
 
-    // ----- Agent context feed (palette: "Agent: …") -------------------------
-
-    /// The pane the agent-feed commands deliver to: the first leaf running a
-    /// recognized coding agent, preferring the active tab, then any tab. `None`
-    /// when no agent runs anywhere.
     pub(crate) fn agent_target_leaf(&self, cx: &App) -> Option<Entity<TerminalView>> {
         let runs_agent = |leaf: &Entity<TerminalView>| leaf.read(cx).agent().is_some();
         if let Some(tab) = self.tabs.get(self.active)
@@ -4820,8 +3344,6 @@ impl Tty7App {
             .find(runs_agent)
     }
 
-    /// Deliver `prompt` into the agent pane's PTY and bring that pane's tab to
-    /// the front so the user sees the turn start. Toasts when no agent runs.
     fn deliver_agent_prompt(&mut self, prompt: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.agent_target_leaf(cx) else {
             crate::terminal::notify_desktop(
@@ -4840,8 +3362,6 @@ impl Tty7App {
         }
     }
 
-    /// "Agent: Send Selection" — the focused pane's selection, phrased as a
-    /// prompt, into the running agent's pane (the context-feed idea).
     fn send_selection_to_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let source = self
             .tabs
@@ -4866,16 +3386,11 @@ impl Tty7App {
         }
     }
 
-    /// "Agent: Send Git Diff for Review" — the focused pane's repo diff
-    /// (unstaged + staged), phrased as a review prompt, into the agent's pane.
     fn send_git_diff_to_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pane = self
             .tabs
             .get(self.active)
             .and_then(|t| t.pane.focused_or_first(window, cx));
-        // The pane's own host answers, so a pane whose repository lives on
-        // another machine gets *its* diff rather than "no known directory".
-        // What is still refused is a cwd no host in this process can answer for.
         let target = pane.and_then(|view| {
             let view = view.read(cx);
             Some((view.host(cx)?, view.host_cwd()?))
@@ -4884,21 +3399,11 @@ impl Tty7App {
             crate::terminal::notify_desktop(Some("tty7"), "This pane has no known directory.");
             return;
         };
-        // Off the UI thread, unlike before: two `git diff` runs against a big
-        // repository froze the window for as long as they took, and against a
-        // remote host they would be two round trips. This is the one visible
-        // change — the menu item now returns immediately and the prompt is
-        // delivered when the diff lands.
         crate::ui::host_ops::HostOps::run_in(
             host,
             window,
             cx,
             move |h| {
-                // Unstaged + staged, concatenated — "everything not yet
-                // committed", which is what a review pass wants. A failed
-                // invocation contributes an empty string, exactly as it did
-                // when this shelled out directly: a diff that cannot be read is
-                // reported as "no uncommitted changes", not as an error.
                 let run = |args: &[&str]| {
                     h.git(&cwd, args)
                         .ok()
@@ -4921,18 +3426,11 @@ impl Tty7App {
         );
     }
 
-    // ----- Settings tab (Cmd+,) -------------------------------------------
-
-    /// Toggle the settings overlay (Cmd+,). If it's already open, close it;
-    /// otherwise assemble its widget state (each control pre-filled from config,
-    /// with its subscriptions pushed onto `subs`) and focus the page.
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings.is_some() {
             self.close_settings(window, cx);
             return;
         }
-        // Settings is about to steal focus; snapshot the active pane so closing
-        // it lands back on the same terminal rather than the tab's first leaf.
         self.remember_active_pane(window, cx);
         let focus_handle = cx.focus_handle();
         let mut subs = Vec::new();
@@ -4943,8 +3441,6 @@ impl Tty7App {
         let link_file_command_input = self.build_link_file_command_input(&mut subs, window, cx);
         let scroll_slider = self.build_scroll_slider(&mut subs, window, cx);
         let window_opacity_slider = self.build_window_opacity_slider(&mut subs, window, cx);
-        // Live filter for the theme picker panel; each keystroke re-renders the
-        // (already-cheap) list so results narrow as you type.
         let theme_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search themes…"));
         subs.push(
             cx.subscribe_in(&theme_search, window, |_this, _i, ev, _w, cx| {
@@ -4953,8 +3449,6 @@ impl Tty7App {
                 }
             }),
         );
-        // Live filter for the nav-header settings search; each keystroke re-renders
-        // the (cheap) nav rail so the result list narrows as you type.
         let settings_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search settings…"));
         subs.push(
@@ -4966,8 +3460,6 @@ impl Tty7App {
             }),
         );
 
-        // Live filter for the SSH section's host list; each keystroke re-renders
-        // the master column so the list narrows as you type.
         let ssh_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter hosts…"));
         subs.push(
             cx.subscribe_in(&ssh_filter, window, |_this, _i, ev, _w, cx| {
@@ -4977,8 +3469,6 @@ impl Tty7App {
             }),
         );
 
-        // The SSH empty state's quick-connect box. Its Connect button enables only
-        // on a parsable target, so each keystroke re-renders the pane.
         let ssh_quick_connect =
             cx.new(|cx| InputState::new(window, cx).placeholder("user@host  or  user@host:port"));
         subs.push(
@@ -5019,9 +3509,6 @@ impl Tty7App {
             agent_hooks_note: None,
             _subs: subs,
         });
-        // Land the caret in the search box so Settings opens ready to type/filter
-        // (a blinking cursor), rather than on the inert page root. Escape still
-        // closes — the root's key handler is an ancestor of the focused input.
         let search_focus = self
             .settings
             .as_ref()
@@ -5030,13 +3517,11 @@ impl Tty7App {
             Some(handle) => window.focus(&handle, cx),
             None => window.focus(&focus_handle, cx),
         }
-        // Build the color editor if we opened straight onto an editable theme.
         self.rebuild_theme_editor(window, cx);
         self.ensure_agent_hooks_loaded(cx);
         cx.notify();
     }
 
-    /// Primary / bold / italic font-family pickers, seeded from config.
     fn build_font_selects(
         &mut self,
         subs: &mut Vec<Subscription>,
@@ -5051,10 +3536,6 @@ impl Tty7App {
         let family = cfg.font_family.clone();
         let font_bold = cfg.font_family_bold.clone();
         let font_italic = cfg.font_family_italic.clone();
-        // Every font the OS reports is selectable — we don't get to decide
-        // that for the user. The picker's dropdown just caps its own height
-        // (see `menu_max_h` in settings.rs) so browsing the full list doesn't
-        // dump it all on screen at once; search still reaches everything.
         let mut font_names = cx.text_system().all_font_names();
         if !font_names.contains(&family) {
             font_names.push(family.clone());
@@ -5073,9 +3554,6 @@ impl Tty7App {
             )
             .searchable(true)
         });
-        // Bold / italic pickers share the font list but prepend a "Default" row
-        // (the `FONT_DEFAULT_LABEL` sentinel) so the user can clear a distinct
-        // face back to synthesized emphasis.
         let build_alt_font_select = |value: &Option<String>,
                                      names: &[String],
                                      window: &mut Window,
@@ -5129,7 +3607,6 @@ impl Tty7App {
         (font_select, font_bold_select, font_italic_select)
     }
 
-    /// Shell program/args and working-directory inputs, committing on Enter/blur.
     fn build_shell_inputs(
         &mut self,
         subs: &mut Vec<Subscription>,
@@ -5137,8 +3614,6 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> (Entity<InputState>, Entity<InputState>, Entity<InputState>) {
         let cfg = cx.global::<Config>();
-        // Pre-fill the shell inputs from config; an unset `shell` leaves them
-        // empty so the placeholders advertise the platform default.
         let (shell_program, shell_args) = match &cfg.shell {
             Some(s) => (s.program.clone(), s.args.join(" ")),
             None => (String::new(), String::new()),
@@ -5192,7 +3667,6 @@ impl Tty7App {
         (shell_program_input, shell_args_input, wd_path_input)
     }
 
-    /// File-open command template input (Links section), committing on Enter/blur.
     fn build_link_file_command_input(
         &mut self,
         subs: &mut Vec<Subscription>,
@@ -5219,8 +3693,6 @@ impl Tty7App {
         input
     }
 
-    /// Persist the file-open command template from the Links settings input. An
-    /// empty value clears the override (falls back to the built-in open).
     fn commit_link_file_command(&mut self, cx: &mut Context<Self>) {
         let Some(command) = self.active_settings().map(|s| {
             s.link_file_command_input
@@ -5238,16 +3710,13 @@ impl Tty7App {
         };
         let cfg = cx.global_mut::<Config>();
         if cfg.link_file_command == command {
-            return; // no change — avoid a redundant disk write on every Blur
+            return;
         }
         cfg.link_file_command = command;
         cfg.save();
         cx.notify();
     }
 
-    /// Window-opacity slider for the Appearance page (20%–100%). Emits `Change`
-    /// continuously as the user drags; each tick sets the global override and
-    /// repaints, so the translucency is live under the thumb.
     fn build_window_opacity_slider(
         &mut self,
         subs: &mut Vec<Subscription>,
@@ -5272,8 +3741,6 @@ impl Tty7App {
         slider
     }
 
-    /// Mouse-scroll multiplier slider (0.5×–5×). Emits `Change` continuously as
-    /// the user drags; each writes + persists the multiplier.
     fn build_scroll_slider(
         &mut self,
         subs: &mut Vec<Subscription>,
@@ -5300,8 +3767,6 @@ impl Tty7App {
         scroll_slider
     }
 
-    /// Close the settings overlay (Esc inside the panel, or Cmd+, again),
-    /// dropping its widget state and returning focus to the active terminal.
     pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings.take().is_some() {
             self.focus_active(window, cx);
@@ -5309,9 +3774,6 @@ impl Tty7App {
         }
     }
 
-    /// Open Settings focused on `section`, opening the overlay if it's closed.
-    /// Unlike `toggle_settings`, this never closes an already-open Settings — the
-    /// entry points that jump to a specific section (e.g. SSH profiles) use it.
     pub(crate) fn open_settings_section(
         &mut self,
         section: SettingsSection,
@@ -5324,8 +3786,6 @@ impl Tty7App {
         self.select_settings_section(section, cx);
     }
 
-    /// Open Settings → SSH with `id`'s profile loaded into the inline edit form
-    /// (the ⌘⏎ / Edit affordance on a saved profile).
     pub(crate) fn open_ssh_profile_in_settings(
         &mut self,
         id: uuid::Uuid,
@@ -5344,8 +3804,6 @@ impl Tty7App {
         }
     }
 
-    /// Open Settings → SSH with a new profile seeded from a QuickConnect target
-    /// ("save as profile"), ready to edit and save.
     pub(crate) fn open_ssh_profile_new_from_target(
         &mut self,
         target: String,
@@ -5367,7 +3825,6 @@ impl Tty7App {
         self.ssh_form_load(&profile, window, cx);
     }
 
-    /// Apply the picked font family live to every terminal and persist it.
     fn commit_font_family(&mut self, family: String, cx: &mut Context<Self>) {
         self.font_family = family.clone();
         for tab in &self.tabs {
@@ -5382,9 +3839,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Apply a distinct bold or italic face (or clear it back to synthesized
-    /// emphasis when the `FONT_DEFAULT_LABEL` sentinel is picked) live to every
-    /// pane, and persist it. `bold == true` targets the bold face, else italic.
     fn commit_font_family_emphasis(&mut self, bold: bool, name: String, cx: &mut Context<Self>) {
         let family = (name != crate::ui::settings::FONT_DEFAULT_LABEL).then_some(name);
         for tab in &self.tabs {
@@ -5414,24 +3868,7 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Re-apply hot-reloaded config to every live pane. Wired to
-    /// `observe_global::<Config>`, so an external edit to `config.json` — picked
-    /// up by the watcher in `main.rs`, which swaps the `Config` global — flows to
-    /// the on-screen terminals without a restart. This complements `apply_theme`
-    /// (which already handles the color side) by covering the font knobs that
-    /// live on `Tty7App`/the panes: size, line height, and family.
-    ///
-    /// Each field is diffed against the currently-applied value and skipped when
-    /// unchanged. That keeps this a no-op for the much more frequent case where
-    /// *our own* code mutated the global (every font setter and `set_preset`
-    /// writes it), and — because we never write the global or `save()` from here
-    /// — closes the save → watch → reload loop that would otherwise oscillate.
     fn reload_from_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Re-apply the theme with the window in hand: the watcher task calls
-        // `apply_theme(None)` (colors/palette), but the window-bound effects — the
-        // Transparent↔Blurred background flip and traffic-light re-pinning — only
-        // happen here. Also keeps the Appearance opacity slider's thumb on a value
-        // that was hand-edited in `config.json` or the theme file.
         apply_theme(Some(window), cx);
         self.sync_window_opacity_slider(window, cx);
         let config = cx.global::<Config>().clone();
@@ -5453,8 +3890,6 @@ impl Tty7App {
                     .map(crate::core::config::gpui_font_features),
             )
         };
-        // Keep the runtime sidebar width in step with the config (an external
-        // edit to `config.json`, or our own drag-end persist which re-fires this).
         self.sidebar_width.set(cx.global::<Config>().sidebar_width);
         self.right_panel_width
             .set(cx.global::<Config>().right_panel_width);
@@ -5521,9 +3956,6 @@ impl Tty7App {
                 }
             }
         }
-        // Mouse-reporting is cached per view (the gates run without a `cx`), so a
-        // hot-reload must push it into every open pane. Diffed per leaf so an
-        // unrelated config edit doesn't churn panes that already agree.
         let report_mouse = cx.global::<Config>().mouse_reporting;
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
@@ -5538,11 +3970,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Persist the shell program + args from the settings inputs. An empty
-    /// program clears the override (`shell: None`), so the daemon falls back to
-    /// the platform default. Only newly spawned panes pick this up — the daemon
-    /// reads `config.json` fresh on each PTY spawn — so running shells are
-    /// untouched. There's nothing to apply live here; we just save.
     fn commit_shell(&mut self, cx: &mut Context<Self>) {
         let Some(settings) = self.active_settings() else {
             return;
@@ -5567,15 +3994,13 @@ impl Tty7App {
         };
         let cfg = cx.global_mut::<Config>();
         if cfg.shell == shell {
-            return; // no change — avoid a redundant disk write on every Blur
+            return;
         }
         cfg.shell = shell;
         cfg.save();
         cx.notify();
     }
 
-    /// Change the working-directory strategy. Only affects newly spawned panes
-    /// (the daemon reads `config.json` fresh per spawn), like the shell setting.
     pub(crate) fn set_working_directory_strategy(
         &mut self,
         strategy: crate::core::config::WdStrategy,
@@ -5590,9 +4015,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Persist the custom working-directory path from the settings input. Only
-    /// used when the strategy is `Custom`, but stored regardless so switching back
-    /// restores it.
     fn commit_working_directory_path(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self
             .active_settings()
@@ -5609,10 +4031,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// The active tab's settings state, if it is the settings tab.
-    /// The open settings page's state, if the overlay is showing. The single
-    /// accessor every settings widget/handler reads, so the rest of the settings
-    /// code is agnostic to where the state lives.
     pub(crate) fn active_settings(&self) -> Option<&SettingsState> {
         self.settings.as_ref()
     }
@@ -5621,31 +4039,18 @@ impl Tty7App {
         self.settings.as_mut()
     }
 
-    /// The status-dot colour for a tab whose representative pane is an SSH
-    /// session (PRD FR-E2), as an RGB value from the same hardcoded semantic
-    /// palette as [`AgentStatus::dot_rgb`] — not the theme's UI tokens, which
-    /// in this app are soft neutral fills (accent is the list-selection grey)
-    /// and read as no state at all. Native panes are phase-coloured
-    /// (connecting = amber, connected = green, failed/disconnected = red); a
-    /// foreground `ssh` typed into a shell gets a plain neutral dot. `None`
-    /// for non-SSH tabs (no dot).
-    ///
-    /// [`AgentStatus::dot_rgb`]: crate::core::cli_agent::AgentStatus::dot_rgb
     pub(crate) fn tab_ssh_dot(&self, tab: &Tab, cx: &App) -> Option<u32> {
         use crate::daemon::protocol::SshPhase;
         let leaf = tab.pane.first_leaf()?;
-        // No dot for a pane still connecting: the SSH phase it would report is
-        // the *pane's* SSH, and it has none yet.
         let v = leaf.terminal()?.read(cx);
         if let Some(phase) = v.ssh_phase() {
-            // Native pane.
             let rgb = if v.ssh_disconnected() {
-                0xEF4444 // red: link lost
+                0xEF4444
             } else {
                 match phase {
-                    SshPhase::Connecting | SshPhase::Authenticating => 0xF59E0B, // amber: in flight
-                    SshPhase::Connected => 0x22C55E,                             // green: link up
-                    SshPhase::Failed { .. } => 0xEF4444, // red: never made it
+                    SshPhase::Connecting | SshPhase::Authenticating => 0xF59E0B,
+                    SshPhase::Connected => 0x22C55E,
+                    SshPhase::Failed { .. } => 0xEF4444,
                 }
             };
             Some(rgb)
@@ -5653,18 +4058,12 @@ impl Tty7App {
             .remote_context()
             .is_some_and(|r| r.kind != crate::daemon::protocol::RemoteKind::Wsl)
         {
-            // A foreground `ssh` typed into a shell: a plain neutral dot. The
-            // kind check matters: a WSL pane also carries a `RemoteContext` (so
-            // its cwd is treated as foreign — see `local_cwd`), but it is not an
-            // SSH session and this dot means "SSH".
             Some(0x9CA3AF)
         } else {
             None
         }
     }
 
-    /// Whether `leaf` is a live, connected native-SSH pane whose effective
-    /// warn-on-close is on (per-profile override, else the global toggle).
     fn leaf_is_warn_ssh(&self, leaf: &Entity<TerminalView>, cx: &App) -> bool {
         use crate::daemon::protocol::SshPhase;
         let v = leaf.read(cx);
@@ -5682,7 +4081,6 @@ impl Tty7App {
         per_profile.unwrap_or(cfg.ssh_warn_on_close)
     }
 
-    /// Whether the tab at `index` holds any live warn-on-close SSH pane (FR-E3).
     pub(crate) fn tab_has_warn_ssh(&self, index: usize, cx: &App) -> bool {
         self.tabs
             .get(index)
@@ -5695,7 +4093,6 @@ impl Tty7App {
             .unwrap_or(false)
     }
 
-    /// Whether the focused pane is a live warn-on-close SSH pane (FR-E3).
     pub(crate) fn focused_pane_is_warn_ssh(&self, window: &Window, cx: &App) -> bool {
         self.tabs
             .get(self.active)
@@ -5704,7 +4101,6 @@ impl Tty7App {
             .unwrap_or(false)
     }
 
-    /// Proceed with a pending SSH-close after confirmation (FR-E3).
     pub(crate) fn confirm_ssh_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.ssh_close_confirm {
             Some(SshCloseKind::Tab(i)) => self.close_tab(i, window, cx),
@@ -5713,17 +4109,11 @@ impl Tty7App {
         }
     }
 
-    /// Dismiss the SSH-close confirmation, leaving the session open (FR-E3).
     pub(crate) fn cancel_ssh_close(&mut self, cx: &mut Context<Self>) {
         self.ssh_close_confirm = None;
         cx.notify();
     }
 
-    /// The focused pane when it is an SSH session of either kind.
-    ///
-    /// Not every pane carrying a `RemoteContext` is one: a WSL pane has one too,
-    /// so that its cwd is treated as foreign (see `TerminalView::local_cwd`),
-    /// and it must not reach anything SSH-shaped from here.
     pub(crate) fn active_ssh_pane(
         &self,
         window: &Window,
@@ -5739,10 +4129,6 @@ impl Tty7App {
         (remote.kind != crate::daemon::protocol::RemoteKind::Wsl).then_some((pane.pane_id, remote))
     }
 
-    /// The focused pane when it is a *connected native* SSH session — the gate for
-    /// the pane's tunnel / SFTP action buttons (top-right of the terminal body).
-    /// `None` for a foreground `ssh`, a still-connecting native pane, or a non-SSH
-    /// pane, so those never grow the action buttons.
     pub(crate) fn active_connected_native_ssh_pane(
         &self,
         window: &Window,
@@ -5761,7 +4147,6 @@ impl Tty7App {
         matches!(leaf.read(cx).ssh_phase(), Some(SshPhase::Connected)).then_some((pane_id, remote))
     }
 
-    /// Select a sidebar section in the settings page (no-op when it's closed).
     pub(crate) fn select_settings_section(
         &mut self,
         target: SettingsSection,
@@ -5769,11 +4154,7 @@ impl Tty7App {
     ) {
         if let Some(s) = self.settings.as_mut() {
             s.section = target;
-            // Leaving the Keybindings page abandons any in-progress capture, so
-            // the interceptor doesn't keep swallowing keys off-screen.
             s.recording = None;
-            // Entering Agents re-reads the hook install states, so edits made
-            // behind the panel's back (another tty7, a hand edit) show up.
             if target == SettingsSection::Agents {
                 s.agent_hooks_states = crate::ui::settings::AgentHooksView::Loading;
             }
@@ -5782,11 +4163,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Read the Agents page's rows, but only when that is the page on screen.
-    ///
-    /// Gated on the section because the read is a config file per agent — on a
-    /// remote machine, a round trip per agent — and opening Settings on
-    /// Appearance has no business paying for six of those.
     fn ensure_agent_hooks_loaded(&mut self, cx: &mut Context<Self>) {
         if self
             .active_settings()
@@ -5796,13 +4172,6 @@ impl Tty7App {
         }
     }
 
-    /// The machines the Agents section offers: this computer, then every remote
-    /// machine this process is connected to right now.
-    ///
-    /// Only connected ones, because a hook install *is* a write to that
-    /// machine's disk — there is nothing to offer without a link. The ones that
-    /// are configured but offline are named under the picker instead of being
-    /// silently dropped from it.
     pub(crate) fn agent_hooks_machines(
         &self,
         cx: &mut App,
@@ -5812,9 +4181,6 @@ impl Tty7App {
             host: crate::ui::host_ops::HostId::LOCAL,
             label: "This Computer".to_string(),
         }];
-        // The label is the name the user gave the box; `HostId` alone is a
-        // hash. `available_hosts` is the same lookup the workspace switcher
-        // does for exactly this reason.
         let configured = crate::ui::remote_connect::available_hosts(cx);
         for id in crate::ui::host_registry::HostRegistry::ids(cx) {
             if id.is_local() {
@@ -5830,14 +4196,6 @@ impl Tty7App {
         out
     }
 
-    /// How many machines the Agents picker cannot offer because nothing is
-    /// connected to them.
-    ///
-    /// Saved SSH profiles only — not the `~/.ssh/config` aliases
-    /// [`available_hosts`](crate::ui::remote_connect::available_hosts) also
-    /// returns. A config with fifty `Host` blocks is normal and most of them are
-    /// git transports that could never host a workspace; counting those would
-    /// turn a helpful footnote into "50 machines aren't connected".
     pub(crate) fn agent_hooks_offline_count(&self, cx: &mut App) -> usize {
         let connected = crate::ui::host_registry::HostRegistry::ids(cx);
         cx.global::<Config>()
@@ -5850,7 +4208,6 @@ impl Tty7App {
             .count()
     }
 
-    /// Point the Agents section at another machine and read its state.
     pub(crate) fn select_agent_hooks_host(
         &mut self,
         host: crate::ui::host_ops::HostId,
@@ -5861,7 +4218,6 @@ impl Tty7App {
                 return;
             }
             s.agent_hooks_host = host;
-            // The note belonged to the machine we just left.
             s.agent_hooks_note = None;
             s.agent_hooks_states = crate::ui::settings::AgentHooksView::Loading;
         }
@@ -5869,13 +4225,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Read every hook-capable agent's install state off the selected machine,
-    /// in the background, and land the rows when they arrive.
-    ///
-    /// Background because a `Host` call blocks and on a remote machine that is a
-    /// round trip *per agent* — six of them, on a link that may be an ocean
-    /// wide. Doing it inline is the window freeze this codebase has already
-    /// fixed twice.
     fn load_agent_hooks_states(&mut self, cx: &mut Context<Self>) {
         use crate::core::agent_hooks::{HookAgent, HookTarget};
         use crate::ui::settings::{AgentHookRow, AgentHooksView};
@@ -5936,20 +4285,11 @@ impl Tty7App {
         );
     }
 
-    /// What the Agents section says when the machine it is pointed at has no
-    /// live connection. One string, because the picker's footnote and the
-    /// rows' resting state have to agree.
     const AGENT_HOOKS_OFFLINE: &'static str = concat!(
         "Not connected to this machine, so its agent config can't be read or ",
         "written. Open a workspace on it and come back."
     );
 
-    /// The host object and remote home for the machine the Agents section is
-    /// pointed at, or `None` when it is a remote that is no longer connected.
-    ///
-    /// `None` for the home means "this computer" — the local target reads its
-    /// own environment, which is the one place `$CLAUDE_CONFIG_DIR` and
-    /// `$XDG_CONFIG_HOME` are ours to honor.
     fn agent_hooks_link(
         &self,
         host_id: crate::ui::host_ops::HostId,
@@ -5966,9 +4306,6 @@ impl Tty7App {
         Some((host, Some(home)))
     }
 
-    /// Settings → Agents: install (or rewrite in place) one agent's hooks on the
-    /// selected machine, then fold the outcome back into the panel — status row
-    /// + note line.
     pub(crate) fn settings_install_agent_hooks(
         &mut self,
         agent: crate::core::agent_hooks::HookAgent,
@@ -5977,7 +4314,6 @@ impl Tty7App {
         self.run_agent_hooks_action(agent, true, cx);
     }
 
-    /// Settings → Agents: remove one agent's tty7 hooks (user hooks survive).
     pub(crate) fn settings_uninstall_agent_hooks(
         &mut self,
         agent: crate::core::agent_hooks::HookAgent,
@@ -5986,14 +4322,6 @@ impl Tty7App {
         self.run_agent_hooks_action(agent, false, cx);
     }
 
-    /// Install or uninstall one agent's hooks on the selected machine, then
-    /// re-read that machine's states — the ground truth, whatever the action
-    /// just did — and surface the action's own summary or error as the note
-    /// under its row.
-    ///
-    /// Writing is a `Host` call too, so it takes the same background trip as the
-    /// read: an install into `~/.claude/settings.json` on a remote box is a read
-    /// and a write over the control connection.
     fn run_agent_hooks_action(
         &mut self,
         agent: crate::core::agent_hooks::HookAgent,
@@ -6047,11 +4375,6 @@ impl Tty7App {
         );
     }
 
-    /// Keep the settings selection on a section that has search hits: if the
-    /// query changed and the current section no longer matches, jump to the
-    /// best-matching one so the shown page always reflects the search. A section
-    /// that still has matches is left alone, so the user's own click isn't yanked
-    /// away as they keep typing.
     pub(crate) fn autoselect_settings_search(&mut self, cx: &mut Context<Self>) {
         let Some(settings) = self.settings.as_ref() else {
             return;
@@ -6068,26 +4391,16 @@ impl Tty7App {
         }
     }
 
-    // ----- Keybindings editing (Settings → Keybindings) --------------------
-
-    /// Begin capturing a new shortcut for `action`: install a keystroke
-    /// interceptor that swallows the next keypress and records it, and stash it
-    /// on the settings state so it stays active only while recording. Any prior
-    /// capture is replaced.
     pub(crate) fn start_recording_key(
         &mut self,
         action: String,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The interceptor fires app-wide *before* keymap dispatch, so a chord
-        // like ⌘T is captured here instead of opening a new tab. It runs until
-        // the returned `Subscription` is dropped (capture done / Esc / cancel).
         let this = cx.weak_entity();
         let intercept = cx.intercept_keystrokes(move |ev, _window, cx| {
             let keystroke = ev.keystroke.clone();
             let _ = this.update(cx, |this, cx| this.on_record_key(&keystroke, cx));
-            // Keep the key from also triggering an action / reaching a surface.
             cx.stop_propagation();
         });
         self.record_gen = self.record_gen.wrapping_add(1);
@@ -6102,11 +4415,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Handle a keystroke captured during recording. Esc cancels. Backspace
-    /// removes the last captured chord, or — with nothing captured yet — resets
-    /// the action to its default. Any other key appends a chord and (re)starts
-    /// the pause-to-commit timer, so single chords and sequences (e.g. the tmux
-    /// preset's `ctrl-b x`) are recorded the same way.
     fn on_record_key(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) {
         let Some((action, has_chords)) = self
             .active_settings()
@@ -6122,7 +4430,6 @@ impl Tty7App {
             }
             "backspace" | "delete" => {
                 if has_chords {
-                    // Edit the sequence: drop the last chord and keep capturing.
                     if let Some(r) = self
                         .active_settings_mut()
                         .and_then(|s| s.recording.as_mut())
@@ -6136,7 +4443,6 @@ impl Tty7App {
                     if still_has {
                         self.schedule_recording_commit(cx);
                     } else {
-                        // Nothing left to commit; wait for a fresh keypress.
                         self.record_gen = self.record_gen.wrapping_add(1);
                     }
                     cx.notify();
@@ -6148,8 +4454,6 @@ impl Tty7App {
             }
             _ => {}
         }
-        // A lone modifier press (⌘ held, no key yet) has nothing to bind — keep
-        // waiting for a real key.
         let Some(spec) = crate::ui::keymap::spec_from_keystroke(keystroke) else {
             return;
         };
@@ -6163,9 +4467,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// (Re)arm the pause-to-commit timer: after a short quiet window with no new
-    /// chord, the captured sequence is committed. Bumping `record_gen` first
-    /// invalidates any earlier timer, so only the latest keypress's timer fires.
     fn schedule_recording_commit(&mut self, cx: &mut Context<Self>) {
         self.record_gen = self.record_gen.wrapping_add(1);
         let generation = self.record_gen;
@@ -6180,8 +4481,6 @@ impl Tty7App {
         .detach();
     }
 
-    /// Commit the captured chords (joined into a sequence spec) as the action's
-    /// override. A no-op if capture ended or nothing was captured.
     fn commit_recording(&mut self, cx: &mut Context<Self>) {
         let Some((action, chords)) = self
             .active_settings()
@@ -6195,8 +4494,6 @@ impl Tty7App {
         self.assign_keybinding(action, chords.join(" "), cx);
     }
 
-    /// Drop the active capture (interceptor released, any pending commit timer
-    /// invalidated) without changing anything.
     fn stop_recording(&mut self, cx: &mut Context<Self>) {
         self.record_gen = self.record_gen.wrapping_add(1);
         if let Some(s) = self.active_settings_mut() {
@@ -6205,15 +4502,7 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Assign `spec` to `action`. If another action already owns that keystroke,
-    /// unbind it (last-writer-wins would otherwise be order-dependent) and note
-    /// the takeover so the user can undo it with a reset.
     fn assign_keybinding(&mut self, action: String, spec: String, cx: &mut Context<Self>) {
-        // Find the current owner of this exact keystroke, if it isn't `action`.
-        // The extra chords installed alongside the table (an action can ship a
-        // second default it has no row for) count as owners too — miss them and
-        // the new binding would quietly take a chord off an action whose
-        // Settings row still advertises its first one.
         let displaced = crate::ui::keymap::effective_bindings(cx)
             .into_iter()
             .chain(crate::ui::keymap::extra_bindings(cx))
@@ -6228,8 +4517,6 @@ impl Tty7App {
         });
         self.update_config(cx, |cfg| {
             if let Some(other) = &displaced {
-                // Explicit empty override = "unbound" (distinct from a reset,
-                // which would restore that action's default and re-conflict).
                 cfg.keybindings.insert(other.clone(), String::new());
             }
             cfg.keybindings.insert(action, spec);
@@ -6241,8 +4528,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Reset one action to its built-in default (drop its override) and
-    /// re-install the keymap.
     pub(crate) fn reset_keybinding(&mut self, action: String, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| {
             cfg.keybindings.remove(&action);
@@ -6255,7 +4540,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Clear every keybinding override, restoring the full default table.
     pub(crate) fn restore_default_keybindings(&mut self, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.keybindings.clear());
         crate::ui::keymap::rebind(cx);
@@ -6266,8 +4550,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Switch the keybinding preset ("default" / "tmux") and re-install the
-    /// keymap so the change is live immediately.
     pub(crate) fn set_keybinding_preset(&mut self, preset: &str, cx: &mut Context<Self>) {
         let preset = preset.to_string();
         self.update_config(cx, |cfg| cfg.keybinding_preset = preset);
@@ -6279,8 +4561,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Set the tmux preset's prefix chord (e.g. `ctrl-b` / `ctrl-a`) and
-    /// re-install the keymap.
     pub(crate) fn set_keybinding_prefix(&mut self, prefix: &str, cx: &mut Context<Self>) {
         let prefix = prefix.to_string();
         self.update_config(cx, |cfg| cfg.prefix = prefix);
@@ -6288,11 +4568,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Open `config.json` with the OS default handler (Settings → Keybindings).
-    /// A fresh install may never have saved yet, so write the current config
-    /// first — the button must not point at a missing file.
-    // The "Open config file" button was temporarily pulled from the UI; keep the
-    // handler around so re-enabling it is a one-line change in `settings.rs`.
     #[allow(dead_code)]
     pub(crate) fn open_config_file(&self, cx: &Context<Self>) {
         let Some(path) = crate::core::config::config_path("config.json") else {
@@ -6313,48 +4588,20 @@ impl Tty7App {
         }
     }
 
-    /// Open the GitHub Releases page in the browser — the "Download" action of
-    /// the Settings → About update prompt. Deliberately hand-off, not
-    /// self-update: the newest build is one click away on the web. Delegates to
-    /// `core::update` so the settings button and the update modal share it.
     pub(crate) fn open_releases_page(&self) {
         crate::core::update::open_releases_page();
     }
 }
 
-/// A per-thread count of how many times the window has drawn, for the
-/// render-idle tests (issue #243).
-///
-/// A window that has settled draws once and stops. Anything that notifies from
-/// the paint path turns that into an unbounded loop — the window never reaches
-/// render idle, and on a compositor that presents every frame the panel visibly
-/// flickers. The seam is testable headlessly because gpui's test build redraws
-/// dirty windows inside `flush_effects`: a paint that notifies simply keeps that
-/// loop running, so counting draws across a quiet interval answers the question
-/// without a real window.
-///
-/// The limit of that: `window.request_animation_frame()` does not drive frames
-/// under the test platform. It registers a next-frame callback that only a real
-/// platform window's frame callback drains, so `cx.notify()` is the only thing
-/// this counts. A repaint loop driven by an animation frame would run right past
-/// this probe and needs a different instrument.
-///
-/// Thread-local rather than a global: `#[gpui::test]` cases run in parallel on
-/// their own threads, and gpui drives each one's foreground work on the thread
-/// that owns its `TestAppContext`.
 #[cfg(test)]
 pub(crate) mod render_probe {
     use std::cell::Cell;
 
     thread_local! {
         static DRAWS: Cell<u64> = const { Cell::new(0) };
-        /// When set, the draw that exceeds it panics instead of spinning. A
-        /// repaint loop lives entirely inside one `flush_effects` call, so
-        /// without this a regression hangs the suite rather than failing it.
-        static BUDGET: Cell<Option<u64>> = const { Cell::new(None) };
+                                static BUDGET: Cell<Option<u64>> = const { Cell::new(None) };
     }
 
-    /// One window draw. Called from [`Tty7App::render`].
     pub(crate) fn record() {
         let n = DRAWS.get() + 1;
         DRAWS.set(n);
@@ -6369,31 +4616,17 @@ pub(crate) mod render_probe {
         }
     }
 
-    /// Start counting from zero, failing the test if `budget` draws pass.
     pub(crate) fn arm(budget: u64) {
         DRAWS.set(0);
         BUDGET.set(Some(budget));
     }
 
-    /// Draws since [`arm`].
     pub(crate) fn draws() -> u64 {
         DRAWS.get()
     }
 }
 
 impl Tty7App {
-    /// The status strip, on a window that has tabs.
-    ///
-    /// `ui::home` draws the same line on an *empty* remote window; this is the
-    /// one that matters, because the rule — a window that loses its machine
-    /// keeps showing what it had — only means anything when there is something
-    /// to keep showing. Both read the same
-    /// [`RemoteStatus::strip_message`](crate::ui::remote_workspace::RemoteStatus::strip_message),
-    /// so the two surfaces cannot word it differently.
-    ///
-    /// Top-centre, deliberately away from the bottom notice: one says what is
-    /// happening to the connection, the other what it means for the keyboard,
-    /// and stacking them would read as one long apology.
     fn render_remote_workspace_strip(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if self.tabs.is_empty() {
             return None;
@@ -6447,17 +4680,6 @@ impl Tty7App {
         )
     }
 
-    /// The bottom line: 未连接 — 输入暂不生效.
-    ///
-    /// It exists because the degrade is otherwise invisible. Everything a
-    /// disconnected window *can* still do — scroll, select, copy, ⌘F — works
-    /// exactly as before, so the only observable difference is that typing
-    /// stops doing anything, and a terminal that silently ignores keystrokes is
-    /// indistinguishable from one that has hung.
-    ///
-    /// Not a place to offer buffering (D6): the notice says input has no effect
-    /// because it has none, and a "queued" variant of this line would be a
-    /// promise to replay keystrokes into a screen that has moved on.
     fn render_remote_input_notice(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if self.tabs.is_empty() {
             return None;
@@ -6493,24 +4715,9 @@ impl Tty7App {
     }
 }
 
-/// Which SSH connection a forward is established on: the pane's own, or — for a
-/// remote workspace — the **workspace's** (M7).
-///
-/// The same shape and the same reason as
-/// [`SftpRoute`](crate::ui::sftp::SftpRoute): resolved on the UI thread from the
-/// pane entity, then used wherever the request actually goes out. Both arms end
-/// at the same `SshManager` on the local daemon; only the owner differs, and the
-/// owner is what decides the lifetime — a pane's forwards die with the pane, a
-/// workspace's outlive every pane in it.
-///
-/// **List, add and remove all take the same arm.** That is the property worth
-/// protecting: a route that listed over the workspace and added over the pane
-/// would produce a band you can read but not write, which is strictly worse than
-/// the empty band a remote workspace showed before this existed.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ForwardRoute {
     pane_id: u64,
-    /// `None` is the pane arm — an SSH pane, or a plain local shell.
     workspace: Option<crate::terminal::PaneWorkspace>,
 }
 
@@ -6526,12 +4733,6 @@ impl ForwardRoute {
         )
     }
 
-    /// A workspace reply, unwrapped to the forward list it should carry.
-    ///
-    /// A daemon that answers something else — most often `Error("workspace is
-    /// not connected …")` — yields an empty list and a log line rather than a
-    /// panic or a stale list: the band showing nothing is the truthful rendering
-    /// of "this workspace's connection is gone".
     fn forwards(
         reply: anyhow::Result<crate::daemon::protocol::DaemonMsg>,
     ) -> Vec<crate::daemon::protocol::ManagedForward> {
@@ -6568,12 +4769,6 @@ impl ForwardRoute {
         Self::forwards(crate::terminal::RemoteTerminal::on_workspace(req))
     }
 
-    /// Drop every forward the workspace owns (they outlive the
-    /// panes, so something has to end them when the workspace does).
-    ///
-    /// A no-op on the pane arm, and that is correct rather than a gap: a pane's
-    /// forwards die with the pane through the daemon's own
-    /// `teardown_pane_forwards`, so there is nothing here to duplicate.
     pub(crate) fn teardown(&self) -> Vec<crate::daemon::protocol::ManagedForward> {
         let Some(req) = self.workspace_op(crate::daemon::protocol::WorkspaceOp::TeardownForwards)
         else {
@@ -6596,65 +4791,30 @@ impl Render for Tty7App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         render_probe::record();
-        // `TTY7_PROFILE`: time the whole window build and, via the aggregated
-        // call rate, expose whether it is rebuilding on real changes or in a
-        // notify loop. A settled window should report no calls at all; anything
-        // above zero on a window nobody is touching is the shape of issue #243,
-        // and this is how a report of it can be checked on the machine that sees
-        // it rather than inferred from the code.
         let prof = crate::ui::perf::enabled().then(std::time::Instant::now);
-        // A live drag-reorder commits when the drag *ends*, which in gpui means
-        // the mouse was released (nothing else clears an active drag): the first
-        // frame without one retires the preview and applies the order it was
-        // last showing. Deliberately not an `on_drop` handler — those only fire
-        // when the pointer is over that particular element at release, so a
-        // release a hair outside the rail or the strip would silently lose the
-        // move. What you were looking at is what you get, wherever you let go.
-        // One place at the root covers every surface that can start a drag.
         if cx.has_active_drag() {
-            // Still dragging: forget last frame's answer so only what this
-            // frame actually draws can be committed (see `clear_pending`).
             crate::ui::reorder::clear_pending(&self.reorder);
         } else if let Some(order) = crate::ui::reorder::take_pending(&self.reorder) {
             self.apply_tab_order(&order, cx);
         }
-        // While a tab or group is in hand, the cursor is a closed hand for the
-        // whole window. It has to be set on the *drag* rather than styled on
-        // the element: gpui overrides every hovered element's cursor with the
-        // active drag's for the duration, and that override is `None` — a plain
-        // arrow — unless something fills it in. Set once per drag (it forces a
-        // refresh, so re-setting it every frame would spin).
         if self.reorder.borrow().is_some()
             && cx.active_drag_cursor_style() != Some(gpui::CursorStyle::ClosedHand)
         {
             cx.set_active_drag_cursor_style(gpui::CursorStyle::ClosedHand, window);
         }
-        // Vertical-tab mode: the sidebar owns the tab list, so the title-bar strip
-        // drops its chips (keeping only "+"/"⋯"). Gated on having tabs — the
-        // zero-tab home page keeps the full-width horizontal layout, so an empty
-        // rail never appears.
         let vertical = matches!(cx.global::<Config>().tab_bar_position, TabBarPosition::Left)
             && !self.tabs.is_empty();
-        // The rail can be collapsed away without leaving `Left` mode. When it is,
-        // the layout below has no left column, so the title strip takes over the
-        // rail's jobs: it reserves the traffic lights and carries the sidebar's
-        // own controls (new tab + expand) at its left edge.
         let rail = vertical && !self.sidebar_collapsed;
         let strip = self.tab_strip(!vertical, window, cx);
         let sidebar = rail.then(|| self.tab_sidebar(window, cx));
-        // Native-SSH status strip / reconnect notice for the focused pane (E1/E4).
         let ssh_status = self
             .tabs
             .get(self.active)
             .and_then(|t| t.pane.focused_or_first(window, cx))
             .and_then(|leaf| self.render_ssh_status_strip(&leaf, cx));
-        // Render the active tab's pane tree.
         let body = match self.tabs.get(self.active) {
-            // Zero tabs: the window's own face — the home page (see `ui::home`).
             None => self.render_home(cx).into_any_element(),
             Some(active_tab) => {
-                // If a pane is maximized and it belongs to the active tab, render
-                // just that leaf full-window; otherwise the normal split layout.
                 let maximized = self.maximized.as_ref().filter(|leaf| {
                     active_tab
                         .pane
@@ -6669,8 +4829,6 @@ impl Render for Tty7App {
                         .child(leaf.clone())
                         .into_any_element(),
                     None => {
-                        // Fading the unfocused panes only says anything once the
-                        // tab is actually split, and the user can turn it off.
                         let dim_inactive = active_tab.pane.leaves().len() > 1
                             && cx.global::<Config>().dim_inactive_panes;
                         active_tab.pane.render(dim_inactive, window, cx)
@@ -6679,13 +4837,7 @@ impl Render for Tty7App {
             }
         };
 
-        // The title strip (a transparent unified title bar carrying `strip`) and
-        // the terminal body area — shared by both layouts.
         let title_bar = TitleBar::new()
-            // Taller than the stock 34px bar so the tabs read substantial and
-            // roomy instead of cramped. `.h(..)` lands in the component's
-            // `refine_style`, applied after its own `.h(TITLE_BAR_HEIGHT)`, so
-            // this override wins.
             .h(px(TITLE_BAR_HEIGHT))
             .bg(cx.theme().transparent)
             .border_color(cx.theme().transparent)
@@ -6695,56 +4847,27 @@ impl Render for Tty7App {
             .relative()
             .overflow_hidden()
             .child(body)
-            // Nothing of the SSH tooling floats over the terminal any more: port
-            // forwarding is a band on the detail panel's Info tab, the remote file
-            // browser is its Files tab, and transfers are the panel's footer. That
-            // also gives the ⌘F find bar the top-right slot back — it used to have
-            // to fight the tunnel/SFTP icons for it.
-            //
-            // In-pane native-SSH auth / host-key sheet (WS3), shown over the pane
-            // that raised the prompt.
             .when_some(self.render_ssh_prompt_overlay(window, cx), |this, el| {
                 this.child(el)
             })
-            // Native-SSH status strip / reconnect notice (E1/E4).
             .when_some(ssh_status, |this, el| this.child(el))
-            // The remote *workspace*'s own state. A sibling of the
-            // SSH pane strip rather than a merge: that one is about one pane's
-            // ssh process, this is about the machine the whole window is on, and
-            // a window can legitimately show both.
             .when_some(self.render_remote_workspace_strip(cx), |this, el| {
                 this.child(el)
             })
             .when_some(self.render_remote_input_notice(cx), |this, el| {
                 this.child(el)
             })
-            // Live-SSH close-confirmation sheet (E3).
             .when_some(self.render_ssh_close_confirm_overlay(cx), |this, el| {
                 this.child(el)
             })
-            // "New Worktree Tab" confirmation sheet (from the tab context menu).
             .when_some(self.render_worktree_prompt_overlay(cx), |this, el| {
                 this.child(el)
             });
 
-        // Working-tree diff overlay — mounted on the *column*, not on
-        // `body_area`, so it covers the title strip too and reads as one
-        // surface the way the code overlay does. Like that overlay it stops at
-        // the rail and the right panel (both are siblings), which is the point:
-        // the sidebar's git lines stay clickable to switch repo, and the
-        // Changes list stays put so you can walk down it file by file.
         let diff_overlay = self.render_diff_overlay(window, cx);
 
-        // Code panel: an immersive overlay ([file tree | editor], IDE-style)
-        // covering the title strip *and* the terminal — the whole column right
-        // of the tab sidebar — so nothing of the terminal chrome distracts.
-        // The terminal underneath keeps its size (no PTY resize/reflow), and
-        // the sidebar stays visible: switching tabs re-roots the tree.
         let code_overlay = self.render_code_overlay(window, cx);
 
-        // The two column overlays, ordered so the one the user last acted on is
-        // the later child and therefore paints on top. Neither outranks the
-        // other by construction.
         let overlays: Vec<gpui::AnyElement> = {
             let mut pair = vec![
                 (OverlayTop::Diff, diff_overlay),
@@ -6760,57 +4883,19 @@ impl Render for Tty7App {
             pair.into_iter().filter_map(|(_, el)| el).collect()
         };
 
-        // The layout. The rail (vertical mode) is a full-height *left column* that
-        // reaches the very top of the window — the traffic lights sit on its
-        // surface — with the title strip and terminal stacked in the right column.
-        // That way the rail surface has no seam with the title bar and reads as one
-        // continuous panel.
-        //
-        // The right detail panel does the same on macOS: a full-height column
-        // carrying its own title-bar-height top zone (tab row + the window's corner
-        // chrome), so its surface runs unbroken from the very top of the window.
-        //
-        // Off macOS it can't. The window controls (─ ▢ ✕) are laid out by the title
-        // bar itself, at *its* right end, so a full-height panel beside the bar
-        // strands them mid-window with the panel's grey to their right. There the
-        // bar spans the panel too — reaching the real top-right corner, where
-        // Windows and Linux users expect the controls — and the panel hangs below
-        // it, VS Code style. The panel's tab row then sits on the panel (no longer
-        // in the caption row), and the corner chrome stays in the strip.
         let right_panel = self.render_right_panel(window, cx);
         let panel_below_title_bar = right_panel.is_some() && !cfg!(target_os = "macos");
-        // Which host the bar goes to: the terminal column's first child, or the
-        // spanning row above [terminal | panel].
         let (column_title_bar, spanning_title_bar) = if panel_below_title_bar {
             (None, Some(title_bar))
         } else {
             (Some(title_bar), None)
         };
-        // And where the overlays hang. Normally on the terminal column, which they
-        // fill: the bar is that column's first child, so an `inset_0` overlay
-        // covers it and the overlay's own header row lands *on* the caption line —
-        // which is what both headers are drawn for (title-bar height, the bar's
-        // insets, a full-size chrome tile for their one control).
-        //
-        // With the bar hoisted, a column-anchored overlay starts 40px down and its
-        // header sits one row too low: level with the panel's tab row instead of
-        // with the caption. So it hangs on the row that owns the bar instead,
-        // inset from the right by the panel's width — covering the bar's band over
-        // the terminal column (which carries nothing there but the drag region, or
-        // the rail's controls while it's collapsed: exactly what an overlay covers
-        // with the panel closed) and stopping short of the panel, so the ─ ▢ ✕
-        // group and the corner chrome keep their own surface and their clicks.
         let (column_overlays, hoisted_overlays) = if panel_below_title_bar {
             (Vec::new(), overlays)
         } else {
             (overlays, Vec::new())
         };
         let panel_px = self.right_panel_px(window, cx);
-        // The terminal column, and the anchor for both overlays: they fill it —
-        // and, since the panel is a sibling rather than a child, stop short of the
-        // panel for free. With the bar spanning above, they stop short of it too,
-        // which keeps the native controls clickable while an overlay is open and
-        // lines the overlay's own header row up with the panel's tab row.
         let terminal_column = div()
             .flex_1()
             .min_w_0()
@@ -6841,23 +4926,8 @@ impl Render for Tty7App {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    // The containing block for the hoisted overlays below.
                     .relative()
                     .child(
-                        // The bar's own band over the panel, painted in the panel's
-                        // surface so the column still reads as one continuous
-                        // sidebar from the very top of the window — the rail's
-                        // trick, kept now that the tab row moved off the caption
-                        // line. Without it the panel's grey started 40px down and
-                        // the corner tore into two colours.
-                        //
-                        // A sibling *under* the transparent bar rather than padding
-                        // inside it: the ─ ▢ ✕ group is the bar's own last child, so
-                        // nothing laid out in the bar can get behind the controls,
-                        // and only a layer below can carry a surface under them.
-                        // Same width and left border as the panel, both read from
-                        // `right_panel_px`, so the edge stays in register through a
-                        // resize drag.
                         div()
                             .relative()
                             .flex_none()
@@ -6875,10 +4945,6 @@ impl Render for Tty7App {
                             .child(bar),
                     )
                     .child(panel_row)
-                    // Last child, so they paint over both the bar and the column.
-                    // Each overlay is `absolute().inset_0()` against this wrapper,
-                    // which is the only thing that has to know where the panel
-                    // starts.
                     .children(hoisted_overlays.into_iter().map(|overlay| {
                         div()
                             .absolute()
@@ -6893,32 +4959,16 @@ impl Render for Tty7App {
             })
             .into_any_element();
 
-        // The real window background paint: gradient-aware and opacity-carrying
-        // (see `theme::window_background`), plus the theme's optional background
-        // image. Falls back to the component theme's solid before the first
-        // `apply_theme` has published the global.
         let (window_bg, bg_image) = match cx.try_global::<crate::ui::presets::ActiveBackground>() {
             Some(bg) => (window_background(bg), bg.image.clone()),
             None => (cx.theme().background.into(), None),
         };
 
-        // Settings is a full-window overlay (not a tab): it covers the tab rail,
-        // title strip, and terminal so it never crowds the tab list. `occlude`
-        // blocks input to the elements behind it. It fills the window edge to
-        // edge — its own nav sidebar reserves the title-bar zone internally (so
-        // that rail reaches the top like the tab rail), rather than insetting the
-        // whole page here.
         let settings_overlay = self.settings.is_some().then(|| {
             div()
                 .absolute()
                 .inset_0()
                 .occlude()
-                // Same gradient-aware paint as the root, so a gradient theme's
-                // settings page doesn't snap to a flat color. A translucent
-                // theme's alpha rides along, letting the background image show
-                // through here too. This second layer compounds the alpha over
-                // the root's paint — deliberate: the overlay must occlude the
-                // terminal behind it to stay readable.
                 .bg(window_bg)
                 .child(self.render_settings(window, cx))
         });
@@ -6975,14 +5025,9 @@ impl Render for Tty7App {
                     this.delete_workspace(id, window, cx);
                 }))
                 .on_action(cx.listener(|_this, _: &NewWorkspace, _window, cx| {
-                    // A fresh workspace, not a copy of this one: the daemon gives
-                    // each pane a single subscriber, so a second window onto the
-                    // same panes would steal this window's output.
                     crate::ui::windows::open(cx, None);
                 }))
                 .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
-                    // With focus in the editor panel, ⌘W closes the active file
-                    // tab instead of the terminal pane/tab.
                     if !this.editor_close_active_if_focused(window, cx) {
                         this.close_pane(window, cx)
                     }
@@ -7124,10 +5169,6 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &EditorSave, window, cx| {
                     this.editor_save_active(window, cx)
                 }))
-                // Quit lives on the same element-tree action path as every other Cmd
-                // shortcut above, so a focused terminal routes `cmd-q` here rather
-                // than relying solely on the global handler (which the keystroke
-                // doesn't reach while focus is deep in the terminal view).
                 .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
                 .on_action(cx.listener(|this, _: &OpenSshProfiles, window, cx| {
                     this.open_settings_section(SettingsSection::Ssh, window, cx)
@@ -7135,9 +5176,6 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &RestartSshSession, window, cx| {
                     this.restart_ssh_session(window, cx)
                 }))
-                // Tab operations that used to be reachable only by right-clicking a
-                // chip. Each targets the active tab, so the menu bar / palette /
-                // keyboard all mean "this tab" without a click to say which.
                 .on_action(cx.listener(|this, _: &RenameTab, window, cx| {
                     this.start_rename(this.active, window, cx)
                 }))
@@ -7156,9 +5194,6 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &MarkTabUnread, _window, cx| {
                     this.mark_tab_unread(this.active, cx)
                 }))
-                // Fork: the bare action has no pane the user pointed at, so it
-                // opens a new tab; the four directional ones come from the pane
-                // right-click menu, where the ask *was* spatial.
                 .on_action(cx.listener(|this, _: &ForkAgentSession, window, cx| {
                     this.fork_active_pane_session(ForkPlacement::NewTab, window, cx)
                 }))
@@ -7177,9 +5212,6 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &CopyAgentSessionId, window, cx| {
                     this.copy_agent_session_id(this.active, window, cx)
                 }))
-                // Settings destinations that deserve their own way in: Help →
-                // Keyboard Shortcuts and the App menu's About both used to require
-                // opening Settings and then hunting for the section.
                 .on_action(cx.listener(|this, _: &ShowKeyboardShortcuts, window, cx| {
                     this.open_settings_section(SettingsSection::Keybindings, window, cx)
                 }))
@@ -7189,8 +5221,6 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
                     this.check_for_updates_now(window, cx)
                 }))
-                // Standard macOS App / Window menu items. gpui exposes the platform
-                // calls but ships no actions for them.
                 .on_action(cx.listener(|_, _: &HideApp, _window, cx| cx.hide()))
                 .on_action(cx.listener(|_, _: &HideOthers, _window, cx| cx.hide_other_apps()))
                 .on_action(cx.listener(|_, _: &ShowAll, _window, cx| cx.unhide_other_apps()))
@@ -7198,17 +5228,11 @@ impl Render for Tty7App {
                     cx.listener(|_, _: &MinimizeWindow, window, _cx| window.minimize_window()),
                 )
                 .on_action(cx.listener(|_, _: &ZoomWindow, window, _cx| window.zoom_window()))
-                // Help destinations. Opened in the default browser; a failure here is
-                // not worth interrupting the user over, so it is logged, not toasted.
                 .on_action(
                     cx.listener(|_, _: &OpenDocumentation, _window, cx| cx.open_url(DOCS_URL)),
                 )
                 .on_action(cx.listener(|_, _: &OpenDiscord, _window, cx| cx.open_url(DISCORD_URL)))
                 .on_action(cx.listener(|_, _: &ReportIssue, _window, cx| cx.open_url(ISSUES_URL)))
-                // The theme's background image, composited over the background fill
-                // at its own opacity and under all content. Absolute, so it doesn't
-                // participate in the flex column; the wrapper clips the Cover
-                // overflow (gpui's `img` paints the fitted bounds unclipped).
                 .when_some(bg_image, |this, image| {
                     this.child(
                         div()
@@ -7224,16 +5248,9 @@ impl Render for Tty7App {
                     )
                 })
                 .child(main_layout)
-                // Settings overlay, above the tabs/terminal when open.
                 .when_some(settings_overlay, |this, overlay| this.child(overlay))
-                // The workspace switcher, in the same layer as the palette: they
-                // answer two different questions and are never open at once.
                 .children(self.render_switcher(cx))
-                // Command palette overlay, layered above everything when open.
                 .when_some(self.palette.clone(), |this, palette| this.child(palette))
-                // Toast layer for `window.push_notification` (worktree/SSH errors).
-                // gpui-component's Root only *stores* the list; the root view must
-                // render the layer — without this child every toast was invisible.
                 .children(gpui_component::Root::render_notification_layer(window, cx));
 
         if let Some(start) = prof {
@@ -7243,26 +5260,15 @@ impl Render for Tty7App {
     }
 }
 
-/// Convert a live `Tab` (pane tree + name) into its serializable mirror.
 fn tab_to_session(tab: &Tab, cx: &App) -> SessionTab {
     SessionTab {
         name: tab.name.clone(),
         pane: pane_to_session(&tab.pane, cx),
         sidebar_group: tab.sidebar_group.borrow().clone(),
-        // Deliberately not the live tab's tree id. This snapshot outlives the
-        // daemon tab it mirrors (the closed-tab stack, the session file), and
-        // rebuilding from it is a *new* tab everywhere it matters.
         tree_id: None,
     }
 }
 
-/// The command that puts a saved coding-agent conversation back, or `None` when
-/// there is nothing to resume (no agent, no captured session id, the agent opts
-/// out of sessions, or the user turned the feature off).
-///
-/// Shared by the two places that learn a pane came back as a bare shell: session
-/// restore, for a local leaf whose daemon already said the pane was gone, and
-/// [`Tty7App::land_pane`], for a remote one where only the machine could say.
 fn agent_resume_command(
     agent: &Option<crate::core::cli_agent::CLIAgent>,
     session_id: Option<&str>,
@@ -7273,12 +5279,6 @@ fn agent_resume_command(
         return None;
     }
     let agent = agent.as_ref()?;
-    // Said out loud, because it is the one step of the restore nobody can
-    // reconstruct afterwards: the pane comes back as a bare shell either way,
-    // and whether that is "no id was ever captured" (hooks not installed on
-    // that machine, or its record lost them) or "the agent declined to resume"
-    // is the whole diagnosis. A leaf that ran no agent at all is the ordinary
-    // case and says nothing.
     let Some(session_id) = session_id else {
         log::info!(
             "{}'s pane had no captured session id; it comes back as a plain shell",
@@ -7289,26 +5289,14 @@ fn agent_resume_command(
     agent.resume_command(session_id, launch_argv)
 }
 
-/// Convert a live `Pane` tree into its serializable mirror, reading each
-/// leaf's current cwd and each split's axis + ratio. Used when saving.
 fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
     match pane {
-        // A pane still connecting has no terminal to interrogate — but it does
-        // know which pane it is trying to re-attach to, and that is the whole
-        // of what restore needs. Quitting mid-connect therefore comes back to
-        // the same pane rather than dropping it from the layout.
         Pane::Leaf(PaneSlot::Connecting(pending)) => {
             let spawn = &pending.read(cx).spawn;
             SessionPane::Leaf {
                 cwd: spawn.working_directory.clone(),
                 pane_id: spawn.restore_pane,
                 ssh_spec: None,
-                // Written back out rather than blanked. A remote pane spends
-                // its first seconds here, and any save landing in that window
-                // used to drop the agent this leaf was running — after which
-                // ending the workspace's sessions left nothing to resume from.
-                // The pane cannot be interrogated yet, but what it is being
-                // rebuilt *from* is right here.
                 agent: spawn.agent,
                 agent_session_id: spawn.agent_session_id.clone(),
                 agent_launch_argv: spawn.agent_launch_argv.clone(),
@@ -7317,26 +5305,9 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
         Pane::Leaf(PaneSlot::Ready(view)) => {
             let view = view.read(cx);
             SessionPane::Leaf {
-                // A restored pane whose daemon pane is gone respawns through
-                // `new_terminal(workspace, …)` — on the *same* machine, since
-                // restore carries the window's workspace — so a remote
-                // workspace's cwd is right to keep. What must not be kept is a
-                // native-SSH or WSL pane's: those come back on the default
-                // *local* shell (a shell pick isn't persisted), which cannot
-                // chdir into the other machine's path. Native-SSH panes
-                // reconnect from `ssh_spec` and the daemon discards the cwd for
-                // them anyway (`server::SpawnNativeSsh`).
                 cwd: view.spawnable_cwd(),
                 pane_id: Some(view.pane_id),
-                // Persist the secret-free native-SSH spec so a *dead* pane can be
-                // reconnected on restore (FR-E4/C2); `None` for local panes. A
-                // live pane reattaches by `pane_id` and never needs this.
                 ssh_spec: view.ssh_spec(),
-                // The running agent + its native session id (when its hooks
-                // reported one), so a pane the daemon loses can resume the
-                // agent conversation instead of just reopening a shell. The
-                // observed launch argv rides along so the resume command keeps
-                // the user's flags (`--dangerously-skip-permissions`, …).
                 agent: view.agent(),
                 agent_session_id: view.agent_session().and_then(|s| s.session_id),
                 agent_launch_argv: view.agent_session().and_then(|s| s.launch_argv),
@@ -7353,8 +5324,6 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
             a: Box::new(pane_to_session(a, cx)),
             b: Box::new(pane_to_session(b, cx)),
         },
-        // A transient `Empty` should never be persisted; mirror it as a bare
-        // leaf so restore still yields a usable terminal.
         Pane::Empty => SessionPane::Leaf {
             cwd: None,
             pane_id: None,
@@ -7366,30 +5335,9 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
     }
 }
 
-/// The pane ids currently alive **on `route`'s machine**, each with the
-/// workspace that owns it (when the daemon knows — `None` for panes spawned by
-/// builds/daemons that predate `pane-owner`). Used by `session_to_pane` to
-/// decide per leaf whether to re-`attach` or `spawn`. Computed once per restore
-/// from that daemon's `List`; empty (→ all-fresh) when it is unreachable.
-///
-/// There is deliberately no unrouted sibling. Pane ids are **per daemon**:
-/// asking this machine's daemon which of a remote workspace's ids are alive
-/// answers about whatever local panes happen to hold those numbers. At restore
-/// that is not a cosmetic error — a leaf would `Attach` to a stranger's pane and
-/// put their shell on screen — and the display sites that used to take the
-/// unrouted answer now go through
-/// [`pane_liveness`](crate::terminal::pane_liveness), which cannot spell the
-/// question without naming a machine.
 pub(crate) fn alive_panes_on(
     route: &crate::terminal::PaneRoute,
 ) -> std::collections::HashMap<u64, Option<String>> {
-    // **Local routes only.** This is a *blocking* `List`, and every caller is on
-    // the UI thread — which is fine against a socket on this machine and is a
-    // multi-second window freeze against one that has to open an SSH channel
-    // first. A remote workspace answers the same question per pane instead, in
-    // the background half of its spawn: `start_pane_spawn` tries the attach and
-    // falls back to a fresh pane when the id is gone, which is exactly what
-    // this set was being consulted for.
     if !matches!(route, crate::terminal::PaneRoute::Local) {
         return std::collections::HashMap::new();
     }
@@ -7400,16 +5348,6 @@ pub(crate) fn alive_panes_on(
         .collect()
 }
 
-/// Whether `owner`'s window may re-attach the live pane `id` — the ownership
-/// gate on session restore.
-///
-/// The failure this closes: two workspace records claiming one pane id (a
-/// corrupted layout store), or a stale id landing on an unrelated pane after
-/// the numbers were reused. Before the daemon knew owners, both cases attached
-/// — one workspace's window silently picked up another's shell, which is how
-/// `work`'s seven tabs once ended up duplicated into `personal`. A pane with no
-/// recorded owner (older daemon, legacy spawn) stays attachable by anyone —
-/// that is today's behavior, not a new risk.
 fn pane_attachable(
     alive: &std::collections::HashMap<u64, Option<String>>,
     id: u64,
@@ -7431,11 +5369,6 @@ fn pane_attachable(
     }
 }
 
-/// Rebuild the tab list from a persisted `Session`, re-attaching to still-live
-/// daemon panes where possible and spawning fresh shells otherwise. An absent or
-/// empty session yields no tabs (the home page). Shared by first-launch restore
-/// (`Tty7App::for_workspace`) and the daemon-restart rebuild (`restart_daemon`), so the two
-/// stay in lockstep.
 fn tabs_from_session(
     workspace: Option<&crate::terminal::PaneWorkspace>,
     owner: WorkspaceId,
@@ -7447,13 +5380,9 @@ fn tabs_from_session(
     let Some(session) = session.filter(|s| !s.tabs.is_empty()) else {
         return (Vec::new(), 0);
     };
-    // Ask *this workspace's* daemon once which panes are still alive, so leaves
-    // re-attach to surviving shells instead of all spawning fresh.
     let alive = alive_panes_on(&crate::terminal::PaneRoute::for_workspace(workspace));
     let mut tabs: Vec<Tab> = Vec::with_capacity(session.tabs.len());
     for st in &session.tabs {
-        // A tab whose every leaf failed to come back has nothing to show; drop
-        // it rather than restore an empty frame (or, worse, abort the launch).
         let Some(pane) = session_to_pane(workspace, owner, &st.pane, &alive, font_size, window, cx)
         else {
             log::error!("dropping a restored tab: no pane in it could be started");
@@ -7466,50 +5395,21 @@ fn tabs_from_session(
             diff_overlay: None,
             code: None,
             overlay_top: OverlayTop::default(),
-            // Seed the sticky group from the saved session so the sidebar
-            // renders grouped on the first frame; the first landed probe
-            // corrects it if the tab's repo changed while we were gone.
             sidebar_group: std::cell::RefCell::new(st.sidebar_group.clone()),
-            // A session lowered from the machine's tree names its daemon tabs;
-            // keeping those ids is what stops the first save from closing and
-            // recreating every one of them.
             tree_id: std::cell::Cell::new(
                 st.tree_id
                     .unwrap_or_else(tty7_core::core::machine::TabId::new),
             ),
         });
     }
-    // Clamp the saved active index into the rebuilt range (which can be empty
-    // when nothing restored).
     let active = session.active.min(tabs.len().saturating_sub(1));
     (tabs, active)
 }
 
-/// Whether a restored leaf's saved `pane_id` names a pane in the same daemon
-/// the caller read its `alive` set from — the window's daemon.
-///
-/// Pane ids are unique only *within* a daemon, so the question is not academic:
-/// looking one up in the wrong set is how a saved id silently matches somebody
-/// else's live pane and the restore attaches to it.
-///
-/// A native-SSH leaf is the one case where a pane does not live in its window's
-/// daemon. Its russh session is spawned by **this client's** daemon however the
-/// window is bound, so in a remote workspace it belongs to a different machine
-/// than every other leaf around it — and its id must not be matched against the
-/// remote's pane list. It reconnects from its saved spec instead, which is what
-/// it does for any id that is no longer live.
 fn leaf_shares_the_window_daemon(window_is_remote: bool, leaf_is_native_ssh: bool) -> bool {
     !(window_is_remote && leaf_is_native_ssh)
 }
 
-/// Rebuild a live `Pane` tree from a saved `SessionPane`. A leaf whose saved
-/// `pane_id` is still alive in the daemon re-`attach`es (process + scrollback
-/// intact); otherwise it spawns a fresh shell in the saved cwd. `alive` is the
-/// daemon's current pane set, computed once by the caller.
-///
-/// `None` when nothing under this node could be started (an unreachable
-/// daemon): restore drops what it can't rebuild instead of leaving `Empty`
-/// nodes — which every tree operation ignores — in a live tab.
 fn session_to_pane(
     workspace: Option<&crate::terminal::PaneWorkspace>,
     owner: WorkspaceId,
@@ -7528,38 +5428,21 @@ fn session_to_pane(
             agent_session_id,
             agent_launch_argv,
         } => {
-            // Only restore the pane id when the daemon confirms it's still live;
-            // a stale id (daemon restarted, pane killed) falls back to a spawn.
-            //
-            // …and `alive` is *one* daemon's pane set, so a leaf whose pane
-            // lives in a different one must not be looked up in it.
             let same_daemon =
                 leaf_shares_the_window_daemon(workspace.is_some(), ssh_spec.is_some());
             let restore = match workspace.is_some() {
-                // A remote leaf keeps its id unconditionally: `alive` is empty
-                // for a remote route by construction (see `alive_panes_on`), and
-                // the attempt to attach happens off the UI thread, where a dead
-                // id costs one failed round trip and falls back to a spawn.
                 true => (*pane_id).filter(|_| same_daemon),
                 false => (*pane_id).filter(|id| same_daemon && pane_attachable(alive, *id, owner)),
             };
-            // A *dead* native-SSH leaf (spec persisted, pane no longer alive)
-            // reconnects rather than dropping back to a local shell (FR-C2/E4):
-            // re-resolve secrets from the profile when it names one, else reuse
-            // the secret-free spec and let the auth sheets prompt.
             if restore.is_none() {
                 if let Some(spec) = ssh_spec.clone() {
                     let resolved = crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
                     match new_terminal_native(font_size, cwd.clone(), resolved, window, cx) {
                         Ok(view) => return Some(Pane::leaf(PaneSlot::Ready(view))),
-                        // Keep restore alive: fall through to a local shell in
-                        // this slot rather than aborting startup.
                         Err(e) => log::error!("restoring native SSH pane failed: {e}"),
                     }
                 }
             }
-            // A shell pick isn't persisted in the session, so a stale pane that
-            // must respawn comes back on the default shell.
             let view = match new_terminal(
                 workspace.cloned(),
                 Some(owner),
@@ -7576,20 +5459,7 @@ fn session_to_pane(
                     return None;
                 }
             };
-            // A pane that could NOT re-attach lost its running agent with the
-            // daemon; when we captured that agent's native session id, hand
-            // the fresh shell its resume command so the conversation picks up
-            // where it left off (cmux's auto-resume, config-gated). The bytes
-            // sit in the PTY input queue until the shell reads its first
-            // command — same mechanism as tmux send-keys at spawn.
             match &view {
-                // A local leaf already knows the answer, and the *view* is what
-                // knows it. Not `restore.is_none()`: `alive` is read once at the
-                // top of the restore, so a pane that exits between that `List`
-                // and this attach fails into a fresh shell inside
-                // `spawn_shell_terminal_in` — which used to land here as
-                // "restore.is_some(), so it kept its agent", leaving an empty
-                // shell and a conversation nobody resumed.
                 PaneSlot::Ready(terminal) if !terminal.read(cx).restored() => {
                     if let Some(cmd) = agent_resume_command(
                         agent,
@@ -7601,11 +5471,6 @@ fn session_to_pane(
                     }
                 }
                 PaneSlot::Ready(_) => {}
-                // A remote leaf does not know yet whether its id was still
-                // good — the attach is happening on a background thread. The
-                // agent travels with the attempt and `land_pane` decides. This
-                // is also what keeps a save landing mid-connect from erasing
-                // it (see `pane_to_session`).
                 PaneSlot::Connecting(pending) => {
                     pending.update(cx, |pending, _| {
                         pending.spawn.agent = *agent;
@@ -7621,8 +5486,6 @@ fn session_to_pane(
                 SessionAxis::Horizontal => Axis::Horizontal,
                 SessionAxis::Vertical => Axis::Vertical,
             };
-            // One side failing collapses the split onto the survivor, exactly
-            // as closing that pane by hand would.
             match (
                 session_to_pane(workspace, owner, a, alive, font_size, window, cx),
                 session_to_pane(workspace, owner, b, alive, font_size, window, cx),
@@ -7635,22 +5498,6 @@ fn session_to_pane(
     }
 }
 
-/// Build a shell-backed terminal view, wiring the per-pane subscriptions every
-/// pane needs. Fallible: the daemon can refuse the spawn (it died, it's
-/// wedged, the shell doesn't exist), and every caller here runs inside a gpui
-/// input callback, where a panic can't unwind and would abort the app instead
-/// of surfacing the failure. Report it, don't `expect` it.
-///
-/// `workspace` is **the switch that makes a window remote**: it picks the route
-/// the pane's daemon connection takes and, through `ShellParts`, binds the view
-/// to the same machine so everything pane-addressed afterwards (`Kill`, the
-/// restore `List`, a reconnect's `Attach`) goes back to it. `None` is a local
-/// pane, byte-for-byte what it always was.
-/// `owner` is the workspace whose window this pane is being created for —
-/// recorded daemon-side at spawn (so restore can tell whose pane is whose) and
-/// stamped on the view (so `save_session` can shout if a window's tabs and its
-/// identity ever come apart). `None` only for callers that genuinely have no
-/// workspace (tests).
 pub(crate) fn new_terminal(
     workspace: Option<crate::terminal::PaneWorkspace>,
     owner: Option<WorkspaceId>,
@@ -7661,14 +5508,6 @@ pub(crate) fn new_terminal(
     window: &mut Window,
     cx: &mut Context<Tty7App>,
 ) -> anyhow::Result<PaneSlot> {
-    // The fork this whole `PaneSlot` business exists for. `PaneRoute` is the
-    // same value that decides whether the connection carries a route header at
-    // all, so "does this pane talk to another computer" is asked once, here.
-    //
-    // A local pane keeps the synchronous path — not for lack of generality, but
-    // because it is ready in well under a millisecond and routing it through a
-    // placeholder would paint one frame of a spinner on every ⌘T. See
-    // `ui::pending_pane` for the whole argument.
     if matches!(
         crate::terminal::PaneRoute::for_workspace(workspace.as_ref()),
         crate::terminal::PaneRoute::Local
@@ -7685,24 +5524,17 @@ pub(crate) fn new_terminal(
         )));
     }
 
-    // Everything else waits on another machine, so it waits *in the tree*.
     let spawn = crate::ui::pending_pane::PendingSpawn {
         workspace,
         working_directory,
         restore_pane,
         shell,
-        // Filled in by session restore, the only caller with an agent session
-        // to bring back (see `session_to_pane`). A brand-new tab or split has
-        // no conversation behind it.
         agent: None,
         agent_session_id: None,
         agent_launch_argv: None,
         owner,
         font_size,
     };
-    // The machine as the user knows it. `RemoteTarget`'s `Display` is the same
-    // label the switcher's rows carry, so "Connecting to gpu-01…" names the row
-    // that was clicked.
     let machine = spawn
         .workspace
         .as_ref()
@@ -7721,8 +5553,6 @@ pub(crate) fn new_terminal(
     Ok(PaneSlot::Connecting(pending))
 }
 
-/// Run (or re-run) the blocking half of a pending pane's spawn, off the UI
-/// thread, and land the result back in the tree.
 fn start_pane_spawn(
     pending: Entity<crate::ui::pending_pane::PendingPane>,
     window: &mut Window,
@@ -7735,15 +5565,6 @@ fn start_pane_spawn(
         let parts = cx
             .background_executor()
             .spawn(async move {
-                // Restore, on a machine nobody asked "which panes are still
-                // alive?" — because asking is itself a routed round trip and
-                // the UI thread is where that question used to be asked from
-                // (`alive_panes_on`). Trying the attach *is* the question, and a
-                // failed one falls back to a fresh pane inside
-                // `spawn_shell_terminal_in`: an id that is gone is the ordinary
-                // case after the workspace's sessions were ended, and a pane the
-                // user cannot get back is not worth a slot that only offers
-                // "Try Again".
                 TerminalView::spawn_shell_terminal_in(
                     spawn.workspace.clone(),
                     spawn.working_directory.clone(),
@@ -7751,10 +5572,6 @@ fn start_pane_spawn(
                     spawn.shell.clone(),
                     spawn.owner,
                 )
-                // Flattened to a string here rather than carried as an
-                // `anyhow::Error`: the chain is not `Send` across this await in
-                // a form worth keeping, and what the pane shows is the rendered
-                // message anyway.
                 .map_err(|e| format!("{e:#}"))
             })
             .await;
@@ -7765,10 +5582,6 @@ fn start_pane_spawn(
     .detach();
 }
 
-/// Wire the per-pane subscriptions every pane needs around a freshly built
-/// terminal. Shared by the synchronous local path and the async remote one, so
-/// a pane that arrived late is wired identically to one that was there from the
-/// first frame.
 fn build_terminal_view(
     parts: crate::terminal::view::ShellParts,
     font_size: f32,
@@ -7777,22 +5590,13 @@ fn build_terminal_view(
 ) -> Entity<TerminalView> {
     let view = cx.new(|cx| {
         let mut view = TerminalView::from_shell_parts(parts, window, cx);
-        // Inherit the current global font size so new panes match existing ones.
         view.font_size = px(font_size);
         view
     });
-    // A pane whose shell exits on its own (`exit`, Ctrl-D, a crash) closes
-    // itself, like every other terminal. This is the single place all panes
-    // are built — new tab, split, session restore — so the subscription
-    // covers them all; restore even cleans up panes that died while no
-    // client was attached (the daemon replays their exit on reattach).
     cx.subscribe_in(&view, window, |app, view, _: &ChildExited, window, cx| {
         app.on_child_exited(view.clone(), window, cx);
     })
     .detach();
-    // The pane's agent started (or replaced) a conversation. Persist it: the
-    // session id is what a later restore resumes from, and nothing else was
-    // making the window save between the id arriving and the user acting.
     cx.subscribe_in(
         &view,
         window,
@@ -7801,9 +5605,6 @@ fn build_terminal_view(
         },
     )
     .detach();
-    // Native-SSH auth/host-key prompts raised by this pane → in-pane sheet. Same
-    // single build site as ChildExited, so every pane (new tab, split, restore)
-    // is covered.
     cx.subscribe_in(
         &view,
         window,
@@ -7816,26 +5617,12 @@ fn build_terminal_view(
     view
 }
 
-/// Kill a daemon pane without blocking the window.
-///
-/// `kill_pane_on` opens a connection down the pane's route and writes one
-/// frame — which against a *remote* route means the daemon opening an SSH
-/// channel first, so doing it inline froze the window every time a remote pane
-/// or tab was closed. Fire-and-forget by nature (a missing daemon means there
-/// is nothing to kill anyway), so there is nothing to wait for and nothing to
-/// report.
 fn kill_pane_off_thread(route: crate::terminal::PaneRoute, pane_id: u64, cx: &mut App) {
     cx.background_executor()
         .spawn(async move { crate::terminal::RemoteTerminal::kill_pane_on(&route, pane_id) })
         .detach();
 }
 
-/// Re-render the app whenever `view` takes focus. Nothing else does this: a
-/// pane owns its own focus handle, so clicking between splits notifies the
-/// *pane*, not us, and any chrome that describes "the active pane" — the right
-/// panel's Info and Changes tabs — would keep showing the pane you left until
-/// some unrelated notify happened to repaint. Focus changes are user-paced, so
-/// the extra frames are free.
 fn watch_pane_focus(view: &Entity<TerminalView>, window: &mut Window, cx: &mut Context<Tty7App>) {
     let handle = view.read(cx).focus_handle.clone();
     let app = cx.weak_entity();
@@ -7848,12 +5635,6 @@ fn watch_pane_focus(view: &Entity<TerminalView>, window: &mut Window, cx: &mut C
         .detach();
 }
 
-/// Build a native (russh) SSH terminal view for `spec`, wiring the same
-/// per-pane subscriptions (`ChildExited`, `AuthPromptReady`) as [`new_terminal`]
-/// so it participates in auto-close and the in-pane auth sheets. Mirrors
-/// `new_terminal` but takes the resolved connect spec instead of a shell.
-/// Errors (daemon down/stale, spawn refused) are returned, never panicked —
-/// callers surface them and keep the app alive.
 pub(crate) fn new_terminal_native(
     font_size: f32,
     working_directory: Option<std::path::PathBuf>,
@@ -7915,20 +5696,11 @@ pub(crate) fn parse_ssh_option_words(input: &str) -> Result<Vec<String>, ()> {
     Ok(words)
 }
 
-/// The data a typed "SSH: Add Connection…" line resolves to: a transient profile
-/// plus the raw `ProxyJump` target (from `-J`), ready for
-/// [`crate::ui::ssh_connect::native_spec_from_transient_profile`].
 pub(crate) struct ParsedSshConnect {
     pub profile: crate::core::ssh_profile::SshProfile,
     pub proxy_jump: Option<String>,
 }
 
-/// Parse a typed connect line (`[ssh] [flags] user@host[:port]`) into native
-/// connect data (PRD §3.1). Only the trivially-mappable flags are honored — `-p`,
-/// `-l`, `-i` (repeatable), `-J`, and `-o User=`/`-o Port=`/`-o ProxyJump=`; other
-/// options are ignored (best-effort). A remote command, a `--` separator, an
-/// unbalanced quote, or a missing/invalid host is an `Err(reason)` surfaced as an
-/// inline notice — never a silent shell-out. Returns the user-facing reason string.
 pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, String> {
     use crate::core::ssh_profile::{SshProfile, parse_quick_connect};
 
@@ -7951,8 +5723,6 @@ pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, S
             return Err("Remote commands aren't supported here".to_string());
         }
         if let Some((flag, attached)) = ssh_short_flag(&word) {
-            // Consume the value (attached `-p2222` form or the next word) when the
-            // flag takes one.
             let value = if ssh_option_takes_value(flag) {
                 if !attached.is_empty() {
                     attached
@@ -7980,11 +5750,9 @@ pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, S
                 'i' => identities.push(value),
                 'J' => jump = Some(value),
                 'o' => apply_ssh_o_option(&value, &mut user, &mut port, &mut jump)?,
-                // Any other flag (value already consumed if it took one) is ignored.
                 _ => {}
             }
         } else if word.starts_with('-') {
-            // A long option (`--foo`) or bare `-`: not something we map.
             return Err(format!("Unsupported option \u{201c}{word}\u{201d}"));
         } else if target.is_none() {
             target = Some(word);
@@ -8000,9 +5768,7 @@ pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, S
 
     let mut profile = SshProfile::new(qc.host.clone());
     profile.host = qc.host;
-    // Explicit `-p` / `-o Port=` wins over a `:port` on the target, else default 22.
     profile.port = port.or(qc.port).unwrap_or(22);
-    // Explicit `-l` / `-o User=` wins over `user@` on the target.
     if let Some(user) = user.or(qc.user) {
         profile.user = user;
     }
@@ -8014,9 +5780,6 @@ pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, S
     })
 }
 
-/// Split a short-option word into `(flag, attached_value)` — `-p2222` → `('p',
-/// "2222")`, `-J` → `('J', "")`. `None` for a non-option, `--`/long option, or a
-/// bare `-`.
 fn ssh_short_flag(word: &str) -> Option<(char, String)> {
     let rest = word.strip_prefix('-')?;
     if rest.is_empty() || rest.starts_with('-') {
@@ -8027,8 +5790,6 @@ fn ssh_short_flag(word: &str) -> Option<(char, String)> {
     Some((flag, chars.as_str().to_string()))
 }
 
-/// Apply the trivially-mappable `-o Name=Value` options (`User`/`Port`/
-/// `ProxyJump`); anything else is ignored (best-effort).
 fn apply_ssh_o_option(
     value: &str,
     user: &mut Option<String>,
@@ -8054,13 +5815,6 @@ fn apply_ssh_o_option(
     Ok(())
 }
 
-/// The window-drag gesture behind every stand-in title bar, exercised against
-/// the real [`title_bar_drag`] rather than a replica of it.
-///
-/// `PlatformWindow::start_window_move` is `unimplemented!()` on gpui's test
-/// platform, which makes a panic a reliable "the window would have started
-/// moving" detector — hence the `#[should_panic]` on the tests that assert a
-/// drag *does* start. The tests that assert one does *not* start simply return.
 #[cfg(test)]
 mod window_drag_tests {
     use gpui::{
@@ -8071,8 +5825,6 @@ mod window_drag_tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    /// A minimal window whose whole surface is one real `title_bar_drag` row, so
-    /// nothing else in the tree can explain a result.
     struct Host;
     impl Render for Host {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -8085,13 +5837,6 @@ mod window_drag_tests {
         }
     }
 
-    /// A resize handle's geometry over a stand-in title bar. The two real
-    /// handles (`tab_sidebar`, `right_panel`) are absolute, 8px wide, `h_full`
-    /// and centred on a panel edge, so their top band lies over a
-    /// `WindowControlArea::Drag` row; standing either of them up needs a whole
-    /// `Tty7App` window, so this reproduces the geometry instead. `occluded`
-    /// mirrors the real handles; `false` is the control that shows the harness
-    /// detects the hijack when the blocking hitbox is missing.
     struct HandleOverRow {
         occluded: bool,
     }
@@ -8104,8 +5849,6 @@ mod window_drag_tests {
                 .w(px(8.))
                 .h_full()
                 .cursor_col_resize()
-                // What each real handle does on press: arm its own drag and ask
-                // for a repaint.
                 .on_mouse_down(MouseButton::Left, |_, window, _| window.refresh());
             let handle = if self.occluded {
                 handle.occlude()
@@ -8125,10 +5868,6 @@ mod window_drag_tests {
         }
     }
 
-    /// The pattern `title_bar_drag` used to carry: a `should_move` cell built
-    /// inside `render`, so every frame hands the next one a fresh, zeroed cell.
-    /// Kept as a control — it is what makes the assertions above it meaningful,
-    /// by showing the harness detects the bug when the bug is present.
     struct PerFrameCellHost;
     impl Render for PerFrameCellHost {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -8187,7 +5926,6 @@ mod window_drag_tests {
         point(at.x + px(12.), at.y + px(3.))
     }
 
-    /// Press, let the window redraw — in production the next vsync — then move.
     fn press_repaint_move(vcx: &mut VisualTestContext, at: Point<Pixels>) {
         vcx.update(|window, cx| {
             window.dispatch_event(moved(at, false), cx);
@@ -8201,13 +5939,6 @@ mod window_drag_tests {
         vcx.run_until_parked();
     }
 
-    /// **The regression this file exists for (#221).** A repaint between the
-    /// press and the first drag event must not disarm the hold. It used to: the
-    /// arm lived in an `Rc<Cell<bool>>` rebuilt by every `render`, and the press
-    /// itself schedules a repaint (the row's `on_double_click` makes gpui call
-    /// `window.refresh()` on mouse-down), so a trackpad press — which starts
-    /// sliding tens of milliseconds later, well past the next vsync — almost
-    /// never survived to reach `start_window_move`.
     #[gpui::test]
     #[should_panic(expected = "not implemented")]
     fn the_arm_survives_a_repaint_between_press_and_move(cx: &mut TestAppContext) {
@@ -8216,10 +5947,6 @@ mod window_drag_tests {
         press_repaint_move(&mut vcx, ON_ROW);
     }
 
-    /// The control for the test above: with the old per-frame cell, the identical
-    /// event sequence loses the arm and never reaches `start_window_move`. If this
-    /// one ever starts panicking, the harness has stopped being able to tell the
-    /// bug from the fix and the test above proves nothing.
     #[gpui::test]
     fn a_per_frame_cell_loses_the_arm_to_the_same_repaint(cx: &mut TestAppContext) {
         let window = cx.add_window(|_, _| PerFrameCellHost);
@@ -8227,8 +5954,6 @@ mod window_drag_tests {
         press_repaint_move(&mut vcx, ON_ROW);
     }
 
-    /// The gesture still defers to an actual move, which is what keeps a plain
-    /// click — and the double-click that zooms the window — intact.
     #[gpui::test]
     fn a_press_alone_does_not_move_the_window(cx: &mut TestAppContext) {
         let window = cx.add_window(|_, _| Host);
@@ -8241,10 +5966,6 @@ mod window_drag_tests {
         vcx.run_until_parked();
     }
 
-    /// The other half of giving the arm a longer life: it now has to be *cleared*
-    /// explicitly. A press that is released and then followed by a plain hover
-    /// must not start a window move — with the old per-frame cell the frame
-    /// boundary did this for free.
     #[gpui::test]
     fn a_release_disarms_so_a_later_hover_does_not_drag(cx: &mut TestAppContext) {
         let window = cx.add_window(|_, _| Host);
@@ -8262,13 +5983,6 @@ mod window_drag_tests {
         vcx.run_until_parked();
     }
 
-    /// A panel resize handle must keep its drag. Its hit area runs the panel's
-    /// full height, so the top 40px sit on a stand-in caption row — and gpui's
-    /// hit test walks *past* a non-blocking hitbox, so without `occlude()` the
-    /// press arms the row's window move as well as the resize, and the first
-    /// drag event moves the window instead of resizing the panel. A durable arm
-    /// makes that reliable rather than a race: the handle's own `window.refresh()`
-    /// used to destroy the per-frame cell before the move could land.
     #[gpui::test]
     fn a_press_on_a_resize_handle_does_not_move_the_window(cx: &mut TestAppContext) {
         let window = cx.add_window(|_, _| HandleOverRow { occluded: true });
@@ -8276,10 +5990,6 @@ mod window_drag_tests {
         press_repaint_move(&mut vcx, ON_ROW);
     }
 
-    /// The control for the test above: the same geometry with a plain hitbox
-    /// hands the press to both the handle and the caption row underneath, and
-    /// the window moves. If this stops panicking, the test above is passing for
-    /// some reason other than the `occlude()` it exists to pin.
     #[gpui::test]
     #[should_panic(expected = "not implemented")]
     fn a_handle_without_a_blocking_hitbox_hands_the_press_to_the_row(cx: &mut TestAppContext) {
@@ -8288,10 +5998,6 @@ mod window_drag_tests {
         press_repaint_move(&mut vcx, ON_ROW);
     }
 
-    /// Two stand-in rows on screen at once — the rail's top zone plus an overlay
-    /// header is a real combination — must not share one arm. This is why the
-    /// builder takes an explicit `key` instead of `window.use_state`, whose id
-    /// comes from the *caller's* `CodeLocation` and would be identical for both.
     #[gpui::test]
     fn two_rows_on_screen_keep_separate_arms(cx: &mut TestAppContext) {
         struct TwoRows;
@@ -8316,8 +6022,6 @@ mod window_drag_tests {
 
         let window = cx.add_window(|_, _| TwoRows);
         let mut vcx = VisualTestContext::from_window(window.into(), cx);
-        // Arm the upper row, then hover the lower one without a button held.
-        // A shared arm would fire here; separate arms leave the lower row cold.
         vcx.update(|window, cx| {
             window.dispatch_event(moved(point(px(300.), px(20.)), false), cx);
             window.dispatch_event(down(point(px(300.), px(20.))), cx);
@@ -8338,12 +6042,6 @@ mod tests {
         parse_ssh_option_words,
     };
 
-    /// The restore-side ownership gate. A pane owned by another workspace must
-    /// read as unattachable even while alive — attaching is how one
-    /// workspace's saved ids once silently picked up another's shells (and
-    /// their running agents). A pane with no recorded owner stays attachable
-    /// by anyone: that is the pre-`pane-owner` behavior, and refusing it would
-    /// orphan every pane a legacy daemon is holding.
     #[test]
     fn restore_only_attaches_panes_the_workspace_owns_or_nobody_claims() {
         let ours = crate::core::session::WorkspaceId::new();
@@ -8371,27 +6069,14 @@ mod tests {
         );
     }
 
-    /// A remote window's saved layout can hold a native-SSH pane, whose russh
-    /// session runs in *this* client's daemon rather than the machine's. Its
-    /// saved id must not be matched against the remote's pane list: the two
-    /// daemons number panes independently, so `1` over there is a different
-    /// pane, and restoring it would swap the user's SSH tab for whatever the
-    /// remote happens to be running.
     #[test]
     fn a_native_ssh_leaf_in_a_remote_window_is_not_looked_up_in_the_remote_daemon() {
         assert!(!leaf_shares_the_window_daemon(true, true));
-        // Everything else is the window's own daemon: a shell in a remote
-        // window is a pane over there, and in a local window both kinds are
-        // panes here.
         assert!(leaf_shares_the_window_daemon(true, false));
         assert!(leaf_shares_the_window_daemon(false, true));
         assert!(leaf_shares_the_window_daemon(false, false));
     }
 
-    // The single gate every fork surface consults. All three conditions have to
-    // hold: an agent with a verified fork command, a session id the hooks have
-    // reported, and a local pane — a remote one would shell the *local* agent
-    // and branch the wrong machine's session.
     #[test]
     fn a_fork_needs_a_command_an_id_and_a_local_pane() {
         let session = |fork_label, session_id: Option<&str>, remote| TabAgentSession {
@@ -8414,12 +6099,6 @@ mod tests {
         );
     }
 
-    /// **A pane that is still connecting keeps the agent it is being rebuilt
-    /// from.** Every remote pane spends its first seconds in that state, and a
-    /// save landing in the window — a focus change, a resize, the window
-    /// closing — used to write `agent: null` over the record. Ending that
-    /// workspace's sessions afterwards left nothing to resume *from*, which is
-    /// what made the resume look like it worked only sometimes.
     #[gpui::test]
     fn a_connecting_pane_saves_the_agent_it_is_rebuilding(cx: &mut gpui::TestAppContext) {
         use crate::core::cli_agent::CLIAgent;
@@ -8479,7 +6158,6 @@ mod tests {
 
     #[test]
     fn parses_typed_connect_into_native_profile() {
-        // Bare `user@host:port` (optional `ssh` prefix) → transient profile.
         let p = parse_ssh_connect_input("ssh deploy@10.0.0.5:2222").unwrap();
         assert_eq!(p.profile.host, "10.0.0.5");
         assert_eq!(p.profile.user, "deploy");
@@ -8489,7 +6167,6 @@ mod tests {
 
     #[test]
     fn parses_typed_connect_flags_and_jump() {
-        // Options before and after the target; `-p`/`-l`/`-i`/`-J` all map.
         let p =
             parse_ssh_connect_input("ssh -p 2222 -l dev -i ~/.ssh/id_ed25519 -J 'jump host' host")
                 .unwrap();
@@ -8502,16 +6179,13 @@ mod tests {
         );
         assert_eq!(p.proxy_jump.as_deref(), Some("jump host"));
 
-        // Attached short-flag form (`-p2222`) and `-o User=`/`-o Port=`.
         let p = parse_ssh_connect_input("host -p2222 -o User=deploy -o Port=2200").unwrap();
         assert_eq!(p.profile.user, "deploy");
-        // `-o Port=` wins over an earlier `-p` (last write wins in the -o pass).
         assert_eq!(p.profile.port, 2200);
     }
 
     #[test]
     fn explicit_flags_override_target_userhost() {
-        // `-l` / `-p` override the `user@host:port` on the target.
         let p = parse_ssh_connect_input("ssh me@host:22 -l other -p 2200").unwrap();
         assert_eq!(p.profile.user, "other");
         assert_eq!(p.profile.port, 2200);
@@ -8519,19 +6193,14 @@ mod tests {
 
     #[test]
     fn rejects_bad_typed_connect_lines() {
-        // No host at all.
         assert!(parse_ssh_connect_input("ssh -p 2222").is_err());
-        // A remote command or `--` separator is not a connect line.
         assert!(parse_ssh_connect_input("ssh dev uptime").is_err());
         assert!(parse_ssh_connect_input("ssh -- dev").is_err());
-        // Unbalanced quote.
         assert!(parse_ssh_connect_input("ssh 'host").is_err());
-        // Invalid port.
         assert!(parse_ssh_connect_input("ssh host -p 0").is_err());
     }
 }
 
-/// The shared headless App + Window the UI-level gpui tests drive.
 #[cfg(test)]
 pub(crate) mod test_window {
     use crate::core::config::Config;
@@ -8540,28 +6209,14 @@ pub(crate) mod test_window {
     use gpui::{AppContext, Entity, TestAppContext, VisualTestContext};
 
     pub(crate) fn harness(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
-        // Every keybinding edit a caller makes goes through `update_config`,
-        // which ends in `Config::save()` — a *full* overwrite of `config.json`
-        // at whatever path the config dir resolves to. Unpinned, that is the
-        // developer's real `~/.config/tty7/config.json`, so running those tests
-        // silently reset the user's entire config to `Config::default()` plus
-        // the shortcut recorded there. The test-only `Config::save` now panics
-        // rather than allow that; pin a scratch dir so it doesn't have to.
         crate::core::config::pin_test_config_dir();
 
-        // The pause-to-commit is a real `smol::Timer` (off the deterministic
-        // executor), so waiting on it parks the test thread.
         cx.executor().allow_parking();
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(Config::default());
             crate::ui::keymap::init(cx);
         });
-        // Wrap the app in a `gpui_component::Root` exactly like `main.rs` does:
-        // the settings overlay's search box (and other gpui-component widgets)
-        // reach for `Root` on the window, which panics if the window's first
-        // layer isn't one. `Root::view()` hands the typed app entity back so the
-        // tests still drive `Tty7App` directly.
         let window = cx.add_window(|window, cx| {
             let app =
                 cx.new(|cx| Tty7App::with_session(None, Some(Session::default()), window, cx));
@@ -8584,14 +6239,6 @@ pub(crate) mod test_window {
         (app, vcx)
     }
 
-    /// [`harness`] plus one open tab, for the tests that need the window to have
-    /// something to show. The pane is a [`quiet_test_pane`], and the returned
-    /// stream must stay alive for as long as it: dropping it closes the socket
-    /// and the pane retires.
-    ///
-    /// Cursor blink is turned off here. It is a real 530ms `cx.notify()` on a
-    /// focused pane and would otherwise be the only thing the render-idle
-    /// measurements ever counted.
     #[cfg(unix)]
     pub(crate) fn harness_with_pane(
         cx: &mut TestAppContext,
@@ -8622,10 +6269,6 @@ pub(crate) mod test_window {
     }
 }
 
-/// A native-SSH split inside a *remote* workspace's window runs in this
-/// client's daemon and is deliberately absent from the remote machine's tree —
-/// so a tree-driven tab rebuild has no leaf for it, and has to keep its view
-/// anyway or a running local session is orphaned with nothing on screen.
 #[cfg(all(test, unix))]
 mod ssh_rebuild_gpui_tests {
     use super::test_window::harness_with_pane;
@@ -8638,12 +6281,8 @@ mod ssh_rebuild_gpui_tests {
 
     #[gpui::test]
     fn a_tree_rebuild_keeps_the_native_ssh_split_a_remote_tab_holds(cx: &mut TestAppContext) {
-        // A window with one tab holding remote pane 1 (as far as the window is
-        // concerned; the socketpair plays the daemon).
         let (app, mut vcx, _remote_pane_stream) = harness_with_pane(cx);
 
-        // Bind the window to a remote workspace and split a native-SSH pane
-        // into the tab — the state a remote window with a local SSH split has.
         let remote = WindowView::on_remote(RemoteRef::new(
             RemoteTarget::Alias {
                 alias: "build-box".into(),
@@ -8671,9 +6310,6 @@ mod ssh_rebuild_gpui_tests {
             stream
         });
 
-        // Another client of the remote machine restructured the tab. The
-        // delta's tree names only the remote pane — the SSH leaf was never in
-        // that tree to be named.
         let applied = app.update_in(&mut vcx, |app, window, cx| {
             let tab = TreeTab {
                 id: app.tabs[0].tree_id.get(),
@@ -8715,12 +6351,6 @@ mod ssh_rebuild_gpui_tests {
         });
     }
 
-    /// A remote window's tab that is native-SSH through and through is
-    /// unrepresentable in the machine's tree **forever** — so it must be
-    /// invisible to the diff, not *held*. Held means "spawns are landing,
-    /// wait"; a tab that can never land would make every diff return before
-    /// the ordering and active-tab passes, freezing tab order and activation
-    /// sync for the whole window for as long as the tab exists.
     #[gpui::test]
     fn a_pure_native_ssh_tab_is_invisible_to_the_tree_not_held(cx: &mut TestAppContext) {
         let (app, mut vcx, _remote_pane_stream) = harness_with_pane(cx);
@@ -8741,7 +6371,6 @@ mod ssh_rebuild_gpui_tests {
                 },
             );
             app.workspace = remote_id;
-            // A second tab holding only a native-SSH pane.
             let (ssh_view, stream) = crate::terminal::view::quiet_test_ssh_pane(2, window, cx);
             app.tabs
                 .push(super::Tab::new(Pane::leaf(PaneSlot::Ready(ssh_view))));
@@ -8772,7 +6401,6 @@ mod keybinding_gpui_tests {
     use crate::ui::settings::SettingsSection;
     use gpui::{Entity, TestAppContext, VisualTestContext};
 
-    /// Open Settings → Keybindings and begin capturing `action`.
     fn begin_capture(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, action: &str) {
         let action = action.to_string();
         app.update_in(vcx, |app, window, cx| {
@@ -8782,8 +6410,6 @@ mod keybinding_gpui_tests {
         });
     }
 
-    /// Poll (bounded) until `action` has the expected override in config — the
-    /// commit fires on a real ~650ms timer.
     fn wait_for_binding(vcx: &mut VisualTestContext, action: &str, expected: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -8800,15 +6426,10 @@ mod keybinding_gpui_tests {
         }
     }
 
-    // End-to-end: open Settings → Keybindings, capture a shortcut for New Tab,
-    // and confirm the recorded keystroke is normalized, persisted to config, and
-    // the capture ends. This drives the real interceptor path installed by
-    // `start_recording_key`, not just the pure helpers.
     #[gpui::test]
     fn recording_a_shortcut_writes_the_override_and_ends_capture(cx: &mut TestAppContext) {
         let (app, mut vcx) = harness(cx);
         begin_capture(&app, &mut vcx, "NewTab");
-        // The platform-primary modifier normalizes to `secondary` on write.
         vcx.simulate_keystrokes("secondary-shift-n");
         wait_for_binding(&mut vcx, "NewTab", "secondary-shift-n");
 
@@ -8822,24 +6443,15 @@ mod keybinding_gpui_tests {
         );
     }
 
-    // A two-chord sequence (the tmux-style `ctrl-b x`) records as one binding.
     #[gpui::test]
     fn recording_a_two_chord_sequence_writes_the_full_spec(cx: &mut TestAppContext) {
         let (app, mut vcx) = harness(cx);
         begin_capture(&app, &mut vcx, "CloseActiveTab");
-        // Two chords in quick succession, then the pause commits the sequence.
-        // `secondary-b` is used (not a bare `ctrl-b`) so the recorded spec is
-        // identical on macOS and elsewhere — the primary modifier normalizes to
-        // `secondary` either way.
         vcx.simulate_keystrokes("secondary-b");
         vcx.simulate_keystrokes("x");
         wait_for_binding(&mut vcx, "CloseActiveTab", "secondary-b x");
     }
 
-    // Taking a chord an action holds only as an *extra* default (Alt+Enter, the
-    // second one Insert Newline ships without a table row of its own) displaces
-    // it like any other owner: the chord stops inserting newlines either way, so
-    // the unset has to be written and the takeover said out loud.
     #[gpui::test]
     fn recording_an_extra_default_chord_displaces_its_owner(cx: &mut TestAppContext) {
         let (app, mut vcx) = harness(cx);
@@ -8858,7 +6470,6 @@ mod keybinding_gpui_tests {
         );
     }
 
-    // Esc during capture cancels without touching config.
     #[gpui::test]
     fn escape_cancels_capture_without_writing(cx: &mut TestAppContext) {
         let (app, mut vcx) = harness(cx);
@@ -8879,8 +6490,6 @@ mod keybinding_gpui_tests {
     }
 }
 
-/// The "+" dropdown is a property of the window's *machine* — the whole of
-/// [`Tty7App::refresh_shells`]'s reason to exist.
 #[cfg(test)]
 mod shell_menu_gpui_tests {
     use crate::core::config::Config;
@@ -8891,19 +6500,12 @@ mod shell_menu_gpui_tests {
     use gpui::{AppContext, Entity, TestAppContext, VisualTestContext};
 
     fn harness(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
-        // The window's construction persists a session; without this it would
-        // write the developer's real one.
         crate::core::config::pin_test_config_dir();
-        // The shell probe runs on `HostOps`' own thread pool, off gpui's
-        // executor, so waiting for it parks the test thread.
         cx.executor().allow_parking();
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(Config::default());
             crate::ui::keymap::init(cx);
-            // Switching workspaces rebinds the window's registry entry; the
-            // headless harness opens windows directly, so nothing else installs
-            // it. Empty is the truth here — this window was never registered.
             crate::ui::windows::WindowRegistry::init(cx);
         });
         let window = cx.add_window(|window, cx| {
@@ -8924,8 +6526,6 @@ mod shell_menu_gpui_tests {
         (app, vcx)
     }
 
-    /// Pump both executors until `done`, or give up. The probe crosses back from
-    /// a real thread pool, so `run_until_parked` alone has nothing to wait on.
     fn pump_until(
         app: &Entity<Tty7App>,
         vcx: &mut VisualTestContext,
@@ -8944,7 +6544,6 @@ mod shell_menu_gpui_tests {
         }
     }
 
-    /// A local window fills its menu from this computer, as it always has.
     #[gpui::test]
     fn a_local_window_lists_this_computers_shells(cx: &mut TestAppContext) {
         let (app, mut vcx) = harness(cx);
@@ -8961,12 +6560,6 @@ mod shell_menu_gpui_tests {
         });
     }
 
-    /// **The bug this exists to stop.** A window bound to a machine that isn't
-    /// answering offers *nothing* rather than this computer's shells: every one
-    /// of those rows would spawn a path that only exists here (`/bin/zsh` on a
-    /// box whose zsh is `/usr/bin/zsh`), and the pane would come up as a spawn
-    /// failure. The empty list falls back to the plain "New Tab" entry, which
-    /// the far end resolves with its own default shell.
     #[gpui::test]
     fn an_unreachable_remote_window_offers_no_local_shells(cx: &mut TestAppContext) {
         let (app, mut vcx) = harness(cx);
@@ -8975,7 +6568,6 @@ mod shell_menu_gpui_tests {
             "the local probe never landed"
         );
 
-        // A workspace on a machine nothing in this process has connected to.
         let remote = WindowView::on_remote(RemoteRef::new(
             RemoteTarget::Alias {
                 alias: "build-box".into(),

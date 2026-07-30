@@ -1,28 +1,3 @@
-//! System tray / menu bar status item.
-//!
-//! The tray is the app's face outside the window: on Windows/Linux the icon
-//! flips to an amber-badged attention state the moment any pane's coding
-//! agent blocks on the user (`Waiting`); on macOS the icon is a template
-//! image that stays calm in every state (legible on any bar) — agent status
-//! lives in the tooltip and menu instead. The menu lists every agent pane —
-//! click one to reveal it — plus window/notification/quit controls. Menu
-//! labels are English, matching the native app menus (`ui::theme::set_menus`).
-//!
-//! Platform split (see Cargo.toml for the why):
-//! - macOS / Windows: tauri's `tray-icon` (NSStatusItem / Shell_NotifyIcon),
-//!   in [`native`]. Both are driven by the main-thread event loop gpui
-//!   already pumps, so the backend lives on the foreground executor.
-//! - Linux: `ksni` (StatusNotifierItem over DBus, pure Rust), in [`sni`] —
-//!   `tray-icon`'s Linux backend would drag in GTK + libappindicator, which
-//!   the AppImage doesn't bundle. On desktops without an SNI host the spawn
-//!   fails and the app simply runs without a tray.
-//!
-//! Data flow mirrors the rest of the UI (which polls rather than observes —
-//! see `TerminalView::poll_foreground`): a foreground task snapshots the
-//! agent panes once a second, diffs against the last snapshot, and only
-//! touches the native tray when something changed. Menu clicks come back on
-//! a channel and are applied to the app on the foreground executor.
-
 mod icon;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native;
@@ -38,38 +13,19 @@ use crate::core::cli_agent::AgentStatus;
 use crate::core::config::{Config, NotifyMode};
 use gpui::App;
 
-/// How often the poll loop re-snapshots the app. Agent status itself is
-/// polled into the views on a 300 ms timer; 1 s here keeps the tray a hair
-/// behind the in-window dots at negligible cost.
 const POLL: std::time::Duration = std::time::Duration::from_millis(1000);
 
-/// A menu click, decoded from the platform menu item id and applied to the
-/// app by [`Tty7App::handle_tray_action`] on the foreground executor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TrayAction {
-    /// Bring the window to the front.
     ShowWindow,
-    /// Reveal the pane hosting this agent: switch to its tab, focus the
-    /// leaf, and activate the window. The id is the leaf's gpui entity id —
-    /// resolved against the live tab tree at click time, so a row that
-    /// outlived its pane (menu open across a close) degrades to a no-op.
-    RevealPane {
-        leaf_id: u64,
-    },
-    /// Set the notification policy (the same knob as Settings → Terminal).
+    RevealPane { leaf_id: u64 },
     SetNotifyMode(NotifyMode),
     OpenSettings,
-    /// Force an update check (even with the startup check disabled) and open
-    /// Settings → About, where the result lands.
     CheckForUpdates,
-    /// Plain quit — identical to ⌘Q: the daemon and every session survive.
     Quit,
-    /// Quit *and* shut the daemon down, ending every running session.
-    /// Confirmed with a prompt before anything happens.
     QuitStopSessions,
 }
 
-/// Sort key for the agent list: the pane that needs the user tops the menu.
 pub(crate) fn urgency(status: AgentStatus) -> u8 {
     match status {
         AgentStatus::Waiting => 3,
@@ -79,38 +35,26 @@ pub(crate) fn urgency(status: AgentStatus) -> u8 {
     }
 }
 
-/// One agent pane, as shown in the tray menu.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct AgentRow {
-    /// The hosting leaf's entity id (`EntityId::as_u64`), the reveal key.
     pub leaf_id: u64,
-    /// Which agent — names the row and picks the brand avatar.
     pub agent: crate::core::cli_agent::CLIAgent,
     pub status: AgentStatus,
-    /// Where it's working: the cwd's directory name, plus the git branch
-    /// when known — e.g. "tty7 @ main".
     pub detail: String,
 }
 
-/// Everything the tray renders, diffed once a second against the app.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct TraySnapshot {
-    /// Agent panes, most urgent first (waiting > working > done > idle).
     pub agents: Vec<AgentRow>,
     pub notify_mode: NotifyMode,
 }
 
 impl TraySnapshot {
-    /// Whether any agent is blocked on the user — drives the attention badge
-    /// on Windows/Linux (the macOS icon stays calm; the tooltip and menu
-    /// carry agent status there).
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub(crate) fn attention(&self) -> bool {
         self.agents.iter().any(|a| a.status == AgentStatus::Waiting)
     }
 
-    /// Hover text: a one-line census of the agent panes ("tty7 — 1 waiting,
-    /// 2 working"), or just "tty7" when none are running.
     pub(crate) fn tooltip(&self) -> String {
         let count = |s: AgentStatus| self.agents.iter().filter(|a| a.status == s).count();
         let mut parts = Vec::new();
@@ -131,18 +75,11 @@ impl TraySnapshot {
     }
 }
 
-/// The platform-independent menu shape; each backend translates it 1:1 into
-/// its native menu type, so the layout and labels live in exactly one place
-/// ([`menu_spec`]).
 pub(crate) enum SpecItem {
     Item {
         id: String,
         label: String,
-        /// `Some(_)` renders a checkable item (the notification radio).
         checked: Option<bool>,
-        /// `Some(_)` renders the agent's brand avatar (colored disc + white
-        /// mark + status dot — the tab avatar's menu translation) next to the
-        /// label. The backends rasterize it via [`icon::agent_avatar`].
         avatar: Option<(crate::core::cli_agent::CLIAgent, AgentStatus)>,
     },
     Separator,
@@ -152,9 +89,6 @@ pub(crate) enum SpecItem {
     },
 }
 
-/// Build the menu for a snapshot. Layout: reveal/window on top, then the
-/// live agent panes, then notification policy + settings, then the two quit
-/// flavors — plain quit keeps sessions (like ⌘Q), the second one stops them.
 pub(crate) fn menu_spec(snap: &TraySnapshot) -> Vec<SpecItem> {
     let item = |id: &str, label: String| SpecItem::Item {
         id: id.to_string(),
@@ -164,9 +98,6 @@ pub(crate) fn menu_spec(snap: &TraySnapshot) -> Vec<SpecItem> {
     };
     let mut items = vec![item("show", "Show tty7".into()), SpecItem::Separator];
     for a in &snap.agents {
-        // The avatar (brand disc + status dot) carries the who/state visually,
-        // exactly like the tab chip; the textual suffix repeats the state for
-        // scanability in a text-first menu.
         let state = match a.status {
             AgentStatus::Waiting => " — needs input",
             AgentStatus::Working => " — working",
@@ -191,9 +122,6 @@ pub(crate) fn menu_spec(snap: &TraySnapshot) -> Vec<SpecItem> {
     };
     items.push(SpecItem::Submenu {
         label: "Notifications".into(),
-        // Weakest to strongest, matching Settings → Window & Tabs → Notify on
-        // command finish, which writes the same setting. The two used to run in
-        // opposite directions with different capitalisation.
         items: vec![
             notify("notify:never", "Never", NotifyMode::Never),
             notify("notify:unfocused", "When Unfocused", NotifyMode::Unfocused),
@@ -204,17 +132,10 @@ pub(crate) fn menu_spec(snap: &TraySnapshot) -> Vec<SpecItem> {
     items.push(item("updates", "Check for Updates…".into()));
     items.push(SpecItem::Separator);
     items.push(item("quit", "Quit tty7".into()));
-    // Plain quit leaves the daemon (and every session) running; this one
-    // stops the daemon too. "Daemon" is already in the product vocabulary —
-    // the Help menu ships "Restart Daemon…" — and the confirm prompt spells
-    // out the consequences.
     items.push(item("quit-stop", "Quit and Stop Daemon…".into()));
     items
 }
 
-/// Decode a clicked menu item id back into an action. Ids are assigned in
-/// [`menu_spec`]; unknown ids (never expected) decode to `None` and the
-/// click is dropped.
 pub(crate) fn action_from_id(id: &str) -> Option<TrayAction> {
     match id {
         "show" => Some(TrayAction::ShowWindow),
@@ -248,8 +169,6 @@ mod tests {
         }
     }
 
-    /// Every id the menu builder mints must decode back to an action —
-    /// otherwise a click on that item silently does nothing.
     #[test]
     fn every_menu_id_decodes_to_an_action() {
         fn check(items: &[SpecItem]) {
@@ -274,7 +193,6 @@ mod tests {
             action_from_id("agent:42"),
             Some(TrayAction::RevealPane { leaf_id: 42 })
         );
-        // Garbage after the prefix is dropped, not a panic or a mis-decode.
         assert_eq!(action_from_id("agent:nope"), None);
         assert_eq!(action_from_id("bogus"), None);
     }
@@ -291,8 +209,6 @@ mod tests {
         assert_eq!(TraySnapshot::default().tooltip(), "tty7");
     }
 
-    /// The empty snapshot renders no agent section (no dangling separator),
-    /// and the notification radio reflects the snapshot's mode.
     #[test]
     fn menu_spec_shape() {
         let empty = menu_spec(&TraySnapshot::default());
@@ -315,7 +231,6 @@ mod tests {
                 "Quit and Stop Daemon…"
             ]
         );
-        // No two separators in a row when the agent section is absent.
         assert!(
             !empty
                 .windows(2)
@@ -330,10 +245,6 @@ mod tests {
     }
 }
 
-/// Everything the tray renders, gathered across *every* open window. One icon
-/// represents the whole app, so an agent waiting in a background window has to
-/// show up here — otherwise the tray would silently only ever describe
-/// whichever window happened to open first.
 fn app_snapshot(cx: &mut App) -> TraySnapshot {
     let windows = crate::ui::windows::WindowRegistry::open_windows(cx);
     let mut agents = Vec::new();
@@ -341,8 +252,6 @@ fn app_snapshot(cx: &mut App) -> TraySnapshot {
         let Some(app) = weak.upgrade() else { continue };
         agents.extend(app.read(cx).agent_rows(cx));
     }
-    // Sorted once over the merged list, so the most urgent pane tops the menu
-    // regardless of which window it lives in.
     agents.sort_by_key(|a| std::cmp::Reverse(urgency(a.status)));
     TraySnapshot {
         agents,
@@ -350,12 +259,6 @@ fn app_snapshot(cx: &mut App) -> TraySnapshot {
     }
 }
 
-/// Route a menu click to the window that should handle it.
-///
-/// `RevealPane` carries a leaf's entity id, which belongs to exactly one
-/// window — sending it anywhere else would silently do nothing. Everything
-/// else (Settings, quit, the notify toggle) acts on the app or just needs
-/// *some* window, so it goes to the most recently focused one.
 fn dispatch(action: TrayAction, cx: &mut App) {
     use crate::ui::windows::WindowRegistry;
 
@@ -371,8 +274,6 @@ fn dispatch(action: TrayAction, cx: &mut App) {
     }
     .or_else(|| WindowRegistry::most_recent(cx));
 
-    // No window at all (every one closed while the menu was open): nothing to
-    // act on. Quit is the exception — it must work even then.
     let Some(workspace) = target else {
         if matches!(action, TrayAction::Quit) {
             cx.quit();
@@ -392,25 +293,9 @@ fn dispatch(action: TrayAction, cx: &mut App) {
     });
 }
 
-/// Wire the tray up: one task pumps menu clicks into the app, another polls
-/// the app into the tray. Called once, for the first window (`ui::app`); both
-/// tasks live for the app's lifetime, not any one window's.
-///
-/// `show_tray_icon` is re-read every tick, so the Settings toggle and a
-/// `config.json` hot-reload both take effect within a second — the backend
-/// is dropped (icon removed) when off and re-created when back on.
 pub(crate) fn init(cx: &mut App) {
     let (tx, rx) = smol::channel::unbounded::<TrayAction>();
 
-    // Menu clicks → the app. The platform handler feeds `tx` from wherever
-    // the OS delivers menu events; this task is the only place they touch
-    // gpui state, with a real window + context in hand.
-    //
-    // App-scoped rather than tied to one window's entity: the tray is a single
-    // icon for the whole app and has to outlive any individual window. Each
-    // click picks its own target window (see [`dispatch`]).
-    // The loop ends when every `TrayAction` sender is dropped — i.e. when the
-    // backend goes away. On app shutdown the detached task itself is dropped.
     cx.spawn(async move |cx| {
         while let Ok(action) = rx.recv().await {
             cx.update(|cx| dispatch(action, cx));
@@ -418,22 +303,11 @@ pub(crate) fn init(cx: &mut App) {
     })
     .detach();
 
-    // App → tray poll loop. Owns the backend; dropping it removes the icon.
-    // The backend types are !Send on macOS (NSStatusItem), which is fine on
-    // the foreground executor — exactly where tray-icon requires them.
     cx.spawn(async move |cx| {
         let mut backend: Option<Backend> = None;
-        // Last snapshot actually pushed; `None` forces a push after
-        // (re)creation so a fresh icon never shows a stale menu.
         let mut shown: Option<TraySnapshot> = None;
-        // Creation can fail transiently — on Linux the SNI host may simply
-        // not be on the bus *yet* (tty7 autostarting at login races the
-        // desktop shell / AppIndicator extension) — so a failed create is
-        // retried on a slow backoff before giving up for this enable-cycle:
-        // one attempt every RETRY_EVERY ticks, MAX_ATTEMPTS total. Toggling
-        // the setting off and on re-arms.
         const MAX_ATTEMPTS: u32 = 10;
-        const RETRY_EVERY: u32 = 30; // ticks ≈ seconds
+        const RETRY_EVERY: u32 = 30;
         let mut attempts = 0u32;
         let mut cooldown = 0u32;
         loop {

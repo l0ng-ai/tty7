@@ -1,13 +1,3 @@
-//! Pane-contextual SSH loopback forward controls.
-//!
-//! Settings owns persistent preferences; this module owns the live forwarding
-//! dashboard that only makes sense beside a concrete SSH pane.
-//!
-//! The dashboard is a **band in the detail panel's Info tab**, not a popover over
-//! the terminal: a pane's forwards are one of its facts, so they belong beside its
-//! cwd, processes and ports rather than in a floating panel of their own. The
-//! rendering helpers here are called from `right_panel`'s Info body.
-
 use gpui::{AnyElement, Context, Div, Entity, FontWeight, Stateful, div, prelude::*, px};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
@@ -18,11 +8,6 @@ use crate::terminal::view::TerminalView;
 use crate::ui::app::{CONTENT_INSET, Tty7App};
 
 impl Tty7App {
-    /// The in-pane native-SSH notice (PRD FR-E4): a dead pane shows a
-    /// bottom-centered "Disconnected — ⌘⇧R to reconnect" bar. Live/connecting
-    /// panes show nothing here — the tab status dot already carries the phase and
-    /// the daemon prints connect progress/failures into the buffer. Returns
-    /// `None` for a non-native or still-alive pane.
     pub(crate) fn render_ssh_status_strip(
         &self,
         leaf: &Entity<TerminalView>,
@@ -42,11 +27,6 @@ impl Tty7App {
 
         let theme = cx.theme();
 
-        // The failure reason is already printed into the terminal buffer
-        // (top-left, in red) by the daemon, so a top-left overlay would sit right
-        // on top of it. Dock the (actionable) reconnect notice at the
-        // bottom-center — clear of the output, a familiar "connection lost,
-        // reconnect" spot.
         let bar = h_flex()
             .occlude()
             .items_center()
@@ -93,9 +73,6 @@ impl Tty7App {
         )
     }
 
-    /// The in-pane "confirm close of a live SSH session" sheet (PRD FR-E3),
-    /// centered over the terminal. Enter/Close closes; Esc/Keep cancels. Returns
-    /// `None` when no confirmation is pending.
     pub(crate) fn render_ssh_close_confirm_overlay(
         &self,
         cx: &mut Context<Self>,
@@ -157,14 +134,6 @@ impl Tty7App {
         )
     }
 
-    /// The Info tab's **Forwards** band: what this pane routes across its
-    /// connection, sitting under Ports, which says what it listens on locally.
-    /// `None` for anything but a connected native-SSH pane — the band doesn't
-    /// exist rather than showing an empty section on every local shell.
-    ///
-    /// The rows are the daemon's list, re-fetched on the Info tab's own poll (see
-    /// `right_panel::sync_procs`), so a forward that dies out from under us turns
-    /// red here without anyone clicking anything.
     pub(crate) fn forwards_section(
         &self,
         pane_id: Option<u64>,
@@ -172,8 +141,6 @@ impl Tty7App {
     ) -> Option<AnyElement> {
         let pane_id = pane_id?;
         let open = self.loopback_panel.form_pane_id == Some(pane_id);
-        // The `+` toggles the add form open. It's the band's only control, so it
-        // takes the header's trailing slot rather than a row of its own.
         let add = crate::ui::tab_strip::chrome_tile(
             Button::new(("ssh-forward-add-toggle", pane_id))
                 .icon(Icon::empty().path("icons/plus.svg").size(px(13.))),
@@ -199,8 +166,6 @@ impl Tty7App {
             .collect();
 
         let mono = cx.theme().mono_font_family.clone();
-        // Rows inset themselves rather than the list, so the hover capsule bleeds
-        // into the same 12px gutter the Changes rows use.
         let mut list = v_flex().px(px(CONTENT_INSET - 4.)).py(px(2.)).gap(px(1.));
         for forward in &managed {
             list = list.child(self.forward_row(forward, &mono, cx));
@@ -209,8 +174,6 @@ impl Tty7App {
         Some(
             v_flex()
                 .child(self.panel_subtitle("Forwards", true, Some(add), cx))
-                // The empty line is suppressed while the form is open: the form
-                // *is* the answer to "nothing here yet".
                 .when(managed.is_empty() && !open, |this| {
                     this.child(
                         div()
@@ -227,11 +190,6 @@ impl Tty7App {
         )
     }
 
-    /// One forward, in the Info list's language: a mono kind letter, the bound
-    /// port as the same chip a listening port gets, and the destination trailing
-    /// it. Click to load it into the form (edit = re-establish); the `×` revealed
-    /// on hover tears it down. A description, where one was typed, takes a second
-    /// muted line — the only thing on the row that isn't derivable from the rule.
     fn forward_row(
         &self,
         forward: &ManagedForward,
@@ -247,16 +205,11 @@ impl Tty7App {
             SshForwardKind::Dynamic => "D",
         };
         let errored = matches!(forward.status, ForwardStatus::Error(_));
-        // A bind host worth naming is one that isn't the loopback default —
-        // `0.0.0.0` means "reachable from the network", which the row must not
-        // hide behind a bare port number.
         let bind = if matches!(forward.bind_host.as_str(), "127.0.0.1" | "localhost" | "") {
             forward.bind_port.to_string()
         } else {
             format!("{}:{}", forward.bind_host, forward.bind_port)
         };
-        // The tail carries the error where there is one: an error is what you
-        // need to read, and the destination is still on the row you clicked from.
         let tail = match &forward.status {
             ForwardStatus::Error(msg) => msg.clone(),
             ForwardStatus::Listening => match forward.kind {
@@ -324,8 +277,6 @@ impl Tty7App {
                     }),
             )
             .child(
-                // Revealed on row hover — the same progressive disclosure the
-                // sidebar's rows use, so a list of forwards stays a list.
                 div()
                     .flex_shrink_0()
                     .opacity(0.)
@@ -352,14 +303,9 @@ impl Tty7App {
             )
     }
 
-    /// The add/edit form, inline under the band. The 460px three-column layout the
-    /// old popover used doesn't survive a 260px column, so the fields stack: kind,
-    /// then one line each for bind and target, each `host : port`.
     fn forward_form(&self, pane_id: u64, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
-        // The form is inside the right panel, i.e. on the sunk rail — not on the
-        // settings sheet the segmented control otherwise assumes.
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let kind = self.loopback_panel.mf_kind;
         let editing = self.loopback_panel.mf_editing.is_some();
@@ -368,11 +314,8 @@ impl Tty7App {
             SshForwardKind::Remote => 1,
             SshForwardKind::Dynamic => 2,
         };
-        // Dynamic (SOCKS) forwards have no fixed target — grey the target line.
         let needs_target = kind != SshForwardKind::Dynamic;
 
-        // `host : port` on one line, the port sized to four digits and the host
-        // taking what's left.
         let pair = |label: &'static str,
                     host: &Entity<gpui_component::input::InputState>,
                     port: &Entity<gpui_component::input::InputState>| {

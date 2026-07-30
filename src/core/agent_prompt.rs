@@ -1,17 +1,5 @@
-//! Prompt builders that feed terminal context *back into* a running CLI coding
-//! agent — the review-prompt / selection-range-prompt idea, sized to tty7:
-//! take what the user is looking at (a selection in some
-//! pane, the repo's `git diff`) and phrase it as one self-contained prompt to
-//! paste into the agent's PTY. Pure string builders, unit-tested; the UI layer
-//! owns finding the agent pane and writing the bytes.
-
-/// Cap on embedded context (selection or diff) so a pathological selection or
-/// a giant diff can't flood the agent's input buffer. Anything longer is
-/// truncated with an explicit note — the agent can always ask for more.
 const MAX_CONTEXT_BYTES: usize = 24 * 1024;
 
-/// Truncate `text` to [`MAX_CONTEXT_BYTES`] on a char boundary, appending a
-/// note when anything was cut.
 fn capped(text: &str) -> String {
     if text.len() <= MAX_CONTEXT_BYTES {
         return text.to_string();
@@ -26,8 +14,6 @@ fn capped(text: &str) -> String {
     )
 }
 
-/// A prompt asking the agent to look at terminal output the user selected
-/// (a build error, a stack trace, a failing test). `cwd` locates the context.
 pub fn build_selection_prompt(selection: &str, cwd: Option<&str>) -> Option<String> {
     let selection = selection.trim_end();
     if selection.trim().is_empty() {
@@ -45,9 +31,6 @@ pub fn build_selection_prompt(selection: &str, cwd: Option<&str>) -> Option<Stri
     Some(prompt)
 }
 
-/// A prompt asking the agent to review the working tree's diff. `diff` is the
-/// combined `git diff` (+ `git diff --cached`) output, embedded so the agent
-/// needn't re-run it; an empty diff yields `None` (nothing to review).
 pub fn build_diff_review_prompt(diff: &str, cwd: Option<&str>) -> Option<String> {
     let diff = diff.trim_end();
     if diff.trim().is_empty() {
@@ -67,11 +50,6 @@ pub fn build_diff_review_prompt(diff: &str, cwd: Option<&str>) -> Option<String>
     Some(prompt)
 }
 
-/// The bytes that deliver `prompt` into an agent's PTY: a bracketed paste (so
-/// multi-line prompts insert as one block instead of submitting line by line —
-/// every recognized agent's TUI enables bracketed paste), followed by CR to
-/// submit. ESC bytes inside the prompt are stripped, same as the clipboard
-/// paste path, so embedded content can't fake the paste terminator.
 pub fn submit_bytes(prompt: &str) -> Vec<u8> {
     let mut bytes = b"\x1b[200~".to_vec();
     bytes.extend(prompt.bytes().filter(|&b| b != 0x1b));
@@ -90,7 +68,6 @@ mod tests {
         assert!(p.contains("error[E0308]"));
         assert!(p.contains("/work/tty7"));
         assert!(p.contains("```"));
-        // Empty / whitespace selections build nothing.
         assert_eq!(build_selection_prompt("   \n", None), None);
     }
 
@@ -115,7 +92,6 @@ mod tests {
         let bytes = submit_bytes("fix this\nplease");
         assert!(bytes.starts_with(b"\x1b[200~"));
         assert!(bytes.ends_with(b"\x1b[201~\r"));
-        // Embedded ESC can't terminate the paste early.
         let sneaky = submit_bytes("a\x1b[201~; rm -rf /\nb");
         let inner = &sneaky[6..sneaky.len() - 7];
         assert!(!inner.contains(&0x1b));

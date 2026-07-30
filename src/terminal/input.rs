@@ -1,32 +1,14 @@
-//! Keyboard input for the terminal view: translating GPUI keystrokes into the
-//! byte sequences a PTY expects, and bridging the platform IME (NSTextInputClient
-//! on macOS) so CJK and dead-key input composes and commits into the terminal.
-
 use alacritty_terminal::term::TermMode;
 use gpui::{App, Bounds, InputHandler, Pixels, UTF16Selection, Window};
 
 use super::view::TerminalView;
-// Only the macOS Option/Meta split reads config from this file; elsewhere the import
-// would be dead.
 #[cfg(target_os = "macos")]
 use crate::core::config::Config;
 
-/// The Kitty keyboard-protocol progressive-enhancement flags currently active in
-/// the terminal, distilled from `TermMode`. We read them straight off the client's
-/// local `Term` (which the reader thread advances over *all* child output, so its
-/// mode bits already reflect every `CSI = flags u` push/pop the app sent — the fork
-/// runs that state machine for us). Only the bits the encoder actually consults are
-/// kept, so the struct stays small and `Copy`.
 #[derive(Clone, Copy, Default)]
 pub(super) struct KittyFlags {
-    /// `DISAMBIGUATE_ESC_CODES` (level 1): escape otherwise-ambiguous keys
-    /// (Tab vs Ctrl+I, Esc, Ctrl+letter, …) as `CSI … u`.
     disambiguate: bool,
-    /// `REPORT_ALL_KEYS_AS_ESC`: encode *every* key as `CSI … u`, including plain
-    /// text keys — not just the ambiguous ones.
     report_all_keys: bool,
-    /// `REPORT_ASSOCIATED_TEXT`: include the produced text as a third `CSI u`
-    /// field, so full-mode apps still receive the character.
     report_text: bool,
 }
 
@@ -39,33 +21,11 @@ impl KittyFlags {
         }
     }
 
-    /// Whether any level of the protocol is active (so the encoder should run).
     pub(super) fn active(self) -> bool {
         self.disambiguate || self.report_all_keys
     }
 }
 
-/// Reshape a keystroke according to the macOS Option-key policy, before any
-/// encoding runs. macOS gives Option two jobs that a terminal can't serve at
-/// once: the OS composes a special character (Option+B types `∫`, delivered in
-/// `key_char`), while Meta bindings need an ESC-prefixed chord (Option+B →
-/// `ESC b`, readline's backward-word). `Config::macos_option_as_alt` picks:
-///
-/// * **On** — the chord is Meta: `key_char` is replaced with the plain key
-///   (uppercased under Shift, matching xterm's `metaSendsEscape` output), so
-///   the legacy encoder's Alt branch emits `ESC` + the base character instead
-///   of `ESC` + the composed one.
-/// * **Off** (default) — the chord is text input: the alt bit is dropped so the
-///   composed character is sent bare. (Without this, the legacy encoder bolts
-///   an ESC prefix onto the composed char — `ESC ∫` — a sequence that is wrong
-///   under either reading; and the prompt editor swallows the chord entirely.)
-///
-/// Only Option chords that produce a single text key are reshaped: named keys
-/// (arrows, Enter, …) and Ctrl/Cmd combinations keep their existing encodings
-/// on both settings. Returns `None` when the keystroke needs no reshaping, so
-/// callers only clone on the affected chords. Callers gate on macOS — the
-/// composed-character split doesn't exist elsewhere — but the function itself
-/// is platform-neutral so it can be tested everywhere.
 pub(super) fn reshape_option_keystroke(
     ks: &gpui::Keystroke,
     option_as_alt: bool,
@@ -75,30 +35,23 @@ pub(super) fn reshape_option_keystroke(
         return None;
     }
     if option_as_alt {
-        // Meta semantics: the byte after ESC must be the key itself. Only
-        // single-character keys compose; named keys already encode off `key`.
         let mut chars = ks.key.chars();
         let base = chars.next()?;
         if chars.next().is_some() {
             return None;
         }
-        // gpui reports shifted letters as a lowercase key + the shift bit;
-        // Meta follows the shifted character (Option+Shift+B → `ESC B`).
         let ch = if m.shift {
             base.to_uppercase().to_string()
         } else {
             base.to_string()
         };
         if ks.key_char.as_deref() == Some(ch.as_str()) {
-            return None; // already the base character — nothing to reshape
+            return None;
         }
         let mut out = ks.clone();
         out.key_char = Some(ch);
         Some(out)
     } else {
-        // macOS convention: the chord is ordinary text input. A chord that
-        // composed no printable text (named keys, Enter's "\n") stays a real
-        // Alt chord — dropping alt there would break Alt+arrow and friends.
         let ch = ks.key_char.as_deref()?;
         if ch.is_empty() || ch.chars().any(|c| c < '\u{20}' || c == '\u{7f}') {
             return None;
@@ -109,37 +62,6 @@ pub(super) fn reshape_option_keystroke(
     }
 }
 
-/// True when a keystroke is ordinary text that macOS should deliver through the
-/// input context (`insertText:` → `replace_text_in_range` → `commit_text`)
-/// rather than the raw `key_char` path.
-///
-/// gpui derives `key_char` by running the event's *virtual keycode* back through
-/// the current layout (`chars_for_modified_key` in its macOS backend); it never
-/// reads the event's Unicode payload. That is fine for a physical keyboard, where
-/// the keycode is the truth, but wrong for any event whose text lives only in the
-/// payload — notably remote-control apps, which synthesize keystrokes as
-/// `CGEventCreateKeyboardEvent(src, 0, …)` + `CGEventKeyboardSetUnicodeString()`.
-/// Keycode 0 is `a`, so every remotely typed character arrived as `a`.
-///
-/// gpui already diverts printable keys to the input context, but only while a
-/// composing input source is active (`is_ime_input_source_active`), so the bug
-/// appeared and vanished depending on which input method was selected — and the
-/// plain ABC layout, the macOS default, always lost the text. Declining the key
-/// here instead makes the IME the single delivery path for text on macOS: gpui
-/// falls through to `handleEvent:`, and the Unicode payload survives.
-///
-/// Chords are deliberately excluded: Ctrl/Cmd/Fn belong to the encoders below,
-/// and Option is owned by [`reshape_option_keystroke`]'s Meta policy.
-///
-/// REPORT_ALL_KEYS_AS_ESC is excluded too: it asks for every key as
-/// `CSI <code>;<mods>[;<text>]u`, and the IME path terminates in
-/// `write_gap_text`, which writes raw UTF-8 with no Kitty awareness. Under that
-/// mode text keys must stay on the [`keystroke_to_bytes`] path so they get
-/// encoded. Disambiguate-only sessions are unaffected — [`encode_kitty`]
-/// declines unmodified text keys there, so the IME route is equivalent.
-///
-/// Compiled under `test` on every platform so the routing rule is covered by
-/// CI everywhere, not just on the macOS runner.
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn defer_to_ime(ks: &gpui::Keystroke, kitty: KittyFlags) -> bool {
     if kitty.report_all_keys {
@@ -154,41 +76,13 @@ pub(super) fn defer_to_ime(ks: &gpui::Keystroke, kitty: KittyFlags) -> bool {
         .is_some_and(|ch| !ch.is_empty() && ch.chars().all(|c| c >= '\u{20}' && c != '\u{7f}'))
 }
 
-/// Whether an Option chord must be kept away from the IME so the Meta policy in
-/// [`reshape_option_keystroke`] can claim it.
-///
-/// macOS counts ⌥-chords as printable text — ⌥B composes `∫` — so while a CJK input
-/// source is active gpui routes them to the IME before the key handler ever runs. The
-/// IME commits the composed character and swallows the event, and Option-as-Meta
-/// silently does nothing (#177). This is the predicate
-/// [`TerminalInputHandler::prefers_ime_for_printable_keys`] answers `false` on.
-///
-/// Only ⌥ alone (optionally with Shift) counts: ⌘ chords are app shortcuts and Ctrl
-/// chords already bypass the IME upstream, and both keep their existing routing.
-///
-/// With the setting off the chord is text input and the IME is the right owner — it is
-/// what makes dead keys (⌥E then E → `é`) compose at all — so this returns `false` and
-/// nothing changes.
-///
-/// Compiled under `test` on every platform so CI covers the rule everywhere, not just
-/// on the macOS runner.
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn meta_chord_bypasses_ime(ks: &gpui::Keystroke, option_as_alt: bool) -> bool {
     let m = &ks.modifiers;
     option_as_alt && m.alt && !m.platform && !m.control
 }
 
-/// Translate a GPUI keystroke into the bytes a PTY expects.
-///
-/// When the app has enabled the Kitty keyboard protocol (`kitty.active()`) we try
-/// the `CSI u` encoder first; anything it declines to encode (plain text keys at the
-/// disambiguate level, keys it doesn't special-case) falls through to the *unchanged*
-/// legacy path. So with the protocol off — the overwhelmingly common case — the
-/// output is byte-for-byte identical to before.
 pub(super) fn keystroke_to_bytes(ks: &gpui::Keystroke, kitty: KittyFlags) -> Option<Vec<u8>> {
-    // Cmd (platform) chords are app-shortcut territory, resolved before we get here;
-    // never Kitty-encode them, so their behavior is unchanged whether or not the
-    // protocol is on.
     if kitty.active() && !ks.modifiers.platform {
         if let Some(bytes) = encode_kitty(ks, kitty) {
             return Some(bytes);
@@ -197,17 +91,8 @@ pub(super) fn keystroke_to_bytes(ks: &gpui::Keystroke, kitty: KittyFlags) -> Opt
     legacy_keystroke_to_bytes(ks)
 }
 
-/// Bytes for a Tab / Shift-Tab press. These keys reach the PTY through the
-/// `SendTab` / `SendBackTab` actions (not `on_key_down`), so the Kitty encoding
-/// lives here rather than in [`encode_kitty`]. Mirrors the encoder's rule for the
-/// legacy control keys: plain unmodified Tab stays legacy `\t` even under
-/// DISAMBIGUATE (so a shell survives a crashed TUI leaving the mode on); it
-/// becomes `CSI 9 u` only when Shift makes it ambiguous or REPORT_ALL_KEYS_AS_ESC
-/// escapes every key. Back-tab keeps its legacy `CSI Z` form when the protocol is
-/// off.
 pub(super) fn tab_bytes(shift: bool, kitty: KittyFlags) -> Vec<u8> {
     if kitty.active() && (shift || kitty.report_all_keys) {
-        // Shift adds the modifier subfield (mods = 1 + shift = 2).
         if shift {
             b"\x1b[9;2u".to_vec()
         } else {
@@ -220,22 +105,8 @@ pub(super) fn tab_bytes(shift: bool, kitty: KittyFlags) -> Vec<u8> {
     }
 }
 
-/// Kitty keyboard-protocol (`CSI u`) encoder. Covers the DISAMBIGUATE_ESC_CODES
-/// level well, plus enough of REPORT_ALL_KEYS_AS_ESC / REPORT_ASSOCIATED_TEXT to be
-/// usable at the full level. Returns `None` for keys it deliberately leaves to the
-/// legacy path — chiefly plain text keys at the disambiguate level, which must still
-/// be sent as raw UTF-8.
-///
-/// Spec: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>
-///
-/// TODO: REPORT_EVENT_TYPES (press/repeat/release event-type subfield) and
-/// REPORT_ALTERNATE_KEYS (shifted / base-layout alternate key codes) are not encoded
-/// yet — we report key *presses* at the primary code only. That's a safe subset:
-/// apps degrade to press-only behavior rather than misbehaving.
 fn encode_kitty(ks: &gpui::Keystroke, kitty: KittyFlags) -> Option<Vec<u8>> {
     let m = &ks.modifiers;
-    // Modifier bitmask per spec: value = 1 + shift(1) + alt(2) + ctrl(4) + super(8).
-    // Super (Cmd) is intentionally excluded — platform chords never reach here.
     let mut mods = 1u32;
     if m.shift {
         mods += 1;
@@ -247,18 +118,10 @@ fn encode_kitty(ks: &gpui::Keystroke, kitty: KittyFlags) -> Option<Vec<u8>> {
         mods += 4;
     }
 
-    // Escape is disambiguated to `CSI 27 u` whenever the protocol is active — that
-    // is the whole point of DISAMBIGUATE_ESC_CODES (tell a plain Esc apart from an
-    // escape-sequence introducer).
     if ks.key.as_str() == "escape" {
         return Some(csi_u(27, mods, None));
     }
 
-    // Enter / Tab / Backspace are the three legacy control keys the spec keeps as
-    // plain `\r` / `\t` / 0x7f under DISAMBIGUATE alone, so a shell stays usable if
-    // a crashed app leaves the mode on (typing `reset⏎` must still send a real CR).
-    // They escalate to `CSI u` only when a modifier makes them ambiguous, or under
-    // REPORT_ALL_KEYS_AS_ESC (which reports *every* key as an escape code).
     let legacy_ctrl_code = match ks.key.as_str() {
         "enter" => Some(13u32),
         "tab" => Some(9),
@@ -267,21 +130,15 @@ fn encode_kitty(ks: &gpui::Keystroke, kitty: KittyFlags) -> Option<Vec<u8>> {
     };
     if let Some(code) = legacy_ctrl_code {
         if mods == 1 && !kitty.report_all_keys {
-            return None; // unmodified at the disambiguate level → legacy path
+            return None;
         }
         return Some(csi_u(code, mods, None));
     }
 
-    // Functional keys encoded in the legacy CSI layout (letter- or tilde-suffixed).
-    // The Kitty protocol keeps these forms and just adds the modifier subfield.
     if let Some(seq) = kitty_functional(ks.key.as_str(), mods) {
         return Some(seq);
     }
 
-    // Text-producing keys. At the disambiguate level these are only escaped when a
-    // Ctrl/Alt modifier makes them ambiguous (e.g. Ctrl+I vs Tab); otherwise we
-    // return None so the legacy path sends the raw character. With
-    // REPORT_ALL_KEYS_AS_ESC, every text key is escaped.
     let modified = m.control || m.alt;
     if modified || kitty.report_all_keys {
         if let Some(code) = text_key_code(ks) {
@@ -293,9 +150,6 @@ fn encode_kitty(ks: &gpui::Keystroke, kitty: KittyFlags) -> Option<Vec<u8>> {
     None
 }
 
-/// Build a `CSI <code> ; <mods> [; <text>] u` sequence. The modifier subfield is
-/// omitted when it's the default (1) and there's no text; when text is present the
-/// (possibly-default) modifier subfield must be kept so the text lands in field 3.
 fn csi_u(code: u32, mods: u32, text: Option<&[u32]>) -> Vec<u8> {
     let mut s = format!("\x1b[{code}");
     match text {
@@ -310,10 +164,6 @@ fn csi_u(code: u32, mods: u32, text: Option<&[u32]>) -> Vec<u8> {
     s.into_bytes()
 }
 
-/// Kitty encoding for the CSI-layout functional keys (arrows / Home / End as
-/// `CSI [1;mods] letter`, Insert / Delete / Page keys as `CSI n[;mods] ~`). Returns
-/// `None` for keys handled elsewhere. With no modifiers these collapse to exactly
-/// the legacy forms, so unmodified navigation is unchanged.
 fn kitty_functional(key: &str, mods: u32) -> Option<Vec<u8>> {
     let letter = match key {
         "up" => Some('A'),
@@ -350,9 +200,6 @@ fn kitty_functional(key: &str, mods: u32) -> Option<Vec<u8>> {
     None
 }
 
-/// The primary Kitty key code for a text-producing key: the Unicode codepoint of the
-/// key's *unshifted* value (lowercased for ASCII letters), per the spec. `None` for
-/// multi-character named keys (which aren't single text keys).
 fn text_key_code(ks: &gpui::Keystroke) -> Option<u32> {
     match ks.key.as_str() {
         "space" => Some(0x20),
@@ -360,24 +207,15 @@ fn text_key_code(ks: &gpui::Keystroke) -> Option<u32> {
             let mut chars = key.chars();
             let c = chars.next()?;
             if chars.next().is_some() {
-                return None; // a multi-char key name, not a single text key
+                return None;
             }
             Some(c.to_ascii_lowercase() as u32)
         }
     }
 }
 
-/// The associated text (field 3) for REPORT_ASSOCIATED_TEXT: the codepoints of the
-/// character(s) the key would produce, or `None` when it produces none (e.g. a
-/// control chord) so the field is omitted.
 fn associated_text(ks: &gpui::Keystroke) -> Option<Vec<u32>> {
     let ch = ks.key_char.as_deref()?;
-    // Drop control codes: the Kitty spec requires the associated-text field to
-    // contain no control characters — "code points below U+0020 and codepoints in
-    // the C0 and C1 blocks". That's C0 (< 0x20) plus DEL (0x7f) and the C1 block
-    // (0x80..=0x9f); leaving those in would emit a control codepoint a conformant
-    // receiver must reject. A control chord's "char" carries no meaningful text
-    // anyway, so filtering them just omits the field.
     let cps: Vec<u32> = ch
         .chars()
         .map(|c| c as u32)
@@ -386,13 +224,10 @@ fn associated_text(ks: &gpui::Keystroke) -> Option<Vec<u32>> {
     (!cps.is_empty()).then_some(cps)
 }
 
-/// The legacy (pre-Kitty) keystroke encoding. Untouched from the original
-/// `keystroke_to_bytes` body, so behavior with the Kitty protocol off is unchanged.
 fn legacy_keystroke_to_bytes(ks: &gpui::Keystroke) -> Option<Vec<u8>> {
     let m = &ks.modifiers;
     let key = ks.key.as_str();
 
-    // Control combinations → C0 control bytes.
     if m.control && !m.platform {
         let b = match key {
             "space" | "2" => Some(0x00),
@@ -428,11 +263,6 @@ fn legacy_keystroke_to_bytes(ks: &gpui::Keystroke) -> Option<Vec<u8>> {
             _ => None,
         };
         if let Some(b) = b {
-            // Alt (Meta) held with the Ctrl chord prefixes ESC, matching xterm's
-            // metaSendsEscape (default on) and the Alt handling in the special-key
-            // and printable branches below — so `Ctrl+Alt+c` sends `\x1b\x03`, not a
-            // bare `\x03` that's indistinguishable from plain Ctrl+C. Without this,
-            // `M-C-<key>` bindings (Emacs, readline, tmux) silently lose the Meta bit.
             if m.alt {
                 return Some(vec![0x1b, b]);
             }
@@ -440,7 +270,6 @@ fn legacy_keystroke_to_bytes(ks: &gpui::Keystroke) -> Option<Vec<u8>> {
         }
     }
 
-    // Named / special keys.
     let seq: Option<&[u8]> = match key {
         "enter" => Some(b"\r"),
         "tab" => Some(b"\t"),
@@ -459,7 +288,6 @@ fn legacy_keystroke_to_bytes(ks: &gpui::Keystroke) -> Option<Vec<u8>> {
         _ => None,
     };
     if let Some(seq) = seq {
-        // Alt + special key → ESC prefix.
         if m.alt {
             let mut v = vec![0x1b];
             v.extend_from_slice(seq);
@@ -468,7 +296,6 @@ fn legacy_keystroke_to_bytes(ks: &gpui::Keystroke) -> Option<Vec<u8>> {
         return Some(seq.to_vec());
     }
 
-    // Printable text. Ignore when Cmd is held (app shortcut territory).
     if m.platform {
         return None;
     }
@@ -485,16 +312,8 @@ fn legacy_keystroke_to_bytes(ks: &gpui::Keystroke) -> Option<Vec<u8>> {
     None
 }
 
-/// Bridges the platform IME (NSTextInputClient on macOS) to the terminal.
-///
-/// Without this, a CJK input method's composed text is never delivered: pinyin
-/// keystrokes leak through as raw latin and the committed characters go nowhere.
-/// `prefers_ime_for_printable_keys` is the crucial bit — it tells GPUI to route
-/// printable keys to the IME first when a non-ASCII input source is active, so
-/// composition actually starts.
 pub struct TerminalInputHandler {
     view: gpui::Entity<TerminalView>,
-    /// Cursor cell bounds in window coordinates, for placing the candidate window.
     cursor_bounds: Option<Bounds<Pixels>>,
 }
 
@@ -596,17 +415,9 @@ impl InputHandler for TerminalInputHandler {
     }
 
     fn apple_press_and_hold_enabled(&mut self) -> bool {
-        // A terminal wants auto-repeat, not the accent palette: holding `j` in
-        // vim scrolls, it does not offer `ĵ`. This used to be moot because
-        // `on_key_down` consumed printable keys before gpui consulted it; now
-        // that text defers to the IME (see `defer_to_ime`), gpui reaches its
-        // held-key branch, and answering `false` there makes it repeat the
-        // character instead of handing the key to press-and-hold.
         false
     }
 
-    // `keystroke` only feeds the macOS Option/Meta split; elsewhere Alt already carries
-    // Meta and never reaches an IME.
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     fn prefers_ime_for_printable_keys(
         &mut self,
@@ -614,48 +425,16 @@ impl InputHandler for TerminalInputHandler {
         window: &mut Window,
         cx: &mut App,
     ) -> bool {
-        // An Option chord under Option-as-Meta belongs to `reshape_option_keystroke`,
-        // not the IME — see `meta_chord_bypasses_ime`. Answering per keystroke is why
-        // tty7 carries a gpui patch: upstream asks this once per view, with no key in
-        // hand, so it cannot say "IME for text, but not for this chord".
         #[cfg(target_os = "macos")]
         if meta_chord_bypasses_ime(keystroke, cx.global::<Config>().macos_option_as_alt) {
             return false;
         }
-        // REPORT_ALL_KEYS_AS_ESC wants every key as `CSI <code>;<mods>[;<text>]u`,
-        // which only `keystroke_to_bytes` produces — the IME path commits raw
-        // UTF-8. Keep printable keys on the dispatch path so they get encoded,
-        // matching the same gate in `on_key_down`. CJK composition and "escape
-        // every key" are mutually exclusive by construction; an app that asks
-        // for the latter gets it.
         if self.view.read(cx).kitty_flags().report_all_keys {
             return false;
         }
-        // While a multi-key keybinding is mid-sequence — e.g. the tmux preset's
-        // `ctrl-b` prefix is held pending — the next key belongs to the keymap,
-        // not the IME. macOS otherwise diverts printable keys straight to the IME
-        // when a CJK input source is active (see `query_prefers_ime_for_printable_keys`
-        // in gpui's macOS backend), so `ctrl-b x` would type an `x` and let the
-        // prefix time out instead of completing the sequence. Declining IME here
-        // lets the keystroke reach `dispatch_key` and finish the chord; when no
-        // sequence is pending this is a no-op, so normal CJK composition is
-        // unaffected.
         if window.has_pending_keystrokes() {
             return false;
         }
-        // Route printable keys to the IME so CJK composes. Whether the committed
-        // text lands in the terminal or the search query is decided by focus in
-        // `input_text` — so opening the search bar no longer disables CJK input in
-        // the terminal, and the search field composes too.
-        //
-        // Linux exception: gpui's IBus integration does not reliably commit plain
-        // ASCII back through `replace_text_in_range`, so forcing IME routing here
-        // swallows ordinary letters — the key never reaches the terminal at all
-        // (Enter/Tab/arrows still work because they bypass the IME as non-printable
-        // keys). Until that gpui path handles pass-through ASCII, keep printable
-        // keys on the direct `on_key_down`/`key_char` path on Linux. Trade-off:
-        // CJK composition is disabled on Linux for now (Linux support is still
-        // experimental); ASCII typing is restored.
         !cfg!(target_os = "linux")
     }
 }
@@ -668,7 +447,6 @@ mod tests {
     };
     use gpui::{Keystroke, Modifiers};
 
-    /// Kitty full mode: every key escaped, with the produced text attached.
     fn full_mode() -> KittyFlags {
         KittyFlags {
             disambiguate: true,
@@ -677,7 +455,6 @@ mod tests {
         }
     }
 
-    /// Level 1 only — the mode a shell leaves on after a TUI exits.
     fn disambiguate_only() -> KittyFlags {
         KittyFlags {
             disambiguate: true,
@@ -686,8 +463,6 @@ mod tests {
         }
     }
 
-    /// The legacy call shape used by the pre-existing tests: encode with the Kitty
-    /// protocol off, exercising exactly the byte output shells see by default.
     fn legacy(ks: &Keystroke) -> Option<Vec<u8>> {
         keystroke_to_bytes(ks, KittyFlags::default())
     }
@@ -705,20 +480,15 @@ mod tests {
         let plain = Modifiers::default();
         let a = ks(plain, "a", Some("a"));
 
-        // Default and disambiguate-only: text belongs to the IME, which is the
-        // only path that carries a synthesized event's real Unicode payload.
         assert!(defer_to_ime(&a, KittyFlags::default()));
         assert!(defer_to_ime(&a, disambiguate_only()));
 
-        // Full mode: the IME commits raw UTF-8, so deferring would drop the
-        // `CSI 97;1;97u` the app negotiated for. Stay on the encoder path.
         assert!(!defer_to_ime(&a, full_mode()));
         assert_eq!(
             keystroke_to_bytes(&a, full_mode()),
             Some(b"\x1b[97;1;97u".to_vec()),
         );
 
-        // Space is text too, and follows the same rule.
         let space = ks(plain, "space", Some(" "));
         assert!(defer_to_ime(&space, KittyFlags::default()));
         assert!(!defer_to_ime(&space, full_mode()));
@@ -738,7 +508,6 @@ mod tests {
     #[test]
     fn non_text_keys_never_defer_to_the_ime() {
         let plain = Modifiers::default();
-        // No `key_char` at all — arrows, F-keys, backspace, escape.
         assert!(!defer_to_ime(
             &ks(plain, "left", None),
             KittyFlags::default()
@@ -747,7 +516,6 @@ mod tests {
             &ks(plain, "backspace", None),
             KittyFlags::default()
         ));
-        // Control chars are filtered even when a `key_char` is present.
         assert!(!defer_to_ime(
             &ks(plain, "enter", Some("\n")),
             KittyFlags::default()
@@ -756,7 +524,6 @@ mod tests {
             &ks(plain, "tab", Some("\t")),
             KittyFlags::default()
         ));
-        // Chords belong to the encoders, not the IME.
         let ctrl = Modifiers {
             control: true,
             ..Default::default()
@@ -780,9 +547,6 @@ mod tests {
 
     #[test]
     fn keystroke_to_bytes_ctrl_alt_letter_prefixes_meta_escape() {
-        // Ctrl+Alt+letter must carry the Meta ESC prefix (xterm metaSendsEscape),
-        // just like Alt+special-key and Alt+printable do below — otherwise the Alt
-        // bit is silently dropped and `Ctrl+Alt+c` is indistinguishable from Ctrl+C.
         let ctrl_alt = Modifiers {
             control: true,
             alt: true,
@@ -791,7 +555,6 @@ mod tests {
         assert_eq!(legacy(&ks(ctrl_alt, "c", None)), Some(vec![0x1b, 0x03]));
         assert_eq!(legacy(&ks(ctrl_alt, "a", None)), Some(vec![0x1b, 0x01]));
         assert_eq!(legacy(&ks(ctrl_alt, "[", None)), Some(vec![0x1b, 0x1b]));
-        // Ctrl alone (no Alt) is unchanged: a bare C0 byte, no ESC prefix.
         let ctrl = Modifiers {
             control: true,
             ..Default::default()
@@ -808,7 +571,6 @@ mod tests {
             alt: true,
             ..Default::default()
         };
-        // Alt + a special key is prefixed with ESC.
         assert_eq!(legacy(&ks(alt, "up", None)), Some(b"\x1b\x1b[A".to_vec()));
     }
 
@@ -816,7 +578,6 @@ mod tests {
     fn keystroke_to_bytes_emits_printable_text_but_not_under_cmd() {
         let none = Modifiers::default();
         assert_eq!(legacy(&ks(none, "a", Some("a"))), Some(b"a".to_vec()));
-        // Cmd-held printable keys are app-shortcut territory -> no PTY bytes.
         let cmd = Modifiers {
             platform: true,
             ..Default::default()
@@ -830,21 +591,16 @@ mod tests {
             control: true,
             ..Default::default()
         };
-        // Ctrl+[ / Ctrl+\ / Ctrl+] map to the ESC/FS/GS control bytes.
         assert_eq!(legacy(&ks(ctrl, "[", None)), Some(vec![0x1b]));
         assert_eq!(legacy(&ks(ctrl, "\\", None)), Some(vec![0x1c]));
         assert_eq!(legacy(&ks(ctrl, "]", None)), Some(vec![0x1d]));
-        // Ctrl+2 is another spelling of NUL.
         assert_eq!(legacy(&ks(ctrl, "2", None)), Some(vec![0x00]));
-        // The full letter range boundaries.
         assert_eq!(legacy(&ks(ctrl, "h", None)), Some(vec![0x08]));
         assert_eq!(legacy(&ks(ctrl, "z", None)), Some(vec![0x1a]));
     }
 
     #[test]
     fn keystroke_to_bytes_ctrl_plus_cmd_is_not_a_c0_byte() {
-        // Ctrl held together with Cmd (platform) is app territory, not a C0 byte;
-        // it falls through the C0 table and, being non-printable under Cmd, yields None.
         let ctrl_cmd = Modifiers {
             control: true,
             platform: true,
@@ -881,30 +637,25 @@ mod tests {
 
     #[test]
     fn keystroke_to_bytes_alt_prefixes_printable_and_ignores_empty_char() {
-        // Alt + a printable char is prefixed with ESC (meta) before the bytes.
         let alt = Modifiers {
             alt: true,
             ..Default::default()
         };
         assert_eq!(legacy(&ks(alt, "b", Some("b"))), Some(b"\x1bb".to_vec()));
-        // An empty key_char produces no bytes (nothing to send).
         let none = Modifiers::default();
         assert_eq!(legacy(&ks(none, "f7", Some(""))), None);
-        // An unknown key with no char is unmapped.
         assert_eq!(legacy(&ks(none, "f7", None)), None);
     }
 
     #[test]
     fn keystroke_to_bytes_emits_multibyte_utf8_char() {
         let none = Modifiers::default();
-        // A composed character commits its UTF-8 bytes verbatim.
         assert_eq!(
             legacy(&ks(none, "é", Some("é"))),
             Some("é".as_bytes().to_vec())
         );
     }
 
-    /// A disambiguate-level `KittyFlags` for the encoder tests.
     fn kitty() -> KittyFlags {
         KittyFlags {
             disambiguate: true,
@@ -920,8 +671,6 @@ mod tests {
             control: true,
             ..Default::default()
         };
-        // Tab and Ctrl+I stay distinct: plain Tab keeps its legacy `\t` at the
-        // disambiguate level, while Ctrl+I is escaped to CSI 105;5 u.
         assert_eq!(
             keystroke_to_bytes(&ks(none, "tab", None), kitty()),
             Some(b"\t".to_vec())
@@ -930,13 +679,10 @@ mod tests {
             keystroke_to_bytes(&ks(ctrl, "i", None), kitty()),
             Some(b"\x1b[105;5u".to_vec())
         );
-        // Escape IS disambiguated to CSI 27 u at this level...
         assert_eq!(
             keystroke_to_bytes(&ks(none, "escape", None), kitty()),
             Some(b"\x1b[27u".to_vec())
         );
-        // ...but the spec keeps plain Enter / Backspace on their legacy bytes so a
-        // shell stays usable if a crashed app leaves the mode on.
         assert_eq!(
             keystroke_to_bytes(&ks(none, "enter", None), kitty()),
             Some(b"\r".to_vec())
@@ -949,10 +695,6 @@ mod tests {
 
     #[test]
     fn kitty_disambiguate_keeps_plain_enter_tab_backspace_legacy() {
-        // Regression: at the DISAMBIGUATE level, plain (unmodified) Enter / Tab /
-        // Backspace must stay legacy `\r` / `\t` / 0x7f — otherwise `reset⏎` can't
-        // rescue a shell after a crashed TUI leaves the mode set (the exact case the
-        // spec's exception exists for). Before the fix these emitted CSI 13/9/127 u.
         let none = Modifiers::default();
         assert_eq!(
             keystroke_to_bytes(&ks(none, "enter", None), kitty()),
@@ -967,9 +709,6 @@ mod tests {
             Some(b"\x7f".to_vec())
         );
 
-        // A modifier makes them ambiguous, so they DO escalate to CSI u carrying the
-        // modifier subfield: Ctrl+Enter -> CSI 13;5 u, Alt+Backspace -> CSI 127;3 u,
-        // Shift+Enter -> CSI 13;2 u.
         let ctrl = Modifiers {
             control: true,
             ..Default::default()
@@ -998,8 +737,6 @@ mod tests {
 
     #[test]
     fn kitty_report_all_keys_escapes_plain_enter_tab_backspace() {
-        // Under REPORT_ALL_KEYS_AS_ESC every key is an escape code, including the
-        // three legacy control keys even with no modifier.
         let full = KittyFlags {
             disambiguate: true,
             report_all_keys: true,
@@ -1022,16 +759,11 @@ mod tests {
 
     #[test]
     fn tab_bytes_follows_the_disambiguate_rule() {
-        // Tab reaches the PTY via the SendTab action, so its Kitty encoding lives in
-        // `tab_bytes`; it must follow the same rule as the on_key_down encoder.
         let off = KittyFlags::default();
-        // Protocol off: legacy Tab / back-tab, unchanged.
         assert_eq!(tab_bytes(false, off), b"\t".to_vec());
         assert_eq!(tab_bytes(true, off), b"\x1b[Z".to_vec());
-        // Disambiguate: plain Tab stays legacy `\t`; Shift-Tab escalates to CSI 9;2 u.
         assert_eq!(tab_bytes(false, kitty()), b"\t".to_vec());
         assert_eq!(tab_bytes(true, kitty()), b"\x1b[9;2u".to_vec());
-        // Report-all: even plain Tab is escaped.
         let full = KittyFlags {
             disambiguate: true,
             report_all_keys: true,
@@ -1043,7 +775,6 @@ mod tests {
     #[test]
     fn kitty_defers_plain_text_to_legacy() {
         let none = Modifiers::default();
-        // A plain letter still sends raw text at the disambiguate level.
         assert_eq!(
             keystroke_to_bytes(&ks(none, "a", Some("a")), kitty()),
             Some(b"a".to_vec())
@@ -1052,9 +783,6 @@ mod tests {
 
     #[test]
     fn kitty_escapes_ctrl_and_alt_text_chords() {
-        // At the disambiguate level, a Ctrl/Alt modifier makes a text key
-        // ambiguous, so it escalates to CSI u with the modifier subfield —
-        // instead of the legacy ESC-prefix / C0 forms.
         let ctrl = Modifiers {
             control: true,
             ..Default::default()
@@ -1063,12 +791,10 @@ mod tests {
             alt: true,
             ..Default::default()
         };
-        // Ctrl+Space would be an ambiguous NUL byte → CSI 32;5 u.
         assert_eq!(
             keystroke_to_bytes(&ks(ctrl, "space", None), kitty()),
             Some(b"\x1b[32;5u".to_vec())
         );
-        // Alt+b escapes as CSI 98;3 u (not the legacy ESC-prefixed "b").
         assert_eq!(
             keystroke_to_bytes(&ks(alt, "b", Some("b")), kitty()),
             Some(b"\x1b[98;3u".to_vec())
@@ -1082,7 +808,6 @@ mod tests {
             shift: true,
             ..Default::default()
         };
-        // Shift+Up carries the modifier subfield; unmodified Up keeps the bare form.
         assert_eq!(
             keystroke_to_bytes(&ks(shift, "up", None), kitty()),
             Some(b"\x1b[1;2A".to_vec())
@@ -1091,7 +816,6 @@ mod tests {
             keystroke_to_bytes(&ks(none, "up", None), kitty()),
             Some(b"\x1b[A".to_vec())
         );
-        // Tilde-form keys likewise: Shift+Delete -> CSI 3;2 ~.
         assert_eq!(
             keystroke_to_bytes(&ks(shift, "delete", None), kitty()),
             Some(b"\x1b[3;2~".to_vec())
@@ -1106,7 +830,6 @@ mod tests {
             report_text: true,
         };
         let none = Modifiers::default();
-        // 'a' -> CSI 97 ; 1 ; 97 u  (code ; mods ; text codepoint).
         assert_eq!(
             keystroke_to_bytes(&ks(none, "a", Some("a")), full),
             Some(b"\x1b[97;1;97u".to_vec())
@@ -1121,10 +844,6 @@ mod tests {
             report_text: true,
         };
         let none = Modifiers::default();
-        // The Kitty spec forbids control codes in the associated-text field (C0,
-        // DEL and the C1 block). A key whose reported char is a lone DEL (U+007F)
-        // or a C1 control (e.g. U+0085) must NOT land that codepoint in field 3;
-        // with no printable text left, the field is omitted entirely -> CSI 97 u.
         assert_eq!(
             keystroke_to_bytes(&ks(none, "a", Some("\u{7f}")), full),
             Some(b"\x1b[97u".to_vec())
@@ -1133,8 +852,6 @@ mod tests {
             keystroke_to_bytes(&ks(none, "a", Some("\u{85}")), full),
             Some(b"\x1b[97u".to_vec())
         );
-        // A printable char mixed with a control keeps only the printable codepoint
-        // in field 3 (the control is dropped, not the whole field): 'a' + DEL -> 97.
         assert_eq!(
             keystroke_to_bytes(&ks(none, "a", Some("a\u{7f}")), full),
             Some(b"\x1b[97;1;97u".to_vec())
@@ -1146,7 +863,6 @@ mod tests {
         let none = KittyFlags::default();
         assert!(!none.active());
         let mods = Modifiers::default();
-        // With the protocol off, output matches the legacy path exactly.
         assert_eq!(
             keystroke_to_bytes(&ks(mods, "tab", None), none),
             Some(b"\t".to_vec())
@@ -1161,15 +877,11 @@ mod tests {
         );
     }
 
-    /// Encode through the Option-key policy the way `on_key_down` does: reshape
-    /// first (macOS semantics), then hand the result to the shared encoder.
     fn reshaped_bytes(ks: &Keystroke, option_as_alt: bool, kitty: KittyFlags) -> Option<Vec<u8>> {
         let reshaped = reshape_option_keystroke(ks, option_as_alt);
         keystroke_to_bytes(reshaped.as_ref().unwrap_or(ks), kitty)
     }
 
-    /// An Option+B chord as gpui reports it on macOS: base key "b", the alt
-    /// bit, and the OS-composed character in `key_char`.
     fn option_b() -> Keystroke {
         let alt = Modifiers {
             alt: true,
@@ -1180,12 +892,10 @@ mod tests {
 
     #[test]
     fn option_as_alt_on_sends_esc_plus_base_key() {
-        // Meta semantics: ESC + the plain key, not ESC + the composed char.
         assert_eq!(
             reshaped_bytes(&option_b(), true, KittyFlags::default()),
             Some(b"\x1bb".to_vec())
         );
-        // Shifted letters follow the shifted character: Option+Shift+B → ESC B.
         let alt_shift = Modifiers {
             alt: true,
             shift: true,
@@ -1195,7 +905,6 @@ mod tests {
             reshaped_bytes(&ks(alt_shift, "b", Some("ı")), true, KittyFlags::default()),
             Some(b"\x1bB".to_vec())
         );
-        // Non-letter keys too: Option+2 composes "™" but Meta sends ESC 2.
         let alt = Modifiers {
             alt: true,
             ..Default::default()
@@ -1208,29 +917,19 @@ mod tests {
 
     #[test]
     fn option_as_alt_off_sends_composed_text_bare() {
-        // macOS convention: the chord is text input — the composed character
-        // goes out with NO ESC prefix. (The unreshaped legacy path used to emit
-        // `ESC ∫`, wrong under either reading of the Option key.)
         assert_eq!(
             reshaped_bytes(&option_b(), false, KittyFlags::default()),
             Some("∫".as_bytes().to_vec())
         );
     }
 
-    /// The routing half of Option-as-Meta (#177): with a CJK input source active,
-    /// macOS hands ⌥-chords to the IME before the key handler runs, because ⌥B
-    /// composes printable text. The IME commits `∫` and eats the event, so the
-    /// reshape above never gets a say — unless the handler declines IME for exactly
-    /// these chords. Everything else keeps composing.
     #[test]
     fn meta_chords_skip_the_ime_only_when_option_is_meta() {
         let alt = Modifiers {
             alt: true,
             ..Default::default()
         };
-        // The bug: ⌥B with the setting on must reach `on_key_down`, not the IME.
         assert!(meta_chord_bypasses_ime(&option_b(), true));
-        // Shift rides along — ⌥⇧B is still a Meta chord.
         let alt_shift = Modifiers {
             alt: true,
             shift: true,
@@ -1241,19 +940,13 @@ mod tests {
             true
         ));
 
-        // Setting off: ⌥ is text input, and the IME owns it — this is what makes
-        // dead keys (⌥E then E → `é`) compose.
         assert!(!meta_chord_bypasses_ime(&option_b(), false));
 
-        // Plain text is never claimed, on either setting: CJK composition is the
-        // whole reason the handler prefers the IME in the first place.
         assert!(!meta_chord_bypasses_ime(
             &ks(Modifiers::default(), "n", Some("n")),
             true
         ));
 
-        // ⌘ chords are app shortcuts and ⌃ chords already bypass the IME upstream;
-        // both keep their existing routing rather than being claimed here.
         let cmd_alt = Modifiers {
             alt: true,
             platform: true,
@@ -1267,8 +960,6 @@ mod tests {
         };
         assert!(!meta_chord_bypasses_ime(&ks(ctrl_alt, "b", None), true));
 
-        // Named keys carry the alt bit too and take the same route — Alt+Left must
-        // not be diverted into a composition either.
         assert!(meta_chord_bypasses_ime(&ks(alt, "left", None), true));
     }
 
@@ -1278,8 +969,6 @@ mod tests {
             alt: true,
             ..Default::default()
         };
-        // Named keys compose nothing: Alt+Up keeps its ESC-prefixed form on
-        // both settings.
         for on in [true, false] {
             assert!(reshape_option_keystroke(&ks(alt, "up", None), on).is_none());
             assert_eq!(
@@ -1287,10 +976,7 @@ mod tests {
                 Some(b"\x1b\x1b[A".to_vec())
             );
         }
-        // Enter's key_char is a control char ("\n"), not composed text: the
-        // chord stays a real Alt chord with the setting off.
         assert!(reshape_option_keystroke(&ks(alt, "enter", Some("\n")), false).is_none());
-        // Ctrl+Alt chords keep the C0 + Meta-ESC encoding on both settings.
         let ctrl_alt = Modifiers {
             control: true,
             alt: true,
@@ -1303,24 +989,18 @@ mod tests {
                 Some(vec![0x1b, 0x03])
             );
         }
-        // No alt held → nothing to reshape, either setting.
         assert!(
             reshape_option_keystroke(&ks(Modifiers::default(), "a", Some("a")), true).is_none()
         );
-        // A key_char already equal to the base key needs no clone.
         assert!(reshape_option_keystroke(&ks(alt, "b", Some("b")), true).is_none());
     }
 
     #[test]
     fn option_reshape_composes_with_the_kitty_encoder() {
-        // Option-as-Meta keeps the alt bit, so a Kitty-aware app still sees the
-        // spec's alt-modified base key.
         assert_eq!(
             reshaped_bytes(&option_b(), true, kitty()),
             Some(b"\x1b[98;3u".to_vec())
         );
-        // Option-as-composed drops the alt bit: at the disambiguate level the
-        // chord is plain text, sent raw like any other typed character.
         assert_eq!(
             reshaped_bytes(&option_b(), false, kitty()),
             Some("∫".as_bytes().to_vec())
@@ -1329,8 +1009,6 @@ mod tests {
 
     #[test]
     fn kitty_never_encodes_cmd_chords() {
-        // Cmd (platform) chords stay app-shortcut territory even with Kitty on:
-        // the same `None`/legacy result as before.
         let cmd = Modifiers {
             platform: true,
             ..Default::default()

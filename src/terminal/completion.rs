@@ -1,33 +1,8 @@
-//! A small, self-contained completion engine for the command editor — tty7's own
-//! engine, not the shell's `compsys`.
-//!
-//! It offers three sources, each candidate carrying the exact char range it
-//! replaces:
-//!   - **command** — builtins + `$PATH` executables, in command position;
-//!   - **path** — files / directories, elsewhere (replace just the word);
-//!   - **remote path** — the same, for a pane whose filesystem is on the far
-//!     end of an SSH connection. The listing itself is a network round-trip the
-//!     view owns, so this module only splits the word into a request
-//!     ([`remote_path_request`]) and turns the answer into candidates
-//!     ([`remote_path_candidates`]) — both pure, both unit-tested.
-//!
-//! History deliberately does *not* feed the menu:
-//! whole-line recall belongs to the inline ghost text (frecency-ranked, cwd
-//! aware — accepted with → / Ctrl+F) and Ctrl+R search. Mixing recalled lines
-//! into the Tab menu buried the precise completions under near-duplicate path
-//! variants of past commands.
-//!
-//! Pure and side-effect-free apart from reading the filesystem / `$PATH`, so the
-//! word-parsing and path logic are unit-tested directly.
-
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::signature::{self, Arg, CmdNode, Signature};
 
-/// A word candidate before it's placed at a range. Signature-derived candidates
-/// carry a `description` and possibly an `icon` (a raw Fig icon string — emoji or
-/// `fig://…`); `$PATH` and path candidates carry neither.
 struct WordCand {
     text: String,
     kind: CandidateKind,
@@ -36,7 +11,6 @@ struct WordCand {
 }
 
 impl WordCand {
-    /// A candidate with no signature metadata — the command and path sources.
     fn plain(text: String, kind: CandidateKind) -> Self {
         Self {
             text,
@@ -47,36 +21,22 @@ impl WordCand {
     }
 }
 
-/// What a completion candidate refers to — drives both the trailing `/` for
-/// directories and the menu's leading icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateKind {
-    /// A command name (builtin or `$PATH` executable).
     Command,
-    /// A directory.
     Dir,
-    /// A regular file.
     File,
-    /// A command flag / option (e.g. `--message`), from a command signature.
     Flag,
-    /// A subcommand or argument value, from a command signature.
     Value,
 }
 
-/// A single completion candidate: the replacement text, its kind, and the char
-/// range `[start, end)` in the original line that it replaces — just the word
-/// under the cursor (`word_start..cursor`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub text: String,
     pub kind: CandidateKind,
     pub start: usize,
     pub end: usize,
-    /// A one-line hint shown in a second column — the flag/subcommand's
-    /// description from its command signature; `None` for path/command candidates.
     pub description: Option<String>,
-    /// Raw Fig icon string (emoji or `fig://…`) for signature candidates; the
-    /// view interprets it, falling back to a per-kind glyph. `None` otherwise.
     pub icon: Option<String>,
 }
 
@@ -86,53 +46,27 @@ impl Candidate {
     }
 }
 
-/// The result of completing at a cursor: the word candidates, each with its own
-/// replacement range, plus any *dynamic* generators the position declares.
-///
-/// Generators can't be run here — this module is pure and synchronous, while a
-/// generator is a child process — so the sync candidates come back immediately
-/// and each pending script rides along for the view to execute on a background
-/// thread and [`CompletionSession::merge`] into the live menu. A position that
-/// declares generators is a completion even when `candidates` is empty (an SSH
-/// host list, a git branch list) — returning `Some` here is what stops the caller
-/// from falling back to filesystem paths, the bug behind `ssh <Tab>` listing the
-/// cwd (#51).
 #[derive(Debug)]
 pub struct Completion {
     pub candidates: Vec<Candidate>,
     pub pending: Vec<PendingGenerator>,
 }
 
-/// A dynamic generator awaiting execution: the shell `script` (the spec's token
-/// list joined with single spaces, ready for `/bin/sh -c`). The view runs it off
-/// the main thread and merges its stdout-derived candidates into the open menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingGenerator {
     pub script: String,
 }
 
-/// Common shell builtins / keywords, offered in command position. Not exhaustive,
-/// but covers what `$PATH` scanning misses (builtins aren't files).
 const BUILTINS: &[&str] = &[
     "cd", "echo", "exit", "export", "pwd", "alias", "unalias", "source", "set", "unset", "history",
     "jobs", "fg", "bg", "kill", "which", "type", "read", "local", "return", "eval", "exec", "test",
     "true", "false", "printf", "let", "declare", "typeset", "shift", "trap", "wait", "umask",
 ];
 
-/// Cap on candidates returned, so a bare prefix that matches thousands of files
-/// (or `$PATH` entries) can't blow up the UI or the cycle.
 const MAX_CANDIDATES: usize = 400;
 
-/// Commands whose arguments are directories, never files. They have no Fig
-/// signature (shell builtins), so the generic path fallback handles them —
-/// which must not offer files (`cd tar` completing to `tar.exe` is never
-/// right).
 const DIR_ONLY_COMMANDS: &[&str] = &["cd", "pushd", "popd", "rmdir"];
 
-/// The command name the cursor's word is an argument of: the first token of
-/// the current simple command (after the last shell separator), reduced to its
-/// basename so `/bin/rmdir` matches like `rmdir`. `None` when there is no
-/// command token before the word.
 fn current_command(chars: &[char], word_start: usize) -> Option<String> {
     let prefix: String = chars[..word_start].iter().collect();
     let seg_start = prefix
@@ -147,18 +81,10 @@ fn current_command(chars: &[char], word_start: usize) -> Option<String> {
     (!base.is_empty()).then(|| base.to_string())
 }
 
-/// Compute completions for `line` at char position `cursor`, resolving relative
-/// paths against `cwd`: command names in command position, filesystem paths
-/// elsewhere. Returns `None` when there's nothing to offer.
-///
-/// `cwd` is `None` when the pane has no directory on *this* machine — a remote
-/// pane. Command completion still runs; everything that would touch the local
-/// filesystem is skipped rather than answered from the wrong machine.
 pub fn complete(line: &str, cursor: usize, cwd: Option<&Path>) -> Option<Completion> {
     let chars: Vec<char> = line.chars().collect();
     let cursor = cursor.min(chars.len());
 
-    // The word under completion is the run of non-whitespace ending at the cursor.
     let mut word_start = cursor;
     while word_start > 0 && !chars[word_start - 1].is_whitespace() {
         word_start -= 1;
@@ -169,30 +95,10 @@ pub fn complete(line: &str, cursor: usize, cwd: Option<&Path>) -> Option<Complet
     let (word_cands, pending) = if is_command && !word.contains('/') {
         (complete_command(&word), Vec::new())
     } else {
-        // In argument position, prefer a per-command signature (flags,
-        // subcommands, typed args) when the command has one; otherwise fall
-        // back to filesystem paths. A signature slot that declares suggestions
-        // or generators owns the position: it returns `Some` (possibly with no
-        // sync candidates but pending scripts) rather than ceding to paths.
-        //
-        // A missing `cwd` means a remote pane, and it disables only the parts
-        // that read *this* machine: paths and generators (see
-        // [`complete_signature`]). The rest of a signature is static text —
-        // `git push`, `--verbose` — and is just as true on the remote, so it is
-        // still offered. Withholding it too would make every Tab in a remote
-        // pane a no-match, and a no-match hands the line to the shell, which
-        // costs the user the inline editor for that prompt.
         match complete_signature(&chars, word_start, &word, cwd) {
             Some(sig) => (sig.cands, sig.pending),
             None => match cwd {
-                // No signature and no local filesystem to fall back on. Offering
-                // this machine's names would insert them into a remote command
-                // line where they do not exist; returning nothing instead lets
-                // the caller hand the Tab to the remote's own completion, which
-                // can actually see that filesystem.
                 None => (Vec::new(), Vec::new()),
-                // No signature: generic paths, narrowed to directories when
-                // the command only takes those (`cd`, `pushd`, …).
                 Some(cwd) => {
                     let dirs_only = current_command(&chars, word_start)
                         .is_some_and(|c| DIR_ONLY_COMMANDS.contains(&c.as_str()));
@@ -223,9 +129,6 @@ pub fn complete(line: &str, cursor: usize, cwd: Option<&Path>) -> Option<Complet
     }
 }
 
-/// Command-name completion: builtins plus `$PATH` executables starting with
-/// `word`. An empty word returns nothing (we don't dump every command on a bare
-/// Tab in command position). Ordered by closeness.
 fn complete_command(word: &str) -> Vec<WordCand> {
     if word.is_empty() {
         return Vec::new();
@@ -259,9 +162,6 @@ fn complete_command(word: &str) -> Vec<WordCand> {
         .collect()
 }
 
-/// Order strings by closeness to what the user typed: since every candidate
-/// shares the typed prefix, the edit distance is just the length still to fill
-/// in — so shorter completions come first, ties broken alphabetically.
 fn sort_by_closeness(items: &mut [String]) {
     items.sort_by(|a, b| {
         a.chars()
@@ -271,10 +171,6 @@ fn sort_by_closeness(items: &mut [String]) {
     });
 }
 
-/// Order candidates in place by closeness — shorter completions first, ties
-/// alphabetical — the same ordering path and signature completion use, applied
-/// across the merged set so asynchronously-arriving generator results settle
-/// into the menu's existing sort rather than piling up at the end.
 fn sort_candidates_by_closeness(cands: &mut [Candidate]) {
     cands.sort_by(|a, b| {
         a.text
@@ -285,56 +181,22 @@ fn sort_candidates_by_closeness(cands: &mut [Candidate]) {
     });
 }
 
-/// What a path-position Tab in a remote pane needs listed on the *far side*,
-/// produced by [`remote_path_request`] and consumed by
-/// [`remote_path_candidates`] once the listing comes back.
-///
-/// Split in two because the listing is a network round-trip: nothing here
-/// touches a filesystem, so both halves stay pure and testable while the view
-/// owns the async middle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemotePathRequest {
-    /// Absolute directory to list on the remote.
     pub dir: String,
-    /// What an entry's name must start with to be offered.
     pub prefix: String,
-    /// The typed text up to and including the last `/`, re-prepended to every
-    /// candidate so the path the user typed is preserved (as [`complete_path`]
-    /// does locally).
     pub dir_part: String,
-    /// Char range in the line the candidates replace.
     pub word_start: usize,
     pub cursor: usize,
-    /// Drop file entries — the command only takes directories.
     pub dirs_only: bool,
 }
 
-/// One entry of a remote directory listing, reduced to what completion cares
-/// about. Keeps this module free of the daemon's SFTP protocol types; the view
-/// converts (and is where "a symlink to a directory counts as a directory"
-/// gets decided, since only the protocol knows the link target).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteEntry {
     pub name: String,
     pub is_dir: bool,
 }
 
-/// The remote directory a path-position Tab wants listed, or `None` when the
-/// caret isn't somewhere a remote path listing could help.
-///
-/// `remote_cwd` is the pane's cwd *in the remote's namespace* — the caller must
-/// have established that the pane really is remote. Declines:
-///   - **command position** (a bare first word): those complete from `$PATH`,
-///     and this machine's `$PATH` is the wrong answer for a remote anyway —
-///     that's [`complete_command`]'s call, not a filesystem question.
-///   - **`~`-prefixed words**: expanding one needs the remote's `$HOME`, which
-///     no OSC reports. Declining hands the Tab to the remote shell, which can
-///     expand it.
-///   - a **relative `remote_cwd`**: nothing to resolve against.
-///
-/// Separators are `/` only — deliberately not [`std::path::is_separator`],
-/// which also accepts `\` on Windows. A Windows host talking to a POSIX remote
-/// must not treat a backslash in the *remote's* path as a separator.
 pub fn remote_path_request(
     line: &str,
     cursor: usize,
@@ -363,10 +225,6 @@ pub fn remote_path_request(
         Some(i) => (&word[..=i], &word[i + 1..]),
         None => ("", word.as_str()),
     };
-    // An absolute `dir_part` stands alone; anything else resolves against the
-    // remote cwd. `.`/`..` inside the path are left for the far side to
-    // resolve — an SFTP server handles them, and we have no remote filesystem
-    // to normalize against here.
     let dir = if dir_part.starts_with('/') {
         dir_part.to_string()
     } else if dir_part.is_empty() {
@@ -386,13 +244,6 @@ pub fn remote_path_request(
     })
 }
 
-/// Turn a remote directory listing into candidates for `req`. Mirrors
-/// [`complete_path`]'s rules exactly — hidden entries only when the prefix asks
-/// for them, `dirs_only` filtering, closeness ordering, the same cap — so a
-/// remote Tab behaves like a local one.
-///
-/// `.` and `..` are dropped: a local `read_dir` never yields them, and offering
-/// them here would make the two panes feel different.
 pub fn remote_path_candidates(req: &RemotePathRequest, entries: &[RemoteEntry]) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
     for entry in entries {
@@ -429,16 +280,7 @@ pub fn remote_path_candidates(req: &RemotePathRequest, entries: &[RemoteEntry]) 
     out
 }
 
-/// Filesystem path completion. Splits `word` into the directory part (kept
-/// verbatim in each candidate so the typed path prefix is preserved) and the
-/// final-segment prefix to match in that directory. Ordered by closeness.
-/// `dirs_only` drops file entries — for commands / argument slots that only
-/// accept directories.
 fn complete_path(word: &str, cwd: &Path, dirs_only: bool) -> Vec<WordCand> {
-    // Split on the last path separator. `is_separator` is `/` on Unix and both
-    // `/` and `\` on Windows, so a `C:\Users\me\f`-style word splits correctly
-    // under the (future) Windows line editor; separators are ASCII so the byte
-    // slice boundaries are valid.
     let (dir_part, prefix) = match word.rfind(std::path::is_separator) {
         Some(i) => (&word[..=i], &word[i + 1..]),
         None => ("", word),
@@ -451,16 +293,12 @@ fn complete_path(word: &str, cwd: &Path, dirs_only: bool) -> Vec<WordCand> {
     let mut out: Vec<WordCand> = Vec::new();
     for entry in rd.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        // Hidden entries only when the prefix explicitly starts with a dot.
         if name.starts_with('.') && !prefix.starts_with('.') {
             continue;
         }
         if !name.starts_with(prefix) {
             continue;
         }
-        // Follow symlinks when classifying: a symlink to a directory must count
-        // as one (it both takes the trailing `/` and survives a dirs-only
-        // filter — `cd` into a linked dir is routine).
         let is_dir = entry
             .file_type()
             .is_ok_and(|t| t.is_dir() || (t.is_symlink() && entry.path().is_dir()));
@@ -487,41 +325,17 @@ fn complete_path(word: &str, cwd: &Path, dirs_only: bool) -> Vec<WordCand> {
     out
 }
 
-/// The sync half of a signature-driven completion: candidates ready now, plus
-/// the dynamic generators whose output the view will merge in later. Returned as
-/// one unit so the caller can tell "this slot is a completion (don't fall back to
-/// paths)" from "no signature here" via the `Option` around it.
 struct SigResult {
     cands: Vec<WordCand>,
     pending: Vec<PendingGenerator>,
 }
 
-/// Signature-driven completion in argument position. Tokenizes the text before
-/// the word into an argv, and — if the current command has a signature — offers
-/// flags, subcommands, or typed-argument suggestions for the cursor's position,
-/// alongside any dynamic generators that position declares.
-///
-/// Returns `None` (so the caller falls back to path completion) when the command
-/// has no signature, or when the position yields nothing useful and isn't a flag,
-/// value, suggestion, or generator slot (so a bare argument still lists files).
-/// A slot with generators returns `Some` even with zero sync candidates — its
-/// results are still inbound, and falling back to paths there is exactly #51.
-///
-/// `cwd` is `None` for a remote pane, which suppresses the two things that would
-/// answer with *this* machine's state: path completion, and generators. The
-/// generator exclusion matters more than it looks — a generator is a local
-/// `/bin/sh -c` (see [`super::generator`]), so `git checkout <Tab>` against a
-/// remote would offer the branches of whatever repo the *local* cwd happens to
-/// sit in. Wrong filenames are obvious when they fail; wrong branch names look
-/// plausible and land in a real command.
 fn complete_signature(
     chars: &[char],
     word_start: usize,
     word: &str,
     cwd: Option<&Path>,
 ) -> Option<SigResult> {
-    // Only the current simple command matters: start after the last shell
-    // separator so `foo | git <tab>` completes `git`, not `foo`.
     let prefix: String = chars[..word_start].iter().collect();
     let seg_start = prefix
         .rfind(['|', '&', ';', '\n', '('])
@@ -533,8 +347,6 @@ fn complete_signature(
 
     let (node, pending_value) = walk_signature(&sig, &tokens[1..]);
 
-    // Flag position: options of the current node whose spelling extends `word`.
-    // Flags never carry generators.
     if word.starts_with('-') {
         let mut out = Vec::new();
         for opt in node.options() {
@@ -558,7 +370,6 @@ fn complete_signature(
         });
     }
 
-    // Value position: the previous token was an option taking an argument.
     if let Some(arg) = pending_value {
         let mut out = Vec::new();
         push_arg_suggestions(&mut out, arg, word);
@@ -571,9 +382,6 @@ fn complete_signature(
             Some(_) => collect_generators(arg),
             None => Vec::new(),
         };
-        // A slot that declares suggestions or generators owns the position even
-        // when nothing matches yet; only a truly featureless value slot cedes to
-        // path completion.
         if out.is_empty() && pending.is_empty() && arg.suggestions.is_empty() {
             return None;
         }
@@ -583,7 +391,6 @@ fn complete_signature(
         });
     }
 
-    // Fresh token: subcommands of the current node plus its first positional arg.
     let mut out = Vec::new();
     for sub in node.subcommands() {
         if sub.hidden {
@@ -612,8 +419,6 @@ fn complete_signature(
         if cwd.is_some() {
             pending = collect_generators(arg);
         }
-        // Suggestions/generators mean this positional owns the slot: don't cede
-        // to paths just because the sync list came back empty.
         claims_slot = !arg.suggestions.is_empty() || !pending.is_empty();
     }
     if out.is_empty() && !claims_slot {
@@ -626,10 +431,6 @@ fn complete_signature(
     }
 }
 
-/// Join each of an argument's dynamic generators into a runnable `/bin/sh -c`
-/// command string. The converter word-split original string scripts, so joining
-/// with single spaces and letting the shell re-parse restores pipes, quoting,
-/// and `bash -c "…"`-style entries.
 fn collect_generators(arg: &Arg) -> Vec<PendingGenerator> {
     arg.generators
         .iter()
@@ -640,17 +441,12 @@ fn collect_generators(arg: &Arg) -> Vec<PendingGenerator> {
         .collect()
 }
 
-/// Walk the argv after the command name, descending into matched subcommands and
-/// skipping options (and the value tokens of value-taking ones). Returns the
-/// deepest node reached, and — when the final prior token is a value-taking
-/// option — the argument the cursor is now positioned to complete.
 fn walk_signature<'a>(sig: &'a Signature, rest: &[&str]) -> (&'a dyn CmdNode, Option<&'a Arg>) {
     let mut node: &dyn CmdNode = sig;
     let mut i = 0;
     while i < rest.len() {
         let tok = rest[i];
         if tok.starts_with('-') {
-            // Skip the flag, and its value token when it takes one inline-`=`-free.
             if node.find_option(tok).is_some_and(|o| o.takes_arg()) && !tok.contains('=') {
                 i += 2;
             } else {
@@ -661,11 +457,9 @@ fn walk_signature<'a>(sig: &'a Signature, rest: &[&str]) -> (&'a dyn CmdNode, Op
         if let Some(sub) = node.find_subcommand(tok) {
             node = sub;
         }
-        // A non-matching bare token is a positional arg; the node is unchanged.
         i += 1;
     }
 
-    // Is the cursor sitting on a value-taking option's value?
     let pending = rest.last().and_then(|last| {
         (last.starts_with('-') && !last.contains('='))
             .then(|| node.find_option(last))
@@ -676,7 +470,6 @@ fn walk_signature<'a>(sig: &'a Signature, rest: &[&str]) -> (&'a dyn CmdNode, Op
     (node, pending)
 }
 
-/// Append an argument's static value suggestions matching `word`.
 fn push_arg_suggestions(out: &mut Vec<WordCand>, arg: &Arg, word: &str) {
     for sug in &arg.suggestions {
         for name in &sug.names {
@@ -692,8 +485,6 @@ fn push_arg_suggestions(out: &mut Vec<WordCand>, arg: &Arg, word: &str) {
     }
 }
 
-/// Dedupe by replacement text and order by closeness (shorter first, then
-/// alphabetical) — the same ordering path completion uses.
 fn finish(mut out: Vec<WordCand>) -> Vec<WordCand> {
     out.sort_by(|a, b| {
         a.text
@@ -706,8 +497,6 @@ fn finish(mut out: Vec<WordCand>) -> Vec<WordCand> {
     out
 }
 
-/// Resolve the directory portion of a path word to an absolute directory to list:
-/// handles `~` expansion, absolute paths, and paths relative to `cwd`.
 fn resolve_dir(dir_part: &str, cwd: &Path) -> PathBuf {
     if dir_part.is_empty() {
         return cwd.to_path_buf();
@@ -726,39 +515,20 @@ fn resolve_dir(dir_part: &str, cwd: &Path) -> PathBuf {
     if p.is_absolute() { p } else { cwd.join(p) }
 }
 
-/// The user's home directory: `$HOME` on Unix, falling back to `%USERPROFILE%`
-/// on Windows (where `HOME` is usually unset).
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
 }
 
-/// One open completion menu: a *picker* over the candidates gathered
-/// when it opened. Moving the highlight (Tab / ↑ / ↓) never touches the editor
-/// line — the line changes only when a candidate is accepted (Enter) or when Tab
-/// fills the candidates' common prefix. Typing re-filters the same candidate set
-/// via [`CompletionSession::refilter`]; the session ends once the word stops
-/// extending the one it opened on. Fields are `pub(super)` so the terminal view
-/// can render the menu.
 pub(super) struct CompletionSession {
-    /// Char index where the word under completion starts — the fixed left edge
-    /// of the range an accept replaces (the right edge is the live caret).
     pub(super) word_start: usize,
-    /// The word as typed when the menu opened (before any common-prefix fill).
-    /// Backspacing below it closes the menu.
     pub(super) open_word: String,
-    /// Every candidate from open time; `filtered` holds indices into this.
     pub(super) all: Vec<Candidate>,
-    /// Indices into `all` still prefix-matching the live word, in order.
     pub(super) filtered: Vec<usize>,
-    /// Highlighted row (an index into `filtered`).
     pub(super) index: Option<usize>,
 }
 
-/// A splice to apply to the command editor: replace chars `[start, end)` of
-/// `orig` with `text`. Used by the view's accept / prefix-fill paths; kept
-/// separate so the pure string edit is testable without a live editor.
 pub(super) struct Replacement {
     pub(super) orig: String,
     pub(super) start: usize,
@@ -767,9 +537,6 @@ pub(super) struct Replacement {
 }
 
 impl Replacement {
-    /// Perform the splice: returns the new line and the caret position (just after
-    /// the inserted text). Char-indexed and clamped, so out-of-range candidate
-    /// offsets can never panic.
     pub(super) fn apply(&self) -> (String, usize) {
         let mut chars: Vec<char> = self.orig.chars().collect();
         let start = self.start.min(chars.len());
@@ -782,8 +549,6 @@ impl Replacement {
 }
 
 impl CompletionSession {
-    /// Open a menu over `all` with the first row highlighted (a default
-    /// preselection, so a bare Enter accepts the top pick).
     pub(super) fn new(word_start: usize, open_word: String, all: Vec<Candidate>) -> Self {
         let filtered = (0..all.len()).collect();
         Self {
@@ -795,15 +560,12 @@ impl CompletionSession {
         }
     }
 
-    /// The highlighted candidate, if any.
     pub(super) fn selected(&self) -> Option<&Candidate> {
         self.index
             .and_then(|i| self.filtered.get(i))
             .map(|&i| &self.all[i])
     }
 
-    /// Move the highlight to the next (`forward`) or previous row, wrapping.
-    /// Selection is visual only — the editor line changes on accept.
     pub(super) fn select(&mut self, forward: bool) {
         let n = self.filtered.len();
         if n == 0 {
@@ -817,10 +579,6 @@ impl CompletionSession {
         });
     }
 
-    /// Re-filter for the live `word`. Returns `false` when the menu should
-    /// close: the word no longer extends the one it opened on (backspaced past
-    /// it) or nothing matches any more. A highlighted candidate that survives
-    /// the filter keeps its highlight; one filtered away falls back to the top.
     pub(super) fn refilter(&mut self, word: &str) -> bool {
         if !word.starts_with(self.open_word.as_str()) {
             return false;
@@ -837,19 +595,6 @@ impl CompletionSession {
         true
     }
 
-    /// Merge asynchronously-produced generator candidates into the open menu.
-    ///
-    /// Called on the main thread when a background generator finishes: dedupe the
-    /// new candidates by text against everything already gathered, append the
-    /// survivors, re-sort the whole set by closeness, then re-run the prefix
-    /// filter against `live_word` — the word as it stands *now*, which may have
-    /// grown while the generator ran. A highlighted candidate that survives the
-    /// re-filter keeps its highlight (matched by text, since the sort renumbers
-    /// `all`); otherwise the top row takes over.
-    ///
-    /// Unlike [`Self::refilter`] this never signals "close": a generator whose
-    /// results don't match the live word (or that returned nothing) just leaves
-    /// the menu as it was — the session lives or dies on the user's own edits.
     pub(super) fn merge(&mut self, new: Vec<Candidate>, live_word: &str) {
         let selected_text = self
             .index
@@ -876,8 +621,6 @@ impl CompletionSession {
         };
     }
 
-    /// Longest common prefix (in chars) of the filtered candidates — what Tab
-    /// fills before it starts moving the highlight.
     pub(super) fn common_prefix(&self) -> Option<String> {
         let mut texts = self.filtered.iter().map(|&i| self.all[i].text.as_str());
         let mut lcp: Vec<char> = texts.next()?.chars().collect();
@@ -911,8 +654,6 @@ mod tests {
         }
     }
 
-    /// The candidate texts `complete` returns for `line` with the cursor at the
-    /// end, or an empty vec when it offers nothing.
     fn texts(line: &str) -> Vec<String> {
         complete(line, line.chars().count(), Some(Path::new("/")))
             .map(|c| c.candidates.into_iter().map(|c| c.text).collect())
@@ -924,7 +665,6 @@ mod tests {
         let t = texts("git ");
         assert!(t.iter().any(|s| s == "commit"), "git subcommands: {t:?}");
         assert!(t.iter().any(|s| s == "status"));
-        // Descriptions ride along for the menu's second column.
         let c = complete("git ", 4, Some(Path::new("/"))).unwrap();
         let commit = c.candidates.iter().find(|c| c.text == "commit").unwrap();
         assert_eq!(commit.kind, CandidateKind::Value);
@@ -951,7 +691,6 @@ mod tests {
 
     #[test]
     fn signature_resolves_nested_subcommands() {
-        // docker compose was grafted in via loadSpec; its subcommands complete.
         let t = texts("docker compose ");
         assert!(
             t.iter().any(|s| s == "up"),
@@ -961,10 +700,6 @@ mod tests {
 
     #[test]
     fn generator_arg_pends_scripts_and_suppresses_path_fallback() {
-        // `git checkout <arg>` declares branch/tag generators (dynamic) with no
-        // `filepaths` template. Pre-#51 the empty-static-match path fell through
-        // to filesystem completion and listed the cwd; now the slot owns the
-        // position — it returns the generator scripts and no path candidates.
         let dir = temp_tree("gen-checkout", &[("sentinel.txt", false), ("subdir", true)]);
         let line = "git checkout ";
         let c = complete(line, line.chars().count(), Some(dir.as_path()))
@@ -980,7 +715,6 @@ mod tests {
             "one pending script is the joined git-branch listing: {:?}",
             c.pending
         );
-        // Crucially, no filesystem entry from the cwd leaked into the menu.
         assert!(
             c.candidates
                 .iter()
@@ -992,8 +726,6 @@ mod tests {
 
     #[test]
     fn generator_script_tokens_join_with_single_spaces() {
-        // The converter word-split original string scripts; joining restores a
-        // single `/bin/sh -c` command.
         let c = complete("git checkout ", 13, Some(Path::new("/"))).unwrap();
         let branch = c
             .pending
@@ -1008,26 +740,19 @@ mod tests {
 
     #[test]
     fn merge_dedupes_resorts_and_refilters_to_live_word() {
-        // Open on "f" with one static candidate, then a generator lands two
-        // branches; the merged set is deduped, closeness-sorted, and filtered to
-        // the live word.
         let mut s = CompletionSession::new(
             0,
             "f".into(),
             vec![cand("feature", CandidateKind::Value, 0, 1)],
         );
         let new = vec![
-            cand("feature", CandidateKind::Value, 0, 1), // dup by text — dropped
+            cand("feature", CandidateKind::Value, 0, 1),
             cand("fix", CandidateKind::Value, 0, 1),
-            cand("main", CandidateKind::Value, 0, 1), // filtered out by live word "f"
+            cand("main", CandidateKind::Value, 0, 1),
         ];
         s.merge(new, "f");
         let texts: Vec<&str> = s.filtered.iter().map(|&i| s.all[i].text.as_str()).collect();
-        // "main" gone (doesn't start with "f"); "feature" not duplicated; closeness
-        // puts the shorter "fix" first.
         assert_eq!(texts, vec!["fix", "feature"]);
-        // The default open-highlight was on "feature"; it survives the merge and
-        // follows the candidate to its new sorted slot rather than snapping to top.
         assert_eq!(s.selected().unwrap().text, "feature");
     }
 
@@ -1041,17 +766,14 @@ mod tests {
                 cand("branch-b", CandidateKind::Value, 0, 1),
             ],
         );
-        s.select(true); // highlight "branch-b"
+        s.select(true);
         assert_eq!(s.selected().unwrap().text, "branch-b");
         s.merge(vec![cand("bugfix", CandidateKind::Value, 0, 1)], "b");
-        // The highlighted candidate survives the merge/re-sort and keeps focus.
         assert_eq!(s.selected().unwrap().text, "branch-b");
     }
 
     #[test]
     fn dir_only_commands_complete_only_directories() {
-        // `cd tar` must offer `target/`, never `tar.gz` (#136) — same for the
-        // other dir-only builtins, and for absolute spellings by basename.
         let dir = temp_tree("dironly", &[("target", true), ("tar.gz", false)]);
         let only_dirs = |line: &str| {
             complete(line, line.chars().count(), Some(dir.as_path()))
@@ -1061,11 +783,8 @@ mod tests {
         assert_eq!(only_dirs("cd tar"), vec!["target"]);
         assert_eq!(only_dirs("pushd tar"), vec!["target"]);
         assert_eq!(only_dirs("/bin/rmdir tar"), vec!["target"]);
-        // Only the current simple command counts: `cd` after a pipe governs.
         assert_eq!(only_dirs("foo | cd tar"), vec!["target"]);
-        // A bare argument slot narrows too.
         assert_eq!(only_dirs("cd "), vec!["target"]);
-        // A generic command keeps offering files alongside directories.
         let both = only_dirs("frobnicate tar");
         assert!(both.contains(&"tar.gz".to_string()), "{both:?}");
         assert!(both.contains(&"target".to_string()), "{both:?}");
@@ -1073,7 +792,6 @@ mod tests {
 
     #[test]
     fn unknown_command_falls_back_to_paths() {
-        // A command with no signature still path-completes (no panic, no menu here).
         let dir = temp_tree("fallback", &[("readme.md", false)]);
         let c = complete(
             "frobnicate read",
@@ -1121,28 +839,25 @@ mod tests {
     #[test]
     fn select_moves_the_highlight_and_wraps_without_touching_candidates() {
         let mut s = session(&["aa", "ab", "ac"]);
-        assert_eq!(s.index, Some(0)); // first row preselected on open
+        assert_eq!(s.index, Some(0));
         s.select(true);
         assert_eq!(s.index, Some(1));
         s.select(true);
         s.select(true);
-        assert_eq!(s.index, Some(0)); // wraps forward
+        assert_eq!(s.index, Some(0));
         s.select(false);
-        assert_eq!(s.index, Some(2)); // wraps backward
+        assert_eq!(s.index, Some(2));
         assert_eq!(s.selected().unwrap().text, "ac");
     }
 
     #[test]
     fn refilter_narrows_keeps_surviving_highlight_and_closes_when_stale() {
         let mut s = session(&["aa", "ab", "abc"]);
-        s.select(true); // highlight "ab"
+        s.select(true);
         assert!(s.refilter("ab"));
-        // "aa" filtered out; the highlighted "ab" survives and keeps its highlight.
         assert_eq!(s.filtered.len(), 2);
         assert_eq!(s.selected().unwrap().text, "ab");
-        // A word that no longer extends the open word closes the menu…
         assert!(!s.refilter(""));
-        // …as does one nothing matches.
         let mut s = session(&["aa", "ab"]);
         assert!(!s.refilter("az"));
     }
@@ -1150,7 +865,6 @@ mod tests {
     #[test]
     fn refilter_falls_back_to_the_top_when_the_highlight_is_filtered_away() {
         let mut s = session(&["aa", "ab", "abc"]);
-        // Highlight "aa", then type "ab" — "aa" drops out, top row takes over.
         assert_eq!(s.selected().unwrap().text, "aa");
         assert!(s.refilter("ab"));
         assert_eq!(s.selected().unwrap().text, "ab");
@@ -1183,7 +897,7 @@ mod tests {
         let c = complete("ech", 3, Some(Path::new("/"))).unwrap();
         let echo = c.candidates.iter().find(|c| c.text == "echo").unwrap();
         assert_eq!(echo.kind, CandidateKind::Command);
-        assert_eq!((echo.start, echo.end), (0, 3)); // replaces the word "ech"
+        assert_eq!((echo.start, echo.end), (0, 3));
     }
 
     #[test]
@@ -1195,11 +909,10 @@ mod tests {
         let line = "cat a";
         let c = complete(line, line.chars().count(), Some(dir.as_path())).unwrap();
         let names: Vec<&str> = c.candidates.iter().map(|c| c.text.as_str()).collect();
-        // Closeness order: assets(6) < apply.sh(8) < apple.txt(9).
         assert_eq!(names, vec!["assets", "apply.sh", "apple.txt"]);
         let assets = c.candidates.iter().find(|c| c.text == "assets").unwrap();
         assert!(assets.is_dir());
-        assert_eq!((assets.start, assets.end), (4, 5)); // the "a" word
+        assert_eq!((assets.start, assets.end), (4, 5));
     }
 
     #[test]
@@ -1238,66 +951,42 @@ mod tests {
         assert_eq!(names, vec!["xa", "xy", "xyz", "xyzzy"]);
     }
 
-    /// A remote pane has no local cwd. Path candidates must come back empty
-    /// rather than from tty7's own directory — inserting a local filename into
-    /// a remote command line names a file that isn't there. Command completion
-    /// is unaffected: it reads `$PATH`, not the cwd.
     #[test]
     fn a_remote_pane_completes_commands_but_never_local_paths() {
         let dir = temp_tree("remote", &[("only-here.txt", false), ("subdir", true)]);
 
-        // With a local cwd the file is offered...
         let c = complete("cat only", 8, Some(dir.as_path())).expect("local pane completes paths");
         assert!(c.candidates.iter().any(|c| c.text.starts_with("only-here")));
 
-        // ...and with none it is not, from the same line.
         assert!(complete("cat only", 8, None).is_none());
-        // Nor does a bare argument position dump anything.
         assert!(complete("cat ", 4, None).is_none());
 
-        // Command position still works — that source never touches the cwd.
         let c = complete("ech", 3, None).expect("command completion needs no cwd");
         assert!(c.candidates.iter().any(|c| c.text == "echo"));
     }
 
-    /// The static half of a signature — subcommands, flags — describes the
-    /// *command*, not the machine, so it survives the loss of a local cwd. This
-    /// is what keeps Tab useful in a remote pane: a position with no candidates
-    /// hands the line to the shell (`handoff_tab_to_shell`), which costs the
-    /// user the inline editor until the next prompt, so answering "nothing" for
-    /// every `git <Tab>` was a real regression once remote panes gained an
-    /// editor at all.
     #[test]
     fn a_remote_pane_still_gets_a_signatures_static_candidates() {
         let c = complete("git ", 4, None).expect("subcommands need no filesystem");
         assert!(c.candidates.iter().any(|c| c.text == "commit"));
         assert!(c.candidates.iter().any(|c| c.text == "push"));
 
-        // Prefix filtering works the same as it does locally.
         let c = complete("git ch", 6, None).expect("subcommands need no filesystem");
         assert!(c.candidates.iter().any(|c| c.text == "checkout"));
         assert!(!c.candidates.iter().any(|c| c.text == "commit"));
 
-        // Flags too.
         let c = complete("git commit --", 13, None).expect("flags need no filesystem");
         assert!(c.candidates.iter().any(|c| c.text == "--message"));
     }
 
-    /// Generators are local `/bin/sh -c` child processes, so against a remote
-    /// they would answer with this machine's state — `git checkout <Tab>`
-    /// offering the branches of whatever repo tty7's own cwd sits in. Unlike a
-    /// wrong filename, a wrong branch name is plausible enough to be accepted.
     #[test]
     fn a_remote_pane_never_runs_a_generator() {
-        // Locally this slot is generator-owned (the branch list).
         let local = complete("git checkout ", 13, Some(Path::new("/"))).unwrap();
         assert!(
             !local.pending.is_empty(),
             "expected the local branch generator to still be declared"
         );
 
-        // Remotely the same slot may keep its static candidates, but must not
-        // schedule a single script.
         if let Some(remote) = complete("git checkout ", 13, None) {
             assert!(
                 remote.pending.is_empty(),
@@ -1307,11 +996,8 @@ mod tests {
         }
     }
 
-    /// The word under the caret, split and resolved against the *remote* cwd.
-    /// This is the request the pane's SSH connection is asked to list.
     #[test]
     fn remote_path_request_splits_the_word_and_resolves_against_the_remote_cwd() {
-        // Bare word: list the cwd itself, nothing to re-prepend.
         let r = remote_path_request("cat fi", 6, "/home/me").unwrap();
         assert_eq!(
             (r.dir.as_str(), r.prefix.as_str(), r.dir_part.as_str()),
@@ -1320,56 +1006,39 @@ mod tests {
         assert_eq!((r.word_start, r.cursor), (4, 6));
         assert!(!r.dirs_only);
 
-        // Relative subdirectory: resolved against the cwd, typed text preserved.
         let r = remote_path_request("cat sub/fi", 10, "/home/me").unwrap();
         assert_eq!(r.dir, "/home/me/sub/");
         assert_eq!((r.prefix.as_str(), r.dir_part.as_str()), ("fi", "sub/"));
 
-        // Absolute: stands alone, the cwd is irrelevant.
         let r = remote_path_request("cat /etc/pa", 11, "/home/me").unwrap();
         assert_eq!(r.dir, "/etc/");
         assert_eq!(r.prefix, "pa");
 
-        // A trailing separator on the cwd must not double up.
         let r = remote_path_request("cat sub/", 8, "/").unwrap();
         assert_eq!(r.dir, "/sub/");
 
-        // `cd` takes directories only — same rule as the local engine.
         assert!(
             remote_path_request("cd pro", 6, "/home/me")
                 .unwrap()
                 .dirs_only
         );
 
-        // A backslash is a filename character on a POSIX remote, not a
-        // separator — even when tty7 itself runs on Windows.
         let r = remote_path_request(r"cat a\b", 7, "/home/me").unwrap();
         assert_eq!((r.dir.as_str(), r.prefix.as_str()), ("/home/me", r"a\b"));
     }
 
-    /// Positions where a remote listing is the wrong answer: the caller falls
-    /// back to the shell handoff for these rather than guessing.
     #[test]
     fn remote_path_request_declines_where_a_listing_cannot_help() {
-        // Command position: `$PATH`, not a directory listing.
         assert!(remote_path_request("ls", 2, "/home/me").is_none());
         assert!(remote_path_request("", 0, "/home/me").is_none());
-        // ...unless the "command" is itself a path, which is a real listing.
         assert!(remote_path_request("./scr", 5, "/home/me").is_some());
 
-        // `~` needs the remote's $HOME, which no OSC reports. The remote shell
-        // can expand it; we can't, so we decline and let it have the Tab.
         assert!(remote_path_request("cat ~/pro", 9, "/home/me").is_none());
 
-        // No absolute cwd to resolve against (the remote shell hasn't reported
-        // one yet, or reported something unusable).
         assert!(remote_path_request("cat fi", 6, "").is_none());
         assert!(remote_path_request("cat fi", 6, "relative/dir").is_none());
     }
 
-    /// A remote listing becomes candidates under exactly the local rules —
-    /// hidden entries stay hidden, the typed directory prefix is preserved, and
-    /// the ordering is the shared closeness sort.
     #[test]
     fn remote_path_candidates_mirror_the_local_path_rules() {
         let entries = |names: &[(&str, bool)]| -> Vec<RemoteEntry> {
@@ -1401,25 +1070,19 @@ mod tests {
             "prefix-matched, shortest first; `.`/`..`/hidden/non-matching dropped"
         );
 
-        // The directory kind survives, so the menu can mark it and the insert
-        // can add the trailing separator.
         let cands = remote_path_candidates(&req, &all);
         assert!(cands.iter().find(|c| c.text == "src").unwrap().is_dir());
         assert!(!cands.iter().find(|c| c.text == "s").unwrap().is_dir());
 
-        // The typed directory part is re-prepended to every candidate, and the
-        // replacement range covers the whole word.
         let req = remote_path_request("cat sub/s", 9, "/home/me").unwrap();
         let c = &remote_path_candidates(&req, &all)[0];
         assert_eq!(c.text, "sub/s");
         assert_eq!((c.start, c.end), (4, 9));
 
-        // A dot prefix opts into hidden entries, as it does locally.
         let req = remote_path_request("cat .h", 6, "/home/me").unwrap();
         let got = texts(remote_path_candidates(&req, &all));
         assert_eq!(got, vec![".hidden"]);
 
-        // `cd` drops the files.
         let req = remote_path_request("cd s", 4, "/home/me").unwrap();
         let got = texts(remote_path_candidates(&req, &all));
         assert_eq!(got, vec!["src"]);
@@ -1429,20 +1092,16 @@ mod tests {
     fn no_candidates_returns_none() {
         let dir = temp_tree("empty", &[("zzz", false)]);
         assert!(complete("cat q", 5, Some(dir.as_path())).is_none());
-        // A blank line offers nothing (no dump of every command on bare Tab).
         assert!(complete("", 0, Some(dir.as_path())).is_none());
         assert!(complete("   ", 3, Some(dir.as_path())).is_none());
     }
 
     #[test]
     fn mid_line_cursor_completes_only_the_word_before_it() {
-        // Caret sits right after "ap" with more text following; the candidate
-        // replaces only `word_start..cursor`, leaving the tail untouched.
         let dir = temp_tree("midline", &[("apple.txt", false)]);
         let c = complete("cat ap x.log", 6, Some(dir.as_path())).unwrap();
         let apple = c.candidates.iter().find(|c| c.text == "apple.txt").unwrap();
         assert_eq!((apple.start, apple.end), (4, 6));
-        // Applying it splices over just that range.
         let (line, cursor) = Replacement {
             orig: "cat ap x.log".into(),
             start: apple.start,
@@ -1463,25 +1122,19 @@ mod tests {
             "xb".to_string(),
         ];
         sort_by_closeness(&mut items);
-        // Shorter first; equal-length ties broken alphabetically.
         assert_eq!(items, vec!["xa", "xb", "xyz", "xyzzy"]);
     }
 
     #[test]
     fn resolve_dir_handles_empty_absolute_and_relative() {
         let cwd = Path::new("/work/proj");
-        // Empty dir part → the cwd itself.
         assert_eq!(resolve_dir("", cwd), PathBuf::from("/work/proj"));
-        // An absolute dir part is taken verbatim.
         assert_eq!(resolve_dir("/etc/", cwd), PathBuf::from("/etc/"));
-        // A relative dir part is joined onto the cwd.
         assert_eq!(resolve_dir("src/", cwd), PathBuf::from("/work/proj/src/"));
     }
 
     #[test]
     fn resolve_dir_expands_tilde_to_home() {
-        // Read the real home (no env mutation, so parallel tests aren't disturbed);
-        // the `~` branches must resolve against it.
         if let Some(home) = home_dir() {
             let cwd = Path::new("/work");
             assert_eq!(resolve_dir("~", cwd), home);

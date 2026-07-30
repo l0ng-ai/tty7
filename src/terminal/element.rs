@@ -1,6 +1,3 @@
-//! GPUI element that paints an `alacritty_terminal` grid as a fixed character
-//! matrix: background quads, shaped glyph runs, and a cursor overlay.
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -18,15 +15,8 @@ use gpui::{
 use gpui_component::ActiveTheme as _;
 
 use super::view::TerminalView;
-// NOTE: `gpui::CursorStyle` (mouse pointer) is already in scope above, so the
-// config cursor-shape enum is always referred to fully-qualified as
-// `crate::core::config::CursorStyle` to avoid the name clash.
 use crate::core::config::Config;
 
-/// Which underline variant the emulator asked for. The alacritty `Flags` bits
-/// are independent, so we collapse them into one ordered style rather than a
-/// bare bool — that lets the painter map curly → wavy and (best effort) vary
-/// the rest instead of drawing every SGR 4:x the same.
 #[derive(Clone, Copy, PartialEq, Default, Debug)]
 enum UnderlineKind {
     #[default]
@@ -38,14 +28,9 @@ enum UnderlineKind {
     Dashed,
 }
 
-/// Per-cell render data resolved from the emulator grid.
 #[derive(Clone)]
 struct RenderCell {
     c: char,
-    /// Combining marks the emulator stacked on this cell: accents, variation
-    /// selectors, ZWJ-sequence tails. They carry no column of their own, but
-    /// dropping them changes what the shaper sees — `❤` and `❤\u{FE0F}` pick
-    /// different faces — so they ride along and get shaped with their base.
     marks: Option<Box<[char]>>,
     fg: Hsla,
     bg: Hsla,
@@ -53,17 +38,11 @@ struct RenderCell {
     bold: bool,
     italic: bool,
     underline: UnderlineKind,
-    /// SGR 58 underline color (OSC-less, per-cell). `None` means "reuse the
-    /// glyph foreground", matching xterm's default.
     underline_color: Option<Hsla>,
     spacer: bool,
     selected: bool,
-    /// Covered by a (non-current) search match.
     match_hit: bool,
-    /// Covered by the current (focused) search match.
     match_current: bool,
-    /// Part of the URL currently under the mouse; painted underlined so the link
-    /// reads as clickable.
     link_hover: bool,
 }
 
@@ -103,8 +82,6 @@ pub struct TermLayout {
     line_height: Pixels,
     cols: usize,
     rows: usize,
-    /// Hitbox over the grid, inserted in prepaint so paint can flip the cursor to
-    /// a pointing hand while a link is hovered.
     hitbox: Hitbox,
 }
 
@@ -118,8 +95,6 @@ fn to_hsla(c: Rgb) -> Hsla {
     .into()
 }
 
-/// Resolve an alacritty color slot to RGB, honoring OSC overrides then falling
-/// back to the static xterm palette / theme defaults.
 fn resolve(
     color: AnsiColor,
     palette: &[Rgb; 256],
@@ -156,22 +131,12 @@ fn build_font(base: &Font, bold: bool, italic: bool) -> Font {
     } else {
         FontStyle::Normal
     };
-    // Batched runs shape several chars in one line, where a programming font's
-    // contextual ligatures (`calt`, e.g. Fira Code's "->") can fuse cells into
-    // one glyph and stress `force_width`'s one-glyph-per-column snapping. Keep
-    // the terminal-safe default unless the user explicitly configured OpenType
-    // features on the base font.
     if f.features.tag_value_list().is_empty() {
         f.features = gpui::FontFeatures::disable_ligatures();
     }
     f
 }
 
-/// Resolve one emulator cell into a `RenderCell`: colors (inverse/hidden
-/// handling included), emphasis, underline style/color, and the selection
-/// flag. `point` is the cell's grid-space position, used only for the
-/// selection test. Wide-char spacers come back with just `spacer` set — the
-/// leading cell paints them.
 fn snapshot_cell(
     cell: &Cell,
     point: AlacPoint,
@@ -201,12 +166,6 @@ fn snapshot_cell(
 
     let mut rc = RenderCell {
         c: cell.c,
-        // `Cell::zerowidth` answers out of the same lazily-boxed `extra` that
-        // holds SGR 58 and OSC 8, so a cell carrying only an underline color or
-        // a hyperlink reports `Some(&[])`. Drop the empties: an empty mark list
-        // is still `Some`, which would pull every linked or SGR-58 cell off the
-        // batched run path onto its own `Cluster` — a `shape_line` per cell for
-        // a whole `ls --hyperlink` listing, and no powerline fast path either.
         marks: cell
             .zerowidth()
             .filter(|marks| !marks.is_empty())
@@ -216,9 +175,6 @@ fn snapshot_cell(
         draw_bg,
         bold: flags.contains(Flags::BOLD) || flags.contains(Flags::BOLD_ITALIC),
         italic: flags.contains(Flags::ITALIC) || flags.contains(Flags::BOLD_ITALIC),
-        // Map the specific underline bit → style. The variants are mutually
-        // exclusive in practice, but check the more specific bits first so a
-        // plain UNDERLINE never shadows them.
         underline: if flags.contains(Flags::DOUBLE_UNDERLINE) {
             UnderlineKind::Double
         } else if flags.contains(Flags::UNDERCURL) {
@@ -232,27 +188,18 @@ fn snapshot_cell(
         } else {
             UnderlineKind::None
         },
-        // SGR 58 underline color (falls back to fg at paint when absent).
         underline_color: cell
             .underline_color()
             .map(|c| to_hsla(resolve(c, palette, colors.fg_rgb, colors.bg_rgb).0)),
         ..RenderCell::default()
     };
 
-    // Selection only *flags* the cell: the paint pass lays a translucent wash
-    // over it and the cell keeps its own foreground and background — so colors
-    // whose information lives in the background (fastfetch swatches, colored
-    // diff blocks, TUI status bars) stay visible while selected, matching the
-    // inline editor's translucent selection.
     if selection.is_some_and(|s| s.contains(point)) {
         rc.selected = true;
     }
     rc
 }
 
-/// The active preset's terminal selection background, read from the
-/// `ActivePalette` global. Falls back to a neutral dark tone if the global
-/// isn't published yet (only possible before the first paint).
 fn active_selection_bg(cx: &gpui::App) -> Rgb {
     match cx.try_global::<crate::terminal::palette::ActivePalette>() {
         Some(a) => a.sel_bg,
@@ -264,9 +211,6 @@ fn active_selection_bg(cx: &gpui::App) -> Rgb {
     }
 }
 
-/// Theme, selection, and search-highlight colors resolved once per paint pass,
-/// so the grid builder and the painters share one consistent set instead of
-/// each re-deriving them.
 struct PaintColors {
     default_fg: Hsla,
     default_bg: Hsla,
@@ -275,7 +219,6 @@ struct PaintColors {
     match_bg: Hsla,
     current_match_bg: Hsla,
     current_match_border: Hsla,
-    /// RGB defaults handed to the ANSI palette resolver.
     fg_rgb: Rgb,
     bg_rgb: Rgb,
 }
@@ -285,23 +228,11 @@ impl PaintColors {
         let default_fg = theme.foreground;
         let default_bg = theme.background;
         let caret = theme.caret;
-        // The selection paints as a *translucent* wash over the cells' own
-        // colors — like the inline editor's selection and VS Code — so
-        // selected text keeps its syntax colors and background-only cells
-        // (fastfetch swatches, colored diff blocks) stay visible instead of
-        // vanishing under an opaque fill. Foreground at 0.24 alpha mirrors the
-        // preset's opaque selection surface (`mix(bg, fg, 0.24)` — see
-        // `presets::active_palette`): on default-background cells it composites
-        // to exactly the tone the opaque fill used to have.
         let selection_bg = {
             let mut c = default_fg;
             c.a = 0.24;
             c
         };
-        // Search highlights derive from the preset's selection surface
-        // (published as the `ActivePalette` global by `apply_theme`, tuned to
-        // keep text legible on both themes): non-current matches get a subtle
-        // wash, the current match a stronger fill plus an accent outline.
         let base_match = to_hsla(active_selection_bg(cx));
         let match_bg = {
             let mut c = base_match;
@@ -327,9 +258,6 @@ impl PaintColors {
     }
 }
 
-/// Paint per-cell background quads, merging each horizontal run of equal color
-/// into a single quad. Background color varies per cell, so this can't share
-/// the fixed-color `paint_cell_runs` helper.
 fn paint_backgrounds(window: &mut Window, geom: &CellGeom, buf: &[RenderCell]) {
     for row in 0..geom.rows {
         let mut col = 0;
@@ -343,8 +271,6 @@ fn paint_backgrounds(window: &mut Window, geom: &CellGeom, buf: &[RenderCell]) {
             let start = col;
             while col < geom.cols {
                 let c = &buf[row * geom.cols + col];
-                // Spacer cells (trailing half of a wide char) inherit the
-                // preceding cell's background — include them in the run.
                 if c.spacer || (c.draw_bg && c.bg == bg) {
                     col += 1;
                 } else {
@@ -356,12 +282,6 @@ fn paint_backgrounds(window: &mut Window, geom: &CellGeom, buf: &[RenderCell]) {
     }
 }
 
-/// Paint a single fixed `color` over every horizontal run of cells matching
-/// `covered`, merging contiguous cells into one quad. An optional `border`
-/// draws an accent outline around each run (used by the current search match).
-///
-/// This collapses the selection, search-wash, and current-match overlays — all
-/// previously copy-pasted run-merge loops — into one place.
 fn paint_cell_runs(
     window: &mut Window,
     geom: &CellGeom,
@@ -380,9 +300,6 @@ fn paint_cell_runs(
             let start = col;
             while col < geom.cols {
                 let cell = &buf[row * geom.cols + col];
-                // Spacer cells are the trailing half of a wide (CJK) char.
-                // They inherit the preceding cell's highlight state, so include
-                // them in the run to paint the full 2-column width.
                 if covered(cell) || cell.spacer {
                     col += 1;
                 } else {
@@ -398,10 +315,6 @@ fn paint_cell_runs(
     }
 }
 
-/// The style facets that must agree for two cells to share one shaped run.
-/// Everything here feeds the `TextRun` (face, color, underline); backgrounds,
-/// selection and search washes live in separate paint layers and don't split
-/// glyph runs.
 #[derive(Clone, Copy, PartialEq)]
 struct GlyphStyle {
     fg: Hsla,
@@ -424,22 +337,12 @@ impl GlyphStyle {
         }
     }
 
-    /// Whether this style paints ink even on blank cells (an underline does),
-    /// which forbids batching across space gaps: a lone space was never
-    /// underlined by the per-cell painter, and batching must not change that.
     fn draws_on_blanks(&self) -> bool {
         self.underline != UnderlineKind::None || self.link_hover
     }
 
-    /// Underline for either an emulator-styled underline or a hovered link (a
-    /// hovered link with no underline of its own reads as a plain single line
-    /// so it looks clickable).
     fn underline_style(&self) -> Option<gpui::UnderlineStyle> {
         self.draws_on_blanks().then(|| {
-            // gpui's `UnderlineStyle` only exposes `thickness` / `color` /
-            // `wavy`, so curly maps to `wavy` and double gets a thicker
-            // line. TODO: gpui has no dotted/dashed primitive, so those
-            // fall back to a straight single line for now.
             let wavy = self.underline == UnderlineKind::Curly;
             let thickness = if self.underline == UnderlineKind::Double {
                 px(2.)
@@ -448,8 +351,6 @@ impl GlyphStyle {
             };
             gpui::UnderlineStyle {
                 thickness,
-                // SGR 58 color when set, else the glyph's own foreground so
-                // the line reads as part of the text it sits on.
                 color: Some(self.underline_color.unwrap_or(self.fg)),
                 wavy,
             }
@@ -457,119 +358,47 @@ impl GlyphStyle {
     }
 }
 
-/// A blank cell paints no glyph (and today, no underline either — see
-/// `GlyphStyle::draws_on_blanks`). A blank carrying combining marks is not
-/// blank: a mark that opens a line lands on the space the grid starts with, and
-/// it still has to be drawn.
 fn is_blank(cell: &RenderCell) -> bool {
     (cell.c == '\0' || cell.c == ' ') && cell.marks.is_none()
 }
 
-/// One paintable piece of a row produced by [`segment_row`].
 #[derive(Debug, PartialEq)]
 enum RowSeg {
-    /// Style-identical ASCII cells (with interior blank gaps rendered as
-    /// spaces), shaped as a single line.
     Run {
         start: usize,
-        /// Columns covered, gaps included — the clip width in cells.
         cells: usize,
         text: String,
     },
-    /// One wide (two-column) glyph — CJK text, wide emoji — shaped on its own
-    /// and pinned to `2 × cell_width`.
-    ///
-    /// These used to batch into multi-glyph runs, which was wrong. gpui's
-    /// `apply_force_width_to_layout` distinguishes a base glyph from a
-    /// zero-advance combining mark by asking whether the shaped x advanced by
-    /// more than *half* the forced width — and fullwidth punctuation fails
-    /// that test: `（` (U+FF08) advances 0.472 em in the common CJK faces,
-    /// while half a two-cell slot is 0.6 em against a 0.6 em primary. The
-    /// glyph *after* such a character was therefore treated as a mark, painted
-    /// at the punctuation's own advance instead of the next column, and the
-    /// two overlapped (every following glyph in the batch then sat one column
-    /// early until the run ended).
-    ///
-    /// Shaping one glyph per line sidesteps the heuristic entirely: the first
-    /// glyph of a line is unconditionally a base. The cost is one `shape_line`
-    /// per wide glyph instead of per run, which the layout cache absorbs —
-    /// it is keyed on text + font + size + force_width, so a per-character key
-    /// recurs far more often than a per-phrase one.
     Wide {
         start: usize,
-        /// Columns covered — always 2 (the glyph plus its spacer).
         cells: usize,
-        /// Interned via [`char_string`], so re-painting a screen full of CJK
-        /// allocates nothing: the same `SharedString` is handed to `shape_line`
-        /// every frame, which is also what keys its layout cache.
         text: SharedString,
     },
-    /// A cell painted on its own: any single-width non-ASCII glyph (box
-    /// drawing, accented Latin, …) that may route to a fallback face whose
-    /// advance isn't the cell width.
-    Solo { col: usize },
-    /// A base with everything that has to shape alongside it — the combining
-    /// marks stacked on it, and a following SARA AM — as one string, so the
-    /// shaper sees the whole cluster. Never batched with neighbours: marks add
-    /// characters without adding columns, which is exactly the correspondence
-    /// `force_width` relies on in a [`RowSeg::Run`] or [`RowSeg::Wide`].
-    ///
-    /// An absorbed SARA AM takes the base's style rather than its own. Unlike
-    /// a [`RowSeg::Run`], the cluster can't break on a style change: split off,
-    /// SARA AM has no base to reorder its nikhahit onto and renders as a dotted
-    /// circle. A recoloured vowel beats a broken one.
+    Solo {
+        col: usize,
+    },
     Cluster {
         col: usize,
-        /// Columns the whole cluster occupies — 2 for a wide base, or for a
-        /// narrow base that absorbed a following SARA AM.
         cells: usize,
         text: String,
-        /// Whether `cells == 2` because the *base* is wide, rather than because
-        /// a spacing character joined it. The two need opposite pinning: a wide
-        /// base is one glyph across two columns, an absorbed SARA AM is two
-        /// glyphs of one column each.
         wide_base: bool,
     },
 }
 
-/// Append a cell's character followed by any combining marks riding on it.
 fn push_cell(text: &mut String, cell: &RenderCell) {
     text.push(cell.c);
     text.extend(cell.marks.iter().flat_map(|marks| marks.iter()));
 }
 
-/// SARA AM (Thai U+0E33, Lao U+0EB3) is `Lo` and owns a column, but it is not
-/// atomic to the shaper: the Thai shaper decomposes it into NIKHAHIT + SARA AA
-/// and moves the nikhahit backwards over any above-base marks onto the base
-/// consonant. Shaped in a run of its own it has no base to reorder onto, and
-/// comes out as a dotted circle.
 fn is_sara_am(c: char) -> bool {
     matches!(c, '\u{0E33}' | '\u{0EB3}')
 }
 
-/// Does `col` hold a SARA AM that should join the preceding cell's cluster?
 fn sara_am_at(row: &[RenderCell], col: usize) -> Option<&RenderCell> {
     row.get(col)
         .filter(|cell| !cell.spacer && is_sara_am(cell.c))
 }
 
-/// Split one grid row into paintable segments.
-///
-/// ASCII-graphic cells batch into [`RowSeg::Run`]s: they always come from the
-/// primary monospace face, so their advances match the cell width (and
-/// `force_width` pins them exactly at paint). Blank cells end an underlined
-/// run, silently join a plain one, and never lead or trail a run.
-///
-/// Wide glyphs (a cell followed by its spacer — the grid's authoritative
-/// two-column marker) each become their own [`RowSeg::Wide`], shaped alone and
-/// pinned by `force_width` at `2 × cell_width`. They are deliberately *not*
-/// batched: a full-width advance is not always > half the forced width (CJK
-/// fullwidth punctuation is ~0.47 em), which breaks `apply_force_width_to_layout`'s
-/// base-vs-combining-mark test — see [`RowSeg::Wide`].
-///
-/// Single-width non-ASCII glyphs still paint solo, preserving the per-cell
-/// behavior for glyphs with unpredictable advances (box drawing must fill its
-/// cell exactly, so per-cell clipping is deliberate there).
 fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
     let mut segs = Vec::new();
     let mut col = 0;
@@ -579,16 +408,11 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
             col += 1;
             continue;
         }
-        // Combining marks come first: they can sit on an ASCII base too, and
-        // either way the whole cluster has to reach the shaper in one string.
         if let Some(marks) = &cell.marks {
             let wide_base = col + 1 < row.len() && row[col + 1].spacer;
             let mut cells = if wide_base { 2 } else { 1 };
             let mut text = String::with_capacity(1 + marks.len());
             push_cell(&mut text, cell);
-            // A wide base already owns both columns, so only a narrow one has a
-            // column spare for SARA AM to join it in. A SARA AM is not itself a
-            // base to absorb onto — two in a row stay separate.
             if !wide_base
                 && !is_sara_am(cell.c)
                 && let Some(am) = sara_am_at(row, col + 1)
@@ -606,11 +430,7 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
             continue;
         }
         if !cell.c.is_ascii_graphic() {
-            // Wide (two-column) glyph? The trailing spacer is the grid's own
-            // width marker, so no Unicode width guessing is needed.
             if col + 1 < row.len() && row[col + 1].spacer {
-                // One segment per glyph, deliberately unbatched — see the
-                // `RowSeg::Wide` docs for why batching can't be made safe.
                 segs.push(RowSeg::Wide {
                     start: col,
                     cells: 2,
@@ -620,10 +440,6 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
             } else if !is_sara_am(cell.c)
                 && let Some(am) = sara_am_at(row, col + 1)
             {
-                // An unmarked base still has to shape with its SARA AM. A
-                // baseless SARA AM is not a base for the next one: absorbing
-                // there would pin the second one's glyphs outside the cluster's
-                // clip, so two in a row stay separate and both stay visible.
                 let mut text = String::with_capacity(2);
                 push_cell(&mut text, cell);
                 push_cell(&mut text, am);
@@ -647,9 +463,6 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
         text.push(cell.c);
         let mut cells = 1;
         col += 1;
-        // Blanks between words may extend the run (they paint nothing), but are
-        // committed only once another matching glyph follows, so a run never
-        // carries trailing blanks.
         let mut gap = 0;
         while col < row.len() {
             let c = &row[col];
@@ -683,20 +496,9 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
 }
 
 thread_local! {
-    /// Single-char `SharedString`s memoized across frames and panes (the UI
-    /// thread paints everything). Solo glyphs used to allocate a fresh String
-    /// per cell per frame — thousands of allocations per paint on a CJK-dense
-    /// screen. Entries are font-independent so they never go stale; the map is
-    /// cleared wholesale only if a pathological stream floods it with unique
-    /// codepoints.
-    static CHAR_STRINGS: RefCell<HashMap<char, SharedString>> = RefCell::new(HashMap::new());
+                            static CHAR_STRINGS: RefCell<HashMap<char, SharedString>> = RefCell::new(HashMap::new());
 
-    /// The grid snapshot buffer, reused across frames and panes (the UI thread
-    /// paints everything sequentially). A full-screen grid is tens of
-    /// thousands of `RenderCell`s (~2 MB); remaking that Vec every paint was
-    /// pure allocator churn. Taken (`mem::take`) for the duration of one
-    /// element's paint and put back after, so panes share one allocation.
-    static GRID_BUF: RefCell<Vec<RenderCell>> = const { RefCell::new(Vec::new()) };
+                        static GRID_BUF: RefCell<Vec<RenderCell>> = const { RefCell::new(Vec::new()) };
 }
 
 fn char_string(c: char) -> SharedString {
@@ -711,38 +513,15 @@ fn char_string(c: char) -> SharedString {
     })
 }
 
-/// The Nerd Font powerline separators tty7 draws natively — as gpui paths
-/// sized to the exact cell — instead of rasterizing a font glyph.
-///
-/// These glyphs are pure geometry that only reads right when it fills the cell
-/// edge-to-edge: prompt themes (powerlevel10k, oh-my-posh, starship) butt them
-/// against colored segment backgrounds, so any gap or overshoot shows as a
-/// seam. Font rasterization can't guarantee that fit — the primary font rarely
-/// covers these codepoints, and a fallback face renders them at *its own*
-/// advance, narrower or wider than our cell (issue #17: separators at
-/// two-thirds width from a mismatched fallback). Building the shape from the
-/// cell rect makes it exact for every font/size combination — the approach
-/// kitty settled on with its programmatic glyphs.
-/// The thin/outline variants (U+E0B1, U+E0B3, …) stay on the font path: they
-/// are hairline strokes, not fills, and the bundled Hack covers the common
-/// ones.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum PowerlineShape {
-    /// U+E0B0 — solid right-pointing triangle (the classic left separator).
     TriangleRight,
-    /// U+E0B2 — solid left-pointing triangle (right-prompt separator).
     TriangleLeft,
-    /// U+E0B4 — solid half-circle bulging right (rounded cap/separator).
     HalfCircleRight,
-    /// U+E0B6 — solid half-circle bulging left.
     HalfCircleLeft,
-    /// U+E0B8 — solid slant triangle filling the lower-left half.
     SlantLowerLeft,
-    /// U+E0BA — solid slant triangle filling the lower-right half.
     SlantLowerRight,
-    /// U+E0BC — solid slant triangle filling the upper-left half.
     SlantUpperLeft,
-    /// U+E0BE — solid slant triangle filling the upper-right half.
     SlantUpperRight,
 }
 
@@ -762,12 +541,6 @@ impl PowerlineShape {
     }
 }
 
-/// Build the fill path for one powerline shape spanning exactly `bounds`
-/// (one cell). Pure geometry, split from the painting so tests can check it.
-///
-/// The half-circles approximate each quarter-ellipse with a single quadratic
-/// Bézier through the corner control point — within ~7% of a true ellipse,
-/// indistinguishable at cell sizes and the same trade kitty makes.
 fn powerline_path(bounds: Bounds<Pixels>, shape: PowerlineShape) -> gpui::Path<Pixels> {
     let (x0, y0) = (bounds.origin.x, bounds.origin.y);
     let (x1, y1) = (x0 + bounds.size.width, y0 + bounds.size.height);
@@ -787,8 +560,6 @@ fn powerline_path(bounds: Bounds<Pixels>, shape: PowerlineShape) -> gpui::Path<P
         PowerlineShape::SlantUpperLeft => tri(point(x0, y0), point(x1, y0), point(x0, y1)),
         PowerlineShape::SlantUpperRight => tri(point(x0, y0), point(x1, y0), point(x1, y1)),
         PowerlineShape::HalfCircleRight => {
-            // Flat edge on the left; the fan fill from the start point closes
-            // it implicitly (start → last point is that straight edge).
             let mut p = gpui::Path::new(point(x0, y0));
             p.curve_to(point(x1, ymid), point(x1, y0));
             p.curve_to(point(x0, y1), point(x1, y1));
@@ -803,45 +574,10 @@ fn powerline_path(bounds: Bounds<Pixels>, shape: PowerlineShape) -> gpui::Path<P
     }
 }
 
-/// What a natively-drawn cell — a Powerline separator or a box-drawing/block
-/// character, both painted as geometry rather than as a font glyph — still has
-/// to send through the text pipeline after its ink is on screen.
-///
-/// `None` for the common case: the geometry *is* the whole cell, so the shaping
-/// and painting below can be skipped entirely.
-///
-/// `Some(' ')` when the style draws on blanks, i.e. it carries an underline (or
-/// is part of a hovered link). Underlines are not painted per-cell — they ride
-/// on the [`TextRun`] that `paint_glyphs` builds, so a cell that returns early
-/// silently loses its underline, leaving a one-column hole in an `ESC[4m` span
-/// or a hovered URL. Shaping a *space* in the cell's own style closes the hole:
-/// a space puts no glyph ink over the geometry already painted, and gpui draws
-/// the line from the same [`gpui::UnderlineStyle`] (curly and double included)
-/// it uses for every other cell, so weight, offset and colour match exactly.
-/// The space comes from the primary monospace face, whose advance *is* the cell
-/// width, so it needs no `force_width` to cover its column.
 fn native_cell_residue(style: &GlyphStyle) -> Option<char> {
     style.draws_on_blanks().then_some(' ')
 }
 
-/// The width `paint_glyphs` clips a segment's paint to.
-///
-/// A batched `Run`/`Wide` segment clips to its exact column span (`cells`
-/// columns): its glyphs come from faces whose advance matches the cell, so
-/// nothing should spill past that span. A lone `solo` glyph is different — it
-/// can be a symbol whose face paints ink well past the single cell the grid
-/// reserved for it: a non-Mono Nerd Font sets a *one-cell advance* on its icons
-/// yet draws up to ~1.9 cells of ink (measured across Hasklug / Meslo /
-/// JetBrainsMono NF), and the OS cascade serves a proportional `➜`/`❯` the same
-/// way. Clipping that to one cell severs the glyph mid-ink — the incomplete
-/// icons and the cut-off arrow in issue #17.
-///
-/// Advance is no signal there (it reads one cell for exactly those overflowing
-/// icons), so a solo glyph gets a two-cell window instead. A glyph that already
-/// fits is untouched — it has no ink to spill — while a symbol that overflows
-/// renders whole, bleeding into a trailing blank the way iTerm2 and Terminal.app
-/// do with non-Mono faces. The two-cell bound keeps a pathological face from
-/// smearing a lone glyph across the row.
 fn seg_clip_width(solo: bool, cells: usize, cell_width: Pixels) -> Pixels {
     if solo {
         cell_width * 2.
@@ -850,20 +586,6 @@ fn seg_clip_width(solo: bool, cells: usize, cell_width: Pixels) -> Pixels {
     }
 }
 
-/// Paint glyphs as per-row batched runs where safe, single cells otherwise.
-///
-/// Merging cells into multi-char `shape_line` runs causes drift whenever a
-/// glyph's font advance ≠ cell_width. gpui's `force_width` (added upstream for
-/// Zed's terminal) pins every glyph in a shaped line to its own column, which
-/// makes batching safe when all glyphs in the line occupy the same number of
-/// columns *and* every one of them clears its base-glyph test — true for
-/// style-identical ASCII runs at `cell_width` per glyph, false for wide glyphs
-/// (see [`RowSeg::Wide`]), which shape one per line at `2 × cell_width`.
-/// Single-width glyphs that may come from a fallback face (box drawing, …)
-/// still paint cell-by-cell: their advances are unpredictable and mixing
-/// widths inside one batch would break `force_width`'s uniform-column
-/// assumption. Powerline separators skip fonts entirely — see
-/// [`PowerlineShape`].
 fn paint_glyphs(
     window: &mut Window,
     cx: &mut App,
@@ -874,9 +596,6 @@ fn paint_glyphs(
     bold_font: Option<&Font>,
     italic_font: Option<&Font>,
 ) {
-    // The four style faces, resolved once per paint instead of once per cell.
-    // A distinct bold/italic family applies when configured (bold wins for
-    // bold+italic cells); `build_font` synthesizes the emphasis otherwise.
     let faces = [
         build_font(base_font, false, false),
         build_font(bold_font.unwrap_or(base_font), true, false),
@@ -907,28 +626,15 @@ fn paint_glyphs(
                     Some(geom.cell_width),
                     false,
                 ),
-                // Each wide glyph is pinned to its own two-column slot; the
-                // clip stops an oversized fallback glyph bleeding past the run.
                 RowSeg::Wide { start, cells, text } => {
                     (start, cells, text, Some(geom.cell_width * 2.), false)
                 }
-                // Always exactly one column now — anything with a trailing
-                // spacer became a Wide run in `segment_row`. No `force_width`
-                // for a single glyph — it paints at the run origin regardless.
                 RowSeg::Solo { col } => {
                     let cell = &buf[row_base + col];
                     let cell_bounds = Bounds::new(
                         point(geom.origin.x + geom.cell_width * (col as f32), y),
                         size(geom.cell_width, geom.line_height),
                     );
-                    // Two families paint as native geometry rather than as a
-                    // font glyph: Powerline separators, and the box-drawing /
-                    // block characters (`boxdraw`) — a font glyph only covers
-                    // the font's own line height, which broke every vertical
-                    // run of `│`/`╭`/`╰` into dashes at line_height > 1.0.
-                    // Either way the cell may still owe an underline, so this
-                    // records whether the ink is already down rather than
-                    // returning outright.
                     let native = if let Some(shape) = PowerlineShape::of(cell.c) {
                         let path = powerline_path(cell_bounds, shape);
                         window.paint_path(path, GlyphStyle::of(cell).fg);
@@ -957,21 +663,10 @@ fn paint_glyphs(
                     } else {
                         match native_cell_residue(&GlyphStyle::of(cell)) {
                             None => continue,
-                            // `solo: false` clips the space to its own single
-                            // column so the underline can't spill sideways.
                             Some(c) => (col, 1, char_string(c), None, false),
                         }
                     }
                 }
-                // Same pinning as the batched runs, just for one base: two
-                // columns get `force_width` so a fallback emoji face can't
-                // drift, one column paints at the origin like `Solo`.
-                // Two columns pin per *base glyph*, and which that is depends
-                // on why the cluster is two cells wide: a wide base is one
-                // glyph spanning both, an absorbed SARA AM is two glyphs of one
-                // column each. `force_width` classifies by advance, so the
-                // marks ride their base under either. One column paints at the
-                // origin like `Solo`.
                 RowSeg::Cluster {
                     col,
                     cells,
@@ -1001,9 +696,6 @@ fn paint_glyphs(
                 .shape_line(text, font_size, run_buf, force_width);
 
             let x = geom.origin.x + geom.cell_width * (start as f32);
-            // Batched runs clip to their exact column span; a solo glyph gets a
-            // two-cell window so a symbol/icon face whose ink overflows its cell
-            // isn't severed (see `seg_clip_width` — issue #17).
             let clip_width = seg_clip_width(solo, cells, geom.cell_width);
             let clip = Bounds::new(point(x, y), size(clip_width, geom.line_height));
             window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
@@ -1020,23 +712,14 @@ fn paint_glyphs(
     }
 }
 
-/// Where the emulator's cursor sits, plus whether the app has hidden it
-/// (DECTCEM off / `CursorShape::Hidden`). The position is tracked even while
-/// hidden so the IME candidate window can anchor to it.
 #[derive(Clone, Copy)]
 struct GridCursor {
     row: usize,
     col: usize,
     hidden: bool,
-    /// The shape to draw after resolving terminal DECSCUSR/default state.
     style: crate::core::config::CursorStyle,
 }
 
-/// Paint the cursor overlay in the configured shape: a filled block, a thin
-/// vertical bar, or an underline in the blink "on" phase when focused (nothing in
-/// the "off" phase, so it blinks). When unfocused every shape falls back to a
-/// static hollow block outline — the conventional "not the active pane" cue,
-/// independent of the shape choice.
 fn paint_cursor(
     window: &mut Window,
     geom: &CellGeom,
@@ -1057,21 +740,18 @@ fn paint_cursor(
         return;
     }
     if !cursor_visible {
-        return; // blink "off" phase
+        return;
     }
     let mut c = caret;
     c.a = 0.55;
     match style {
         CursorStyle::Block => window.paint_quad(fill(rect, c)),
         CursorStyle::Bar => {
-            // A 2px vertical bar hugging the cell's left edge, scaled up a touch
-            // on very large fonts so it stays visible.
             let w = (geom.cell_width * 0.15).max(px(1.)).min(px(3.));
             let bar = Bounds::new(rect.origin, size(w, rect.size.height));
             window.paint_quad(fill(bar, c));
         }
         CursorStyle::Underline => {
-            // A thin line along the cell's baseline, same thickness logic.
             let h = (geom.line_height * 0.12).max(px(1.)).min(px(3.));
             let y = rect.origin.y + rect.size.height - h;
             let line = Bounds::new(point(rect.origin.x, y), size(rect.size.width, h));
@@ -1088,8 +768,6 @@ fn cursor_style_from_shape(shape: CursorShape) -> crate::core::config::CursorSty
     }
 }
 
-/// Paint IME pre-edit (composing) text over the cursor cell, underlined so it
-/// reads as provisional.
 fn paint_marked(
     window: &mut Window,
     cx: &mut App,
@@ -1139,11 +817,6 @@ fn paint_marked(
     );
 }
 
-/// What [`TerminalElement::build_grid`] found alongside the cell buffer: the
-/// cursor cell, the optional sub-line-scroll sliver row, and whether any cell
-/// carries a selection / search-highlight flag — so the paint pass can skip
-/// the corresponding overlay scans entirely in the common no-selection,
-/// no-search frame.
 struct GridSnapshot {
     cursor: Option<GridCursor>,
     sliver: Option<Vec<RenderCell>>,
@@ -1153,14 +826,6 @@ struct GridSnapshot {
 }
 
 impl TerminalElement {
-    /// Snapshot the emulator grid into `buf` (releasing the term lock before
-    /// returning) and locate the cursor cell. Search-match highlighting is
-    /// layered on afterwards. `buf` is caller-provided so the (rows × cols)
-    /// allocation is reused across frames instead of remade per paint.
-    ///
-    /// With `want_sliver`, also snapshots the row just above the viewport
-    /// (grid line `-(display_offset + 1)`), which becomes visible when a
-    /// sub-line scroll fraction shifts the whole grid down at paint.
     fn build_grid(
         &self,
         colors: &PaintColors,
@@ -1178,10 +843,6 @@ impl TerminalElement {
         let display_offset;
         {
             let mut palette = self.view.read(cx).terminal.palette;
-            // Overwrite the ANSI 16 (slots 0-15) with the active preset's set
-            // for the current mode, published as the `ActivePalette` global by
-            // `apply_theme`. The 256-color cube and grayscale ramp (slots 16+)
-            // stay as built. Falls back to the stored palette if unset.
             if let Some(active) = cx.try_global::<crate::terminal::palette::ActivePalette>() {
                 palette[..16].copy_from_slice(&active.ansi16);
             }
@@ -1202,12 +863,6 @@ impl TerminalElement {
                 buf[row as usize * cols + col] = rc;
             }
 
-            // The extra top row for sub-line scrolling. Grid lines index into
-            // history below 0, so the line above the viewport exists whenever
-            // we're not already at the top of the scrollback. Search-match
-            // washes are skipped here: matches are flagged in viewport
-            // coordinates, and a strip at most one line tall lighting up a
-            // frame early isn't worth widening that mapping.
             if want_sliver && (display_offset as usize) < term.grid().history_size() {
                 let line = AlacLine(-display_offset - 1);
                 let mut row_buf = vec![RenderCell::default(); cols];
@@ -1229,11 +884,6 @@ impl TerminalElement {
                 sliver = Some(row_buf);
             }
 
-            // Cursor cell. We record the position even when the app has hidden the
-            // cursor (`CursorShape::Hidden`, e.g. a full-screen TUI like Claude Code
-            // that draws its own): the rendered block honours `hidden`, but the IME
-            // candidate window still needs an anchor at the input cell — otherwise it
-            // falls back to a window corner and can't follow the caret.
             let cur = content.cursor;
             let row = cur.point.line.0 + display_offset;
             let col = cur.point.column.0;
@@ -1259,9 +909,6 @@ impl TerminalElement {
         }
     }
 
-    /// Flag the cells covered by the hovered link (if it's currently on screen) so
-    /// they paint underlined. The link is stored in scroll-stable grid coordinates,
-    /// so we shift it back into a screen row by the current display offset.
     fn flag_hovered_link(
         &self,
         buf: &mut [RenderCell],
@@ -1273,9 +920,6 @@ impl TerminalElement {
         let Some(link) = self.view.read(cx).hovered_link.as_ref() else {
             return;
         };
-        // The link may span several rows — a soft wrap, or a URL a program
-        // split with a hard newline. Paint every covered cell: full columns on
-        // the interior rows, clamped to `start`/`end` on the first and last.
         let (start, end) = (link.start, link.end);
         let mut line = start.line.0;
         while line <= end.line.0 {
@@ -1302,14 +946,6 @@ impl TerminalElement {
         }
     }
 
-    /// Flag cells covered by search matches. Driven entirely by the SearchState
-    /// match list (computed only when the query changes), so this is the single
-    /// source of truth for highlighting. Cheap per frame: the list is ordered
-    /// top→bottom and non-overlapping (see `recompute_matches`), so a binary
-    /// search finds the first match that can touch the viewport and iteration
-    /// stops at the first one past it — instead of scanning all (up to 10k)
-    /// matches every frame. Returns whether any (non-current, current) cells
-    /// were flagged, so paint can skip the highlight passes entirely.
     fn flag_search_matches(
         &self,
         buf: &mut [RenderCell],
@@ -1322,7 +958,6 @@ impl TerminalElement {
             return (false, false);
         };
         let (mut any_hit, mut any_current) = (false, false);
-        // First match whose end reaches the viewport's top row.
         let first = search
             .matches
             .partition_point(|m| m.end().line.0 + display_offset < 0);
@@ -1331,7 +966,7 @@ impl TerminalElement {
             let start = *m.start();
             let end = *m.end();
             if start.line.0 + display_offset >= rows as i32 {
-                break; // ordered: everything after starts below the viewport too
+                break;
             }
             if is_current {
                 any_current = true;
@@ -1369,9 +1004,6 @@ impl TerminalElement {
         (any_hit, any_current)
     }
 
-    /// Register the per-frame mouse listeners (press / drag / release) over our
-    /// bounds, translating pixel positions to grid cells and routing to the view
-    /// (selection, link opening, or mouse-tracking reports).
     fn register_mouse_handlers(
         &self,
         geom: CellGeom,
@@ -1381,9 +1013,6 @@ impl TerminalElement {
     ) {
         let view = self.view.clone();
         window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
-            // `is_hovered` (not `bounds.contains`) so a click on an overlay that
-            // sits above the terminal — the Cmd+F search bar, which `.occlude()`s
-            // its area — doesn't fall through and start a terminal selection.
             if !phase.bubble() || !hitbox.is_hovered(window) {
                 return;
             }
@@ -1393,10 +1022,6 @@ impl TerminalElement {
             let button = ev.button;
             let clicks = ev.click_count;
             view.update(cx, |v, cx| {
-                // Secondary+click (⌘ on macOS, Ctrl on Windows/Linux) opens a
-                // URL under the cursor. Not the raw platform key: that's Win/
-                // Super off macOS, which the OS mostly swallows — and every
-                // other terminal there opens links on Ctrl+click.
                 let link_modifier = mods.secondary() || v.link_modifier_down();
                 if link_modifier
                     && button == MouseButton::Left
@@ -1404,15 +1029,10 @@ impl TerminalElement {
                 {
                     return;
                 }
-                // Report to the app when in mouse-tracking mode (Shift forces
-                // local selection instead).
                 if v.mouse_mode() && !mods.shift {
                     v.mouse_press(button, col, row, &mods);
                     return;
                 }
-                // A left click/double-click/triple-click on the command-editor
-                // line drives its caret/selection instead of a (meaningless)
-                // terminal selection over it.
                 if button == MouseButton::Left
                     && v.editor_click(col, raw_row, clicks, mods.shift, cx)
                 {
@@ -1430,15 +1050,7 @@ impl TerminalElement {
             let raw_row = geom.pos_to_row_raw(ev.position);
             let mods = ev.modifiers;
             let Some(button) = ev.pressed_button else {
-                // No button down: detect a link under the cursor so it underlines.
-                // This runs in mouse-tracking mode too — hover detection is purely
-                // local (button-less motion is never forwarded to the app), and
-                // ⌘-click opens links inside mouse-mode TUIs as well, so the
-                // underline affordance must match. Skipped only when the pointer
-                // is outside our bounds (or under the search-bar overlay).
                 let inside = hitbox.is_hovered(window);
-                // Focus-follows-mouse: hovering an unfocused pane focuses it, no
-                // click needed. Guarded on `inside` and the config flag.
                 if inside && cx.global::<Config>().focus_follows_mouse {
                     let handle = view.read(cx).focus_handle.clone();
                     if !handle.is_focused(window) {
@@ -1447,10 +1059,6 @@ impl TerminalElement {
                 }
                 view.update(cx, |v, cx| {
                     if inside {
-                        // Any-event mouse tracking (mode 1003): apps that asked
-                        // for all motion get button-less moves too; `mouse_motion`
-                        // no-ops unless the mode is set. Shift keeps the mouse
-                        // local, matching the click/drag/scroll routing.
                         if !mods.shift {
                             v.mouse_motion(col, row, &mods);
                         }
@@ -1467,16 +1075,11 @@ impl TerminalElement {
                     v.mouse_drag(button, col, row, &mods);
                     return;
                 }
-                // A drag that began on the command-editor line extends its
-                // selection rather than the terminal's.
                 if button == MouseButton::Left && v.editor_drag(col, raw_row, cx) {
                     return;
                 }
                 if button == MouseButton::Left {
                     v.on_select_update(col, row, left, cx);
-                    // Past the top/bottom edge, keep the selection growing by
-                    // auto-scrolling the scrollback (`pos_to_cell` clamps the
-                    // row, so the position alone stops at the edge).
                     let overshoot = drag_overshoot(ev.position.y, bounds, geom.line_height);
                     v.select_autoscroll(overshoot, col, left, cx);
                 }
@@ -1547,7 +1150,6 @@ impl Element for TerminalElement {
         let font_size = self.view.read(cx).font_size;
         let base_font = self.view.read(cx).font.clone();
 
-        // Measure the monospace advance from a single glyph.
         let sample = window.text_system().shape_line(
             SharedString::new_static("M"),
             font_size,
@@ -1563,10 +1165,6 @@ impl Element for TerminalElement {
         );
         let cell_width = sample.width.max(px(1.));
         let line_height_mul = self.view.read(cx).line_height_mul;
-        // Clamp to >= 1px like `cell_width`: a degenerate config (font_size 0 or a
-        // tiny line-height multiple) can round to 0, and dividing `bounds.height`
-        // by 0 yields `inf`, which casts to `usize::MAX` rows → `rows * cols`
-        // capacity overflow and an allocation panic on the first paint.
         let line_height = px((font_size.as_f32() * line_height_mul).round()).max(px(1.));
 
         let cols = (bounds.size.width.as_f32() / cell_width.as_f32())
@@ -1601,20 +1199,9 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // Optional frame timing (TTY7_FPS=1). Times the whole paint body below.
         let fps_start = super::fps::enabled().then(std::time::Instant::now);
 
-        // Sub-line scroll fraction: shift the whole grid down by this many
-        // pixels so trackpad scrolling moves continuously instead of snapping
-        // line by line. The strip that opens above the top row is filled with
-        // the next older row (the "sliver"). Mouse mapping stays consistent
-        // automatically: `pos_to_cell` measures from this shifted origin.
         let frac = self.view.read(cx).scroll_frac.clamp(0., 1.);
-        // While the command editor's wrapped input would spill past the bottom
-        // row, the whole grid shifts up by that many lines — the top rows are
-        // clipped by the content mask and the overlay's wrapped tail lands in
-        // the vacated strip, emulating the scroll an echoing shell would do.
-        // Mouse mapping follows automatically via the shifted origin.
         let input_shift = self.view.read(cx).input_scroll_rows();
         let geom = CellGeom {
             origin: point(
@@ -1633,36 +1220,20 @@ impl Element for TerminalElement {
         let bold_font = self.view.read(cx).font_bold.clone();
         let italic_font = self.view.read(cx).font_italic.clone();
         let focused = self.view.read(cx).focus_handle.is_focused(window);
-        // Blink phase (only meaningful while focused) and the transient bell flash.
         let cursor_visible = self.view.read(cx).cursor_visible;
         let bell_flash = self.view.read(cx).bell_flash;
-        // While the inline line editor is live it owns the keyboard and draws its
-        // own caret at the prompt; suppress the terminal's block cursor so the two
-        // don't stack (the editor isn't focused on `focus_handle`, so otherwise the
-        // grid would paint a stale hollow box behind the field).
         let editor_active = self.view.read(cx).input_active();
 
-        // Snapshot the emulator grid into the reused buffer (lock released
-        // inside). The buffer is returned to `GRID_BUF` at the end of paint.
         let mut buf = GRID_BUF.with(|b| std::mem::take(&mut *b.borrow_mut()));
         let snap = self.build_grid(&colors, &mut buf, geom.rows, geom.cols, frac > 0., cx);
         let cursor = snap.cursor;
         let sliver = snap.sliver.as_ref();
 
-        // Cell the IME candidate window anchors to. Use the cursor position even
-        // when the app has hidden the hardware cursor (full-screen TUIs draw their
-        // own) so composition still tracks the input cell instead of dropping to a
-        // window corner.
         let cursor_cell = cursor.map(|c| (c.row, c.col));
-        // The rendered cursor, by contrast, honours `hidden`; it carries its shape
-        // so `paint_cursor` can draw a block / bar / underline.
         let render_cursor = cursor
             .filter(|c| !c.hidden)
             .map(|c| (c.row, c.col, c.style));
 
-        // Register the IME / text input handler so CJK (and dead-key) input
-        // composes and commits to the PTY. Positioned at the cursor cell so the
-        // candidate window appears in the right place.
         let cursor_bounds = cursor_cell.map(|(row, col)| geom.cell_rect(row, col, 1));
         let focus_handle = self.view.read(cx).focus_handle.clone();
         window.handle_input(
@@ -1673,10 +1244,6 @@ impl Element for TerminalElement {
         let marked = self.view.read(cx).marked_text.clone();
 
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            // Background quads, then the selection / search overlays, then
-            // glyphs. The overlay passes each rescan the whole buffer, so they
-            // only run when the snapshot actually flagged something — the
-            // common no-selection, no-search frame skips all three.
             paint_backgrounds(window, &geom, &buf);
             if snap.any_selected {
                 paint_cell_runs(window, &geom, &buf, colors.selection_bg, None, |c| {
@@ -1708,10 +1275,6 @@ impl Element for TerminalElement {
                 bold_font.as_ref(),
                 italic_font.as_ref(),
             );
-            // The sliver row above the viewport, exposed by the sub-line
-            // scroll shift: same paint layers on a one-row geometry sitting
-            // one line above the (already shifted) grid origin, clipped by
-            // the surrounding content mask.
             if let Some(row) = sliver {
                 let sg = CellGeom {
                     origin: point(geom.origin.x, geom.origin.y - geom.line_height),
@@ -1733,9 +1296,6 @@ impl Element for TerminalElement {
                     italic_font.as_ref(),
                 );
             }
-            // While the command editor is live, it draws its own caret and IME
-            // pre-edit in the overlay; suppress the grid's versions so they don't
-            // double up.
             if !editor_active {
                 paint_cursor(
                     window,
@@ -1758,9 +1318,6 @@ impl Element for TerminalElement {
                 );
             }
 
-            // Visual bell: a brief, low-alpha wash over the whole surface as a
-            // restrained, non-intrusive alternative to an audible beep. Cleared
-            // automatically ~150ms after the bell by the view's timer.
             if bell_flash {
                 let mut c = colors.default_fg;
                 c.a = 0.12;
@@ -1768,16 +1325,10 @@ impl Element for TerminalElement {
             }
         });
 
-        // Hand the snapshot buffer back for the next paint (any pane).
         GRID_BUF.with(|b| *b.borrow_mut() = buf);
 
         self.register_mouse_handlers(geom, bounds, prepaint.hitbox.id, window);
 
-        // Mouse pointer over the surface: a pointing hand over a hovered link
-        // (Cmd+click opens it); otherwise an I-beam over the selectable text,
-        // like every other terminal. Once a program takes over mouse reporting
-        // the pointer stays the default arrow, signalling "the app owns this"
-        // (matching Terminal.app / iTerm).
         let view = self.view.read(cx);
         if view.hovered_link.is_some() {
             window.set_cursor_style(CursorStyle::PointingHand, &prepaint.hitbox);
@@ -1791,7 +1342,6 @@ impl Element for TerminalElement {
     }
 }
 
-/// Geometry helper for mapping pixel positions to grid cells.
 #[derive(Clone, Copy)]
 struct CellGeom {
     origin: Point<Pixels>,
@@ -1802,7 +1352,6 @@ struct CellGeom {
 }
 
 impl CellGeom {
-    /// The pixel rectangle covering `span` cells starting at (`row`, `col`).
     fn cell_rect(&self, row: usize, col: usize, span: usize) -> Bounds<Pixels> {
         let x = self.origin.x + self.cell_width * (col as f32);
         let y = self.origin.y + self.line_height * (row as f32);
@@ -1812,7 +1361,6 @@ impl CellGeom {
         )
     }
 
-    /// Returns (column, row, is_left_half).
     fn pos_to_cell(&self, pos: Point<Pixels>) -> (usize, usize, bool) {
         let lx = (pos.x - self.origin.x).as_f32().max(0.);
         let ly = (pos.y - self.origin.y).as_f32().max(0.);
@@ -1824,20 +1372,12 @@ impl CellGeom {
         (col, row, left)
     }
 
-    /// The row under `pos` without `pos_to_cell`'s bottom clamp. While the
-    /// input overlay shifts the grid up, its wrapped rows extend past
-    /// `rows - 1` into the vacated strip; the command editor needs those raw
-    /// rows so clicks and drags land on the right wrapped line. (Terminal
-    /// consumers — selection, mouse reports — keep the clamped row.)
     fn pos_to_row_raw(&self, pos: Point<Pixels>) -> usize {
         let ly = (pos.y - self.origin.y).as_f32().max(0.);
         (ly / self.line_height.as_f32()).floor() as usize
     }
 }
 
-/// Vertical overshoot of a selection drag past the pane bounds, in lines:
-/// positive above the top edge (auto-scroll up into history), negative below
-/// the bottom, zero while inside. Feeds `TerminalView::select_autoscroll`.
 fn drag_overshoot(y: Pixels, bounds: Bounds<Pixels>, line_height: Pixels) -> f32 {
     let lh = line_height.as_f32().max(1.);
     if y < bounds.top() {
@@ -1867,7 +1407,6 @@ mod tests {
         assert!((white.l - 1.0).abs() < 1e-6, "white has full lightness");
         assert!(white.s.abs() < 1e-6, "white is desaturated");
 
-        // A pure primary round-trips back through Rgba.
         let back = Rgba::from(to_hsla(Rgb { r: 255, g: 0, b: 0 }));
         assert!((back.r - 1.0).abs() < 1e-3);
         assert!(back.g.abs() < 1e-3 && back.b.abs() < 1e-3);
@@ -1875,7 +1414,6 @@ mod tests {
 
     #[test]
     fn resolve_covers_every_color_slot() {
-        // A palette whose red channel encodes its own index, for easy assertions.
         let mut palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
         for (i, slot) in palette.iter_mut().enumerate() {
             slot.r = i as u8;
@@ -1891,19 +1429,16 @@ mod tests {
             b: 12,
         };
 
-        // A direct RGB spec passes through and is not a "default".
         let spec = Rgb { r: 1, g: 2, b: 3 };
         assert_eq!(
             resolve(AnsiColor::Spec(spec), &palette, fg, bg),
             (spec, false)
         );
 
-        // Indexed reads the palette slot.
         let (rgb, is_def) = resolve(AnsiColor::Indexed(5), &palette, fg, bg);
         assert_eq!(rgb.r, 5);
         assert!(!is_def);
 
-        // Named Foreground/Background fall back to the theme defaults (is_default=true).
         assert_eq!(
             resolve(AnsiColor::Named(NamedColor::Foreground), &palette, fg, bg),
             (fg, true)
@@ -1913,7 +1448,6 @@ mod tests {
             (bg, true)
         );
 
-        // A concrete named ANSI color reads the palette, not a default.
         let (rgb, is_def) = resolve(AnsiColor::Named(NamedColor::Red), &palette, fg, bg);
         assert_eq!(rgb.r, NamedColor::Red as u8);
         assert!(!is_def);
@@ -1930,7 +1464,6 @@ mod tests {
         assert_eq!(bold_italic.weight, FontWeight::BOLD);
         assert_eq!(bold_italic.style, FontStyle::Italic);
 
-        // Family is preserved across the tweak.
         assert_eq!(bold_italic.family, base.family);
     }
 
@@ -1948,7 +1481,6 @@ mod tests {
         assert_eq!(r.origin.y, px(20. + 16. * 2.));
         assert_eq!(r.size.width, px(8.));
         assert_eq!(r.size.height, px(16.));
-        // A multi-cell span widens the rect by that many cells.
         assert_eq!(geom.cell_rect(0, 0, 4).size.width, px(32.));
     }
 
@@ -1961,33 +1493,24 @@ mod tests {
             cols: 5,
             rows: 3,
         };
-        // Left of the cell midpoint → left half.
         let (c, r, left) = geom.pos_to_cell(point(px(2.), px(5.)));
         assert_eq!((c, r), (0, 0));
         assert!(left);
-        // Right of the midpoint → right half.
         let (_, _, left) = geom.pos_to_cell(point(px(8.), px(5.)));
         assert!(!left);
-        // Negative offsets clamp to the first cell.
         let (c, r, _) = geom.pos_to_cell(point(px(-100.), px(-100.)));
         assert_eq!((c, r), (0, 0));
-        // Far beyond the grid clamps to (cols-1, rows-1).
         let (c, r, _) = geom.pos_to_cell(point(px(9999.), px(9999.)));
         assert_eq!((c, r), (4, 2));
     }
 
-    /// Drag auto-scroll only engages past the vertical edges, scaled to lines:
-    /// above the top is positive (into history), below the bottom negative.
     #[test]
     fn drag_overshoot_signed_by_edge_and_zero_inside() {
         let bounds = Bounds::new(point(px(0.), px(100.)), size(px(200.), px(100.)));
-        // Anywhere inside (including the exact edges) → no auto-scroll.
         assert_eq!(drag_overshoot(px(150.), bounds, px(10.)), 0.);
         assert_eq!(drag_overshoot(px(100.), bounds, px(10.)), 0.);
         assert_eq!(drag_overshoot(px(200.), bounds, px(10.)), 0.);
-        // 20px above the top at 10px lines → 2 lines up.
         assert_eq!(drag_overshoot(px(80.), bounds, px(10.)), 2.);
-        // 30px below the bottom → 3 lines down.
         assert_eq!(drag_overshoot(px(230.), bounds, px(10.)), -3.);
     }
 
@@ -2009,8 +1532,6 @@ mod tests {
             CursorStyle::Block
         );
     }
-
-    // ---- segment_row ----
 
     fn cell(c: char) -> RenderCell {
         RenderCell {
@@ -2035,8 +1556,6 @@ mod tests {
         }
     }
 
-    /// A row of wide glyphs as the grid stores them: each char followed by its
-    /// trailing spacer cell.
     fn wide_cells(chars: &str) -> Vec<RenderCell> {
         let mut row = Vec::new();
         for c in chars.chars() {
@@ -2056,10 +1575,8 @@ mod tests {
 
     #[test]
     fn segment_row_joins_plain_runs_across_gaps_but_trims_edges() {
-        // " ab  cd  " → one run: interior blanks join, leading/trailing don't.
         let row: Vec<_> = " ab  cd  ".chars().map(cell).collect();
         assert_eq!(segment_row(&row), [run(1, 6, "ab  cd")]);
-        // NUL cells (never-written grid slots) count as blanks too.
         let mut row: Vec<_> = "ab cd".chars().map(cell).collect();
         row[2].c = '\0';
         assert_eq!(segment_row(&row), [run(0, 5, "ab cd")]);
@@ -2067,15 +1584,12 @@ mod tests {
 
     #[test]
     fn segment_row_ends_underlined_runs_at_blanks() {
-        // The per-cell painter never underlined a blank cell; a batched run
-        // must not start doing so, thus the gap splits the run.
         let mut row: Vec<_> = "ab cd".chars().map(cell).collect();
         for c in &mut row {
             c.underline = UnderlineKind::Single;
         }
         assert_eq!(segment_row(&row), [run(0, 2, "ab"), run(3, 2, "cd")]);
 
-        // Same for a hovered link.
         let mut row: Vec<_> = "ab cd".chars().map(cell).collect();
         for c in &mut row {
             c.link_hover = true;
@@ -2085,13 +1599,11 @@ mod tests {
 
     #[test]
     fn segment_row_splits_on_style_changes() {
-        // Foreground color change mid-word.
         let mut row: Vec<_> = "abcd".chars().map(cell).collect();
         row[2].fg = gpui::red();
         row[3].fg = gpui::red();
         assert_eq!(segment_row(&row), [run(0, 2, "ab"), run(2, 2, "cd")]);
 
-        // Bold toggling.
         let mut row: Vec<_> = "abcd".chars().map(cell).collect();
         row[0].bold = true;
         assert_eq!(segment_row(&row), [run(0, 1, "a"), run(1, 3, "bcd")]);
@@ -2099,9 +1611,6 @@ mod tests {
 
     #[test]
     fn segment_row_isolates_non_ascii() {
-        // A wide CJK char (cell + spacer) between ASCII words: the wide cell
-        // becomes a one-glyph Wide run (spanning its spacer), and the ASCII
-        // resumes batching after it.
         let mut row: Vec<_> = "ok?字 no".chars().map(cell).collect();
         row.insert(4, {
             let mut sp = cell(' ');
@@ -2113,8 +1622,6 @@ mod tests {
             [run(0, 3, "ok?"), wide(3, 2, "字"), run(6, 2, "no")]
         );
 
-        // Single-width non-ASCII (box drawing) paints solo — it may come
-        // from a fallback face with a non-cell advance.
         let row: Vec<_> = "a─b".chars().map(cell).collect();
         assert_eq!(
             segment_row(&row),
@@ -2124,7 +1631,6 @@ mod tests {
 
     #[test]
     fn powerline_shape_maps_only_the_solid_separators() {
-        // The eight solid separators are drawn natively.
         for (c, shape) in [
             ('\u{e0b0}', PowerlineShape::TriangleRight),
             ('\u{e0b2}', PowerlineShape::TriangleLeft),
@@ -2137,9 +1643,6 @@ mod tests {
         ] {
             assert_eq!(PowerlineShape::of(c), Some(shape), "U+{:04X}", c as u32);
         }
-        // The thin/outline variants are hairline strokes — a filled gpui path
-        // can't draw those, so they stay on the font path — as do neighboring
-        // codepoints and ordinary prompt symbols.
         for c in [
             '\u{e0b1}', '\u{e0b3}', '\u{e0b5}', '\u{e0b7}', '\u{e0b9}', '\u{e0bb}', '\u{e0bd}',
             '\u{e0bf}', '\u{e0a0}', '\u{e0c0}', '\u{2500}', '❯', '➜',
@@ -2150,10 +1653,6 @@ mod tests {
 
     #[test]
     fn powerline_path_fills_exactly_one_cell() {
-        // Native drawing exists to guarantee edge-to-edge fit: every vertex of
-        // every shape must stay inside the cell it was given (no overshoot into
-        // a neighbor), and the fill must actually reach both horizontal edges
-        // (no two-thirds-width separators — the issue #17 symptom).
         let (x0, y0, w, h) = (px(10.), px(20.), px(9.), px(21.));
         let bounds = Bounds::new(point(x0, y0), size(w, h));
         for shape in [
@@ -2190,15 +1689,9 @@ mod tests {
     #[test]
     fn seg_clip_width_frees_solo_symbols_but_pins_batched_runs() {
         let cell = px(10.);
-        // Batched Run/Wide segments clip to their exact column span, so an
-        // oversized fallback glyph can't bleed past the run.
         assert_eq!(seg_clip_width(false, 1, cell), px(10.));
-        assert_eq!(seg_clip_width(false, 5, cell), px(50.)); // an ASCII run
-        assert_eq!(seg_clip_width(false, 2, cell), px(20.)); // a wide (CJK) glyph
-        // A solo glyph gets a two-cell window instead, so a non-Mono Nerd Font
-        // icon (one-cell advance, ~1.9-cell ink) or a proportional arrow renders
-        // whole instead of severed at the cell edge (issue #17) — the bound keeps
-        // a pathological face from smearing across the row.
+        assert_eq!(seg_clip_width(false, 5, cell), px(50.));
+        assert_eq!(seg_clip_width(false, 2, cell), px(20.));
         assert_eq!(seg_clip_width(true, 1, cell), px(20.));
     }
 
@@ -2219,14 +1712,6 @@ mod tests {
         );
     }
 
-    /// A natively-drawn cell keeps its underline.
-    ///
-    /// Underlines ride on the `TextRun`, so the Solo arm's early return for
-    /// Powerline separators and box-drawing characters used to drop them: an
-    /// `ESC[4m` span or a hovered URL containing `─`, `│` or `` showed a
-    /// one-column hole where the line should have run through. The residue is
-    /// what closes it — a space shaped in the cell's own style, carrying the
-    /// underline and no glyph ink.
     #[test]
     fn natively_drawn_cells_still_carry_their_underline() {
         let plain = GlyphStyle::of(&cell('│'));
@@ -2250,8 +1735,6 @@ mod tests {
             );
         }
 
-        // A hovered link underlines even without an emulator underline, and
-        // the characters it spans may well be box drawing or a separator.
         for ch in ['│', '─', '╭', '█', '\u{e0b0}'] {
             let mut c = cell(ch);
             c.link_hover = true;
@@ -2266,9 +1749,6 @@ mod tests {
 
     #[test]
     fn segment_row_keeps_powerline_separators_solo() {
-        // The native-draw intercept lives in the Solo arm of `paint_glyphs`;
-        // if separators ever started batching into Run/Wide segments they'd
-        // silently bypass it and fall back to font rasterization.
         let row = vec![cell('a'), cell('\u{e0b0}'), cell('\u{e0b4}'), cell('b')];
         assert_eq!(
             segment_row(&row),
@@ -2283,15 +1763,6 @@ mod tests {
 
     #[test]
     fn segment_row_gives_each_wide_glyph_its_own_segment() {
-        // A CJK phrase emits one segment per glyph, each covering its glyph +
-        // spacer. Batching them was wrong: gpui's `apply_force_width_to_layout`
-        // only starts a new column when the shaped x has advanced past *half*
-        // the forced width, and fullwidth punctuation doesn't. `（` advances
-        // 0.472 em where half a two-cell slot is 0.6 em, so the glyph after it
-        // was classified as a combining mark, painted at the punctuation's own
-        // advance instead of the next column, and the two overlapped. Shaping
-        // each glyph alone makes it the first glyph of its line, which that
-        // function always treats as a base.
         let row = wide_cells("你好世界");
         assert_eq!(
             segment_row(&row),
@@ -2306,7 +1777,6 @@ mod tests {
 
     #[test]
     fn segment_row_isolates_narrow_fullwidth_punctuation() {
-        // The exact reproduction: `（这样` painted `这` on top of `（`.
         let row = wide_cells("（这样");
         assert_eq!(
             segment_row(&row),
@@ -2316,11 +1786,8 @@ mod tests {
 
     #[test]
     fn segment_row_tracks_wide_columns_across_styles_and_gaps() {
-        // Per-glyph segments make a mid-phrase style change a non-event: each
-        // glyph already carries its own style at paint. Column starts must
-        // still step by 2.
         let mut row = wide_cells("你好世界");
-        row[4].fg = gpui::red(); // third glyph (cols 4-5)
+        row[4].fg = gpui::red();
         row[6].fg = gpui::red();
         assert_eq!(
             segment_row(&row),
@@ -2332,8 +1799,6 @@ mod tests {
             ]
         );
 
-        // A blank cell between wide glyphs still consumes its column, so the
-        // glyph after it starts at 3, not 2.
         let mut row = wide_cells("你好");
         row.insert(2, cell(' '));
         assert_eq!(segment_row(&row), [wide(0, 2, "你"), wide(3, 2, "好")]);
@@ -2341,8 +1806,6 @@ mod tests {
 
     #[test]
     fn segment_row_leaves_spacerless_wide_char_solo() {
-        // A wide char whose spacer was clipped off (last column) has no width
-        // marker, so it falls back to the single-cell path.
         let row = vec![cell('a'), cell('字')];
         assert_eq!(segment_row(&row), [run(0, 1, "a"), RowSeg::Solo { col: 1 }]);
     }
@@ -2371,10 +1834,8 @@ mod tests {
         }
     }
 
-    /// Combining marks reach the shaper attached to their base, in one string.
     #[test]
     fn segment_row_shapes_combining_marks_with_their_base() {
-        // Single column: `e` + U+0301 → é.
         let mut row = vec![cell('a'), cell('e'), cell('b')];
         row[1].marks = Some(Box::from(['\u{0301}']));
         assert_eq!(
@@ -2382,14 +1843,10 @@ mod tests {
             [run(0, 1, "a"), cluster(1, 1, "e\u{0301}"), run(2, 1, "b"),]
         );
 
-        // Two columns: the emulator widened the base, so the cluster owns the
-        // spacer too (❤ + U+FE0F).
         let mut row = wide_cells("\u{2764}");
         row[0].marks = Some(Box::from(['\u{FE0F}']));
         assert_eq!(segment_row(&row), [wide_cluster(0, 2, "\u{2764}\u{FE0F}")]);
 
-        // Several marks on one base: an above-base vowel and a tone mark both
-        // sit on the consonant (ที่ = ท U+0E17 + ◌ี U+0E35 + ◌่ U+0E48).
         let mut row = vec![cell('\u{0E17}'), cell('a')];
         row[0].marks = Some(Box::from(['\u{0E35}', '\u{0E48}']));
         assert_eq!(
@@ -2398,14 +1855,8 @@ mod tests {
         );
     }
 
-    /// SARA AM (U+0E33) is the awkward Thai vowel: `Lo`, width 1, so the grid
-    /// gives it its own column — but the shaper decomposes it into NIKHAHIT +
-    /// SARA AA and reorders the nikhahit backwards onto the base consonant.
-    /// Shaped in its own run it has no base to reorder onto and comes out as a
-    /// dotted circle, so it has to join the preceding cell's cluster.
     #[test]
     fn segment_row_absorbs_sara_am_into_its_base() {
-        // น + ้ (tone) + ำ — the base already carries a mark.
         let mut row = vec![cell('\u{0E19}'), cell('\u{0E33}'), cell('a')];
         row[0].marks = Some(Box::from(['\u{0E49}']));
         assert_eq!(
@@ -2413,36 +1864,25 @@ mod tests {
             [cluster(0, 2, "\u{0E19}\u{0E49}\u{0E33}"), run(2, 1, "a")]
         );
 
-        // ก + ำ — an unmarked base still has to shape with it.
         let row = vec![cell('\u{0E01}'), cell('\u{0E33}')];
         assert_eq!(segment_row(&row), [cluster(0, 2, "\u{0E01}\u{0E33}")]);
 
-        // Lao SARA AM (U+0EB3) takes the same shaper path.
         let row = vec![cell('\u{0E81}'), cell('\u{0EB3}')];
         assert_eq!(segment_row(&row), [cluster(0, 2, "\u{0E81}\u{0EB3}")]);
 
-        // A style change does not break the cluster, unlike a `Run` or `Wide`
-        // batch: split off, the vowel has no base and paints a dotted circle,
-        // so it takes the base's style instead.
         let mut row = vec![cell('\u{0E01}'), cell('\u{0E33}')];
         row[1].fg = gpui::red();
         assert_eq!(segment_row(&row), [cluster(0, 2, "\u{0E01}\u{0E33}")]);
     }
 
-    /// With nothing to attach to, SARA AM paints alone — a dotted circle is the
-    /// shaper's honest answer for an orphaned mark, and inventing a base would
-    /// be worse.
     #[test]
     fn segment_row_leaves_a_baseless_sara_am_alone() {
         let row = vec![cell('\u{0E33}'), cell('a')];
         assert_eq!(segment_row(&row), [RowSeg::Solo { col: 0 }, run(1, 1, "a")]);
 
-        // A blank before it is not a base either.
         let row = vec![cell(' '), cell('\u{0E33}')];
         assert_eq!(segment_row(&row), [RowSeg::Solo { col: 1 }]);
 
-        // Nor is another SARA AM: absorbing would pin the second one's glyphs
-        // past the cluster's two-cell clip and swallow it entirely.
         let row = vec![cell('\u{0E33}'), cell('\u{0E33}')];
         assert_eq!(
             segment_row(&row),
@@ -2450,11 +1890,8 @@ mod tests {
         );
     }
 
-    /// A marked cell never joins a batch: marks add characters without adding
-    /// columns, which would desync `force_width`'s glyph-per-column pinning.
     #[test]
     fn segment_row_never_batches_a_marked_cell() {
-        // ASCII run splits around it.
         let mut row: Vec<_> = "abc".chars().map(cell).collect();
         row[1].marks = Some(Box::from(['\u{0301}']));
         assert_eq!(
@@ -2462,7 +1899,6 @@ mod tests {
             [run(0, 1, "a"), cluster(1, 1, "b\u{0301}"), run(2, 1, "c"),]
         );
 
-        // Wide run splits around it.
         let mut row = wide_cells("你好世");
         row[2].marks = Some(Box::from(['\u{FE0F}']));
         assert_eq!(
@@ -2475,8 +1911,6 @@ mod tests {
         );
     }
 
-    /// A mark opening a line lands on the space the grid starts with — that
-    /// cell still has ink, so it must not be skipped as blank.
     #[test]
     fn segment_row_keeps_a_blank_that_carries_marks() {
         let mut row = vec![cell(' '), cell(' ')];
@@ -2492,8 +1926,6 @@ mod tests {
         assert_eq!(a.as_ref(), "界");
     }
 
-    /// Hand-built `PaintColors` for the snapshot tests (the real `resolve`
-    /// needs a live theme/App).
     fn test_colors() -> PaintColors {
         let fg = Rgb {
             r: 10,
@@ -2527,11 +1959,6 @@ mod tests {
         }
     }
 
-    /// Regression: selection must not rewrite a cell's own colors. It used to
-    /// force the foreground to the preset's selection text color and rely on an
-    /// opaque fill — which erased background-only cells entirely (fastfetch
-    /// color swatches, colored diff blocks vanished while selected). Selection
-    /// now only flags the cell; the paint pass lays a translucent wash on top.
     #[test]
     fn selected_cells_keep_their_own_colors_for_the_translucent_wash() {
         let mut palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
@@ -2549,7 +1976,6 @@ mod tests {
         let point = AlacPoint::new(AlacLine(0), AlacColumn(0));
         let range = SelectionRange::new(point, point, false);
 
-        // A fastfetch-style swatch: a space whose information IS its background.
         let swatch = Cell {
             bg: AnsiColor::Indexed(1),
             ..Cell::default()
@@ -2559,7 +1985,6 @@ mod tests {
         assert!(rc.draw_bg, "the swatch background still paints");
         assert_eq!(rc.bg, to_hsla(palette[1]), "background not replaced");
 
-        // Colored text keeps its syntax color while selected.
         let text = Cell {
             c: 'x',
             fg: AnsiColor::Indexed(2),
@@ -2569,14 +1994,9 @@ mod tests {
         assert!(rc.selected);
         assert_eq!(rc.fg, to_hsla(palette[2]), "foreground not forced");
 
-        // And the wash itself is translucent, or the kept colors could never
-        // read through it.
         assert!(colors.selection_bg.a < 1.0);
     }
 
-    /// SGR 7 swaps the two colors, and the swapped background must paint even
-    /// when the cell sat on the *default* background — otherwise an inverse
-    /// block (`ls` selections, status bars) silently vanishes.
     #[test]
     fn inverse_swaps_colors_and_always_paints_the_background() {
         let mut palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
@@ -2603,8 +2023,6 @@ mod tests {
         );
     }
 
-    /// SGR 8 conceals text by drawing it in the background color — whatever
-    /// that background is — without turning a default background opaque.
     #[test]
     fn hidden_paints_the_foreground_as_the_background() {
         let mut palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
@@ -2616,8 +2034,6 @@ mod tests {
         let colors = test_colors();
         let point = AlacPoint::new(AlacLine(0), AlacColumn(0));
 
-        // On the default background the glyph melts into the theme bg and the
-        // cell still skips the background fill.
         let on_default = Cell {
             c: 's',
             fg: AnsiColor::Indexed(1),
@@ -2629,7 +2045,6 @@ mod tests {
         assert_eq!(rc.fg, to_hsla(colors.bg_rgb));
         assert!(!rc.draw_bg);
 
-        // On a colored background it melts into *that* color instead.
         let on_colored = Cell {
             c: 's',
             bg: AnsiColor::Indexed(1),
@@ -2641,10 +2056,6 @@ mod tests {
         assert_eq!(rc.fg, rc.bg);
     }
 
-    /// Each underline SGR maps to its own variant, and the specific bits must
-    /// win over a plain UNDERLINE that may be set alongside them — a curly
-    /// diagnostic squiggle degrading to a straight line is exactly the kind of
-    /// regression a human eyeball misses.
     #[test]
     fn underline_flag_bits_map_to_their_variants() {
         let palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
@@ -2665,16 +2076,12 @@ mod tests {
         assert_eq!(kind(Flags::UNDERCURL), UnderlineKind::Curly);
         assert_eq!(kind(Flags::DOTTED_UNDERLINE), UnderlineKind::Dotted);
         assert_eq!(kind(Flags::DASHED_UNDERLINE), UnderlineKind::Dashed);
-        // A variant bit set together with plain UNDERLINE keeps the variant.
         assert_eq!(
             kind(Flags::UNDERLINE | Flags::UNDERCURL),
             UnderlineKind::Curly
         );
     }
 
-    /// SGR 58 sets a dedicated underline color that resolves through the
-    /// palette; without it the field stays `None` so paint falls back to the
-    /// glyph's foreground.
     #[test]
     fn sgr58_underline_color_resolves_through_the_palette() {
         let mut palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
@@ -2707,8 +2114,6 @@ mod tests {
         );
     }
 
-    /// BOLD_ITALIC is its own flag bit — it must light up both emphases, not
-    /// require BOLD and ITALIC to also be set.
     #[test]
     fn bold_italic_flag_sets_both_emphases() {
         let palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
@@ -2729,9 +2134,6 @@ mod tests {
         assert_eq!(emphases(Flags::BOLD_ITALIC), (true, true));
     }
 
-    /// Wide-char spacers only mark the column as occupied; everything else —
-    /// colors, underline, selection — is the leading cell's job. A spacer that
-    /// painted anything would double-draw under every CJK glyph.
     #[test]
     fn wide_char_spacers_defer_to_the_leading_cell() {
         let mut palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
@@ -2757,11 +2159,6 @@ mod tests {
         }
     }
 
-    /// SGR 58, OSC 8 and combining marks all live in alacritty's one lazily
-    /// boxed `extra`, so `Cell::zerowidth` says `Some(&[])` for a cell that
-    /// merely carries a color or a link. Only real marks may set `marks`: an
-    /// empty list is still `Some`, and `segment_row` would take every linked
-    /// cell off the batched run path onto a `shape_line` of its own.
     #[test]
     fn only_real_combining_marks_set_marks() {
         let palette = [Rgb { r: 0, g: 0, b: 0 }; 256];

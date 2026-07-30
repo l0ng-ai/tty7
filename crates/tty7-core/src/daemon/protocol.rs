@@ -1,161 +1,45 @@
-//! Wire protocol between the GUI **client** and the persistent **daemon**.
-//!
-//! One Unix-domain-socket connection carries exactly one *pane* (a single PTY +
-//! child). The GUI opens one connection per terminal view; session listing uses
-//! a short-lived control connection. This mirrors the in-process model where one
-//! `TerminalView` owns one terminal, so nothing higher up needs multiplexing.
-//!
-//! ## Framing
-//!
-//! Every message is a length-prefixed frame:
-//!
-//! ```text
-//! [u32 LE payload_len][u8 kind][payload (payload_len bytes)]
-//! ```
-//!
-//! The `kind` byte selects the variant. Hot-path variants (`Input`, `Output`,
-//! `Snapshot`) carry the raw PTY bytes *verbatim* as the payload — no
-//! serialization, no copy beyond the frame. Cold control variants serialize
-//! their small structs as JSON, which keeps the wire format easy to evolve and
-//! debug without pulling in a binary-codec dependency.
-//!
-//! Decoding never trusts the length blindly: frames larger than [`MAX_FRAME`]
-//! are rejected so a desynced/hostile peer can't make us allocate unboundedly.
-
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Upper bound on a single frame's payload. A `Snapshot` replays the daemon's
-/// byte ring (a few MB by default), so this is generous; anything past it is a
-/// protocol desync and we error rather than allocate.
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 
-/// Version of this wire protocol. The daemon outlives the GUI binary, so after
-/// an app upgrade the two can be different builds; the GUI asks a running
-/// daemon for its version (`ClientMsg::Version`) before reusing it and, on a
-/// mismatch, keeps it alive but asks the user whether to keep their sessions
-/// on the old dialect or restart the service clean (see
-/// `spawn::ensure_running`).
-///
-/// Bump this on any change an old peer would *misread*: a repurposed kind
-/// byte, a changed payload shape, altered framing. Purely additive changes —
-/// a brand-new kind, a new `#[serde(default)]` field — don't need a bump;
-/// the existing unknown-kind / missing-field behavior already covers them.
-///
-/// A **new variant of an existing enum** is not additive, despite looking it:
-/// the enums here carry no `#[serde(other)]` fallback, so an old peer fails
-/// the whole `from_json` and its reader treats that as a desync — it drops the
-/// connection rather than ignoring the field. That is what earned v2.
-///
-/// ## History
-///
-/// - **v4** — the daemon serves the machine tree. `tty7 --daemon` now runs
-///   the shared `run_daemon`: a control listener (carrying the daemon-owned
-///   workspace tree) beside the pane listener. No pane frame changed, so by
-///   the letter of the rule above this is additive — but the *service* is
-///   not: a v3 daemon has no control socket at all, and a GUI from this
-///   build that silently adopted one would connect its control link into the
-///   void forever — every window hydrating from a tree that never answers,
-///   which renders as empty windows with no error anywhere. The bump routes
-///   that meeting into `ensure_running`'s existing keep-or-restart prompt,
-///   where "restart the background service" is the fix.
-/// - **v3** — the [`control`](super::control) dialect (kinds 60-63) and
-///   [`DaemonVersion::features`]. By the rule above this is *additive* and
-///   would not earn a bump on its own: a v2 daemon meeting a control frame
-///   already reports an unknown kind. The bump buys something else — it makes
-///   "does this peer speak control?" a question that can be asked **forwards**.
-///   Without it the only probe is to open a control connection and see whether
-///   the peer drops it, which costs a round trip, logs a misleading desync
-///   error, and is indistinguishable from a genuine desync. `features` then
-///   makes this the *last* bump of its kind: further capabilities are announced
-///   as strings, not as a higher number.
-/// - **v2** — [`RemoteKind::Wsl`]. A v1 client decoding a WSL pane's
-///   `RemoteContext` errors out and loses the pane, which only bites on a
-///   downgrade (a v2 GUI spawns the pane, a v1 GUI later attaches to it), but
-///   loses it silently. The handshake now catches that skew and asks.
-/// - **v1** — the dialect at the time versioning landed.
 pub const PROTOCOL_VERSION: u32 = 4;
 
-/// Capability string for [`DaemonVersion::features`]: this daemon records
-/// which workspace each pane was spawned for and reports it in `List`'s
-/// [`PaneInfo::owner`], and it understands the [`kind::SPAWN_OWNED`] frame. A
-/// client must check for this before sending an owned spawn — the frame kind
-/// is unknown to older daemons, which drop the connection over it.
 pub const FEATURE_PANE_OWNER: &str = "pane-owner";
 
-/// Reply to `ClientMsg::Version`: the protocol dialect the daemon speaks, plus
-/// its crate version for logs/diagnostics. Only `protocol`, `features` and
-/// `instance` drive decisions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonVersion {
     pub protocol: u32,
-    /// The daemon binary's `CARGO_PKG_VERSION`. Display only.
     #[serde(default)]
     pub build: String,
-    /// Fine-grained capability bits — see [`super::control::feature`].
-    ///
-    /// `#[serde(default)]`, so a pre-v3 daemon's reply still decodes (as an
-    /// empty list, which is the truth about it). This exists so that a
-    /// capability added after v3 does **not** need another version bump, and
-    /// therefore does not need to provoke the "Restart Daemon?" prompt for
-    /// every user whose daemon happens to predate it.
     #[serde(default)]
     pub features: Vec<String>,
-    /// Identity of this daemon *process*, minted once at startup — the same
-    /// identity the control hello announces
-    /// ([`ControlHelloOk::instance`](crate::daemon::control::ControlHelloOk::instance)),
-    /// which is what reconnect logic actually consults to tell "the link
-    /// blinked" from "a different process answers now". PTYs die with the
-    /// process, so a changed instance means every previously live pane is
-    /// gone; the machine tree records the same fact per pane (`load_machine`
-    /// clears every `live` flag on open), and a daemon carrying a tree seeds
-    /// its pane ids *past* everything the tree names rather than restarting
-    /// from 1, so a stale id can never alias a new shell. Empty for daemons
-    /// that predate the field — "unknown", never "restarted".
     #[serde(default)]
     pub instance: String,
 }
 
 impl DaemonVersion {
-    /// What *this* build answers with.
-    ///
-    /// A single constructor so the capability list can't drift between the
-    /// daemon's reply and anything else that claims to describe this build.
     pub fn current() -> DaemonVersion {
         DaemonVersion {
             protocol: PROTOCOL_VERSION,
             build: env!("CARGO_PKG_VERSION").to_string(),
-            // This reply describes the *pane* socket only. The control
-            // dialect lives on the daemon's separate control socket, whose
-            // own `ControlHelloOk` announces `control` / `host-rpc` /
-            // `machine-tree` for itself; claiming them here would say the
-            // pane socket speaks frames it does not.
-            //
-            // `pane-owner` *is* a pane-protocol capability, so every process
-            // serving panes from this build advertises it.
             features: vec![FEATURE_PANE_OWNER.to_string()],
             instance: process_instance().to_string(),
         }
     }
 
-    /// Whether this peer advertises `name`.
     pub fn has_feature(&self, name: &str) -> bool {
         self.features.iter().any(|f| f == name)
     }
 }
 
-/// This process's pane-daemon identity: a uuid minted on first use and stable
-/// for the process lifetime. See [`DaemonVersion::instance`] for why it exists.
 pub fn process_instance() -> &'static str {
     static INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     INSTANCE.get_or_init(|| uuid::Uuid::new_v4().to_string())
 }
 
-/// Terminal geometry shared by spawn/attach/resize. Cell pixel size travels too
-/// so the daemon can set an accurate `TIOCSWINSZ` (`ws_xpixel`/`ws_ypixel`),
-/// which some full-screen apps read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WinSize {
     pub cols: u16,
@@ -164,33 +48,15 @@ pub struct WinSize {
     pub cell_h: u16,
 }
 
-/// A shell program plus launch arguments, carried by `Spawn` when the user
-/// picked a specific shell from the new-tab dropdown. Same shape as
-/// `config::ShellConfig`, but defined here so the wire format doesn't depend
-/// on the config module's evolution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellSpec {
-    /// Bare name resolved via `PATH` (`"pwsh"`) or an absolute path.
     pub program: String,
     #[serde(default)]
     pub args: Vec<String>,
-    /// True when `args` were authored by tty7's own shell discovery
-    /// (`core::shells`) rather than by the user, and so may be replaced by
-    /// shell integration — Git Bash's `-i -l` is tty7's way of saying "an
-    /// interactive login shell", which `setup_bash`'s `--rcfile … -i` plus its
-    /// replayed login-file chain expresses differently but equivalently.
-    /// User-configured args get no such liberty; see
-    /// `daemon::shell_integration::setup`'s `has_custom_args`.
-    ///
-    /// Defaults to `false` on the wire so an older client's frame — which can
-    /// only carry user-configured args — keeps them untouched.
     #[serde(default)]
     pub args_are_tty7_defaults: bool,
 }
 
-/// Whether a short `ssh` option flag consumes the following argument as its
-/// value. Used by the GUI's typed-connect parser to skip an option's value while
-/// hunting for the destination token.
 pub fn ssh_option_takes_value(flag: char) -> bool {
     matches!(
         flag,
@@ -217,7 +83,6 @@ pub fn ssh_option_takes_value(flag: char) -> bool {
     )
 }
 
-/// Metadata for one live pane, returned by `List` for session restore / pickers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneInfo {
     pub pane_id: u64,
@@ -225,56 +90,23 @@ pub struct PaneInfo {
     pub cwd: Option<PathBuf>,
     #[serde(default)]
     pub title: String,
-    /// False once the child has exited but the pane lingers (so a client can
-    /// still read its final scrollback).
     pub alive: bool,
-    /// The workspace this pane was spawned for (a `WorkspaceId` uuid, as a
-    /// string), when the spawning client said ([`ClientMsg::Spawn`]'s `owner`).
-    /// `None` for panes spawned by older clients or through the legacy spawn
-    /// kinds. Restore uses this to refuse re-attaching a pane to a workspace
-    /// that never owned it — the failure mode where one workspace's saved ids
-    /// silently pick up another's shells.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
 }
 
-/// A pane whose filesystem is not the host's — either a remote session, or a
-/// local one behind a boundary the host's own tools can't follow (WSL).
-///
-/// The common consequence, whatever the kind, is that the pane's cwd names a
-/// path in *that* namespace: see `TerminalView::local_cwd`, which is what keeps
-/// a local `git` / `read_dir` / spawn away from it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteContext {
     pub kind: RemoteKind,
-    /// Original foreground argv. Kept so follow-up operations can preserve ssh
-    /// config flags such as `-F`, `-p`, and `-J` rather than guessing. Empty
-    /// for kinds that aren't detected from a foreground process.
     pub argv: Vec<String>,
-    /// The destination token: `host`, `user@host`, or ssh config alias for the
-    /// ssh kinds; the distro name for [`RemoteKind::Wsl`].
     pub target: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RemoteKind {
-    /// A foreground `ssh` process typed into a normal shell, detected from the
-    /// local process table. Status/label only — it has no tty7-owned connection,
-    /// so forwarding / SFTP don't apply to it.
     Ssh,
-    /// A pane backed by the daemon's native russh session engine
-    /// (`daemon::ssh`). Forwarding / SFTP reach the connection through the
-    /// in-memory registry.
     NativeSsh,
-    /// A `wsl.exe` pane: not remote in the network sense, but its shell lives
-    /// inside a distro with its own filesystem namespace, so a cwd it reports
-    /// (`/home/me/proj`) means nothing to the Windows-side host — and on
-    /// Windows is *drive-relative* rather than invalid, so it silently resolves
-    /// to `C:\home\me\proj`. Set at spawn time from the `ShellSpec`, not
-    /// detected from the process table. Nothing SSH-specific applies to it:
-    /// callers that mean "an SSH pane" must test the kind, not merely that a
-    /// `RemoteContext` is present.
     Wsl,
 }
 
@@ -285,69 +117,38 @@ pub struct LoopbackForwardRequest {
     pub remote_port: u16,
 }
 
-// ---------------------------------------------------------------------------
-// Workspace-scoped control requests (M7).
-//
-// A *remote workspace* has no pane on this daemon: its panes live on the remote
-// `tty7-server`, and the only thing this side owns is the `SshConnection` the
-// workspace's routed link rides. So every pane-addressed control request above
-// (`SftpList { pane_id }`, `AddForward { pane_id }`, …) is unaddressable for it.
-//
-// Rather than a parallel variant per operation, the workspace form is one
-// envelope: the *only* thing that differs is how the connection is found, and
-// the daemon resolves that once, up front. Replies reuse the existing
-// `DaemonMsg` variants verbatim, so no daemon-space kind is spent.
-// ---------------------------------------------------------------------------
-
-/// A control request that runs on a **remote workspace's** SSH connection
-/// rather than a pane's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceRequest {
-    /// Which workspace the request is *attributed* to. Two workspaces on the
-    /// same machine share one `SshConnection` but own their forwards
-    /// separately, so this is not derivable from `spec`.
     pub workspace: crate::core::session::WorkspaceId,
-    /// Names the machine. **Secret-free** ([`NativeSshSpec::without_secrets`]):
-    /// the daemon only ever *looks up* an already-authenticated connection with
-    /// this key and never connects, so nothing here needs to authenticate.
     pub spec: Box<NativeSshSpec>,
-    /// The pane the caller is rendering the answer under, stamped into
-    /// `ManagedForward::pane_id` / `SftpJobProgress::pane_id` so the GUI's
-    /// per-pane panels can filter rows they asked for. Display only — it is
-    /// *not* what the forward is owned by, and a workspace forward outlives it.
     pub view_pane: u64,
     pub op: WorkspaceOp,
 }
 
-/// The operation half of a [`WorkspaceRequest`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WorkspaceOp {
-    /// ⌘/Ctrl-clicked `localhost:PORT` — ensure an on-demand local forward to
-    /// `remote_host:remote_port` and reply `LoopbackForward { local_port }`.
     EnsureLoopback {
         remote_host: String,
         remote_port: u16,
     },
-    /// Establish a managed forward owned by the workspace; replies `ForwardList`.
-    AddForward { rule: SshForwardRule },
-    /// Tear one workspace forward down by id; replies `ForwardList`.
-    RemoveForward { forward_id: u64 },
-    /// The workspace's managed forwards; replies `ForwardList`.
+    AddForward {
+        rule: SshForwardRule,
+    },
+    RemoveForward {
+        forward_id: u64,
+    },
     ListForwards,
-    /// Drop every forward the workspace owns (the workspace was closed). Replies
-    /// with the — now empty — `ForwardList`.
     TeardownForwards,
-    /// List a remote directory over the workspace's SFTP session; replies
-    /// `SftpEntries`.
-    SftpList { path: String },
-    /// A one-shot SFTP operation on the workspace's session; replies
-    /// `SftpOpResult`.
-    SftpOp { op: SftpOp },
-    /// Start an upload/download on the workspace's session; replies
-    /// `SftpTransferStarted`. `spec.pane_id` is ignored in favour of `view_pane`.
-    SftpTransferStart { spec: SftpTransferSpec },
-    /// Poll the workspace's transfer jobs; replies `SftpTransferProgress`.
+    SftpList {
+        path: String,
+    },
+    SftpOp {
+        op: SftpOp,
+    },
+    SftpTransferStart {
+        spec: SftpTransferSpec,
+    },
     SftpTransferList,
 }
 
@@ -372,23 +173,6 @@ pub struct LoopbackForwardInfo {
     pub idle_secs: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Native SSH (russh) session engine — wire types (Workstream 2).
-//
-// A `NativeSshSpec` is everything the daemon needs to establish one russh
-// connection and open a shell channel on it. The GUI (WS1/WS6) resolves a
-// stored profile — including any OS-keychain secrets and any jump-host profile
-// references — into this fully self-contained spec before sending it; the daemon
-// never reads the keychain or the profile store. Secrets (`password`,
-// `key_passphrases`) ride the *local* daemon socket exactly once and are held
-// only in memory. `NativeSshSpec` has a hand-written `Debug` that redacts them,
-// so it is safe to log a spec for diagnostics.
-// ---------------------------------------------------------------------------
-
-/// Which authentication methods the daemon may attempt. `Auto` tries all in the
-/// Tabby-derived order (none → publickey → agent → password → keyboard-interactive);
-/// the others restrict attempts to that single family (plus the mandatory leading
-/// `none` probe, which only learns the server's advertised methods).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum SshAuthMode {
@@ -401,17 +185,11 @@ pub enum SshAuthMode {
     KeyboardInteractive,
 }
 
-/// The transport under the SSH connection. Exactly one is used; `Command` and the
-/// proxies are mutually exclusive with each other and with a jump host (which is
-/// carried separately on `NativeSshSpec::jump`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum SshProxy {
     #[default]
     None,
-    /// A `ProxyCommand`-style program whose stdio is the transport. The daemon
-    /// substitutes `%h`/`%p` (and `%r`) tokens itself before spawning — the gap
-    /// Tabby left open (#11058).
     Command(String),
     Socks {
         host: String,
@@ -423,8 +201,6 @@ pub enum SshProxy {
     },
 }
 
-/// Per-connection algorithm preference lists. Empty list = russh defaults (with
-/// tty7's Tabby-derived preference applied where russh supports the entry).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SshAlgorithms {
     #[serde(default)]
@@ -439,8 +215,6 @@ pub struct SshAlgorithms {
     pub compression: Vec<String>,
 }
 
-/// A preconfigured port-forward carried on the spec. WS2 only carries the data;
-/// establishing forwards is WS4's job (see the seam in `daemon::ssh`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SshForwardKind {
@@ -462,21 +236,6 @@ pub struct SshForwardRule {
     pub description: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// SFTP (Workstream 5) — wire types.
-//
-// SFTP rides a native-SSH pane's already-authenticated russh connection: the
-// daemon opens an SFTP-subsystem channel on the pane's connection (reused across
-// panes sharing it) and answers directory listings / file operations / transfer
-// jobs. All requests carry the `pane_id`; the daemon resolves it to the pane's
-// `SshConnection` through the registry. Only native-SSH panes have one — a PTY
-// pane (or a foreground `ssh` typed in a shell) replies with an `Error`.
-// ---------------------------------------------------------------------------
-
-/// The classification of one remote directory entry. Symlinks are reported as
-/// `Symlink`; the daemon additionally follow-stats the target so the GUI can tell
-/// a link-to-directory (navigable) from a link-to-file (downloadable) via
-/// [`SftpEntry::target_is_dir`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SftpEntryKind {
@@ -485,77 +244,34 @@ pub enum SftpEntryKind {
     Symlink,
 }
 
-/// One entry in a remote directory listing (or a single `Stat` result).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SftpEntry {
     pub name: String,
     pub kind: SftpEntryKind,
     #[serde(default)]
     pub size: u64,
-    /// Modification time in whole seconds since the Unix epoch (0 if unknown).
     #[serde(default)]
     pub mtime: u64,
-    /// Unix mode bits (permissions + type), 0 if the server didn't report them.
     #[serde(default)]
     pub permissions: u32,
-    /// For a `Symlink`, whether the (followed) target is a directory — lets the
-    /// GUI decide navigate-vs-download without another round-trip. Always false
-    /// for non-symlinks.
     #[serde(default)]
     pub target_is_dir: bool,
 }
 
-/// A metadata / namespace operation on the remote filesystem. Recursive delete
-/// (`RemoveDir`) recurses daemon-side. `Stat`/`Readlink`/`Realpath` return data in the
-/// [`SftpOpResult`]; the rest just succeed or fail.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SftpOp {
-    /// Follow-symlink stat of a single path.
-    Stat {
-        path: String,
-    },
-    Mkdir {
-        path: String,
-    },
-    /// Create a new empty file, failing if one already exists at `path`.
-    CreateFile {
-        path: String,
-    },
-    RemoveFile {
-        path: String,
-    },
-    /// Recursive directory delete (daemon walks + removes children first).
-    RemoveDir {
-        path: String,
-    },
-    Rename {
-        from: String,
-        to: String,
-    },
-    /// Set the permission (mode) bits of `path`.
-    Chmod {
-        path: String,
-        mode: u32,
-    },
-    /// Read a symlink's target path (returned as [`SftpOpResult::Link`]).
-    Readlink {
-        path: String,
-    },
-    /// Resolve `path` against the SFTP session's own working directory and return
-    /// it absolute (SFTP's REALPATH), as [`SftpOpResult::Link`].
-    ///
-    /// Exists for one job: `Realpath { path: "." }` is how the browser learns the
-    /// login directory. A remote shell only reports its cwd if tty7's shell
-    /// integration is installed over there, which on a host you just connected to
-    /// it usually isn't — and `/` is a poor place to open a file browser.
-    Realpath {
-        path: String,
-    },
+    Stat { path: String },
+    Mkdir { path: String },
+    CreateFile { path: String },
+    RemoveFile { path: String },
+    RemoveDir { path: String },
+    Rename { from: String, to: String },
+    Chmod { path: String, mode: u32 },
+    Readlink { path: String },
+    Realpath { path: String },
 }
 
-/// The reply to a [`SftpOp`]. `Done` for side-effecting ops; `Stat`/`Link` carry
-/// the queried data; `Error` carries a human-readable failure reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SftpOpResult {
@@ -565,30 +281,23 @@ pub enum SftpOpResult {
     Error(String),
 }
 
-/// Transfer direction for a background SFTP job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SftpTransferKind {
-    /// local → remote.
     Upload,
-    /// remote → local.
     Download,
 }
 
-/// The recipe for a background transfer job. `local` is a path in the *daemon
-/// process's* filesystem (same user); `remote` is an absolute remote path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SftpTransferSpec {
     pub pane_id: u64,
     pub kind: SftpTransferKind,
     pub local: PathBuf,
     pub remote: String,
-    /// Recurse into directories (create dirs on the far side).
     #[serde(default)]
     pub recursive: bool,
 }
 
-/// Lifecycle state of a transfer job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SftpJobState {
@@ -598,47 +307,33 @@ pub enum SftpJobState {
     Cancelled,
 }
 
-/// A snapshot of one transfer job's progress, returned by the poll-based
-/// `SftpTransferList` request while the tray is visible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SftpJobProgress {
     pub job_id: u64,
     pub pane_id: u64,
     pub kind: SftpTransferKind,
     pub state: SftpJobState,
-    /// The path currently being transferred (a leaf within a recursive job).
     #[serde(default)]
     pub current: String,
     #[serde(default)]
     pub bytes_done: u64,
     #[serde(default)]
     pub bytes_total: u64,
-    /// Populated only when `state == Error`.
     #[serde(default)]
     pub error: Option<String>,
-    /// Display labels (the job's endpoints).
     #[serde(default)]
     pub local: String,
     #[serde(default)]
     pub remote: String,
 }
 
-/// Runtime status of a live managed forward, surfaced to the GUI per row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ForwardStatus {
-    /// The forward's listener (Local/Dynamic) or remote binding (Remote) is up.
     Listening,
-    /// The forward failed to come up (bind conflict, remote request denied, …).
-    /// The string is a human-readable reason with no secrets.
     Error(String),
 }
 
-/// One established managed forward on a native-SSH pane's connection (WS4). This
-/// is the runtime counterpart of a [`SshForwardRule`]: it carries a daemon-issued
-/// `id` (used to remove it), the pane it is attributed to (for per-pane listing),
-/// the *resolved* bind port (a `bind_port` of 0 resolves to the OS-assigned port),
-/// and a live `status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedForward {
     pub id: u64,
@@ -655,24 +350,15 @@ pub struct ManagedForward {
     pub status: ForwardStatus,
 }
 
-/// One process running under a pane's shell, for the details panel's process
-/// list. `depth` is hops from the shell (the shell itself is 0), which is all the
-/// UI needs to indent the tree — sending the parent pid would make the client
-/// rebuild a hierarchy the daemon already walked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcEntry {
     pub pid: u32,
     pub name: String,
     pub depth: u8,
-    /// Whether this process (or its group) currently owns the terminal — the one
-    /// the user is actually looking at.
     #[serde(default)]
     pub foreground: bool,
 }
 
-/// A TCP port a pane's process tree is listening on. The pane that started a dev
-/// server is exactly the context in which "which port is this on?" gets asked, so
-/// the answer belongs next to the process list rather than in a global inspector.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortEntry {
     pub port: u16,
@@ -680,12 +366,9 @@ pub struct PortEntry {
     pub name: String,
 }
 
-/// Reply to `QueryProcs`: what a pane is running, and what it's listening on.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneProcs {
-    /// Depth-first from the shell, so rendering in order gives a readable tree.
     pub procs: Vec<ProcEntry>,
-    /// Ascending by port; deduped, since one listener can bind several addresses.
     pub ports: Vec<PortEntry>,
 }
 
@@ -697,8 +380,6 @@ fn default_true() -> bool {
     true
 }
 
-/// The fully-resolved recipe for one native SSH connection + shell. See the
-/// module-level comment above for the trust/secret model.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeSshSpec {
     pub host: String,
@@ -706,30 +387,21 @@ pub struct NativeSshSpec {
     pub user: String,
 
     pub auth_mode: SshAuthMode,
-    /// Private-key paths to try, in order. `%h`/`%r` expand to host/user.
     #[serde(default)]
     pub identity_files: Vec<String>,
     #[serde(default)]
     pub agent_forward: bool,
 
-    /// Cleartext password, pre-resolved by the GUI from the keychain. SECRET.
     #[serde(default)]
     pub password: Option<String>,
-    /// Passphrases for encrypted identity files, keyed by identity-file path (as
-    /// listed in `identity_files`). Pre-resolved by the GUI. SECRET.
     #[serde(default)]
     pub key_passphrases: Option<std::collections::HashMap<String, String>>,
 
     #[serde(default)]
     pub proxy: SshProxy,
-    /// Jump host: the GUI resolves a profile reference into a nested spec, so a
-    /// multi-level chain is a chain of `jump` boxes. The daemon opens a
-    /// `direct-tcpip` channel on the (recursively established) jump connection and
-    /// uses it as this connection's transport.
     #[serde(default)]
     pub jump: Option<Box<NativeSshSpec>>,
 
-    /// Preconfigured forwards — carried only (WS4 establishes them).
     #[serde(default)]
     pub forwards: Vec<SshForwardRule>,
 
@@ -742,7 +414,6 @@ pub struct NativeSshSpec {
 
     #[serde(default)]
     pub algorithms: SshAlgorithms,
-    /// X11 forwarding — carried only (implementing X11 channels is deferred).
     #[serde(default)]
     pub x11: bool,
 
@@ -752,25 +423,11 @@ pub struct NativeSshSpec {
     pub verify_host_keys: bool,
     #[serde(default)]
     pub skip_banner: bool,
-    /// Bootstrap tty7's shell integration (OSC 133 prompt marks + cwd
-    /// reporting) into the remote shell — what powers the inline line editor,
-    /// exit-code marks and cwd tracking for this pane. See
-    /// [`crate::daemon::shell_integration::remote`].
-    ///
-    /// On by default, and a remote we can't integrate declines itself (the
-    /// probe answers "unknown shell" and the session starts bare), so this is
-    /// for the case the probe can't detect: a remote where the bootstrap *would*
-    /// work but the user would rather it didn't — a bash host where the
-    /// login-shell → `--rcfile` swap upsets something, or simply a host they
-    /// want left exactly as stock ssh leaves it.
     #[serde(default = "default_true")]
     pub shell_integration: bool,
-    /// Lines sent verbatim (each + `\n`) to the shell channel after it starts,
-    /// sequentially, with no expect-logic.
     #[serde(default)]
     pub login_script: Vec<String>,
 
-    /// UI labeling only — never affects connection behavior.
     #[serde(default)]
     pub display_name: Option<String>,
     #[serde(default)]
@@ -778,11 +435,7 @@ pub struct NativeSshSpec {
 }
 
 impl NativeSshSpec {
-    /// A clone with all secrets stripped (`password`, `key_passphrases`), and the
-    /// jump chain stripped recursively. This is the form that is safe to persist
-    /// (e.g. in `core::session` for native-SSH pane respawn) — the daemon
-    /// re-resolves secrets from the GUI/keychain on the next connect.
-    #[allow(dead_code)] // consumed by WS6 when persisting native-SSH panes
+    #[allow(dead_code)]
     pub fn without_secrets(&self) -> NativeSshSpec {
         NativeSshSpec {
             password: None,
@@ -794,9 +447,6 @@ impl NativeSshSpec {
 }
 
 impl std::fmt::Debug for NativeSshSpec {
-    /// Redacts secrets so a spec can be logged. `password` / `key_passphrases`
-    /// collapse to a presence marker; the nested `jump` spec redacts recursively
-    /// through this same impl.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeSshSpec")
             .field("host", &self.host)
@@ -829,29 +479,16 @@ impl std::fmt::Debug for NativeSshSpec {
     }
 }
 
-/// One row for the "SSH → Known hosts" management view (WS3): a single trusted
-/// (or revoked / CA) `known_hosts` entry. Hashed hosts surface their raw `|1|…`
-/// field (the hash can't be reversed to a hostname). Listed daemon-side because
-/// the daemon owns file access on the native path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnownHostEntry {
-    /// Raw host field as stored (`example.com`, `[h]:2222`, a comma list, or a
-    /// `|1|salt|hash` hashed token).
     pub host: String,
-    /// `"@cert-authority"` / `"@revoked"` when the line carries a marker.
     #[serde(default)]
     pub marker: Option<String>,
-    /// Key algorithm string (`ssh-ed25519`, `ecdsa-sha2-nistp256`, …).
     pub key_type: String,
-    /// `SHA256:…` fingerprint, or `"?"` for an entry whose blob doesn't parse.
     pub fingerprint_sha256: String,
-    /// Stable identity used to delete this exact entry.
     pub id: KnownHostId,
 }
 
-/// Content-based identity of one `known_hosts` entry (host field + key type +
-/// blob), so a delete survives unrelated edits between list and delete rather
-/// than relying on a fragile line index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnownHostId {
     pub host: String,
@@ -859,18 +496,12 @@ pub struct KnownHostId {
     pub keyblob: String,
 }
 
-/// One prompt in a keyboard-interactive challenge (RFC 4256).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KiPrompt {
     pub text: String,
-    /// Whether the user's keystrokes should be echoed (false for passwords).
     pub echo: bool,
 }
 
-/// An interactive decision the daemon needs from the GUI during a native-SSH
-/// spawn. Sent as `DaemonMsg::AuthPrompt` over the pane's own connection, before
-/// any `Output`; the daemon blocks that auth/host-key step until the matching
-/// `ClientMsg::AuthResponse` arrives (or a timeout fails it cleanly).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthPromptKind {
     Password {
@@ -899,24 +530,16 @@ pub enum AuthPromptKind {
         fingerprint_sha256: String,
         old_fingerprint_sha256: String,
     },
-    /// A server auth banner. Fire-and-forget: no response is expected or awaited.
     Banner {
         text: String,
     },
 }
 
-/// The GUI's reply to an [`AuthPromptKind`]. `Secret`/`Secrets` carry cleartext
-/// (a password, a passphrase, or keyboard-interactive answers); the hand-written
-/// `Debug` redacts them.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthResponse {
     Secret(String),
     Secrets(Vec<String>),
-    HostKeyDecision {
-        accept: bool,
-        remember: bool,
-    },
-    /// The user dismissed the prompt; the daemon fails the auth step cleanly.
+    HostKeyDecision { accept: bool, remember: bool },
     Cancelled,
 }
 
@@ -935,8 +558,6 @@ impl std::fmt::Debug for AuthResponse {
     }
 }
 
-/// Progress of a native-SSH spawn, sent as `DaemonMsg::SshStatus` so the GUI can
-/// show a status line while the connection comes up (or explain a failure).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SshPhase {
     Connecting,
@@ -945,202 +566,117 @@ pub enum SshPhase {
     Failed { reason: String },
 }
 
-/// Messages the GUI client sends to the daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientMsg {
-    /// Create a new pane (spawn a shell) in `cwd`, sized to `size`. The daemon
-    /// replies `Spawned`, then this connection becomes that pane's stream.
-    /// `shell` overrides the daemon's default shell resolution (config →
-    /// platform default) when the user picked one from the new-tab dropdown.
     Spawn {
         cwd: Option<PathBuf>,
         size: WinSize,
         shell: Option<ShellSpec>,
-        /// The workspace this pane will belong to (a `WorkspaceId` uuid, as a
-        /// string). Rides the [`kind::SPAWN_OWNED`] frame, which only a daemon
-        /// advertising [`FEATURE_PANE_OWNER`] understands — callers leave this
-        /// `None` for older daemons and the spawn goes out on the legacy kinds,
-        /// byte-for-byte as before.
         owner: Option<String>,
     },
-    /// Bind this connection to an existing pane and (re)size it. The daemon
-    /// replies with a `Snapshot` then live `Output`.
-    Attach { pane_id: u64, size: WinSize },
-    /// Raw bytes typed/pasted into the pane. Hot path — payload is verbatim.
+    Attach {
+        pane_id: u64,
+        size: WinSize,
+    },
     Input(Vec<u8>),
-    /// The client's view changed size; resize the PTY (`SIGWINCH` to the child).
     Resize(WinSize),
-    /// Disconnect from the pane without killing it (it keeps running detached).
     Detach,
-    /// Terminate a pane's child and forget it.
-    Kill { pane_id: u64 },
-    /// Ask for the list of live panes (control connection).
+    Kill {
+        pane_id: u64,
+    },
     List,
-    /// Shut the whole daemon down: hang up every pane's child, then exit the
-    /// process. A control-connection message the GUI sends to force a fresh
-    /// daemon — e.g. so a newly granted macOS permission (Full Disk Access) takes
-    /// effect, which a long-lived daemon process can't otherwise see. Ends every
-    /// running session, so the caller confirms with the user first.
     Shutdown,
-    /// Ensure a local SSH port-forward exists for a loopback URL printed by a
-    /// remote session in `pane_id`. Control-connection message; daemon replies
-    /// with `LoopbackForward` or `Error`.
     EnsureLoopbackForward(LoopbackForwardRequest),
-    /// Ask for the daemon's active SSH loopback port-forwards.
     ListLoopbackForwards,
-    /// Close one active SSH loopback port-forward.
     CloseLoopbackForward(LoopbackForwardId),
-    /// Create a new pane backed by the daemon's native russh session engine.
-    /// Like `Spawn`, but the pane's byte source is an SSH shell channel rather
-    /// than a local PTY. `spec` is fully self-contained (see [`NativeSshSpec`]).
-    /// This connection then becomes that pane's stream, and also carries the
-    /// interactive auth/host-key exchange (`AuthPrompt`/`AuthResponse`).
     SpawnNativeSsh {
         cwd: Option<PathBuf>,
         size: WinSize,
         spec: Box<NativeSshSpec>,
     },
-    /// The GUI's reply to a `DaemonMsg::AuthPrompt` with a matching `request_id`.
-    /// Delivered on the pane's own connection while its native-SSH spawn is still
-    /// authenticating.
     AuthResponse {
         request_id: u64,
         response: AuthResponse,
     },
-    /// List the OpenSSH `known_hosts` entries for the "SSH → Known hosts" settings
-    /// section (control connection; daemon replies with `KnownHostsList`).
     ListKnownHosts,
-    /// Delete one `known_hosts` entry, then reply with the refreshed list.
     DeleteKnownHost(KnownHostId),
-    /// List a remote directory over the pane's SFTP session (control connection).
-    /// Daemon replies `SftpEntries` or `Error`.
-    SftpList { pane_id: u64, path: String },
-    /// A one-shot SFTP filesystem operation (mkdir/remove/rename/chmod/stat/…) on
-    /// the pane's SFTP session. Daemon replies `SftpOpResult`.
-    SftpOp { pane_id: u64, op: SftpOp },
-    /// Start a background upload/download job on the pane's SFTP session. Daemon
-    /// replies `SftpTransferStarted { job_id }` (or `Error`).
+    SftpList {
+        pane_id: u64,
+        path: String,
+    },
+    SftpOp {
+        pane_id: u64,
+        op: SftpOp,
+    },
     SftpTransferStart(SftpTransferSpec),
-    /// Cancel a running transfer job. Daemon replies with the current
-    /// `SftpTransferProgress` list.
-    SftpTransferCancel { job_id: u64 },
-    /// Poll the transfer jobs for a pane (the GUI polls while its tray is
-    /// visible). Daemon replies with a `SftpTransferProgress` list.
-    SftpTransferList { pane_id: u64 },
-    /// Establish a new managed port-forward (Local/Remote/Dynamic) on the native-SSH
-    /// pane `pane_id`'s connection (WS4). Control-connection message; the daemon
-    /// replies with a `ForwardList` reflecting the pane's forwards after the add.
-    AddForward { pane_id: u64, rule: SshForwardRule },
-    /// Tear down one managed forward by its daemon-issued id. Control-connection
-    /// message; the daemon replies with the pane's remaining `ForwardList`.
-    RemoveForward { pane_id: u64, forward_id: u64 },
-    /// Ask for the managed forwards attributed to `pane_id`. Control-connection
-    /// message; the daemon replies with a `ForwardList`.
-    ListForwards { pane_id: u64 },
-    /// One-shot query for a pane's process tree and listening ports, over a
-    /// short-lived control connection; the daemon replies with `PaneProcs`.
-    ///
-    /// Deliberately pull-based, unlike `Cwd`/`Agent` which the daemon pushes:
-    /// walking the process table and probing sockets costs far more than sniffing
-    /// an OSC sequence, and the answer is only ever looked at while the details
-    /// panel's Info tab is open. Pushing it on a timer would burn that cost for
-    /// every pane, forever, to feed a view that's usually closed.
-    QueryProcs { pane_id: u64 },
-    /// A control request scoped to a **remote workspace's** SSH connection
-    /// instead of a pane's. See [`WorkspaceRequest`].
+    SftpTransferCancel {
+        job_id: u64,
+    },
+    SftpTransferList {
+        pane_id: u64,
+    },
+    AddForward {
+        pane_id: u64,
+        rule: SshForwardRule,
+    },
+    RemoveForward {
+        pane_id: u64,
+        forward_id: u64,
+    },
+    ListForwards {
+        pane_id: u64,
+    },
+    QueryProcs {
+        pane_id: u64,
+    },
     OnWorkspace(Box<WorkspaceRequest>),
-    /// Ask which protocol version the daemon speaks (control connection); the
-    /// daemon replies `Version`. A daemon that predates versioning doesn't know
-    /// this kind and drops the connection instead of replying — the client
-    /// reads that hangup as "older than every versioned daemon" and treats it
-    /// like any other mismatch: keep it, ask the user (see
-    /// `spawn::ensure_running`).
     Version,
 }
 
-/// Messages the daemon sends back to the GUI client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonMsg {
-    /// Result of `Spawn`: the id of the freshly created pane.
-    Spawned { pane_id: u64 },
-    /// The geometry the next `Snapshot`'s bytes were recorded under, sent
-    /// immediately before it so the client can size its local grid to match
-    /// before replaying. Replaying at any other width mis-wraps history and
-    /// lands relative cursor motion on the wrong rows. The attach replay is a
-    /// `Size` → `Snapshot` pair per geometry segment of the pane's ring
-    /// (oldest first); the last pair carries the PTY's current size.
+    Spawned {
+        pane_id: u64,
+    },
     Size(WinSize),
-    /// One segment of the pane's byte-ring replay, sent right after
-    /// `Attach`/`Spawn` (paired with its `Size`) so the client's local
-    /// emulator rebuilds the current screen + scrollback.
     Snapshot(Vec<u8>),
-    /// Live PTY output tail. Hot path — payload is verbatim.
     Output(Vec<u8>),
-    /// The foreground cwd, sniffed daemon-side from OSC 7 / proc lookup.
     Cwd(PathBuf),
-    /// Shell prompt/command state, sniffed daemon-side from OSC 133.
     Prompt {
         active: bool,
         at_prompt: bool,
         last_exit: Option<i32>,
     },
-    /// The pane's child exited; `code` is its status when known.
-    Exited { code: Option<i32> },
-    /// Reply to `List`.
+    Exited {
+        code: Option<i32>,
+    },
     PaneList(Vec<PaneInfo>),
-    /// The foreground remote context, or `None` when the pane is local / unknown.
     RemoteContext(Option<RemoteContext>),
-    /// The third-party CLI coding agent currently running in the foreground
-    /// (Claude Code, Codex, Gemini, …), or `None` when no known agent is running.
-    /// Detected daemon-side from the foreground `argv` — see
-    /// [`crate::core::cli_agent`].
     Agent(Option<crate::core::cli_agent::CLIAgent>),
-    /// The rich per-session agent status (idle / working / waiting / done +
-    /// native session id), sniffed daemon-side from the pane's OSC stream
-    /// (tty7's sentinel events, with an opaque OSC 9/777 fallback) — see
-    /// [`crate::core::cli_agent::AgentSessionState`]. `None` clears it (the
-    /// agent exited).
     AgentStatus(Option<crate::core::cli_agent::AgentSessionState>),
-    /// Reply to `EnsureLoopbackForward`.
     LoopbackForward(LoopbackForward),
-    /// Reply to `ListLoopbackForwards` and `CloseLoopbackForward`.
     LoopbackForwardList(Vec<LoopbackForwardInfo>),
-    /// A native-SSH spawn needs an interactive decision from the GUI (password,
-    /// passphrase, keyboard-interactive answers, or a host-key confirmation).
-    /// Sent before `Output` starts flowing; the daemon blocks the auth step until
-    /// a `ClientMsg::AuthResponse` with the same `request_id` arrives. A `Banner`
-    /// prompt is fire-and-forget (no response awaited).
     AuthPrompt {
         request_id: u64,
         prompt: AuthPromptKind,
     },
-    /// Progress of a native-SSH spawn (connect/auth/connected/failed).
-    SshStatus { phase: SshPhase },
-    /// Reply to `ListKnownHosts` and `DeleteKnownHost`.
+    SshStatus {
+        phase: SshPhase,
+    },
     KnownHostsList(Vec<KnownHostEntry>),
-    /// Reply to `SftpList`: the directory's entries (unsorted; the GUI sorts).
     SftpEntries(Vec<SftpEntry>),
-    /// Reply to `SftpOp`.
     SftpOpResult(SftpOpResult),
-    /// Reply to `SftpTransferStart`: the id of the freshly created job.
-    SftpTransferStarted { job_id: u64 },
-    /// Reply to `SftpTransferList` / `SftpTransferCancel`: progress snapshots.
+    SftpTransferStarted {
+        job_id: u64,
+    },
     SftpTransferProgress(Vec<SftpJobProgress>),
-    /// Reply to `AddForward` / `RemoveForward` / `ListForwards`: the managed
-    /// forwards currently attributed to the requested pane (WS4).
     ForwardList(Vec<ManagedForward>),
-    /// Reply to `QueryProcs`.
     Procs(PaneProcs),
-    /// Reply to `Version`.
     Version(DaemonVersion),
-    /// A request failed (e.g. `Attach` to an unknown/dead pane id).
     Error(String),
 }
 
-// Kind bytes. Client and daemon have independent spaces (a connection always
-// knows which direction it is reading), so the small overlaps are intentional.
 mod kind {
-    // Client -> daemon
     pub const SPAWN: u8 = 1;
     pub const ATTACH: u8 = 2;
     pub const INPUT: u8 = 3;
@@ -1149,66 +685,27 @@ mod kind {
     pub const KILL: u8 = 6;
     pub const LIST: u8 = 7;
     pub const SHUTDOWN: u8 = 8;
-    /// `Spawn` with an explicit, non-managed shell override. A separate kind
-    /// (rather than a new field under `SPAWN`) so a default spawn stays
-    /// byte-identical on the wire: the GUI and the long-lived daemon can be
-    /// different versions, and an old daemon must keep serving new-GUI default
-    /// spawns.
     pub const SPAWN_SHELL: u8 = 9;
     pub const ENSURE_LOOPBACK_FORWARD: u8 = 10;
     pub const LIST_LOOPBACK_FORWARDS: u8 = 11;
     pub const CLOSE_LOOPBACK_FORWARD: u8 = 12;
-    // 13 (was `SPAWN_MANAGED_SSH`, the system-ssh compat funnel) is retired: all
-    // SSH goes through the native russh engine (`SPAWN_NATIVE_SSH`).
-    /// `SpawnNativeSsh` — the native russh session engine. A brand-new kind, so a
-    /// daemon that predates WS2 rejects it (unknown kind → error) rather than
-    /// mis-spawning; a native-SSH pane must never silently fall back to anything.
     pub const SPAWN_NATIVE_SSH: u8 = 14;
-    /// `AuthResponse` — the GUI's reply to an `AUTH_PROMPT`.
     pub const AUTH_RESPONSE: u8 = 15;
-    /// `ListKnownHosts` — control request for the known_hosts management view.
     pub const LIST_KNOWN_HOSTS: u8 = 16;
-    /// `DeleteKnownHost` — remove one known_hosts entry.
     pub const DELETE_KNOWN_HOST: u8 = 17;
-    // (WS3 reserves 15-17, WS4 reserves 20-24.) SFTP (WS5) owns 30-36.
     pub const SFTP_LIST: u8 = 30;
     pub const SFTP_OP: u8 = 31;
     pub const SFTP_TRANSFER_START: u8 = 32;
     pub const SFTP_TRANSFER_CANCEL: u8 = 33;
     pub const SFTP_TRANSFER_LIST: u8 = 34;
-    // (16–19 reserved: WS3 auth extensions.)
-    /// `AddForward` — establish a managed port-forward (WS4).
     pub const ADD_FORWARD: u8 = 20;
-    /// `RemoveForward` — tear down one managed forward by id (WS4).
     pub const REMOVE_FORWARD: u8 = 21;
-    /// `ListForwards` — list a pane's managed forwards (WS4).
     pub const LIST_FORWARDS: u8 = 22;
-    /// `Version` — protocol-version handshake. 40 sits clear of every reserved
-    /// range above (WS3 16–19, WS4 20–24, SFTP 30–36).
     pub const VERSION: u8 = 40;
-    /// `QueryProcs` — a pane's process tree + listening ports, for the details
-    /// panel. 50 sits clear of every range above and of `VERSION`.
     pub const QUERY_PROCS: u8 = 50;
-    // 51 is taken: `daemon::router::ROUTE_KIND`, the route header that hands a
-    // connection to a remote `tty7-server`. It is defined there rather than
-    // here because this module is private and the router must not become a
-    // reason to open it — but the number is spent either way.
-    /// `OnWorkspace` — a control request on a remote workspace's SSH connection
-    ///. 52 is the next number clear of every range above, of the
-    /// router's 51, and of the retired 13; the contract's control connection
-    /// reserves 60-63, which this stays below.
     pub const ON_WORKSPACE: u8 = 52;
-    /// `Spawn` carrying a [`super::OwnedSpawn`] **struct** payload — the spawn
-    /// that also names the workspace owning the pane. A brand-new kind for the
-    /// same reason `SPAWN_SHELL` was one: the legacy spawn payloads are
-    /// positional tuples an old daemon cannot grow, so a client only sends this
-    /// to a daemon advertising [`super::FEATURE_PANE_OWNER`] and falls back to
-    /// the legacy kinds otherwise. The struct payload is the lesson learned —
-    /// any further spawn field rides this kind with `#[serde(default)]`, no new
-    /// number needed. 53 stays below the control connection's 60-63 reserve.
     pub const SPAWN_OWNED: u8 = 53;
 
-    // Daemon -> client
     pub const SPAWNED: u8 = 1;
     pub const SNAPSHOT: u8 = 2;
     pub const OUTPUT: u8 = 3;
@@ -1221,32 +718,20 @@ mod kind {
     pub const REMOTE_CONTEXT: u8 = 10;
     pub const LOOPBACK_FORWARD: u8 = 11;
     pub const LOOPBACK_FORWARD_LIST: u8 = 12;
-    /// `AuthPrompt` — an interactive auth/host-key request during a native-SSH spawn.
     pub const AUTH_PROMPT: u8 = 13;
-    /// `SshStatus` — native-SSH spawn progress.
     pub const SSH_STATUS: u8 = 14;
-    /// `KnownHostsList` — reply to `LIST_KNOWN_HOSTS` / `DELETE_KNOWN_HOST`.
     pub const KNOWN_HOSTS_LIST: u8 = 15;
-    // SFTP (WS5) replies own 30-36 in the daemon space too.
     pub const SFTP_ENTRIES: u8 = 30;
     pub const SFTP_OP_RESULT: u8 = 31;
     pub const SFTP_TRANSFER_STARTED: u8 = 32;
     pub const SFTP_TRANSFER_PROGRESS: u8 = 33;
-    // (15–19 reserved: WS3 auth extensions.)
-    /// `ForwardList` — reply to the WS4 managed-forward messages.
     pub const FORWARD_LIST: u8 = 20;
-    /// `Agent` — the foreground CLI coding agent detected on a pane (or its clear).
     pub const AGENT: u8 = 21;
-    /// `AgentStatus` — the pane's rich agent-session status (or its clear).
     pub const AGENT_STATUS: u8 = 22;
-    /// `Version` — reply to the client-space `VERSION` request (same value by
-    /// design; the spaces are independent).
     pub const VERSION_REPLY: u8 = 40;
-    /// `Procs` — reply to the client-space `QUERY_PROCS` request.
     pub const PROCS: u8 = 50;
 }
 
-/// Write one framed message: `[u32 LE len][u8 kind][payload]`.
 pub fn write_frame<W: Write>(w: &mut W, kind: u8, payload: &[u8]) -> io::Result<()> {
     let len = payload.len();
     if len > MAX_FRAME {
@@ -1261,9 +746,6 @@ pub fn write_frame<W: Write>(w: &mut W, kind: u8, payload: &[u8]) -> io::Result<
     Ok(())
 }
 
-/// Read one framed message, returning `(kind, payload)`. Returns an `UnexpectedEof`
-/// error when the peer closes cleanly between frames (callers treat that as a
-/// normal disconnect).
 pub fn read_frame<R: Read>(r: &mut R) -> io::Result<(u8, Vec<u8>)> {
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf)?;
@@ -1281,34 +763,16 @@ pub fn read_frame<R: Read>(r: &mut R) -> io::Result<(u8, Vec<u8>)> {
     Ok((kind[0], payload))
 }
 
-/// The kind byte of the frame at the front of `buf`, once its 5-byte header has
-/// arrived — the payload need not have.
-///
-/// For the one caller that has to classify a reply *before* paying for it: the
-/// client's `Attach` is answered either by a tiny `Error` or by a `Size` +
-/// `Snapshot` replay that can run to megabytes, and waiting for the whole first
-/// frame to tell them apart would stall every successful attach behind its own
-/// scrollback.
 pub fn peek_frame_kind(buf: &[u8]) -> Option<u8> {
     (buf.len() >= 5).then(|| buf[4])
 }
 
-/// Whether `kind` is the [`DaemonMsg::Error`] frame. The kind bytes themselves
-/// stay private — this is the one classification a client makes without
-/// decoding, and naming it keeps the numbering in one file.
 pub fn is_error_kind(kind: u8) -> bool {
     kind == kind::ERROR
 }
 
-/// Extract one complete frame from the front of `buf`, if fully buffered — the
-/// resumable counterpart of [`read_frame`] for callers that read the stream
-/// with timeouts (the client reader enforces the DEC 2026 synchronized-update
-/// deadline this way). A partial frame stays in `buf` untouched until more
-/// bytes arrive, so a read that times out mid-frame loses nothing. Returns
-/// `Ok(None)` while the frame is incomplete; an oversize length is a protocol
-/// desync and errors, mirroring `read_frame`.
 pub fn take_frame(buf: &mut Vec<u8>) -> io::Result<Option<(u8, Vec<u8>)>> {
-    const HEADER: usize = 5; // u32 LE payload length + u8 kind
+    const HEADER: usize = 5;
     if buf.len() < HEADER {
         return Ok(None);
     }
@@ -1328,8 +792,6 @@ pub fn take_frame(buf: &mut Vec<u8>) -> io::Result<Option<(u8, Vec<u8>)>> {
     Ok(Some((kind, payload)))
 }
 
-/// Serialize a control struct to JSON, mapping serde errors to `io::Error` so
-/// the encode/decode surface is a single error type.
 fn to_json<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
     serde_json::to_vec(value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
@@ -1338,8 +800,6 @@ fn from_json<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> io::Result<T> {
     serde_json::from_slice(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-/// The [`kind::SPAWN_OWNED`] payload — a struct, not a tuple, so the *next*
-/// spawn field is a `#[serde(default)]` line here instead of a new frame kind.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OwnedSpawn {
     #[serde(default)]
@@ -1352,12 +812,8 @@ struct OwnedSpawn {
 }
 
 impl ClientMsg {
-    /// Encode and write this message as one frame.
     pub fn encode<W: Write>(&self, w: &mut W) -> io::Result<()> {
         match self {
-            // Default spawn keeps the legacy frame (kind + tuple payload)
-            // byte-for-byte so an older daemon still serves it; an explicit
-            // shell rides the newer SPAWN_SHELL frame. See `kind::SPAWN_SHELL`.
             ClientMsg::Spawn {
                 cwd,
                 size,
@@ -1370,8 +826,6 @@ impl ClientMsg {
                 shell: shell @ Some(_),
                 owner: None,
             } => write_frame(w, kind::SPAWN_SHELL, &to_json(&(cwd, size, shell))?),
-            // An owner present means the caller checked FEATURE_PANE_OWNER —
-            // this frame kind is unknown to daemons without it.
             ClientMsg::Spawn {
                 cwd,
                 size,
@@ -1447,7 +901,6 @@ impl ClientMsg {
         }
     }
 
-    /// Reconstruct a message from a decoded frame.
     pub fn from_frame(k: u8, payload: Vec<u8>) -> io::Result<Self> {
         Ok(match k {
             kind::SPAWN => {
@@ -1553,7 +1006,6 @@ impl ClientMsg {
         })
     }
 
-    /// Read and decode the next client message from `r`.
     pub fn read<R: Read>(r: &mut R) -> io::Result<Self> {
         let (k, payload) = read_frame(r)?;
         Self::from_frame(k, payload)
@@ -1561,7 +1013,6 @@ impl ClientMsg {
 }
 
 impl DaemonMsg {
-    /// Encode and write this message as one frame.
     pub fn encode<W: Write>(&self, w: &mut W) -> io::Result<()> {
         match self {
             DaemonMsg::Spawned { pane_id } => write_frame(w, kind::SPAWNED, &to_json(pane_id)?),
@@ -1613,7 +1064,6 @@ impl DaemonMsg {
         }
     }
 
-    /// Reconstruct a message from a decoded frame.
     pub fn from_frame(k: u8, payload: Vec<u8>) -> io::Result<Self> {
         Ok(match k {
             kind::SPAWNED => DaemonMsg::Spawned {
@@ -1667,7 +1117,6 @@ impl DaemonMsg {
         })
     }
 
-    /// Read and decode the next daemon message from `r`.
     pub fn read<R: Read>(r: &mut R) -> io::Result<Self> {
         let (k, payload) = read_frame(r)?;
         Self::from_frame(k, payload)
@@ -1685,15 +1134,6 @@ mod tests {
         cell_h: 17,
     };
 
-    /// End-to-end: a full attach session's worth of `ClientMsg`s and `DaemonMsg`s
-    /// crossing a *real* duplex stream (loopback TCP — the same transport shape the
-    /// daemon uses on Windows, and close enough to the Unix socket to exercise the
-    /// framing). Unlike the single-`Cursor` round-trips above, this drives both
-    /// directions across a thread boundary with mixed, back-to-back frames, so it
-    /// catches framing bugs that only surface when `read_frame` must reassemble a
-    /// message split across TCP segments or sitting behind an unrelated one. This is
-    /// the client↔daemon IPC seam the rest of the suite otherwise only tests in
-    /// halves.
     #[test]
     fn full_session_round_trips_over_a_real_duplex_stream() {
         use std::io::Write;
@@ -1703,9 +1143,6 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
 
-        // A realistic exchange: the client spawns a pane, resizes, types a command
-        // and detaches; the daemon acknowledges, replays a snapshot, streams output,
-        // reports prompt state, then exit.
         let client_msgs = vec![
             ClientMsg::Spawn {
                 cwd: Some(PathBuf::from("/work")),
@@ -1729,7 +1166,6 @@ mod tests {
             DaemonMsg::Exited { code: Some(0) },
         ];
 
-        // Daemon end: accept, decode every client message, then stream the replies.
         let expect_from_client = client_msgs.clone();
         let reply_with = daemon_msgs.clone();
         let daemon = thread::spawn(move || {
@@ -1744,7 +1180,6 @@ mod tests {
             got
         });
 
-        // Client end: send every request, then decode every reply.
         let mut sock = TcpStream::connect(addr).unwrap();
         for m in &client_msgs {
             m.encode(&mut sock).unwrap();
@@ -1759,7 +1194,6 @@ mod tests {
         assert_eq!(got_from_daemon, daemon_msgs, "client decoded daemon stream");
     }
 
-    /// Round-trip every `ClientMsg` variant through encode → read.
     #[test]
     fn client_roundtrip() {
         let msgs = vec![
@@ -1901,7 +1335,6 @@ mod tests {
         }
     }
 
-    /// Round-trip every `DaemonMsg` variant through encode → read.
     #[test]
     fn daemon_roundtrip() {
         let msgs = vec![
@@ -1938,8 +1371,6 @@ mod tests {
                 argv: vec!["ssh".into(), "-p".into(), "2222".into(), "dev".into()],
                 target: "dev".into(),
             })),
-            // A WSL pane's context rides the same wire; `kind` is serialized
-            // kebab-case, so this pins the encoding of the new variant.
             DaemonMsg::RemoteContext(Some(RemoteContext {
                 kind: RemoteKind::Wsl,
                 argv: Vec::new(),
@@ -2075,14 +1506,8 @@ mod tests {
         }
     }
 
-    /// Wire compatibility across GUI/daemon version skew, both directions:
-    /// a default spawn (`shell: None`) must emit the *legacy* frame — kind
-    /// `SPAWN` with a `(cwd, size)` tuple an old daemon can decode — and a
-    /// hand-built legacy frame must decode with `shell: None`. Locks the
-    /// compat contract documented on `kind::SPAWN_SHELL`.
     #[test]
     fn default_spawn_stays_wire_compatible_with_old_daemons() {
-        // New client -> old daemon: encode and pick the frame apart.
         let msg = ClientMsg::Spawn {
             cwd: Some(PathBuf::from("/work")),
             size: SIZE,
@@ -2093,13 +1518,10 @@ mod tests {
         msg.encode(&mut buf).unwrap();
         let (k, payload) = read_frame(&mut std::io::Cursor::new(&buf)).unwrap();
         assert_eq!(k, kind::SPAWN, "default spawn must use the legacy kind");
-        // An old daemon deserializes exactly a (cwd, size) tuple.
         let (cwd, size): (Option<PathBuf>, WinSize) = serde_json::from_slice(&payload).unwrap();
         assert_eq!(cwd, Some(PathBuf::from("/work")));
         assert_eq!(size, SIZE);
 
-        // Old client -> new daemon: a hand-built legacy frame decodes to
-        // `shell: None`.
         let legacy = serde_json::to_vec(&(Some(PathBuf::from("/old")), SIZE)).unwrap();
         let decoded = ClientMsg::from_frame(kind::SPAWN, legacy).unwrap();
         assert_eq!(
@@ -2113,14 +1535,11 @@ mod tests {
         );
     }
 
-    /// An explicit-shell spawn rides the `SPAWN_SHELL` frame (not the legacy
-    /// `SPAWN` kind), and round-trips through encode → decode.
     #[test]
     fn explicit_shell_spawn_uses_shell_kind() {
         let shell = ShellSpec {
             program: "fish".to_string(),
             args: vec!["-l".to_string()],
-            // Set so the round-trip covers the flag, not just program + args.
             args_are_tty7_defaults: true,
         };
         let msg = ClientMsg::Spawn {
@@ -2145,12 +1564,6 @@ mod tests {
         );
     }
 
-    /// An owned spawn rides the `SPAWN_OWNED` frame — never a legacy kind,
-    /// whose tuple payloads cannot carry the field — and round-trips with the
-    /// shell pick intact. The compat direction is the caller's contract:
-    /// `owner` is only ever set for a daemon advertising `pane-owner`, so the
-    /// legacy kinds stay byte-for-byte what old daemons expect (locked by
-    /// `default_spawn_stays_wire_compatible_with_old_daemons` above).
     #[test]
     fn owned_spawn_uses_the_owned_kind_and_round_trips() {
         let msg = ClientMsg::Spawn {
@@ -2170,9 +1583,6 @@ mod tests {
         assert_eq!(ClientMsg::from_frame(k, payload).unwrap(), msg);
     }
 
-    /// The `SPAWN_OWNED` payload is a struct with defaults, so a frame from a
-    /// *newer* client — more fields, or fewer — still decodes. This is the
-    /// property that makes it the last spawn kind ever needed.
     #[test]
     fn owned_spawn_payload_tolerates_unknown_and_missing_fields() {
         let payload = serde_json::to_vec(&serde_json::json!({
@@ -2197,9 +1607,6 @@ mod tests {
         );
     }
 
-    /// A `PaneInfo` from an old daemon has no `owner` key and decodes to
-    /// `None` — the "attachable by anyone" reading every pane had before the
-    /// field existed.
     #[test]
     fn pane_info_owner_defaults_for_old_daemons() {
         let old = serde_json::json!({"pane_id": 3, "title": "zsh", "alive": true});
@@ -2208,8 +1615,6 @@ mod tests {
         assert!(info.alive);
     }
 
-    /// An empty-payload binary frame (e.g. an `Input([])`) still round-trips and
-    /// an oversize length is rejected.
     #[test]
     fn frame_edges() {
         let mut buf = Vec::new();
@@ -2217,7 +1622,6 @@ mod tests {
         let mut cursor = std::io::Cursor::new(&buf);
         assert_eq!(read_frame(&mut cursor).unwrap(), (3, vec![]));
 
-        // A hand-rolled frame claiming a huge length must be rejected.
         let mut bad = Vec::new();
         bad.extend_from_slice(&(u32::MAX).to_le_bytes());
         bad.push(3);
@@ -2225,32 +1629,22 @@ mod tests {
         assert!(read_frame(&mut cursor).is_err());
     }
 
-    /// `write_frame` refuses to emit a payload larger than `MAX_FRAME` rather than
-    /// putting a frame on the wire the peer would reject.
     #[test]
     fn write_frame_rejects_oversize_payload() {
         let oversize = vec![0u8; MAX_FRAME + 1];
         let mut buf = Vec::new();
         assert!(write_frame(&mut buf, 3, &oversize).is_err());
-        // Nothing partial should have been emitted before the size check.
         assert!(buf.is_empty());
     }
 
-    /// An unknown kind byte is a protocol desync, surfaced as an error (not a panic)
-    /// for both directions.
     #[test]
     fn from_frame_rejects_unknown_kind() {
         assert!(ClientMsg::from_frame(99, vec![]).is_err());
         assert!(DaemonMsg::from_frame(99, vec![]).is_err());
     }
 
-    /// `take_frame` decodes exactly `write_frame`'s output, leaves partial
-    /// frames buffered (byte-at-a-time arrival included), preserves trailing
-    /// bytes of the next frame, and rejects an oversize length.
     #[test]
     fn take_frame_is_resumable_and_mirrors_read_frame() {
-        // Two frames, delivered one byte at a time: nothing decodes until each
-        // frame completes, and the buffer is never corrupted by partial reads.
         let mut wire = Vec::new();
         write_frame(&mut wire, 3, b"hello").unwrap();
         write_frame(&mut wire, 9, &[]).unwrap();
@@ -2266,34 +1660,26 @@ mod tests {
         assert_eq!(got, vec![(3, b"hello".to_vec()), (9, vec![])]);
         assert!(buf.is_empty(), "nothing left over after both frames");
 
-        // A complete frame followed by a partial one: the first pops, the
-        // partial tail stays intact for the next read.
         let mut buf = Vec::new();
         write_frame(&mut buf, 3, b"done").unwrap();
-        buf.extend_from_slice(&10u32.to_le_bytes()); // next frame's header only
+        buf.extend_from_slice(&10u32.to_le_bytes());
         assert_eq!(take_frame(&mut buf).unwrap(), Some((3, b"done".to_vec())));
         assert_eq!(take_frame(&mut buf).unwrap(), None);
         assert_eq!(buf, 10u32.to_le_bytes());
 
-        // An oversize length is a desync, same as read_frame.
         let mut bad = (u32::MAX).to_le_bytes().to_vec();
         bad.push(3);
         assert!(take_frame(&mut bad).is_err());
     }
 
-    /// A frame truncated mid-stream — after the length prefix, or mid-payload —
-    /// surfaces as an error (the reader treats it as a dropped peer), never a
-    /// short/garbage frame.
     #[test]
     fn read_frame_on_truncated_frame_is_an_error() {
-        // Length prefix only, no kind byte.
         let mut cut = std::io::Cursor::new(5u32.to_le_bytes().to_vec());
         assert_eq!(
             read_frame(&mut cut).unwrap_err().kind(),
             std::io::ErrorKind::UnexpectedEof
         );
 
-        // Kind present but the payload is shorter than the length promised.
         let mut buf = Vec::new();
         buf.extend_from_slice(&10u32.to_le_bytes());
         buf.push(3);
@@ -2305,28 +1691,21 @@ mod tests {
         );
     }
 
-    /// A control frame whose JSON payload is garbage decodes to an error rather
-    /// than panicking — a desynced peer can't crash the reader.
     #[test]
     fn from_frame_rejects_malformed_json_payloads() {
         assert!(ClientMsg::from_frame(kind::SPAWN, b"not json".to_vec()).is_err());
         assert!(DaemonMsg::from_frame(kind::PANE_LIST, b"{oops".to_vec()).is_err());
     }
 
-    /// A clean close between frames (empty input) reads as `UnexpectedEof`, which
-    /// callers treat as a normal disconnect.
     #[test]
     fn read_frame_on_empty_input_is_eof() {
         let mut empty = std::io::Cursor::new(Vec::<u8>::new());
         let err = read_frame(&mut empty).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
-        // The typed readers surface the same EOF.
         let mut empty2 = std::io::Cursor::new(Vec::<u8>::new());
         assert!(ClientMsg::read(&mut empty2).is_err());
     }
 
-    /// `PaneInfo`'s `#[serde(default)]` fields tolerate an older/leaner JSON that
-    /// omits `cwd` and `title`.
     #[test]
     fn pane_info_deserializes_with_defaults() {
         let info: PaneInfo = serde_json::from_str(r#"{"pane_id": 5, "alive": true}"#).unwrap();
@@ -2403,7 +1782,6 @@ mod tests {
         }
     }
 
-    /// The wire spec round-trips through serde, secrets and jump chain included.
     #[test]
     fn native_ssh_spec_serde_round_trips() {
         let spec = sample_native_spec();
@@ -2412,24 +1790,18 @@ mod tests {
         assert_eq!(spec, back);
     }
 
-    /// Missing optional fields decode via `#[serde(default)]` (forward compat).
     #[test]
     fn native_ssh_spec_tolerates_minimal_json() {
         let spec: NativeSshSpec =
             serde_json::from_str(r#"{"host":"h","port":22,"user":"u","auth_mode":"auto"}"#)
                 .unwrap();
-        assert_eq!(spec.term, "xterm-256color"); // defaulted
-        assert!(spec.verify_host_keys); // defaulted true
-        // A spec persisted before shell integration existed must come back
-        // opted *in* — `#[serde(default)]` on a bool would silently turn it off
-        // for every reconnect to a pane saved by an older build.
+        assert_eq!(spec.term, "xterm-256color");
+        assert!(spec.verify_host_keys);
         assert!(spec.shell_integration);
         assert_eq!(spec.password, None);
         assert!(spec.jump.is_none());
     }
 
-    /// The hand-written `Debug` must never leak secrets — for the spec *or* its
-    /// nested jump spec — and `AuthResponse::Secret(s)` redact too.
     #[test]
     fn secrets_are_redacted_in_debug_output() {
         let spec = sample_native_spec();
@@ -2449,22 +1821,16 @@ mod tests {
         );
     }
 
-    /// `without_secrets` clears passwords/passphrases recursively but keeps
-    /// everything else, so the sanitized spec is safe to persist.
     #[test]
     fn without_secrets_strips_password_and_passphrases_recursively() {
         let clean = sample_native_spec().without_secrets();
         assert_eq!(clean.password, None);
         assert!(clean.key_passphrases.is_none());
         assert_eq!(clean.jump.as_ref().unwrap().password, None);
-        // Non-secret fields survive.
         assert_eq!(clean.host, "example.com");
         assert_eq!(clean.login_script, vec!["tmux attach".to_string()]);
     }
 
-    /// Every `WorkspaceOp` round-trips inside the `OnWorkspace` envelope. Kept
-    /// as its own test rather than folded into `client_roundtrip` so the
-    /// pane-addressed corpus there stays byte-for-byte what it was.
     #[test]
     fn on_workspace_roundtrip() {
         let ws = crate::core::session::WorkspaceId::new();
@@ -2525,8 +1891,6 @@ mod tests {
         }
     }
 
-    /// The new native-SSH client/daemon message variants round-trip through the
-    /// frame codec (new kind bytes included).
     #[test]
     fn native_ssh_messages_round_trip() {
         let client_msgs = vec![
@@ -2594,8 +1958,6 @@ mod tests {
         }
     }
 
-    /// The native-SSH spawn uses a brand-new kind byte, so a pre-WS2 daemon
-    /// rejects it (unknown kind) rather than mis-spawning.
     #[test]
     fn native_ssh_spawn_uses_new_kind_byte() {
         let msg = ClientMsg::SpawnNativeSsh {
@@ -2609,11 +1971,6 @@ mod tests {
         assert_eq!(k, kind::SPAWN_NATIVE_SSH);
     }
 
-    /// A daemon that predates `features` answers without the field, and that
-    /// reply must still decode — as an empty capability list, which is exactly
-    /// the truth about it. If it didn't, upgrading the app while an old daemon
-    /// held live sessions would turn the version handshake into a hard failure
-    /// instead of the keep-or-restart question it is meant to be.
     #[test]
     fn a_version_reply_without_features_still_decodes() {
         let legacy = br#"{"protocol":2,"build":"26.7.4"}"#;
@@ -2624,10 +1981,6 @@ mod tests {
         assert!(!v.has_feature(crate::daemon::control::feature::CONTROL));
     }
 
-    /// And the reverse skew: a *newer* daemon's extra field must not break an
-    /// older client's decode. serde ignores unknown fields by default and this
-    /// struct must never opt out of that, or every future capability becomes a
-    /// breaking change for clients that don't care about it.
     #[test]
     fn a_version_reply_with_unknown_fields_still_decodes() {
         let future = br#"{"protocol":4,"build":"99.0.0","features":["control"],
@@ -2637,11 +1990,6 @@ mod tests {
         assert!(v.has_feature(crate::daemon::control::feature::CONTROL));
     }
 
-    /// This build's own answer: the bumped version, and — deliberately — no
-    /// control capability, because the *local session daemon* does not serve
-    /// the control dialect. `tty7-server` does, and advertises it itself.
-    /// Claiming it here would make the GUI open a connection this process
-    /// cannot answer.
     #[test]
     fn the_local_daemon_does_not_claim_the_control_dialect() {
         let v = DaemonVersion::current();

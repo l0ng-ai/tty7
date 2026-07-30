@@ -1,17 +1,3 @@
-//! The `tty7-server` command line: the three subcommands, and the two shapes
-//! `--stdio` takes.
-//!
-//! `stdio_conformance.rs` proves the *protocol* over `--stdio --serve`. This
-//! file proves the argument handling and the byte bridge — the mode that carries
-//! a connection to a control server that is already running, which is the path
-//! an `ssh host tty7-server --stdio` takes on a machine with a live daemon and
-//! which no amount of `Host` conformance would exercise.
-//!
-//! Everything `--stdio` is Unix-only — the flag is refused on Windows, where a
-//! machine is reached over its own transport rather than by shipping a server
-//! onto it. The plain argument handling below is not, and runs
-//! everywhere.
-
 use std::process::{Command, Stdio};
 
 #[cfg(unix)]
@@ -50,7 +36,6 @@ impl LinkShutdown for ServerProcess {
     }
 }
 
-/// Start `tty7-server --stdio <args>` and connect a `RemoteHost` to its pipes.
 #[cfg(unix)]
 fn stdio_child(args: &[&str]) -> io::Result<Arc<RemoteHost>> {
     let mut child = Command::new(EXE)
@@ -67,7 +52,6 @@ fn stdio_child(args: &[&str]) -> io::Result<Arc<RemoteHost>> {
     RemoteHost::connect_with(out, inp, Some(closer), "stdio:cli", &hello)
 }
 
-/// A control server on a temp socket, for the bridge to reach.
 #[cfg(unix)]
 fn listening_server(dir: &tempfile::TempDir) -> PathBuf {
     let sock = dir.path().join("control.sock");
@@ -76,13 +60,6 @@ fn listening_server(dir: &tempfile::TempDir) -> PathBuf {
     sock
 }
 
-/// **The bridge.** `--stdio --bridge` forwards bytes between its own pipes and a
-/// control server that is already listening, parsing nothing on the way.
-///
-/// That "parsing nothing" is the load-bearing part: the version handshake this
-/// stream carries belongs to the client and the server at the far end, and a
-/// bridge with an opinion about the protocol would become a third party to a
-/// negotiation it is not qualified to join.
 #[cfg(unix)]
 #[test]
 fn the_bridge_carries_a_whole_session() {
@@ -97,22 +74,15 @@ fn the_bridge_carries_a_whole_session() {
     host.write_file(&f, b"two hops").unwrap();
     assert_eq!(host.read_file(&f, 1024).unwrap(), b"two hops");
 
-    // A payload big enough that it cannot arrive in one read, so the bridge's
-    // copy loop is doing real work rather than passing a single buffer through.
     let big = host.join(sandbox.path(), "big.bin");
     let body: Vec<u8> = (0..2 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
     host.write_file(&big, &body).unwrap();
     assert!(host.read_file(&big, 8 * 1024 * 1024).unwrap() == body);
 
-    // Out-of-order replies survive the extra hop too: the bridge must not
-    // serialize what the server took care to keep concurrent.
     let entries = host.read_dir(sandbox.path(), None).unwrap();
     assert_eq!(entries.len(), 2);
 }
 
-/// `--bridge` with nowhere to bridge to fails rather than quietly serving
-/// itself. An operator who asked for the bridge is telling us a server exists;
-/// silently becoming that server would fork the machine's state in two.
 #[cfg(unix)]
 #[test]
 fn an_explicit_bridge_with_no_server_fails() {
@@ -125,8 +95,6 @@ fn an_explicit_bridge_with_no_server_fails() {
     );
 }
 
-/// With neither flag, `--stdio` probes: nothing listening means serve here, so a
-/// machine that has never run a daemon is still reachable over ssh.
 #[cfg(unix)]
 #[test]
 fn the_default_mode_serves_when_nothing_is_listening() {
@@ -138,8 +106,6 @@ fn the_default_mode_serves_when_nothing_is_listening() {
     assert!(host.exists(sandbox.path()));
 }
 
-/// ...and something listening means bridge to it, so a second `--stdio` session
-/// joins the machine's existing server instead of standing up a rival.
 #[cfg(unix)]
 #[test]
 fn the_default_mode_bridges_when_a_server_is_listening() {
@@ -153,7 +119,6 @@ fn the_default_mode_bridges_when_a_server_is_listening() {
     assert_eq!(std::fs::read(&f).unwrap(), b"ok");
 }
 
-/// Contradictory flags are refused rather than one silently winning.
 #[cfg(unix)]
 #[test]
 fn serve_and_bridge_together_are_refused() {
@@ -170,12 +135,6 @@ fn serve_and_bridge_together_are_refused() {
     );
 }
 
-/// `agent-hook` runs the same emitter the GUI binary does, and stays quiet.
-///
-/// Quiet is the requirement, not a nicety: this runs as a child of an agent's
-/// hook runner, and anything it prints lands in the agent's own transcript. With
-/// no controlling terminal there is nowhere to emit to, and it still has to
-/// succeed — a hook that fails is a hook the agent reports as broken.
 #[test]
 fn agent_hook_is_quiet_and_succeeds() {
     let out = Command::new(EXE)
@@ -187,8 +146,6 @@ fn agent_hook_is_quiet_and_succeeds() {
     assert!(out.stdout.is_empty(), "agent-hook wrote to stdout");
 }
 
-/// A malformed `agent-hook` invocation is still silent and still succeeds — the
-/// emitter's whole contract is that it never becomes the agent's problem.
 #[test]
 fn agent_hook_without_arguments_still_succeeds() {
     let out = Command::new(EXE)
@@ -214,7 +171,6 @@ fn version_and_help_report_on_stdout() {
     }
 }
 
-/// No arguments is a usage error, not a process that sits there doing nothing.
 #[test]
 fn no_arguments_is_a_usage_error() {
     let out = Command::new(EXE).output().unwrap();

@@ -1,21 +1,3 @@
-//! In-pane native-SSH auth & host-key sheets (WS3).
-//!
-//! When the daemon's russh connect task needs a decision only the user can make
-//! (a password, a key passphrase, keyboard-interactive answers, or a host-key
-//! confirmation) it sends a `DaemonMsg::AuthPrompt` over the pane's own stream.
-//! `RemoteTerminal` queues it; the view emits `AuthPromptReady`; `Tty7App` drains
-//! it here into a keyboard-first sheet rendered over the pane. The user's answer
-//! goes back as a `ClientMsg::AuthResponse` via `RemoteTerminal::respond_auth`.
-//!
-//! Structure: a **pure** [`PromptModel`] + the submit/keychain decision functions
-//! (unit-tested with no window), and the gpui [`SshPromptState`] + `impl Tty7App`
-//! rendering that wraps them. Prompts are keyed to the pane that raised them, so
-//! switching tabs never loses or misroutes a pending sheet.
-//!
-//! Security posture (PRD §5.3): an unknown host is a neutral confirm; a *changed*
-//! host key is a red MITM warning whose default action is ABORT — trusting it
-//! requires typing an explicit confirmation, never a bare Enter.
-
 use gpui::{
     AnyElement, Context, Entity, FocusHandle, IntoElement, ParentElement as _, Styled as _,
     Subscription, Window, div, prelude::*, px,
@@ -31,27 +13,18 @@ use crate::terminal::view::TerminalView;
 
 use super::app::Tty7App;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Pure model + decision logic (no gpui) — the unit-tested core.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// One keyboard-interactive prompt row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct KiRow {
     pub text: String,
-    /// Whether keystrokes echo (false ⇒ masked input, e.g. a 2FA code field).
     pub echo: bool,
 }
 
-/// The active sheet and the data it displays. Pure — holds no widgets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PromptModel {
     Password {
         user: String,
         host: String,
         port: u16,
-        /// FR-A6: a stored password we auto-supplied was rejected by the server,
-        /// so warn and offer to overwrite/clear the keychain entry.
         rejected: bool,
     },
     KeyPassphrase {
@@ -78,8 +51,6 @@ pub(crate) enum PromptModel {
     },
 }
 
-/// What to do with the OS keychain after a secret submit. Deliberately explicit so
-/// FR-A6's "delete only in the rejection path" is auditable in one place.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KeychainWrite {
     None,
@@ -89,15 +60,11 @@ pub(crate) enum KeychainWrite {
         port: u16,
         secret: String,
     },
-    /// Delete the stale stored password (only reached in the FR-A6 rejection path
-    /// when the user declines to remember the new one).
     DeletePassword {
         user: String,
         host: String,
         port: u16,
     },
-    /// Store a key passphrase. The account is the key's content hash, computed by
-    /// the applier from `key_path` (WS1's `key_account_from_contents`).
     SetKeyPassphrase {
         key_path: String,
         secret: String,
@@ -105,10 +72,6 @@ pub(crate) enum KeychainWrite {
 }
 
 impl PromptModel {
-    /// Build a model from an incoming prompt, given the pane's endpoint (for the
-    /// port, which the `Password` prompt omits) and whether this connect
-    /// auto-supplied a stored password (FR-A6). Returns `None` for a `Banner`
-    /// (handled out-of-band — banners never block).
     pub(crate) fn from_prompt(
         kind: AuthPromptKind,
         endpoint: Option<(String, u16)>,
@@ -168,8 +131,6 @@ impl PromptModel {
         })
     }
 
-    /// How many text inputs this sheet needs (KI has one per prompt; the changed
-    /// host-key sheet has a single confirmation field; host-key-unknown has none).
     fn input_count(&self) -> usize {
         match self {
             PromptModel::Password { .. } | PromptModel::KeyPassphrase { .. } => 1,
@@ -180,15 +141,6 @@ impl PromptModel {
     }
 }
 
-/// Resolve a password submit into a response and a keychain action (FR-A6).
-///
-/// - `remember` ⇒ store (overwrite) the new password.
-/// - not remembered, but this was the **rejection** path (a stored password had
-///   been auto-supplied and the server rejected it) ⇒ delete the stale entry.
-/// - otherwise ⇒ leave the keychain untouched.
-///
-/// Crucially the delete only ever happens in the rejection path, so a network
-/// error / timeout / other-method failure never clears a good credential.
 pub(crate) fn password_submit(
     user: &str,
     host: &str,
@@ -216,7 +168,6 @@ pub(crate) fn password_submit(
     (AuthResponse::Secret(secret), write)
 }
 
-/// Resolve a key-passphrase submit. Remember ⇒ store by key-content hash.
 pub(crate) fn passphrase_submit(
     key_path: &str,
     secret: String,
@@ -233,12 +184,10 @@ pub(crate) fn passphrase_submit(
     (AuthResponse::Secret(secret), write)
 }
 
-/// Keyboard-interactive: all answers in order.
 pub(crate) fn ki_submit(answers: Vec<String>) -> AuthResponse {
     AuthResponse::Secrets(answers)
 }
 
-/// Unknown host: `trust` ⇒ accept + remember (write known_hosts); else abort.
 pub(crate) fn host_key_unknown_decision(trust: bool) -> AuthResponse {
     AuthResponse::HostKeyDecision {
         accept: trust,
@@ -246,14 +195,10 @@ pub(crate) fn host_key_unknown_decision(trust: bool) -> AuthResponse {
     }
 }
 
-/// A changed host key is trusted ONLY when the user typed the explicit
-/// confirmation. Anything else (empty, wrong word, a bare Enter) aborts. Never
-/// auto-accept (PRD FR-S2).
 pub(crate) fn changed_confirmed(typed: &str) -> bool {
     typed.trim().eq_ignore_ascii_case("yes")
 }
 
-/// The decision for a changed-host-key submit, given the typed confirmation.
 pub(crate) fn host_key_changed_decision(typed: &str) -> AuthResponse {
     if changed_confirmed(typed) {
         AuthResponse::HostKeyDecision {
@@ -268,41 +213,16 @@ pub(crate) fn host_key_changed_decision(typed: &str) -> AuthResponse {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// gpui state + rendering.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// The app-owned auth-sheet state. One active prompt at a time; further prompts
-/// stay queued on the raising pane's `RemoteTerminal` until this one resolves.
 pub(crate) struct SshPromptState {
-    /// The pane that raised the active prompt (for routing the response back).
     pane: Option<Entity<TerminalView>>,
-    /// The daemon pane id, so rendering keys the sheet to the right pane.
     pane_id: Option<u64>,
-    /// The `request_id` the response must carry.
     request_id: u64,
-    /// The active sheet, or `None` when nothing is pending.
     model: Option<PromptModel>,
-    /// Dismissable, non-blocking server banners (never written into scrollback —
-    /// bytes stay transparent per FR-C4).
     banners: Vec<String>,
-    /// Input widgets for the active sheet (secret/answer/confirm fields).
     inputs: Vec<Entity<InputState>>,
-    /// "Remember (keychain)" toggle for password / passphrase sheets.
     remember: bool,
-    /// Latest spawn phase, for a small status line.
     phase: Option<SshPhase>,
-    /// A prompt raised by a **routed** connect (a remote workspace's control
-    /// stream) rather than by a pane.
-    ///
-    /// Those have no pane and no `TerminalView` to answer through — the question
-    /// arrives while the route is still being set up, before anything exists to
-    /// render it — so the answer goes back down this channel instead. The sheet
-    /// itself is the same one, which is the point: one auth UI, two producers.
     routed: Option<crate::ui::remote_connect::PendingAuth>,
-    /// The machine [`routed`](Self::routed) belongs to, kept separately because
-    /// answering *takes* the prompt and the queue still has to be released
-    /// afterwards.
     routed_host: Option<tty7_core::host::HostId>,
     focus_handle: FocusHandle,
     _subs: Vec<Subscription>,
@@ -334,9 +254,6 @@ impl SshPromptState {
         self.inputs.clear();
         self.remember = false;
         self._subs.clear();
-        // A routed prompt still parked here was never answered — a connect
-        // thread is blocked on it. Cancelling is the safe direction and the same
-        // answer an unanswered one times out into.
         if let Some(pending) = self.routed.take() {
             pending.answer(AuthResponse::Cancelled);
         }
@@ -344,11 +261,6 @@ impl SshPromptState {
 }
 
 impl Tty7App {
-    /// Drain the raising pane's pending prompts/phase into the sheet state. Called
-    /// from the `AuthPromptReady` subscription (single build site in
-    /// `new_terminal`). Banners are collected; the first real prompt becomes the
-    /// active sheet. If a sheet is already active, later prompts stay queued on the
-    /// pane and are picked up when the current one resolves.
     pub(crate) fn on_auth_prompt_ready(
         &mut self,
         view: Entity<TerminalView>,
@@ -356,13 +268,10 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         let pane_id = view.read(cx).pane_id;
-        // Snapshot the pane's endpoint / rejection flag / phase, and pull a prompt
-        // out — all inside a short immutable borrow, cloning what we need.
         let (endpoint, auto_supplied, phase, banners, next) = {
             let term = &view.read(cx).terminal;
             let mut banners = Vec::new();
             let mut next: Option<(u64, AuthPromptKind)> = None;
-            // Only pull a new sheet if none is active; always harvest banners.
             let want_prompt = self.ssh_prompt.model.is_none();
             loop {
                 if want_prompt {
@@ -375,11 +284,6 @@ impl Tty7App {
                         None => break,
                     }
                 } else {
-                    // A sheet is already up (another pane's): harvest banners
-                    // only, leaving the real prompt *queued* — popping it here
-                    // would drop it (no re-queue) and that pane's auth would
-                    // dangle until the broker timeout. `dismiss_and_advance`
-                    // picks queued prompts up when the active sheet resolves.
                     match term.take_auth_banner() {
                         Some(text) => banners.push(text),
                         None => break,
@@ -403,8 +307,6 @@ impl Tty7App {
         if let Some((request_id, kind)) = next {
             if let Some(model) = PromptModel::from_prompt(kind, endpoint, auto_supplied) {
                 let inputs = build_inputs(&model, window, cx);
-                // Submit on Enter from any input (KI advances naturally; a single
-                // field submits directly).
                 let mut subs = Vec::new();
                 for input in &inputs {
                     subs.push(cx.subscribe_in(
@@ -432,14 +334,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Raise the sheet for a prompt that came off a **routed** connect (a remote
-    /// workspace reaching its machine), rather than off a pane.
-    ///
-    /// **Hands the prompt back** (`GiveBack`) when a sheet is already up, rather
-    /// than dropping it: the caller re-offers it, which is what the start-up auth
-    /// queue in `ui::remote_workspace` does. A dropped
-    /// [`PendingAuth`](crate::ui::remote_connect::PendingAuth) leaves a connect
-    /// thread parked until its 180s timeout.
     pub(crate) fn raise_routed_auth(
         &mut self,
         pending: crate::ui::remote_connect::PendingAuth,
@@ -450,12 +344,7 @@ impl Tty7App {
         if self.ssh_prompt.model.is_some() {
             return SheetOutcome::GiveBack(pending);
         }
-        // No endpoint and no auto-supplied password: a routed connect's
-        // credentials were resolved before the route was opened, so there is no
-        // "the stored one was rejected" case to warn about here.
         let Some(model) = PromptModel::from_prompt(pending.prompt.clone(), None, false) else {
-            // A banner, not a question. Show it and answer so the connect
-            // carries on rather than waiting out the consent timeout.
             if let AuthPromptKind::Banner { text } = &pending.prompt {
                 self.ssh_prompt.banners.push(text.clone());
             }
@@ -479,8 +368,6 @@ impl Tty7App {
         if let Some(first) = inputs.first() {
             first.update(cx, |s, cx| s.focus(window, cx));
         }
-        // `pane_id` stays `None` so the overlay draws whatever tab is on screen:
-        // this sheet belongs to the *window's machine*, not to one pane in it.
         self.ssh_prompt.pane = None;
         self.ssh_prompt.pane_id = None;
         self.ssh_prompt.request_id = 0;
@@ -494,7 +381,6 @@ impl Tty7App {
         SheetOutcome::Raised
     }
 
-    /// Reply to the active prompt and clear it, then pick up any queued prompt.
     pub(crate) fn submit_ssh_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(model) = self.ssh_prompt.model.clone() else {
             return;
@@ -522,8 +408,6 @@ impl Tty7App {
                 passphrase_submit(key_path, secret, remember)
             }
             PromptModel::KeyboardInteractive { .. } => (ki_submit(values), KeychainWrite::None),
-            // Host-key sheets don't submit via Enter on an input (unknown has no
-            // input; changed submits through its confirm field handled here too).
             PromptModel::HostKeyUnknown { .. } => {
                 (host_key_unknown_decision(true), KeychainWrite::None)
             }
@@ -538,8 +422,6 @@ impl Tty7App {
         self.dismiss_and_advance(window, cx);
     }
 
-    /// Cancel the active prompt (Esc). Password/passphrase/KI ⇒ `Cancelled`;
-    /// host-key sheets ⇒ an explicit abort decision.
     pub(crate) fn cancel_ssh_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(model) = self.ssh_prompt.model.clone() else {
             return;
@@ -556,27 +438,21 @@ impl Tty7App {
         self.dismiss_and_advance(window, cx);
     }
 
-    /// Trust an unknown host (its neutral sheet's affirmative action).
     pub(crate) fn trust_ssh_host_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.respond_active(host_key_unknown_decision(true), cx);
         self.dismiss_and_advance(window, cx);
     }
 
-    /// Toggle the "remember (keychain)" checkbox on the active sheet.
     pub(crate) fn toggle_ssh_remember(&mut self, cx: &mut Context<Self>) {
         self.ssh_prompt.remember = !self.ssh_prompt.remember;
         cx.notify();
     }
 
-    /// Surface a connect-time failure (a typed line that can't be parsed into a
-    /// host, or an unresolvable alias) as a dismissable inline banner over the
-    /// focused pane — a diagnosable message rather than a silent no-op.
     pub(crate) fn push_ssh_connect_error(&mut self, reason: String, cx: &mut Context<Self>) {
         self.ssh_prompt.banners.push(reason);
         cx.notify();
     }
 
-    /// Dismiss one banner by index.
     pub(crate) fn dismiss_ssh_banner(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix < self.ssh_prompt.banners.len() {
             self.ssh_prompt.banners.remove(ix);
@@ -585,8 +461,6 @@ impl Tty7App {
     }
 
     fn respond_active(&mut self, response: AuthResponse, cx: &Context<Self>) {
-        // A routed prompt answers down its own channel: there is no pane, and
-        // the connect thread is parked on this reply.
         if let Some(pending) = self.ssh_prompt.routed.take() {
             pending.answer(response);
             return;
@@ -598,22 +472,13 @@ impl Tty7App {
 
     fn dismiss_and_advance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pane = self.ssh_prompt.pane.clone();
-        // D7: the sheet is one machine's turn. Handing it back is
-        // what lets the next machine's queued connect ask its question, so it
-        // has to happen on every exit from a routed sheet — answered, cancelled
-        // or dismissed.
         if let Some(host) = self.ssh_prompt.routed_host.take() {
             crate::ui::remote_workspace::release_auth_sheet(host, cx);
         }
         self.ssh_prompt.clear();
-        // Another prompt may already be queued on the pane (e.g. a KI round after
-        // a password). Pick it up.
         if let Some(pane) = pane {
             self.on_auth_prompt_ready(pane, window, cx);
         }
-        // Still no sheet: another pane's prompt may have arrived while ours was
-        // up. It was deliberately left queued (see `on_auth_prompt_ready`), and
-        // its pane may get no further wakeup to re-raise it — find it now.
         if self.ssh_prompt.model.is_none() {
             let waiting = self
                 .tabs
@@ -627,8 +492,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Apply a keychain action off the UI path. Best-effort — a keychain failure
-    /// never blocks the connection (the secret already went to the daemon).
     fn apply_keychain_write(&self, write: KeychainWrite) {
         let store = OsCredentialStore;
         match write {
@@ -647,11 +510,6 @@ impl Tty7App {
                 let _ = store.delete_password(&user, &host, port);
             }
             KeychainWrite::SetKeyPassphrase { key_path, secret } => {
-                // The keychain account is the key file's content hash. If the key
-                // can't be read we skip remember rather than store under a guessed
-                // account (documented WS3 fallback). The prompt's key_path is the
-                // spec's raw entry, which can still carry a `~` (e.g. an old
-                // persisted spec) — expand before reading.
                 let path = crate::core::ssh_profile::expand_tilde(&key_path);
                 match std::fs::read(&path) {
                     Ok(bytes) => {
@@ -666,20 +524,14 @@ impl Tty7App {
         }
     }
 
-    /// Render the auth sheet over the active pane, if a prompt is pending for the
-    /// currently focused pane. Also renders any dismissable banners.
     pub(crate) fn render_ssh_prompt_overlay(
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        // Nothing to show if there's no active model and no banners.
         if self.ssh_prompt.model.is_none() && self.ssh_prompt.banners.is_empty() {
             return None;
         }
-        // Per-pane keying: only draw the sheet when the pane that raised it is the
-        // one currently on screen, so switching tabs never misroutes it (the
-        // prompt state is retained until that pane is focused again).
         let focused_pane_id = self
             .tabs
             .get(self.active)
@@ -691,7 +543,6 @@ impl Tty7App {
 
         let mut stack = v_flex().gap_2().items_center();
 
-        // Banners first (non-blocking, dismissable).
         for (ix, banner) in self.ssh_prompt.banners.iter().enumerate() {
             stack = stack.child(self.render_ssh_banner(ix, banner, cx));
         }
@@ -776,7 +627,6 @@ impl Tty7App {
             } else {
                 cx.theme().border
             })
-            // Esc cancels/aborts from anywhere in the sheet.
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" {
                     this.cancel_ssh_prompt(window, cx);
@@ -795,7 +645,6 @@ impl Tty7App {
             PromptModel::Password { rejected, .. } => {
                 let mut c = card;
                 if *rejected {
-                    // FR-A6: warn that the stored password was rejected.
                     c = c.child(
                         div()
                             .text_xs()
@@ -898,8 +747,6 @@ impl Tty7App {
                 .child(
                     h_flex()
                         .gap_2()
-                        // Default/primary action is ABORT — trusting requires the
-                        // typed confirmation submitted via Enter on the field.
                         .child(
                             Button::new("ssh-hkc-abort")
                                 .label("Abort")
@@ -931,9 +778,6 @@ impl Tty7App {
     }
 
     fn render_ssh_remember(&self, cx: &mut Context<Self>) -> AnyElement {
-        // A real checkbox, left-aligned in its own row. The old ghost Button
-        // stretched to the card's full width, so its selected-state fill read as
-        // a full-width grey bar rather than a checkbox.
         h_flex()
             .child(
                 Checkbox::new("ssh-remember")
@@ -966,7 +810,6 @@ impl Tty7App {
     }
 }
 
-/// Build the input widgets a model needs, masking non-echo fields.
 fn build_inputs(
     model: &PromptModel,
     window: &mut Window,
@@ -975,8 +818,6 @@ fn build_inputs(
     let count = model.input_count();
     (0..count)
         .map(|i| {
-            // Which fields mask: password + passphrase always; KI per its `echo`;
-            // the changed-host confirm field is plain text.
             let masked = match model {
                 PromptModel::Password { .. } | PromptModel::KeyPassphrase { .. } => true,
                 PromptModel::KeyboardInteractive { prompts, .. } => {
@@ -1053,8 +894,6 @@ mod tests {
 
     #[test]
     fn non_rejection_without_remember_never_touches_keychain() {
-        // The critical FR-A6 guarantee: a plain failed attempt (not the stored-
-        // password rejection path) must NOT clear anything.
         let (_resp, write) = password_submit("u", "h", 22, "pw".into(), false, false);
         assert_eq!(write, KeychainWrite::None);
     }
@@ -1101,7 +940,6 @@ mod tests {
 
     #[test]
     fn changed_host_never_auto_accepts() {
-        // Only an explicit "yes" trusts; everything else aborts.
         assert!(changed_confirmed("yes"));
         assert!(changed_confirmed("  YES "));
         assert!(!changed_confirmed(""));

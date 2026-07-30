@@ -1,21 +1,3 @@
-//! The machine-owned workspace tree, end to end against a real `tty7-server`
-//! child process.
-//!
-//! The client is the shipped `ControlClient`, the wire is the control dialect
-//! over real pipes, and the server is the shipped binary owning its tree in a
-//! file. What the process boundary buys here specifically:
-//!
-//! | | Why an in-process store would not do |
-//! |---|---|
-//! | The tree is on **the server's** disk | The whole design is "the daemon owns the structure"; a store in the test's address space proves the data type, not the ownership |
-//! | `machine-tree` is advertised only when served | The capability bit is built from what the *binary* wires up |
-//! | A delta reaches the **other** connection, never the writer | Origin exclusion is the contract that lets a client apply its own edit from the reply and everyone else's from the push |
-//!
-//! Every case gets its own `$TTY7_DATA_DIR`, so no case can be explained by
-//! another's leftovers and nothing here can touch a developer's real tree.
-
-// Unix-only: the server under test is a `--stdio` child, and the two-client
-// case stands up a control socket.
 #![cfg(unix)]
 
 use std::io;
@@ -30,8 +12,6 @@ use tty7_core::daemon::control::{
     feature,
 };
 
-/// The child, and the only way to end it — a process-backed link is reaped by
-/// its `LinkShutdown`, exactly as in `stdio_conformance.rs`.
 struct ServerProcess {
     child: Mutex<Option<Child>>,
 }
@@ -47,7 +27,6 @@ impl LinkShutdown for ServerProcess {
     }
 }
 
-/// One connected client: the RPC channel, plus everything the server pushed.
 struct Client {
     control: ControlClient,
     events: Arc<Mutex<Vec<ControlEvent>>>,
@@ -55,9 +34,6 @@ struct Client {
 }
 
 impl Client {
-    /// Wait for a `Layout` delta about `workspace` matching `want`, or fail
-    /// saying what did arrive. Polled because a push and the reply that caused
-    /// it race by construction.
     fn expect_delta(&self, workspace: WorkspaceId, want: impl Fn(&LayoutDelta) -> bool) {
         let key = workspace.to_string();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -90,9 +66,6 @@ impl Client {
     }
 }
 
-/// Start a `tty7-server --stdio --serve` whose tree lives in `data_dir`, and
-/// connect a client to it. `--serve` for the same reason as everywhere else in
-/// these tests: a developer's real daemon must never be bridged into.
 fn connect(data_dir: &Path, token: &str) -> Client {
     let mut child = Command::new(env!("CARGO_BIN_EXE_tty7-server"))
         .args(["--stdio", "--serve"])
@@ -145,10 +118,6 @@ fn seed(pane: u64, cwd: &str) -> PaneSeed {
     }
 }
 
-// ---------------------------------------------------------------------------
-
-/// The capability bit is the client's cue that the tree verbs are worth a
-/// round trip, and it has to reflect what the shipped binary wired up.
 #[test]
 fn the_server_advertises_the_machine_tree() {
     let dir = data_dir();
@@ -163,15 +132,11 @@ fn the_server_advertises_the_machine_tree() {
     );
 }
 
-/// The semantic operations against a real server, and the tree ends up in a
-/// file that server owns. This is "the daemon owns the structure" as a
-/// syscall someone else made, not as a diagram.
 #[test]
 fn the_tree_is_built_by_operations_and_lives_in_the_servers_file() {
     let dir = data_dir();
     let client = connect(dir.path(), "ops");
 
-    // Build: a workspace, a tab, a split.
     let ws = match client
         .control
         .call(ControlRequest::WorkspaceCreate {
@@ -208,7 +173,6 @@ fn the_tree_is_built_by_operations_and_lives_in_the_servers_file() {
         })
         .expect("split");
 
-    // Read back through the wire.
     let machine = match client.control.call(ControlRequest::MachineGet).unwrap() {
         ReplyOk::MachineTree(m) => *m,
         other => panic!("expected MachineTree, got {other:?}"),
@@ -222,11 +186,9 @@ fn the_tree_is_built_by_operations_and_lives_in_the_servers_file() {
         "panes this server was told about in its own lifetime are live"
     );
 
-    // The file is the server's: the test process never wrote it.
     let text = std::fs::read_to_string(machine_file(&dir)).expect("the server wrote its tree");
     assert!(text.contains(&ws.id.to_string()), "{text}");
 
-    // A refusal is a client-visible error, not a dropped reply.
     let missing = client
         .control
         .call(ControlRequest::WorkspaceTree {
@@ -236,9 +198,6 @@ fn the_tree_is_built_by_operations_and_lives_in_the_servers_file() {
     assert_eq!(missing.kind(), io::ErrorKind::NotFound);
 }
 
-/// **The revival contract, across a real restart.** A second server process
-/// reads the first one's tree; every pane in it is dead (`live == false`), the
-/// leaves still name them, and `PaneReplace` rebinds a leaf to a successor.
 #[test]
 fn a_new_server_process_reports_the_old_panes_dead_and_accepts_their_successors() {
     let dir = data_dir();
@@ -268,7 +227,6 @@ fn a_new_server_process_reports_the_old_panes_dead_and_accepts_their_successors(
         ws
     };
 
-    // A brand-new server process over the same file.
     let second = connect(dir.path(), "second");
     let machine = match second.control.call(ControlRequest::MachineGet).unwrap() {
         ReplyOk::MachineTree(m) => *m,
@@ -291,7 +249,6 @@ fn a_new_server_process_reports_the_old_panes_dead_and_accepts_their_successors(
         "the leaf still names the dead pane — the revival slot"
     );
 
-    // Revive: a fresh pane takes the leaf, the spent record goes.
     second
         .control
         .call(ControlRequest::PaneReplace {
@@ -311,9 +268,6 @@ fn a_new_server_process_reports_the_old_panes_dead_and_accepts_their_successors(
     assert!(machine.panes.iter().all(|p| p.id != 7));
 }
 
-/// Two clients on one server. An operation by one reaches the other as a
-/// `Layout` delta and never comes back to its author — the mechanism that
-/// replaces whole-record last-writer-wins with edits that all land.
 #[test]
 fn an_operation_from_one_client_reaches_the_other_as_a_delta() {
     use tty7_core::host::local::LocalHost;
@@ -342,8 +296,6 @@ fn an_operation_from_one_client_reaches_the_other_as_a_delta() {
             .iter()
             .any(|f| f == feature::MACHINE_TREE)
     );
-    // Make sure the watcher's subscription is up (its server thread subscribes
-    // before answering its first request).
     watcher.control.call(ControlRequest::Ping).unwrap();
 
     let ws = match writer
@@ -379,8 +331,6 @@ fn an_operation_from_one_client_reaches_the_other_as_a_delta() {
         ws.id,
         |d| matches!(d, LayoutDelta::TabCreated { tab: t, .. } if t.id == tab.id),
     );
-    // The created tab became active, and the *change of active tab* is its own
-    // delta — implicit activation must not be something a client re-derives.
     watcher.expect_delta(
         ws.id,
         |d| matches!(d, LayoutDelta::ActiveTabChanged { tab: t } if *t == tab.id),
@@ -391,7 +341,6 @@ fn an_operation_from_one_client_reaches_the_other_as_a_delta() {
         "a client must not be pushed its own operation"
     );
 
-    // …and the rule holds in the other direction.
     watcher
         .control
         .call(ControlRequest::TabRename {
@@ -407,10 +356,6 @@ fn an_operation_from_one_client_reaches_the_other_as_a_delta() {
     assert_eq!(watcher.delta_count(), 3, "still only the writer's own ops");
 }
 
-/// Takeover semantics on the new tree, with **no record store served at
-/// all**: the attach verbs predate the tree, and their contract — newcomer
-/// wins, the displaced session is told, a stale detach cannot evict the
-/// usurper — must survive the record store's retirement.
 #[test]
 fn attachment_rides_the_tree_when_no_record_store_is_served() {
     use tty7_core::host::local::LocalHost;
@@ -452,8 +397,6 @@ fn attachment_rides_the_tree_when_no_record_store_is_served() {
         "the tree's own record says who holds the workspace"
     );
 
-    // The newcomer wins, learns whom it displaced, and the displaced session
-    // is pushed a Preempted notice.
     match attach(&desktop).expect("takeover") {
         ReplyOk::Attached { took_over_from } => {
             assert_eq!(took_over_from.as_deref(), Some("laptop"));
@@ -473,7 +416,6 @@ fn attachment_rides_the_tree_when_no_record_store_is_served() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    // The preempted session tidying up must not evict the usurper.
     laptop
         .control
         .call(ControlRequest::WorkspaceDetach {
@@ -486,8 +428,6 @@ fn attachment_rides_the_tree_when_no_record_store_is_served() {
     );
 }
 
-/// A `--stdio --bridge` child connected to an already-listening control
-/// socket — the two-hop shape a real multi-client machine has.
 fn bridged(sock: &Path, token: &str) -> Client {
     let hello = ControlHello::host_rpc(token, token);
     let mut child = Command::new(env!("CARGO_BIN_EXE_tty7-server"))
