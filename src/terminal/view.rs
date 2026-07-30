@@ -308,6 +308,7 @@ fn ring_system_bell() -> bool {
 
 fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     if bracketed {
+        let text = text.replace("\r\n", "\n");
         let mut bytes = b"\x1b[200~".to_vec();
         bytes.extend(text.bytes().filter(|&b| b != 0x1b));
         bytes.extend_from_slice(b"\x1b[201~");
@@ -5146,6 +5147,20 @@ mod tests {
         assert_eq!(
             paste_bytes("a\nb", true),
             b"\x1b[200~a\nb\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn paste_bytes_folds_crlf_so_a_windows_clipboard_pastes_like_any_other() {
+        assert_eq!(
+            paste_bytes("a\r\nb\r\n", true),
+            b"\x1b[200~a\nb\n\x1b[201~".to_vec(),
+            "CRLF must reach the app as one line break, not two"
+        );
+        assert_eq!(
+            paste_bytes("a\r\nb", true),
+            paste_bytes("a\nb", true),
+            "a Windows clipboard must paste exactly like a Unix one"
         );
     }
 

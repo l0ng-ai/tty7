@@ -113,6 +113,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Windows and Linux stop taking keys the shell needs** — `secondary` means
+  Cmd on macOS and Ctrl everywhere else, and the default keymap was carried over
+  from macOS unchanged. That put window actions straight on top of terminal
+  control codes: Ctrl+D could not send EOF (it split the pane), Ctrl+[ could not
+  send ESC (it cycled panes), and Ctrl+W, Ctrl+K, Ctrl+P, Ctrl+J, Ctrl+T,
+  Ctrl+Q and Ctrl+S were all spoken for. These are window-level bindings with no
+  context, so they matched before the terminal ever saw the key — the code that
+  sends EOF was there, just unreachable.
+
+  Off macOS the rule is now that `ctrl-<letter>`, `ctrl-[`, `ctrl-]`, `ctrl-\`
+  and `ctrl-space` belong to the terminal, and window actions live on
+  `ctrl-shift-*` — the convention GNOME Terminal, Konsole, Windows Terminal and
+  WezTerm already share. A test enforces it, so the next binding added cannot
+  quietly reintroduce the problem.
+
+  | action | was | now |
+  |---|---|---|
+  | Focus previous / next pane | Ctrl+[ / Ctrl+] | Ctrl+Shift+[ / Ctrl+Shift+] |
+  | Split right / down | Ctrl+D / Ctrl+Shift+D | Ctrl+Shift+D / Ctrl+Alt+Shift+D |
+  | Close tab | Ctrl+W | Ctrl+Shift+W |
+  | New tab | Ctrl+T | Ctrl+Shift+T |
+  | Reopen closed tab | Ctrl+Shift+T | Alt+Shift+T |
+  | Clear scrollback | Ctrl+K | Ctrl+Shift+K |
+  | Command palette | Ctrl+P | Ctrl+Shift+P |
+  | Toggle right panel | Ctrl+J | Ctrl+Shift+J |
+  | Toggle left panel | unbound | Ctrl+Shift+B |
+  | Quit | Ctrl+Q | Ctrl+Shift+Q |
+  | Fullscreen | Ctrl+Enter | F11 |
+  | Activate tab 1-9 | Ctrl+1-9 | Alt+1-9 |
+  | Focus pane by direction | Ctrl+Alt+arrow | Alt+arrow |
+
+  Ctrl+S keeps saving in the code panel but now falls through to the terminal
+  when the editor does not have focus, so a shell still receives XOFF.
+  Ctrl+C, Ctrl+V and Ctrl+X are unchanged — Ctrl+C still copies only when there
+  is a selection and sends SIGINT otherwise — and **Shift+Insert** now pastes.
+  macOS bindings are untouched. Anything you rebound yourself still wins; only
+  the defaults moved. (#269)
+
 - **The machine that runs your panes now owns their layout** — the workspace,
   tab and pane tree has moved out of the app and into the background service, so
   one machine has one tree that every client of it reads: the window on it, a
@@ -230,6 +268,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already showing that repo paints immediately instead of re-probing. (#239)
 
 ### Fixed
+
+- **A Windows clipboard pastes like every other clipboard** — text copied on
+  Windows carries `\r\n`, and a bracketed paste forwarded it byte for byte. vim
+  counts CR and LF as two line breaks, so pasting a block of code into it left a
+  blank line under every line — bad enough to make tty7 unusable for editing.
+  Bracketed pastes now fold `\r\n` down to a single `\n`, which is exactly what
+  the same paste already produced on Linux and macOS. The non-bracketed path is
+  untouched: with no paste mode to distinguish text from typing, a line break
+  still has to arrive as the CR the Return key sends. (#269)
 
 - **Closing every window before quitting no longer loses your place** — launch
   only ever restored a workspace that still had a window at quit, so closing them

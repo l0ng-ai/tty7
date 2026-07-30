@@ -5167,6 +5167,10 @@ impl Render for Tty7App {
                     this.toggle_code_panel(window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &EditorSave, window, cx| {
+                    if !this.editor_has_focus(window, cx) {
+                        cx.propagate();
+                        return;
+                    }
                     this.editor_save_active(window, cx)
                 }))
                 .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))

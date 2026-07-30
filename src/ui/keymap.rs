@@ -3,7 +3,7 @@ use gpui::{App, Global, KeyBinding, Keystroke, NoAction};
 use crate::core::actions::*;
 use crate::core::config::Config;
 use crate::terminal::view::{
-    ClearScrollback, FindInTerminal, FindNext, FindPrevious, InsertNewline,
+    ClearScrollback, FindInTerminal, FindNext, FindPrevious, InsertNewline, PasteText,
 };
 use crate::ui::theme::set_menus;
 
@@ -17,6 +17,9 @@ pub fn init(cx: &mut App) {
     bindings.push(KeyBinding::new("secondary-+", IncreaseFontSize, None));
     bindings.push(KeyBinding::new("tab", SendTab, Some("Terminal")));
     bindings.push(KeyBinding::new("shift-tab", SendBackTab, Some("Terminal")));
+    if cfg!(not(target_os = "macos")) {
+        bindings.push(KeyBinding::new("shift-insert", PasteText, Some("Terminal")));
+    }
     cx.bind_keys(bindings);
     cx.set_global(BoundKeystrokes(bound_keystrokes(&effective)));
 
@@ -99,11 +102,22 @@ fn bound_keystrokes(effective: &[(String, String)]) -> Vec<(String, Option<&'sta
         .collect()
 }
 
+fn per_platform(mac: &'static str, other: &'static str) -> &'static str {
+    if cfg!(target_os = "macos") {
+        mac
+    } else {
+        other
+    }
+}
+
 pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("NewTab", "secondary-t"),
+        ("NewTab", per_platform("secondary-t", "secondary-shift-t")),
         ("NewWorkspace", "secondary-shift-n"),
-        ("CloseActiveTab", "secondary-w"),
+        (
+            "CloseActiveTab",
+            per_platform("secondary-w", "secondary-shift-w"),
+        ),
         ("RenameTab", ""),
         ("NewWorktreeTab", ""),
         ("CloseOtherTabs", ""),
@@ -120,14 +134,35 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         ("DeleteWorkspace", ""),
         ("RenameWorkspace", ""),
         ("ToggleSwitcher", "secondary-shift-o"),
-        ("SplitRight", "secondary-d"),
-        ("SplitDown", "secondary-shift-d"),
-        ("FocusNextPane", "secondary-]"),
-        ("FocusPrevPane", "secondary-["),
-        ("FocusPaneLeft", "secondary-alt-left"),
-        ("FocusPaneRight", "secondary-alt-right"),
-        ("FocusPaneUp", "secondary-alt-up"),
-        ("FocusPaneDown", "secondary-alt-down"),
+        (
+            "SplitRight",
+            per_platform("secondary-d", "secondary-shift-d"),
+        ),
+        (
+            "SplitDown",
+            per_platform("secondary-shift-d", "secondary-alt-shift-d"),
+        ),
+        (
+            "FocusNextPane",
+            per_platform("secondary-]", "secondary-shift-]"),
+        ),
+        (
+            "FocusPrevPane",
+            per_platform("secondary-[", "secondary-shift-["),
+        ),
+        (
+            "FocusPaneLeft",
+            per_platform("secondary-alt-left", "alt-left"),
+        ),
+        (
+            "FocusPaneRight",
+            per_platform("secondary-alt-right", "alt-right"),
+        ),
+        ("FocusPaneUp", per_platform("secondary-alt-up", "alt-up")),
+        (
+            "FocusPaneDown",
+            per_platform("secondary-alt-down", "alt-down"),
+        ),
         ("ResizePaneLeft", ""),
         ("ResizePaneRight", ""),
         ("ResizePaneUp", ""),
@@ -136,15 +171,15 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         ("SwapPanePrev", ""),
         ("NextTab", "ctrl-tab"),
         ("PrevTab", "ctrl-shift-tab"),
-        ("ActivateTab1", "secondary-1"),
-        ("ActivateTab2", "secondary-2"),
-        ("ActivateTab3", "secondary-3"),
-        ("ActivateTab4", "secondary-4"),
-        ("ActivateTab5", "secondary-5"),
-        ("ActivateTab6", "secondary-6"),
-        ("ActivateTab7", "secondary-7"),
-        ("ActivateTab8", "secondary-8"),
-        ("ActivateTab9", "secondary-9"),
+        ("ActivateTab1", per_platform("secondary-1", "alt-1")),
+        ("ActivateTab2", per_platform("secondary-2", "alt-2")),
+        ("ActivateTab3", per_platform("secondary-3", "alt-3")),
+        ("ActivateTab4", per_platform("secondary-4", "alt-4")),
+        ("ActivateTab5", per_platform("secondary-5", "alt-5")),
+        ("ActivateTab6", per_platform("secondary-6", "alt-6")),
+        ("ActivateTab7", per_platform("secondary-7", "alt-7")),
+        ("ActivateTab8", per_platform("secondary-8", "alt-8")),
+        ("ActivateTab9", per_platform("secondary-9", "alt-9")),
         ("SelectWorkspace1", ""),
         ("SelectWorkspace2", ""),
         ("SelectWorkspace3", ""),
@@ -157,20 +192,25 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         ("IncreaseFontSize", "secondary-="),
         ("DecreaseFontSize", "secondary--"),
         ("ResetFontSize", "secondary-0"),
-        ("TogglePalette", "secondary-p"),
-        ("ReopenClosedTab", "secondary-shift-t"),
+        (
+            "TogglePalette",
+            per_platform("secondary-p", "secondary-shift-p"),
+        ),
+        (
+            "ReopenClosedTab",
+            per_platform("secondary-shift-t", "alt-shift-t"),
+        ),
         ("ToggleMaximizePane", "secondary-shift-enter"),
-        ("ToggleFullscreen", "secondary-enter"),
+        ("ToggleFullscreen", per_platform("secondary-enter", "f11")),
         ("ToggleTabSidebar", ""),
         (
             "ToggleLeftPanel",
-            if cfg!(target_os = "macos") {
-                "secondary-b"
-            } else {
-                ""
-            },
+            per_platform("secondary-b", "secondary-shift-b"),
         ),
-        ("ToggleRightPanel", "secondary-j"),
+        (
+            "ToggleRightPanel",
+            per_platform("secondary-j", "secondary-shift-j"),
+        ),
         (
             "FindInTerminal",
             if cfg!(target_os = "macos") {
@@ -195,7 +235,10 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
                 "shift-f3"
             },
         ),
-        ("ClearScrollback", "secondary-k"),
+        (
+            "ClearScrollback",
+            per_platform("secondary-k", "secondary-shift-k"),
+        ),
         ("InsertNewline", INSERT_NEWLINE_DEFAULT),
         ("OpenSettings", "secondary-,"),
         (
@@ -243,7 +286,7 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         ("EditorSave", "secondary-s"),
         ("OpenSshProfiles", ""),
         ("RestartSshSession", "secondary-shift-r"),
-        ("Quit", "secondary-q"),
+        ("Quit", per_platform("secondary-q", "secondary-shift-q")),
     ]
 }
 
@@ -705,7 +748,10 @@ mod tests {
                 .map(|(_, k)| *k)
                 .unwrap()
         };
-        assert_eq!(key_of("ToggleFullscreen"), "secondary-enter");
+        assert_eq!(
+            key_of("ToggleFullscreen"),
+            per_platform("secondary-enter", "f11")
+        );
         assert_eq!(key_of("ToggleMaximizePane"), "secondary-shift-enter");
         for window_chord in ["secondary-enter", "secondary-shift-enter"] {
             assert_ne!(window_chord, INSERT_NEWLINE_DEFAULT);
@@ -714,6 +760,46 @@ mod tests {
         for chord in [INSERT_NEWLINE_DEFAULT, INSERT_NEWLINE_ALT_DEFAULT] {
             assert_ne!(chord, "shift-alt-enter");
             assert_ne!(chord, "alt-shift-enter");
+        }
+    }
+
+    #[test]
+    fn no_default_binding_sits_on_a_terminal_control_code() {
+        for (action, spec) in default_bindings() {
+            for chord in spec.split_whitespace() {
+                let ks = Keystroke::parse(chord).expect("default chords parse");
+                let m = &ks.modifiers;
+                if !m.control || m.alt || m.shift || m.platform || m.function {
+                    continue;
+                }
+                let steals = ks.key.len() == 1
+                    && ks
+                        .key
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphabetic() || "[]\\".contains(c))
+                    || ks.key == "space";
+                assert!(
+                    !steals,
+                    "{action} is bound to {chord}, which the shell needs as a control code \
+                     (Ctrl+[ is ESC, Ctrl+D is EOF, Ctrl+W deletes a word). \
+                     Window actions belong on ctrl-shift-* off macOS."
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_default_chord_is_claimed_by_exactly_one_action() {
+        let mut seen: Vec<(&str, &str)> = Vec::new();
+        for (action, spec) in default_bindings() {
+            if spec.is_empty() {
+                continue;
+            }
+            if let Some((other, _)) = seen.iter().find(|(_, s)| *s == spec) {
+                panic!("{action} and {other} both claim {spec}");
+            }
+            seen.push((action, spec));
         }
     }
 
@@ -774,7 +860,10 @@ mod gpui_tests {
             };
             assert_eq!(key_of("NewTab"), "secondary-shift-n");
             assert_eq!(key_of("SplitRight"), "ctrl-b %");
-            assert_eq!(key_of("TogglePalette"), "secondary-p");
+            assert_eq!(
+                key_of("TogglePalette"),
+                per_platform("secondary-p", "secondary-shift-p")
+            );
 
             cx.global_mut::<Config>().keybinding_preset = "default".to_string();
             rebind(cx);
@@ -783,7 +872,7 @@ mod gpui_tests {
                 eff.iter()
                     .find(|(a, _)| a == "SplitRight")
                     .map(|(_, k)| k.as_str()),
-                Some("secondary-d")
+                Some(per_platform("secondary-d", "secondary-shift-d"))
             );
         });
     }
