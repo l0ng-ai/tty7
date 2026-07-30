@@ -457,9 +457,22 @@ impl InstallConfirm for FakeUser {
     }
 }
 
+/// The fixture's installer: this file's [`VERSION`], this file's dialect, and
+/// timeouts a fake can satisfy.
+///
+/// **Every test builds its installer through here**, and the dialect is why.
+/// `Installer::new` starts at [`RemoteProtocol::of_this_build`], while
+/// [`FakeRemote`] answers with [`ours`] — the fixture's fixed `c3p4`. A test that
+/// hand-rolls the builder and forgets [`Installer::with_dialect`] passes only
+/// while the real [`CONTROL_VERSION`](crate::daemon::control::CONTROL_VERSION)
+/// happens to equal [`CONTROL`], and then fails on the next wire break with a
+/// `DialectMismatch` that has nothing to do with whatever that bump changed.
+/// Two tests did exactly that, so `release` is a trait object: a chunked or
+/// throttled fetcher is a reason to vary the *source*, never a reason to leave
+/// this function.
 fn installer<'a>(
     remote: &'a FakeRemote,
-    release: &'a FakeRelease,
+    release: &'a dyn AssetFetcher,
     user: &'a FakeUser,
     host: &str,
 ) -> Installer<'a> {
@@ -1341,10 +1354,7 @@ fn an_install_reports_both_transfers_to_completion() {
     let reports = Arc::new(Reports::default());
 
     let report = with_install_progress(reports.clone(), || {
-        Installer::new(&remote, &release, &user, "me@build-box:22")
-            .with_version(VERSION)
-            .with_timeouts(Duration::from_millis(200), Duration::from_millis(10))
-            .run()
+        installer(&remote, &release, &user, "me@build-box:22").run()
     })
     .expect("install");
     assert!(report.installed, "the fake remote started empty");
@@ -1418,10 +1428,7 @@ fn every_report_carries_the_host() {
     let reports = Arc::new(Reports::default());
 
     with_install_progress(reports.clone(), || {
-        Installer::new(&remote, &release, &user, "me@build-box:22")
-            .with_version(VERSION)
-            .with_timeouts(Duration::from_millis(200), Duration::from_millis(10))
-            .run()
+        installer(&remote, &release, &user, "me@build-box:22").run()
     })
     .expect("install");
 
