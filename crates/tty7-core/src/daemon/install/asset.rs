@@ -10,9 +10,23 @@
 use std::fmt;
 
 /// The release asset for a 64-bit x86 Linux box.
-pub const ASSET_X86_64: &str = "tty7-server-x86_64-unknown-linux-musl";
-/// The release asset for a 64-bit ARM Linux box.
-pub const ASSET_AARCH64: &str = "tty7-server-aarch64-unknown-linux-musl";
+///
+/// **`<os>-<arch>-musl`, not the Rust target triple.** These names used to be
+/// `${{ matrix.target }}` pasted into a filename, which put `unknown` — the
+/// triple's *vendor* field, meaning "no particular vendor" — in front of anyone
+/// reading the releases page. Of the triple's four fields only two say anything
+/// to whoever downloads this: the architecture, which is what `asset_for_uname`
+/// picks by, and `musl`, which is why one file runs on any distribution. The
+/// order matches the GUI assets the same release publishes
+/// (`tty7-<version>-linux-x86_64.tar.gz`), so one release is one naming scheme.
+///
+/// The build target keeps the triple wherever it really is one — `cargo
+/// zigbuild --target`, the `target/<triple>/release` path, the cache key. This
+/// is a *download* name, and the two are no longer spelled the same on purpose.
+pub const ASSET_X86_64: &str = "tty7-server-linux-x86_64-musl";
+/// The release asset for a 64-bit ARM Linux box. See [`ASSET_X86_64`] for the
+/// naming.
+pub const ASSET_AARCH64: &str = "tty7-server-linux-aarch64-musl";
 /// The sha256 manifest published beside every asset in a release.
 pub const CHECKSUMS_ASSET: &str = "checksums.txt";
 
@@ -382,12 +396,39 @@ mod tests {
     fn download_urls_point_at_the_release_the_tag_names() {
         assert_eq!(
             download_url(&release_tag("26.7.5"), ASSET_X86_64),
-            "https://github.com/l0ng-ai/tty7/releases/download/v26.7.5/tty7-server-x86_64-unknown-linux-musl"
+            "https://github.com/l0ng-ai/tty7/releases/download/v26.7.5/tty7-server-linux-x86_64-musl"
         );
         assert_eq!(
             download_url(&release_tag("26.7.6-nightly.20260727"), CHECKSUMS_ASSET),
             "https://github.com/l0ng-ai/tty7/releases/download/nightly/checksums.txt"
         );
+    }
+
+    /// **The asset names, pinned as literals.**
+    ///
+    /// They are one half of a contract whose other half is a `cp` in two
+    /// workflow files, and checking them against the consts they come from
+    /// would assert nothing. A literal here is what makes changing one side
+    /// without the other a failing test rather than a 404 on a user's machine.
+    ///
+    /// Including the absence of `unknown`: that word only ever reached these
+    /// names by way of `${{ matrix.target }}`, and a build triple pasted into a
+    /// download name is worth failing on rather than explaining again.
+    #[test]
+    fn asset_names_are_the_ones_the_release_workflow_publishes() {
+        assert_eq!(ASSET_X86_64, "tty7-server-linux-x86_64-musl");
+        assert_eq!(ASSET_AARCH64, "tty7-server-linux-aarch64-musl");
+        for asset in [ASSET_X86_64, ASSET_AARCH64] {
+            assert!(
+                !asset.contains("unknown"),
+                "{asset} carries the triple's vendor field"
+            );
+        }
+        // `checksums::expected_digest` matches the filename field whole, and
+        // says outright that it relies on no asset name being a substring of
+        // another. Two names is the whole set, so check it here.
+        assert!(!ASSET_X86_64.contains(ASSET_AARCH64));
+        assert!(!ASSET_AARCH64.contains(ASSET_X86_64));
     }
 
     /// Path construction, including the `mkdir` chain. Asserted literally: these

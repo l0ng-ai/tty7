@@ -768,13 +768,24 @@ impl RemoteOps for WslRemoteOps {
 /// Overrides where the bundled Linux server binaries are looked for. Exists so
 /// this can be tested, and so a developer running an unpackaged build can point
 /// at a `cargo build --target x86_64-unknown-linux-musl` output.
+///
+/// **The file in it has to carry the asset name**, not cargo's — [`Self::locate`]
+/// joins the directory with
+/// [`asset::ASSET_X86_64`](crate::daemon::install::asset::ASSET_X86_64) and
+/// nothing translates, so a cross-compile has to be copied to
+/// `tty7-server-linux-x86_64-musl` rather than left as plain `tty7-server`.
+///
+/// [`Self::locate`]: BundledServerBinary::locate
 pub const BUNDLED_DIR_ENV: &str = "TTY7_BUNDLED_SERVER_DIR";
 
 /// The subdirectory beside the client executable that a packaged build puts the
 /// Linux server binaries in. **This is the contract with the release workflow**:
 /// the Windows installer must place
-/// `<install dir>/server/tty7-server-x86_64-unknown-linux-musl` (and the
-/// `aarch64` one, for WSL on ARM Windows).
+/// `<install dir>/server/tty7-server-linux-x86_64-musl` (and the `aarch64` one,
+/// for WSL on ARM Windows) — the filenames
+/// [`asset::ASSET_X86_64`](crate::daemon::install::asset::ASSET_X86_64) names,
+/// because [`BundledServerBinary::locate`] joins the directory with the asset
+/// name and nothing translates between the two.
 pub const BUNDLED_SUBDIR: &str = "server";
 
 /// Directories a bundled Linux server binary is looked for in, most specific
@@ -1681,10 +1692,7 @@ mod tests {
             .load("26.7.5", super::super::asset::ASSET_X86_64)
             .expect_err("nothing bundled yet");
         let msg = err.to_string();
-        assert!(
-            msg.contains("tty7-server-x86_64-unknown-linux-musl"),
-            "{msg}"
-        );
+        assert!(msg.contains("tty7-server-linux-x86_64-musl"), "{msg}");
         assert!(msg.contains(&tmp.display().to_string()), "{msg}");
         assert!(matches!(err, InstallError::MissingBundled { .. }));
 
@@ -2074,7 +2082,7 @@ mod tests {
             .run()
             .expect_err("no aarch64 binary bundled");
         let msg = err.to_string();
-        assert!(msg.contains("aarch64-unknown-linux-musl"), "{msg}");
+        assert!(msg.contains("linux-aarch64-musl"), "{msg}");
 
         // With it bundled, the same install goes through.
         std::fs::write(dir.join(super::super::asset::ASSET_AARCH64), b"\x7fELF arm").unwrap();

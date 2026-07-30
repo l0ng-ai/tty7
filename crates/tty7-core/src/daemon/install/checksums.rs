@@ -96,9 +96,9 @@ fn parse_hex(s: &str) -> Option<Digest> {
 /// The digest `manifest` records for `asset`.
 ///
 /// **The filename field is matched whole, never by substring.**
-/// `tty7-server-x86_64-unknown-linux-musl` happens not to be a substring of any
-/// other asset today, but that is an accident of the current release contents,
-/// not a property anyone maintains — and a substring match that drifted would
+/// `tty7-server-linux-x86_64-musl` happens not to be a substring of any other
+/// asset today, but that is an accident of the current release contents, not a
+/// property anyone maintains — and a substring match that drifted would
 /// silently verify one binary's bytes against another's digest.
 ///
 /// The coreutils format is `<digest><two spaces><name>`; the second space is `*`
@@ -239,9 +239,9 @@ mod tests {
     #[test]
     fn a_malformed_entry_aborts() {
         for bad in [
-            "abc  tty7-server-x86_64-unknown-linux-musl",
-            "zz786850e387550fdab836ed7e6dc881de23001b4b4d8ec3a1a0b9d5e0d5c0f1x  tty7-server-x86_64-unknown-linux-musl",
-            "  tty7-server-x86_64-unknown-linux-musl",
+            "abc  tty7-server-linux-x86_64-musl",
+            "zz786850e387550fdab836ed7e6dc881de23001b4b4d8ec3a1a0b9d5e0d5c0f1x  tty7-server-linux-x86_64-musl",
+            "  tty7-server-linux-x86_64-musl",
         ] {
             let err = expected_digest(bad, ASSET_X86_64).unwrap_err();
             assert!(

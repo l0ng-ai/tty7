@@ -396,7 +396,7 @@ pub struct InstallRequest {
     pub host: String,
     /// The version about to be installed (= the client's own version).
     pub version: String,
-    /// The release asset name, e.g. `tty7-server-x86_64-unknown-linux-musl`.
+    /// The release asset name, e.g. `tty7-server-linux-x86_64-musl`.
     pub asset: &'static str,
     /// The URL it was downloaded from.
     pub source_url: String,

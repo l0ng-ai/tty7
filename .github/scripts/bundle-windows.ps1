@@ -33,7 +33,11 @@ Copy-Item README.md "$Stage/README.md"
 # change on its own. Missing is a warning, not an error, matching `server-musl`'s
 # own skip-don't-fail probe; WSL then fails at connect time with a message
 # naming the directories it searched.
-$ServerAsset = "tty7-server-x86_64-unknown-linux-musl"
+#
+# The *filename* is a contract too, not just the directory: `wsl.rs` looks for
+# `<dir>/<asset name>`, so this string has to stay whatever
+# `install::asset::ASSET_X86_64` says it is.
+$ServerAsset = "tty7-server-linux-x86_64-musl"
 $ServerSrc = "bundled-server/$ServerAsset"
 if (Test-Path $ServerSrc) {
     New-Item -ItemType Directory -Force -Path "$Stage/server" | Out-Null

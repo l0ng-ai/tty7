@@ -1151,7 +1151,7 @@ mod tests {
         InstallRequest {
             host: "me@build-box:22".into(),
             version: "0.9.1".into(),
-            asset: "tty7-server-x86_64-unknown-linux-musl",
+            asset: "tty7-server-linux-x86_64-musl",
             source_url: "https://example.invalid/v0.9.1/tty7-server".into(),
             remote_path: "/home/me/.local/share/tty7/bin/tty7-server-0.9.1".into(),
             size_bytes: 9_437_184,

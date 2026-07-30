@@ -121,7 +121,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v7
         with:
-          name: release-server-x86_64-unknown-linux-musl
+          name: release-tty7-server-linux-x86_64-musl
           path: tty7/bundled-server
 
       - name: Package Windows installer + zip
@@ -161,10 +161,16 @@ jobs:
   server-musl:
     strategy:
       fail-fast: false
+      # `target` is the build triple; `asset` is the published filename. They
+      # are deliberately not the same string — the triple's vendor field is
+      # `unknown`, which says nothing to anyone reading the releases page. See
+      # `install::asset::ASSET_X86_64`, which pins these two names as literals.
       matrix:
-        target:
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
+        include:
+          - target: x86_64-unknown-linux-musl
+            asset: tty7-server-linux-x86_64-musl
+          - target: aarch64-unknown-linux-musl
+            asset: tty7-server-linux-aarch64-musl
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -C strip=symbols
@@ -234,14 +240,14 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/tty7-server" \
-             "dist/tty7-server-${{ matrix.target }}"
-          chmod +x "dist/tty7-server-${{ matrix.target }}"
+             "dist/${{ matrix.asset }}"
+          chmod +x "dist/${{ matrix.asset }}"
 
       - uses: actions/upload-artifact@v7
         if: steps.probe.outputs.present == 'true'
         with:
-          name: release-server-${{ matrix.target }}
-          path: tty7/dist/tty7-server-${{ matrix.target }}
+          name: release-${{ matrix.asset }}
+          path: tty7/dist/${{ matrix.asset }}
           if-no-files-found: error
 
   # Single assembly step, after all four platforms succeed. The release object is
