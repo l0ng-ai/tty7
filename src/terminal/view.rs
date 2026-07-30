@@ -5611,8 +5611,7 @@ impl TerminalView {
         // 2) Bare URL or file path detected in the logical line. `bridge_hard_wrap`
         //    is on so a URL a program printed with a literal `\n` mid-way is
         //    recovered whole, not truncated at the break.
-        let (text, points, click_idx) =
-            super::smart_select::logical_line_at(&term, click, true)?;
+        let (text, points, click_idx) = super::smart_select::logical_line_at(&term, click, true)?;
         drop(term);
         // Same gate as the click path — a relative path is resolved against the
         // cwd and stat-checked, so a remote pane's cwd must not be used.

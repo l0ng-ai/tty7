@@ -305,7 +305,10 @@ mod tokenizer {
 /// The contiguous run of cells carrying the same OSC 8 hyperlink URI as the
 /// clicked cell, following soft wraps in both directions (a long link wraps
 /// across rows; stopping at the row edge would truncate the selection).
-pub(super) fn hyperlink_run<T: EventListener>(term: &Term<T>, click: Point) -> Option<(Point, Point)> {
+pub(super) fn hyperlink_run<T: EventListener>(
+    term: &Term<T>,
+    click: Point,
+) -> Option<(Point, Point)> {
     let grid = term.grid();
     let cols = term.columns();
     if click.column.0 >= cols {
@@ -385,14 +388,30 @@ pub(super) fn logical_line_at<T: EventListener>(
     let bottom = term.bottommost_line();
     let wraps = |line: Line| grid[line][last_col].flags.contains(Flags::WRAPLINE);
     // A hard bridge joins `line` to `line + 1` when the row is full to the
-    // right edge with a link char and the next row opens with one too. Guards
-    // against gluing an ordinary short line onto the following paragraph.
-    let is_link_char = |c: char| c != ' ' && super::search::is_url_char(c);
+    // right edge with a link char and the next row opens with one too, which
+    // rules out gluing an ordinary short line onto the following paragraph.
+    //
+    // It cannot rule out the converse: a hard newline carries no signal about
+    // whether the producer split a URL, so a *complete* URL that happens to end
+    // exactly at the right edge is bridged onto whatever the next row starts
+    // with (`…/a` + `README.md` resolves as `…/aREADME.md`). There is no
+    // reliable test for that — the head of a genuinely split URL is itself a
+    // valid URL — so we accept the false positive: the address bar shows the
+    // mistake and the user is one glance from spotting it.
+    //
+    // What we do not accept is the same accident promoting the *second* row to
+    // the authority. `https://good.com` + `@evil.com/x` parses as userinfo, so
+    // the real host becomes `evil.com` while the underline still reads
+    // `good.com` — a phishing hop wearing a trusted label. Never bridge into
+    // one.
+    let is_link_char = |c: char| super::search::is_url_char(c);
     let hard = |line: Line| {
-        bridge_hard_wrap
-            && line < bottom
-            && is_link_char(grid[line][last_col].c)
-            && is_link_char(grid[Line(line.0 + 1)][Column(0)].c)
+        // `line < bottom` must stay ahead of the `line + 1` lookup — the last
+        // grid line has no successor to index.
+        bridge_hard_wrap && line < bottom && is_link_char(grid[line][last_col].c) && {
+            let next = grid[Line(line.0 + 1)][Column(0)].c;
+            is_link_char(next) && next != '@'
+        }
     };
     let continues = |line: Line| wraps(line) || hard(line);
 
@@ -811,8 +830,8 @@ mod tests {
         let (text, _points, _idx) =
             logical_line_at(&term, click, true).expect("logical line under click");
         let idx = text.find("https").expect("url in bridged line");
-        let (_s, _e, url) = crate::terminal::search::url_span_at(&text, idx + 2)
-            .expect("url span in bridged line");
+        let (_s, _e, url) =
+            crate::terminal::search::url_span_at(&text, idx + 2).expect("url span in bridged line");
         assert_eq!(url, "https://example.com/deep/path/seg");
 
         // Smart-select mode (bridge_hard_wrap = false) must NOT glue the two
@@ -823,6 +842,54 @@ mod tests {
             !text.contains("deep"),
             "double-click must not bridge a hard newline: {text:?}"
         );
+    }
+
+    #[test]
+    fn a_hard_break_before_userinfo_is_never_bridged() {
+        // Row 0 ends with a bare host that fills the row exactly, row 1 opens
+        // with `@`. Bridging would resolve `https://good.com@evil.com/x`, whose
+        // authority per RFC 3986 is `evil.com` — the underline would read
+        // `good.com` while the click navigated elsewhere. The hard bridge must
+        // refuse this one even though the row shape otherwise invites it.
+        let term = term_with(20, 4, "go1 https://good.com\r\n@evil.com/x rest");
+        assert!(
+            !term.grid()[Line(0)][Column(19)]
+                .flags
+                .contains(Flags::WRAPLINE),
+            "fixture must be a hard newline, not a soft wrap"
+        );
+
+        let click = Point::new(Line(0), Column(8));
+        let (text, _points, idx) =
+            logical_line_at(&term, click, true).expect("logical line under click");
+        assert!(
+            !text.contains("evil"),
+            "a hard break before `@` must not bridge: {text:?}"
+        );
+        let (_s, _e, url) =
+            crate::terminal::search::url_span_at(&text, idx).expect("url span under click");
+        assert_eq!(url, "https://good.com");
+    }
+
+    #[test]
+    fn a_soft_wrap_before_userinfo_still_stitches() {
+        // The `@` guard is about the *ambiguity* of a hard newline. A soft wrap
+        // is the terminal folding one logical line, so the continuation is
+        // certain and a userinfo URL must still resolve whole.
+        let term = term_with(20, 4, "see https://user1234@ex.com/z rest");
+        assert!(
+            term.grid()[Line(0)][Column(19)]
+                .flags
+                .contains(Flags::WRAPLINE),
+            "fixture must be a soft wrap, not a hard newline"
+        );
+
+        let click = Point::new(Line(0), Column(10));
+        let (text, _points, idx) =
+            logical_line_at(&term, click, true).expect("logical line under click");
+        let (_s, _e, url) =
+            crate::terminal::search::url_span_at(&text, idx).expect("url span under click");
+        assert_eq!(url, "https://user1234@ex.com/z");
     }
 
     #[test]
