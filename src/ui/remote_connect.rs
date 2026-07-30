@@ -1223,10 +1223,28 @@ mod tests {
                 },
             )
         });
+        // Bounded, because this loop is the difference between a stolen prompt
+        // being a failure and being a *hang*. `AUTH_MAILBOX` is process-global
+        // and `pump_auth_sheets` drains every entry in one pass, so any gpui test
+        // in this binary that drives a tick can take this prompt before the line
+        // below does — and unbounded, this test then spins until CI's six-hour
+        // job limit. It has: a `main` run sat inside this test for 2h50m, and
+        // three Windows runs before it went the same way, none of them naming a
+        // test until the run was cancelled and its partial log read back.
+        let deadline = Instant::now() + Duration::from_secs(10);
         let pending = loop {
             if let Some(p) = take_pending_auth() {
                 break p;
             }
+            assert!(
+                Instant::now() < deadline,
+                "no routed prompt arrived within 10s. `respond` pushes one \
+                 unconditionally, so an empty mailbox means something else \
+                 drained it first — `pump_auth_sheets` takes all of it, and it \
+                 runs from any gpui test here that drives a tick. Responder \
+                 thread finished: {}",
+                handle.is_finished(),
+            );
             std::thread::sleep(Duration::from_millis(5));
         };
         assert_eq!(pending.host, target.host_id());

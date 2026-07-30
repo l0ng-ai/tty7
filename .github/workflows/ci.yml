@@ -112,9 +112,13 @@ jobs:
 
       # `cargo test` has no timeout of its own, so one hung test is
       # indistinguishable from a slow suite until the job hits GitHub's six-hour
-      # limit. The Windows suite intermittently hangs here — roughly one run in
-      # ten, on any branch, while the same commit passes on a re-run — and every
-      # time it did, the job held a runner slot for hours and reported nothing.
+      # limit. The suite intermittently hangs here — roughly one run in ten, on
+      # any branch, while the same commit passes on a re-run — and every time it
+      # did, the job held a runner slot for hours and reported nothing.
+      #
+      # Seen on Windows three times and on Linux once, so it is not a
+      # platform-specific test: `Build` succeeds, `Test` starts, and nothing
+      # further is ever written.
       #
       # The step's honest budget is small: ~75s warm and ~3.5 min when this step
       # also has to compile the test targets, on every platform. 20 minutes is
@@ -123,27 +127,22 @@ jobs:
         timeout-minutes: 20
         run: cargo test --locked --target ${{ matrix.target }}
 
-      # What the hang has never left behind: any indication of *which* test was
-      # stuck. libtest prints a test's name when it finishes, so a hung one is
-      # the one name missing from a truncated list. The process table has the
-      # answer instead — the surviving test binary names its crate and test
-      # target — so grab it while the runner is still up.
+      # There is deliberately no post-mortem step here, and that is worth
+      # recording, because an earlier version of this file had one: on failure it
+      # dumped the process table to find the surviving test binary.
       #
-      # Windows-only because that is the only platform this has happened on, and
-      # `failure()` rather than `always()` so a green run stays quiet.
-      - name: Which test was still running (Windows post-mortem)
-        if: failure() && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Write-Host '--- processes under the build/test tree ---'
-          Get-CimInstance Win32_Process |
-            Where-Object { $_.CommandLine -match 'target\\|tty7|cargo' } |
-            Select-Object ProcessId, ParentProcessId, Name, CommandLine |
-            Format-List
-          Write-Host '--- top 15 by working set ---'
-          Get-Process | Sort-Object -Descending WorkingSet64 |
-            Select-Object -First 15 Id, Name, @{n='WS_MB';e={[int]($_.WorkingSet64/1MB)}} |
-            Format-Table -AutoSize
+      # It does not work, and cannot. GitHub kills the step's whole process tree
+      # when `timeout-minutes` trips, *before* the next step runs, so on the one
+      # failure that matters the dump comes back empty — verified on run
+      # 30526538997, where it printed two headers and nothing between them.
+      #
+      # Nor is it needed. libtest already prints "<test> has been running for
+      # over 60 seconds" for a test that has not returned, and that line was
+      # sitting in every hung run all along. The obstacle was never the
+      # diagnostic: a job's log cannot be fetched while the job is in progress
+      # (the API 404s), and nobody cancels a six-hour run to read one. The `Test`
+      # timeout above is what fixes that — the step *fails*, so the log lands,
+      # with the name in it.
 
   # Static musl builds of the headless server binary that remote workspaces push
   # onto the far machine (decision D10).
