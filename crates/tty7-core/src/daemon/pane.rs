@@ -1316,7 +1316,22 @@ impl DaemonPane {
                             let alive = st.alive;
                             let facts_after = may_change_facts.then(|| observed_facts(&st));
                             drop(st);
-                            if let (Some(before), Some(after)) = (facts_before, facts_after)
+                            // …and a third time, on teardown. From `hangup` on,
+                            // nothing this thread still reads describes a pane
+                            // in use — while the facts in the record are what
+                            // the *next* open builds a successor from. The kill
+                            // takes the whole process group down, so a poll
+                            // landing between the coding agent's death and the
+                            // PTY's EOF reports "nothing recognizable in the
+                            // foreground" and would publish that as "the agent
+                            // left", wiping the session id `--resume` needs.
+                            // That race is why ending a workspace's sessions
+                            // sometimes came back to a bare shell instead of
+                            // the conversation. The last steady-state answer is
+                            // the one worth keeping; `live` is not ours to
+                            // write here either — `DeathReporter` owns it.
+                            if !shutting_down.load(Ordering::SeqCst)
+                                && let (Some(before), Some(after)) = (facts_before, facts_after)
                                 && facts_changed(&before, &after)
                             {
                                 let (cwd, agent) = after;
@@ -3836,6 +3851,95 @@ mod tests {
             agent.unwrap().launch_argv.as_deref(),
             Some(&["claude".to_string()][..])
         );
+    }
+
+    /// Ending a workspace's sessions has to leave a record its successor can
+    /// resume from. The kill hangs up the whole process group, so the coding
+    /// agent dies before the PTY EOFs — and a poll firing on whatever bytes
+    /// still come out then sees nothing recognizable in the foreground.
+    /// Published, that answer clears the record's agent, session id and all, and
+    /// the reopened workspace comes back to a bare shell instead of the
+    /// conversation. So a teardown publishes nothing.
+    ///
+    /// The second half is the behaviour that must *not* change: the same answer
+    /// about a pane nobody is tearing down means the agent exited on its own.
+    #[test]
+    fn a_pane_killed_with_its_agent_keeps_the_facts_a_resume_needs() {
+        use crate::core::cli_agent::{AgentSessionState, CLIAgent};
+        use crate::core::machine::{
+            AgentFacts, MACHINE_FILE, MachineStore, OBSERVE_SLOT, PaneSeed, publish_observations,
+            withdraw_observations,
+        };
+
+        const PANE: u64 = 77;
+        let _slot = OBSERVE_SLOT.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = MachineStore::open(dir.path().join(MACHINE_FILE));
+        let ws = store.workspace_create(None, None, None).unwrap();
+        store
+            .tab_create(
+                ws.id,
+                None,
+                PaneSeed {
+                    pane: PANE,
+                    cwd: Some("/work/api".to_string()),
+                    ssh_spec: None,
+                    agent: Some(AgentFacts {
+                        agent: CLIAgent::Claude,
+                        session_id: Some("sess-1".to_string()),
+                        launch_argv: Some(vec!["claude".to_string()]),
+                        status: None,
+                    }),
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        publish_observations(&store);
+
+        // One read carrying a prompt mark — which is what opens the publish
+        // gate — while the poll answers "nothing recognizable in the
+        // foreground", the reading a hung-up agent produces.
+        let run = |shutting_down: bool| {
+            let mut state = test_state(true);
+            state.id = PANE;
+            state.agent = Some(CLIAgent::Claude);
+            state.agent_session = Some(AgentSessionState {
+                session_id: Some("sess-1".to_string()),
+                ..Default::default()
+            });
+            DaemonPane::spawn_reader(
+                Arc::new(Mutex::new(state)),
+                Arc::new(AtomicBool::new(shutting_down)),
+                Arc::new(OutputGate::new()),
+                Box::new(std::io::Cursor::new(b"\x1b]133;D;0\x07".to_vec())),
+                || false,
+                ForegroundProbes {
+                    remote: Box::new(|| None),
+                    agent: Box::new(|| Some(None)),
+                    cwd: Box::new(|| None),
+                },
+                Arc::new(DeathReporter::new(|| {})),
+            )
+            .join()
+            .unwrap();
+        };
+
+        run(true);
+        let kept = store
+            .pane(PANE)
+            .expect("the record outlives the pane")
+            .agent
+            .expect("a teardown must not report the agent away");
+        assert_eq!(kept.session_id.as_deref(), Some("sess-1"));
+
+        run(false);
+        assert!(
+            store.pane(PANE).unwrap().agent.is_none(),
+            "an agent that left a pane still in use is a fact, and clears"
+        );
+
+        withdraw_observations();
     }
 
     /// The full daemon-side rich-status path: sentinel OSC events sniffed out

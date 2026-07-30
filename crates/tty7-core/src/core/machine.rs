@@ -1690,6 +1690,13 @@ pub(crate) fn withdraw_observations() {
     *OBSERVED.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
+/// Test-only: [`OBSERVED`] is one slot for the whole process, so a test that
+/// installs a store must hold this for as long as it needs its observations to
+/// land there — otherwise a test elsewhere in the binary withdraws the store
+/// mid-run and the observation is silently dropped.
+#[cfg(test)]
+pub(crate) static OBSERVE_SLOT: Mutex<()> = Mutex::new(());
+
 /// Copy a file we are about to stop honouring somewhere the user can find it.
 fn quarantine(path: &Path) {
     let aside = quarantine_path(path);
@@ -2398,6 +2405,7 @@ mod tests {
     /// unconditionally.
     #[test]
     fn published_observations_land_in_the_installed_store() {
+        let _slot = OBSERVE_SLOT.lock().unwrap_or_else(|e| e.into_inner());
         observe_pane(1, |p| p.cwd = Some("/nowhere".into()));
 
         let (store, _dir, _ws, _tab) = store_with_tab();

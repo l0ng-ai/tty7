@@ -143,7 +143,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v7
         with:
-          name: nightly-server-x86_64-unknown-linux-musl
+          name: nightly-tty7-server-linux-x86_64-musl
           path: tty7/bundled-server
 
       - name: Package Windows installer + zip
@@ -174,10 +174,15 @@ jobs:
     if: needs.plan.outputs.build == 'true'
     strategy:
       fail-fast: false
+      # `target` is the build triple; `asset` is the published filename. Kept
+      # apart for the reason release.yml spells out: the triple's vendor field is
+      # `unknown`, and a download name has no business carrying it.
       matrix:
-        target:
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
+        include:
+          - target: x86_64-unknown-linux-musl
+            asset: tty7-server-linux-x86_64-musl
+          - target: aarch64-unknown-linux-musl
+            asset: tty7-server-linux-aarch64-musl
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -C strip=symbols
@@ -245,14 +250,14 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/tty7-server" \
-             "dist/tty7-server-${{ matrix.target }}"
-          chmod +x "dist/tty7-server-${{ matrix.target }}"
+             "dist/${{ matrix.asset }}"
+          chmod +x "dist/${{ matrix.asset }}"
 
       - uses: actions/upload-artifact@v7
         if: steps.probe.outputs.present == 'true'
         with:
-          name: nightly-server-${{ matrix.target }}
-          path: tty7/dist/tty7-server-${{ matrix.target }}
+          name: nightly-${{ matrix.asset }}
+          path: tty7/dist/${{ matrix.asset }}
           if-no-files-found: error
 
   # Single publish step after all platforms succeed, so the rolling release is

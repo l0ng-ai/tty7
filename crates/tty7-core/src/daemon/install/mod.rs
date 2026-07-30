@@ -1,14 +1,14 @@
-//! Installing, launching and version-matching `tty7-server` on a remote machine.
+//! Installing, launching and dialect-matching `tty7-server` on a remote machine.
 //!
 //! The six steps, in order:
 //!
 //! | | Step | Where |
 //! |---|---|---|
 //! | 1 | `uname -sm` → the release asset that runs there | [`asset::asset_for_uname`] |
-//! | 2 | SFTP-stat `~/.local/share/tty7/bin/tty7-server-<client version>` | [`Installer::run`] |
+//! | 2 | SFTP-stat `~/.local/share/tty7/bin/tty7-server-c<control>p<protocol>` | [`Installer::run`] |
 //! | 3 | absent → download the asset **on the client** + sha256-verify it | [`download`], [`checksums`] |
-//! | 4 | SFTP-put into `bin/.tty7-server-<ver>.tmp` | [`RemoteOps::put`] |
-//! | 5 | `chmod 0755` then `rename` — atomic publish | [`RemoteOps::rename`] |
+//! | 4 | SFTP-put into `bin/.tty7-server-c<c>p<p>.<pid>.tmp` | [`RemoteOps::put`] |
+//! | 5 | `chmod 0755`, `--protocol` to earn the name, then `rename` — atomic publish | [`RemoteOps::rename`] |
 //! | 6 | probe the remote control socket; nothing there → launch a detached daemon | [`Installer::ensure_daemon`] |
 //!
 //! ## Why the client downloads
@@ -60,9 +60,13 @@ pub use checksums::ChecksumError;
 
 use crate::daemon::ssh::SshConnection;
 
-/// The client version, which is also the version of the server it installs.
-/// Client and server ship from the same workspace version, so "the server that
-/// matches me" is always `tty7-server-<this>`.
+/// The client version, which is also the version of the server it installs —
+/// client and server ship from the same workspace version.
+///
+/// Names the release to download and labels this client in a prompt, and that is
+/// all it may be used for. **"Which server matches me" is a question about
+/// dialects**, not about this string; two builds between releases share it and
+/// need not speak to each other. See [`asset::binary_name`].
 pub fn client_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
@@ -392,7 +396,7 @@ pub struct InstallRequest {
     pub host: String,
     /// The version about to be installed (= the client's own version).
     pub version: String,
-    /// The release asset name, e.g. `tty7-server-x86_64-unknown-linux-musl`.
+    /// The release asset name, e.g. `tty7-server-linux-x86_64-musl`.
     pub asset: &'static str,
     /// The URL it was downloaded from.
     pub source_url: String,
@@ -531,6 +535,16 @@ pub enum InstallPhase {
     /// Writing the verified bytes to the remote over SFTP. `total` is exact:
     /// the bytes are in memory by now.
     Uploading { done: u64, total: u64 },
+    /// Stopping the server that was running and starting the one we want, with
+    /// no bytes involved either way.
+    ///
+    /// Carries no counts because there is nothing to count: it is a SIGTERM, a
+    /// poll until the socket goes quiet, a launch, and a poll until it answers —
+    /// up to `REMOTE_SHUTDOWN_TIMEOUT + REMOTE_STARTUP_TIMEOUT` of a GUI that
+    /// would otherwise sit there looking like nothing had been clicked. Reported
+    /// precisely because the case it exists for ("Replace Server" onto a binary
+    /// already present) transfers nothing and so would report nothing at all.
+    Restarting,
 }
 
 impl InstallPhase {
@@ -539,6 +553,8 @@ impl InstallPhase {
         let (done, total) = match *self {
             InstallPhase::Downloading { done, total } => (done, total?),
             InstallPhase::Uploading { done, total } => (done, total),
+            // Indeterminate by nature: the wait is two timeouts, not a transfer.
+            InstallPhase::Restarting => return None,
         };
         if total == 0 {
             return None;
@@ -670,6 +686,13 @@ impl RemoteProtocol {
             protocol: crate::daemon::protocol::PROTOCOL_VERSION,
             build: client_version().to_string(),
         }
+    }
+
+    /// The two numbers that decide everything, without the build string that
+    /// decides nothing. This is what names the installed file — see
+    /// [`asset::binary_name`].
+    pub fn dialect(&self) -> (u32, u32) {
+        (self.control, self.protocol)
     }
 
     /// Whether a server speaking `self` can serve a client speaking `other`.
@@ -845,6 +868,27 @@ pub enum InstallError {
     Write { path: String, reason: String },
     /// The daemon would not start, or would not answer after starting.
     Launch { reason: String },
+    /// The bytes were uploaded, made executable, asked what they speak — and
+    /// answered with something other than the dialect the filename they were
+    /// about to be published under promises.
+    ///
+    /// Terminal, and the temp file is removed rather than published. This is the
+    /// check that makes "the filename is the dialect" a fact instead of a
+    /// convention: without it a source that hands over the wrong build (a
+    /// [`wsl::BUNDLED_DIR_ENV`] pointing at a stale cross-compile, a release tag
+    /// that predates a wire break) writes a file that lies, and the *next*
+    /// connect trusts the name and fails in the handshake with nothing to
+    /// blame.
+    ///
+    /// `spoke` is `None` when the binary could not answer at all — it did not
+    /// exec, or it is older than [`PROTOCOL_FLAG`]. Both mean the same thing
+    /// here: nothing may be published under a name that has not been earned.
+    DialectMismatch {
+        /// Where the bytes came from, so the message can name the thing to fix.
+        origin: String,
+        wanted: RemoteProtocol,
+        spoke: Option<RemoteProtocol>,
+    },
 }
 
 impl std::fmt::Display for InstallError {
@@ -877,6 +921,25 @@ impl std::fmt::Display for InstallError {
                 write!(f, "could not write {path} on the remote machine: {reason}")
             }
             Self::Launch { reason } => write!(f, "the remote tty7-server did not start: {reason}"),
+            Self::DialectMismatch {
+                origin,
+                wanted,
+                spoke,
+            } => {
+                let spoken = match spoke {
+                    Some(s) => format!("control v{}, protocol v{}", s.control, s.protocol),
+                    None => "nothing this client understands".to_string(),
+                };
+                write!(
+                    f,
+                    "this build needs a tty7-server speaking control v{} and protocol v{}, \
+                     but {origin} speaks {spoken}; nothing was installed. \
+                     Point {} at a directory holding a matching server binary.",
+                    wanted.control,
+                    wanted.protocol,
+                    wsl::BUNDLED_DIR_ENV,
+                )
+            }
         }
     }
 }
@@ -886,9 +949,9 @@ impl std::error::Error for InstallError {}
 impl From<InstallError> for io::Error {
     fn from(e: InstallError) -> io::Error {
         let kind = match &e {
-            InstallError::Unsupported(_) | InstallError::MissingBundled { .. } => {
-                io::ErrorKind::Unsupported
-            }
+            InstallError::Unsupported(_)
+            | InstallError::MissingBundled { .. }
+            | InstallError::DialectMismatch { .. } => io::ErrorKind::Unsupported,
             InstallError::Declined { .. } => io::ErrorKind::PermissionDenied,
             InstallError::Checksum(_) => io::ErrorKind::InvalidData,
             InstallError::Launch { .. } => io::ErrorKind::TimedOut,
@@ -944,7 +1007,12 @@ pub struct Installer<'a> {
     source: Option<&'a dyn ServerBinarySource>,
     confirm: &'a dyn InstallConfirm,
     host: String,
+    /// Which release to download, and what to call this client in a prompt.
+    /// **Never a decision input** — see [`asset::binary_name`].
     version: String,
+    /// What this client speaks, and therefore which file on the remote is the
+    /// one that can serve it.
+    dialect: RemoteProtocol,
     /// Overridable so tests do not spend the real budget waiting for a daemon
     /// that a fake will never start.
     startup_timeout: Duration,
@@ -965,6 +1033,7 @@ impl<'a> Installer<'a> {
             confirm,
             host: host.into(),
             version: client_version().to_string(),
+            dialect: RemoteProtocol::of_this_build(),
             startup_timeout: REMOTE_STARTUP_TIMEOUT,
             poll_interval: REMOTE_POLL_INTERVAL,
         }
@@ -987,16 +1056,107 @@ impl<'a> Installer<'a> {
             confirm,
             host: host.into(),
             version: client_version().to_string(),
+            dialect: RemoteProtocol::of_this_build(),
             startup_timeout: REMOTE_STARTUP_TIMEOUT,
             poll_interval: REMOTE_POLL_INTERVAL,
         }
     }
 
-    /// Install a specific version instead of this build's. Tests only — a real
-    /// client can only speak its own dialect.
+    /// Download a specific version's release instead of this build's. Tests
+    /// only. Does **not** move the install path — that follows the dialect.
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
         self.version = version.into();
+        self.dialect.build = self.version.clone();
         self
+    }
+
+    /// Pretend this client speaks `control`/`protocol`. Tests only — a real
+    /// client can only speak its own dialect, and every decision in this module
+    /// keys off it, so the fakes need a way to stand somewhere else.
+    pub fn with_dialect(mut self, control: u32, protocol: u32) -> Self {
+        self.dialect.control = control;
+        self.dialect.protocol = protocol;
+        self
+    }
+
+    /// The paths this client's dialect installs to under `home`.
+    fn paths_for(&self, home: &str) -> RemotePaths {
+        asset::remote_paths(home, self.dialect.control, self.dialect.protocol)
+    }
+
+    /// Make this machine's *running* server one that speaks to us, installing a
+    /// binary first only if the one at our dialect's path cannot — "Replace
+    /// server on this host".
+    ///
+    /// The action a failed handshake offers, and it covers both ways a connect
+    /// can reach a server it cannot talk to:
+    ///
+    /// | What is wrong | What this does |
+    /// |---|---|
+    /// | An older daemon is serving; our binary is there and fine | Restart onto it. **No download.** |
+    /// | The binary at our dialect's path is missing, or answers with something else | Install ours, then restart |
+    ///
+    /// The first row is the common one and the reason this asks before it
+    /// downloads: [`run`](Self::run) leaves a machine in exactly that state
+    /// every time it declines to kill a daemon that owns live panes, so the
+    /// button under the handshake error must not need a network — or a released
+    /// asset that speaks our dialect, which for a dev build does not exist — to
+    /// fix the case it was written for.
+    ///
+    /// The second row is the only thing anywhere that overwrites a published
+    /// binary. Every other path trusts `tty7-server-c<c>p<p>` to speak c/p,
+    /// because [`install`](Self::install) proves that before publishing it; only
+    /// something outside tty7 can put a file there that lies, and this is the
+    /// way out when it does.
+    ///
+    /// **Every pane the running server hosts dies**, in both rows, for the same
+    /// reason as [`restart_daemon`](Self::restart_daemon). Only ever call it
+    /// with a user's explicit answer behind it.
+    pub fn replace(&self) -> Result<(), InstallError> {
+        let home = self.ops.home_dir().map_err(InstallError::NoHome)?;
+        let paths = self.paths_for(&home);
+
+        if !self.published_binary_serves_us(&paths)? {
+            let uname = self
+                .ops
+                .run("uname -sm")
+                .map_err(InstallError::Probe)
+                .and_then(|out| {
+                    if out.success() {
+                        Ok(out.stdout)
+                    } else {
+                        Err(InstallError::Probe(out.failure_reason()))
+                    }
+                })?;
+            let asset = asset::asset_for_uname(&uname).map_err(InstallError::Unsupported)?;
+            self.install(asset, &paths)?;
+        }
+
+        self.restart_daemon()
+    }
+
+    /// Whether the binary at our dialect's path is there, runnable, and really
+    /// speaks what its name claims.
+    ///
+    /// The one place that spends a probe on a `stat` hit. [`run`](Self::run)
+    /// deliberately does not — it would pay a round trip on every connect to
+    /// re-check something the install already proved. Here the caller is about
+    /// to either download 8 MB or drop every pane on the machine, so one
+    /// question first is cheap by comparison.
+    fn published_binary_serves_us(&self, paths: &RemotePaths) -> Result<bool, InstallError> {
+        let stat = self
+            .ops
+            .stat(&paths.binary)
+            .map_err(|reason| InstallError::Write {
+                path: paths.binary.clone(),
+                reason,
+            })?;
+        if !stat.is_some_and(|s| !s.is_dir && s.mode & 0o100 != 0) {
+            return Ok(false);
+        }
+        Ok(self
+            .probe_protocol(&paths.binary)
+            .is_some_and(|spoken| spoken.serves(&self.dialect)))
     }
 
     /// Shorten the daemon-startup budget. Tests only.
@@ -1006,8 +1166,10 @@ impl<'a> Installer<'a> {
         self
     }
 
-    /// The whole flow. On `Ok`, the machine has `tty7-server-<version>` installed
-    /// and a daemon answering on its control socket.
+    /// The whole flow. On `Ok`, a `tty7-server` this client can speak to is
+    /// answering on the machine's control socket — either the one published at
+    /// `tty7-server-c<control>p<protocol>`, or one that was already running and
+    /// said it speaks our dialects.
     pub fn run(&self) -> Result<InstallReport, InstallError> {
         // --- 1. uname -sm --------------------------------------------------
         let uname = self
@@ -1023,9 +1185,14 @@ impl<'a> Installer<'a> {
             })?;
         let asset = asset::asset_for_uname(&uname).map_err(InstallError::Unsupported)?;
 
-        // --- 2. is the matching version already there? ----------------------
+        // --- 2. is a server that can serve us already there? ------------------
+        //
+        // One `stat` of a path built entirely from this client's own two
+        // dialect numbers. Nothing is asked of the remote to decide *which*
+        // path to look at, which is what keeps this cheap enough to run before
+        // every link and correct on a machine that cannot reach GitHub.
         let home = self.ops.home_dir().map_err(InstallError::NoHome)?;
-        let paths = asset::remote_paths(&home, &self.version);
+        let paths = self.paths_for(&home);
 
         let already = self
             .ops
@@ -1068,7 +1235,12 @@ impl<'a> Installer<'a> {
                         spoken.protocol,
                         self.version,
                     );
-                    report.paths = asset::remote_paths_for_binary(&home, &exe);
+                    report.paths = asset::remote_paths_for_binary(
+                        &home,
+                        &exe,
+                        self.dialect.control,
+                        self.dialect.protocol,
+                    );
                     report.reused = Some(spoken);
                 }
                 None => {
@@ -1101,7 +1273,7 @@ impl<'a> Installer<'a> {
         let Some(spoken) = self.probe_protocol(&exe) else {
             return Ok(None);
         };
-        if !spoken.serves(&RemoteProtocol::of_this_build()) {
+        if !spoken.serves(&self.dialect) {
             return Ok(None);
         }
         Ok(Some((exe, spoken)))
@@ -1144,6 +1316,10 @@ impl<'a> Installer<'a> {
             bytes,
             origin: asset_url,
         } = self.load_binary(asset)?;
+        // Kept past the consent prompt, which consumes the original: if the
+        // upload turns out to speak the wrong dialect, "where did these bytes
+        // come from" is the whole content of the error.
+        let asset_origin = asset_url.clone();
 
         // --- consent, once per machine --------------------------------------
         let confirmed = if self.is_first_install(paths) {
@@ -1178,29 +1354,53 @@ impl<'a> Installer<'a> {
         // refuses SETSTAT) must not block an install that will otherwise work.
         let _ = self.ops.chmod(&paths.bin_dir, DIR_MODE);
 
+        // The dialect names one file, so two clients installing the same dialect
+        // at once would otherwise write the same temp path and interleave their
+        // bytes into it. The pid makes the staging area private; the final name
+        // is still the shared one, and `rename` is still what publishes it.
+        let temp = unique_temp(&paths.temp);
+
         let sink = install_progress();
         let total = bytes.len() as u64;
         self.ops
-            .put_with_progress(&paths.temp, &bytes, &|done| {
+            .put_with_progress(&temp, &bytes, &|done| {
                 sink.report(&self.host, InstallPhase::Uploading { done, total });
             })
             .map_err(|reason| InstallError::Write {
-                path: paths.temp.clone(),
+                path: temp.clone(),
                 reason,
             })?;
 
-        // --- 5. chmod then rename --------------------------------------------
+        // --- 5. chmod, ask what it speaks, then rename -----------------------
         //
         // chmod *before* the rename, so the binary is never visible at its final
         // path in a non-executable state: a concurrent connect that finds
-        // `tty7-server-<ver>` present would otherwise try to exec a 0644 file.
+        // `tty7-server-c<c>p<p>` present would otherwise try to exec a 0644 file.
         self.ops
-            .chmod(&paths.temp, BINARY_MODE)
+            .chmod(&temp, BINARY_MODE)
             .map_err(|reason| InstallError::Write {
-                path: paths.temp.clone(),
+                path: temp.clone(),
                 reason,
             })?;
-        if let Err(reason) = self.ops.rename(&paths.temp, &paths.binary) {
+
+        // The file is about to be published under a name that *claims* a
+        // dialect. Earn the claim: the binary is on the machine and executable,
+        // so ask it, and publish nothing if the answer is not the one the name
+        // promises. Also the first moment an architecture mistake can surface as
+        // itself — a binary for the wrong machine cannot exec, so it cannot
+        // answer, and it is refused here instead of dying as `Exec format error`
+        // inside a daemon launch that has no visible connection to `uname`.
+        let spoke = self.probe_protocol(&temp);
+        if !spoke.as_ref().is_some_and(|s| s.serves(&self.dialect)) {
+            let _ = self.ops.remove_file(&temp);
+            return Err(InstallError::DialectMismatch {
+                origin: asset_origin,
+                wanted: self.dialect.clone(),
+                spoke,
+            });
+        }
+
+        if let Err(reason) = self.ops.rename(&temp, &paths.binary) {
             // Some SFTP servers refuse a rename onto an existing name. The only
             // way that path exists here is a leftover from an interrupted run
             // (a *usable* binary short-circuits in `run`), so removing it and
@@ -1208,7 +1408,7 @@ impl<'a> Installer<'a> {
             // location.
             let _ = self.ops.remove_file(&paths.binary);
             self.ops
-                .rename(&paths.temp, &paths.binary)
+                .rename(&temp, &paths.binary)
                 .map_err(|_| InstallError::Write {
                     path: paths.binary.clone(),
                     reason,
@@ -1326,18 +1526,18 @@ impl<'a> Installer<'a> {
     fn check_running_build(&self, paths: &RemotePaths) -> Option<MismatchedRemoteDaemon> {
         let exe = self.running_server_exe()?;
         let exe = exe.as_str();
-        let running_version = asset::version_from_path(exe);
-        if running_version.as_deref() == Some(self.version.as_str()) || exe == paths.binary {
+        // The name carries the dialects, so most of the time the path we already
+        // had in hand is the whole answer and no second round trip is spent.
+        if asset::dialect_from_path(exe) == Some(self.dialect.dialect()) || exe == paths.binary {
             return None;
         }
-        // A different build, so ask the only question that decides anything.
-        // An unanswerable probe leaves the old behaviour in place: a server that
-        // predates the flag really might not understand us, and the prompt is
-        // the honest response to not knowing.
-        if self
-            .probe_protocol(exe)
-            .is_some_and(|spoken| spoken.serves(&RemoteProtocol::of_this_build()))
-        {
+        // Either a dialect that is not ours, or a legacy version-named binary
+        // that claims nothing. Ask it directly. An unanswerable probe leaves the
+        // old behaviour in place: a server that predates the flag really might
+        // not understand us, and the prompt is the honest response to not
+        // knowing.
+        let spoken = self.probe_protocol(exe);
+        if spoken.as_ref().is_some_and(|s| s.serves(&self.dialect)) {
             log::info!(
                 "remote {} is served by {exe}, a different build this client speaks to anyway",
                 self.host,
@@ -1346,7 +1546,7 @@ impl<'a> Installer<'a> {
         }
         let entry = MismatchedRemoteDaemon {
             host: self.host.clone(),
-            running_version,
+            running_version: spoken.map(|s| s.build),
             running_exe: Some(exe.to_string()),
             wanted_version: self.version.clone(),
         };
@@ -1365,7 +1565,10 @@ impl<'a> Installer<'a> {
     /// dies; that is what the prompt warns about.
     pub fn restart_daemon(&self) -> Result<(), InstallError> {
         let home = self.ops.home_dir().map_err(InstallError::NoHome)?;
-        let paths = asset::remote_paths(&home, &self.version);
+        let paths = self.paths_for(&home);
+        // Before the first timeout rather than after it: this is the only signal
+        // the user gets that the click landed.
+        install_progress().report(&self.host, InstallPhase::Restarting);
 
         // SIGTERM by the pid whose executable is a tty7-server: the daemon tears
         // down like a local `Shutdown`, hanging every pane's child up with its
@@ -1445,6 +1648,36 @@ fn launch_script(binary: &str, settle: Option<String>) -> String {
     }
 }
 
+/// A staging path private to this process, from the shared per-dialect one.
+///
+/// `.tty7-server-c3p4.tmp` → `.tty7-server-c3p4.4711.tmp`. Inserted before the
+/// suffix rather than appended so the name still ends in `.tmp` and still starts
+/// with a dot: both are what keep a half-written upload from being mistaken for
+/// an installed server.
+///
+/// The litter this can leave (one file per install killed between `put` and
+/// `rename`) is the price of the collision it prevents, and it is bounded by how
+/// often that happens — which is "almost never", against "every time two clients
+/// install the same dialect at once" for the shared name.
+///
+/// **A pid, so private to a process and not to a client.** Two tty7 processes on
+/// one machine (the released build and the one you are compiling) cannot collide;
+/// two on *different* machines that happen to share a pid still can. That
+/// remainder is left alone because the `--protocol` check now stands behind it:
+/// bytes from two uploads interleaved into one file do not answer with our
+/// dialect, so the outcome is a [`InstallError::DialectMismatch`] and a removed
+/// temp rather than a published binary that lies. Two installs from *within* one
+/// process share a pid and so share this path too — that is what `wsl`'s
+/// `INSTALL_LOCKS` and `SshManager`'s per-key `ConnSlot` are for, and this is not
+/// a second attempt at their job.
+fn unique_temp(shared: &str) -> String {
+    let pid = std::process::id();
+    match shared.strip_suffix(".tmp") {
+        Some(stem) => format!("{stem}.{pid}.tmp"),
+        None => format!("{shared}.{pid}"),
+    }
+}
+
 /// POSIX single-quote escaping. Home directories with spaces, apostrophes or
 /// `$` in them are rare but real, and every command here interpolates a path.
 pub(crate) fn shell_quote(s: &str) -> String {
@@ -1479,14 +1712,15 @@ fn connection_label(conn: &SshConnection) -> String {
 /// binary plus a live daemon costs two SSH commands and one SFTP stat, no
 /// download, no prompt.
 ///
-/// The returned path is **absolute and version-qualified**
-/// (`~/.local/share/tty7/bin/tty7-server-<version>`), and the session-channel
-/// fallback must use it rather than the bare name. Nothing puts that directory
-/// on a non-interactive `PATH`, and the file is not even called `tty7-server` —
-/// so `exec tty7-server --stdio` is a `command not found` on a machine where the
-/// install just succeeded.
+/// The returned path is **absolute and never the bare name**
+/// (`~/.local/share/tty7/bin/tty7-server-c<control>p<protocol>`, or the path of a
+/// server already running there that answered with our dialects), and the
+/// session-channel fallback must use it rather than the bare name. Nothing puts
+/// that directory on a non-interactive `PATH`, and the file is not even called
+/// `tty7-server` — so `exec tty7-server --stdio` is a `command not found` on a
+/// machine where the install just succeeded.
 ///
-/// A version mismatch is *not* an error: an older daemon still owns every live
+/// A dialect mismatch is *not* an error: an older daemon still owns every live
 /// pane on that machine, so it keeps serving and the mismatch is recorded for
 /// [`take_mismatched_remote_daemons`] to raise. Only a machine we cannot install
 /// on, cannot verify a download for, or cannot get a daemon running on fails.
@@ -1526,13 +1760,27 @@ pub fn ensure_remote_server_labeled(conn: &Arc<SshConnection>, host: &str) -> io
 }
 
 /// Restart the remote daemon at this client's build, dropping every pane it
-/// hosts. The "restart the service" answer to the version-mismatch prompt.
+/// hosts. The "restart the service" answer to the dialect-mismatch prompt.
 pub fn restart_remote_daemon(conn: &Arc<SshConnection>) -> io::Result<()> {
     let host = connection_label(conn);
     let ops = ssh_ops::SshRemoteOps::new(conn.clone());
     let fetch = default_fetcher();
     let confirm = install_confirm();
     Installer::new(&ops, fetch.as_ref(), confirm.as_ref(), host).restart_daemon()?;
+    Ok(())
+}
+
+/// Reinstall this client's server on `conn`'s machine even though one is
+/// already at its path, and restart the daemon onto it. See
+/// [`Installer::replace`] — this is what a handshake that failed against a
+/// binary whose name lied about its dialect offers as the way out.
+pub fn replace_remote_server(conn: &Arc<SshConnection>) -> io::Result<()> {
+    let host = connection_label(conn);
+    let ops = ssh_ops::SshRemoteOps::new(conn.clone());
+    let fetch = default_fetcher();
+    let confirm = install_confirm();
+    let source = BundledOrRelease::from_env(fetch.as_ref());
+    Installer::with_source(&ops, &source, confirm.as_ref(), host).replace()?;
     Ok(())
 }
 

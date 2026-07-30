@@ -436,8 +436,9 @@ impl SshManager {
 
         // The installed binary's **absolute** path, not the bare name. Nothing
         // puts `~/.local/share/tty7/bin` on a non-interactive `PATH`, and the
-        // file there is `tty7-server-<version>` — so `exec tty7-server --stdio`
-        // is a `command not found` on a machine the install just succeeded on.
+        // file there is `tty7-server-c<control>p<protocol>` — so
+        // `exec tty7-server --stdio` is a `command not found` on a machine the
+        // install just succeeded on.
         // The install pass we just ran is what knows the path, so it hands it
         // over rather than leaving the transport to guess.
         let base = match server_command {
@@ -525,6 +526,26 @@ impl SshManager {
         // off the runtime's workers.
         setup
             .blocking(move || crate::daemon::install::restart_remote_daemon(&conn))
+            .await??;
+        Ok(())
+    }
+
+    /// Reinstall this client's `tty7-server` on `spec`'s host over whatever is at
+    /// its path, then restart the daemon onto it — "Replace Server", and **it
+    /// drops every pane that server is hosting**.
+    ///
+    /// Unlike [`restart_remote_server`](Self::restart_remote_server) this *does*
+    /// write: it is the answer to a handshake that failed against a binary whose
+    /// name promised a dialect it does not speak, so the file itself is what has
+    /// to change. See [`crate::daemon::install::Installer::replace`].
+    pub async fn replace_remote_server(
+        &self,
+        spec: &NativeSshSpec,
+        setup: &RouteSetup,
+    ) -> anyhow::Result<()> {
+        let (conn, _reused) = self.open_connection(spec, &setup.broker).await?;
+        setup
+            .blocking(move || crate::daemon::install::replace_remote_server(&conn))
             .await??;
         Ok(())
     }

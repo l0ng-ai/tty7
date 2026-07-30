@@ -20,10 +20,23 @@ use super::*;
 use crate::daemon::install::asset::{ASSET_X86_64, CHECKSUMS_ASSET};
 
 const VERSION: &str = "26.7.5";
+/// The dialects the fixture's client speaks. Fixed literals rather than
+/// [`RemoteProtocol::of_this_build`] so [`BINARY`] can be asserted as a string:
+/// these tests are about *how* the name is built, and a name derived from the
+/// same constants it is checked against would assert nothing.
+const CONTROL: u32 = 3;
+const PROTOCOL: u32 = 4;
 const HOME: &str = "/home/me";
 const BIN_DIR: &str = "/home/me/.local/share/tty7/bin";
-const BINARY: &str = "/home/me/.local/share/tty7/bin/tty7-server-26.7.5";
-const TEMP: &str = "/home/me/.local/share/tty7/bin/.tty7-server-26.7.5.tmp";
+const BINARY: &str = "/home/me/.local/share/tty7/bin/tty7-server-c3p4";
+/// The shared per-dialect staging name. What actually gets written is
+/// [`temp()`] — `unique_temp` of this.
+const TEMP_BASE: &str = "/home/me/.local/share/tty7/bin/.tty7-server-c3p4.tmp";
+
+/// The staging path this process writes to, which carries its pid.
+fn temp() -> String {
+    unique_temp(TEMP_BASE)
+}
 
 /// Stand-in for the release asset. Content is irrelevant; only its digest is.
 const SERVER_BYTES: &[u8] = b"\x7fELF...a static musl tty7-server, pretend it is 6 MB";
@@ -68,6 +81,14 @@ struct FakeRemote {
     /// models a server too old to know the flag: the probe fails, and the
     /// installer falls back to having no opinion.
     speaks: Mutex<HashMap<String, RemoteProtocol>>,
+    /// What a *freshly uploaded* binary answers. Registered by `put` against the
+    /// path written, because the real installer asks the bytes it just staged
+    /// what they speak before publishing them — a fake whose uploads stayed mute
+    /// would model every install as a failed one.
+    ///
+    /// `None` models bytes that cannot answer at all: the wrong architecture, or
+    /// a build older than the flag.
+    installed_speaks: Option<RemoteProtocol>,
 }
 
 impl FakeRemote {
@@ -90,6 +111,7 @@ impl FakeRemote {
             running_exe: Mutex::new(None),
             launch_works: true,
             speaks: Mutex::new(HashMap::new()),
+            installed_speaks: Some(ours()),
         }
     }
 
@@ -99,15 +121,36 @@ impl FakeRemote {
         self
     }
 
-    /// A machine tty7 has installed on before (so consent is not re-asked).
-    fn with_previous_install(self, version: &str) -> Self {
-        self.preinstall(&format!("{BIN_DIR}/tty7-server-{version}"), 0o755);
+    /// Make whatever gets uploaded answer with `spoken` — a source that hands
+    /// over a build other than the one the client asked for. `None` for bytes
+    /// that cannot answer at all.
+    fn uploads_speaking(mut self, spoken: Option<RemoteProtocol>) -> Self {
+        self.installed_speaks = spoken;
         self
+    }
+
+    /// A machine tty7 has installed on before (so consent is not re-asked), with
+    /// this client's own dialect already published.
+    fn with_previous_install(self) -> Self {
+        self.preinstall(BINARY, 0o755);
+        self.speaks
+            .lock()
+            .unwrap()
+            .insert(BINARY.to_string(), ours());
+        self
+    }
+
+    /// A machine an *older, version-naming* client installed on: consent was
+    /// given once, and what it left behind claims no dialect. Returns the path.
+    fn with_legacy_install(self, version: &str) -> (Self, String) {
+        let path = format!("{BIN_DIR}/tty7-server-{version}");
+        self.preinstall(&path, 0o755);
+        (self, path)
     }
 
     fn preinstall(&self, path: &str, mode: u32) {
         let mut files = self.files.lock().unwrap();
-        for dir in asset::remote_paths(HOME, VERSION).dir_chain {
+        for dir in asset::remote_paths(HOME, CONTROL, PROTOCOL).dir_chain {
             files.entry(dir).or_insert(FakeFile {
                 bytes: Vec::new(),
                 mode: 0o700,
@@ -270,6 +313,13 @@ impl RemoteOps for FakeRemote {
                 is_dir: false,
             },
         );
+        // Uploaded bytes are a binary that can be asked what it speaks, which is
+        // exactly what the installer does with them next.
+        let mut speaks = self.speaks.lock().unwrap();
+        match &self.installed_speaks {
+            Some(spoken) => speaks.insert(path.to_string(), spoken.clone()),
+            None => speaks.remove(path),
+        };
         Ok(())
     }
 
@@ -282,6 +332,12 @@ impl RemoteOps for FakeRemote {
         match files.remove(from) {
             Some(f) => {
                 files.insert(to.to_string(), f);
+                // The binary keeps its answer when it changes name.
+                let mut speaks = self.speaks.lock().unwrap();
+                match speaks.remove(from) {
+                    Some(spoken) => speaks.insert(to.to_string(), spoken),
+                    None => speaks.remove(to),
+                };
                 Ok(())
             }
             None => Err("2: No such file".into()),
@@ -401,14 +457,28 @@ impl InstallConfirm for FakeUser {
     }
 }
 
+/// The fixture's installer: this file's [`VERSION`], this file's dialect, and
+/// timeouts a fake can satisfy.
+///
+/// **Every test builds its installer through here**, and the dialect is why.
+/// `Installer::new` starts at [`RemoteProtocol::of_this_build`], while
+/// [`FakeRemote`] answers with [`ours`] — the fixture's fixed `c3p4`. A test that
+/// hand-rolls the builder and forgets [`Installer::with_dialect`] passes only
+/// while the real [`CONTROL_VERSION`](crate::daemon::control::CONTROL_VERSION)
+/// happens to equal [`CONTROL`], and then fails on the next wire break with a
+/// `DialectMismatch` that has nothing to do with whatever that bump changed.
+/// Two tests did exactly that, so `release` is a trait object: a chunked or
+/// throttled fetcher is a reason to vary the *source*, never a reason to leave
+/// this function.
 fn installer<'a>(
     remote: &'a FakeRemote,
-    release: &'a FakeRelease,
+    release: &'a dyn AssetFetcher,
     user: &'a FakeUser,
     host: &str,
 ) -> Installer<'a> {
     Installer::new(remote, release, user, host)
         .with_version(VERSION)
+        .with_dialect(CONTROL, PROTOCOL)
         .with_timeouts(Duration::from_millis(200), Duration::from_millis(10))
 }
 
@@ -445,7 +515,7 @@ fn first_install_runs_all_six_steps() {
     assert_eq!(installed.bytes, SERVER_BYTES, "the verified bytes landed");
     assert_eq!(installed.mode, 0o755, "and are executable");
     assert!(
-        remote.file(TEMP).is_none(),
+        remote.file(&temp()).is_none(),
         "the temp name is consumed by the rename"
     );
 
@@ -462,7 +532,7 @@ fn first_install_runs_all_six_steps() {
 /// **Atomic replacement.** The final path must only ever be produced by
 /// renaming a temp that is *already* executable — never written to directly,
 /// and never chmod'ed after it is visible. Both would leave a window in which a
-/// concurrent connect finds `tty7-server-<ver>` present and unusable.
+/// concurrent connect finds `tty7-server-c<c>p<p>` present and unusable.
 #[test]
 fn the_final_path_is_only_ever_reached_by_renaming_a_ready_temp() {
     let remote = FakeRemote::new();
@@ -484,15 +554,17 @@ fn the_final_path_is_only_ever_reached_by_renaming_a_ready_temp() {
 
     let put = writes
         .iter()
-        .position(|j| matches!(j, Journal::Put { path, .. } if path == TEMP))
+        .position(|j| matches!(j, Journal::Put { path, .. } if path == &temp()))
         .expect("the bytes go to the temp path");
     let chmod = writes
         .iter()
-        .position(|j| matches!(j, Journal::Chmod { path, mode } if path == TEMP && *mode == 0o755))
+        .position(
+            |j| matches!(j, Journal::Chmod { path, mode } if path == &temp() && *mode == 0o755),
+        )
         .expect("the temp is made executable");
     let rename = writes
         .iter()
-        .position(|j| matches!(j, Journal::Rename { from, to } if from == TEMP && to == BINARY))
+        .position(|j| matches!(j, Journal::Rename { from, to } if from == &temp() && to == BINARY))
         .expect("the temp is renamed onto the binary");
 
     assert!(put < chmod, "bytes before mode: {writes:?}");
@@ -571,7 +643,7 @@ fn a_sha256_mismatch_aborts_before_touching_the_remote() {
         "nothing may be written after a failed verification: {:?}",
         remote.writes()
     );
-    assert!(remote.file(TEMP).is_none());
+    assert!(remote.file(&temp()).is_none());
     assert!(remote.file(BINARY).is_none());
     assert!(
         user.asked().is_empty(),
@@ -681,7 +753,7 @@ fn the_default_confirmation_declines() {
 /// about "may tty7 put binaries here", and it was given.
 #[test]
 fn upgrading_a_known_machine_does_not_ask_again() {
-    let remote = FakeRemote::new().with_previous_install("26.7.4");
+    let (remote, legacy) = FakeRemote::new().with_legacy_install("26.7.4");
     let release = FakeRelease::new();
     let user = FakeUser::declining(); // would refuse if asked
 
@@ -695,12 +767,9 @@ fn upgrading_a_known_machine_does_not_ask_again() {
         user.asked().is_empty(),
         "no prompt on a machine we already use"
     );
-    // The older binary is still there: versioned paths coexist.
-    assert!(
-        remote
-            .file(&format!("{BIN_DIR}/tty7-server-26.7.4"))
-            .is_some()
-    );
+    // The old binary is still there: one file per dialect, and the older one may
+    // still be the one a running daemon was exec'd from.
+    assert!(remote.file(&legacy).is_some());
     assert!(remote.file(BINARY).is_some());
 }
 
@@ -800,13 +869,13 @@ fn a_failed_write_names_the_path_and_does_not_fall_back() {
             ref path,
             ref reason,
         } => {
-            assert_eq!(path, TEMP, "the exact path that failed");
+            assert_eq!(path, &temp(), "the exact path that failed");
             assert!(reason.contains("no space left"), "the server's own reason");
         }
         other => panic!("expected a write failure, got {other}"),
     }
     let message = err.to_string();
-    assert!(message.contains(TEMP), "{message}");
+    assert!(message.contains(&temp()), "{message}");
     assert!(message.contains("no space left"), "{message}");
 
     // One attempt at one path. No second put, no alternative directory.
@@ -891,15 +960,21 @@ fn a_daemon_that_never_answers_is_an_error() {
     }
 }
 
-/// **Version mismatch: keep the old daemon, record the mismatch.** It owns every
+/// **Dialect mismatch: keep the old daemon, record the mismatch.** It owns every
 /// live pane on that machine; ending them at connect time is the user's call,
 /// not the installer's — exactly as `spawn::ensure_running` treats the local
 /// daemon.
 #[test]
 fn an_older_running_daemon_is_kept_and_reported() {
-    let remote = FakeRemote::new()
-        .with_previous_install("26.7.4")
-        .serving(&format!("{BIN_DIR}/tty7-server-26.7.4"));
+    let (remote, legacy) = FakeRemote::new().with_legacy_install("26.7.4");
+    let remote = remote.serving(&legacy).speaking(
+        &legacy,
+        RemoteProtocol {
+            control: CONTROL - 1,
+            protocol: PROTOCOL,
+            build: "26.7.4".to_string(),
+        },
+    );
     let release = FakeRelease::new();
     let user = FakeUser::approving();
 
@@ -942,7 +1017,7 @@ fn an_unidentifiable_running_daemon_is_not_a_mismatch() {
 #[test]
 fn restart_replaces_the_running_daemon() {
     let remote = FakeRemote::new()
-        .with_previous_install("26.7.4")
+        .with_previous_install()
         .serving(&format!("{BIN_DIR}/tty7-server-26.7.4"));
     remote.preinstall(BINARY, 0o755);
     let release = FakeRelease::new();
@@ -1168,7 +1243,7 @@ fn a_bundle_that_lacks_the_asset_does_not_fall_back_to_the_network() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The path the installer publishes to is **absolute and version-qualified**,
+/// The path the installer publishes to is **absolute and dialect-qualified**,
 /// and that is what the session-channel fallback has to exec.
 ///
 /// Observed for real: the transport exec'd the bare name `tty7-server`, which
@@ -1177,19 +1252,19 @@ fn a_bundle_that_lacks_the_asset_does_not_fall_back_to_the_network() {
 /// file there is not even called `tty7-server`. The remote process died at
 /// once, taking the pane with it.
 #[test]
-fn the_published_path_is_absolute_and_version_qualified() {
-    // Built from *this crate's* version rather than the fixture's `VERSION`:
-    // what the transport execs is whatever `client_version()` currently names,
-    // and pinning the shape to a literal would only re-assert the literal (and
-    // go red on every release bump, which is how it used to behave).
-    let published = asset::remote_paths(HOME, client_version()).binary;
+fn the_published_path_is_absolute_and_dialect_qualified() {
+    // Built from *this crate's* dialects rather than the fixture's, because
+    // what the transport execs is whatever this build currently names.
+    let real = RemoteProtocol::of_this_build();
+    let published = asset::remote_paths(HOME, real.control, real.protocol).binary;
     assert!(
         published.starts_with('/'),
         "a relative path would resolve against whatever directory the exec landed in"
     );
-    assert!(
-        published.ends_with(&format!("tty7-server-{}", client_version())),
-        "the filename carries the version, so the bare name never names it: {published}"
+    assert_eq!(
+        asset::dialect_from_path(&published),
+        Some((real.control, real.protocol)),
+        "the filename carries the dialects, so the bare name never names it: {published}"
     );
     assert_ne!(
         published.rsplit('/').next(),
@@ -1279,10 +1354,7 @@ fn an_install_reports_both_transfers_to_completion() {
     let reports = Arc::new(Reports::default());
 
     let report = with_install_progress(reports.clone(), || {
-        Installer::new(&remote, &release, &user, "me@build-box:22")
-            .with_version(VERSION)
-            .with_timeouts(Duration::from_millis(200), Duration::from_millis(10))
-            .run()
+        installer(&remote, &release, &user, "me@build-box:22").run()
     })
     .expect("install");
     assert!(report.installed, "the fake remote started empty");
@@ -1356,10 +1428,7 @@ fn every_report_carries_the_host() {
     let reports = Arc::new(Reports::default());
 
     with_install_progress(reports.clone(), || {
-        Installer::new(&remote, &release, &user, "me@build-box:22")
-            .with_version(VERSION)
-            .with_timeouts(Duration::from_millis(200), Duration::from_millis(10))
-            .run()
+        installer(&remote, &release, &user, "me@build-box:22").run()
     })
     .expect("install");
 
@@ -1378,7 +1447,7 @@ fn every_report_carries_the_host() {
 /// ignore it on the one connect where it means something.
 #[test]
 fn a_present_binary_reports_no_progress() {
-    let remote = FakeRemote::new().with_previous_install(VERSION);
+    let remote = FakeRemote::new().with_previous_install();
     let release = FakeRelease::new();
     let user = FakeUser::approving();
     let reports = Arc::new(Reports::default());
@@ -1467,12 +1536,16 @@ fn a_fraction_is_either_absent_or_in_range() {
 /// What this client speaks, which is what a remote has to match.
 fn ours() -> RemoteProtocol {
     RemoteProtocol {
+        control: CONTROL,
+        protocol: PROTOCOL,
         build: VERSION.to_string(),
-        ..RemoteProtocol::of_this_build()
     }
 }
 
 const OTHER_BUILD: &str = "26.7.9-nightly.20260801";
+/// A server installed by a client that named files after *versions* — every
+/// binary already sitting on a user's machine when this naming shipped. Its path
+/// claims no dialect, so it can only be adopted by being asked.
 const OTHER_EXE: &str = "/home/me/.local/share/tty7/bin/tty7-server-26.7.9-nightly.20260801";
 
 /// **A newer server this client can talk to is adopted, not overwritten.**
@@ -1620,9 +1693,7 @@ fn a_server_that_cannot_be_probed_is_installed_over() {
 /// before should cost a `stat` and nothing more.
 #[test]
 fn the_matching_version_still_costs_no_probe() {
-    let remote = FakeRemote::new()
-        .with_previous_install(VERSION)
-        .serving(BINARY);
+    let remote = FakeRemote::new().with_previous_install().serving(BINARY);
     let release = FakeRelease::new();
     let user = FakeUser::approving();
 
@@ -1694,4 +1765,273 @@ fn a_noisy_shell_does_not_break_the_probe() {
     );
     assert_eq!(RemoteProtocol::parse(""), None);
     assert_eq!(RemoteProtocol::parse("not json at all"), None);
+}
+
+// ---------------------------------------------------------------------------
+// The name is a promise, and it is checked before it is published.
+// ---------------------------------------------------------------------------
+
+/// **Bytes that speak the wrong dialect are never published.**
+///
+/// The whole naming scheme rests on `tty7-server-c<c>p<p>` really speaking
+/// c/p, and nothing upstream of the upload can guarantee that: a
+/// `TTY7_BUNDLED_SERVER_DIR` can hold a stale cross-compile, and a release tag
+/// can predate a wire break. Publishing anyway writes a file that lies, and the
+/// *next* connect trusts the name, skips the install, and dies in the handshake
+/// with nothing to blame.
+#[test]
+fn an_upload_that_speaks_the_wrong_dialect_is_not_published() {
+    let remote = FakeRemote::new().uploads_speaking(Some(RemoteProtocol {
+        control: CONTROL - 1,
+        protocol: PROTOCOL,
+        build: "26.7.4".to_string(),
+    }));
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let err = installer(&remote, &release, &user, "me@stale-box:22")
+        .run()
+        .unwrap_err();
+
+    match err {
+        InstallError::DialectMismatch { ref spoke, .. } => assert_eq!(
+            spoke.as_ref().map(|s| s.dialect()),
+            Some((CONTROL - 1, PROTOCOL)),
+            "the error quotes what the bytes actually said"
+        ),
+        other => panic!("expected a dialect mismatch, got {other}"),
+    }
+    assert!(
+        remote.file(BINARY).is_none(),
+        "nothing may sit at the published name"
+    );
+    assert!(
+        remote.file(&temp()).is_none(),
+        "and the staged file is cleaned up rather than left to be found"
+    );
+    assert!(
+        err.to_string().contains(wsl::BUNDLED_DIR_ENV),
+        "the message points at the one lever that fixes it: {err}"
+    );
+}
+
+/// **Bytes that cannot answer at all are refused the same way.**
+///
+/// A binary for the wrong architecture cannot exec, so it cannot answer. This
+/// is the first moment that mistake can surface as itself; without the check it
+/// used to reach a daemon launch and die as `Exec format error`, which names
+/// nothing about `uname`.
+#[test]
+fn an_upload_that_cannot_answer_is_not_published() {
+    let remote = FakeRemote::new().uploads_speaking(None);
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let err = installer(&remote, &release, &user, "me@wrong-arch:22")
+        .run()
+        .unwrap_err();
+
+    assert!(
+        matches!(err, InstallError::DialectMismatch { spoke: None, .. }),
+        "got {err}"
+    );
+    assert!(remote.file(BINARY).is_none());
+}
+
+/// **A dialect already installed is reused without downloading or asking.**
+///
+/// The hot path, stated as a cost: one `stat` of a path built from this
+/// client's own two numbers, and no network at all — which is what has to hold
+/// on a machine that cannot reach GitHub.
+#[test]
+fn a_machine_with_our_dialect_installed_costs_nothing() {
+    let remote = FakeRemote::new().with_previous_install().serving(BINARY);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let report = installer(&remote, &release, &user, "me@ready-box:22")
+        .run()
+        .expect("connect");
+
+    assert!(!report.installed);
+    assert!(report.mismatch.is_none());
+    assert!(remote.writes().is_empty(), "{:?}", remote.writes());
+    assert!(release.fetched().is_empty(), "{:?}", release.fetched());
+}
+
+/// **A different build behind our dialect is used as-is.**
+///
+/// The deliberate limit of the whole scheme: dialects decide whether a connect
+/// works, and "is this the build I just compiled" is a different question that
+/// must not cost an 8 MB upload on every connect. Someone else's install, or an
+/// older client's, serves us fine.
+#[test]
+fn another_build_at_our_dialect_is_used_rather_than_replaced() {
+    let remote = FakeRemote::new().with_previous_install().serving(BINARY);
+    // Same file, same dialect, a build string from a different release.
+    let remote = remote.speaking(
+        BINARY,
+        RemoteProtocol {
+            build: OTHER_BUILD.to_string(),
+            ..ours()
+        },
+    );
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let report = installer(&remote, &release, &user, "me@shared-box:22")
+        .run()
+        .expect("connect");
+
+    assert!(!report.installed, "{:?}", remote.writes());
+    assert!(
+        report.mismatch.is_none(),
+        "a different build at the same dialect is not a question for the user"
+    );
+}
+
+/// **A legacy version-named binary is not adopted on the strength of its name.**
+///
+/// Every machine tty7 had already installed on carries one. The name claims no
+/// dialect, so the only honest thing to do is ask — and if it cannot answer,
+/// install ours beside it.
+#[test]
+fn a_legacy_named_binary_is_probed_not_assumed() {
+    let (remote, legacy) = FakeRemote::new().with_legacy_install(VERSION);
+    // It answers, and it happens to speak our dialects: adopt it, no upload.
+    let remote = remote.serving(&legacy).speaking(
+        &legacy,
+        RemoteProtocol {
+            build: VERSION.to_string(),
+            ..ours()
+        },
+    );
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let report = installer(&remote, &release, &user, "me@legacy-box:22")
+        .run()
+        .expect("connect");
+
+    assert!(
+        !report.installed,
+        "it speaks our dialects, so it serves: {:?}",
+        remote.writes()
+    );
+    assert_eq!(
+        report.paths.binary, legacy,
+        "and that is what we connect to"
+    );
+    assert!(report.mismatch.is_none());
+}
+
+/// **The staging name is private to this process.**
+///
+/// One file per dialect means the shared temp name is the same string for every
+/// client installing that dialect, so two of them at once would interleave
+/// their bytes into it. The published name stays shared — `rename` is still
+/// what makes an install visible.
+#[test]
+fn the_staging_path_carries_the_pid() {
+    let staged = temp();
+    assert_ne!(staged, TEMP_BASE);
+    assert!(staged.contains(&std::process::id().to_string()), "{staged}");
+    assert!(staged.ends_with(".tmp"), "still recognisable as staging");
+    assert!(
+        staged.rsplit('/').next().unwrap().starts_with('.'),
+        "still hidden, so a killed upload is not mistaken for an install"
+    );
+    assert_eq!(
+        staged.rsplit_once('/').unwrap().0,
+        BINARY.rsplit_once('/').unwrap().0,
+        "same directory, so the publishing rename is still atomic"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// "Replace Server" — the way out of a handshake this client lost.
+// ---------------------------------------------------------------------------
+
+/// **A good binary already at our path is restarted onto, not re-downloaded.**
+///
+/// The state `run` leaves behind every time it refuses to kill a daemon that
+/// owns live panes: our binary published, an older one still serving. It is the
+/// common case behind the handshake error, and the button that offers to fix it
+/// must not need a network — least of all a released asset speaking a dialect
+/// that, for any build between releases, does not exist yet.
+#[test]
+fn replacing_reuses_a_published_binary_that_already_serves_us() {
+    let (remote, legacy) = FakeRemote::new().with_legacy_install("26.7.4");
+    let remote = remote.with_previous_install().serving(&legacy).speaking(
+        &legacy,
+        RemoteProtocol {
+            control: CONTROL - 1,
+            protocol: PROTOCOL,
+            build: "26.7.4".to_string(),
+        },
+    );
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    installer(&remote, &release, &user, "me@stuck-box:22")
+        .replace()
+        .expect("the binary is already there and it speaks to us");
+
+    assert!(
+        release.fetched().is_empty(),
+        "nothing to download: {:?}",
+        release.fetched()
+    );
+    assert!(
+        !remote
+            .writes()
+            .iter()
+            .any(|j| matches!(j, Journal::Put { .. })),
+        "and nothing to upload: {:?}",
+        remote.writes()
+    );
+    assert!(
+        remote
+            .journal()
+            .iter()
+            .any(|j| matches!(j, Journal::Launch)),
+        "but the daemon really is restarted: {:?}",
+        remote.journal()
+    );
+}
+
+/// **A binary whose name lies is overwritten.**
+///
+/// The other reason a handshake fails against a path this client trusts:
+/// something outside tty7 put a file there. `run` cannot catch it — it trusts
+/// the name, which is what makes the connect cheap — so this is the only thing
+/// that does.
+#[test]
+fn replacing_overwrites_a_published_binary_that_does_not_serve_us() {
+    let remote = FakeRemote::new().with_previous_install();
+    // Someone replaced it: the name says our dialect, the bytes disagree.
+    let remote = remote.speaking(
+        BINARY,
+        RemoteProtocol {
+            control: CONTROL - 1,
+            protocol: PROTOCOL,
+            build: "hand-placed".to_string(),
+        },
+    );
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    installer(&remote, &release, &user, "me@tampered-box:22")
+        .replace()
+        .expect("ours is written over it");
+
+    assert!(
+        remote
+            .writes()
+            .iter()
+            .any(|j| matches!(j, Journal::Put { .. })),
+        "the file had to be rewritten: {:?}",
+        remote.writes()
+    );
+    assert!(!release.fetched().is_empty(), "which means downloading it");
 }

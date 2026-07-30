@@ -804,13 +804,13 @@ impl Tty7App {
         .detach();
     }
 
-    /// Version skew, for a remote server.
+    /// Dialect skew, for a remote server.
     ///
-    /// Same shape as the local `prompt_daemon_version_mismatch`, and for the
-    /// same reason: the running daemon owns every live pane on that machine, so
-    /// this is a choice between an old dialect and losing the work. `take`
-    /// semantics on the producer side mean this fires once per discovery rather
-    /// than once per window.
+    /// A mismatch is only recorded when the running daemon cannot speak to this
+    /// client at all, so "leave it alone" is the same answer as "do not connect"
+    /// — the buttons say that rather than offering a Keep that would fail in the
+    /// handshake a moment later. `take` semantics on the producer side mean this
+    /// fires once per discovery rather than once per window.
     pub(crate) fn prompt_remote_daemon_mismatch(window: &mut Window, cx: &mut Context<Self>) {
         for mismatch in crate::daemon::install::take_mismatched_remote_daemons() {
             let title = remote_connect::mismatch_title(&mismatch);
@@ -819,25 +819,84 @@ impl Tty7App {
                 PromptLevel::Warning,
                 &title,
                 Some(&detail),
-                &["Keep Sessions", "Restart Server"],
+                // Named once, beside the detail that explains them.
+                &remote_connect::MISMATCH_ANSWERS,
                 cx,
             );
             cx.spawn(async move |this, cx| {
-                // Index 1 is Restart Server. Dismissing the prompt keeps the
-                // sessions, which is the answer that destroys nothing.
+                // Index 1 is Restart Server. Dismissing the prompt is Cancel,
+                // which is the answer that destroys nothing.
                 if !matches!(answer.await, Ok(1)) {
                     return;
                 }
                 let _ = this.update_in(cx, |this, window, cx| {
-                    this.restart_remote_server(mismatch, window, cx);
+                    this.restart_mismatched_remote_server(mismatch, window, cx);
                 });
             })
             .detach();
         }
     }
 
-    /// Carry out "Restart Server": replace the `tty7-server` on a
-    /// machine with this client's build.
+    /// [`Self::restart_remote_server`] for the machine a mismatch names: the
+    /// prompt knows the daemon by the record that reported it, and the record
+    /// has to be turned back into something addressable before anything can be
+    /// asked of it.
+    fn restart_mismatched_remote_server(
+        &mut self,
+        mismatch: crate::daemon::install::MismatchedRemoteDaemon,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let label = mismatch.host.clone();
+        match remote_connect::mismatch_target(&mismatch)
+            .ok_or_else(|| format!("tty7 no longer has a way to reach {label}"))
+        {
+            Ok(target) => self.restart_remote_server(target, label, window, cx),
+            Err(e) => Tty7App::report_restart_failure(&label, &e, window, cx),
+        }
+    }
+
+    /// "Restart Server" for a machine with nothing wrong with it — the
+    /// switcher's machine menu, and where a remote window's "Restart Daemon…"
+    /// lands.
+    ///
+    /// Same outcome and same warning as the two repair paths above; the only
+    /// difference is that nothing is broken, so the wording claims nothing is.
+    /// Confirmed for the reason all three are: every session on that machine
+    /// ends, including the ones other windows are showing.
+    pub(crate) fn confirm_restart_remote_server(
+        &mut self,
+        target: RemoteTarget,
+        label: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Restart tty7's server on \u{201c}{label}\u{201d}?"),
+            Some(&format!(
+                "This stops every session on {label} — anything still running in them \
+                 will be terminated, including sessions this window is not showing. \
+                 Workspaces and layouts are kept and come back with fresh shells."
+            )),
+            &["Cancel", "Restart Server"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            // Index 1 is Restart Server; a dismissed prompt is Cancel.
+            if !matches!(answer.await, Ok(1)) {
+                return;
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.restart_remote_server(target, label, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Carry out "Restart Server": stop the `tty7-server` on a machine and start
+    /// this client's build in its place. The half every entry point shares, past
+    /// whichever prompt asked.
     ///
     /// **This throws work away and says so.** Every pane the old server hosts
     /// dies with it — that is what the prompt the user just answered warns
@@ -847,15 +906,12 @@ impl Tty7App {
     /// layout: same tabs and splits, new shells, nothing running in them.
     fn restart_remote_server(
         &mut self,
-        mismatch: crate::daemon::install::MismatchedRemoteDaemon,
+        target: RemoteTarget,
+        label: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let label = mismatch.host.clone();
-        let header = match remote_connect::mismatch_target(&mismatch)
-            .ok_or_else(|| format!("tty7 no longer has a way to reach {label}"))
-            .and_then(|target| remote_connect::control_route(&target, cx))
-        {
+        let header = match remote_connect::control_route(&target, cx) {
             Ok(header) => header.restart_server(),
             Err(e) => {
                 Tty7App::report_restart_failure(&label, &e, window, cx);
@@ -863,11 +919,16 @@ impl Tty7App {
             }
         };
         let host = header.target.origin_key();
+        // From the target, not from the connection key: that is how the switcher
+        // derives the id it looks the phase up under, and a bar keyed to a
+        // different id than the panel reads is a bar nobody ever sees.
+        let host_id = target.host_id();
         log::info!("restarting tty7's server on {label} at the user's request");
         // The same watcher the connect flow uses: a restart re-opens the
-        // machine's connection, so it can raise a password sheet on the way in.
+        // machine's connection, so it can raise a password sheet on the way in,
+        // and it reports a phase the panel has to be told to look at.
         let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        self.watch_for_restart_consent(running.clone(), cx);
+        self.watch_for_restart_consent(host_id, running.clone(), cx);
         cx.spawn(async move |this, cx| {
             let for_task = label.clone();
             let outcome = cx
@@ -875,6 +936,7 @@ impl Tty7App {
                 .spawn(async move { remote_connect::restart_server_blocking(header, &for_task) })
                 .await;
             running.store(false, std::sync::atomic::Ordering::Relaxed);
+            remote_connect::clear_install_progress(host_id);
             let _ = this.update_in(cx, |_, window, cx| match outcome {
                 Ok(()) => {
                     log::info!("{label} is now serving this client's build");
@@ -882,6 +944,117 @@ impl Tty7App {
                 }
                 Err(e) => {
                     log::warn!("could not restart tty7's server on {label}: {e}");
+                    Tty7App::report_restart_failure(&label, &e, window, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// "Restart Server", from the error card: put a `tty7-server` this client
+    /// can talk to on the machine — writing one first only if the binary at our
+    /// dialect's path cannot — and restart the daemon onto it.
+    ///
+    /// **The same button, the same words, and the same outcome as the mismatch
+    /// prompt's.** Both make that machine's running server one we can speak to
+    /// and end everything on it; they differ only in what had to happen for the
+    /// machine to get into each state, which is not the user's problem. Naming
+    /// the two apart ("Replace" here, "Restart" there) asked them to tell
+    /// identical outcomes apart by a distinction that only exists inside
+    /// [`Installer::replace`]. The internal names stay split because the actions
+    /// really are a superset and a subset.
+    ///
+    /// **Confirmed first, because it destroys work.** The connect that failed
+    /// proves nothing about the *other* panes on that machine — an older daemon
+    /// can be serving them perfectly well over its own dialect — and they all go
+    /// with it. The failure the button sits under is a good reason to offer
+    /// this, never a reason to do it unasked.
+    ///
+    /// Reached only from a connect error that [`is_dialect_refusal`] recognises,
+    /// which is the one failure this can fix.
+    ///
+    /// [`is_dialect_refusal`]: crate::daemon::control::is_dialect_refusal
+    /// [`Installer::replace`]: crate::daemon::install::Installer::replace
+    pub(crate) fn confirm_replace_remote_server(
+        &mut self,
+        target: RemoteTarget,
+        label: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Restart tty7's server on \u{201c}{label}\u{201d}?"),
+            Some(&format!(
+                "The tty7-server running on {label} speaks a protocol this client cannot. \
+                 tty7 will restart the service there onto one that does, installing it \
+                 first if {label} does not already have it.\n\
+                 \n\
+                 Every session running on {label} ends, including any this window is not \
+                 connected to."
+            )),
+            &["Cancel", "Restart Server"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            // Index 1 is Restart Server; a dismissed prompt is Cancel.
+            if !matches!(answer.await, Ok(1)) {
+                return;
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.replace_remote_server(target, label, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The half of [`Self::confirm_replace_remote_server`] that runs after the
+    /// user has said yes.
+    fn replace_remote_server(
+        &mut self,
+        target: RemoteTarget,
+        label: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let route = match remote_connect::control_route(&target, cx) {
+            Ok(header) => header.replace_server(),
+            // Said out loud, for the reason every other failure on this path is:
+            // the user answered a prompt that promised the machine's server
+            // would be replaced, and a log line is not an answer to that. The
+            // failure this catches — no route to the machine any more — is one
+            // where nothing was touched, which the wording already allows for.
+            Err(e) => {
+                log::warn!("could not address {label} to replace its server: {e}");
+                Tty7App::report_restart_failure(&label, &e, window, cx);
+                return;
+            }
+        };
+        let host = route.target.origin_key();
+        let host_id = target.host_id();
+        log::info!("replacing tty7's server on {label} at the user's request");
+        // The same watcher the restart path uses: replacing re-opens the
+        // machine's connection, so it can raise a password sheet on the way in,
+        // and it writes, so it can raise the install-consent sheet too.
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        self.watch_for_restart_consent(host_id, running.clone(), cx);
+        cx.spawn(async move |this, cx| {
+            let for_task = label.clone();
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { remote_connect::restart_server_blocking(route, &for_task) })
+                .await;
+            running.store(false, std::sync::atomic::Ordering::Relaxed);
+            // Either way the bar is over. On failure the error card takes the
+            // space back, which it cannot do while a phase is still recorded.
+            remote_connect::clear_install_progress(host_id);
+            let _ = this.update_in(cx, |_, window, cx| match outcome {
+                Ok(()) => {
+                    log::info!("{label} is now serving this client's build");
+                    reconnect_after_restart(&host, cx);
+                }
+                Err(e) => {
+                    log::warn!("could not replace tty7's server on {label}: {e}");
                     Tty7App::report_restart_failure(&label, &e, window, cx);
                 }
             });
@@ -931,11 +1104,24 @@ impl Tty7App {
     /// so it costs nothing when nothing is restarting.
     fn watch_for_restart_consent(
         &self,
+        host: HostId,
         running: Arc<std::sync::atomic::AtomicBool>,
         cx: &mut Context<Self>,
     ) {
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
+            let mut painted: Option<crate::daemon::install::InstallPhase> = None;
             while running.load(std::sync::atomic::Ordering::Relaxed) {
+                // The same repaint `watch_for_install_consent` does, and needed
+                // for the same reason: the sink is written from the routed
+                // connection's reader thread and nothing else would ask the
+                // panel to look at it. Without this a restart that transfers
+                // nothing — the common "Restart Server" — leaves the click with
+                // no visible effect for the length of two timeouts.
+                let reported = remote_connect::install_progress_for(host);
+                if reported != painted {
+                    painted = reported;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                }
                 cx.update(pump_auth_sheets);
                 cx.background_executor()
                     .timer(Duration::from_millis(100))
@@ -1844,6 +2030,12 @@ fn release_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
 /// when no workspace is bound to the machine yet) and the supervisor's tick
 /// (start-up and every reconnect, when no picker is open).
 pub(crate) fn pump_auth_sheets(cx: &mut gpui::App) {
+    // Yield the mailbox to a test that is waiting for a prompt it caused itself;
+    // see `remote_connect::MAILBOX_TURN`. Compiled out of a release build, which
+    // has one tick and one mailbox and nothing to arbitrate.
+    #[cfg(test)]
+    let _turn = remote_connect::claim_mailbox();
+
     let mut inbox: Vec<remote_connect::PendingAuth> = Vec::new();
     while let Some(pending) = remote_connect::take_pending_auth() {
         inbox.push(pending);

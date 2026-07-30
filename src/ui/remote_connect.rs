@@ -133,6 +133,21 @@ pub fn available_hosts(cx: &App) -> Vec<HostChoice> {
     out
 }
 
+/// The name the picker shows for `target`.
+///
+/// Not `RemoteTarget`'s `Display`, which for a saved profile is its *uuid* — the
+/// type deliberately cannot reach into the profile store, so anything putting a
+/// machine's name in front of the user has to do this lookup. Falls back to the
+/// `Display` for a machine no longer on file, which is the honest answer: that
+/// is all tty7 still knows about it.
+pub fn label_for(target: &RemoteTarget, cx: &App) -> String {
+    available_hosts(cx)
+        .into_iter()
+        .find(|host| host.target == *target)
+        .map(|host| host.label)
+        .unwrap_or_else(|| target.to_string())
+}
+
 /// The machines matching `query`, best match first.
 ///
 /// A `~/.ssh/config` with fifty `Host` blocks is normal, and a list that long
@@ -480,8 +495,9 @@ pub fn connect_blocking(
 /// Machines whose agent hooks this process has already looked at.
 static HOOKS_REFRESHED: Mutex<Vec<HostId>> = Mutex::new(Vec::new());
 
-/// Heal this machine's stale tty7 agent hooks — the ones pointing at a
-/// `tty7-server-<version>` an upgrade replaced (see
+/// Heal this machine's stale tty7 agent hooks — the ones naming a server binary
+/// that is no longer the one this client installs, whether because a wire break
+/// moved the name or because an older, version-naming client wrote them (see
 /// [`crate::core::agent_hooks::refresh_remote_hooks`]).
 ///
 /// Off the connect's own thread, and once per machine per run: it is a config
@@ -1017,17 +1033,54 @@ pub fn take_pending_auth() -> Option<PendingAuth> {
     AUTH_MAILBOX.lock().ok()?.pop()
 }
 
+/// Whose turn it is to drain [`AUTH_MAILBOX`], for tests only.
+///
+/// The mailbox is process-global, and [`pump_auth_sheets`] takes *every* entry in
+/// one pass — correct for the app, where one tick serves one mailbox, and fatal
+/// in a test binary, where a test waiting for the prompt it just caused shares
+/// that mailbox with every gpui test driving a tick. The prompt gets drained by a
+/// tick that has no idea it was spoken for, and the waiting test never sees it.
+///
+/// So a test that needs its own prompt back claims this first, and the drain
+/// yields while it is held. Compiled out of a release build, where there is one
+/// app, one tick and nothing to arbitrate.
+///
+/// [`pump_auth_sheets`]: crate::ui::remote_workspace::pump_auth_sheets
+#[cfg(test)]
+pub(crate) static MAILBOX_TURN: Mutex<()> = Mutex::new(());
+
+/// Claim [`MAILBOX_TURN`], ignoring poisoning: a test that panicked while holding
+/// it has nothing to corrupt here — the guard protects an ordering, not data.
+#[cfg(test)]
+pub(crate) fn claim_mailbox() -> std::sync::MutexGuard<'static, ()> {
+    MAILBOX_TURN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 // ---------------------------------------------------------------------------
 // 7. Remote daemon version skew
 // ---------------------------------------------------------------------------
 
-/// The keep-or-restart question for a remote `tty7-server` at a different build.
+/// The answers the dialect-mismatch prompt offers, in the order `window.prompt`
+/// takes them — **index 1 is the destructive one**, which is what
+/// `prompt_remote_daemon_mismatch` matches on.
 ///
-/// The local analogue is `Tty7App::prompt_daemon_version_mismatch`, and the
-/// trade is identical: the running daemon owns every live pane on that machine,
-/// so restarting it throws that work away, while keeping it means talking an
-/// older dialect. The one thing that differs is whose machine it is, which is
-/// why the title names the host.
+/// Written down here rather than at the prompt because [`mismatch_detail`] spells
+/// both out by name in its body: a detail explaining a button that is no longer
+/// there is worse than no explanation at all. `Keep Sessions` used to be index 0
+/// and had to go, which is precisely the drift this prevents repeating.
+pub const MISMATCH_ANSWERS: [&str; 2] = ["Cancel", "Restart Server"];
+
+/// The restart-or-cancel question for a remote `tty7-server` this client cannot
+/// talk to.
+///
+/// **There is no "keep and carry on" here, and the wording must not imply one.**
+/// A mismatch is only ever recorded when the running daemon's *dialects* are not
+/// ours (`Installer::check_running_build`) — a merely different build that can
+/// still speak to us is reused in silence and never reaches this prompt. The
+/// workspace connects to the daemon that is running, so leaving it in place
+/// means the connection fails in the handshake. The real choice is between
+/// ending that machine's sessions and not connecting at all, and saying so is
+/// the difference between a decision and a trick.
 pub fn mismatch_detail(m: &MismatchedRemoteDaemon) -> String {
     let running = match (&m.running_version, &m.running_exe) {
         (Some(v), Some(exe)) => format!("{v} (from {exe})"),
@@ -1036,10 +1089,12 @@ pub fn mismatch_detail(m: &MismatchedRemoteDaemon) -> String {
         (None, None) => "an unknown build".to_string(),
     };
     format!(
-        "{host} is already serving tty7 sessions from {running}, but this client is {wanted}.\n\
+        "{host} is serving tty7 sessions from {running}, which speaks a protocol \
+         this client ({wanted}) cannot. tty7 has installed a matching server there, \
+         but the one already running is the one your sessions are on.\n\
          \n\
-         Keep Sessions\u{2003}everything running on {host} stays up, over the older protocol.\n\
-         Restart Server\u{2003}starts {wanted} there and ends every session it is hosting.",
+         Restart Server\u{2003}starts {wanted} there and ends every session it is hosting.\n\
+         Cancel\u{2003}leaves {host} exactly as it is. This window will not connect.",
         host = m.host,
         wanted = m.wanted_version,
     )
@@ -1068,6 +1123,7 @@ pub fn mismatch_target(m: &MismatchedRemoteDaemon) -> Option<RemoteTarget> {
 /// The connection is a setup window and nothing else: the daemon acks and both
 /// ends close. Reconnecting afterwards is the supervisor's job, not this one's.
 pub fn restart_server_blocking(header: RouteHeader, label: &str) -> Result<(), String> {
+    let action = header.action;
     crate::daemon::spawn::ensure_running()
         .map_err(|e| format!("tty7's local daemon could not be started: {e}"))?;
     let mut stream = crate::daemon::transport::connect()
@@ -1078,7 +1134,7 @@ pub fn restart_server_blocking(header: RouteHeader, label: &str) -> Result<(), S
     // connection instead — a link, not a restart. Saying nothing happened is the
     // only honest answer; the alternative is a "done" over a server still
     // running the old build.
-    if !ack.performed(crate::daemon::router::RouteAction::RestartServer) {
+    if !ack.performed(action) {
         return Err(format!(
             "this machine's tty7 daemon is an older build and cannot restart the server on \
              {label}. Quit tty7 (which stops the daemon) and open it again, then retry."
@@ -1095,7 +1151,7 @@ mod tests {
         InstallRequest {
             host: "me@build-box:22".into(),
             version: "0.9.1".into(),
-            asset: "tty7-server-x86_64-unknown-linux-musl",
+            asset: "tty7-server-linux-x86_64-musl",
             source_url: "https://example.invalid/v0.9.1/tty7-server".into(),
             remote_path: "/home/me/.local/share/tty7/bin/tty7-server-0.9.1".into(),
             size_bytes: 9_437_184,
@@ -1207,6 +1263,11 @@ mod tests {
     /// were the same thread, and on the pane path they never are.
     #[test]
     fn a_routed_auth_prompt_carries_the_machine_that_raised_it() {
+        // Held for the whole exchange: the prompt this test is about to cause
+        // goes into a process-global mailbox, and `pump_auth_sheets` drains all of
+        // it from any gpui test in this binary that drives a tick. Without the
+        // claim that drain takes this test's prompt and the wait below never ends.
+        let _turn = claim_mailbox();
         while take_pending_auth().is_some() {}
         let target = RemoteTarget::direct("me", "build-box", 22);
         let route =
@@ -1223,10 +1284,28 @@ mod tests {
                 },
             )
         });
+        // Bounded, because this loop is the difference between a stolen prompt
+        // being a failure and being a *hang*. `AUTH_MAILBOX` is process-global
+        // and `pump_auth_sheets` drains every entry in one pass, so any gpui test
+        // in this binary that drives a tick can take this prompt before the line
+        // below does — and unbounded, this test then spins until CI's six-hour
+        // job limit. It has: a `main` run sat inside this test for 2h50m, and
+        // three Windows runs before it went the same way, none of them naming a
+        // test until the run was cancelled and its partial log read back.
+        let deadline = Instant::now() + Duration::from_secs(10);
         let pending = loop {
             if let Some(p) = take_pending_auth() {
                 break p;
             }
+            assert!(
+                Instant::now() < deadline,
+                "no routed prompt arrived within 10s. `respond` pushes one \
+                 unconditionally, so an empty mailbox means something else \
+                 drained it first — `pump_auth_sheets` takes all of it, and it \
+                 runs from any gpui test here that drives a tick. Responder \
+                 thread finished: {}",
+                handle.is_finished(),
+            );
             std::thread::sleep(Duration::from_millis(5));
         };
         assert_eq!(pending.host, target.host_id());
@@ -1334,6 +1413,24 @@ mod tests {
             ..m
         };
         assert!(mismatch_detail(&unknown).contains("an unknown build"));
+    }
+
+    /// The detail explains the buttons by name, so it has to name the ones that
+    /// are actually there. This is a prompt whose whole job is to make a
+    /// destructive choice legible; a body describing an answer the prompt does
+    /// not offer (as it did while `Keep Sessions` was one of them) turns that
+    /// back into a guess.
+    #[test]
+    fn the_mismatch_detail_explains_every_answer_the_prompt_offers() {
+        let detail = mismatch_detail(&MismatchedRemoteDaemon {
+            host: "me@build-box:22".into(),
+            running_version: Some("0.8.0".into()),
+            running_exe: None,
+            wanted_version: "0.9.1".into(),
+        });
+        for answer in MISMATCH_ANSWERS {
+            assert!(detail.contains(answer), "{answer} is unexplained: {detail}");
+        }
     }
 
     #[test]

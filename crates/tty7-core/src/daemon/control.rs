@@ -118,6 +118,35 @@ use super::protocol::{MAX_FRAME, read_frame, write_frame};
 /// - **v1** — the dialect at the time remote workspaces landed.
 pub const CONTROL_VERSION: u32 = 3;
 
+/// The phrase every control-dialect refusal contains.
+///
+/// Written down once so the message and the test that recognises it cannot
+/// drift apart. See [`is_dialect_refusal`].
+const DIALECT_MARKER: &str = "speaks control v";
+
+/// The message a handshake between two incompatible control dialects fails
+/// with.
+fn dialect_refusal(peer_build: &str, peer: u32, ours: u32) -> String {
+    format!("control peer (build {peer_build}) {DIALECT_MARKER}{peer}, this build speaks v{ours}")
+}
+
+/// Whether an error message is a control-dialect refusal rather than one of the
+/// dozen other reasons a connect fails (a dead host, a bad key, a refused
+/// port).
+///
+/// A marker in the text rather than a typed error because this message crosses
+/// two process boundaries — the daemon's route ack, then the GUI's error card —
+/// as a `String`, and rebuilding a type on the far side of that would be more
+/// machinery than the one question needs.
+///
+/// The question is worth asking because the answer is unusually specific: a
+/// dialect refusal is the *only* connect failure that a reinstall on the far end
+/// fixes, and the only one where offering that (destructive) action is
+/// justified. Everything else it must not offer it for.
+pub fn is_dialect_refusal(message: &str) -> bool {
+    message.contains(DIALECT_MARKER)
+}
+
 /// This process's identity as a control server, minted once on first use.
 ///
 /// Answers "am I still talking to the same server?" — the question no other
@@ -1538,10 +1567,7 @@ impl ControlClient {
             // connection dropped".
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                format!(
-                    "control peer (build {}) speaks control v{}, this build speaks v{}",
-                    ok.build, ok.control_version, hello.control_version
-                ),
+                dialect_refusal(&ok.build, ok.control_version, hello.control_version),
             ));
         }
 
@@ -3493,6 +3519,32 @@ mod tests {
             msg.contains(&format!("v{CONTROL_VERSION}")),
             "names ours: {msg}"
         );
+        assert!(
+            is_dialect_refusal(&msg),
+            "and the GUI can tell this apart from an unreachable host, which is what \
+             decides whether it may offer to replace the far end's binary: {msg}"
+        );
+    }
+
+    /// **Only a dialect refusal is recognised as one.**
+    ///
+    /// [`is_dialect_refusal`] gates a destructive offer — reinstalling the
+    /// server on someone's machine and dropping every pane on it. A connect that
+    /// failed for any other reason must never reach that button, because
+    /// replacing the binary would not fix it and would cost the user their
+    /// sessions to find out.
+    #[test]
+    fn other_connect_failures_are_not_dialect_refusals() {
+        for other in [
+            "Connection refused (os error 61)",
+            "ssh: handshake failed: no matching key exchange method",
+            "the remote tty7-server did not start: exit status 127",
+            "could not resolve the remote home directory: Permission denied",
+            "control peer answered the handshake with Bye instead of HELLO_OK",
+        ] {
+            assert!(!is_dialect_refusal(other), "{other}");
+        }
+        assert!(is_dialect_refusal(&dialect_refusal("26.7.6", 2, 3)));
     }
 
     /// A peer that answers the handshake with something other than `HELLO_OK`

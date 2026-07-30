@@ -226,8 +226,19 @@ pub enum RouteAction {
     /// daemon that was serving is the one being replaced.
     ///
     /// This drops every pane that daemon hosts. It happens only when
-    /// a user has answered the keep-or-restart prompt with "Restart Server".
+    /// a user has answered the dialect-mismatch prompt with "Restart Server".
     RestartServer,
+    /// [`RestartServer`](Self::RestartServer), plus rewriting the binary first.
+    ///
+    /// The one action that installs over a server already sitting at the path
+    /// this client's dialect names. Nothing on the connect path does that — the
+    /// name is checked against the binary before it is published, so a name that
+    /// lies can only come from outside tty7. The handshake is what discovers it,
+    /// and this is what its error offers as the way out.
+    ///
+    /// Drops every pane, same as `RestartServer`, and needs the same explicit
+    /// answer from a user behind it.
+    ReplaceServer,
 }
 
 /// The frame that turns a local connection into a routed one.
@@ -304,6 +315,14 @@ impl RouteHeader {
     /// this — every pane that machine hosts dies with the old daemon.
     pub fn restart_server(mut self) -> RouteHeader {
         self.action = RouteAction::RestartServer;
+        self
+    }
+
+    /// The same machine, asking the daemon to rewrite the `tty7-server` binary
+    /// this client's dialect names and restart onto it. Same warning as
+    /// [`restart_server`](Self::restart_server): every pane there dies.
+    pub fn replace_server(mut self) -> RouteHeader {
+        self.action = RouteAction::ReplaceServer;
         self
     }
 
@@ -660,14 +679,19 @@ impl RouteAck {
         }
     }
 
-    /// The answer to a [`RouteAction::RestartServer`] header: the machine's
+    /// The answer to a header that asked for a one-shot action: the machine's
     /// server is this client's build again, and there is no link because there
     /// is nothing more to say on this connection.
-    fn restarted() -> RouteAck {
+    ///
+    /// Echoes back the action it performed rather than hard-coding one, because
+    /// that echo is exactly what [`RouteAck::performed`] checks — an ack naming
+    /// the wrong action would read to the client as an older daemon that
+    /// silently did something else.
+    fn acted(action: RouteAction) -> RouteAck {
         RouteAck {
             ok: true,
             link: None,
-            action: Some(RouteAction::RestartServer),
+            action: Some(action),
             error: None,
         }
     }
@@ -987,9 +1011,9 @@ async fn drive(local: Stream, header: &RouteHeader) -> io::Result<()> {
             // the last thing this connection carries. The client reconnects to
             // the new one on its own — the supervisor's reconnect is already the
             // path for "the machine's server went away".
-            Ok(Performed::Restarted) => {
-                log::info!("restarted tty7's server on {}", header.describe());
-                let payload = ack_payload(&RouteAck::restarted())?;
+            Ok(Performed::Acted(action)) => {
+                log::info!("performed {action:?} on {}", header.describe());
+                let payload = ack_payload(&RouteAck::acted(action))?;
                 write_frame(&mut write_half, ROUTE_KIND, &payload).await?;
                 None
             }
@@ -1104,8 +1128,8 @@ enum Performed {
     /// The link and the connection that has to outlive it. Boxed because a
     /// `RemoteLink` is two orders of magnitude larger than the other variant.
     Linked(Box<RemoteLink>, Option<Arc<SshConnection>>),
-    /// [`RouteAction::RestartServer`] ran. Nothing is left to forward.
-    Restarted,
+    /// A one-shot action ran. Nothing is left to forward.
+    Acted(RouteAction),
 }
 
 /// Do what the header asks — open a link, or carry out a one-shot action.
@@ -1120,9 +1144,9 @@ async fn perform(header: &RouteHeader, setup: &RouteSetup) -> anyhow::Result<Per
             let (link, conn) = open_link(header, setup).await?;
             Ok(Performed::Linked(Box::new(link), conn))
         }
-        RouteAction::RestartServer => {
-            restart_server(header, setup).await?;
-            Ok(Performed::Restarted)
+        action @ (RouteAction::RestartServer | RouteAction::ReplaceServer) => {
+            restart_server(header, setup, action).await?;
+            Ok(Performed::Acted(action))
         }
     }
 }
@@ -1135,9 +1159,18 @@ async fn perform(header: &RouteHeader, setup: &RouteSetup) -> anyhow::Result<Per
 /// `LocalStdio` "machine" is a child process spawned per connection — neither
 /// has a long-lived remote daemon that could be replaced, so neither can raise
 /// the mismatch prompt this action answers. Saying so beats a silent success.
-async fn restart_server(header: &RouteHeader, setup: &RouteSetup) -> anyhow::Result<()> {
-    match &header.target {
-        RouteTarget::Ssh(spec) => {
+async fn restart_server(
+    header: &RouteHeader,
+    setup: &RouteSetup,
+    action: RouteAction,
+) -> anyhow::Result<()> {
+    match (&header.target, action) {
+        (RouteTarget::Ssh(spec), RouteAction::ReplaceServer) => {
+            SshManager::global()
+                .replace_remote_server(spec, setup)
+                .await
+        }
+        (RouteTarget::Ssh(spec), _) => {
             SshManager::global()
                 .restart_remote_server(spec, setup)
                 .await
@@ -1762,7 +1795,7 @@ mod tests {
         assert_eq!(ack.action, None);
         assert!(!ack.performed(RouteAction::RestartServer));
 
-        assert!(RouteAck::restarted().performed(RouteAction::RestartServer));
+        assert!(RouteAck::acted(RouteAction::RestartServer).performed(RouteAction::RestartServer));
         // A forwarding ack is not one either, which is the same daemon answering
         // a header whose action it *did* understand.
         let forwarded = RouteAck {

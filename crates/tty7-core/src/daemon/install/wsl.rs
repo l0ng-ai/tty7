@@ -768,13 +768,24 @@ impl RemoteOps for WslRemoteOps {
 /// Overrides where the bundled Linux server binaries are looked for. Exists so
 /// this can be tested, and so a developer running an unpackaged build can point
 /// at a `cargo build --target x86_64-unknown-linux-musl` output.
+///
+/// **The file in it has to carry the asset name**, not cargo's — [`Self::locate`]
+/// joins the directory with
+/// [`asset::ASSET_X86_64`](crate::daemon::install::asset::ASSET_X86_64) and
+/// nothing translates, so a cross-compile has to be copied to
+/// `tty7-server-linux-x86_64-musl` rather than left as plain `tty7-server`.
+///
+/// [`Self::locate`]: BundledServerBinary::locate
 pub const BUNDLED_DIR_ENV: &str = "TTY7_BUNDLED_SERVER_DIR";
 
 /// The subdirectory beside the client executable that a packaged build puts the
 /// Linux server binaries in. **This is the contract with the release workflow**:
 /// the Windows installer must place
-/// `<install dir>/server/tty7-server-x86_64-unknown-linux-musl` (and the
-/// `aarch64` one, for WSL on ARM Windows).
+/// `<install dir>/server/tty7-server-linux-x86_64-musl` (and the `aarch64` one,
+/// for WSL on ARM Windows) — the filenames
+/// [`asset::ASSET_X86_64`](crate::daemon::install::asset::ASSET_X86_64) names,
+/// because [`BundledServerBinary::locate`] joins the directory with the asset
+/// name and nothing translates between the two.
 pub const BUNDLED_SUBDIR: &str = "server";
 
 /// Directories a bundled Linux server binary is looked for in, most specific
@@ -891,7 +902,8 @@ impl ServerBinarySource for BundledServerBinary {
 /// opens one routed connection per pane, all at once, on separate daemon
 /// threads. Without this they run the installer concurrently against the same
 /// distribution, and the interleaving is destructive rather than merely wasteful:
-/// two runs both write `.tty7-server-<ver>.tmp`, the first renames it into place
+/// two runs in *this* process share a pid and so share
+/// `.tty7-server-c<c>p<p>.<pid>.tmp`, the first renames it into place
 /// and reports success, and the second's rename then fails — which sends it down
 /// [`Installer::install`]'s recovery branch, whose `remove_file(&paths.binary)`
 /// **deletes the binary the first run just published**. Every later pane then
@@ -1680,10 +1692,7 @@ mod tests {
             .load("26.7.5", super::super::asset::ASSET_X86_64)
             .expect_err("nothing bundled yet");
         let msg = err.to_string();
-        assert!(
-            msg.contains("tty7-server-x86_64-unknown-linux-musl"),
-            "{msg}"
-        );
+        assert!(msg.contains("tty7-server-linux-x86_64-musl"), "{msg}");
         assert!(msg.contains(&tmp.display().to_string()), "{msg}");
         assert!(matches!(err, InstallError::MissingBundled { .. }));
 
@@ -1751,6 +1760,24 @@ mod tests {
                         status: Some(1),
                         stdout: String::new(),
                         stderr: String::new(),
+                    })
+                };
+            }
+            if let Some(exe) = cmd
+                .trim()
+                .strip_suffix(crate::daemon::install::PROTOCOL_FLAG)
+            {
+                // Every binary this fake holds is one the installer just put
+                // there, so it speaks what this build speaks. Anything else
+                // cannot answer, exactly like a server older than the flag.
+                let exe = exe.trim().trim_matches('\'');
+                return if self.files.lock().unwrap().contains_key(exe) {
+                    ok(&crate::daemon::install::RemoteProtocol::of_this_build().to_line())
+                } else {
+                    Ok(ExecOutput {
+                        status: Some(1),
+                        stdout: String::new(),
+                        stderr: "unknown flag".into(),
                     })
                 };
             }
@@ -1882,9 +1909,14 @@ mod tests {
         assert!(report.installed);
         assert!(report.launched);
         assert!(report.confirmed, "a first install asks");
+        let dialect = crate::daemon::install::RemoteProtocol::of_this_build();
         assert_eq!(
             report.paths.binary,
-            "/home/me/.local/share/tty7/bin/tty7-server-26.7.5"
+            format!(
+                "/home/me/.local/share/tty7/bin/tty7-server-c{}p{}",
+                dialect.control, dialect.protocol
+            ),
+            "the name follows the dialect, not the `--with_version` release"
         );
         assert_eq!(
             ops.files.lock().unwrap()[&report.paths.binary].0,
@@ -2050,7 +2082,7 @@ mod tests {
             .run()
             .expect_err("no aarch64 binary bundled");
         let msg = err.to_string();
-        assert!(msg.contains("aarch64-unknown-linux-musl"), "{msg}");
+        assert!(msg.contains("linux-aarch64-musl"), "{msg}");
 
         // With it bundled, the same install goes through.
         std::fs::write(dir.join(super::super::asset::ASSET_AARCH64), b"\x7fELF arm").unwrap();

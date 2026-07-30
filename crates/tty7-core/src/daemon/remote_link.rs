@@ -251,9 +251,9 @@ fn spawn_stdio_owned(program: &str, args: &[String]) -> io::Result<ProcessStream
 ///
 /// **Only a fallback for links that skip the install pass.** SSH links do not:
 /// `SshManager::open_remote_link` runs `install::ensure_remote_server` first and
-/// uses the absolute, version-qualified path it returns. That matters because
+/// uses the absolute, dialect-qualified path it returns. That matters because
 /// nothing puts `~/.local/share/tty7/bin` on a non-interactive `PATH`, and the
-/// file there is `tty7-server-<version>` — this bare name would be a
+/// file there is `tty7-server-c<control>p<protocol>` — this bare name would be a
 /// `command not found` on a machine the install had just succeeded on.
 /// [`super::router::RouteHeader::server_command`] overrides either.
 pub const DEFAULT_REMOTE_SERVER_CMD: &str = "tty7-server --stdio";

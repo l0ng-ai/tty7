@@ -23,8 +23,9 @@
 //! [`HookTarget`] — the three facts that differ between machines: where `~` is,
 //! which filesystem to write through, and which executable answers
 //! `agent-hook`. Locally that is this binary; remotely it is the
-//! `tty7-server-<version>` the installer published there, which carries the
-//! same emitter for exactly this reason (`crates/tty7-server/src/main.rs`).
+//! `tty7-server-c<control>p<protocol>` the installer published there, which
+//! carries the same emitter for exactly this reason
+//! (`crates/tty7-server/src/main.rs`).
 
 use std::io;
 use std::io::{IsTerminal as _, Read as _};
@@ -475,7 +476,7 @@ impl<'a> HookTarget<'a> {
     }
 
     /// A remote machine: the `$HOME` its handshake reported, and the
-    /// `tty7-server-<version>` this client published into it.
+    /// `tty7-server-c<control>p<protocol>` this client published into it.
     ///
     /// The *installed* binary, not the one the running daemon was launched
     /// from. The two can differ — a user who kept an older daemon alive rather
@@ -483,10 +484,16 @@ impl<'a> HookTarget<'a> {
     /// a one-shot child of the agent that writes an escape sequence to its own
     /// tty and exits. It never talks to the daemon, so the binary only has to
     /// exist, and the one this client installed is the one it can prove does.
+    ///
+    /// Naming it stays a pure function of `home` because the name is built from
+    /// this client's own dialect numbers — nothing has to be asked of the remote
+    /// to know what tty7 called the file it put there.
     pub fn remote(host: &'a dyn Host, home: PathBuf) -> HookTarget<'a> {
+        let dialect = crate::daemon::install::RemoteProtocol::of_this_build();
         let binary = crate::daemon::install::asset::remote_paths(
             &home.to_string_lossy(),
-            crate::daemon::install::client_version(),
+            dialect.control,
+            dialect.protocol,
         )
         .binary;
         HookTarget {
@@ -1564,19 +1571,18 @@ mod tests {
     }
 
     /// The hook a remote machine runs is the binary that lives *there*. The
-    /// local exe path is meaningless over there, and the version is in the
-    /// server binary's filename — which is what makes a server upgrade leave
-    /// hooks pointing at a path that no longer exists (see [`refresh_hooks`]).
+    /// local exe path is meaningless over there, and the dialects are in the
+    /// server binary's filename — which is what makes a wire break leave hooks
+    /// pointing at a path that no longer exists (see [`refresh_hooks`]).
     #[test]
     fn the_hook_command_names_the_binary_on_that_machine() {
         let host = FakeRemote::shared();
         let target = HookTarget::remote(&*host, PathBuf::from("/home/me"));
-        let version = crate::daemon::install::client_version();
+        let dialect = crate::daemon::install::RemoteProtocol::of_this_build();
+        let name = format!("tty7-server-c{}p{}", dialect.control, dialect.protocol);
         assert_eq!(
             target.hook_command(HookAgent::Claude, "stop"),
-            format!(
-                "\"/home/me/.local/share/tty7/bin/tty7-server-{version}\" agent-hook claude stop"
-            )
+            format!("\"/home/me/.local/share/tty7/bin/{name}\" agent-hook claude stop")
         );
 
         // And locally it is still this process's own executable.
@@ -1607,9 +1613,10 @@ mod tests {
             assert_eq!(hooks_state(&target, agent), HooksState::Installed);
             // The file really is there, under the remote-shaped path.
             let path = agent.target_path(&target);
+            let dialect = crate::daemon::install::RemoteProtocol::of_this_build();
             assert!(std::fs::read_to_string(&path).unwrap().contains(&format!(
-                "tty7-server-{}",
-                crate::daemon::install::client_version()
+                "tty7-server-c{}p{}",
+                dialect.control, dialect.protocol
             )));
             uninstall_hooks(&target, agent).expect("uninstall succeeds");
             assert_eq!(hooks_state(&target, agent), HooksState::NotInstalled);
