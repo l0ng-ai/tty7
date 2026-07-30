@@ -2169,6 +2169,15 @@ impl TerminalView {
         if self.history_scope.is_local() || self.host_id.is_local() {
             return Vec::new();
         }
+        // The Host reaches the workspace machine's home directory and nothing
+        // beyond it. A pane that has ssh'ed onward from there (remote_context)
+        // is scoped to the *inner* target, and seeding that scope from the
+        // workspace host's ~/.zsh_history would offer commands from the wrong
+        // box — the exact confusion scoping exists to prevent. Those panes
+        // start from what tty7 recorded for the inner target, like bare ssh.
+        if self.remote_context().is_some() {
+            return Vec::new();
+        }
         let Some(host) = self.host(cx) else {
             return Vec::new();
         };
