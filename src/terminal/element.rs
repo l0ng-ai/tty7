@@ -1273,15 +1273,32 @@ impl TerminalElement {
         let Some(link) = self.view.read(cx).hovered_link.as_ref() else {
             return;
         };
-        let row = link.line + display_offset;
-        if row < 0 || row as usize >= rows {
-            return;
-        }
-        let row = row as usize;
-        let mut col = link.start;
-        while col <= link.end && col < cols {
-            buf[row * cols + col].link_hover = true;
-            col += 1;
+        // The link may span several rows — a soft wrap, or a URL a program
+        // split with a hard newline. Paint every covered cell: full columns on
+        // the interior rows, clamped to `start`/`end` on the first and last.
+        let (start, end) = (link.start, link.end);
+        let mut line = start.line.0;
+        while line <= end.line.0 {
+            let grid_row = line + display_offset;
+            if grid_row >= 0 && (grid_row as usize) < rows {
+                let grid_row = grid_row as usize;
+                let col_start = if line == start.line.0 {
+                    start.column.0
+                } else {
+                    0
+                };
+                let col_end = if line == end.line.0 {
+                    end.column.0
+                } else {
+                    cols.saturating_sub(1)
+                };
+                let mut col = col_start;
+                while col <= col_end && col < cols {
+                    buf[grid_row * cols + col].link_hover = true;
+                    col += 1;
+                }
+            }
+            line += 1;
         }
     }
 

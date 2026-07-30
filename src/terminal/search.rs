@@ -861,7 +861,7 @@ fn truncate_at_unbalanced_close(token: &mut String) {
 /// Whether `c` may appear inside a URL per RFC 3986 (unreserved + reserved + `%`).
 /// Every such character is ASCII, so any CJK character, full-width bracket, arrow or
 /// emoji is rejected — which is what lets a URL be cut off from trailing CJK prose.
-fn is_url_char(c: char) -> bool {
+pub(super) fn is_url_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
         || matches!(
             c,
