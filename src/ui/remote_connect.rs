@@ -240,7 +240,9 @@ fn wsl_choices(names: &[String]) -> Vec<HostChoice> {
 /// The same shape `terminal::pane_liveness` uses for the machine answers drawn
 /// two rows above these.
 #[derive(Default)]
-pub struct WslDistros {
+struct WslDistros {
+    /// The last list a probe actually produced. A probe that could not answer
+    /// leaves it alone — see [`sweep_wsl`].
     names: Vec<String>,
     /// When the last probe landed; `None` while none ever has, which is what
     /// makes the first [`sweep_wsl`] run instead of waiting out the TTL.
@@ -264,6 +266,13 @@ const WSL_TTL: Duration = Duration::from_secs(30);
 /// Safe to call from `render` or from an action: it reads the global, may start
 /// background work, and never blocks. Off Windows there are no distributions
 /// and nothing is spawned.
+///
+/// **A probe that could not answer keeps the last list.** `wsl.exe` refuses while
+/// a `wsl --shutdown` is in flight, and overwriting with its empty answer would
+/// make every distribution vanish from the switcher for a TTL — over something
+/// the user runs routinely and that changed nothing. An *authoritative* empty
+/// answer still clears the rows, which is what unregistering the last
+/// distribution has to look like.
 pub fn sweep_wsl(cx: &mut App) {
     if !cfg!(windows) {
         return;
@@ -276,15 +285,11 @@ pub fn sweep_wsl(cx: &mut App) {
     }
     cx.update_global::<WslDistros, _>(|state, _| state.in_flight = true);
     cx.spawn(async move |cx| {
-        let names = cx
-            .background_spawn(async { crate::core::shells::wsl_distros() })
+        let probed = cx
+            .background_spawn(async { crate::core::shells::wsl_distros_probed() })
             .await;
         let _ = cx.update(|cx| {
-            cx.update_global::<WslDistros, _>(|state, _| {
-                state.names = names;
-                state.probed_at = Some(Instant::now());
-                state.in_flight = false;
-            });
+            cx.update_global::<WslDistros, _>(|state, _| adopt_probe(state, probed));
             // The frame that asked for this list is long gone — the answer lands
             // on a background task, and an idle switcher has nothing else that
             // would redraw it.
@@ -292,6 +297,20 @@ pub fn sweep_wsl(cx: &mut App) {
         });
     })
     .detach();
+}
+
+/// Fold a probe result into the state: an answer replaces the list, a probe that
+/// could not answer leaves it standing, and either way the stamp advances so the
+/// TTL governs the next attempt.
+///
+/// Pure, because this is the whole judgement in [`sweep_wsl`] and the rest of it
+/// is a background task on a platform CI cannot run.
+fn adopt_probe(state: &mut WslDistros, probed: Option<Vec<String>>) {
+    if let Some(names) = probed {
+        state.names = names;
+    }
+    state.probed_at = Some(Instant::now());
+    state.in_flight = false;
 }
 
 /// `user@host` — with the port only when it isn't the default, which is the
@@ -1464,5 +1483,38 @@ mod tests {
         let by_kind = filter_hosts(&hosts, "wsl");
         assert_eq!(by_kind.len(), 1);
         assert_eq!(by_kind[0].label, "Ubuntu");
+    }
+
+    /// **A probe that could not answer is not an empty machine list.** `wsl.exe`
+    /// refuses while a `wsl --shutdown` is in flight; adopting that as "you have
+    /// no distributions" would empty the switcher for a TTL over a command that
+    /// changed nothing.
+    #[test]
+    fn a_failed_probe_keeps_the_distros_it_already_had() {
+        let mut state = WslDistros {
+            names: vec!["Ubuntu-24.04".to_string()],
+            ..Default::default()
+        };
+        adopt_probe(&mut state, None);
+
+        assert_eq!(state.names, vec!["Ubuntu-24.04".to_string()]);
+        assert!(state.probed_at.is_some(), "the TTL still restarts");
+        assert!(!state.in_flight, "the next sweep is allowed to run");
+    }
+
+    /// An answer is adopted whole, *including* an empty one — unregistering the
+    /// last distribution has to take its row away, or the picker offers a machine
+    /// that cannot be reached.
+    #[test]
+    fn an_answered_probe_replaces_the_list_even_when_it_is_empty() {
+        let mut state = WslDistros {
+            names: vec!["Ubuntu-24.04".to_string()],
+            ..Default::default()
+        };
+        adopt_probe(&mut state, Some(Vec::new()));
+        assert!(state.names.is_empty());
+
+        adopt_probe(&mut state, Some(vec!["Arch".to_string()]));
+        assert_eq!(state.names, vec!["Arch".to_string()]);
     }
 }

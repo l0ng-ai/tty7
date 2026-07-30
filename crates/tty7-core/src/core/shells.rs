@@ -324,7 +324,7 @@ fn detect_windows() -> Vec<DetectedShell> {
         });
     }
 
-    for distro in list_wsl_distros() {
+    for distro in list_wsl_distros().unwrap_or_default() {
         out.push(DetectedShell {
             label: format!("WSL · {distro}"),
             program: "wsl.exe".into(),
@@ -357,13 +357,26 @@ pub fn git_bash_path() -> Option<PathBuf> {
 /// Spawns `wsl.exe` on Windows — the same rule as [`detect_shells`]: call it
 /// off the UI thread.
 pub fn wsl_distros() -> Vec<String> {
+    wsl_distros_probed().unwrap_or_default()
+}
+
+/// [`wsl_distros`], keeping the difference between *nothing is installed* and
+/// *the probe could not answer*.
+///
+/// `Some(vec![])` is an answer — WSL is present and has no distributions, or this
+/// is not Windows at all, where there can never be one. `None` means the probe
+/// itself failed, and a caller holding a previous list should keep it rather than
+/// report that the user's distributions have gone away: `wsl.exe` refuses while a
+/// `wsl --shutdown` is in flight, which is a routine thing to run and a terrible
+/// reason to empty the machine picker.
+pub fn wsl_distros_probed() -> Option<Vec<String>> {
     #[cfg(windows)]
     {
         list_wsl_distros()
     }
     #[cfg(not(windows))]
     {
-        Vec::new()
+        Some(Vec::new())
     }
 }
 
@@ -389,20 +402,23 @@ fn find_git_bash() -> Option<PathBuf> {
     pick_first_existing(candidates)
 }
 
-/// Installed WSL distribution names via `wsl.exe -l -q`, or empty when WSL is
-/// absent. [`hide_console`](crate::core::proc::hide_console) keeps the probe
-/// from flashing a console window (we're a GUI process).
+/// Installed WSL distribution names via `wsl.exe -l -q`.
+///
+/// **`None` is "the probe could not answer", not "there are none"** — no
+/// `wsl.exe`, or one that failed, which is what a distribution mid-`wsl
+/// --shutdown` or a broken WSL install looks like. `Some(vec![])` is the
+/// authoritative empty answer: WSL is there and nothing is registered.
+/// [`hide_console`](crate::core::proc::hide_console) keeps the probe from
+/// flashing a console window (we're a GUI process).
 #[cfg(windows)]
-fn list_wsl_distros() -> Vec<String> {
+fn list_wsl_distros() -> Option<Vec<String>> {
     let mut cmd = std::process::Command::new("wsl.exe");
     cmd.args(["-l", "-q"]);
-    let Ok(output) = crate::core::proc::hide_console(&mut cmd).output() else {
-        return Vec::new();
-    };
+    let output = crate::core::proc::hide_console(&mut cmd).output().ok()?;
     if !output.status.success() {
-        return Vec::new();
+        return None;
     }
-    parse_wsl_list(&output.stdout)
+    Some(parse_wsl_list(&output.stdout))
 }
 
 /// Decode `wsl.exe -l -q` output — UTF-16LE, one distro per line — skipping
