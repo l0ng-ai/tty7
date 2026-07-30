@@ -451,7 +451,13 @@ impl Tty7App {
             // Only while *this* window is the one connecting. Another window's
             // install is its own business, and a bar under a row this panel is
             // not driving would have no "Try Again" to turn into.
-            if group.link == Link::Connecting {
+            //
+            // `error` counts too, and is not an exception to that: it is the
+            // state a machine is in while the error card.s "Restart Server" — a
+            // exists inside this panel's own error card — is working on it. Left
+            // out, the one flow that transfers nothing would show nothing at all
+            // for the length of two timeouts.
+            if group.link == Link::Connecting || group.error.is_some() {
                 group.installing = remote_connect::install_progress_for(id);
             }
             // Read app-wide, not from this window's snapshot: any window's
@@ -878,50 +884,97 @@ impl Tty7App {
         // A failure is a resting state — it stays on screen with its reason
         // in full and its next move one click away, rather than reverting the
         // panel and leaving the user to guess between VPN, keys and the box.
-        if let Some(error) = group.error.as_ref() {
+        // Not while something is being done about it: a stale reason sitting
+        // above a live progress bar reads as two states at once, and the two
+        // buttons under it are exactly what must not be clicked twice.
+        if let Some(error) = group.error.as_ref().filter(|_| group.installing.is_none()) {
             let retry = GroupRef::of(group);
+            let replace = retry.clone();
             let theme = cx.theme();
-            block = block.child(
-                v_flex()
-                    .gap(px(4.))
-                    .ml(px(KID_INDENT))
-                    .mr(px(4.))
-                    .mb(px(2.))
-                    .px(px(10.))
-                    .py(px(8.))
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(theme.danger.opacity(0.35))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(error.clone()),
-                    )
-                    .child(
-                        Button::new(gpui::SharedString::from(format!(
-                            "switcher-retry:{}",
-                            group.key
-                        )))
-                        .label("Try Again")
-                        .ghost()
-                        .xsmall()
-                        .on_click(cx.listener(
-                            move |this, _, _window, cx| {
-                                if let Some(target) = retry.target.clone() {
-                                    this.connect_to_host(
-                                        HostChoice {
-                                            target,
-                                            label: retry.label.clone(),
-                                            detail: String::new(),
-                                        },
-                                        cx,
-                                    );
-                                }
-                            },
-                        )),
-                    ),
-            );
+            block =
+                block.child(
+                    v_flex()
+                        .gap(px(4.))
+                        .ml(px(KID_INDENT))
+                        .mr(px(4.))
+                        .mb(px(2.))
+                        .px(px(10.))
+                        .py(px(8.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(theme.danger.opacity(0.35))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(error.clone()),
+                        )
+                        .child(
+                            h_flex()
+                                .gap(px(4.))
+                                .child(
+                                    Button::new(gpui::SharedString::from(format!(
+                                        "switcher-retry:{}",
+                                        group.key
+                                    )))
+                                    .label("Try Again")
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        if let Some(target) = retry.target.clone() {
+                                            this.connect_to_host(
+                                                HostChoice {
+                                                    target,
+                                                    label: retry.label.clone(),
+                                                    detail: String::new(),
+                                                },
+                                                cx,
+                                            );
+                                        }
+                                    })),
+                                )
+                                // Only for the one failure a reinstall fixes. Every
+                                // other reason a connect fails (unreachable, refused
+                                // key, no route) would cost the user every pane on
+                                // that machine and not help — so the button is not
+                                // there to be misread as a general retry.
+                                .when(
+                                    crate::daemon::control::is_dialect_refusal(error)
+                                        && replace.target.is_some(),
+                                    |row| {
+                                        row.child(
+                                            Button::new(gpui::SharedString::from(format!(
+                                                "switcher-replace:{}",
+                                                group.key
+                                            )))
+                                            // The same words as the mismatch
+                                            // prompt's button, because it is the
+                                            // same thing to the user: this
+                                            // machine's server becomes one this
+                                            // client can talk to, and everything
+                                            // running on it ends. Whether a binary
+                                            // has to be written on the way is an
+                                            // implementation detail, and a second
+                                            // verb for it only asks the user to
+                                            // tell two identical outcomes apart.
+                                            .label("Restart Server")
+                                            .ghost()
+                                            .xsmall()
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                if let Some(target) = replace.target.clone() {
+                                                    this.confirm_replace_remote_server(
+                                                        target,
+                                                        replace.label.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }
+                                            })),
+                                        )
+                                    },
+                                ),
+                        ),
+                );
         }
         // A machine with no workspaces on it renders as its header alone. There
         // used to be a "New Workspace" row to fill the space; it lives in the
@@ -957,21 +1010,27 @@ impl Tty7App {
         // The same warning colour the header's dot and "installing…" already
         // use, so the row and the bar read as one state and not two.
         let accent = theme.warning;
-        let (verb, done, total) = match phase {
-            InstallPhase::Downloading { done, total } => ("Downloading", done, total),
-            InstallPhase::Uploading { done, total } => ("Copying", done, Some(total)),
-        };
         // An unknown total (no Content-Length) still gets a line of text and a
         // bar — just an empty one. A bar that guessed at a fraction would be
         // lying, and one that vanished would read as the install having stopped.
+        // A restart is the same shape for a different reason: it is two timeouts
+        // and no transfer, so there is nothing it could honestly fill.
         let fraction = phase.fraction().unwrap_or(0.0);
-        let caption = match total {
-            Some(total) => format!(
-                "{verb} tty7's server… {} / {}",
+        let caption = match phase {
+            InstallPhase::Restarting => "Restarting tty7's server\u{2026}".to_string(),
+            InstallPhase::Downloading { done, total } => match total {
+                Some(total) => format!(
+                    "Downloading tty7's server\u{2026} {} / {}",
+                    human_bytes(done),
+                    human_bytes(total)
+                ),
+                None => format!("Downloading tty7's server\u{2026} {}", human_bytes(done)),
+            },
+            InstallPhase::Uploading { done, total } => format!(
+                "Copying tty7's server\u{2026} {} / {}",
                 human_bytes(done),
                 human_bytes(total)
             ),
-            None => format!("{verb} tty7's server… {}", human_bytes(done)),
         };
 
         v_flex()

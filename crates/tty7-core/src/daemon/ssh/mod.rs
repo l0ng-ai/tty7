@@ -529,6 +529,26 @@ impl SshManager {
         Ok(())
     }
 
+    /// Reinstall this client's `tty7-server` on `spec`'s host over whatever is at
+    /// its path, then restart the daemon onto it — "Replace Server", and **it
+    /// drops every pane that server is hosting**.
+    ///
+    /// Unlike [`restart_remote_server`](Self::restart_remote_server) this *does*
+    /// write: it is the answer to a handshake that failed against a binary whose
+    /// name promised a dialect it does not speak, so the file itself is what has
+    /// to change. See [`crate::daemon::install::Installer::replace`].
+    pub async fn replace_remote_server(
+        &self,
+        spec: &NativeSshSpec,
+        setup: &RouteSetup,
+    ) -> anyhow::Result<()> {
+        let (conn, _reused) = self.open_connection(spec, &setup.broker).await?;
+        setup
+            .blocking(move || crate::daemon::install::replace_remote_server(&conn))
+            .await??;
+        Ok(())
+    }
+
     /// [`open_remote_link`](Self::open_remote_link) for the daemon's std threads
     /// (the router runs on one). Safe from any thread that is not itself a
     /// runtime worker — the server's connection threads never are.

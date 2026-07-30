@@ -1754,6 +1754,24 @@ mod tests {
                     })
                 };
             }
+            if let Some(exe) = cmd
+                .trim()
+                .strip_suffix(crate::daemon::install::PROTOCOL_FLAG)
+            {
+                // Every binary this fake holds is one the installer just put
+                // there, so it speaks what this build speaks. Anything else
+                // cannot answer, exactly like a server older than the flag.
+                let exe = exe.trim().trim_matches('\'');
+                return if self.files.lock().unwrap().contains_key(exe) {
+                    ok(&crate::daemon::install::RemoteProtocol::of_this_build().to_line())
+                } else {
+                    Ok(ExecOutput {
+                        status: Some(1),
+                        stdout: String::new(),
+                        stderr: "unknown flag".into(),
+                    })
+                };
+            }
             // The `/proc` sweep: no other build is running.
             ok("")
         }
@@ -1882,9 +1900,14 @@ mod tests {
         assert!(report.installed);
         assert!(report.launched);
         assert!(report.confirmed, "a first install asks");
+        let dialect = crate::daemon::install::RemoteProtocol::of_this_build();
         assert_eq!(
             report.paths.binary,
-            "/home/me/.local/share/tty7/bin/tty7-server-26.7.5"
+            format!(
+                "/home/me/.local/share/tty7/bin/tty7-server-c{}p{}",
+                dialect.control, dialect.protocol
+            ),
+            "the name follows the dialect, not the `--with_version` release"
         );
         assert_eq!(
             ops.files.lock().unwrap()[&report.paths.binary].0,

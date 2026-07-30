@@ -1044,13 +1044,17 @@ pub(crate) fn claim_mailbox() -> std::sync::MutexGuard<'static, ()> {
 // 7. Remote daemon version skew
 // ---------------------------------------------------------------------------
 
-/// The keep-or-restart question for a remote `tty7-server` at a different build.
+/// The restart-or-cancel question for a remote `tty7-server` this client cannot
+/// talk to.
 ///
-/// The local analogue is `Tty7App::prompt_daemon_version_mismatch`, and the
-/// trade is identical: the running daemon owns every live pane on that machine,
-/// so restarting it throws that work away, while keeping it means talking an
-/// older dialect. The one thing that differs is whose machine it is, which is
-/// why the title names the host.
+/// **There is no "keep and carry on" here, and the wording must not imply one.**
+/// A mismatch is only ever recorded when the running daemon's *dialects* are not
+/// ours (`Installer::check_running_build`) — a merely different build that can
+/// still speak to us is reused in silence and never reaches this prompt. The
+/// workspace connects to the daemon that is running, so leaving it in place
+/// means the connection fails in the handshake. The real choice is between
+/// ending that machine's sessions and not connecting at all, and saying so is
+/// the difference between a decision and a trick.
 pub fn mismatch_detail(m: &MismatchedRemoteDaemon) -> String {
     let running = match (&m.running_version, &m.running_exe) {
         (Some(v), Some(exe)) => format!("{v} (from {exe})"),
@@ -1059,10 +1063,12 @@ pub fn mismatch_detail(m: &MismatchedRemoteDaemon) -> String {
         (None, None) => "an unknown build".to_string(),
     };
     format!(
-        "{host} is already serving tty7 sessions from {running}, but this client is {wanted}.\n\
+        "{host} is serving tty7 sessions from {running}, which speaks a protocol \
+         this client ({wanted}) cannot. tty7 has installed a matching server there, \
+         but the one already running is the one your sessions are on.\n\
          \n\
-         Keep Sessions\u{2003}everything running on {host} stays up, over the older protocol.\n\
-         Restart Server\u{2003}starts {wanted} there and ends every session it is hosting.",
+         Restart Server\u{2003}starts {wanted} there and ends every session it is hosting.\n\
+         Cancel\u{2003}leaves {host} exactly as it is. This window will not connect.",
         host = m.host,
         wanted = m.wanted_version,
     )
@@ -1091,6 +1097,7 @@ pub fn mismatch_target(m: &MismatchedRemoteDaemon) -> Option<RemoteTarget> {
 /// The connection is a setup window and nothing else: the daemon acks and both
 /// ends close. Reconnecting afterwards is the supervisor's job, not this one's.
 pub fn restart_server_blocking(header: RouteHeader, label: &str) -> Result<(), String> {
+    let action = header.action;
     crate::daemon::spawn::ensure_running()
         .map_err(|e| format!("tty7's local daemon could not be started: {e}"))?;
     let mut stream = crate::daemon::transport::connect()
@@ -1101,7 +1108,7 @@ pub fn restart_server_blocking(header: RouteHeader, label: &str) -> Result<(), S
     // connection instead — a link, not a restart. Saying nothing happened is the
     // only honest answer; the alternative is a "done" over a server still
     // running the old build.
-    if !ack.performed(crate::daemon::router::RouteAction::RestartServer) {
+    if !ack.performed(action) {
         return Err(format!(
             "this machine's tty7 daemon is an older build and cannot restart the server on \
              {label}. Quit tty7 (which stops the daemon) and open it again, then retry."

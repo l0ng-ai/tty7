@@ -148,7 +148,7 @@ pub fn download_url(tag: &str, asset: &str) -> String {
     format!("{RELEASE_BASE}/{tag}/{asset}")
 }
 
-/// Absolute remote paths for one client version's server binary.
+/// Absolute remote paths for one *dialect*'s server binary.
 ///
 /// Built with explicit `/` joins from an absolute `$HOME` the remote resolved for
 /// us (SFTP does not expand `~`, and `PathBuf::join` would emit `\` on a Windows
@@ -157,25 +157,27 @@ pub fn download_url(tag: &str, asset: &str) -> String {
 pub struct RemotePaths {
     /// `$HOME/.local/share/tty7/bin`.
     pub bin_dir: String,
-    /// `$HOME/.local/share/tty7/bin/tty7-server-<version>` — the atomically
-    /// published binary. The version is *in the path* so two clients of different
-    /// versions can coexist on one machine; only the running daemon is singular.
+    /// `$HOME/.local/share/tty7/bin/tty7-server-c<control>p<protocol>` — the
+    /// atomically published binary. See [`binary_name`] for why the dialects, and
+    /// not the version, are what the name carries.
     pub binary: String,
-    /// `$HOME/.local/share/tty7/bin/.tty7-server-<version>.tmp` — where the bytes
-    /// land before `chmod` + `rename`.
+    /// `$HOME/.local/share/tty7/bin/.tty7-server-c<control>p<protocol>.tmp` —
+    /// where the bytes land before `chmod`, the `--protocol` check, and `rename`.
     ///
     /// A dotfile, so a half-written upload is not mistaken for an installed
-    /// server by anything globbing the directory, and a *fixed* name per version
-    /// so an install killed mid-upload leaves one reusable file behind instead of
-    /// accumulating random-suffixed litter on someone else's disk.
+    /// server by anything reading the directory. The installer adds a per-process
+    /// suffix (`super::unique_temp`) before writing: one file per dialect means
+    /// two clients installing the same dialect at once would otherwise interleave
+    /// their bytes into one name.
     pub temp: String,
     /// Every directory that must exist before the upload, outermost first. SFTP
     /// has no recursive mkdir, so the installer walks this.
     pub dir_chain: Vec<String>,
 }
 
-/// Build the remote paths for `version` under an absolute remote `home`.
-pub fn remote_paths(home: &str, version: &str) -> RemotePaths {
+/// Build the remote paths for a server speaking `control`/`protocol` under an
+/// absolute remote `home`.
+pub fn remote_paths(home: &str, control: u32, protocol: u32) -> RemotePaths {
     let home = home.trim_end_matches('/');
     let mut dir_chain = Vec::with_capacity(INSTALL_DIR_COMPONENTS.len());
     let mut cursor = home.to_string();
@@ -184,17 +186,35 @@ pub fn remote_paths(home: &str, version: &str) -> RemotePaths {
         dir_chain.push(cursor.clone());
     }
     let bin_dir = cursor;
+    let name = binary_name(control, protocol);
     RemotePaths {
-        binary: format!("{bin_dir}/{}", binary_name(version)),
-        temp: format!("{bin_dir}/.tty7-server-{version}.tmp"),
+        binary: format!("{bin_dir}/{name}"),
+        temp: format!("{bin_dir}/.{name}.tmp"),
         dir_chain,
         bin_dir,
     }
 }
 
-/// The filename a `version`'s server binary is installed under.
-pub fn binary_name(version: &str) -> String {
-    format!("tty7-server-{version}")
+/// The filename a server speaking `control`/`protocol` is installed under.
+///
+/// **The dialects are the name, and the version is nowhere in it.** Everything
+/// the installer decides — is there something usable here, can the daemon that
+/// is running talk to us — is a question about dialects, and a name built from
+/// them answers it with a `stat` the client can address without asking the
+/// remote anything. A name built from the version answers a *different*
+/// question, and answers this one wrong in both directions: two builds that
+/// share a version string but not a dialect (any two dev builds between
+/// releases) look interchangeable, and two builds that share a dialect but not a
+/// version look incompatible and cost an 8 MB upload that changes nothing.
+///
+/// One file per dialect, so a machine accumulates at most one binary per wire
+/// break rather than one per release. Which *build* is sitting behind a given
+/// dialect is a separate question, answered by [`PROTOCOL_FLAG`][flag] and by
+/// the control handshake — not by the filename.
+///
+/// [flag]: super::PROTOCOL_FLAG
+pub fn binary_name(control: u32, protocol: u32) -> String {
+    format!("tty7-server-c{control}p{protocol}")
 }
 
 /// [`RemotePaths`] pointing at a binary that is **already on the machine**,
@@ -210,27 +230,33 @@ pub fn binary_name(version: &str) -> String {
 /// where a later install would write. Nothing writes anything on the adoption
 /// path, so they are unused there; keeping them well-formed means a caller that
 /// falls back to installing does not need a second `RemotePaths`.
-pub fn remote_paths_for_binary(home: &str, binary: &str) -> RemotePaths {
-    let version = version_from_path(binary);
-    let mut paths = remote_paths(home, version.as_deref().unwrap_or("unknown"));
+pub fn remote_paths_for_binary(
+    home: &str,
+    binary: &str,
+    control: u32,
+    protocol: u32,
+) -> RemotePaths {
+    let mut paths = remote_paths(home, control, protocol);
     paths.binary = binary.to_string();
     paths
 }
 
-/// The version encoded in an installed binary's *path*, if it is one of ours.
+/// The dialects encoded in an installed binary's *path*, if it is one of ours.
 ///
-/// This is how the running daemon's build is identified without asking it: the
-/// install path carries the version by construction, so `readlink /proc/<pid>/exe`
-/// on the remote answers "which tty7-server is serving this machine" for every
-/// build we have ever shipped — including ones older than any handshake we could
-/// send them.
-pub fn version_from_path(path: &str) -> Option<String> {
+/// This is how the running daemon is identified without asking it: the install
+/// path carries the dialects by construction, so `readlink /proc/<pid>/exe` on
+/// the remote answers "can the thing serving this machine talk to us" in the
+/// round trip that found it.
+///
+/// `None` for anything else, and that deliberately includes every binary
+/// installed by a client that named files after versions: an old name carries no
+/// dialect, so it gets no opinion, and the probe (`--protocol`) is what settles
+/// it. Guessing a dialect from a version string is the exact inference this
+/// naming exists to make impossible.
+pub fn dialect_from_path(path: &str) -> Option<(u32, u32)> {
     let name = path.rsplit('/').next()?;
-    let rest = name.strip_prefix("tty7-server-")?;
-    if rest.is_empty() {
-        return None;
-    }
-    Some(rest.to_string())
+    let (control, protocol) = name.strip_prefix("tty7-server-c")?.split_once('p')?;
+    Some((control.parse().ok()?, protocol.parse().ok()?))
 }
 
 #[cfg(test)]
@@ -369,16 +395,13 @@ mod tests {
     /// what `PathBuf::join` would produce on a Windows client) would create a file
     /// named `.local\share\tty7\bin` in the remote home directory.
     #[test]
-    fn remote_paths_are_posix_and_versioned() {
-        let p = remote_paths("/home/me", "26.7.5");
+    fn remote_paths_are_posix_and_named_by_dialect() {
+        let p = remote_paths("/home/me", 3, 4);
         assert_eq!(p.bin_dir, "/home/me/.local/share/tty7/bin");
-        assert_eq!(
-            p.binary,
-            "/home/me/.local/share/tty7/bin/tty7-server-26.7.5"
-        );
+        assert_eq!(p.binary, "/home/me/.local/share/tty7/bin/tty7-server-c3p4");
         assert_eq!(
             p.temp,
-            "/home/me/.local/share/tty7/bin/.tty7-server-26.7.5.tmp"
+            "/home/me/.local/share/tty7/bin/.tty7-server-c3p4.tmp"
         );
         assert_eq!(
             p.dir_chain,
@@ -400,7 +423,7 @@ mod tests {
     /// mistaken for an installed server.
     #[test]
     fn temp_path_is_a_hidden_sibling_of_the_binary() {
-        let p = remote_paths("/home/me", "26.7.5");
+        let p = remote_paths("/home/me", 3, 4);
         let dir = |s: &str| s.rsplit_once('/').unwrap().0.to_string();
         assert_eq!(dir(&p.temp), dir(&p.binary));
         assert!(p.temp.rsplit('/').next().unwrap().starts_with('.'));
@@ -412,36 +435,52 @@ mod tests {
     #[test]
     fn trailing_slash_on_home_is_absorbed() {
         assert_eq!(
-            remote_paths("/root/", "1.0.0").binary,
-            "/root/.local/share/tty7/bin/tty7-server-1.0.0"
+            remote_paths("/root/", 1, 1).binary,
+            "/root/.local/share/tty7/bin/tty7-server-c1p1"
         );
         // Root as home is degenerate but must still be well-formed.
-        assert_eq!(remote_paths("/", "1.0.0").bin_dir, "/.local/share/tty7/bin");
+        assert_eq!(remote_paths("/", 1, 1).bin_dir, "/.local/share/tty7/bin");
     }
 
     /// The inverse used to identify a *running* daemon from its executable path.
     #[test]
-    fn version_is_recoverable_from_an_install_path() {
+    fn dialects_are_recoverable_from_an_install_path() {
         assert_eq!(
-            version_from_path("/home/me/.local/share/tty7/bin/tty7-server-26.7.4").as_deref(),
-            Some("26.7.4")
+            dialect_from_path("/home/me/.local/share/tty7/bin/tty7-server-c3p4"),
+            Some((3, 4))
         );
-        assert_eq!(
-            version_from_path("tty7-server-26.7.6-nightly.20260727").as_deref(),
-            Some("26.7.6-nightly.20260727")
-        );
-        // Not ours, or not versioned: no opinion rather than a wrong one.
-        assert_eq!(version_from_path("/usr/bin/tty7-server"), None);
-        assert_eq!(version_from_path("/usr/local/bin/tty7-server-"), None);
-        assert_eq!(version_from_path("/bin/bash"), None);
+        assert_eq!(dialect_from_path("tty7-server-c12p30"), Some((12, 30)));
+        // Not ours, or not dialect-named: no opinion rather than a wrong one.
+        assert_eq!(dialect_from_path("/usr/bin/tty7-server"), None);
+        assert_eq!(dialect_from_path("/bin/bash"), None);
+        assert_eq!(dialect_from_path("tty7-server-c3"), None);
+        assert_eq!(dialect_from_path("tty7-server-cxpy"), None);
+    }
+
+    /// Every name a version-naming client ever installed reads as "no opinion".
+    ///
+    /// The whole point of the rename is that a version string can no longer be
+    /// mistaken for a dialect; a parser that squeezed `3` out of `26.7.3` would
+    /// reintroduce exactly that, and on the paths of binaries already sitting on
+    /// users' machines.
+    #[test]
+    fn legacy_version_named_binaries_carry_no_dialect() {
+        for legacy in [
+            "/home/me/.local/share/tty7/bin/tty7-server-26.7.4",
+            "tty7-server-26.7.6-nightly.20260727",
+            "tty7-server-0.1.0",
+            "/usr/local/bin/tty7-server-",
+        ] {
+            assert_eq!(dialect_from_path(legacy), None, "{legacy}");
+        }
     }
 
     /// Round-trip: the name we install under is the name we recognise later.
     #[test]
-    fn install_path_and_version_extraction_round_trip() {
-        for version in ["26.7.5", "0.1.0", "26.7.6-nightly.20260727"] {
-            let p = remote_paths("/home/me", version);
-            assert_eq!(version_from_path(&p.binary).as_deref(), Some(version));
+    fn install_path_and_dialect_extraction_round_trip() {
+        for (c, p) in [(1u32, 1u32), (3, 4), (26, 7)] {
+            let paths = remote_paths("/home/me", c, p);
+            assert_eq!(dialect_from_path(&paths.binary), Some((c, p)));
         }
     }
 }
