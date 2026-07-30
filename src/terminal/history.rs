@@ -40,14 +40,74 @@ pub struct History {
     pub meta: HashMap<String, EntryMeta>,
 }
 
-pub fn load() -> History {
-    let mut raw: Vec<Raw> = load_shell_history();
-    if let Some(path) = config_path("history")
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub enum Scope {
+    #[default]
+    Local,
+    Remote(String),
+}
+
+impl Scope {
+    pub fn remote(label: &str) -> Scope {
+        let label = label.trim();
+        if label.is_empty() {
+            Scope::Local
+        } else {
+            Scope::Remote(label.to_string())
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        matches!(self, Scope::Local)
+    }
+
+    fn file(&self) -> Option<PathBuf> {
+        match self {
+            Scope::Local => config_path("history"),
+            Scope::Remote(label) => config_path("history.d").map(|d| d.join(file_stem(label))),
+        }
+    }
+}
+
+fn file_stem(label: &str) -> String {
+    let mut safe: String = label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    safe.truncate(48);
+    format!("{safe}-{:016x}", tty7_core::host::fnv1a64(label.as_bytes()))
+}
+
+pub fn load(scope: &Scope) -> History {
+    load_with_shell_files(scope, Vec::new())
+}
+
+pub fn load_with_shell_files(scope: &Scope, shell_files: Vec<Vec<u8>>) -> History {
+    let mut raw: Vec<Raw> = if scope.is_local() {
+        load_shell_history()
+    } else {
+        let mut out = Vec::new();
+        for bytes in &shell_files {
+            parse_shell_history(&String::from_utf8_lossy(bytes), &mut out);
+        }
+        out
+    };
+    if let Some(path) = scope.file()
         && let Ok(content) = std::fs::read_to_string(&path)
     {
         raw.extend(content.lines().map(parse_own_line));
     }
     normalize(raw)
+}
+
+pub fn shell_history_names() -> [&'static str; 2] {
+    [".zsh_history", ".bash_history"]
 }
 
 fn looks_absolute(p: &str) -> bool {
@@ -151,11 +211,11 @@ pub fn format_ago(now: u64, ts: u64) -> String {
     format!("{n}{unit}")
 }
 
-pub fn append(cmd: &str, cwd: Option<&Path>, ts: u64, exit: Option<i32>) {
+pub fn append(scope: &Scope, cmd: &str, cwd: Option<&Path>, ts: u64, exit: Option<i32>) {
     if cmd.contains('\n') {
         return;
     }
-    let Some(path) = config_path("history") else {
+    let Some(path) = scope.file() else {
         return;
     };
     if let Some(parent) = path.parent() {
@@ -570,11 +630,17 @@ mod tests {
     fn append_then_load_recovers_the_command_and_metadata() {
         crate::core::config::pin_test_config_dir();
 
-        append("bad\ncmd", None, 1_700_000_000, None);
+        append(&Scope::Local, "bad\ncmd", None, 1_700_000_000, None);
 
         let unique = format!("tty7_cov_marker_{}", std::process::id());
-        append(&unique, Some(Path::new("/tmp")), 1_700_000_123, Some(1));
-        let loaded = load();
+        append(
+            &Scope::Local,
+            &unique,
+            Some(Path::new("/tmp")),
+            1_700_000_123,
+            Some(1),
+        );
+        let loaded = load(&Scope::Local);
         assert!(
             loaded.entries.iter().any(|e| e == &unique),
             "appended command should be recalled by load()"
@@ -607,6 +673,7 @@ mod tests {
                 std::thread::spawn(move || {
                     for i in 0..25 {
                         append(
+                            &Scope::Local,
                             &format!("{tag}_{t}_{i}"),
                             Some(Path::new("/tmp")),
                             1_700_000_000,
@@ -620,7 +687,7 @@ mod tests {
             h.join().unwrap();
         }
 
-        let loaded = load();
+        let loaded = load(&Scope::Local);
         for t in 0..8 {
             for i in 0..25 {
                 let cmd = format!("{tag}_{t}_{i}");
@@ -633,17 +700,107 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_scope_never_serves_the_local_machine_s_history() {
+        crate::core::config::pin_test_config_dir();
+
+        let tag = format!("tty7_scope_{}", std::process::id());
+        let here = Scope::Local;
+        let there = Scope::remote("me@box");
+        append(&here, &format!("{tag}_local"), None, 1_700_000_000, Some(0));
+        append(
+            &there,
+            &format!("{tag}_remote"),
+            None,
+            1_700_000_001,
+            Some(0),
+        );
+
+        let local = load(&here);
+        let remote = load(&there);
+        assert!(local.entries.iter().any(|e| e == &format!("{tag}_local")));
+        assert!(remote.entries.iter().any(|e| e == &format!("{tag}_remote")));
+        assert!(
+            !remote.entries.iter().any(|e| e == &format!("{tag}_local")),
+            "a remote pane must not be offered commands from this machine"
+        );
+        assert!(
+            !local.entries.iter().any(|e| e == &format!("{tag}_remote")),
+            "the local pane must not be offered commands from the far end"
+        );
+    }
+
+    #[test]
+    fn two_remotes_keep_their_own_stores() {
+        crate::core::config::pin_test_config_dir();
+
+        let tag = format!("tty7_twohosts_{}", std::process::id());
+        let a = Scope::remote("me@alpha");
+        let b = Scope::remote("me@beta");
+        append(&a, &format!("{tag}_a"), None, 1_700_000_000, Some(0));
+        append(&b, &format!("{tag}_b"), None, 1_700_000_001, Some(0));
+
+        assert!(
+            !load(&a).entries.iter().any(|e| e == &format!("{tag}_b")),
+            "one host's history must not leak into another's"
+        );
+        assert!(!load(&b).entries.iter().any(|e| e == &format!("{tag}_a")));
+    }
+
+    #[test]
+    fn a_remote_scope_reads_the_far_end_s_own_shell_history() {
+        crate::core::config::pin_test_config_dir();
+
+        let scope = Scope::remote("me@readfile");
+        let zsh = b": 1700000000:0;systemctl status nginx\n".to_vec();
+        let bash = b"journalctl -u nginx\n".to_vec();
+        let loaded = load_with_shell_files(&scope, vec![zsh, bash]);
+
+        assert!(
+            loaded.entries.iter().any(|e| e == "systemctl status nginx"),
+            "the far end's zsh history should be searchable"
+        );
+        assert!(loaded.entries.iter().any(|e| e == "journalctl -u nginx"));
+        assert_eq!(
+            loaded.meta.get("systemctl status nginx"),
+            Some(&EntryMeta {
+                ts: Some(1_700_000_000),
+                exit: None,
+            }),
+            "zsh's second field is elapsed seconds, not an exit code"
+        );
+    }
+
+    #[test]
+    fn a_label_that_is_not_a_filename_still_gets_its_own_file() {
+        let slashes = file_stem("me@box:/srv/../weird");
+        assert!(
+            !slashes.contains(['/', '\\', ':', '@']),
+            "a scope file name must not escape its directory: {slashes}"
+        );
+        assert_ne!(file_stem("me@alpha"), file_stem("me@beta"));
+        assert_eq!(file_stem("me@alpha"), file_stem("me@alpha"));
+        assert!(file_stem(&"x".repeat(400)).len() < 80);
+    }
+
+    #[test]
+    fn an_empty_label_falls_back_to_local_rather_than_a_nameless_file() {
+        assert_eq!(Scope::remote(""), Scope::Local);
+        assert_eq!(Scope::remote("   "), Scope::Local);
+    }
+
+    #[test]
     fn append_rejects_a_cwd_that_would_break_the_line_format() {
         crate::core::config::pin_test_config_dir();
 
         let unique = format!("tty7_nlcwd_marker_{}", std::process::id());
         append(
+            &Scope::Local,
             &unique,
             Some(Path::new("/tmp/evil\n/tmp/tail")),
             1_700_000_000,
             None,
         );
-        let loaded = load();
+        let loaded = load(&Scope::Local);
         assert!(loaded.entries.iter().any(|e| e == &unique));
         assert!(loaded.cwds.get(&unique).is_none_or(|d| d.is_empty()));
         assert!(!loaded.entries.iter().any(|e| e == "/tmp/evil"));

@@ -269,6 +269,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **⌃R on a remote machine searches that machine's history** — tty7 owns ⌃R at
+  the prompt and shows its own fuzzy menu, but the store behind it had no notion
+  of *where* a command had run. Every pane read one file, so ssh'ing to a server
+  and reaching for ⌃R offered the commands you had typed on your laptop —
+  worse than offering nothing, since the answers look plausible until you run
+  one. History is now kept per machine: the local store stays where it was, and
+  each remote gets its own, keyed by the target you connected to. On a remote
+  workspace tty7 also reads the far end's own `~/.zsh_history` and
+  `~/.bash_history` through the same channel it already uses for git and file
+  listings, so the first ⌃R on a freshly connected box has something in it
+  rather than starting empty. Switching a pane between machines swaps the store
+  under it, and the local history file is untouched by the upgrade. (#269)
+
 - **A Windows clipboard pastes like every other clipboard** — text copied on
   Windows carries `\r\n`, and a bracketed paste forwarded it byte for byte. vim
   counts CR and LF as two line breaks, so pasting a block of code into it left a
