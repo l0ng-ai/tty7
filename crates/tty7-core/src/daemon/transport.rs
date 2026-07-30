@@ -638,6 +638,62 @@ mod imp_windows {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::time::{Duration, Instant};
+
+        /// How long a loopback client gets to show up. Generous on purpose — the
+        /// client is a thread in this same process dialling 127.0.0.1 — so a trip
+        /// means the client is never coming, not that the runner is slow.
+        const CLIENT_WITHIN: Duration = Duration::from_secs(10);
+
+        /// `accept()` with a deadline, and a read timeout on what it returns.
+        ///
+        /// Both halves matter, and neither is available on the blocking calls
+        /// these tests would otherwise make. Every client below is a thread that
+        /// `unwrap()`s its `connect`: when one of those panics — a transient
+        /// loopback refusal on a loaded runner is enough — a plain
+        /// `listener.accept()` has nothing left to wake it, and the handshake read
+        /// after it has nothing left to feed it. The test does not fail. The whole
+        /// test binary stops, `cargo test` never returns, and CI bills six hours
+        /// for a step that takes seventy-five seconds.
+        ///
+        /// That is not hypothetical: it happened three times in one day, and
+        /// because libtest only names a test once it *finishes*, no log ever said
+        /// which one. These tests are `cfg(windows)`, so a developer's macOS
+        /// `cargo test` never runs them and CI is the only place they execute.
+        fn accept_within(listener: &TcpListener) -> TcpStream {
+            listener
+                .set_nonblocking(true)
+                .expect("put the listener in polling mode");
+            let deadline = Instant::now() + CLIENT_WITHIN;
+            let accepted = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "no client connected within {CLIENT_WITHIN:?}; the \
+                             client thread most likely panicked, and without this \
+                             deadline this test would hang until CI's job limit"
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(e) => panic!("accept failed: {e}"),
+                }
+            };
+            listener
+                .set_nonblocking(false)
+                .expect("restore the listener to blocking");
+            // Winsock gives an accepted socket the listening socket's blocking
+            // mode, so this is a real change rather than a no-op: the handshake
+            // read must block, but only for a bounded time.
+            accepted
+                .set_nonblocking(false)
+                .expect("the accepted socket must block");
+            accepted
+                .set_read_timeout(Some(CLIENT_WITHIN))
+                .expect("bound the handshake read too");
+            accepted
+        }
 
         /// A token round-trips through hex encode → decode unchanged.
         #[test]
@@ -722,7 +778,7 @@ mod imp_windows {
                 s.write_all(&token).unwrap();
                 s
             });
-            let (mut server_side, _) = listener.accept().unwrap();
+            let mut server_side = accept_within(&listener);
             assert!(authenticate_with(&mut server_side, &token).is_ok());
             let _keep = good.join().unwrap();
 
@@ -733,7 +789,7 @@ mod imp_windows {
                 let mut s = TcpStream::connect(loopback(port)).unwrap();
                 let _ = s.write_all(&bad_token);
             });
-            let (mut server_side2, _) = listener.accept().unwrap();
+            let mut server_side2 = accept_within(&listener);
             assert!(authenticate_with(&mut server_side2, &token).is_err());
             bad.join().unwrap();
         }
@@ -769,7 +825,7 @@ mod imp_windows {
             // proof of same-user, which is what filesystem permissions give the
             // Unix socket for free.
             let good = std::thread::spawn(move || connect_endpoint(CONTROL).unwrap());
-            let (mut server_side, _) = listener.accept().unwrap();
+            let mut server_side = accept_within(&listener);
             assert!(check_endpoint_token(&mut server_side, &token).is_ok());
             let _keep = good.join().unwrap();
 
@@ -781,7 +837,7 @@ mod imp_windows {
                 let mut s = TcpStream::connect(loopback(port)).unwrap();
                 let _ = s.write_all(&foreign);
             });
-            let (mut server_side, _) = listener.accept().unwrap();
+            let mut server_side = accept_within(&listener);
             assert_eq!(
                 check_endpoint_token(&mut server_side, &token)
                     .unwrap_err()
@@ -822,7 +878,7 @@ mod imp_windows {
                 s.write_all(&token).unwrap();
                 s
             });
-            let (mut server_side, _) = listener.accept().unwrap();
+            let mut server_side = accept_within(&listener);
             assert!(authenticate(&mut server_side).is_ok());
             let _keep = good.join().unwrap();
 
