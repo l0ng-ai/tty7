@@ -143,6 +143,16 @@ pub trait RemoteOps: Send + Sync {
     /// for it to exit. Used only for the daemon launch, which by design never
     /// exits.
     fn spawn_detached(&self, cmd: &str) -> Result<(), String>;
+    /// A wait to run in the *same* invocation as the daemon launch, right after
+    /// the launch line, for a transport that cannot let the invocation return
+    /// while the daemon is still fragile. `binary` is the server just launched.
+    ///
+    /// Defaulted to nothing, because SSH needs nothing: closing an exec channel
+    /// is unhurried and a backgrounded daemon survives it. WSL is the one
+    /// transport that does — see [`wsl::launch_settle`](super::install::wsl).
+    fn launch_settle(&self, _binary: &str) -> Option<String> {
+        None
+    }
     /// `stat` following symlinks. `Ok(None)` means "not there", which is a normal
     /// answer, not an error.
     fn stat(&self, path: &str) -> Result<Option<RemoteStat>, String>;
@@ -1293,8 +1303,9 @@ impl<'a> Installer<'a> {
     }
 
     fn launch_daemon(&self, paths: &RemotePaths) -> Result<(), InstallError> {
+        let settle = self.ops.launch_settle(&paths.binary);
         self.ops
-            .spawn_detached(&launch_command(&paths.binary))
+            .spawn_detached(&launch_script(&paths.binary, settle))
             .map_err(|reason| InstallError::Launch { reason })
     }
 
@@ -1417,6 +1428,21 @@ fn launch_command(binary: &str) -> String {
            nohup {bin} --daemon < /dev/null > /dev/null 2>&1 & \
          fi"
     )
+}
+
+/// The launch line, plus whatever wait the transport asked for in
+/// [`RemoteOps::launch_settle`].
+///
+/// A free function so the one thing that must never happen — the wait replacing
+/// the launch instead of following it — is testable without a machine of any
+/// kind. A daemon that was never launched fails exactly like one that was
+/// reaped, so this is cheap to get wrong and expensive to notice.
+fn launch_script(binary: &str, settle: Option<String>) -> String {
+    let launch = launch_command(binary);
+    match settle {
+        Some(settle) => format!("{launch}\n{settle}"),
+        None => launch,
+    }
 }
 
 /// POSIX single-quote escaping. Home directories with spaces, apostrophes or

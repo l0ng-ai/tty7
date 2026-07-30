@@ -72,9 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Two things had to be fixed for this to work at all, both invisible until
   something could actually select a distribution. WSL kills what an interop
   session started the moment its `wsl.exe` exits, and `setsid` does not make the
-  new daemon safe instantly — so the launch now holds its invocation open for a
-  beat, instead of reporting "started but nothing was answering on the control
-  socket" over a correctly installed binary. And a pane's connection now asks
+  new daemon safe instantly — so the launch now holds its invocation open until
+  the daemon answers, instead of reporting "started but nothing was answering on
+  the control socket" over a correctly installed binary. And a pane's connection now asks
   for the remote's *pane* socket: the flag that says so was added by the SSH
   path and by the local `--stdio` one, but never by WSL, so the workspace would
   connect and the window would open with a pane that could not reach the machine.

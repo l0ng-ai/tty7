@@ -986,6 +986,29 @@ fn the_launch_command_detaches_and_closes_every_stream() {
     );
 }
 
+/// A transport's settle **follows** the launch; it never replaces it. Cheap to
+/// get wrong in a `format!` and expensive to notice, because a daemon that was
+/// never launched fails exactly like one that died right after being launched.
+///
+/// And a transport that asks for nothing — every one but WSL — gets the launch
+/// line by itself, with no trailing newline to change what the shell reads.
+#[test]
+fn a_launch_settle_follows_the_launch_and_never_replaces_it() {
+    let plain = launch_script(BINARY, None);
+    assert_eq!(plain, launch_command(BINARY), "no settle, no wrapping");
+
+    let settled = launch_script(BINARY, Some("sleep 1\n".to_string()));
+    assert!(
+        settled.starts_with(&plain),
+        "the launch survives: {settled}"
+    );
+    assert!(settled.contains("--daemon"), "{settled}");
+    assert!(
+        settled.ends_with("sleep 1\n"),
+        "the settle is last: {settled}"
+    );
+}
+
 /// Every command interpolates a remote path, and home directories with spaces
 /// or apostrophes exist. Unquoted, `/home/o'brien/...` would end the string
 /// mid-path and run whatever followed.

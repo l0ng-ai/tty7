@@ -72,7 +72,8 @@ const MARKER: &str = "__tty7_wsl__";
 /// stopped distribution pays for booting its VM and init.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 /// Budget for the daemon launch. It backgrounds and returns, but not
-/// immediately — see [`DETACH_SETTLE`], which holds the invocation open.
+/// immediately — see [`launch_settle`], which holds the invocation open until the
+/// daemon answers.
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Budget for writing the server binary — a few megabytes over a pipe, plus
 /// whatever the distribution's disk is doing.
@@ -285,8 +286,17 @@ const HOME_SCRIPT: &str = "printf '__tty7_wsl__ home=%s\\n' \"$HOME\"\n";
 /// distribution whose default user has no home directory.
 const CD_HOME: &str = "cd \"$HOME\" 2>/dev/null || cd /\n";
 
-/// Appended after the daemon launch line so `wsl.exe` does not exit while the
-/// daemon is still detaching.
+/// How many times the settle asks the daemon whether it is serving, and how long
+/// it waits between asks — a little over five seconds in all, generous for a
+/// distribution that is booting its VM, and far inside [`LAUNCH_TIMEOUT`].
+const SETTLE_TRIES: u32 = 25;
+const SETTLE_STEP: &str = "0.2";
+/// How long to hold the invocation open *after* the daemon answers. See
+/// [`launch_settle`].
+const SETTLE_GRACE: &str = "0.3";
+
+/// The wait that runs after the daemon launch, in the same `wsl.exe`
+/// invocation, so `wsl.exe` does not exit while the daemon is still detaching.
 ///
 /// **WSL reaps what an interop session started when that session's `wsl.exe`
 /// exits**, and `setsid` does not make the child safe the instant it runs.
@@ -306,30 +316,52 @@ const CD_HOME: &str = "cd \"$HOME\" 2>/dev/null || cd /\n";
 ///
 /// The SSH path needs none of this (an exec channel's close is unhurried), which
 /// is why the shared [`launch_command`](super::launch_command) stays as it is
-/// and this lives here.
+/// and this is a [`RemoteOps::launch_settle`](super::RemoteOps::launch_settle)
+/// instead.
 ///
-/// # Why a flat wait and not a wait *for the socket*
+/// # It waits for an answer, not for a fixed number of seconds
 ///
-/// Polling `<config dir>/daemon.sock` until it appears looks like the obvious
-/// improvement, and it is wrong. [`ensure_daemon`](super::Installer::ensure_daemon)
-/// only reaches the launch when the socket did **not** answer, and the ordinary
-/// reason for that is a socket file a dead daemon left behind — `wsl --shutdown`
-/// is a routine thing to run. A `-S` test would pass on that stale file
-/// immediately, skip the wait, and restore the bug in exactly the state that
-/// produced it.
+/// A flat `sleep` is a bet on how long a distribution takes to detach, and the
+/// one that loses that bet is the cold or loaded distribution — the same
+/// condition the failure needed in the first place. So the wait asks the daemon
+/// the only question that settles it, `--stdio --bridge`, exactly as
+/// [`ensure_daemon`](super::Installer::ensure_daemon) asks it from this side, and
+/// stops as soon as it is answered. The normal case is therefore *shorter* than
+/// the flat second it replaces, and the cold case is allowed the seconds it
+/// actually needs instead of failing with nothing to go on.
 ///
-/// One second, because 0.3 was enough in the reproduction and this is paid only
-/// on a launch — which happens when no daemon is already serving the
-/// distribution, not on every connect.
-const DETACH_SETTLE: &str = "sleep 1\n";
+/// **Waiting on `<config dir>/daemon.sock` would be wrong**, which is why this
+/// waits on the answer and not on the file.
+/// [`ensure_daemon`](super::Installer::ensure_daemon) only reaches the launch
+/// when the socket did *not* answer, and the ordinary reason for that is a socket
+/// file a dead daemon left behind — `wsl --shutdown` is a routine thing to run.
+/// A `-S` test would pass on that stale file immediately, skip the wait, and
+/// restore the bug in exactly the state that produced it. A daemon that answers
+/// cannot be a leftover file.
+///
+/// [`SETTLE_GRACE`] follows the answer because what makes the daemon safe is not
+/// observable from here — 0.3s of *any* wait was enough in the reproduction, so
+/// the answer is followed by that much regardless.
+pub(super) fn launch_settle(binary: &str) -> String {
+    settle_script(binary, SETTLE_TRIES, SETTLE_STEP, SETTLE_GRACE)
+}
 
-/// The daemon launch line plus its [`DETACH_SETTLE`] wait.
-///
-/// Split out from [`WslRemoteOps::spawn_detached`] so the composition is
-/// testable without a distribution: the one thing that must never happen is the
-/// wait replacing the launch rather than following it.
-fn launch_script(cmd: &str) -> String {
-    format!("{cmd}\n{DETACH_SETTLE}")
+/// [`launch_settle`] with its budget spelled out, so a test can run the real
+/// script against a real `sh` without waiting out the real budget.
+fn settle_script(binary: &str, tries: u32, step: &str, grace: &str) -> String {
+    let bin = shell_quote(binary);
+    // `< /dev/null` on the probe matters twice over: it is what makes `--bridge`
+    // answer and exit rather than proxy, and this script itself arrives on the
+    // shell's stdin, so a probe left reading stdin would eat the rest of it.
+    format!(
+        "__tty7_settle=0\n\
+         while [ \"$__tty7_settle\" -lt {tries} ]; do\n\
+         if {bin} --stdio --bridge < /dev/null > /dev/null 2>&1; then break; fi\n\
+         __tty7_settle=$((__tty7_settle + 1))\n\
+         sleep {step}\n\
+         done\n\
+         sleep {grace}\n"
+    )
 }
 
 /// `HOME_SCRIPT` has to spell the marker out, because a `const` cannot
@@ -638,7 +670,12 @@ impl RemoteOps for WslRemoteOps {
         // The status is ignored for the same reason it is over SSH: the script
         // reports on the backgrounding, never on the daemon. Whether the daemon
         // came up is settled by probing its socket.
-        self.sh(&launch_script(cmd), LAUNCH_TIMEOUT).map(|_| ())
+        self.sh(cmd, LAUNCH_TIMEOUT).map(|_| ())
+    }
+
+    /// WSL is the transport that needs one. See [`launch_settle`].
+    fn launch_settle(&self, binary: &str) -> Option<String> {
+        Some(launch_settle(binary))
     }
 
     fn stat(&self, path: &str) -> Result<Option<RemoteStat>, String> {
@@ -1164,41 +1201,100 @@ mod tests {
         dir
     }
 
-    /// The wait follows the launch; it never replaces it. Cheap to get wrong in
-    /// a `format!` and expensive to notice — a daemon that is never launched
-    /// fails exactly like one that was reaped.
-    #[test]
-    fn the_launch_script_keeps_the_launch_and_appends_the_wait() {
-        let script = launch_script("setsid 'tty7-server' --daemon &");
-        let (launch, wait) = script.split_once('\n').expect("two parts");
-        assert_eq!(launch, "setsid 'tty7-server' --daemon &");
-        assert_eq!(wait.trim(), "sleep 1");
+    /// A stand-in for the remote `tty7-server`: a script that answers the
+    /// settle's probe (`code` 0) or never answers it (anything else).
+    #[cfg(unix)]
+    fn fake_server(dir: &std::path::Path, name: &str, code: u8) -> String {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\nexit {code}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_str().unwrap().to_string()
     }
 
-    /// **The settle wait, executed**: the launch still runs, the invocation is
-    /// really held afterwards, and it is held for a beat rather than for the
-    /// whole budget its caller allows.
+    /// The settle asks the daemon with *the daemon's own binary*, quoted, in the
+    /// control dialect — the same question
+    /// [`Installer::ensure_daemon`] asks from this side. Not `--pane` (that is
+    /// the other socket and would answer for the wrong thing) and not a test on
+    /// the socket file, which a stale one passes.
+    #[test]
+    fn the_settle_asks_the_control_dialect_with_the_quoted_binary() {
+        let script = settle_script("/home/a b/tty7-server-26.7.6", 4, "0.2", "0.3");
+        assert!(
+            script.contains("'/home/a b/tty7-server-26.7.6' --stdio --bridge < /dev/null"),
+            "{script}"
+        );
+        assert!(!script.contains("--pane"), "{script}");
+        assert!(!script.contains("-S "), "no file test: {script}");
+        assert!(script.contains("-lt 4"), "{script}");
+    }
+
+    /// **The settle, executed against a daemon that answers.** It stops on the
+    /// first answer and still holds the invocation for [`SETTLE_GRACE`] — so the
+    /// normal launch is *shorter* than the flat second this replaced, and the
+    /// wait is still really there.
     ///
-    /// The middle assertion is the one with teeth. A wait that silently became a
-    /// no-op — a `sleep` a distro rejects, a line lost in a `format!` — reads as
-    /// a passing test everywhere except against a real distribution, which is
+    /// This is the assertion with teeth. A settle that silently became a no-op —
+    /// a `sleep` a distro rejects, a line lost in a `format!` — reads as a
+    /// passing test everywhere except against a real distribution, which is
     /// where it already cost an afternoon.
     #[cfg(unix)]
     #[test]
-    fn the_settle_wait_really_holds_the_invocation_open() {
+    fn the_settle_stops_as_soon_as_the_daemon_answers() {
+        let dir = sh_scratch("settle-answers");
+        let serving = fake_server(&dir, "tty7-server-answers", 0);
+
         let started = std::time::Instant::now();
-        let (out, ok) = real_sh(&launch_script("echo launched"));
+        let (out, ok) = real_sh(&settle_script(&serving, SETTLE_TRIES, SETTLE_STEP, "0.3"));
         let elapsed = started.elapsed();
 
         assert!(ok, "{out}");
-        assert!(out.contains("launched"), "the launch still ran: {out:?}");
         assert!(
-            elapsed >= Duration::from_millis(900),
-            "the wait did not happen: {elapsed:?}"
+            elapsed >= Duration::from_millis(250),
+            "the grace after the answer did not happen: {elapsed:?}"
         );
         assert!(
-            elapsed < LAUNCH_TIMEOUT,
-            "the wait outlived the budget its caller gives the whole launch"
+            elapsed < Duration::from_millis(1500),
+            "it kept waiting after the daemon had answered: {elapsed:?}"
+        );
+    }
+
+    /// **The settle, executed against a daemon that never answers.** It spends
+    /// its whole budget and then returns — a launch that failed has to become
+    /// `ensure_daemon`'s verdict, not a hung invocation.
+    #[cfg(unix)]
+    #[test]
+    fn the_settle_gives_up_rather_than_hanging() {
+        let dir = sh_scratch("settle-silent");
+        let silent = fake_server(&dir, "tty7-server-silent", 1);
+
+        let started = std::time::Instant::now();
+        let (out, ok) = real_sh(&settle_script(&silent, 3, "0.1", "0.1"));
+        let elapsed = started.elapsed();
+
+        assert!(ok, "{out}");
+        assert!(
+            elapsed >= Duration::from_millis(350),
+            "it did not ask three times: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "it never gave up: {elapsed:?}"
+        );
+    }
+
+    /// The real budget stays well inside the one its caller allows the *whole*
+    /// launch, or a slow daemon turns into a killed invocation instead of a
+    /// launched one. Also the guard that both steps are still numbers a `sleep`
+    /// accepts.
+    #[test]
+    fn the_settle_budget_fits_inside_the_launch_timeout() {
+        let step: f64 = SETTLE_STEP.parse().expect("a number for `sleep`");
+        let grace: f64 = SETTLE_GRACE.parse().expect("a number for `sleep`");
+        let worst = f64::from(SETTLE_TRIES) * step + grace;
+        assert!(
+            worst < LAUNCH_TIMEOUT.as_secs_f64() / 2.0,
+            "{worst}s of settle inside a {LAUNCH_TIMEOUT:?} launch budget"
         );
     }
 
