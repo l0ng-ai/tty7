@@ -3,7 +3,7 @@ use gpui::{App, Global, KeyBinding, Keystroke, NoAction};
 use crate::core::actions::*;
 use crate::core::config::Config;
 use crate::terminal::view::{
-    ClearScrollback, FindInTerminal, FindNext, FindPrevious, InsertNewline, PasteText,
+    ClearScrollback, CopyText, FindInTerminal, FindNext, FindPrevious, InsertNewline, PasteText,
 };
 use crate::ui::theme::set_menus;
 
@@ -17,9 +17,6 @@ pub fn init(cx: &mut App) {
     bindings.push(KeyBinding::new("secondary-+", IncreaseFontSize, None));
     bindings.push(KeyBinding::new("tab", SendTab, Some("Terminal")));
     bindings.push(KeyBinding::new("shift-tab", SendBackTab, Some("Terminal")));
-    if cfg!(not(target_os = "macos")) {
-        bindings.push(KeyBinding::new("shift-insert", PasteText, Some("Terminal")));
-    }
     cx.bind_keys(bindings);
     cx.set_global(BoundKeystrokes(bound_keystrokes(&effective)));
 
@@ -50,15 +47,31 @@ const INSERT_NEWLINE_DEFAULT: &str = "shift-enter";
 
 const INSERT_NEWLINE_ALT_DEFAULT: &str = "alt-enter";
 
+const PASTE_ALT_DEFAULT: &str = "shift-insert";
+
+fn paste_text_default() -> &'static str {
+    per_platform("", "ctrl-shift-v")
+}
+
+fn extra_defaults() -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
+        (
+            "InsertNewline",
+            INSERT_NEWLINE_DEFAULT,
+            INSERT_NEWLINE_ALT_DEFAULT,
+        ),
+        ("PasteText", paste_text_default(), PASTE_ALT_DEFAULT),
+    ]
+}
+
 fn extra_keystrokes(effective: &[(String, String)]) -> Vec<(&'static str, &'static str)> {
-    let on_default = effective
-        .iter()
-        .any(|(a, k)| a == "InsertNewline" && k == INSERT_NEWLINE_DEFAULT);
-    if on_default {
-        vec![("InsertNewline", INSERT_NEWLINE_ALT_DEFAULT)]
-    } else {
-        Vec::new()
-    }
+    extra_defaults()
+        .into_iter()
+        .filter(|(action, primary, _)| {
+            !primary.is_empty() && effective.iter().any(|(a, k)| a == action && k == primary)
+        })
+        .map(|(action, _, extra)| (action, extra))
+        .collect()
 }
 
 pub(crate) fn extra_bindings(cx: &App) -> Vec<(String, String)> {
@@ -240,6 +253,8 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
             per_platform("secondary-k", "secondary-shift-k"),
         ),
         ("InsertNewline", INSERT_NEWLINE_DEFAULT),
+        ("CopyText", per_platform("", "ctrl-shift-c")),
+        ("PasteText", paste_text_default()),
         ("OpenSettings", "secondary-,"),
         (
             "ShowKeyboardShortcuts",
@@ -479,9 +494,8 @@ fn keystroke_is_valid(s: &str) -> bool {
 
 fn action_context(action: &str) -> Option<&'static str> {
     match action {
-        "FindInTerminal" | "FindNext" | "FindPrevious" | "ClearScrollback" | "InsertNewline" => {
-            Some("Terminal")
-        }
+        "FindInTerminal" | "FindNext" | "FindPrevious" | "ClearScrollback" | "InsertNewline"
+        | "CopyText" | "PasteText" => Some("Terminal"),
         _ => None,
     }
 }
@@ -560,6 +574,8 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "FindPrevious" => KeyBinding::new(keystroke, FindPrevious, action_context(action)),
         "ClearScrollback" => KeyBinding::new(keystroke, ClearScrollback, action_context(action)),
         "InsertNewline" => KeyBinding::new(keystroke, InsertNewline, action_context(action)),
+        "CopyText" => KeyBinding::new(keystroke, CopyText, action_context(action)),
+        "PasteText" => KeyBinding::new(keystroke, PasteText, action_context(action)),
         "OpenSettings" => KeyBinding::new(keystroke, OpenSettings, None),
         "ShowKeyboardShortcuts" => KeyBinding::new(keystroke, ShowKeyboardShortcuts, None),
         "About" => KeyBinding::new(keystroke, About, None),
@@ -669,10 +685,7 @@ mod tests {
                 .map(|(_, k)| k.as_str()),
             Some("shift-enter")
         );
-        assert_eq!(
-            extra_keystrokes(&effective),
-            vec![("InsertNewline", "alt-enter")]
-        );
+        assert!(extra_keystrokes(&effective).contains(&("InsertNewline", "alt-enter")));
         for key in ["shift-enter", "alt-enter"] {
             assert!(keystroke_is_valid(key), "{key} does not parse");
             assert!(make_binding("InsertNewline", key).is_some());
@@ -682,6 +695,53 @@ mod tests {
             );
         }
         assert_eq!(key_tokens("shift-enter"), vec![SHIFT, "⏎"]);
+    }
+
+    #[test]
+    fn paste_ships_both_terminal_chords_off_macos_and_retires_together() {
+        let effective: Vec<(String, String)> = default_bindings()
+            .into_iter()
+            .map(|(a, k)| (a.to_string(), k.to_string()))
+            .collect();
+        if cfg!(target_os = "macos") {
+            assert!(
+                !extra_keystrokes(&effective)
+                    .iter()
+                    .any(|(a, _)| *a == "PasteText"),
+                "macOS pastes with Cmd+V; no extra chord should install there"
+            );
+            return;
+        }
+        assert_eq!(
+            effective
+                .iter()
+                .find(|(a, _)| a == "PasteText")
+                .map(|(_, k)| k.as_str()),
+            Some("ctrl-shift-v")
+        );
+        assert_eq!(
+            effective
+                .iter()
+                .find(|(a, _)| a == "CopyText")
+                .map(|(_, k)| k.as_str()),
+            Some("ctrl-shift-c")
+        );
+        assert!(extra_keystrokes(&effective).contains(&("PasteText", "shift-insert")));
+        for key in ["ctrl-shift-v", "shift-insert"] {
+            assert!(
+                bound_keystrokes(&effective)
+                    .iter()
+                    .any(|(k, c)| k == key && *c == Some("Terminal")),
+                "{key} must be installed in the Terminal context and remembered for rebind"
+            );
+        }
+        let rebound = vec![("PasteText".to_string(), "ctrl-alt-v".to_string())];
+        assert!(
+            !extra_keystrokes(&rebound)
+                .iter()
+                .any(|(a, _)| *a == "PasteText"),
+            "moving Paste off its default must retire Shift+Insert with it"
+        );
     }
 
     #[test]
@@ -782,16 +842,15 @@ mod tests {
                     continue;
                 }
                 let steals = ks.key.len() == 1
-                    && ks
-                        .key
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_ascii_alphabetic() || "[]\\".contains(c))
+                    && ks.key.chars().next().is_some_and(|c| {
+                        c.is_ascii_alphabetic() || "[]\\`".contains(c) || ('2'..='8').contains(&c)
+                    })
                     || ks.key == "space";
                 assert!(
                     !steals,
                     "{action} is bound to {chord}, which the shell needs as a control code \
-                     (Ctrl+[ is ESC, Ctrl+D is EOF, Ctrl+W deletes a word). \
+                     (Ctrl+[ is ESC, Ctrl+D is EOF, Ctrl+W deletes a word, \
+                     Ctrl+2..8 are NUL/ESC/FS/GS/RS/US/DEL). \
                      Window actions belong on ctrl-shift-* off macOS."
                 );
             }

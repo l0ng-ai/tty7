@@ -148,8 +148,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the editor does not have focus, so a shell still receives XOFF.
   Ctrl+C, Ctrl+V and Ctrl+X are unchanged — Ctrl+C still copies only when there
   is a selection and sends SIGINT otherwise — and **Shift+Insert** now pastes.
-  macOS bindings are untouched. Anything you rebound yourself still wins; only
-  the defaults moved. (#269)
+  With Alt+←/→ focusing panes (Windows Terminal's default), word-by-word
+  movement in the prompt editor lives on Ctrl+←/→ — the Windows/Linux text
+  convention, which already worked — with Ctrl+Shift+←/→ and Alt+Shift+←/→
+  both selecting by word. macOS bindings are untouched. Anything you rebound
+  yourself still wins; only the defaults moved. (#269)
+
+- **Ctrl+Shift+C and Ctrl+Shift+V copy and paste, like every GUI terminal** —
+  the chord GNOME Terminal, Konsole, Windows Terminal and WezTerm all teach.
+  Ctrl+C/Ctrl+V still work as before; Shift+Insert stays a second paste chord,
+  and moving Paste to a key of your own retires both defaults together. Copy
+  and Paste now sit in the default keymap table rather than being installed
+  behind the scenes, so Settings → Keybindings lists them, records new chords
+  for them, and warns when another binding would collide — previously
+  Shift+Insert was invisible there and could not be reassigned. (#269)
 
 - **The machine that runs your panes now owns their layout** — the workspace,
   tab and pane tree has moved out of the app and into the background service, so
