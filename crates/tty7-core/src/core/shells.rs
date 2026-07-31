@@ -27,6 +27,37 @@ pub struct ShellInventory {
     pub default_name: String,
 }
 
+/// Common interactive-shell process names, lowercase and without a
+/// platform-specific extension. Anything that lands in here is what a pane
+/// looks like at an idle prompt — not distinctive enough to stand in for a
+/// pane's cwd/repo name when picking a display title.
+const BARE_SHELL_NAMES: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "dash",
+    "ksh",
+    "tcsh",
+    "csh",
+    "nu",
+    "elvish",
+    "xonsh",
+    "pwsh",
+    "powershell",
+    "cmd",
+    "wsl",
+];
+
+/// True when `name` is a bare interactive-shell process name (e.g. the
+/// foreground process of an idle terminal), so callers that want a
+/// *distinctive* title should skip it and fall back to something else.
+pub fn is_bare_shell_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    let lower = lower.strip_suffix(".exe").unwrap_or(&lower);
+    BARE_SHELL_NAMES.contains(&lower)
+}
+
 pub fn inventory() -> ShellInventory {
     let configured = crate::core::config::shell_command();
     ShellInventory {
@@ -408,5 +439,17 @@ mod tests {
         assert_eq!(default_shell_name(Some("pwsh")), "pwsh");
         assert!(!default_shell_name(None).is_empty());
         assert!(!default_shell_name(Some("  ")).is_empty());
+    }
+
+    #[test]
+    fn bare_shell_names_are_recognized_case_and_extension_insensitively() {
+        assert!(is_bare_shell_name("zsh"));
+        assert!(is_bare_shell_name("bash"));
+        assert!(is_bare_shell_name("PowerShell"));
+        assert!(is_bare_shell_name("pwsh.exe"));
+        assert!(is_bare_shell_name("CMD.EXE"));
+        assert!(!is_bare_shell_name("nvim"));
+        assert!(!is_bare_shell_name("claude"));
+        assert!(!is_bare_shell_name(""));
     }
 }

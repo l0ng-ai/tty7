@@ -276,7 +276,7 @@ fn pane_title_of<'a>(ws: &Workspace, panes: &'a [PaneRecord]) -> Option<&'a str>
         .flat_map(|t| t.root.pane_ids())
         .filter_map(|id| panes.iter().find(|p| p.id == id))
         .map(|p| p.title.trim())
-        .find(|title| !title.is_empty())
+        .find(|title| !title.is_empty() && !tty7_core::core::shells::is_bare_shell_name(title))
 }
 
 pub fn subject_path_of(ws: &Workspace, panes: &[PaneRecord]) -> Option<String> {
@@ -528,6 +528,13 @@ mod tests {
             display_name_of(&ws, &panes),
             "nvim",
             "a live process name is more distinctive than the cwd group"
+        );
+
+        panes[0].title = "zsh".into();
+        assert_eq!(
+            display_name_of(&ws, &panes),
+            "tty7",
+            "an idle shell prompt is not distinctive — cwd/repo name should win"
         );
 
         ws.name = Some("  Release prep  ".into());
