@@ -594,7 +594,7 @@ enum ShellKind {
 fn shell_kind(program: Option<&str>) -> Option<ShellKind> {
     let owned = match program {
         Some(p) => p.to_string(),
-        None => std::env::var("SHELL").ok()?,
+        None => crate::core::shells::login_shell(),
     };
     let base = Path::new(&owned)
         .file_name()?

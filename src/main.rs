@@ -123,7 +123,7 @@ fn merge_paths(primary: &str, secondary: &str) -> String {
 
 #[cfg(unix)]
 fn enrich_path_from_login_shell() {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let shell = crate::core::shells::login_shell();
     let cmd = if std::path::Path::new(&shell).file_name() == Some("fish".as_ref()) {
         "string join ':' $PATH"
     } else {
