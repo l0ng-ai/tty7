@@ -44,6 +44,7 @@ pub fn two_workspace_machine() -> Machine {
     let record = |id: u64, cwd: &str| PaneRecord {
         id,
         cwd: Some(cwd.to_string()),
+        title: String::new(),
         ssh_spec: None,
         agent: None,
         live: true,

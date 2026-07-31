@@ -257,6 +257,9 @@ pub fn display_name_of(ws: &Workspace, panes: &[PaneRecord]) -> String {
     if let Some(name) = ws.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
         return name.to_string();
     }
+    if let Some(title) = pane_title_of(ws, panes) {
+        return title.to_string();
+    }
     subject_path_of(ws, panes)
         .and_then(|path| {
             std::path::Path::new(&path)
@@ -265,6 +268,15 @@ pub fn display_name_of(ws: &Workspace, panes: &[PaneRecord]) -> String {
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Untitled".to_string())
+}
+
+fn pane_title_of<'a>(ws: &Workspace, panes: &'a [PaneRecord]) -> Option<&'a str> {
+    ws.tabs
+        .iter()
+        .flat_map(|t| t.root.pane_ids())
+        .filter_map(|id| panes.iter().find(|p| p.id == id))
+        .map(|p| p.title.trim())
+        .find(|title| !title.is_empty())
 }
 
 pub fn subject_path_of(ws: &Workspace, panes: &[PaneRecord]) -> Option<String> {
@@ -501,15 +513,22 @@ mod tests {
     #[test]
     fn display_names_derive_from_the_tree_with_the_session_precedence() {
         let mut ws = Workspace::default();
-        let panes = vec![PaneRecord {
+        let mut panes = vec![PaneRecord {
             cwd: Some("/home/me/scratch".into()),
             ..PaneRecord::new(1)
         }];
         ws.tabs = vec![leaf_tab(1)];
         assert_eq!(display_name_of(&ws, &panes), "scratch");
 
+        panes[0].title = "nvim".into();
+        assert_eq!(display_name_of(&ws, &panes), "nvim");
+
         ws.tabs[0].sidebar_group = Some("/repo/tty7".into());
-        assert_eq!(display_name_of(&ws, &panes), "tty7");
+        assert_eq!(
+            display_name_of(&ws, &panes),
+            "nvim",
+            "a live process name is more distinctive than the cwd group"
+        );
 
         ws.name = Some("  Release prep  ".into());
         assert_eq!(display_name_of(&ws, &panes), "Release prep");

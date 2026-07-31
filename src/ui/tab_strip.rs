@@ -232,7 +232,11 @@ impl Tty7App {
         }
 
         crate::terminal::pane_liveness::sweep(cx);
-        let current = crate::ui::machine_mirror::display_name_for(cx, self.workspace)
+        let current = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| workspace_osc_title(tab, cx).or_else(|| workspace_agent_title(tab, cx)))
+            .or_else(|| crate::ui::machine_mirror::display_name_for(cx, self.workspace))
             .unwrap_or_else(|| "tty7".to_string());
         let monogram: String = current
             .chars()
@@ -1080,6 +1084,19 @@ impl Tty7App {
                 None => this.child(chrome),
             })
     }
+}
+
+fn workspace_osc_title(tab: &Tab, cx: &App) -> Option<String> {
+    let title = tab.leaf_title(None, cx);
+    let title = title.trim();
+    if title.is_empty() || title == "tty7" || title.starts_with("tty7 — ") {
+        return None;
+    }
+    Some(title.to_string())
+}
+
+fn workspace_agent_title(tab: &Tab, cx: &App) -> Option<String> {
+    tab.agent(cx).map(|agent| agent.display_name().to_string())
 }
 
 #[cfg(test)]
