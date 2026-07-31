@@ -2472,6 +2472,10 @@ impl TerminalView {
         None
     }
 
+    fn link_inactive_reason(&self, cx: &gpui::App) -> Option<&'static str> {
+        (!self.accepts_input(cx)).then_some("the remote link is not attached")
+    }
+
     fn shell_vi_prompt(&self) -> bool {
         self.terminal.shell_vi_mode() && self.terminal.at_prompt() && !self.on_alt_screen()
     }
@@ -2885,7 +2889,8 @@ impl TerminalView {
             cx.propagate();
             return;
         }
-        if !self.accepts_input(cx) {
+        if let Some(reason) = self.link_inactive_reason(cx) {
+            log::debug!(target: "tty7::completion", "Tab does nothing and the line stays: {reason}");
             return;
         }
         if let Some(reason) = self.input_inactive_reason() {
@@ -3049,7 +3054,7 @@ impl TerminalView {
             let entries = listed.unwrap_or_else(|e| {
                 log::warn!(
                     target: "tty7::completion",
-                    "remote listing failed, so the shell gets the line: {e}"
+                    "remote listing failed, treating it as no candidates: {e}"
                 );
                 Vec::new()
             });
@@ -3071,7 +3076,10 @@ impl TerminalView {
         forward: bool,
         cx: &mut Context<Self>,
     ) {
-        if let Some(reason) = self.input_inactive_reason() {
+        if let Some(reason) = self
+            .link_inactive_reason(cx)
+            .or_else(|| self.input_inactive_reason())
+        {
             log::debug!(
                 target: "tty7::completion",
                 "dropping a remote listing for {line:?}: {reason}"
@@ -5982,6 +5990,11 @@ mod gpui_tests {
                 );
             })
             .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "not one byte reached the wire"
+        );
     }
 
     #[gpui::test]
@@ -6981,6 +6994,7 @@ mod gpui_tests {
     ) {
         crate::core::config::pin_test_config_dir();
         let (window, mut daemon) = harness(cx);
+        cx.update(|cx| crate::ui::keymap::init(cx));
         DaemonMsg::Prompt {
             active: true,
             at_prompt: true,
@@ -6991,15 +7005,23 @@ mod gpui_tests {
         wait_for_input_active(&window, cx);
 
         window
-            .update(cx, |view, _, cx| {
+            .update(cx, |view, window, cx| {
+                window.activate_window();
+                view.focus_handle.focus(window, cx);
                 view.cmd.set("zzqqx");
                 bind_to_a_disconnected_remote_workspace(view, cx);
+            })
+            .unwrap();
 
-                view.tab_pressed(true, cx);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.simulate_keystrokes("tab");
+
+        window
+            .update(cx, |view, _, cx| {
                 assert_eq!(
                     view.cmd.text(),
                     "zzqqx",
-                    "a Tab that cannot reach the shell must not empty the line"
+                    "a Tab dispatched through SendTab must not empty the line"
                 );
                 assert!(
                     view.editor_handoff.is_none(),
@@ -7010,7 +7032,7 @@ mod gpui_tests {
                 assert_eq!(
                     view.cmd.text(),
                     "zzqqx",
-                    "Enter on a read-only window must not swallow the line either"
+                    "submit_command guards the link too, even though on_key_down already does"
                 );
             })
             .unwrap();
@@ -7019,6 +7041,56 @@ mod gpui_tests {
             None,
             "not one byte reached the wire"
         );
+    }
+
+    #[gpui::test]
+    fn a_tab_on_a_detached_remote_pane_never_asks_for_a_listing(cx: &mut TestAppContext) {
+        use std::io::Write as _;
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        DaemonMsg::Cwd(std::path::PathBuf::from("/home/me/proj"))
+            .encode(&mut daemon)
+            .unwrap();
+        daemon.flush().unwrap();
+        wait_for_input_active(&window, cx);
+        for _ in 0..200 {
+            if window
+                .update(cx, |view, _, _| view.cwd().is_some())
+                .unwrap()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, _, cx| {
+                view.cmd.set("ls /home/me/");
+                bind_to_a_disconnected_remote_workspace(view, cx);
+                assert!(
+                    view.remote_ssh_cwd().is_some(),
+                    "the pane has to look remote enough to want a listing at all"
+                );
+
+                view.tab_pressed(true, cx);
+                assert!(
+                    !view.remote_completion_inflight,
+                    "a Tab must not send an SFTP listing down a link that is not attached"
+                );
+                assert_eq!(
+                    view.cmd.text(),
+                    "ls /home/me/",
+                    "and the line stays where it was"
+                );
+            })
+            .unwrap();
     }
 
     #[gpui::test]
