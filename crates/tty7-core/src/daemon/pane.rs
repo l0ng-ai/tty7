@@ -210,6 +210,19 @@ const LOCALE_DEFINITION_DIR: &str = "/usr/share/locale";
 #[cfg(any(target_os = "macos", test))]
 const FALLBACK_CHARACTER_LOCALES: [&str; 2] = ["C.UTF-8", "en_US.UTF-8"];
 
+/// The variable the locale fallback sets.
+///
+/// It has to be one a shell consults for *every* category. `LC_CTYPE` alone
+/// fixes character handling and leaves collation, time and numbers at `C`; a
+/// shell that then asks `setlocale(LC_COLLATE, "")` finds no variable to read
+/// and bash warns `setlocale: LC_COLLATE: cannot change locale ()` once per
+/// category. (zsh and fish swallow the failure, so they look fine while being
+/// just as half-configured.) `LC_ALL` would also cover everything, but it wins
+/// over every `LC_*` the user's own rc files set afterwards — `LANG` loses to
+/// them, which is what a fallback should do.
+#[cfg(any(target_os = "macos", test))]
+const LOCALE_FALLBACK_KEY: &str = "LANG";
+
 #[cfg(any(target_os = "macos", test))]
 fn character_locale(identifier: Option<&str>, exists: impl Fn(&str) -> bool) -> Option<String> {
     identifier
@@ -350,7 +363,7 @@ fn apply_common_command_setup(
                 .is_dir()
         })
     {
-        cmd.env("LC_CTYPE", locale);
+        cmd.env(LOCALE_FALLBACK_KEY, locale);
     }
 }
 
@@ -4218,6 +4231,22 @@ mod tests {
             &[("LANG", "")],
             &[("LANG", "en_US.UTF-8")]
         ));
+    }
+
+    #[test]
+    fn locale_fallback_sets_a_variable_that_backs_every_category() {
+        let injected =
+            std::iter::once((LOCALE_FALLBACK_KEY.to_string(), "en_US.UTF-8".to_string()))
+                .collect::<std::collections::HashMap<_, _>>();
+
+        // Whatever we inject has to satisfy the check that gated it, or every
+        // pane would keep re-deriving a fallback that is already in place.
+        assert!(!locale_fallback_is_needed(&injected, |_| None));
+
+        // And it has to back every category, not just character handling — see
+        // LOCALE_FALLBACK_KEY. LC_CTYPE here would leave a shell warning about
+        // LC_COLLATE and friends on every launch.
+        assert_eq!(LOCALE_FALLBACK_KEY, "LANG");
     }
 
     #[test]
