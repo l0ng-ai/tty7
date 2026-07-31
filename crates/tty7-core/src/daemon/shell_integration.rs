@@ -745,6 +745,28 @@ fn bash_rcfile() -> String {
 # Replays what a real *login* shell would have sourced, in the same order —
 # necessary because tty7 spawns bash non-login (see shell_integration.rs) so
 # that --rcfile is honored at all; bash silently ignores it for login shells.
+#
+# ~/.bashrc needs both halves of a rule that cannot be written as a static
+# order, because the two shapes in the wild want opposite things:
+#
+#   * a ~/.bash_profile that forwards to ~/.bashrc (the common case, and what
+#     every "put this in your .bash_profile" guide produces). Sourcing ~/.bashrc
+#     again afterwards runs the user's whole file twice: banners print twice,
+#     completions get sourced twice, anything appending to PROMPT_COMMAND stacks.
+#   * a ~/.bash_profile that does *not* forward — written by someone whose
+#     terminal spawns non-login shells, so ~/.bashrc always arrived on its own
+#     and the profile only ever had to hold login-time settings. Dropping
+#     ~/.bashrc from the chain would take that user's aliases, prompt and
+#     completions away entirely.
+#
+# So watch instead of guess: wrap `source`/`.` for the length of the chain, note
+# whether ~/.bashrc came through, and fill it in afterwards only if it did not.
+# `~` is already expanded to $HOME by the time the wrapper sees $1, so matching
+# on the trailing path component covers `. ~/.bashrc`, `source "$HOME/.bashrc"`
+# and a spelled-out absolute path alike.
+__tty7_bashrc=0
+source() {{ case "${{1-}}" in */.bashrc|.bashrc) __tty7_bashrc=1;; esac; builtin source "$@"; }}
+.() {{ case "${{1-}}" in */.bashrc|.bashrc) __tty7_bashrc=1;; esac; builtin . "$@"; }}
 if [[ -f /etc/profile ]]; then source /etc/profile; fi
 if [[ -f ~/.bash_profile ]]; then
   source ~/.bash_profile
@@ -753,7 +775,9 @@ elif [[ -f ~/.bash_login ]]; then
 elif [[ -f ~/.profile ]]; then
   source ~/.profile
 fi
-if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi
+unset -f source .
+if [[ $__tty7_bashrc == 0 && -f ~/.bashrc ]]; then source ~/.bashrc; fi
+unset __tty7_bashrc
 {BASH_INTEGRATION}"#
     )
 }
@@ -1545,6 +1569,84 @@ mod tests {
         assert!(rc.contains("~/.bashrc"));
         assert!(rc.contains("__tty7"));
         assert!(rc.contains("133;"));
+    }
+
+    /// Runs `bash_rcfile()` against a throwaway $HOME whose ~/.bashrc appends a
+    /// line every time it is sourced, and reports how many lines it left.
+    ///
+    /// `None` means there is no usable bash on this box, so there is nothing to
+    /// assert either way.
+    #[cfg(unix)]
+    fn bashrc_sourcings(profile: Option<(&str, &str)>) -> Option<usize> {
+        let home = throwaway_dir("tty7-rcfile-home-")?;
+        let ticks = home.join("ticks");
+        if let Some((name, body)) = profile {
+            std::fs::write(home.join(name), body).expect("write profile");
+        }
+        std::fs::write(
+            home.join(".bashrc"),
+            format!("printf 'tick\\n' >> '{}'\n", ticks.display()),
+        )
+        .expect("write .bashrc");
+        let rcfile = home.join("rcfile");
+        std::fs::write(&rcfile, bash_rcfile()).expect("write rcfile");
+
+        let ran = std::process::Command::new("bash")
+            .arg("--rcfile")
+            .arg(&rcfile)
+            .args(["-i", "-c", "true"])
+            .env("HOME", &home)
+            .output();
+        let sourced = ran.ok().map(|_| {
+            std::fs::read_to_string(&ticks)
+                .unwrap_or_default()
+                .lines()
+                .count()
+        });
+        let _ = std::fs::remove_dir_all(&home);
+        sourced
+    }
+
+    /// The profile chain is first-match-wins, and a ~/.bash_profile that exists
+    /// only to forward to ~/.bashrc is the common case — so sourcing ~/.bashrc
+    /// after the chain ran it a second time for almost everybody.
+    #[cfg(unix)]
+    #[test]
+    fn a_forwarding_bash_profile_does_not_pull_bashrc_in_twice() {
+        for forward in [
+            "if [ -f ~/.bashrc ]; then . ~/.bashrc; fi\n",
+            "source \"$HOME/.bashrc\"\n",
+        ] {
+            let Some(sourced) = bashrc_sourcings(Some((".bash_profile", forward))) else {
+                return;
+            };
+            assert_eq!(
+                sourced, 1,
+                "~/.bashrc must be sourced exactly once for {forward:?}, got {sourced}",
+            );
+        }
+    }
+
+    /// The other half of the rule: a profile that never forwards is why the
+    /// unconditional source existed in the first place. Dropping it outright
+    /// would leave this user with no aliases, prompt or completions at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_that_never_forwards_still_gets_bashrc_once() {
+        for profile in [
+            Some((".bash_profile", "export TTY7_PROFILE=1\n")),
+            Some((".profile", "export TTY7_PROFILE=1\n")),
+            // No profile at all — the plain macOS $HOME.
+            None,
+        ] {
+            let Some(sourced) = bashrc_sourcings(profile) else {
+                return;
+            };
+            assert_eq!(
+                sourced, 1,
+                "~/.bashrc must still arrive for {profile:?}, got {sourced}",
+            );
+        }
     }
 
     #[test]
