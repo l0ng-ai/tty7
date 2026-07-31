@@ -2486,6 +2486,10 @@ impl TerminalView {
         None
     }
 
+    fn link_inactive_reason(&self, cx: &gpui::App) -> Option<&'static str> {
+        (!self.accepts_input(cx)).then_some("the remote link is not attached")
+    }
+
     fn shell_vi_prompt(&self) -> bool {
         self.terminal.shell_vi_mode() && self.terminal.at_prompt() && !self.on_alt_screen()
     }
@@ -2610,7 +2614,7 @@ impl TerminalView {
     }
 
     fn submit_command(&mut self, cx: &mut Context<Self>) {
-        if self.terminal.exited {
+        if self.terminal.exited || !self.accepts_input(cx) {
             return;
         }
         if let Some(net) = self.hold.engage() {
@@ -2869,6 +2873,9 @@ impl TerminalView {
     }
 
     fn handoff_line_to_shell(&mut self, chord: &[u8], cx: &mut Context<Self>) {
+        if !self.accepts_input(cx) {
+            return;
+        }
         if let Some(net) = self.hold.engage() {
             self.cmd.prepend_str(&net);
         }
@@ -2894,6 +2901,10 @@ impl TerminalView {
     fn tab_pressed(&mut self, forward: bool, cx: &mut Context<Self>) {
         if self.search_focused {
             cx.propagate();
+            return;
+        }
+        if let Some(reason) = self.link_inactive_reason(cx) {
+            log::debug!(target: "tty7::completion", "Tab does nothing and the line stays: {reason}");
             return;
         }
         if let Some(reason) = self.input_inactive_reason() {
@@ -3054,19 +3065,16 @@ impl TerminalView {
         log::debug!(target: "tty7::completion", "listing {dir} over the remote's own connection");
         cx.spawn(async move |this, cx| {
             let listed = cx.background_spawn(async move { route.list(&dir) }).await;
-            if let Err(e) = &listed {
-                log::warn!(target: "tty7::completion", "remote listing failed: {e}");
-            }
+            let entries = listed.unwrap_or_else(|e| {
+                log::warn!(
+                    target: "tty7::completion",
+                    "remote listing failed, treating it as no candidates: {e}"
+                );
+                Vec::new()
+            });
             let _ = this.update(cx, |view, cx| {
                 view.remote_completion_inflight = false;
-                view.remote_path_results(
-                    req,
-                    &line,
-                    cursor,
-                    listed.unwrap_or_default(),
-                    forward,
-                    cx,
-                )
+                view.remote_path_results(req, &line, cursor, entries, forward, cx);
             });
         })
         .detach();
@@ -3082,6 +3090,16 @@ impl TerminalView {
         forward: bool,
         cx: &mut Context<Self>,
     ) {
+        if let Some(reason) = self
+            .link_inactive_reason(cx)
+            .or_else(|| self.input_inactive_reason())
+        {
+            log::debug!(
+                target: "tty7::completion",
+                "dropping a remote listing for {line:?}: {reason}"
+            );
+            return;
+        }
         if self.cmd.text() != line || self.cmd.cursor() != cursor {
             log::debug!(
                 target: "tty7::completion",
@@ -5955,6 +5973,45 @@ mod gpui_tests {
     }
 
     #[gpui::test]
+    fn a_late_remote_listing_leaves_a_line_the_editor_no_longer_owns_alone(
+        cx: &mut TestAppContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for_input_active(&window, cx);
+
+        window
+            .update(cx, |view, _, cx| {
+                view.cmd.set("ls /nope/");
+                view.editor_handoff = Some(view.terminal.prompt_cycle());
+                assert!(!view.input_active(), "the shell owns this prompt already");
+
+                let req =
+                    super::completion::remote_path_request("ls /nope/", 9, "/home/u").unwrap();
+                view.remote_path_results(req, "ls /nope/", 9, Vec::new(), true, cx);
+
+                assert_eq!(
+                    view.cmd.text(),
+                    "ls /nope/",
+                    "an empty listing must not hand off a line the editor no longer drives"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "not one byte reached the wire"
+        );
+    }
+
+    #[gpui::test]
     fn tab_completion_off_sends_every_tab_to_the_shell(cx: &mut TestAppContext) {
         let (window, mut daemon) = harness(cx);
         cx.update(|cx| {
@@ -6943,6 +7000,111 @@ mod gpui_tests {
             )),
         }));
         id
+    }
+
+    #[gpui::test]
+    fn a_disconnected_remote_pane_keeps_the_line_instead_of_handing_it_to_nowhere(
+        cx: &mut TestAppContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| crate::ui::keymap::init(cx));
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for_input_active(&window, cx);
+
+        window
+            .update(cx, |view, window, cx| {
+                window.activate_window();
+                view.focus_handle.focus(window, cx);
+                view.cmd.set("zzqqx");
+                bind_to_a_disconnected_remote_workspace(view, cx);
+            })
+            .unwrap();
+
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.simulate_keystrokes("tab");
+
+        window
+            .update(cx, |view, _, cx| {
+                assert_eq!(
+                    view.cmd.text(),
+                    "zzqqx",
+                    "a Tab dispatched through SendTab must not empty the line"
+                );
+                assert!(
+                    view.editor_handoff.is_none(),
+                    "nothing was handed off, so the editor keeps the prompt"
+                );
+
+                view.submit_command(cx);
+                assert_eq!(
+                    view.cmd.text(),
+                    "zzqqx",
+                    "submit_command guards the link too, even though on_key_down already does"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "not one byte reached the wire"
+        );
+    }
+
+    #[gpui::test]
+    fn a_tab_on_a_detached_remote_pane_never_asks_for_a_listing(cx: &mut TestAppContext) {
+        use std::io::Write as _;
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        DaemonMsg::Cwd(std::path::PathBuf::from("/home/me/proj"))
+            .encode(&mut daemon)
+            .unwrap();
+        daemon.flush().unwrap();
+        wait_for_input_active(&window, cx);
+        for _ in 0..200 {
+            if window
+                .update(cx, |view, _, _| view.cwd().is_some())
+                .unwrap()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, _, cx| {
+                view.cmd.set("ls /home/me/");
+                bind_to_a_disconnected_remote_workspace(view, cx);
+                assert!(
+                    view.remote_ssh_cwd().is_some(),
+                    "the pane has to look remote enough to want a listing at all"
+                );
+
+                view.tab_pressed(true, cx);
+                assert!(
+                    !view.remote_completion_inflight,
+                    "a Tab must not send an SFTP listing down a link that is not attached"
+                );
+                assert_eq!(
+                    view.cmd.text(),
+                    "ls /home/me/",
+                    "and the line stays where it was"
+                );
+            })
+            .unwrap();
     }
 
     #[gpui::test]
