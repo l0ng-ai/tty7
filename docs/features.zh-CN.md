@@ -61,6 +61,7 @@ Aider、Amp、OpenCode 等约 17 个）并在其外围加功能 —— 绝不包
 - **复制 Session ID** —— 把 agent 的原生 session id 复制到剪贴板，就在 *Copy Working Directory* 旁边，方便粘进 `codex resume`、bug 报告或别的工具
 - **上下文回填** —— 面板命令把当前选区或仓库 `git diff` 打包成 prompt 直接喂给正在跑的 agent
 - **托盘图标** —— 系统托盘 / 菜单栏常驻图标，任何 agent 等你输入时立即切换为提醒态；菜单列出所有 agent pane（品牌头像 + 状态点，点击直达）、可切换通知策略，并在保留会话的普通退出之外提供 *Quit and Stop Daemon*（`show_tray_icon`，默认开启）
+- **`tty7` 上 PATH** —— CLI 随每个安装包一起发布，启动时自动放到 PATH 上，脚本和 coding agent 在任何终端里都能驱动 tty7。tty7 自己的 pane 里则一定可用，因为 pane 继承 app 的环境。Unix 上是往 `/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin`、`~/bin`、`~/.cargo/bin` 中你 PATH 已经覆盖的那个目录里放一个软链；Windows 上是把安装目录追加到用户 PATH，卸载时再摘掉。你自己装的 `tty7` 一律保持原样，不会被覆盖。关掉：设置 → About，或 `config.json` 里 `install_cli_on_path: false`
 
 ## SSH
 

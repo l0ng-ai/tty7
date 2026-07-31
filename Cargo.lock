@@ -9685,6 +9685,7 @@ dependencies = [
  "tray-icon",
  "tty7-core",
  "uuid",
+ "windows-sys 0.61.2",
  "winresource",
 ]
 
@@ -9692,6 +9693,7 @@ dependencies = [
 name = "tty7-cli"
 version = "26.7.6"
 dependencies = [
+ "alacritty_terminal",
  "anyhow",
  "clap",
  "libc",

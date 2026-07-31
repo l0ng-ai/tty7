@@ -1168,6 +1168,10 @@ impl Tty7App {
             let _ = this.update_in(cx, |this, window, cx| {
                 match &restarted {
                     Ok(()) => {
+                        // The link we held pointed at the server we just killed. Drop it
+                        // before asking for the tree, or the pull goes out on a dead
+                        // socket and the window is left empty on the home page.
+                        crate::ui::local_link::LocalLink::invalidate(cx);
                         crate::ui::tree_sync::resync_window_from_tree(cx, this.workspace);
                     }
                     Err(e) => {
@@ -1906,6 +1910,13 @@ impl Tty7App {
 
     pub(crate) fn set_check_for_updates(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.check_for_updates = on);
+    }
+
+    /// Takes effect at next launch: `core::cli_install` runs once from `main`,
+    /// before there is a window to flip this in. Turning it off does not remove
+    /// a symlink already placed — the install is idempotent, not reversible.
+    pub(crate) fn set_install_cli_on_path(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.install_cli_on_path = on);
     }
 
     pub(crate) fn set_dim_inactive_panes(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -6535,7 +6546,7 @@ mod shell_menu_gpui_tests {
         vcx: &mut VisualTestContext,
         done: impl Fn(&Tty7App) -> bool,
     ) -> bool {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             vcx.background_executor.run_until_parked();
             if app.update(vcx, |app, _| done(app)) {

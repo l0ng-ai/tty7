@@ -274,10 +274,22 @@ fn find_git_bash() -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
+const WSL_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[cfg(windows)]
 fn list_wsl_distros() -> Option<Vec<String>> {
     let mut cmd = std::process::Command::new("wsl.exe");
     cmd.args(["-l", "-q"]);
-    let output = crate::core::proc::hide_console(&mut cmd).output().ok()?;
+    let output = match crate::core::proc::output_within(
+        crate::core::proc::hide_console(&mut cmd),
+        WSL_LIST_TIMEOUT,
+    ) {
+        Ok(output) => output,
+        Err(e) => {
+            log::warn!("could not list the WSL distros: {e}");
+            return None;
+        }
+    };
     if !output.status.success() {
         return None;
     }

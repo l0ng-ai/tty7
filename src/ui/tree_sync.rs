@@ -654,6 +654,12 @@ struct WsState {
     inflight: bool,
     informed: bool,
     epoch: u64,
+    /// A hydration that failed and still owes this window its layout.
+    ///
+    /// The window is sitting empty because of it, so nothing may be pushed
+    /// from it until the pull is retried — an empty window diffs into
+    /// "close every tab" and would wipe the layout off the machine.
+    rehydrate: Option<Adopt>,
 }
 
 impl Default for WsState {
@@ -667,6 +673,7 @@ impl Default for WsState {
             inflight: false,
             informed: false,
             epoch: 0,
+            rehydrate: None,
         }
     }
 }
@@ -684,6 +691,10 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
         return;
     }
     if crate::ui::remote_workspace::workspace_is_preempted(cx, client_ws) {
+        return;
+    }
+    if let Some(adopt) = take_rehydrate(cx, client_ws, app.tabs.is_empty()) {
+        hydrate(cx, client_ws, adopt);
         return;
     }
     adopt_tab_ids(app, cx);
@@ -732,6 +743,20 @@ pub(crate) fn on_link_up(cx: &mut App, host: HostId) {
             app.update(cx, |app, cx| sync_window(app, cx));
         }
     }
+}
+
+/// Claims a hydration owed to `client_ws`, if one is still outstanding.
+///
+/// A `Replace` retry is dropped once the window has tabs again: the user moved
+/// on without us, and replaying the machine's older layout over their work
+/// would be worse than never retrying at all.
+fn take_rehydrate(cx: &mut App, client_ws: WorkspaceId, window_is_empty: bool) -> Option<Adopt> {
+    let state = cx
+        .default_global::<TreeSync>()
+        .windows
+        .get_mut(&client_ws)?;
+    let adopt = state.rehydrate.take()?;
+    (window_is_empty || adopt == Adopt::IfEmpty).then_some(adopt)
 }
 
 pub(crate) fn window_is_informed(cx: &App, client_ws: WorkspaceId) -> bool {
@@ -1114,6 +1139,8 @@ fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
         };
         state.queue.clear();
         state.epoch += 1;
+        // This attempt takes over the debt; it re-records it if it fails too.
+        state.rehydrate = None;
         state.epoch
     };
     cx.spawn(async move |cx| {
@@ -1136,13 +1163,7 @@ fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
             }
         };
         let Some(client) = client else {
-            cx.update(|cx| {
-                if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) {
-                    if let SyncPhase::Unprimed { priming, .. } = &mut state.sync {
-                        *priming = false;
-                    }
-                }
-            });
+            cx.update(|cx| owe_rehydration(cx, client_ws, epoch, adopt));
             return;
         };
         let outcome = cx
@@ -1152,6 +1173,26 @@ fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
         cx.update(|cx| finish_hydration(cx, client_ws, epoch, adopt, outcome));
     })
     .detach();
+}
+
+/// Records that a hydration failed and still owes `client_ws` its layout.
+///
+/// Nothing else recovers on its own: the window stays empty, and without this
+/// the next `sync_window` would push that emptiness to the machine as "close
+/// every tab". Instead the pull is retried the next time the window syncs —
+/// which is what a reconnect does through `on_link_up`.
+fn owe_rehydration(cx: &mut App, client_ws: WorkspaceId, epoch: u64, adopt: Adopt) {
+    let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
+        return;
+    };
+    if state.epoch != epoch {
+        return;
+    }
+    if let SyncPhase::Unprimed { priming, .. } = &mut state.sync {
+        *priming = false;
+    }
+    state.rehydrate = Some(adopt);
+    log::info!("workspace {client_ws}: will pull its layout again once its machine answers");
 }
 
 fn pull_workspace(
@@ -1201,11 +1242,7 @@ fn finish_hydration(
         Ok(pulled) => pulled,
         Err(e) => {
             log::warn!("could not hydrate workspace {client_ws} from its machine: {e}");
-            if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws)
-                && let SyncPhase::Unprimed { priming, .. } = &mut state.sync
-            {
-                *priming = false;
-            }
+            owe_rehydration(cx, client_ws, epoch, adopt);
             return;
         }
     };
@@ -1693,6 +1730,95 @@ mod tests {
             assert!(
                 !state.informed,
                 "the licence to prune must not survive a takeover"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_hydration_that_died_on_a_stale_link_is_owed_back(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let ws = WorkspaceId::new();
+            let epoch = {
+                let state = cx
+                    .default_global::<TreeSync>()
+                    .windows
+                    .entry(ws)
+                    .or_default();
+                state.sync = SyncPhase::Unprimed {
+                    dirty: false,
+                    priming: true,
+                };
+                state.epoch
+            };
+            owe_rehydration(cx, ws, epoch, Adopt::Replace);
+            let state = &cx.default_global::<TreeSync>().windows[&ws];
+            assert!(
+                matches!(state.sync, SyncPhase::Unprimed { priming: false, .. }),
+                "the attempt is over; another one must be able to start"
+            );
+            assert!(
+                state.rehydrate.is_some(),
+                "dropping the failure here is what left the window on the home page"
+            );
+
+            // A newer attempt has already taken over — the loser must not
+            // re-arm a retry behind its back.
+            {
+                let state = cx
+                    .default_global::<TreeSync>()
+                    .windows
+                    .get_mut(&ws)
+                    .unwrap();
+                state.rehydrate = None;
+                state.epoch += 1;
+            }
+            owe_rehydration(cx, ws, epoch, Adopt::Replace);
+            assert!(
+                cx.default_global::<TreeSync>().windows[&ws]
+                    .rehydrate
+                    .is_none()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_window_that_filled_up_while_owed_keeps_what_it_has(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let ws = WorkspaceId::new();
+            let arm = |cx: &mut App, adopt| {
+                cx.default_global::<TreeSync>()
+                    .windows
+                    .entry(ws)
+                    .or_default()
+                    .rehydrate = Some(adopt);
+            };
+
+            arm(cx, Adopt::Replace);
+            assert!(
+                take_rehydrate(cx, ws, true).is_some(),
+                "an empty window is exactly the one that still needs its layout"
+            );
+            assert!(
+                take_rehydrate(cx, ws, true).is_none(),
+                "the debt is claimed once"
+            );
+
+            arm(cx, Adopt::Replace);
+            assert!(
+                take_rehydrate(cx, ws, false).is_none(),
+                "replaying an older layout over the user's new tabs is worse than not retrying"
+            );
+            assert!(
+                cx.default_global::<TreeSync>().windows[&ws]
+                    .rehydrate
+                    .is_none(),
+                "and the dropped retry must not linger"
+            );
+
+            arm(cx, Adopt::IfEmpty);
+            assert!(
+                take_rehydrate(cx, ws, false).is_some(),
+                "IfEmpty polices that itself, and still owes the mirror a pull"
             );
         });
     }

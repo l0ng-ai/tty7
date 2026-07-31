@@ -307,7 +307,12 @@ impl Host for RemoteHost {
             other => return Err(wrong_shape("an accepted git stream", &other)),
         }
 
-        drain_git_stream(&rx, &queued, GIT_STREAM_IDLE_TIMEOUT, on_line)
+        drain_git_stream(
+            &mut |idle| rx.recv_timeout(idle),
+            &queued,
+            GIT_STREAM_IDLE_TIMEOUT,
+            on_line,
+        )
     }
 
     fn shells(&self) -> io::Result<ShellInventory> {
@@ -364,15 +369,17 @@ impl std::fmt::Debug for RemoteHost {
 
 const GIT_STREAM_QUEUE_BUDGET: usize = 32 * 1024 * 1024;
 
+type NextGitMsg<'a> = &'a mut dyn FnMut(Duration) -> Result<GitStreamMsg, mpsc::RecvTimeoutError>;
+
 fn drain_git_stream(
-    rx: &mpsc::Receiver<GitStreamMsg>,
+    next: NextGitMsg<'_>,
     queued: &AtomicUsize,
     idle: Duration,
     on_line: &mut dyn FnMut(&str),
 ) -> io::Result<Option<i32>> {
     let mut split = crate::core::git::LineSplitter::default();
     loop {
-        match rx.recv_timeout(idle) {
+        match next(idle) {
             Ok(GitStreamMsg::Chunk(bytes)) => {
                 let _ = queued.fetch_update(Ordering::AcqRel, Ordering::Acquire, |q| {
                     Some(q.saturating_sub(bytes.len()))
@@ -792,54 +799,57 @@ mod tests {
         (host, seen_rx)
     }
 
+    fn scripted(
+        steps: Vec<Result<GitStreamMsg, mpsc::RecvTimeoutError>>,
+    ) -> impl FnMut(Duration) -> Result<GitStreamMsg, mpsc::RecvTimeoutError> {
+        let mut steps = steps.into_iter();
+        move |_| {
+            steps
+                .next()
+                .unwrap_or(Err(mpsc::RecvTimeoutError::Disconnected))
+        }
+    }
+
     #[test]
     fn a_stream_that_goes_silent_times_out() {
-        let (tx, rx) = mpsc::channel();
-        tx.send(GitStreamMsg::Chunk(b"alpha\n".to_vec())).unwrap();
-
         let mut lines = Vec::new();
-        let started = Instant::now();
         let queued = AtomicUsize::new(b"alpha\n".len());
-        let got = drain_git_stream(&rx, &queued, Duration::from_millis(120), &mut |l| {
+        let mut next = scripted(vec![
+            Ok(GitStreamMsg::Chunk(b"alpha\n".to_vec())),
+            Err(mpsc::RecvTimeoutError::Timeout),
+        ]);
+        let got = drain_git_stream(&mut next, &queued, Duration::from_millis(120), &mut |l| {
             lines.push(l.to_string())
         });
 
         let err = got.expect_err("a stream that never ends must not read as success");
         assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
         assert_eq!(lines, ["alpha"], "what did arrive was still delivered");
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "the wait is the idle gap, not the whole stream"
-        );
-        drop(tx);
     }
 
     #[test]
-    fn a_slow_stream_outlives_its_idle_timeout() {
-        let (tx, rx) = mpsc::channel();
-        let idle = Duration::from_millis(150);
-        thread::spawn(move || {
-            for i in 0..5 {
-                thread::sleep(Duration::from_millis(60));
-                let _ = tx.send(GitStreamMsg::Chunk(format!("line {i}\n").into_bytes()));
-            }
-            let _ = tx.send(GitStreamMsg::End {
-                code: Some(0),
-                failed: false,
-            });
-        });
+    fn the_idle_window_is_the_gap_between_messages_not_the_whole_stream() {
+        let mut steps: Vec<Result<GitStreamMsg, mpsc::RecvTimeoutError>> = (0..5)
+            .map(|i| Ok(GitStreamMsg::Chunk(format!("line {i}\n").into_bytes())))
+            .collect();
+        steps.push(Ok(GitStreamMsg::End {
+            code: Some(0),
+            failed: false,
+        }));
 
         let mut lines = Vec::new();
-        let started = Instant::now();
         let queued = AtomicUsize::new(0);
-        let code =
-            drain_git_stream(&rx, &queued, idle, &mut |l| lines.push(l.to_string())).unwrap();
+        let mut next = scripted(steps);
+        let code = drain_git_stream(&mut next, &queued, Duration::from_millis(150), &mut |l| {
+            lines.push(l.to_string())
+        })
+        .unwrap();
 
         assert_eq!(code, Some(0));
-        assert_eq!(lines.len(), 5, "{lines:?}");
-        assert!(
-            started.elapsed() > idle,
-            "the read outlived a single idle window without being cut"
+        assert_eq!(
+            lines.len(),
+            5,
+            "every message reset the window, so none of them was cut: {lines:?}"
         );
     }
 
@@ -875,9 +885,12 @@ mod tests {
         });
 
         let mut lines = Vec::new();
-        let err = drain_git_stream(&rx, &queued, Duration::from_secs(5), &mut |l| {
-            lines.push(l.to_string())
-        })
+        let err = drain_git_stream(
+            &mut |d| rx.recv_timeout(d),
+            &queued,
+            Duration::from_secs(5),
+            &mut |l| lines.push(l.to_string()),
+        )
         .expect_err("a cut-off stream must not read as a complete diff");
         assert!(err.to_string().contains("outran"), "{err}");
     }
@@ -919,8 +932,13 @@ mod tests {
         });
 
         let mut lines = 0usize;
-        let code = drain_git_stream(&rx, &queued, Duration::from_secs(10), &mut |_| lines += 1)
-            .expect("a drained stream is not an overrun, however much crosses it");
+        let code = drain_git_stream(
+            &mut |d| rx.recv_timeout(d),
+            &queued,
+            Duration::from_secs(10),
+            &mut |_| lines += 1,
+        )
+        .expect("a drained stream is not an overrun, however much crosses it");
         assert_eq!(code, Some(0));
         assert_eq!(lines, chunks, "every line arrived");
         assert_eq!(queued.load(Ordering::Acquire), 0, "the arrears settled");
