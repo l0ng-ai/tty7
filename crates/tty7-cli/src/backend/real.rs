@@ -1,4 +1,3 @@
-use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -12,7 +11,7 @@ use tty7_core::daemon::control::{
 use tty7_core::daemon::protocol::{DaemonMsg, PaneInfo, PaneProcs, ShellSpec, WinSize};
 use tty7_core::daemon::router::RouteTarget;
 
-use super::{Backend, RunSpec};
+use super::{Backend, CaptureSegment, RunSpec};
 
 const SESSION_SIZE: WinSize = WinSize {
     cols: 120,
@@ -146,7 +145,7 @@ impl Backend for RealBackend {
         Ok(())
     }
 
-    fn capture(&mut self, pane: u64, scrollback: bool) -> Result<String> {
+    fn capture(&mut self, pane: u64, scrollback: bool) -> Result<Vec<CaptureSegment>> {
         let mut session = self
             .pane_client()?
             .observe(pane, SESSION_SIZE)
@@ -156,11 +155,21 @@ impl Backend for RealBackend {
         // macOS). That must not turn a completed capture into an error — the
         // replay we already collected is the answer.
         let _ = session.set_recv_timeout(Some(REPLAY_FIRST_WAIT));
-        let mut snapshots: Vec<Vec<u8>> = Vec::new();
+        // The daemon replays each ring segment as `Size` then `Snapshot`, so the
+        // last size seen is the one the next snapshot was recorded at. Observing
+        // does not resize anything — the daemon ignores the size we asked with —
+        // so `SESSION_SIZE` is only the stand-in for a server too old to have
+        // sent one.
+        let mut segments: Vec<CaptureSegment> = Vec::new();
+        let mut size = SESSION_SIZE;
         loop {
             match session.recv() {
+                Ok(DaemonMsg::Size(seen)) => {
+                    size = seen;
+                    let _ = session.set_recv_timeout(Some(REPLAY_SETTLE));
+                }
                 Ok(DaemonMsg::Snapshot(bytes)) => {
-                    snapshots.push(bytes);
+                    segments.push(CaptureSegment { size, bytes });
                     let _ = session.set_recv_timeout(Some(REPLAY_SETTLE));
                 }
                 Ok(DaemonMsg::Output(_)) | Ok(DaemonMsg::Exited { .. }) => break,
@@ -173,12 +182,11 @@ impl Backend for RealBackend {
             }
         }
         let _ = session.detach();
-        let bytes: Vec<u8> = if scrollback {
-            snapshots.concat()
-        } else {
-            snapshots.pop().unwrap_or_default()
-        };
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        if !scrollback {
+            // Only the newest segment, which is the one holding the screen.
+            segments.drain(..segments.len().saturating_sub(1));
+        }
+        Ok(segments)
     }
 
     fn procs(&mut self, pane: u64) -> Result<PaneProcs> {
@@ -234,12 +242,13 @@ impl Backend for RealBackend {
             .running
             .take()
             .ok_or_else(|| anyhow!("run_wait without a spawned command"))?;
-        let mut stdout = std::io::stdout().lock();
         let code = loop {
             match session.recv() {
                 Ok(DaemonMsg::Output(bytes)) | Ok(DaemonMsg::Snapshot(bytes)) => {
-                    stdout.write_all(&bytes)?;
-                    stdout.flush()?;
+                    // Not `stdout.write_all`: a caller who stopped reading
+                    // (`tty7 run -- … | head`) must end the pipeline, not turn
+                    // into an error about the command we were streaming.
+                    crate::stdio::out(&bytes);
                 }
                 Ok(DaemonMsg::Exited { code }) => break code,
                 Ok(_) => {}

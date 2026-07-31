@@ -33,6 +33,14 @@ clap = { version = "4", features = ["derive"] }
 # every column after it out of line. Already in the tree via alacritty.
 unicode-width = "0.2"
 
+# The VT parser behind `capture --plain`. A pane's replay is a byte stream, and
+# recovering the text from it is a terminal's job, not a regex's: only the grid
+# knows that a break at column 120 was a wrap rather than a newline, that a CR
+# meant "overwrite this line", or which cell a wide char and its spacer share.
+# The same crate the GUI renders with, at the same rev, so the two agree about
+# what a pane says.
+alacritty_terminal.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

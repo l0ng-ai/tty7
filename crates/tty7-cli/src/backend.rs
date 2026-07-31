@@ -1,11 +1,24 @@
 use anyhow::Result;
 use tty7_core::core::session::WorkspaceId;
 use tty7_core::daemon::control::{ControlEvent, ControlHelloOk, ControlRequest, ReplyOk};
-use tty7_core::daemon::protocol::{PaneInfo, PaneProcs};
+use tty7_core::daemon::protocol::{PaneInfo, PaneProcs, WinSize};
 
 mod real;
 
 pub use real::RealBackend;
+
+/// One replayed snapshot together with the size it was recorded at.
+///
+/// The daemon's scrollback ring starts a new segment on every resize and sends
+/// `Size` immediately before each `Snapshot`, so the two always arrive paired.
+/// Keeping them paired is what lets `capture --plain` replay a segment through a
+/// grid of the right width — parse 203 columns of output at 120 and every wrap
+/// lands in the wrong place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureSegment {
+    pub size: WinSize,
+    pub bytes: Vec<u8>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunSpec {
@@ -24,7 +37,8 @@ pub trait Backend {
 
     fn send_input(&mut self, pane: u64, bytes: Vec<u8>) -> Result<()>;
 
-    fn capture(&mut self, pane: u64, scrollback: bool) -> Result<String>;
+    /// The pane's replay: the newest segment, or every one with `scrollback`.
+    fn capture(&mut self, pane: u64, scrollback: bool) -> Result<Vec<CaptureSegment>>;
 
     fn procs(&mut self, pane: u64) -> Result<PaneProcs>;
 
@@ -56,7 +70,7 @@ pub mod mock {
     };
     use tty7_core::daemon::protocol::{PROTOCOL_VERSION, PaneInfo, PaneProcs};
 
-    use super::{Backend, RunSpec};
+    use super::{Backend, CaptureSegment, RunSpec};
 
     pub struct MockBackend {
         pub machine: Machine,
@@ -66,7 +80,7 @@ pub mod mock {
         pub next_spawn_id: u64,
         pub sent: Vec<(u64, Vec<u8>)>,
         pub captured: Vec<(u64, bool)>,
-        pub capture_text: String,
+        pub capture_segments: Vec<CaptureSegment>,
         pub procs_calls: Vec<u64>,
         pub procs_reply: PaneProcs,
         pub registry: Vec<PaneInfo>,
@@ -86,7 +100,7 @@ pub mod mock {
                 next_spawn_id: 6,
                 sent: Vec::new(),
                 captured: Vec::new(),
-                capture_text: String::new(),
+                capture_segments: Vec::new(),
                 procs_calls: Vec::new(),
                 procs_reply: PaneProcs::default(),
                 registry: Vec::new(),
@@ -141,9 +155,9 @@ pub mod mock {
             Ok(())
         }
 
-        fn capture(&mut self, pane: u64, scrollback: bool) -> Result<String> {
+        fn capture(&mut self, pane: u64, scrollback: bool) -> Result<Vec<CaptureSegment>> {
             self.captured.push((pane, scrollback));
-            Ok(self.capture_text.clone())
+            Ok(self.capture_segments.clone())
         }
 
         fn procs(&mut self, pane: u64) -> Result<PaneProcs> {

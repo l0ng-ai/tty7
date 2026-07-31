@@ -9693,6 +9693,7 @@ dependencies = [
 name = "tty7-cli"
 version = "26.7.6"
 dependencies = [
+ "alacritty_terminal",
  "anyhow",
  "clap",
  "libc",

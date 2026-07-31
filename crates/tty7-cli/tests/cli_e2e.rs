@@ -1,4 +1,4 @@
-use std::io::BufRead as _;
+use std::io::{BufRead as _, Read as _};
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -46,6 +46,14 @@ fn main() {
         (
             "events_stream_reports_a_workspace_creation",
             events_stream_reports_a_workspace_creation,
+        ),
+        (
+            "a_reader_that_hung_up_ends_the_pipeline_quietly",
+            a_reader_that_hung_up_ends_the_pipeline_quietly,
+        ),
+        (
+            "capture_plain_returns_text_not_escapes",
+            capture_plain_returns_text_not_escapes,
         ),
     ];
 
@@ -459,4 +467,102 @@ fn events_stream_reports_a_workspace_creation(daemon: &Daemon) {
         verdict,
         "no event line arrived within {SETTLE_WITHIN:?}; saw {seen:?}"
     );
+}
+
+/// `tty7 … | head -1` must end the way `cat … | head -1` ends. Rust ignores
+/// SIGPIPE and `println!` panics on the resulting error, so without the fix
+/// this printed a panic and a backtrace note on a correct invocation.
+///
+/// Both write paths are covered: `ls` goes through the report emitter, `run`
+/// through the loop that streams a child's output. The reader is dropped
+/// immediately, long before either has anything to say, so the very first
+/// write lands on a pipe with no other end — no need to guess at a buffer size.
+fn a_reader_that_hung_up_ends_the_pipeline_quietly(daemon: &Daemon) {
+    daemon.run_ok(&["ws", "new", "pipews"]);
+
+    let printer = one_shot("echo tty7_e2e_pipe_marker");
+    let mut streaming: Vec<&str> = vec!["run", "--"];
+    streaming.extend(printer.iter().map(String::as_str));
+
+    for args in [vec!["ls"], streaming] {
+        let mut child = daemon
+            .cli(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("could not spawn tty7 {args:?}: {e}"));
+        drop(child.stdout.take().expect("stdout was piped"));
+
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("stderr was piped")
+            .read_to_string(&mut stderr)
+            .expect("reading tty7's stderr");
+        let status = child.wait().expect("waiting for tty7");
+
+        assert!(
+            !stderr.contains("panicked"),
+            "tty7 {args:?} panicked when its reader hung up: {stderr}"
+        );
+        assert!(
+            !stderr.to_lowercase().contains("broken pipe"),
+            "a hung-up reader is how a pipeline ends, not something to report: \
+             tty7 {args:?} said {stderr}"
+        );
+        // Unix dies of SIGPIPE, so there is no code at all; Windows exits 0.
+        // Either way it must not be the failure exit, which is what the error
+        // path used to produce.
+        assert_ne!(
+            status.code(),
+            Some(1),
+            "tty7 {args:?} treated a hung-up reader as a failure: {stderr}"
+        );
+    }
+}
+
+/// `--plain` against a real pane, end to end through a real daemon.
+///
+/// The discriminator is the PTY's own line ending: a terminal ends lines with
+/// CRLF, so every raw capture carries `\r`, and a rendered one carries none —
+/// that CR was an instruction to the grid, not text. It holds whatever the test
+/// machine's shell decorates its prompt with, which a check for escape bytes
+/// would not: the isolated daemon's shell prints no colour at all.
+///
+/// What the grid *does* with those bytes (wraps, overwrites, cursor moves) is
+/// pinned by the unit tests in `screen.rs`, which can craft the byte stream
+/// exactly. This one proves the flag reaches them.
+fn capture_plain_returns_text_not_escapes(daemon: &Daemon) {
+    let created = daemon.run_json(&["new", &workdir()]);
+    let pane = created["pane"].as_u64().expect("new prints the pane id");
+    let address = format!("%{pane}");
+
+    daemon.run_ok(&["send", &address, "echo tty7_e2e_plain_marker", "--enter"]);
+
+    let deadline = Instant::now() + SETTLE_WITHIN;
+    loop {
+        let raw = daemon.run_ok(&["capture", &address, "--scrollback"]);
+        let plain = daemon.run_ok(&["capture", &address, "--scrollback", "--plain"]);
+        if plain.contains("tty7_e2e_plain_marker") {
+            assert!(
+                raw.contains('\r'),
+                "the default hands back the pane's bytes, CRLF included:\n{raw:?}"
+            );
+            assert!(
+                !plain.contains('\r'),
+                "a carriage return is an instruction to the grid, not text:\n{plain:?}"
+            );
+            assert!(
+                !plain.contains('\u{1b}'),
+                "an escape survived the grid:\n{plain:?}"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the sent text never showed up in the rendered capture; last was:\n{plain}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }

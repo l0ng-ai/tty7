@@ -67,8 +67,9 @@ pub enum Command {
     Send(SendArgs),
 
     #[command(
-        about = "Print a pane's output with its ANSI escapes intact, decoded as UTF-8 \
-                 (invalid bytes become U+FFFD): the newest scrollback segment by default"
+        about = "Print a pane's output — as text with `--plain`, otherwise with its ANSI \
+                 escapes intact, decoded as UTF-8 (invalid bytes become U+FFFD): the \
+                 newest scrollback segment by default"
     )]
     Capture(CaptureArgs),
 
@@ -197,11 +198,18 @@ pub struct CaptureArgs {
 
     #[arg(
         long,
-        help = "Print the whole scrollback ring, raw ANSI bytes; the ring splits into \
-                segments on resize, and without this flag only the last segment is \
-                printed (for a never-resized pane the two are identical)"
+        help = "Print the whole scrollback ring; the ring splits into segments on resize, \
+                and without this flag only the last segment is printed (for a \
+                never-resized pane the two are identical)"
     )]
     pub scrollback: bool,
+
+    #[arg(
+        long,
+        help = "Replay the output through a terminal and print the resulting text: no \
+                escapes, wrapped lines rejoined, overwrites and cursor moves applied"
+    )]
+    pub plain: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -617,7 +625,26 @@ mod tests {
             panic!("capture did not parse");
         };
         assert!(args.scrollback);
+        assert!(!args.plain, "raw bytes stay the default");
         assert_eq!(args.target.as_deref(), Some("%3"));
+    }
+
+    #[test]
+    fn capture_plain_is_its_own_flag_and_composes_with_scrollback() {
+        // The two answer different questions — how much to replay, and whether
+        // to replay it through a grid — so neither implies or excludes the other.
+        let Some(Command::Capture(args)) = parse(&["tty7", "capture", "--plain"]).command else {
+            panic!("capture did not parse");
+        };
+        assert!(args.plain && !args.scrollback);
+        assert!(args.target.is_none(), "the pane comes from $TTY7_PANE");
+
+        let Some(Command::Capture(args)) =
+            parse(&["tty7", "capture", "%3", "--plain", "--scrollback"]).command
+        else {
+            panic!("capture did not parse");
+        };
+        assert!(args.plain && args.scrollback);
     }
 
     #[test]
