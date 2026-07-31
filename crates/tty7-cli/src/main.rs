@@ -4,13 +4,17 @@ mod cli;
 mod commands;
 mod output;
 mod resolve;
+mod screen;
 mod server;
+mod stdio;
 #[cfg(test)]
 mod testbed;
 
 use clap::Parser;
 
 fn main() -> std::process::ExitCode {
+    // Before the first byte goes out, and before clap can print a usage error.
+    stdio::end_pipelines_quietly();
     let cli = cli::Cli::parse();
     let json = cli.json;
     let quiet = cli.quiet;
@@ -21,10 +25,8 @@ fn main() -> std::process::ExitCode {
         // ours. The report rides along anyway: --json must not go silent just
         // because the verb also carries an exit code.
         Ok(commands::Outcome::Exit(code, report)) => {
+            // No flush needed before the exit below: `stdio::out` already did.
             emit(report, json, quiet);
-            // process::exit runs no destructors and flushes nothing; stdout is
-            // a LineWriter, so anything not ending in a newline would be lost.
-            let _ = std::io::Write::flush(&mut std::io::stdout());
             std::process::exit(code)
         }
         Ok(commands::Outcome::Report(report)) => {
@@ -46,10 +48,10 @@ fn emit(report: commands::Report, json: bool, quiet: bool) {
     }
     if json {
         if !report.json.is_null() {
-            println!("{}", report.json);
+            stdio::line(&report.json.to_string());
         }
     } else if !report.human.is_empty() {
-        print!("{}", ensure_newline(report.human));
+        stdio::out(ensure_newline(report.human).as_bytes());
     }
 }
 

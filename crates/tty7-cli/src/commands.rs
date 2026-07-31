@@ -13,6 +13,7 @@ use crate::cli::{
 };
 use crate::output;
 use crate::resolve;
+use crate::screen;
 
 #[derive(Debug)]
 pub struct Report {
@@ -386,7 +387,16 @@ fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
 
 fn capture(args: CaptureArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     let pane = address::pane_or_context(args.target.as_deref(), ctx)?;
-    let text = backend.capture(pane, args.scrollback)?;
+    let segments = backend.capture(pane, args.scrollback)?;
+    // Raw is the default and stays byte-for-byte what the daemon stored, joined
+    // in replay order; `--plain` hands the same bytes to a grid instead. Either
+    // way `--json` carries whatever was printed, so a caller reads one field.
+    let text = if args.plain {
+        screen::render(&segments)
+    } else {
+        let bytes: Vec<u8> = segments.into_iter().flat_map(|s| s.bytes).collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
     report(text.clone(), json!({ "pane": pane, "text": text }))
 }
 
@@ -588,9 +598,9 @@ fn pane_close(target: Option<&str>, ctx: &Context, backend: &mut dyn Backend) ->
 fn events(json_mode: bool, backend: &mut dyn Backend) -> Result<Outcome> {
     backend.events(&mut |event| {
         if json_mode {
-            println!("{}", serde_json::to_string(&event)?);
+            crate::stdio::line(&serde_json::to_string(&event)?);
         } else {
-            println!("{}", event_line(&event));
+            crate::stdio::line(&event_line(&event));
         }
         Ok(())
     })?;
@@ -741,6 +751,20 @@ mod tests {
 
     fn mock() -> MockBackend {
         MockBackend::with_machine(two_workspace_machine())
+    }
+
+    /// A replayed snapshot at a 20-column pane, which is narrow enough that the
+    /// wrapping tests can wrap without pages of fixture.
+    fn segment(bytes: &[u8]) -> crate::backend::CaptureSegment {
+        crate::backend::CaptureSegment {
+            size: tty7_core::daemon::protocol::WinSize {
+                cols: 20,
+                rows: 10,
+                cell_w: 8,
+                cell_h: 16,
+            },
+            bytes: bytes.to_vec(),
+        }
     }
 
     fn run_cli(args: &[&str], ctx: &Context, backend: &mut MockBackend) -> Outcome {
@@ -1227,7 +1251,7 @@ mod tests {
     #[test]
     fn capture_and_procs_are_wired_through_the_backend() {
         let mut backend = mock();
-        backend.capture_text = "$ make\nok\n".into();
+        backend.capture_segments = vec![segment(b"$ make\r\nok\r\n")];
         let out = run_cli(
             &["tty7", "capture", "%2", "--scrollback"],
             &Context::default(),
@@ -1236,12 +1260,58 @@ mod tests {
         assert_eq!(backend.captured, vec![(2, true)]);
         assert_eq!(
             human(out),
-            "$ make\nok\n",
-            "capture prints the pane verbatim"
+            "$ make\r\nok\r\n",
+            "without --plain the pane's bytes are passed through untouched"
         );
 
         run_cli(&["tty7", "procs", "%1"], &Context::default(), &mut backend);
         assert_eq!(backend.procs_calls, vec![1]);
+    }
+
+    #[test]
+    fn capture_plain_replays_the_bytes_through_a_grid() {
+        let mut backend = mock();
+        // Coloured, CR-overwritten, and wrapped past the 20-column pane: three
+        // things the raw form shows verbatim and `--plain` has to resolve.
+        backend.capture_segments = vec![segment(
+            b"\x1b[32m$ make\x1b[0m\r\n10%\r100%\r\nabcdefghijklmnopqrstuvwxyz\r\n",
+        )];
+        let raw = human(run_cli(
+            &["tty7", "capture", "%2"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert!(
+            raw.contains("\x1b[32m"),
+            "the default keeps escapes: {raw:?}"
+        );
+
+        let plain = human(run_cli(
+            &["tty7", "capture", "%2", "--plain"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(plain, "$ make\n100%\nabcdefghijklmnopqrstuvwxyz");
+    }
+
+    #[test]
+    fn capture_json_carries_whichever_form_was_asked_for() {
+        let mut backend = mock();
+        backend.capture_segments = vec![segment(b"\x1b[31mred\x1b[0m\r\n")];
+        let raw = json_of(run_cli(
+            &["tty7", "capture", "%2"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(raw["text"], json!("\u{1b}[31mred\u{1b}[0m\r\n"));
+
+        let plain = json_of(run_cli(
+            &["tty7", "capture", "%2", "--plain"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(plain["text"], json!("red"));
+        assert_eq!(plain["pane"], json!(2));
     }
 
     #[test]

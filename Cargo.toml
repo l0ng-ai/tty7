@@ -91,29 +91,9 @@ image = "0.25"
 # to gpui's rev so the shared `http_client`/`zed-reqwest` versions stay aligned.
 reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
 
-# Our fork of Zed's alacritty_terminal fork. Used by the *client*
-# (`terminal::remote`) for the VT parser + grid (`Term`/`ansi::Processor`) that
-# renders the mirror. The daemon's PTY itself is driven by `portable-pty` below.
-#
-# The `tty7` branch is Zed's `fcf32fe` (the rev Zed pins) plus two commits, both
-# still missing from alacritty master as of 852e971:
-#
-# 1. `push_keyboard_mode` capped its stack by removing from `title_stack` instead
-#    of `keyboard_mode_stack` — a copy-paste slip from `push_title` that compiles
-#    because both are `Vec`s. With `kitty_keyboard` on (see
-#    `terminal_config_from_user`) every overflowing push silently drops a saved
-#    title, and once the title stack is empty `Vec::remove(0)` panics — 4097
-#    unpopped `CSI > 1 u` pushes, about 20KB of output, kill the reader thread and
-#    freeze the pane.
-# 2. `input` reserves columns per `char`, so an emoji written as base + U+FE0F
-#    (`❤️`, `🗂️`, `⚠️` — any base whose East Asian Width is Neutral) gets one
-#    column instead of two and shifts the rest of the line left by one. The fork
-#    re-scores the sequence with `UnicodeWidthStr` and widens the cell (issue
-#    #203).
-#
-# Each patch has a guard test in `src/terminal/remote.rs`; drop this fork once
-# both land upstream.
-alacritty_terminal = { git = "https://github.com/l0ng-ai/alacritty", rev = "b79e70484b13308ce766a763531ac25a8302c012" }
+# See `[workspace.dependencies]`: the pin is shared with tty7-cli, which parses
+# `capture` output through the same grid.
+alacritty_terminal.workspace = true
 
 # Desktop notifications driven by OSC 9 / OSC 777 escape sequences. Cross-platform;
 # the macOS backend uses the deprecated NSUserNotification (weak — a completion
@@ -246,6 +226,33 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac10
 # backends are added by the `cfg(target_os = "linux")` dependency entry in the
 # package manifest, so they never reach the Windows/macOS builds.
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["font-kit", "runtime_shaders"] }
+
+# Our fork of Zed's alacritty_terminal fork: the VT parser + grid
+# (`Term`/`ansi::Processor`). Two packages read it and they must agree, hence
+# this being a workspace pin rather than one each — the GUI (`terminal::remote`)
+# to render the live mirror, and tty7-cli to turn a captured pane back into text
+# (`tty7 capture --plain`). The daemon parses nothing; it is a byte pipe, and its
+# PTY is driven by `portable-pty`.
+#
+# The `tty7` branch is Zed's `fcf32fe` (the rev Zed pins) plus two commits, both
+# still missing from alacritty master as of 852e971:
+#
+# 1. `push_keyboard_mode` capped its stack by removing from `title_stack` instead
+#    of `keyboard_mode_stack` — a copy-paste slip from `push_title` that compiles
+#    because both are `Vec`s. With `kitty_keyboard` on (see
+#    `terminal_config_from_user`) every overflowing push silently drops a saved
+#    title, and once the title stack is empty `Vec::remove(0)` panics — 4097
+#    unpopped `CSI > 1 u` pushes, about 20KB of output, kill the reader thread and
+#    freeze the pane.
+# 2. `input` reserves columns per `char`, so an emoji written as base + U+FE0F
+#    (`❤️`, `🗂️`, `⚠️` — any base whose East Asian Width is Neutral) gets one
+#    column instead of two and shifts the rest of the line left by one. The fork
+#    re-scores the sequence with `UnicodeWidthStr` and widens the cell (issue
+#    #203).
+#
+# Each patch has a guard test in `src/terminal/remote.rs`; drop this fork once
+# both land upstream.
+alacritty_terminal = { git = "https://github.com/l0ng-ai/alacritty", rev = "b79e70484b13308ce766a763531ac25a8302c012" }
 
 anyhow = "1"
 log = "0.4"
