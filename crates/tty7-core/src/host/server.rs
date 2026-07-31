@@ -13,6 +13,7 @@ use crate::daemon::control::{
     WireErrorKind, feature, server_started,
 };
 use crate::daemon::duplex::{Duplex, Halves};
+use crate::daemon::protocol::PaneInfo;
 use crate::host::{Host, SearchHit, SharedHost, WatchSub};
 
 pub const MAX_WORKERS: usize = 64;
@@ -25,6 +26,7 @@ pub const LAYOUT_EVENT_QUEUE: usize = 1024;
 
 pub trait PaneDirectory: Send + Sync {
     fn pane_count(&self) -> u64;
+    fn panes(&self) -> Vec<PaneInfo>;
     fn agent_states(&self) -> Vec<PaneAgentState>;
 }
 
@@ -476,6 +478,26 @@ fn drop_unsendable_hits(hits: &mut Vec<SearchHit>) {
     }
 }
 
+fn machine_with_live_panes(conn: &Conn) -> io::Result<machine::Machine> {
+    let mut machine = conn.machine()?.machine();
+    let Some(panes) = conn.panes.as_ref().map(|p| p.panes()) else {
+        return Ok(machine);
+    };
+    for info in panes {
+        let record = match machine.panes.iter_mut().find(|p| p.id == info.pane_id) {
+            Some(record) => record,
+            None => {
+                machine.panes.push(machine::PaneRecord::new(info.pane_id));
+                machine.panes.last_mut().expect("record was just inserted")
+            }
+        };
+        record.cwd = info.cwd.map(|p| p.to_string_lossy().into_owned());
+        record.title = info.title;
+        record.live = info.alive;
+    }
+    Ok(machine)
+}
+
 fn run_request(
     conn: &Arc<Conn>,
     req_id: u64,
@@ -590,7 +612,7 @@ fn run_request(
         }
 
         ControlRequest::MachineGet => (
-            ReplyOk::MachineTree(Box::new(conn.machine()?.machine())),
+            ReplyOk::MachineTree(Box::new(machine_with_live_panes(conn)?)),
             Vec::new(),
         ),
         ControlRequest::WorkspaceTree { workspace } => (
@@ -1535,11 +1557,17 @@ mod aggregate_tests {
     use crate::host::local::LocalHost;
     use std::net::{TcpListener, TcpStream};
 
-    struct ThreePanesOneAgent;
+    struct ThreePanesOneAgent {
+        panes: Vec<PaneInfo>,
+    }
 
     impl PaneDirectory for ThreePanesOneAgent {
         fn pane_count(&self) -> u64 {
             3
+        }
+
+        fn panes(&self) -> Vec<PaneInfo> {
+            self.panes.clone()
         }
 
         fn agent_states(&self) -> Vec<PaneAgentState> {
@@ -1574,7 +1602,7 @@ mod aggregate_tests {
     #[test]
     fn status_answers_with_this_servers_facts() {
         let services = Services {
-            panes: Some(Arc::new(ThreePanesOneAgent)),
+            panes: Some(Arc::new(ThreePanesOneAgent { panes: Vec::new() })),
             ..Services::none()
         };
         let client = client_with(services);
@@ -1601,7 +1629,7 @@ mod aggregate_tests {
     #[test]
     fn agent_states_are_the_pane_directorys_snapshot() {
         let services = Services {
-            panes: Some(Arc::new(ThreePanesOneAgent)),
+            panes: Some(Arc::new(ThreePanesOneAgent { panes: Vec::new() })),
             ..Services::none()
         };
         let client = client_with(services);
@@ -1614,6 +1642,48 @@ mod aggregate_tests {
         assert_eq!(states[0].agent, Some(CLIAgent::Claude));
         assert_eq!(states[0].state.status, AgentStatus::Working);
         assert_eq!(states[0].state.session_id.as_deref(), Some("sess-7"));
+    }
+
+    #[test]
+    fn machine_get_overlays_live_pane_titles() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = MachineStore::open(dir.path().join(machine::MACHINE_FILE));
+        let ws = store.workspace_create(None, None, None).unwrap();
+        store
+            .tab_create(
+                ws.id,
+                None,
+                machine::PaneSeed {
+                    pane: 7,
+                    cwd: Some("/repo/tty7".into()),
+                    ssh_spec: None,
+                    agent: None,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+
+        let services = Services {
+            machine: Some(store),
+            attachments: Arc::new(AttachRegistry::default()),
+            panes: Some(Arc::new(ThreePanesOneAgent {
+                panes: vec![PaneInfo {
+                    pane_id: 7,
+                    cwd: Some(PathBuf::from("/repo/tty7")),
+                    title: "nvim".into(),
+                    alive: true,
+                    owner: None,
+                }],
+            })),
+        };
+        let client = client_with(services);
+        let ReplyOk::MachineTree(machine) = client.call(ControlRequest::MachineGet).unwrap() else {
+            panic!("MachineGet must answer with a machine tree");
+        };
+        let pane = machine.panes.iter().find(|p| p.id == 7).unwrap();
+        assert_eq!(pane.title, "nvim");
+        assert!(pane.live);
     }
 
     #[test]

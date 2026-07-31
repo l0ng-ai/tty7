@@ -84,6 +84,10 @@ impl crate::host::server::PaneDirectory for Registry {
         self.panes.lock().unwrap().len() as u64
     }
 
+    fn panes(&self) -> Vec<crate::daemon::protocol::PaneInfo> {
+        self.list()
+    }
+
     fn agent_states(&self) -> Vec<crate::daemon::control::PaneAgentState> {
         let panes: Vec<Arc<DaemonPane>> = self.panes.lock().unwrap().values().cloned().collect();
         let mut states: Vec<_> = panes.iter().filter_map(|p| p.agent_state()).collect();

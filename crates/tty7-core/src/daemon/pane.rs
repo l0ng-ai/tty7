@@ -1571,7 +1571,10 @@ fn agent_facts_changed(
     match (before, after) {
         (None, None) => false,
         (Some(a), Some(b)) => {
-            a.agent != b.agent || a.session_id != b.session_id || a.launch_argv != b.launch_argv
+            a.agent != b.agent
+                || a.session_id != b.session_id
+                || a.launch_argv != b.launch_argv
+                || a.status != b.status
         }
         _ => true,
     }
