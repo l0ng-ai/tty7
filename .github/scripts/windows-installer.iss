@@ -74,6 +74,7 @@ Source: "{#StageDir}\tty7-app.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; The CLI. `core::cli_install` adds {app} to the user's PATH at first launch,
 ; so this is not registered as an [Env] change here — the portable zip has no
 ; installer to do it, and one code path serving both is one behaviour to debug.
+; The uninstaller takes that entry back out; see RemoveAppDirFromUserPath below.
 Source: "{#StageDir}\tty7.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\completions\*"; DestDir: "{app}\completions"; Flags: ignoreversion recursesubdirs
 Source: "{#StageDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
@@ -115,4 +116,68 @@ begin
   Exec(ExpandConstant('{tmp}\tty7-app.exe'), '--stop-daemon', '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := '';
+end;
+
+(* Take {app} back out of the user's PATH.
+
+  `core::cli_install` puts it there at first launch rather than the installer
+  doing it, because the portable zip has no installer — but that leaves nobody
+  to undo it, and an uninstall that permanently grows the user's PATH by one
+  dead entry is not an uninstall. So the removal lives here, on the one install
+  shape that has an uninstaller at all. (Unix has no equivalent hook: deleting
+  the .app or the tarball leaves the symlink behind for the user to remove.)
+
+  HKCU even for an all-users install: cli_install only ever writes the user
+  hive, so that is the only place an entry can be. On a machine where several
+  users ran tty7, this clears the one uninstalling — the others keep a dead
+  entry, which is the price of not needing elevation to install in the first
+  place.
+
+  Entries are compared case-insensitively and ignoring a trailing backslash,
+  and every other entry is written back verbatim: this is somebody's PATH, and
+  we are here to remove one thing from it, not to tidy it. No
+  WM_SETTINGCHANGE broadcast — the entry now names a deleted directory, so
+  nothing is waiting on the news, and it is gone from new shells at next
+  sign-in regardless. *)
+procedure RemoveAppDirFromUserPath();
+var
+  Existing, Rebuilt, Raw, Entry, Target: String;
+  P: Integer;
+begin
+  if not RegQueryStringValue(HKEY_CURRENT_USER, 'Environment', 'Path', Existing) then
+    exit;
+
+  Target := RemoveBackslashUnlessRoot(ExpandConstant('{app}'));
+  Rebuilt := '';
+  (* The trailing ';' makes the last entry look like every other one. *)
+  Existing := Existing + ';';
+  repeat
+    P := Pos(';', Existing);
+    Raw := Copy(Existing, 1, P - 1);
+    Existing := Copy(Existing, P + 1, Length(Existing));
+    Entry := Trim(Raw);
+    if (Entry <> '') and
+       (CompareText(RemoveBackslashUnlessRoot(Entry), Target) <> 0) then
+    begin
+      if Rebuilt <> '' then
+        Rebuilt := Rebuilt + ';';
+      Rebuilt := Rebuilt + Raw;
+    end;
+  until Existing = '';
+
+  if Rebuilt = '' then
+    RegDeleteValue(HKEY_CURRENT_USER, 'Environment', 'Path')
+  (* Inno cannot read a value's type back, so infer it: a PATH holding a '%' is
+     one that has to stay expandable, and rewriting it as REG_SZ would freeze
+     every other entry's variable at today's value. *)
+  else if Pos('%', Rebuilt) > 0 then
+    RegWriteExpandStringValue(HKEY_CURRENT_USER, 'Environment', 'Path', Rebuilt)
+  else
+    RegWriteStringValue(HKEY_CURRENT_USER, 'Environment', 'Path', Rebuilt);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    RemoveAppDirFromUserPath();
 end;

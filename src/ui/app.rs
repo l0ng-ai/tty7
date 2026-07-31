@@ -1908,6 +1908,13 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.check_for_updates = on);
     }
 
+    /// Takes effect at next launch: `core::cli_install` runs once from `main`,
+    /// before there is a window to flip this in. Turning it off does not remove
+    /// a symlink already placed — the install is idempotent, not reversible.
+    pub(crate) fn set_install_cli_on_path(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.install_cli_on_path = on);
+    }
+
     pub(crate) fn set_dim_inactive_panes(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.dim_inactive_panes = on);
     }

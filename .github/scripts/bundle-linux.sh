@@ -36,7 +36,7 @@ chmod +x "$STAGE/tty7"
 # Release builds keep symbols (thin LTO, no profile strip); drop them here so
 # the archive isn't ~100 MB of debug info.
 strip "$STAGE/tty7-app" || echo "⚠️  strip unavailable — shipping unstripped binary"
-strip "$STAGE/tty7" || true
+strip "$STAGE/tty7" || echo "⚠️  strip unavailable — shipping unstripped CLI"
 mkdir -p "$STAGE/completions"
 cp assets/completions/*.json "$STAGE/completions/"
 cp LICENSE "$STAGE/LICENSE"

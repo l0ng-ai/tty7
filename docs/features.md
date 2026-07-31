@@ -64,6 +64,7 @@ it never wraps or replaces the agent.
 - **Copy Session ID** — put the agent's native session id on the clipboard, beside *Copy Working Directory*, for pasting into `codex resume`, a bug report, or another tool
 - **Context feed** — palette commands send the current selection or the repo's `git diff` to the running agent as a ready-made prompt
 - **Tray icon** — a system tray / menu bar item that flips to an attention state the moment any agent needs your input; its menu lists every agent pane (brand avatar + status dot, click to reveal), switches the notification policy, and offers *Quit and Stop Daemon* alongside the plain session-keeping quit (`show_tray_icon`, on by default)
+- **`tty7` on PATH** — the CLI ships inside every installer and is put on PATH at launch, so a script or a coding agent can drive tty7 from any terminal. Inside a tty7 pane it works regardless, since panes inherit the app's environment. On Unix it is a symlink into whichever of `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/bin`, `~/.cargo/bin` your PATH already covers; on Windows the install directory is appended to your user PATH, and the uninstaller takes it back out. A `tty7` you installed yourself is left alone, never replaced. Off via Settings → About or `install_cli_on_path: false` in `config.json`
 
 ## SSH
 

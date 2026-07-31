@@ -212,13 +212,15 @@ fn main() {
     #[cfg(unix)]
     enrich_path_from_login_shell();
 
+    let config = crate::core::config::Config::load();
+
     // After the PATH enrichment above, which is what makes the candidate scan
     // see the user's real PATH rather than the stub a Finder launch inherits —
     // and before the daemon below, which forks every pane and so must already
     // carry the CLI's directory in its environment.
-    crate::core::cli_install::install();
+    crate::core::cli_install::install(config.install_cli_on_path);
 
-    let restore_session = crate::core::config::Config::load().restore_session;
+    let restore_session = config.restore_session;
     let daemon_result = if restore_session {
         crate::daemon::spawn::ensure_running()
     } else {

@@ -369,6 +369,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             title: "How shells work",
             keywords: "shell session daemon server detach persist background close quit stop delete workspace layout survive reboot tmux",
         },
+        SearchEntry {
+            section: About,
+            title: "Command line tool",
+            keywords: "cli tty7 path shell command install symlink terminal iterm agent script",
+        },
     ]
 }
 
@@ -4489,6 +4494,7 @@ impl Tty7App {
             .try_global::<crate::core::update::UpdateStatus>()
             .and_then(|s| s.available.clone());
         let check_for_updates = cx.global::<Config>().check_for_updates;
+        let install_cli_on_path = cx.global::<Config>().install_cli_on_path;
 
         let logo = Arc::new(Image::from_bytes(
             ImageFormat::Png,
@@ -4593,6 +4599,40 @@ impl Tty7App {
                                     .text_sm()
                                     .text_color(foreground)
                                     .child("Check for updates on launch"),
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .mt_6()
+                    .gap_2()
+                    .child(self.section_rule(cx))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(foreground)
+                            .child("Command line"),
+                    )
+                    .child(div().text_sm().text_color(muted_fg).child(
+                        "Put the bundled `tty7` command on your PATH at launch, so scripts and coding agents can drive tty7 from any terminal. Inside a tty7 pane it works either way. Turn this off if you keep your own `tty7` — one you built or installed yourself — and do not want it shadowed. Takes effect at next launch.",
+                    ))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                crate::ui::theme::switch("install-cli-on-path", cx)
+                                    .checked(install_cli_on_path)
+                                    .on_click(cx.listener(|this, on: &bool, _w, cx| {
+                                        this.set_install_cli_on_path(*on, cx)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(foreground)
+                                    .child("Install the `tty7` command on PATH"),
                             ),
                     ),
             )
