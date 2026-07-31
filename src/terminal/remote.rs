@@ -76,6 +76,10 @@ struct ReaderSignals {
     auth: Arc<Mutex<VecDeque<(u64, AuthPromptKind)>>>,
     phase: Arc<Mutex<Option<SshPhase>>>,
     marks: crate::terminal::marks::Marks,
+    /// Kitty-graphics images the daemon lifted out of the stream (issue #213),
+    /// anchored to the grid for the paint path to blit. Shared with the reader,
+    /// which places/deletes them as `DaemonMsg::Image`/`DeleteImage` frames land.
+    images: crate::terminal::images::ImageStore,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -167,6 +171,11 @@ pub struct RemoteTerminal {
     agent: Arc<Mutex<Option<CLIAgent>>>,
     agent_session: Arc<Mutex<Option<AgentSessionState>>>,
     marks: crate::terminal::marks::Marks,
+    /// Kitty-graphics images placed on this pane's grid (issue #213).
+    /// Written by the reader thread from out-of-band `Image`/`DeleteImage`
+    /// frames, read by the paint path — same shared-handle discipline as
+    /// `marks`, since only the client holds the grid the anchors are relative to.
+    images: crate::terminal::images::ImageStore,
     route: PaneRoute,
     proxy: EventProxy,
     reader_thread: Option<JoinHandle<()>>,
@@ -333,6 +342,10 @@ impl RemoteTerminal {
             let mut term = self.term.lock();
             term.reset_state();
         }
+        // The grid was just reset, so every image anchor now points nowhere.
+        // Drop them; the daemon does not replay out-of-band image frames, so a
+        // browser redraws on its next transmit (see issue #213's reattach note).
+        self.images.clear();
 
         let reader = Self::spawn_reader(
             self.term.clone(),
@@ -352,6 +365,7 @@ impl RemoteTerminal {
                 auth: self.auth_prompts.clone(),
                 phase: self.ssh_phase.clone(),
                 marks: self.marks.clone(),
+                images: self.images.clone(),
             },
         );
         if let Ok(mut writer) = self.writer.lock() {
@@ -400,6 +414,7 @@ impl RemoteTerminal {
             Arc::new(Mutex::new(VecDeque::new()));
         let ssh_phase: Arc<Mutex<Option<SshPhase>>> = Arc::new(Mutex::new(None));
         let marks = crate::terminal::marks::Marks::new();
+        let images = crate::terminal::images::ImageStore::new();
 
         let reader_thread = Self::spawn_reader(
             term.clone(),
@@ -419,6 +434,7 @@ impl RemoteTerminal {
                 auth: auth_prompts.clone(),
                 phase: ssh_phase.clone(),
                 marks: marks.clone(),
+                images: images.clone(),
             },
         );
 
@@ -444,6 +460,7 @@ impl RemoteTerminal {
             agent,
             agent_session,
             marks,
+            images,
             route: PaneRoute::Local,
             proxy,
             reader_thread: Some(reader_thread),
@@ -489,6 +506,7 @@ impl RemoteTerminal {
                     auth,
                     phase,
                     marks,
+                    images,
                 } = signals;
                 crate::core::threads::promote_to_user_interactive();
                 let mut stream = read_half;
@@ -499,6 +517,19 @@ impl RemoteTerminal {
                 let mut mark_scan = MarkScanner::new();
                 let mut pending: Vec<u8> = buffered;
                 let mut pending_size: Option<WinSize> = None;
+                // Kitty-graphics decode runs on its own thread with newest-frame
+                // coalescing (issue #213): inflating a full-window browser frame
+                // is ~42 ms, and doing it inline here would block PTY output and
+                // scrolling for that long every frame. The worker owns the inflate
+                // + BGRA swap + placement; the reader only captures the grid
+                // anchor and hands off the still-compressed frame. Dropped when
+                // the loop ends, which joins the thread.
+                let image_decoder = {
+                    let proxy = proxy.clone();
+                    crate::terminal::images::DecodeWorker::spawn(images.clone(), move || {
+                        proxy.send_event(AlacEvent::Wakeup);
+                    })
+                };
                 let mut scratch = vec![0u8; 256 * 1024];
 
                 let trace = std::env::var("TTY7_TRACE").is_ok_and(|v| !v.is_empty() && v != "0");
@@ -632,6 +663,59 @@ impl RemoteTerminal {
                             DaemonMsg::Output(bytes) => {
                                 out_batch.extend_from_slice(&bytes);
                                 tr_frames += 1;
+                            }
+                            // Kitty graphics (issue #213): the daemon lifted an
+                            // image out of the stream and forwarded it out-of-band,
+                            // interleaved *in stream order* with the Output frames
+                            // around it. Flush the pending text first so the grid
+                            // cursor sits where the sender drew the image, then
+                            // anchor the placement to that cell in scroll-stable
+                            // absolute-row coordinates (the same formula
+                            // `record_mark` uses), so it tracks scrolling.
+                            DaemonMsg::Image(frame) => {
+                                flush_batch!();
+                                if let Some(img) =
+                                    tty7_core::core::kitty_graphics::Image::decode_frame(&frame)
+                                {
+                                    // Capture the anchor *now*, at the cursor cell
+                                    // the transmission arrived on; the decode is
+                                    // deferred to the worker thread but must land
+                                    // at this position, not wherever the cursor has
+                                    // scrolled to by the time inflate finishes.
+                                    let (anchor_row, anchor_col) = {
+                                        use alacritty_terminal::grid::Dimensions as _;
+                                        let term = term.lock();
+                                        let grid = term.grid();
+                                        let row = grid.history_size() as i64
+                                            - grid.display_offset() as i64
+                                            + i64::from(grid.cursor.point.line.0);
+                                        (row, grid.cursor.point.column.0)
+                                    };
+                                    // Hand off without blocking the reader: the
+                                    // worker inflates, swaps, places, and wakes the
+                                    // view. Stale frames coalesce away there.
+                                    image_decoder.submit(
+                                        crate::terminal::images::PendingFrame {
+                                            img,
+                                            anchor_row,
+                                            anchor_col,
+                                        },
+                                    );
+                                }
+                            }
+                            // An `a=d` delete, lifted out the same way. Order with
+                            // the surrounding output does not matter for a delete
+                            // (it targets by id/placement, not cursor position),
+                            // but flushing keeps a delete-then-retransmit in the
+                            // same read from racing its own replacement.
+                            DaemonMsg::DeleteImage(sel) => {
+                                flush_batch!();
+                                if let Some(del) =
+                                    tty7_core::core::kitty_graphics::ImageDelete::decode(&sel)
+                                {
+                                    images.delete(&del);
+                                    proxy.send_event(AlacEvent::Wakeup);
+                                }
                             }
                             DaemonMsg::Cwd(path) => {
                                 flush_batch!();
@@ -852,6 +936,13 @@ impl RemoteTerminal {
 
     pub fn marks(&self) -> crate::terminal::marks::Marks {
         self.marks.clone()
+    }
+
+    /// The kitty-graphics image store for this pane. Cheap handle clone — the
+    /// store is an `Arc<Mutex<..>>` shared with the reader thread, which places
+    /// and deletes images as out-of-band frames arrive from the daemon.
+    pub fn images(&self) -> crate::terminal::images::ImageStore {
+        self.images.clone()
     }
 
     pub fn agent_session(&self) -> Option<AgentSessionState> {

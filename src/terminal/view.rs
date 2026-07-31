@@ -772,6 +772,7 @@ impl TerminalView {
         rows: usize,
         cell_width: Pixels,
         line_height: Pixels,
+        scale: f32,
     ) {
         if (cols, rows) != (self.terminal.size().cols, self.terminal.size().rows) {
             self.last_hover_cell = None;
@@ -779,10 +780,23 @@ impl TerminalView {
         }
         self.cell_width = cell_width;
         self.line_height = line_height;
+        // Report the cell size to the child in *device* pixels (logical × display
+        // scale), so `ws_xpixel`/`ws_ypixel` describe the real framebuffer. A
+        // pixel-aware program like terminal-browser renders its frame at that
+        // native resolution; painted back into logical-pixel bounds, gpui blits
+        // it ~1:1 on the framebuffer instead of upscaling a half-resolution
+        // bitmap (which looked soft and magnified on Retina). This is what
+        // kitty/ghostty report. `self.cell_width` stays logical — glyph layout
+        // and mouse mapping work in logical pixels.
+        let scale = if scale.is_finite() && scale > 0. {
+            scale
+        } else {
+            1.
+        };
         self.terminal.resize(
             TermSize::new(cols, rows),
-            cell_width.as_f32().round() as u16,
-            line_height.as_f32().round() as u16,
+            (cell_width.as_f32() * scale).round().max(1.) as u16,
+            (line_height.as_f32() * scale).round().max(1.) as u16,
         );
     }
 
@@ -5680,16 +5694,16 @@ mod gpui_tests {
         let (window, _daemon) = harness(cx);
         window
             .update(cx, |view, _, cx| {
-                view.set_grid_size(80, 24, px(8.), px(17.));
+                view.set_grid_size(80, 24, px(8.), px(17.), 1.);
                 view.hover_link_at(0, 23, true, cx);
                 assert_eq!(view.last_hover_cell, Some((0, 23)));
                 view.hovered_link = Some(HoveredLink {
                     start: Point::new(Line(23), Column(0)),
                     end: Point::new(Line(23), Column(3)),
                 });
-                view.set_grid_size(80, 24, px(8.), px(17.));
+                view.set_grid_size(80, 24, px(8.), px(17.), 1.);
                 assert_eq!(view.last_hover_cell, Some((0, 23)));
-                view.set_grid_size(80, 8, px(8.), px(17.));
+                view.set_grid_size(80, 8, px(8.), px(17.), 1.);
                 assert!(view.last_hover_cell.is_none(), "the cell is stale");
                 assert!(view.hovered_link.is_none(), "so is the link it resolved");
             })

@@ -662,6 +662,10 @@ fn spawn_writer(
                 };
                 let drained = match &msg {
                     DaemonMsg::Output(b) => b.len(),
+                    // Image frames are lifted from the same PTY read the gate
+                    // credits, so they must debit it too or the reader stays
+                    // throttled against bytes that already left the queue.
+                    DaemonMsg::Image(b) => b.len(),
                     _ => 0,
                 };
                 let write_ok = msg.encode(&mut write_stream).is_ok();

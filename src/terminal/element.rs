@@ -7,10 +7,10 @@ use alacritty_terminal::selection::SelectionRange;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Rgb};
 use gpui::{
-    App, BorderStyle, Bounds, ContentMask, CursorStyle, Element, ElementId, Font, FontStyle,
-    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, Hsla, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, SharedString,
-    Style, TextAlign, TextRun, Window, fill, outline, point, px, relative, size,
+    App, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, Element, ElementId, Font,
+    FontStyle, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, Hsla, IntoElement,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba,
+    SharedString, Style, TextAlign, TextRun, Window, fill, outline, point, px, relative, size,
 };
 use gpui_component::ActiveTheme as _;
 
@@ -823,6 +823,11 @@ struct GridSnapshot {
     any_selected: bool,
     any_match: bool,
     any_current: bool,
+    /// Scrollback state at snapshot time, so the paint pass can map a kitty
+    /// image's absolute anchor row back to a screen row: screen_row =
+    /// anchor_row - history_size + display_offset.
+    display_offset: i32,
+    history_size: usize,
 }
 
 impl TerminalElement {
@@ -841,6 +846,7 @@ impl TerminalElement {
         let mut sliver: Option<Vec<RenderCell>> = None;
         let mut any_selected = false;
         let display_offset;
+        let history_size;
         {
             let mut palette = self.view.read(cx).terminal.palette;
             if let Some(active) = cx.try_global::<crate::terminal::palette::ActivePalette>() {
@@ -850,6 +856,7 @@ impl TerminalElement {
             let term = term.lock();
             let content = term.renderable_content();
             display_offset = content.display_offset as i32;
+            history_size = term.grid().history_size();
             let selection = content.selection;
 
             for cell in content.display_iter {
@@ -906,6 +913,8 @@ impl TerminalElement {
             any_selected,
             any_match,
             any_current,
+            display_offset,
+            history_size,
         }
     }
 
@@ -1175,7 +1184,7 @@ impl Element for TerminalElement {
             .max(1.0) as usize;
 
         self.view.update(cx, |view, _cx| {
-            view.set_grid_size(cols, rows, cell_width, line_height);
+            view.set_grid_size(cols, rows, cell_width, line_height, window.scale_factor());
         });
 
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
@@ -1243,6 +1252,18 @@ impl Element for TerminalElement {
         );
         let marked = self.view.read(cx).marked_text.clone();
 
+        // Kitty-graphics placements for this pane. Each image anchors to an
+        // absolute scrollback row (recorded when its command arrived in-stream);
+        // map that back to a screen row with the snapshot's scroll state and
+        // drop anything scrolled out of the viewport.
+        let image_store = self.view.read(cx).terminal.images();
+        let images = image_store.snapshot();
+        // Render images retired since the last paint (frames a re-transmitting
+        // browser superseded, or deletes). Evicted from the atlas below — this
+        // is the only place with `&mut Window` — so a 60fps sender doesn't leak
+        // a GPU tile per frame.
+        let retired_images = image_store.take_retired();
+
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             paint_backgrounds(window, &geom, &buf);
             if snap.any_selected {
@@ -1275,6 +1296,64 @@ impl Element for TerminalElement {
                 bold_font.as_ref(),
                 italic_font.as_ref(),
             );
+            // Kitty-graphics images, painted over the placeholder cells they
+            // occupy. `anchor_row` is absolute (measured from the top of
+            // scrollback); convert it to a screen row with the same scroll state
+            // `build_grid` captured. Rows spanning past the viewport top/bottom
+            // are clipped by the surrounding content mask.
+            //
+            // Sizing: per the kitty spec, an image with no `c=`/`r=` is shown at
+            // its natural size — one image pixel per terminal *device* pixel. A
+            // sender like terminal-browser renders its frame to exactly fill the
+            // pixel area we reported to the child via `ws_xpixel`/`ws_ypixel`,
+            // which the daemon sets to `cols × round(cell_w × scale)` /
+            // `rows × round(cell_h × scale)` — the cell size in *device* pixels
+            // (see `set_grid_size`). So the frame is at device resolution; to map
+            // it back to a cell span we divide by that *same* device cell size,
+            // `round(cell_logical × scale)`. Painting the resulting cell-span
+            // bounds (in logical px) lets gpui blit the device-resolution bitmap
+            // ~1:1 on the framebuffer — sharp, and the right size — instead of
+            // upscaling a half-resolution one. Deriving here, not at placement,
+            // keeps it correct across font-size / zoom / display-scale changes.
+            let scale = window.scale_factor();
+            let scale = if scale.is_finite() && scale > 0. {
+                scale
+            } else {
+                1.
+            };
+            for img in &images {
+                let round_w = (geom.cell_width.as_f32() * scale).round().max(1.);
+                let round_h = (geom.line_height.as_f32() * scale).round().max(1.);
+                let span_cols = if img.cols > 0 {
+                    img.cols as f32
+                } else {
+                    (img.width_px as f32 / round_w).round().max(1.)
+                };
+                let span_rows = if img.rows > 0 {
+                    img.rows as f32
+                } else {
+                    (img.height_px as f32 / round_h).round().max(1.)
+                };
+                let screen_row =
+                    img.anchor_row - snap.history_size as i64 + snap.display_offset as i64;
+                // Fully above or below the viewport: nothing visible to paint.
+                if screen_row + span_rows as i64 <= 0 || screen_row >= geom.rows as i64 {
+                    continue;
+                }
+                let top = geom.origin.y + geom.line_height * screen_row as f32;
+                let left = geom.origin.x + geom.cell_width * img.anchor_col as f32;
+                let bounds = Bounds {
+                    origin: point(left, top),
+                    size: size(geom.cell_width * span_cols, geom.line_height * span_rows),
+                };
+                let _ = window.paint_image(bounds, Corners::default(), img.data.clone(), 0, false);
+            }
+            // Evict superseded / deleted frames from the sprite atlas. Without
+            // this a browser re-transmitting at 60fps would leak one GPU tile per
+            // frame, growing the atlas without bound until the compositor stalls.
+            for retired in &retired_images {
+                let _ = window.drop_image(retired.clone());
+            }
             if let Some(row) = sliver {
                 let sg = CellGeom {
                     origin: point(geom.origin.x, geom.origin.y - geom.line_height),

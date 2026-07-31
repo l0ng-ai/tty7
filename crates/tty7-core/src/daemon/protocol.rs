@@ -641,6 +641,18 @@ pub enum DaemonMsg {
     Size(WinSize),
     Snapshot(Vec<u8>),
     Output(Vec<u8>),
+    /// A kitty graphics image lifted out of the PTY stream daemon-side (issue
+    /// #213). Carried out-of-band as a compact binary frame
+    /// ([`crate::core::kitty_graphics::Image::encode_frame`]) so the base64 text
+    /// never rides the socket and the client's VT parser never sees it. The
+    /// pixel payload stays *compressed* on the wire — the client inflates — so a
+    /// remote pane's frames don't balloon across the SSH tunnel.
+    Image(Vec<u8>),
+    /// A kitty graphics delete (`a=d`) lifted out of the PTY stream daemon-side.
+    /// Payload is a compact selector frame
+    /// ([`crate::core::kitty_graphics::ImageDelete::encode`]) telling the client
+    /// which stored image(s)/placement(s) to drop.
+    DeleteImage(Vec<u8>),
     Cwd(PathBuf),
     Prompt {
         active: bool,
@@ -730,6 +742,13 @@ mod kind {
     pub const AGENT_STATUS: u8 = 22;
     pub const VERSION_REPLY: u8 = 40;
     pub const PROCS: u8 = 50;
+    /// `Image` — a kitty graphics frame lifted out of the PTY stream (issue
+    /// #213). 60 sits clear of every range above; the payload is the compact
+    /// binary encoding, not JSON, so it stays outside the `to_json` arms.
+    pub const IMAGE: u8 = 60;
+    /// `DeleteImage` — a kitty graphics `a=d` delete lifted out of the stream
+    /// (issue #213). Compact binary selector, like `IMAGE`.
+    pub const DELETE_IMAGE: u8 = 61;
 }
 
 pub fn write_frame<W: Write>(w: &mut W, kind: u8, payload: &[u8]) -> io::Result<()> {
@@ -1019,6 +1038,8 @@ impl DaemonMsg {
             DaemonMsg::Size(size) => write_frame(w, kind::SIZE, &to_json(size)?),
             DaemonMsg::Snapshot(bytes) => write_frame(w, kind::SNAPSHOT, bytes),
             DaemonMsg::Output(bytes) => write_frame(w, kind::OUTPUT, bytes),
+            DaemonMsg::Image(frame) => write_frame(w, kind::IMAGE, frame),
+            DaemonMsg::DeleteImage(sel) => write_frame(w, kind::DELETE_IMAGE, sel),
             DaemonMsg::Cwd(path) => write_frame(w, kind::CWD, &to_json(path)?),
             DaemonMsg::Prompt {
                 active,
@@ -1072,6 +1093,8 @@ impl DaemonMsg {
             kind::SIZE => DaemonMsg::Size(from_json(&payload)?),
             kind::SNAPSHOT => DaemonMsg::Snapshot(payload),
             kind::OUTPUT => DaemonMsg::Output(payload),
+            kind::IMAGE => DaemonMsg::Image(payload),
+            kind::DELETE_IMAGE => DaemonMsg::DeleteImage(payload),
             kind::CWD => DaemonMsg::Cwd(from_json(&payload)?),
             kind::PROMPT => {
                 let (active, at_prompt, last_exit) = from_json(&payload)?;

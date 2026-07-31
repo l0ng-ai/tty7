@@ -9587,6 +9587,7 @@ dependencies = [
  "libgssapi",
  "log",
  "memchr",
+ "miniz_oxide",
  "notify 8.2.0",
  "portable-pty",
  "russh",

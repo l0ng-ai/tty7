@@ -6,6 +6,7 @@ pub mod git;
 pub mod gitignore;
 #[allow(dead_code)]
 pub mod keychain;
+pub mod kitty_graphics;
 pub mod logfile;
 pub mod machine;
 pub mod osc;

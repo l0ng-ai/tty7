@@ -112,6 +112,12 @@ memchr = "2"
 # roughly 4 MB. Base64 costs 1.33× instead. Already in the tree via russh.
 base64 = "0.22"
 
+# zlib inflate for the kitty graphics protocol's `o=z` (compressed) pixel
+# payloads (`core::kitty_graphics`). Pure-Rust, no new native code, and already
+# in the tree transitively — the same crate `terminal-browser` uses for the
+# deflate side, so the two ends agree on the wire format.
+miniz_oxide = "0.8"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 # GSSAPI/Kerberos SSH auth — see the `gssapi` feature below for why it is

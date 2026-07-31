@@ -9,9 +9,11 @@ use std::time::Duration;
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::core::kitty_graphics::{GraphicsSniffer, Segment, Sniffed};
 use crate::core::osc::OscTokenizer;
 use crate::daemon::protocol::{
     AuthResponse, DaemonMsg, NativeSshSpec, PaneInfo, RemoteContext, RemoteKind, ShellSpec, WinSize,
+    MAX_FRAME,
 };
 use crate::daemon::shell_integration;
 
@@ -416,7 +418,13 @@ pub struct DaemonPane {
     pub id: u64,
     owner: Option<String>,
     backend: PaneBackend,
-    writer: Mutex<Box<dyn Write + Send>>,
+    /// The input side (keyboard input / pasted text): the PTY writer, or the
+    /// native-SSH channel writer. Behind a `Mutex` because writes can arrive from
+    /// different connection threads. `Arc`-shared so the reader thread can write
+    /// kitty-graphics query replies (`\x1b_G…;OK\x1b\\`) back to the PTY inline
+    /// with the sniff, without routing through `write_input`.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Set during teardown so the reader doesn't emit a spurious exit.
     shutting_down: Arc<AtomicBool>,
     gate: Arc<OutputGate>,
     state: Arc<Mutex<PaneState>>,
@@ -464,6 +472,32 @@ impl DeathReporter {
     }
 }
 
+/// One out-of-band frame the reader forwards to the subscriber, kept in stream
+/// order so a kitty image lands at the cursor cell the sender drew it at: a chunk
+/// carrying graphics splits into `Output` runs interleaved with `Image`/`Delete`
+/// frames, and they must reach the client in that same order. `Output` becomes a
+/// `DaemonMsg::Output`, `Image` an encoded image frame, `Delete` a compact
+/// selector — see the reader loop's `sniff` handling.
+enum GraphicsFrame {
+    Output(Vec<u8>),
+    Image(Vec<u8>),
+    Delete(Vec<u8>),
+}
+
+/// Queue an encoded image frame for the subscriber, dropping any frame larger
+/// than [`MAX_FRAME`]. The writer's `write_frame` rejects an oversize payload
+/// with an error the writer loop treats as *fatal* — it would tear the client
+/// off an otherwise-healthy pane. A single image that won't fit is not worth
+/// that: drop it here so the rest of the stream keeps flowing. The inline
+/// `t=d` path is bounded by `MAX_TRANSMISSION_BASE64` but that still admits
+/// ~72 MiB of raw pixels, and the local shm/file path has no cap of its own,
+/// so both can land here over the limit.
+fn push_image_frame(frames: &mut Vec<GraphicsFrame>, frame: Vec<u8>) {
+    if frame.len() <= MAX_FRAME {
+        frames.push(GraphicsFrame::Image(frame));
+    }
+}
+
 impl DaemonPane {
     pub fn spawn(
         id: u64,
@@ -484,7 +518,7 @@ impl DaemonPane {
         drop(pair.slave);
 
         let reader_handle = pair.master.try_clone_reader()?;
-        let writer = pair.master.take_writer()?;
+        let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
 
         let state = Arc::new(Mutex::new(PaneState {
             id,
@@ -513,7 +547,7 @@ impl DaemonPane {
                 shell_pid,
                 integration_dir: spawn.integration_dir,
             }),
-            writer: Mutex::new(writer),
+            writer: writer.clone(),
             shutting_down: shutting_down.clone(),
             gate: gate.clone(),
             state: state.clone(),
@@ -540,6 +574,7 @@ impl DaemonPane {
             shutting_down,
             gate,
             reader_handle,
+            writer.clone(),
             move || foreground_command_running(&fg_master, shell_pid),
             ForegroundProbes {
                 remote: Box::new(move || foreground_remote_context(&remote_master)),
@@ -561,7 +596,10 @@ impl DaemonPane {
     ) -> anyhow::Result<Arc<Self>> {
         let bridge = crate::daemon::ssh::session::make_bridge();
         let reader_handle: Box<dyn Read + Send> = Box::new(bridge.reader);
-        let writer: Box<dyn Write + Send> = Box::new(bridge.writer);
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(Box::new(bridge.writer)));
+        // The connect task fills this once authenticated; the pane exposes it to
+        // WS4/WS5 via `ssh_connection()`.
         let connection: crate::daemon::ssh::SharedConnection = Arc::new(Mutex::new(Weak::new()));
 
         let target = spec
@@ -607,7 +645,7 @@ impl DaemonPane {
                 handle: bridge.handle,
                 connection: connection.clone(),
             }),
-            writer: Mutex::new(writer),
+            writer: writer.clone(),
             shutting_down: shutting_down.clone(),
             gate: gate.clone(),
             state: state.clone(),
@@ -622,6 +660,7 @@ impl DaemonPane {
             shutting_down,
             gate,
             reader_handle,
+            writer.clone(),
             || false,
             ForegroundProbes {
                 remote: Box::new(|| None),
@@ -664,6 +703,10 @@ impl DaemonPane {
         shutting_down: Arc<AtomicBool>,
         gate: Arc<OutputGate>,
         mut reader: Box<dyn Read + Send>,
+        // The pane's input side, shared so the reader can write kitty-graphics
+        // query replies (`\x1b_G…;OK\x1b\\`) straight back to the PTY — see the
+        // graphics sniff in the loop below.
+        writer: Arc<Mutex<Box<dyn Write + Send>>>,
         foreground_running: impl Fn() -> bool + Send + 'static,
         probes: ForegroundProbes,
         death: Arc<DeathReporter>,
@@ -678,6 +721,20 @@ impl DaemonPane {
             .spawn(move || {
                 crate::core::threads::promote_to_user_interactive();
                 let mut sniffer = OscSniffer::new();
+                // Kitty graphics interception (issue #213): lifts image
+                // sequences out of the stream *before* the ring/subscriber see
+                // them, so the base64 pixels never enter replay and the client's
+                // VT parser never chews through them. Zero-copy on the common
+                // no-graphics chunk — see [`GraphicsSniffer::sniff`].
+                //
+                // File/shm transfer (`t=s`/`t=f`/`t=t`) is honored only while the
+                // pane is *local*: the object/path names resolve on this host, and
+                // reading them can't leak across an SSH tunnel. A pane that starts
+                // local can `ssh` out mid-session, so the flag is refreshed from
+                // the same remote-context poll below. Seed it from the pane's
+                // current context so the first probe answers correctly.
+                let starts_local = state.lock().unwrap().remote.is_none();
+                let mut graphics = GraphicsSniffer::new_local(starts_local);
                 let mut buf = [0u8; 65536];
 
                 let trace = std::env::var("TTY7_TRACE").is_ok_and(|v| !v.is_empty() && v != "0");
@@ -714,7 +771,71 @@ impl DaemonPane {
                                 tr_reads += 1;
                                 tr_bytes += n as u64;
                             }
-                            let bytes = &buf[..n];
+                            let raw = &buf[..n];
+                            // Kitty graphics: strip any image sequences out of the
+                            // stream before anything else sees them. On the common
+                            // no-graphics chunk this borrows `raw` unchanged; only a
+                            // chunk that actually carries `\x1b_G…` allocates. Query
+                            // replies are written straight back to the PTY here, and
+                            // any images/deletes are forwarded to the subscriber
+                            // out-of-band below — none of it enters the replay ring.
+                            //
+                            // `frames` is the ordered list of out-of-band frames to
+                            // forward *in stream position*: a kitty image anchors to
+                            // the cursor cell as it stood when its command appeared,
+                            // so the client must apply the text before an image, then
+                            // the image, then the text after it, in that order. On
+                            // the no-graphics fast path `frames` stays empty and the
+                            // whole chunk is sent as one `Output`; only a chunk with
+                            // graphics splits into interleaved frames.
+                            let mut frames: Vec<GraphicsFrame> = Vec::new();
+                            let passthrough: std::borrow::Cow<[u8]> = match graphics.sniff(raw) {
+                                Sniffed::Plain(b) => std::borrow::Cow::Borrowed(b),
+                                Sniffed::Segments(segs) => {
+                                    let mut pass = Vec::new();
+                                    for seg in segs {
+                                        match seg {
+                                            Segment::Output(b) => {
+                                                pass.extend_from_slice(&b);
+                                                frames.push(GraphicsFrame::Output(b));
+                                            }
+                                            Segment::Query(reply) => {
+                                                if let Ok(mut w) = writer.lock() {
+                                                    let _ = w.write_all(&reply);
+                                                    let _ = w.flush();
+                                                }
+                                            }
+                                            Segment::Image(img) => {
+                                                push_image_frame(&mut frames, img.encode_frame());
+                                            }
+                                            Segment::ImageFromMedium(transfer) => {
+                                                // File/shm handoff on a local pane:
+                                                // read (and unlink) the object here,
+                                                // then forward the raw pixels exactly
+                                                // like an inline image. This is the
+                                                // fast path that skips the client-side
+                                                // inflate the compressed-inline `t=d`
+                                                // fallback would force. A failed read
+                                                // just drops the frame — the sender
+                                                // reclaims its own object.
+                                                if let Some(img) = transfer.resolve() {
+                                                    push_image_frame(
+                                                        &mut frames,
+                                                        img.encode_frame(),
+                                                    );
+                                                }
+                                            }
+                                            Segment::Delete(d) => {
+                                                frames.push(GraphicsFrame::Delete(d.encode()));
+                                            }
+                                        }
+                                    }
+                                    std::borrow::Cow::Owned(pass)
+                                }
+                            };
+                            let bytes: &[u8] = &passthrough;
+                            // Sniff first (cheap, over the same bytes); collect any
+                            // cwd/prompt change to emit while we hold the lock.
                             let mut signals = sniffer.feed(bytes);
 
                             if signals.shell.iter().any(|s| s.at_prompt) && foreground_running() {
@@ -755,14 +876,59 @@ impl DaemonPane {
                             let facts_before = may_change_facts.then(|| observed_facts(&st));
                             st.ring.append(bytes);
                             if let Some(sub) = &st.subscriber {
-                                if sub.send(DaemonMsg::Output(bytes.to_vec())).is_ok() {
-                                    gate.add(n);
+                                // A send error just means the client is gone; ignore
+                                // it and let the next attach install a new sender.
+                                // Successful sends are counted against the gate; the
+                                // connection's writer thread credits them back.
+                                //
+                                // On the no-graphics fast path `frames` is empty and
+                                // the whole passthrough goes as one `Output`. When a
+                                // chunk carried graphics, the frames are forwarded in
+                                // stream order instead, so an image lands at the same
+                                // cursor cell the sender drew it at. Each `Output`
+                                // frame is gated on its own length; an image frame is
+                                // gated too (it rode the same PTY read); a delete is
+                                // tiny and ungated, matching the drain accounting in
+                                // `server.rs`.
+                                if frames.is_empty() {
+                                    if !bytes.is_empty()
+                                        && sub.send(DaemonMsg::Output(bytes.to_vec())).is_ok()
+                                    {
+                                        gate.add(bytes.len());
+                                    }
+                                } else {
+                                    for frame in frames {
+                                        match frame {
+                                            GraphicsFrame::Output(b) => {
+                                                let len = b.len();
+                                                if !b.is_empty()
+                                                    && sub.send(DaemonMsg::Output(b)).is_ok()
+                                                {
+                                                    gate.add(len);
+                                                }
+                                            }
+                                            GraphicsFrame::Image(frame) => {
+                                                let len = frame.len();
+                                                if sub.send(DaemonMsg::Image(frame)).is_ok() {
+                                                    gate.add(len);
+                                                }
+                                            }
+                                            GraphicsFrame::Delete(sel) => {
+                                                let _ = sub.send(DaemonMsg::DeleteImage(sel));
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             apply_signals(&mut st, signals);
                             if let Some(remote) = remote {
                                 apply_remote_context(&mut st, remote);
                             }
+                            // Keep kitty file/shm transfer gated on the pane's
+                            // *current* locality: an `ssh` that just took the PTY
+                            // must stop us honoring host-local object names. Cheap
+                            // and only meaningful when a probe follows.
+                            graphics.set_local(st.remote.is_none());
                             if let Some(agent) = agent {
                                 apply_agent(&mut st, agent);
                             }
@@ -1706,6 +1872,7 @@ fn proc_name(pid: i32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::kitty_graphics::ImageDelete;
     use std::path::Path;
 
     #[test]
@@ -2495,6 +2662,12 @@ mod tests {
         assert_eq!(d.shell.last().unwrap().last_exit_code, Some(-1));
     }
 
+    /// A discard writer for `spawn_reader` tests that don't inspect the PTY
+    /// write-back path (graphics query replies).
+    fn null_writer() -> Arc<Mutex<Box<dyn Write + Send>>> {
+        Arc::new(Mutex::new(Box::new(std::io::sink())))
+    }
+
     fn test_state(alive: bool) -> PaneState {
         PaneState {
             id: 0,
@@ -2595,6 +2768,7 @@ mod tests {
                 Arc::new(AtomicBool::new(shutting_down)),
                 Arc::new(OutputGate::new()),
                 Box::new(std::io::Cursor::new(b"\x1b]133;D;0\x07".to_vec())),
+                null_writer(),
                 || false,
                 ForegroundProbes {
                     remote: Box::new(|| None),
@@ -2856,6 +3030,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(OutputGate::new()),
             Box::new(std::io::Cursor::new(b"tail".to_vec())),
+            null_writer(),
             || false,
             ForegroundProbes {
                 remote: Box::new(|| None),
@@ -2881,6 +3056,131 @@ mod tests {
         );
     }
 
+    /// Issue #213 end-to-end at the reader: a chunk carrying text plus a
+    /// kitty graphics query and a transmit-and-display must (1) keep only the
+    /// text in the replay ring and the `Output` frame, (2) write the `a=q` reply
+    /// back to the PTY writer, and (3) forward the image out-of-band as an
+    /// `Image` frame the client can decode.
+    #[test]
+    fn reader_strips_graphics_and_forwards_them_out_of_band() {
+        use crate::core::kitty_graphics::Image;
+        use base64::Engine as _;
+
+        let state = Arc::new(Mutex::new(test_state(true)));
+        let (sub_tx, sub_rx) = mpsc::channel();
+        state.lock().unwrap().subscriber = Some(sub_tx);
+
+        // A writer we can read back, to prove the query reply reached the PTY.
+        #[derive(Clone)]
+        struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedBuf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(Box::new(SharedBuf(sink.clone()))));
+
+        // One 1x1 opaque-red RGBA pixel, transmitted-and-displayed inline.
+        let pixel = [0xffu8, 0x00, 0x00, 0xff];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(pixel);
+        let stream = format!(
+            "before\x1b_Gi=1,a=q,t=d,f=32,s=1,v=1;AAAA\x1b\\\
+             mid\x1b_Ga=T,f=32,t=d,s=1,v=1,i=1;{b64}\x1b\\after"
+        );
+
+        let handle = DaemonPane::spawn_reader(
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(OutputGate::new()),
+            Box::new(std::io::Cursor::new(stream.into_bytes())),
+            writer,
+            || false,
+            ForegroundProbes {
+                remote: Box::new(|| None),
+                agent: Box::new(|| None),
+                cwd: Box::new(|| None),
+            },
+            Arc::new(DeathReporter::new(|| {})),
+        );
+        handle.join().unwrap();
+
+        // (1) The ring holds the text, none of the graphics bytes.
+        assert_eq!(state.lock().unwrap().ring.flatten(), b"beforemidafter");
+        // (2) The query reply went to the PTY writer.
+        assert_eq!(sink.lock().unwrap().as_slice(), b"\x1b_Gi=1;OK\x1b\\");
+        // (3) The subscriber sees the passthrough and the image *in stream order*:
+        // the text before the image, then the image at its cursor cell, then the
+        // text after it. The `a=q` reply splits "before" from "mid" into two
+        // Output frames; the image sits between "mid" and "after".
+        assert!(matches!(sub_rx.try_recv(), Ok(DaemonMsg::Output(b)) if b == b"before"));
+        assert!(matches!(sub_rx.try_recv(), Ok(DaemonMsg::Output(b)) if b == b"mid"));
+        match sub_rx.try_recv() {
+            Ok(DaemonMsg::Image(frame)) => {
+                let img = Image::decode_frame(&frame).expect("decodable image frame");
+                assert_eq!(img.id, 1);
+                assert_eq!((img.width, img.height), (1, 1));
+                assert_eq!(img.to_rgba8().unwrap(), pixel);
+            }
+            other => panic!("expected Image frame, got {other:?}"),
+        }
+        assert!(matches!(sub_rx.try_recv(), Ok(DaemonMsg::Output(b)) if b == b"after"));
+    }
+
+    /// A kitty delete (`a=d`) is lifted out and forwarded as a `DeleteImage`
+    /// selector, leaving the surrounding text intact in the ring.
+    #[test]
+    fn reader_forwards_graphics_deletes() {
+        let state = Arc::new(Mutex::new(test_state(true)));
+        let (sub_tx, sub_rx) = mpsc::channel();
+        state.lock().unwrap().subscriber = Some(sub_tx);
+
+        let handle = DaemonPane::spawn_reader(
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(OutputGate::new()),
+            Box::new(std::io::Cursor::new(b"x\x1b_Ga=d,d=A\x1b\\y".to_vec())),
+            null_writer(),
+            || false,
+            ForegroundProbes {
+                remote: Box::new(|| None),
+                agent: Box::new(|| None),
+                cwd: Box::new(|| None),
+            },
+            Arc::new(DeathReporter::new(|| {})),
+        );
+        handle.join().unwrap();
+
+        assert_eq!(state.lock().unwrap().ring.flatten(), b"xy");
+        // In stream order: text before the delete, the delete, then text after.
+        assert!(matches!(sub_rx.try_recv(), Ok(DaemonMsg::Output(b)) if b == b"x"));
+        match sub_rx.try_recv() {
+            Ok(DaemonMsg::DeleteImage(sel)) => {
+                let d = ImageDelete::decode(&sel).unwrap();
+                assert_eq!(d.target, b'A');
+            }
+            other => panic!("expected DeleteImage, got {other:?}"),
+        }
+        assert!(matches!(sub_rx.try_recv(), Ok(DaemonMsg::Output(b)) if b == b"y"));
+    }
+
+    #[test]
+    fn push_image_frame_drops_over_max_frame() {
+        let mut frames = Vec::new();
+        // At the limit: queued.
+        push_image_frame(&mut frames, vec![0u8; MAX_FRAME]);
+        // Over the limit: dropped, so the writer's fatal `write_frame` error
+        // (which would disconnect the client) is never reached.
+        push_image_frame(&mut frames, vec![0u8; MAX_FRAME + 1]);
+        assert_eq!(frames.len(), 1, "only the in-budget frame is queued");
+        assert!(matches!(&frames[0], GraphicsFrame::Image(f) if f.len() == MAX_FRAME));
+    }
+
     #[test]
     fn reader_poll_applies_the_probed_cwd() {
         let state = Arc::new(Mutex::new(test_state(true)));
@@ -2896,6 +3196,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(OutputGate::new()),
             Box::new(std::io::Cursor::new(b"alice@host ~ % ".to_vec())),
+            null_writer(),
             || false,
             ForegroundProbes {
                 remote: Box::new(|| None),
@@ -2926,6 +3227,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(OutputGate::new()),
             Box::new(std::io::Cursor::new(Vec::new())),
+            null_writer(),
             || false,
             ForegroundProbes {
                 remote: Box::new(|| None),
@@ -2951,6 +3253,7 @@ mod tests {
             Arc::new(AtomicBool::new(true)),
             Arc::new(OutputGate::new()),
             Box::new(std::io::Cursor::new(Vec::new())),
+            null_writer(),
             || false,
             ForegroundProbes {
                 remote: Box::new(|| None),
