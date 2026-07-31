@@ -43,6 +43,21 @@ impl LocalLink {
         link.client.as_ref().filter(|c| c.is_connected()).cloned()
     }
 
+    /// Drops the cached client without waiting for its reader to notice.
+    ///
+    /// `ControlClient::is_connected` only flips once the reader sees EOF, so
+    /// for a moment after we kill the daemon ourselves the dead link still
+    /// hands itself out and every call on it fails. Callers that know the far
+    /// end is gone say so here, and the next tick reconnects.
+    pub fn invalidate(cx: &mut App) {
+        let link = cx.default_global::<LocalLink>();
+        if link.client.take().is_some() {
+            log::info!("dropped the control link to the local daemon; it was restarted");
+        }
+        link.backoff.reset();
+        link.next_attempt = None;
+    }
+
     fn tick(cx: &mut App) {
         let now = std::time::Instant::now();
         let link = cx.default_global::<LocalLink>();
