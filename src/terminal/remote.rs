@@ -732,7 +732,7 @@ impl RemoteTerminal {
                                 if let Some(del) =
                                     tty7_core::core::kitty_graphics::ImageDelete::decode(&sel)
                                 {
-                                    images.delete(&del);
+                                    image_decoder.delete(&del);
                                     proxy.send_event(AlacEvent::Wakeup);
                                 }
                             }
