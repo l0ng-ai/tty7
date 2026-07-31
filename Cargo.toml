@@ -146,6 +146,16 @@ tray-icon = "0.24"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# `core::cli_install` edits HKCU\Environment to put the bundled CLI on PATH.
+# `setx` is not an option there: it truncates at 1024 characters, so a long user
+# PATH comes back mangled. 0.61 is already in the tree (tray-icon pulls it), so
+# this pins no new code.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_System_Registry",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 # Embeds `assets/favicon.ico` into the `.exe` so Windows shows the tty7 logo in
 # the taskbar / window / Explorer (macOS gets its icon from the `.app` bundle via
 # bundle.sh instead). Only needed at build time on Windows — see build.rs.

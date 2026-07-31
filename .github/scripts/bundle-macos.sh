@@ -27,6 +27,13 @@ rm -rf dist
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "target/${TARGET}/release/tty7-app" "$APP/Contents/MacOS/tty7-app"
 chmod +x "$APP/Contents/MacOS/tty7-app"
+# The CLI rides inside the bundle rather than beside it: a DMG is drag-to-
+# Applications, so anything not in the .app never reaches the user's disk. The
+# GUI symlinks it onto PATH at launch (see core::cli_install), which is why it
+# sits next to tty7-app under MacOS/ — that is the directory the GUI resolves
+# relative to its own executable.
+cp "target/${TARGET}/release/tty7" "$APP/Contents/MacOS/tty7"
+chmod +x "$APP/Contents/MacOS/tty7"
 cp assets/tty7.icns "$APP/Contents/Resources/tty7.icns"
 # Completion signatures are loaded at runtime (not embedded), resolved relative
 # to the executable as ../Resources/completions — see terminal::signature.
@@ -94,7 +101,17 @@ if [[ -n "$SIGN_ID" && -n "${APPLE_CERTIFICATE:-}" ]]; then
 </plist>
 ENT
 
-    # Sign inner-out: the executable first, then the bundle.
+    # Sign inner-out: the executables first, then the bundle. The CLI must be
+    # signed explicitly — notarization rejects a bundle carrying an unsigned
+    # Mach-O, and the outer `codesign "$APP"` does not descend into MacOS/ for
+    # anything but CFBundleExecutable.
+    #
+    # It gets hardened runtime (notarization requires it) but none of the GUI's
+    # entitlements: the JIT and library-validation exemptions exist for gpui's
+    # Metal path, and a CLI that never renders anything has no business holding
+    # them.
+    codesign --force --options runtime --timestamp \
+        --sign "$SIGN_ID" "$APP/Contents/MacOS/tty7"
     codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" \
         --sign "$SIGN_ID" "$APP/Contents/MacOS/tty7-app"
     codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" \

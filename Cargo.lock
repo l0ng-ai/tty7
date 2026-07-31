@@ -9685,6 +9685,7 @@ dependencies = [
  "tray-icon",
  "tty7-core",
  "uuid",
+ "windows-sys 0.61.2",
  "winresource",
 ]
 

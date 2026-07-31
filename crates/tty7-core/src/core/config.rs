@@ -160,6 +160,13 @@ pub struct Config {
     #[serde(default, deserialize_with = "de_lenient")]
     pub notify_on_command_finish: NotifyMode,
     pub check_for_updates: bool,
+    /// Whether the GUI puts the bundled `tty7` CLI on PATH at launch (see
+    /// `core::cli_install`). On by default: the CLI is the agent-facing half of
+    /// this product and is worth nothing sitting unreachable inside the bundle.
+    /// Off is for people who keep their own `tty7` — a `cargo install` build, a
+    /// package manager's copy — and do not want it shadowed.
+    #[serde(default = "default_true")]
+    pub install_cli_on_path: bool,
     #[serde(default = "default_notify_threshold_secs")]
     pub notify_threshold_secs: u64,
     #[serde(default = "default_true")]
@@ -401,6 +408,7 @@ impl Default for Config {
             sidebar_diff_preview: true,
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,
+            install_cli_on_path: true,
             notify_threshold_secs: default_notify_threshold_secs(),
             restore_session: true,
             show_tray_icon: true,

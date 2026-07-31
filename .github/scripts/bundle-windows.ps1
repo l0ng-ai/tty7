@@ -21,6 +21,10 @@ Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 
 Copy-Item "target/$Target/release/tty7-app.exe" "$Stage/tty7-app.exe"
+# The CLI, staged beside the GUI so both the zip and the installer carry it.
+# `core::cli_install` resolves it relative to tty7-app.exe and puts that
+# directory on the user's PATH.
+Copy-Item "target/$Target/release/tty7.exe" "$Stage/tty7.exe"
 New-Item -ItemType Directory -Force -Path "$Stage/completions" | Out-Null
 Copy-Item "assets/completions/*.json" "$Stage/completions/"
 Copy-Item LICENSE "$Stage/LICENSE.txt"

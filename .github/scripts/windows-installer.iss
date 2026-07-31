@@ -58,11 +58,23 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; it. The user would keep launching the previous version from their pinned icon,
 ; against the same daemon endpoint as the new one. Delete it on upgrade; a fresh
 ; install simply has nothing to remove.
+;
+; That name is now reused by the CLI below, which lands at the very same path.
+; The order saves us: [InstallDelete] runs before [Files], so the stale GUI is
+; gone before the CLI is written, and what survives is never a mix of the two.
+; The taskbar pin is the loose end — post-upgrade it points at a CLI, so
+; clicking it flashes a console instead of opening a window. That is louder
+; than the bug it replaces (silently running last release's GUI), and the pin
+; is not ours to rewrite; the Start Menu entry in [Icons] is correct either way.
 [InstallDelete]
 Type: files; Name: "{app}\tty7.exe"
 
 [Files]
 Source: "{#StageDir}\tty7-app.exe"; DestDir: "{app}"; Flags: ignoreversion
+; The CLI. `core::cli_install` adds {app} to the user's PATH at first launch,
+; so this is not registered as an [Env] change here — the portable zip has no
+; installer to do it, and one code path serving both is one behaviour to debug.
+Source: "{#StageDir}\tty7.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\completions\*"; DestDir: "{app}\completions"; Flags: ignoreversion recursesubdirs
 Source: "{#StageDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion

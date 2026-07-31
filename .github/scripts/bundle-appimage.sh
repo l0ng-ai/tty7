@@ -55,6 +55,13 @@ mkdir -p "$APPDIR/usr/bin"
 cp "target/${TARGET}/release/tty7-app" "$APPDIR/usr/bin/tty7-app"
 chmod +x "$APPDIR/usr/bin/tty7-app"
 
+# The CLI, beside the GUI as everywhere else. Unlike the tarball, an AppImage is
+# mounted at a fresh /tmp/.mount_XXXX per run, so `core::cli_install` must copy
+# this onto PATH rather than symlink it — a link into the mount dies the moment
+# the app exits. That branch keys off $APPIMAGE, which the runtime sets.
+cp "target/${TARGET}/release/tty7" "$APPDIR/usr/bin/tty7"
+chmod +x "$APPDIR/usr/bin/tty7"
+
 # A desktop entry + icon are mandatory AppImage metadata; linuxdeploy places
 # them and generates AppRun. Icon basename must match the desktop's Icon= key.
 cat > "$TOOLS/tty7.desktop" <<'DESKTOP'
