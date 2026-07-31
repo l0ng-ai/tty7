@@ -330,7 +330,12 @@ pub fn decode(img: &Image) -> Option<(Arc<RenderImage>, u32, u32)> {
         return None;
     }
     rgba.truncate(w as usize * h as usize * 4);
-    // RGBA → BGRA for the atlas (opaque browser frames need no premultiply).
+    // RGBA → BGRA for the atlas. A channel swap and nothing else: `RenderImage`
+    // holds *straight* alpha, not premultiplied. gpui's own producers say so —
+    // `swap_rgba_pa_to_bgra`, which both the CoreGraphics text rasterizer and
+    // the SVG renderer run their premultiplied output through, divides the
+    // color channels back out by alpha on the way in. Premultiplying here would
+    // darken every translucent pixel of an `f=100` PNG twice over.
     for px in rgba.chunks_exact_mut(4) {
         px.swap(0, 2);
     }

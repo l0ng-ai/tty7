@@ -156,6 +156,10 @@ pub struct RemoteTerminal {
     pub exited: bool,
     size: TermSize,
     synced_size: bool,
+    /// The `(cell_w, cell_h)` last sent to the daemon, in device pixels. Tracked
+    /// alongside `size` so a display-scale change still reaches the child even
+    /// when the grid dimensions are unchanged.
+    synced_cell: (u16, u16),
     writer: Mutex<Stream>,
     cwd: Arc<Mutex<Option<PathBuf>>>,
     shell_state: Arc<Mutex<ShellState>>,
@@ -445,6 +449,7 @@ impl RemoteTerminal {
             exited: false,
             size,
             synced_size: false,
+            synced_cell: (0, 0),
             writer: Mutex::new(write_half),
             cwd,
             shell_state,
@@ -882,7 +887,13 @@ impl RemoteTerminal {
     }
 
     pub fn resize(&mut self, size: TermSize, cell_w: u16, cell_h: u16) {
-        if self.synced_size && size == self.size {
+        // The cell size has to be part of the early-out, not just cols/rows: it
+        // is reported in *device* pixels, so moving the window between a 2x and
+        // a 1x display changes `ws_xpixel`/`ws_ypixel` while the grid stays
+        // exactly the same. Comparing only `size` there would skip the resize
+        // and leave a pixel-aware child rendering for the old framebuffer.
+        let cell = (cell_w, cell_h);
+        if self.synced_size && size == self.size && cell == self.synced_cell {
             use alacritty_terminal::grid::Dimensions as _;
             let term = self.term.lock();
             if term.columns() == size.cols && term.screen_lines() == size.rows {
@@ -891,6 +902,7 @@ impl RemoteTerminal {
         }
         self.synced_size = true;
         self.size = size;
+        self.synced_cell = cell;
         self.term.lock().resize(size);
 
         let win = win_size(size, cell_w, cell_h);

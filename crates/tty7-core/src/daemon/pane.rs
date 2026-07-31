@@ -12,8 +12,8 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use crate::core::kitty_graphics::{GraphicsSniffer, Segment, Sniffed};
 use crate::core::osc::OscTokenizer;
 use crate::daemon::protocol::{
-    AuthResponse, DaemonMsg, NativeSshSpec, PaneInfo, RemoteContext, RemoteKind, ShellSpec, WinSize,
-    MAX_FRAME,
+    AuthResponse, DaemonMsg, MAX_FRAME, NativeSshSpec, PaneInfo, RemoteContext, RemoteKind,
+    ShellSpec, WinSize,
 };
 use crate::daemon::shell_integration;
 

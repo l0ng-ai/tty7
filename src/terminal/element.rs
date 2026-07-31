@@ -1257,12 +1257,14 @@ impl Element for TerminalElement {
         // map that back to a screen row with the snapshot's scroll state and
         // drop anything scrolled out of the viewport.
         let image_store = self.view.read(cx).terminal.images();
-        let images = image_store.snapshot();
-        // Render images retired since the last paint (frames a re-transmitting
-        // browser superseded, or deletes). Evicted from the atlas below — this
-        // is the only place with `&mut Window` — so a 60fps sender doesn't leak
-        // a GPU tile per frame.
+        // Take the retired list *before* the snapshot. The decode worker runs on
+        // its own thread and can retire a frame between the two calls; taking
+        // retired second would hand us a list containing an image the snapshot
+        // still says to paint, and `sprite_atlas.remove` takes effect
+        // immediately — so the frame would paint and then vanish. In this order
+        // the worst case is evicting one paint late, which is invisible.
         let retired_images = image_store.take_retired();
+        let images = image_store.snapshot();
 
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             paint_backgrounds(window, &geom, &buf);

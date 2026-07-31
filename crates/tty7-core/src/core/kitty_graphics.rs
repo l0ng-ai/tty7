@@ -16,10 +16,17 @@
 //! parser never has to chew through it.
 //!
 //! Scope: this handles the subset the wire actually carries in practice
-//! (transmit-and-display, query, delete), with the two transmission media that
-//! survive tty7's socket + SSH topology — direct (`t=d`, base64 inline) only;
-//! shared-memory (`t=s`) and file (`t=f`) probes are answered *unsupported* so a
-//! sender like `terminal-browser` falls back to `t=d` on its own.
+//! (transmit-and-display, query, delete). Which transmission media we accept
+//! depends on where the pane lives:
+//!
+//! - Direct (`t=d`, base64 inline) is always honored — it is the only medium
+//!   that survives tty7's socket + SSH topology.
+//! - File (`t=f`/`t=t`) and shared memory (`t=s`) are honored only on a *local*
+//!   unix pane, where the name resolves on this host and the daemon can read it
+//!   without anything crossing a tunnel. Everywhere else — a remote pane, or a
+//!   non-unix host where [`MediumTransfer::resolve`] can't do the work — the
+//!   probe is answered *unsupported* so a sender like `terminal-browser` falls
+//!   back to `t=d` on its own rather than transmitting into a black hole.
 //!
 //! Protocol reference: <https://sw.kovidgoyal.net/kitty/graphics-protocol/>
 
@@ -28,14 +35,30 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
 
 /// Cap on a single APC payload (one chunk) we'll buffer before abandoning it.
-/// `terminal-browser` chunks direct transmissions into 4 KiB base64 pieces;
-/// other senders may transmit uncompressed in one shot, so this is generous.
-const MAX_APC_PAYLOAD: usize = 1 << 20; // 1 MiB per chunk
+/// `terminal-browser` chunks direct transmissions into 4 KiB base64 pieces, but
+/// the spec only *recommends* chunking — a sender is free to put a whole frame
+/// in one command, and an uncompressed 4K RGBA frame is ~44 MB of base64. Size
+/// this to admit a one-shot frame that still fits [`MAX_TRANSMISSION_BASE64`];
+/// [`ApcTokenizer::push_graphics`] logs whatever it has to drop.
+const MAX_APC_PAYLOAD: usize = MAX_TRANSMISSION_BASE64;
 
-/// Cap on the reassembled base64 of one chunked transmission. A 4K full-window
-/// RGBA frame is ~33 MB raw, ~44 MB base64; this bounds a runaway or hostile
-/// sender without rejecting a legitimate large frame.
-const MAX_TRANSMISSION_BASE64: usize = 96 << 20; // 96 MiB
+/// Cap on the reassembled base64 of one chunked transmission.
+///
+/// This has to stay under [`crate::daemon::protocol::MAX_FRAME`] once decoded:
+/// base64 shrinks by 3/4, and [`Image::encode_frame`] prepends [`HEADER_LEN`]
+/// bytes, so the decoded payload must leave room for the header inside the wire
+/// frame. Blowing past `MAX_FRAME` would make `write_frame` fail, which the
+/// daemon's writer loop treats as fatal — one oversized image would drop the
+/// client's whole connection instead of just that frame. 48 MiB of base64 is
+/// ~36 MB of pixels, comfortably more than a 4K full-window RGBA frame (~33 MB)
+/// and comfortably under the 64 MiB wire ceiling.
+const MAX_TRANSMISSION_BASE64: usize = 48 << 20; // 48 MiB
+
+/// Cap on the *resolved* pixel bytes of one image, whatever medium carried it.
+/// Bounds the file/shm fast path (where the sender names an object whose size we
+/// don't control) and backstops the direct path, keeping every frame we hand the
+/// daemon inside [`crate::daemon::protocol::MAX_FRAME`].
+pub const MAX_IMAGE_BYTES: usize = crate::daemon::protocol::MAX_FRAME - HEADER_LEN;
 
 /// A streaming tokenizer that splits raw output into a *passthrough* byte stream
 /// and the kitty graphics commands lifted out of it.
@@ -214,11 +237,15 @@ impl ApcTokenizer {
                         i += 1;
                     }
                     // ESC began some other escape: abandon this graphics command.
-                    // Its bytes were meant as graphics, so they stay stripped.
+                    // Its bytes were meant as graphics, so they stay stripped —
+                    // but the escape itself belongs to the terminal, so forward
+                    // it and re-examine this byte from Ground rather than eating
+                    // both. Swallowing them would turn a `\x1b[31m` that follows
+                    // an unterminated graphics command into literal `31m`.
                     _ => {
                         self.buf.clear();
+                        on_passthrough(b"\x1b");
                         self.state = State::Ground;
-                        i += 1;
                     }
                 },
                 State::PassApcEsc => match bytes[i] {
@@ -229,6 +256,16 @@ impl ApcTokenizer {
                     }
                     0x1b => {
                         on_passthrough(b"\x1b"); // a lone ESC in APC data
+                        i += 1;
+                    }
+                    // A bare `ESC _` re-opens, same as the two graphics states
+                    // do. Without this, a foreign APC that never sends its ST
+                    // swallows every `ESC _G …` after it — the graphics get
+                    // forwarded as APC text that the client's vte then discards,
+                    // so the image is simply lost.
+                    b'_' => {
+                        self.buf.clear();
+                        self.state = State::ApcStart;
                         i += 1;
                     }
                     _ => {
@@ -247,9 +284,12 @@ impl ApcTokenizer {
                         self.state = State::ApcStart;
                         i += 1;
                     }
+                    // As in `ApcGraphicsEsc`: the dropped command's bytes stay
+                    // stripped, but the escape that interrupted it is the
+                    // terminal's and has to reach the client intact.
                     _ => {
+                        on_passthrough(b"\x1b");
                         self.state = State::Ground;
-                        i += 1;
                     }
                 },
             }
@@ -261,6 +301,9 @@ impl ApcTokenizer {
     /// abandon the command.
     fn push_graphics(&mut self, run: &[u8]) -> bool {
         if self.buf.len() + run.len() > MAX_APC_PAYLOAD {
+            log::debug!(
+                "kitty graphics: dropping a command whose payload passed {MAX_APC_PAYLOAD} bytes"
+            );
             self.buf.clear();
             return false;
         }
@@ -569,7 +612,9 @@ impl Control {
                 b"r" => c.rows = num(),
                 b"m" => c.more = val == b"1",
                 b"d" => c.delete = val.first().copied().unwrap_or(0),
-                b"q" => c.quiet = num() as u8,
+                // Clamp rather than truncate: `q=256` must not wrap to 0 and
+                // turn a request for silence into a request for chatter.
+                b"q" => c.quiet = num().min(u8::MAX as u32) as u8,
                 b"O" => c.offset = num(),
                 b"S" => c.size = num(),
                 _ => {} // unknown key: ignore
@@ -636,6 +681,14 @@ impl Image {
     /// (whose decode needs the `image` crate the GUI owns, not this core) or on
     /// a malformed payload; PNG callers should decode [`data`](Image::data)
     /// themselves after checking [`format`](Image::format).
+    ///
+    /// The inflate is bounded by what `width`/`height` claim the pixels are:
+    /// deflate expands ~1000:1 in the limit, so an unbounded `decompress_to_vec`
+    /// here would let a payload well inside [`MAX_TRANSMISSION_BASE64`] balloon
+    /// into tens of GB and OOM the client — and this runs in the GUI process, so
+    /// it would take every pane down, not just the one that received the escape.
+    /// The caller checks the inflated length against `width*height*4` anyway, so
+    /// capping it up front costs nothing.
     pub fn to_rgba8(&self) -> Option<Vec<u8>> {
         if self.format == WireFormat::Png {
             return None;
@@ -647,7 +700,12 @@ impl Image {
             // (which bounds only the *compressed* bytes) inflates to tens of GB
             // and OOMs the whole GUI process. A payload that decompresses past
             // its own declared dimensions is malformed, so we drop it.
-            let limit = self.decoded_len()?;
+            //
+            // The declared size is itself attacker-chosen, so clamp it too:
+            // `s=65535,v=65535` alone works out to 17 GB, which would hand the
+            // bomb right back its allocation. No real frame comes near
+            // `MAX_IMAGE_BYTES`, which is what the wire can carry anyway.
+            let limit = self.decoded_len()?.min(MAX_IMAGE_BYTES);
             miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&self.data, limit).ok()?
         } else {
             self.data.clone()
@@ -768,7 +826,9 @@ impl MediumTransfer {
     }
 
     /// The `offset..offset+size` slice of `buf` (or `offset..` when `size == 0`),
-    /// copied out. `None` if the bounds fall outside the object.
+    /// copied out. `None` if `offset` itself falls outside the object; an `S=`
+    /// that runs past the end is *truncated* to what's there rather than
+    /// discarding the frame, which is what kitty does.
     #[cfg(unix)]
     fn slice_region(&self, buf: &[u8]) -> Option<Vec<u8>> {
         let start = self.offset as usize;
@@ -778,21 +838,47 @@ impl MediumTransfer {
         let end = if self.size == 0 {
             buf.len()
         } else {
-            start.checked_add(self.size as usize)?
+            start.saturating_add(self.size as usize).min(buf.len())
         };
         buf.get(start..end).map(<[u8]>::to_vec)
     }
 
     #[cfg(unix)]
     fn read_file(&self) -> Option<Vec<u8>> {
+        use std::io::Read as _;
         use std::os::unix::ffi::OsStringExt;
         let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(self.name.clone()));
-        let bytes = std::fs::read(&path).ok()?;
+
+        // Read through a bounded reader, not `fs::read`. The name is attacker
+        // -reachable (any program that can write to the pty picks it), and
+        // `fs::read` on `/dev/zero` never returns — on the daemon *reader*
+        // thread, which would wedge the pane's whole output path. Refusing
+        // anything that isn't a regular file also keeps us off fifos and
+        // devices, where the open itself can block.
+        let file = std::fs::File::open(&path).ok()?;
+        let meta = file.metadata().ok()?;
+        if !meta.is_file() || meta.len() as usize > MAX_IMAGE_BYTES {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(meta.len() as usize);
+        file.take(MAX_IMAGE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return None;
+        }
+
         let out = self.slice_region(&bytes)?;
         // A temp file is the sender's one-shot handoff: remove it after reading
         // so the browser's per-frame temp files don't pile up. A named `t=f`
         // file is the sender's to manage; leave it.
-        if self.medium == Medium::TempFile {
+        //
+        // Only unlink inside a known temp directory. `name` is an arbitrary path
+        // out of an escape sequence — `cat`ing a hostile file is enough to send
+        // one — so an unqualified `remove_file` here would delete anything the
+        // user can, `~/.ssh/id_ed25519` included. The spec requires this check
+        // for exactly that reason.
+        if self.medium == Medium::TempFile && path_is_in_temp_dir(&path) {
             let _ = std::fs::remove_file(&path);
         }
         Some(out)
@@ -804,6 +890,13 @@ impl MediumTransfer {
     #[cfg(unix)]
     fn read_shared(&self) -> Option<Vec<u8>> {
         use std::os::raw::c_void;
+        // A POSIX shm name is a single `/`-prefixed component — no embedded
+        // separators, no `..`. Some platforms resolve `shm_open` against the
+        // filesystem, where a name like `/../../etc/passwd` would escape the shm
+        // namespace and reach a real path we'd then `shm_unlink`.
+        if !shm_name_is_wellformed(&self.name) {
+            return None;
+        }
         // The name must be a C string; kitty shm names look like `/px-…`.
         let cname = std::ffi::CString::new(self.name.clone()).ok()?;
         // SAFETY: FFI. `shm_open` with O_RDONLY on a name the sender created;
@@ -816,8 +909,13 @@ impl MediumTransfer {
             }
             // Size the mapping from the object itself; the sender may not send
             // `S=`, and mapping past the end would fault on access.
+            // Refuse an object bigger than a frame can carry rather than mapping
+            // and copying it out only for the send to fail downstream.
             let mut st: libc::stat = std::mem::zeroed();
-            if libc::fstat(fd, &mut st) != 0 || st.st_size <= 0 {
+            if libc::fstat(fd, &mut st) != 0
+                || st.st_size <= 0
+                || st.st_size as u64 > MAX_IMAGE_BYTES as u64
+            {
                 libc::close(fd);
                 libc::shm_unlink(cname.as_ptr());
                 return None;
@@ -844,6 +942,45 @@ impl MediumTransfer {
             out
         }
     }
+}
+
+/// Whether `path` sits inside a directory the platform hands out for temp files,
+/// which is the only place a `t=t` handoff may be unlinked.
+///
+/// Compares *canonicalized* paths so `/tmp/../home/me/.ssh/id_ed25519` — which
+/// has the right prefix textually — doesn't pass. On macOS `TMPDIR` is a
+/// per-user path under `/var/folders/…` that canonicalizes through the
+/// `/private` symlink, so `std::env::temp_dir()` is canonicalized too rather
+/// than compared raw.
+#[cfg(unix)]
+fn path_is_in_temp_dir(path: &std::path::Path) -> bool {
+    let Ok(real) = path.canonicalize() else {
+        return false;
+    };
+    // `/dev/shm` is where a `t=t` sender that wanted shm-like semantics without
+    // `shm_open` puts its handoff; kitty accepts it alongside the temp dirs.
+    let candidates = [
+        std::env::temp_dir(),
+        std::path::PathBuf::from("/tmp"),
+        std::path::PathBuf::from("/dev/shm"),
+    ];
+    candidates.iter().any(|dir| {
+        dir.canonicalize()
+            .is_ok_and(|d| real.starts_with(&d) && real != d)
+    })
+}
+
+/// Whether `name` is a well-formed POSIX shm object name: a leading `/` followed
+/// by one non-empty component with no further separators and no `.`/`..`.
+#[cfg(unix)]
+fn shm_name_is_wellformed(name: &[u8]) -> bool {
+    // POSIX caps the name at NAME_MAX; 255 is the floor every platform we build
+    // for meets, and no real sender comes close.
+    if name.len() < 2 || name.len() > 255 || name[0] != b'/' {
+        return false;
+    }
+    let rest = &name[1..];
+    !rest.contains(&b'/') && !rest.contains(&0) && rest != b"." && rest != b".."
 }
 
 /// A delete request distilled from an `a=d` command, in the compact form the
@@ -977,6 +1114,15 @@ impl GraphicsParser {
         }
     }
 
+    /// Whether a `t=f`/`t=t`/`t=s` transfer can actually be resolved here: the
+    /// sender has to share this host's filesystem (a local pane), and
+    /// [`MediumTransfer::resolve`] has to have a real implementation on this
+    /// platform (it is unix-only). Both `query_reply` and `finalize` route
+    /// through this so what we advertise and what we accept can't drift apart.
+    fn honors_indirect_media(&self) -> bool {
+        self.local && cfg!(unix)
+    }
+
     /// Feed one complete `_G` command payload (the bytes [`ApcTokenizer`]
     /// delivers). Returns an [`Event`] when a command completes (a query, a
     /// finished image, or a delete); returns `None` for an intermediate chunk of
@@ -994,11 +1140,17 @@ impl GraphicsParser {
         }
 
         match control.action {
-            Action::Query => Some(self.query_reply(&control)),
+            Action::Query => self.query_reply(&control),
             Action::Delete => Some(Event::Delete(control)),
-            Action::TransmitAndDisplay | Action::Transmit | Action::Display => {
-                self.accept_chunk(control, data)
-            }
+            Action::TransmitAndDisplay | Action::Transmit => self.accept_chunk(control, data),
+            // `a=p` places an image transmitted by an *earlier* command, which
+            // needs the stored-image table this parser deliberately doesn't
+            // keep. Routing it through `accept_chunk` would emit an `Image` with
+            // an empty payload — a frame the client can only throw away — so
+            // drop it here instead. Senders that split transmit from placement
+            // get nothing; `a=T` (the shape every sender tty7 targets uses)
+            // is unaffected.
+            Action::Display => None,
             // An action we don't handle, with nothing in flight: drop it.
             Action::Other => None,
         }
@@ -1018,6 +1170,9 @@ impl GraphicsParser {
         let pending = self.pending.as_mut()?;
         pending.base64.extend_from_slice(data);
         if pending.base64.len() > MAX_TRANSMISSION_BASE64 {
+            log::debug!(
+                "kitty graphics: abandoning a transmission past {MAX_TRANSMISSION_BASE64} base64 bytes"
+            );
             self.pending = None; // abandon an oversized transmission
             return None;
         }
@@ -1041,7 +1196,7 @@ impl GraphicsParser {
         // pane, so a well-behaved sender never reaches here; the guard is
         // belt-and-suspenders.
         if control.medium != Medium::Direct {
-            if !self.local {
+            if !self.honors_indirect_media() {
                 return None;
             }
             return Some(Event::ImageFromMedium(MediumTransfer {
@@ -1077,12 +1232,25 @@ impl GraphicsParser {
         }))
     }
 
-    /// Build the `a=q` reply. On a local pane we honor direct, file, and shm
-    /// transfer, so any of those probes gets `OK`; on a remote pane only direct
-    /// is honored and a `t=f`/`t=s`/`t=t` probe gets an error — which makes a
+    /// Build the `a=q` reply. On a local unix pane we honor direct, file, and
+    /// shm transfer, so any of those probes gets `OK`; otherwise only direct is
+    /// honored and a `t=f`/`t=s`/`t=t` probe gets an error — which makes a
     /// sender like `terminal-browser` fall back to inline `t=d` on its own.
-    fn query_reply(&self, control: &Control) -> Event {
-        let honored = control.medium == Medium::Direct || self.local;
+    ///
+    /// The answer has to track what [`MediumTransfer::resolve`] can actually do,
+    /// including on the platform axis: it is unix-only, so replying `OK` to a
+    /// file/shm probe on Windows would talk a sender into a medium whose every
+    /// frame we then silently discard, leaving the pane blank.
+    fn query_reply(&self, control: &Control) -> Option<Event> {
+        let honored = control.medium == Medium::Direct || self.honors_indirect_media();
+        // `q=` asks us to stay quiet: 1 suppresses success replies, 2 suppresses
+        // failures too. This matters because the reply is written back to the
+        // *PTY* — it arrives as if the user had typed it. A sender that asked
+        // for silence and gets `\x1b_Gi=1;OK\x1b\` anyway has those bytes land
+        // in its stdin, or, if it already exited, on the shell's input line.
+        if control.quiet >= 2 || (control.quiet == 1 && honored) {
+            return None;
+        }
         let status: &[u8] = if honored { b"OK" } else { b"ENOTSUPPORTED" };
         // Echo back the id (preferred) or number the sender used, exactly as
         // kitty does, so the sender can correlate the reply.
@@ -1098,7 +1266,7 @@ impl GraphicsParser {
         reply.push(b';');
         reply.extend_from_slice(status);
         reply.extend_from_slice(b"\x1b\\");
-        Event::Query { reply, honored }
+        Some(Event::Query { reply, honored })
     }
 }
 
@@ -1336,6 +1504,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn query_reply_ok_for_shm_file_on_local_pane() {
         // A local pane shares the sender's filesystem, so file/shm are honored:
         // this is what unlocks terminal-browser's zero-inflate fast path.
@@ -1356,6 +1525,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn shared_transmission_surfaces_medium_transfer_on_local() {
         // `terminal-browser`'s shm transmit template: raw f=32, no o=z, the
         // shm object name base64'd after the `;`.
@@ -1414,6 +1584,218 @@ mod tests {
         assert_eq!(img.data, rgba);
         assert_eq!(img.to_rgba8().unwrap(), rgba);
         assert!(!path.exists(), "temp file should be removed after read");
+    }
+
+    /// Build a `t=t` transfer naming `path`, the shape a hostile escape uses.
+    #[cfg(unix)]
+    fn temp_file_transfer(path: &std::path::Path) -> MediumTransfer {
+        MediumTransfer {
+            medium: Medium::TempFile,
+            name: path.to_path_buf().into_os_string().into_encoded_bytes(),
+            offset: 0,
+            size: 0,
+            id: 1,
+            number: 0,
+            placement: 0,
+            width: 2,
+            height: 1,
+            cols: 0,
+            rows: 0,
+            format: WireFormat::Rgba,
+            compressed: false,
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_temp_file_transfer_outside_the_temp_dir_is_read_but_not_deleted() {
+        // `t=t` names an arbitrary path out of an escape sequence — `cat`ing a
+        // hostile file is enough to send one. Unlinking whatever it points at
+        // would delete e.g. `~/.ssh/id_ed25519`. Read it, leave it.
+        //
+        // `/etc/hosts` stands in for the victim: a real, readable file that is
+        // never under a temp dir on any host we build for. Deliberately *not*
+        // something derived from `CARGO_MANIFEST_DIR` — a checkout can itself
+        // live under `/tmp`, which would make the test assert the opposite of
+        // what it means to.
+        let victim = std::path::Path::new("/etc/hosts");
+        let img = temp_file_transfer(victim).resolve().expect("still reads");
+        assert!(!img.data.is_empty());
+        assert!(
+            victim.exists(),
+            "a path outside the temp dir must survive a t=t handoff"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_temp_dir_check_resolves_symlinks_and_dotdot_before_comparing() {
+        // The prefix has to be checked on the *canonicalized* path: `/tmp/../etc`
+        // starts with `/tmp` textually but lands nowhere near it. macOS also
+        // routes both `/tmp` and `TMPDIR` through `/private`, so a raw string
+        // compare would reject the legitimate case too.
+        let dir = tempfile::tempdir().unwrap();
+        let inside = dir.path().join("frame.rgba");
+        std::fs::write(&inside, [0u8; 4]).unwrap();
+        assert!(path_is_in_temp_dir(&inside));
+
+        assert!(!path_is_in_temp_dir(std::path::Path::new(
+            "/tmp/../etc/hosts"
+        )));
+        assert!(!path_is_in_temp_dir(std::path::Path::new("/etc/hosts")));
+        // A path that doesn't resolve at all can't be vouched for.
+        assert!(!path_is_in_temp_dir(std::path::Path::new(
+            "/nonexistent-tty7-test-path"
+        )));
+        // The temp dir itself is not a file we'd ever unlink.
+        assert!(!path_is_in_temp_dir(&std::env::temp_dir()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_transfer_naming_a_character_device_is_refused() {
+        // `fs::read` on `/dev/zero` never returns, and this runs on the daemon's
+        // reader thread — the pane's whole output path would wedge.
+        let t = temp_file_transfer(std::path::Path::new("/dev/zero"));
+        assert_eq!(t.resolve(), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_malformed_shm_name_is_refused_before_shm_open() {
+        for name in [
+            &b"/../../etc/passwd"[..],
+            &b"/sub/dir"[..],
+            &b"no-leading-slash"[..],
+            &b"/"[..],
+            &b"/.."[..],
+        ] {
+            assert!(
+                !shm_name_is_wellformed(name),
+                "{:?} should be refused",
+                String::from_utf8_lossy(name)
+            );
+        }
+        assert!(shm_name_is_wellformed(b"/px-abc123"));
+    }
+
+    #[test]
+    fn a_bomb_that_declares_huge_dimensions_is_still_bounded() {
+        // The declared size is the sender's to choose, so bounding the inflate
+        // by it alone isn't enough: `s=65535,v=65535` works out to a 17 GB
+        // budget, which hands a bomb back exactly the allocation the bound was
+        // meant to deny. The absolute `MAX_IMAGE_BYTES` clamp is what closes it.
+        // (`to_rgba8_bounds_the_inflate_by_declared_dimensions` covers the
+        // ordinary case, where the declared size is the tighter of the two.)
+        let img = Image {
+            id: 1,
+            number: 0,
+            placement: 0,
+            width: 65535,
+            height: 65535,
+            cols: 0,
+            rows: 0,
+            // Has to inflate past `MAX_IMAGE_BYTES` to exercise the clamp at
+            // all — anything smaller decodes on its merits and proves nothing.
+            // Zeros deflate to a few KB, so the payload on the wire stays tiny,
+            // which is the whole point of the attack.
+            data: miniz_oxide::deflate::compress_to_vec_zlib(&vec![0u8; MAX_IMAGE_BYTES + 1], 6),
+            format: WireFormat::Rgba,
+            compressed: true,
+        };
+        assert!(
+            img.decoded_len().unwrap() > MAX_IMAGE_BYTES,
+            "the declared budget must be the looser bound for this to test anything"
+        );
+        assert!(
+            img.data.len() < 1 << 20,
+            "the compressed payload must stay small: {}",
+            img.data.len()
+        );
+        assert_eq!(img.to_rgba8(), None, "the clamp has to reject it");
+    }
+
+    #[test]
+    fn a_transmission_cap_leaves_room_for_the_wire_frame() {
+        // `MAX_TRANSMISSION_BASE64` has to decode to something that still fits
+        // in a `MAX_FRAME` wire frame with the header on it — otherwise
+        // `write_frame` fails, and the daemon's writer treats that as fatal and
+        // drops the client's whole connection over one image.
+        let decoded_max = MAX_TRANSMISSION_BASE64 / 4 * 3;
+        assert!(
+            decoded_max + HEADER_LEN <= crate::daemon::protocol::MAX_FRAME,
+            "{decoded_max} + {HEADER_LEN} must fit in {}",
+            crate::daemon::protocol::MAX_FRAME
+        );
+        assert!(MAX_IMAGE_BYTES + HEADER_LEN <= crate::daemon::protocol::MAX_FRAME);
+    }
+
+    #[test]
+    fn a_quiet_sender_gets_no_reply_written_back_to_its_pty() {
+        // The reply is written to the *PTY* — it arrives as if typed. `q=1`
+        // suppresses success, `q=2` suppresses failures too.
+        let mut p = GraphicsParser::new_local(true);
+        assert_eq!(p.feed(b"Gi=1,a=q,t=d,q=1;AAAA"), None);
+        assert_eq!(p.feed(b"Gi=2,a=q,t=d,q=2;AAAA"), None);
+        // A refusal still reaches a `q=1` sender, which needs to hear it to fall
+        // back, and an unquiet probe is answered as before.
+        let mut remote = GraphicsParser::new();
+        assert!(matches!(
+            remote.feed(b"Gi=3,a=q,t=s,q=1;AAAA"),
+            Some(Event::Query { honored: false, .. })
+        ));
+        assert!(matches!(
+            p.feed(b"Gi=4,a=q,t=d;AAAA"),
+            Some(Event::Query { honored: true, .. })
+        ));
+    }
+
+    #[test]
+    fn a_quiet_key_past_a_byte_does_not_wrap_to_chatty() {
+        assert_eq!(Control::parse(b"Ga=q,q=256;").unwrap().quiet, 255);
+    }
+
+    #[test]
+    fn graphics_after_an_unterminated_foreign_apc_are_still_lifted() {
+        // A foreign APC that never sends its ST used to swallow every `ESC _G`
+        // after it: the graphics were forwarded as APC text, which the client's
+        // vte then discards, so the image vanished with no trace.
+        let input = b"\x1b_somevendor\x1b_Ga=q;AAAA\x1b\\";
+        assert_eq!(collect(&[&input[..]]), vec![b"Ga=q;AAAA".to_vec()]);
+    }
+
+    #[test]
+    fn an_escape_interrupting_a_graphics_command_still_reaches_the_client() {
+        // The abandoned command's bytes stay stripped, but the escape that
+        // interrupted it belongs to the terminal — swallowing it turned a
+        // following `\x1b[31m` into literal `31m` on screen.
+        let mut t = ApcTokenizer::new();
+        let mut out = Vec::new();
+        t.feed(b"\x1b_Gxx\x1b[31mred", |b| out.extend_from_slice(b), |_| {});
+        assert_eq!(out, b"\x1b[31mred");
+    }
+
+    #[test]
+    fn a_place_only_command_emits_nothing_rather_than_an_empty_image() {
+        // `a=p` places an image transmitted earlier, which needs a stored-image
+        // table this parser doesn't keep. It used to fall through the chunk
+        // accumulator and emit an `Image` with no payload.
+        let mut p = GraphicsParser::new_local(true);
+        assert_eq!(p.feed(b"Ga=p,i=42,p=1;"), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_oversized_size_key_truncates_instead_of_dropping_the_frame() {
+        // kitty truncates an `S=` that runs past the object; discarding the
+        // whole frame loses an image a real sender would have seen rendered.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame.rgba");
+        std::fs::write(&path, [1u8, 2, 3, 4]).unwrap();
+        let mut t = temp_file_transfer(&path);
+        t.medium = Medium::File; // leave the file in place
+        t.size = 4096;
+        assert_eq!(t.resolve().expect("truncated, not dropped").data.len(), 4);
     }
 
     #[test]
@@ -1549,10 +1931,7 @@ mod tests {
         // A payload that inflates to exactly its declared size still decodes.
         let pixels = vec![0xabu8; 4]; // 1x1 RGBA
         let z = miniz_oxide::deflate::compress_to_vec_zlib(&pixels, 9);
-        let ok = Image {
-            data: z,
-            ..img
-        };
+        let ok = Image { data: z, ..img };
         assert_eq!(ok.to_rgba8().as_deref(), Some(&pixels[..]));
     }
 }
