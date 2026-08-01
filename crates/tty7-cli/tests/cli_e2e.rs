@@ -544,11 +544,12 @@ fn capture_plain_returns_text_not_escapes(daemon: &Daemon) {
     loop {
         let raw = daemon.run_ok(&["capture", &address, "--scrollback"]);
         let plain = daemon.run_ok(&["capture", &address, "--scrollback", "--plain"]);
-        if plain.contains("tty7_e2e_plain_marker") {
-            assert!(
-                raw.contains('\r'),
-                "the default hands back the pane's bytes, CRLF included:\n{raw:?}"
-            );
+        // The marker renders as soon as the shell echoes the typed command,
+        // which can be before the pane has seen a single CR — ConPTY repaints
+        // the input line in escape-laden bursts, and `raw` is a separate,
+        // slightly earlier snapshot besides. The CR is part of what must
+        // settle, not something the marker's arrival already proves.
+        if plain.contains("tty7_e2e_plain_marker") && raw.contains('\r') {
             assert!(
                 !plain.contains('\r'),
                 "a carriage return is an instruction to the grid, not text:\n{plain:?}"
@@ -561,7 +562,8 @@ fn capture_plain_returns_text_not_escapes(daemon: &Daemon) {
         }
         assert!(
             Instant::now() < deadline,
-            "the sent text never showed up in the rendered capture; last was:\n{plain}"
+            "the captures never settled (marker rendered, CRLF in the raw \
+             bytes); last plain was:\n{plain}\nlast raw was:\n{raw:?}"
         );
         std::thread::sleep(Duration::from_millis(200));
     }
