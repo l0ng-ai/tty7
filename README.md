@@ -23,9 +23,9 @@
 
 - **Performance** — ~2× the throughput of Alacritty, Ghostty, or Kitty ([benchmarks](#benchmarks))
 - **Sessions persist** — quit or reboot; your shells and supported agent sessions keep running, no tmux
-- **Remote workspaces** — files, repos, tabs, panes, diffs, and worktrees run on the remote machine, not beside an SSH shell
-- **Agent-aware** — recognizes Claude Code, Codex & co. in a pane: status, notifications, branch + diff, session resume
-- **CLI + Skills** — gives coding agents an interface to create panes, run real TTY commands, inspect output, and work across connected machines
+- **Remote workspaces** — files, repos, panes, and git data stay on the remote machine
+- **Agent-aware** — Claude Code, Codex & co.: status, notifications, git context
+- **CLI + Skills** — agents create panes, run commands, and inspect output
 
 ## Install
 

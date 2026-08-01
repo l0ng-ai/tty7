@@ -23,9 +23,9 @@
 
 - **性能** —— 吞吐约为 Alacritty、Ghostty、Kitty 的 2 倍（[基准测试](#基准测试)）
 - **会话常驻** —— 退出应用、重启机器后，shell 和已支持的 agent 会话照样运行；无需 tmux
-- **远程工作区** —— 文件、仓库、标签页、pane、diff 和 worktree 都运行在远端机器上，而不只是一个 SSH shell
-- **Agent-aware** —— 识别 pane 里的 Claude Code、Codex 等：状态、通知、分支 + diff、会话恢复
-- **CLI + Skills** —— 为 coding agent 提供操作接口：创建 pane、在真实 TTY 中运行命令、读取输出、跨已连接机器工作
+- **远程工作区** —— 文件、仓库、pane 和 git 信息都留在远端机器上
+- **Agent-aware** —— Claude Code、Codex 等：状态、通知、git 上下文
+- **CLI + Skills** —— agent 创建 pane、运行命令、读取输出
 
 ## 安装
 
