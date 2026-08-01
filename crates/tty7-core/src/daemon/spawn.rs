@@ -393,6 +393,169 @@ fn detach(cmd: &mut Command) {
     cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
 }
 
+#[cfg(all(test, windows))]
+mod windows_spawn_tests {
+    use super::*;
+    use std::mem::size_of;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use windows_sys::Win32::System::Threading::{
+        ProcessRedirectionTrustPolicy, SetProcessMitigationPolicy,
+    };
+
+    const INNER_ENV: &str = "TTY7_REDIRECTION_TRUST_INNER";
+    const CLEAN_PARENT_ENV: &str = "TTY7_REDIRECTION_TRUST_CLEAN_PARENT";
+    const PROBE_RESULT_ENV: &str = "TTY7_REDIRECTION_TRUST_PROBE_RESULT";
+    const TEST_NAME: &str =
+        "daemon::spawn::windows_spawn_tests::daemon_spawn_does_not_inherit_redirection_trust";
+
+    /// Redirection Trust cannot be disabled after it is enforced, so the outer
+    /// test delegates the destructive policy change to a short-lived copy of
+    /// the test executable. This keeps the remaining test process clean.
+    #[test]
+    fn daemon_spawn_does_not_inherit_redirection_trust() {
+        // A probe process reports both its inherited policy and whether it can
+        // traverse the fixture. Checking the policy directly keeps this test
+        // deterministic on elevated CI runners, whose own junctions may remain
+        // trusted even while Redirection Trust is enforced.
+        if let Some(result) = std::env::var_os(PROBE_RESULT_ENV) {
+            let result = PathBuf::from(result);
+            let junction_probe = result
+                .parent()
+                .expect("probe result has a fixture directory")
+                .join("current")
+                .join("probe.txt");
+            let verdict = if windows::redirection_trust_enforced() {
+                "ENFORCED"
+            } else if junction_probe.exists() {
+                "CLEAN_OK"
+            } else {
+                "CLEAN_BLOCKED"
+            };
+            std::fs::write(result, verdict).expect("write mitigation probe verdict");
+            return;
+        }
+
+        if std::env::var_os(INNER_ENV).is_none() {
+            let output = Command::new(std::env::current_exe().expect("locate test executable"))
+                .args(["--exact", TEST_NAME, "--nocapture"])
+                .env(INNER_ENV, "1")
+                .env(CLEAN_PARENT_ENV, std::process::id().to_string())
+                .output()
+                .expect("spawn isolated mitigation test process");
+            assert!(
+                output.status.success(),
+                "isolated mitigation test failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let clean_parent_pid: u32 = std::env::var(CLEAN_PARENT_ENV)
+            .expect("clean parent pid")
+            .parse()
+            .expect("clean parent pid is numeric");
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "tty7-redirection-trust-{}-{unique}",
+            std::process::id()
+        ));
+        let target = root.join("version");
+        let junction = root.join("current");
+        let inherited_result = root.join("inherited-result.txt");
+        let result = root.join("result.txt");
+        let batch = root.join("junction probe.cmd");
+        std::fs::create_dir_all(&target).expect("create junction target");
+        std::fs::write(target.join("probe.txt"), b"ok").expect("write junction probe");
+
+        let comspec = std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
+        let linked = Command::new(&comspec)
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .status()
+            .expect("create junction fixture");
+        assert!(linked.success(), "mklink must create the junction fixture");
+
+        let mut policy = 1u32;
+        // SAFETY: The DWORD buffer exactly matches the Windows policy layout,
+        // and only this disposable inner test process receives the policy.
+        let enabled = unsafe {
+            SetProcessMitigationPolicy(
+                ProcessRedirectionTrustPolicy,
+                (&raw mut policy).cast(),
+                size_of::<u32>(),
+            )
+        };
+        assert!(
+            enabled != 0,
+            "enable Redirection Trust: {}",
+            io::Error::last_os_error()
+        );
+        assert!(
+            windows::redirection_trust_enforced(),
+            "tty7 must detect the enforcing policy before selecting the alternate spawn path"
+        );
+
+        // First prove that an ordinary child inherits the enforced policy.
+        // This is the red-capable half of the regression and does not depend on
+        // how Windows classifies the junction created by the current account.
+        let inherited = Command::new(std::env::current_exe().expect("locate test executable"))
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(PROBE_RESULT_ENV, &inherited_result)
+            .status()
+            .expect("spawn ordinary mitigation probe");
+        assert!(inherited.success(), "ordinary mitigation probe must run");
+        assert_eq!(
+            std::fs::read_to_string(&inherited_result)
+                .expect("read inherited mitigation verdict")
+                .trim(),
+            "ENFORCED",
+            "an ordinary child must demonstrate the policy inheritance that the alternate spawn path removes"
+        );
+
+        // The clean helper inherits INNER_ENV from this disposable process. A
+        // batch wrapper adds the result path before launching another copy of
+        // the test executable, whose first branch records its actual policy.
+        let test_exe = std::env::current_exe().expect("locate test executable");
+        let script = format!(
+            "@echo off\r\nset \"{PROBE_RESULT_ENV}={}\"\r\n\"{}\" --exact \"{TEST_NAME}\" --nocapture\r\n",
+            result.display(),
+            test_exe.display(),
+        );
+        std::fs::write(&batch, script).expect("write mitigation probe batch");
+
+        windows::spawn_detached_with_parent(
+            Path::new(&comspec),
+            &[
+                std::ffi::OsString::from("/d"),
+                std::ffi::OsString::from("/c"),
+                batch.as_os_str().to_owned(),
+            ],
+            clean_parent_pid,
+        )
+        .expect("spawn mitigation probe through clean logical parent");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !result.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        let verdict = std::fs::read_to_string(&result).unwrap_or_else(|_| "MISSING".into());
+        let _ = std::fs::remove_dir(&junction);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            verdict.trim(),
+            "CLEAN_OK",
+            "a tty7 daemon child must drop the inherited policy and retain access to user-created junctions"
+        );
+    }
+}
+
 #[cfg(test)]
 mod exe_name_tests {
     use super::*;

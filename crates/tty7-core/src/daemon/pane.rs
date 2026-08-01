@@ -427,6 +427,16 @@ const EXIT_CODE_PROBE_WINDOW: Duration = Duration::from_millis(500);
 
 const EXIT_CODE_PROBE_INTERVAL: Duration = Duration::from_millis(10);
 
+// On Windows the process handle can signal before ConPTY has delivered the
+// final output bytes to the reader thread. Give that reader a bounded chance
+// to report first so Exited remains ordered after the pane's last output. The
+// process monitor still reports after the grace period if the pipe never ends.
+#[cfg(windows)]
+const WINDOWS_OUTPUT_DRAIN_GRACE: Duration = Duration::from_millis(500);
+
+#[cfg(windows)]
+const WINDOWS_OUTPUT_DRAIN_POLL: Duration = Duration::from_millis(5);
+
 struct Observer {
     id: u64,
     tx: Sender<DaemonMsg>,
@@ -611,6 +621,20 @@ impl DeathReporter {
         if let Some(on_dead) = self.on_dead.lock().unwrap().take() {
             on_dead();
         }
+    }
+}
+
+/// Waits briefly for the ConPTY reader to publish the ordered exit event.
+///
+/// The process monitor is only a fallback for Windows pipes that never reach
+/// EOF. If the reader has already claimed the reporter, it is either emitting
+/// the final Output frames or resolving the exit code, so no second report is
+/// needed. Otherwise the deadline preserves the monitor's liveness guarantee.
+#[cfg(windows)]
+fn wait_for_windows_reader_report(death: &DeathReporter) {
+    let deadline = std::time::Instant::now() + WINDOWS_OUTPUT_DRAIN_GRACE;
+    while !death.reported.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(WINDOWS_OUTPUT_DRAIN_POLL);
     }
 }
 
@@ -1249,7 +1273,16 @@ impl DaemonPane {
         let Some(pid) = shell_pid else { return };
         let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
         if handle.is_null() {
-            death.report(&state, &shutting_down);
+            // The process may have exited before OpenProcess ran. Report from
+            // a helper thread so the ConPTY reader can start and drain output
+            // while the bounded grace period is in progress.
+            std::thread::Builder::new()
+                .name("tty7-daemon-pane-exit-fallback".to_string())
+                .spawn(move || {
+                    wait_for_windows_reader_report(&death);
+                    death.report(&state, &shutting_down);
+                })
+                .expect("spawn daemon pane exit fallback thread");
             return;
         }
         let handle = handle as isize;
@@ -1261,6 +1294,7 @@ impl DaemonPane {
                     WaitForSingleObject(handle, INFINITE);
                     CloseHandle(handle);
                 }
+                wait_for_windows_reader_report(&death);
                 death.report(&state, &shutting_down);
             })
             .expect("spawn daemon pane exit monitor thread");
