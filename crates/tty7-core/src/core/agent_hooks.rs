@@ -1206,9 +1206,12 @@ mod tests {
         let local = local_host();
         let here = HookTarget::local(&*local).expect("home resolves in tests");
         let exe = std::env::current_exe().unwrap();
+        let command_exe = here
+            .hook_command_exe()
+            .unwrap_or_else(|| format!("\"{}\"", exe.display()));
         assert_eq!(
             here.hook_command(HookAgent::Claude, "stop"),
-            format!("\"{}\" agent-hook claude stop", exe.display())
+            format!("{command_exe} agent-hook claude stop")
         );
     }
 
@@ -1250,6 +1253,9 @@ mod tests {
         let exe = exe_json.trim_matches('"').to_string();
         let host = local_host();
         let target = HookTarget::local(&*host).expect("home resolves in tests");
+        let hook_exe_raw = target.hook_command_exe().unwrap_or_else(|| exe_raw.clone());
+        let hook_exe_json = serde_json::to_string(&hook_exe_raw).unwrap();
+        let hook_exe = hook_exe_json.trim_matches('"');
 
         let copilot = copilot_hooks_json(&target).expect("copilot content builds");
         let parsed: serde_json::Value = serde_json::from_str(&copilot).expect("valid JSON");
@@ -1267,11 +1273,11 @@ mod tests {
                 "copilot {event} carries the emitter"
             );
         }
-        assert!(copilot.contains(&exe));
+        assert!(copilot.contains(hook_exe));
 
         let opencode = opencode_plugin_js(&target).expect("opencode content builds");
         assert!(opencode.contains("agent-hook opencode"));
-        assert!(opencode.contains(&exe));
+        assert!(opencode.contains(hook_exe));
         assert!(opencode.contains(r#"process.env["TTY7"]"#));
 
         let pi = pi_extension_ts(&target).expect("pi content builds");
@@ -1300,7 +1306,7 @@ mod tests {
                 "grok {event} matcher"
             );
         }
-        assert!(grok.contains(&exe));
+        assert!(grok.contains(hook_exe));
     }
 
     #[test]
