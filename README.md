@@ -42,7 +42,7 @@ Native builds for each platform on [**Releases**](https://github.com/l0ng-ai/tty
 
 | | |
 |---|---|
-| **Input** | ghost suggestions from history · explained tab completion · syntax highlighting · multi-line editing · click places the caret · <kbd>⌃ R</kbd> fuzzy history |
+| **Editor-grade input** | ghost suggestions from history · explained tab completion · syntax highlighting · multi-line editing · click places the caret · <kbd>⌃ R</kbd> fuzzy history |
 | **Window** | tabs & splits · <kbd>⌘ P</kbd> palette · <kbd>⌘ F</kbd> scrollback search · nine themes · IME |
 | **Agent-aware** | per-pane detection (~17 CLIs): status dot · notifications · branch + diff · resume after reboot · tray icon when input is needed |
 | **Remote workspaces** | remote files, repos, changes, diffs, worktrees, tabs, and panes · reconnect from any client and continue where you left off |
