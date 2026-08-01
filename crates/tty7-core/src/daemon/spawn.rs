@@ -7,6 +7,9 @@ use crate::core::config;
 use crate::daemon::protocol::{ClientMsg, DaemonMsg, DaemonVersion, PROTOCOL_VERSION};
 use crate::daemon::{pidfile, transport};
 
+#[cfg(windows)]
+mod windows;
+
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -276,10 +279,32 @@ fn spawn_detached() -> anyhow::Result<()> {
     let exe = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("could not locate own executable: {e}"))?;
 
+    let config_dir = config::config_dir_path();
+
+    // Some Windows shell brokers enforce Redirection Trust on processes they
+    // launch. An ordinary child inherits it and cannot traverse Scoop's
+    // user-created `current` junctions. The policy cannot be relaxed in place,
+    // so create the daemon through the clean interactive desktop shell only
+    // when the enforcing bit is actually present.
+    #[cfg(windows)]
+    if windows::redirection_trust_enforced() {
+        let mut args = vec![std::ffi::OsString::from("--daemon")];
+        if let Some(dir) = &config_dir {
+            args.push(std::ffi::OsString::from("--config-dir"));
+            args.push(dir.as_os_str().to_owned());
+        }
+        windows::spawn_detached_with_clean_parent(&exe, &args).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to spawn daemon through the Windows desktop shell while Redirection Trust is enforced: {error}"
+            )
+        })?;
+        return Ok(());
+    }
+
     let mut cmd = Command::new(exe);
     cmd.arg("--daemon");
 
-    if let Some(dir) = config::config_dir_path() {
+    if let Some(dir) = config_dir {
         cmd.arg("--config-dir").arg(dir);
     }
 
