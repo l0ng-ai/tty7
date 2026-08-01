@@ -4317,6 +4317,27 @@ impl Tty7App {
         Some((host, Some(home)))
     }
 
+    /// Settings → Agents: the "Agent coordination" switch — install or remove
+    /// the session-CLI note in the agents' instruction files. Flipping it is
+    /// also an explicit decision, so the one-time coordination prompt is
+    /// marked seen and will never second-guess the user.
+    pub(crate) fn set_agents_coordinate(&mut self, on: bool, cx: &mut Context<Self>) {
+        let result = if on {
+            crate::core::agent_note::install()
+        } else {
+            crate::core::agent_note::uninstall()
+        };
+        if let Err(e) = result {
+            log::warn!("agent-coordination note change failed: {e}");
+        }
+        let config = cx.global_mut::<crate::core::config::Config>();
+        if !config.agents_coordinate_prompt_seen {
+            config.agents_coordinate_prompt_seen = true;
+            config.save();
+        }
+        cx.notify();
+    }
+
     pub(crate) fn settings_install_agent_hooks(
         &mut self,
         agent: crate::core::agent_hooks::HookAgent,

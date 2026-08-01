@@ -166,6 +166,47 @@ pub fn refresh_menu(cx: &mut App) {
     crate::ui::theme::set_menus(cx);
 }
 
+/// Offer — once — to teach the user's coding agents the session CLI (install
+/// the `core::agent_note` block into their instruction files).
+///
+/// Fires the first time a pane detects a coding agent: the one moment the
+/// offer is guaranteed relevant (an agent is literally running right now) and
+/// still early. Whatever the answer, it never asks again — "Not Now" is a
+/// decision, not a snooze — and the Settings → Agents toggle stays available
+/// both ways. The seen-flag is written *before* the prompt resolves so a
+/// second pane starting an agent while the dialog is up can't stack another.
+pub fn prompt_agent_coordination(window: &mut Window, cx: &mut App) {
+    if cx.global::<Config>().agents_coordinate_prompt_seen || crate::core::agent_note::installed() {
+        return;
+    }
+    cx.global_mut::<Config>().agents_coordinate_prompt_seen = true;
+    cx.global::<Config>().save();
+    let answer = window.prompt(
+        gpui::PromptLevel::Info,
+        "Let your agents coordinate?",
+        Some(
+            "tty7 can teach the coding agents you run (Claude Code, Codex, …) \
+             its session CLI, so one agent can start another, send it prompts, \
+             wait until it needs input or finishes, and read its output.\n\n\
+             Enabling adds a short marked note to ~/.claude/CLAUDE.md (and \
+             ~/.codex/AGENTS.md when present). You can turn it off anytime in \
+             Settings → Agents.",
+        ),
+        &["Not Now", "Enable"],
+        cx,
+    );
+    cx.spawn(async move |_cx| {
+        // Index 1 == "Enable"; "Not Now" and a dismissed dialog change nothing.
+        if let Ok(1) = answer.await {
+            match crate::core::agent_note::install() {
+                Ok(_) => log::info!("agent-coordination note installed"),
+                Err(e) => log::warn!("could not install the agent-coordination note: {e}"),
+            }
+        }
+    })
+    .detach();
+}
+
 pub const MENU_SLOTS: usize = 9;
 
 pub fn menu_order(cx: &App) -> Vec<(WorkspaceId, bool)> {

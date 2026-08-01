@@ -173,6 +173,13 @@ pub struct Config {
     pub restore_session: bool,
     #[serde(default = "default_true")]
     pub show_tray_icon: bool,
+    /// Whether the one-time "Let your agents coordinate?" prompt has run — the
+    /// offer to install the session-CLI note into the agents' instruction
+    /// files (see the app crate's `core::agent_note`). It fires the first time
+    /// a coding agent is detected in a pane, and never again whatever was
+    /// answered; the Settings → Agents toggle stays available either way.
+    #[serde(default)]
+    pub agents_coordinate_prompt_seen: bool,
     #[serde(default = "default_true")]
     pub confirm_window_close: bool,
     #[serde(default, deserialize_with = "de_lenient")]
@@ -412,6 +419,7 @@ impl Default for Config {
             notify_threshold_secs: default_notify_threshold_secs(),
             restore_session: true,
             show_tray_icon: true,
+            agents_coordinate_prompt_seen: false,
             confirm_window_close: true,
             bell: BellMode::Visual,
             tab_completion: true,
