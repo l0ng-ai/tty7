@@ -2021,10 +2021,7 @@ impl TerminalView {
         })
     }
 
-    // `&mut Window` (though most of this only reads): the first-agent edge raises
-    // the one-time coordination prompt, and `Window::prompt` needs the mutable
-    // handle. The single caller (`update_in`) has it anyway.
-    fn poll_foreground(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn poll_foreground(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.terminal.exited {
             return;
         }
@@ -2064,11 +2061,6 @@ impl TerminalView {
         let running = !at_prompt;
         if running && self.running_agent.is_none() {
             self.running_agent = self.terminal.foreground_agent();
-            // First agent ever seen: the moment the coordination offer is
-            // relevant (self-guarding one-shot — see `prompt_agent_coordination`).
-            if self.running_agent.is_some() {
-                crate::ui::windows::prompt_agent_coordination(window, cx);
-            }
         }
         let cmd_finished = self.running_since.is_some() && !running;
         match (self.running_since, running) {
@@ -2076,9 +2068,6 @@ impl TerminalView {
                 self.running_since = Some(std::time::Instant::now());
                 self.running_title = self.title.clone();
                 self.running_agent = self.terminal.foreground_agent();
-                if self.running_agent.is_some() {
-                    crate::ui::windows::prompt_agent_coordination(window, cx);
-                }
             }
             (Some(start), false) => {
                 let elapsed = start.elapsed();

@@ -3567,22 +3567,23 @@ impl Tty7App {
             cx,
         ));
 
-        // Agent coordination: the session-CLI note in the agents' instruction
-        // files (see `core::agent_note`). State is read from the files
-        // themselves — like the hook rows, the filesystem is the truth, so an
+        // The orchestration skill (see `core::orchestration_skill`): a Claude
+        // Code skill a primary agent invokes explicitly to delegate work to
+        // worker panes over the session CLI. State is read from the file
+        // itself — like the hook rows, the filesystem is the truth, so an
         // edit made outside this panel shows up here. Above the machine
-        // picker: the note lives on this machine's disk regardless of which
+        // picker: the skill lives on this machine's disk regardless of which
         // host's hooks are managed below.
-        let coordinate_switch = crate::ui::theme::switch("agents-coordinate", cx)
-            .checked(crate::core::agent_note::installed())
-            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_agents_coordinate(*on, cx)))
+        let skill_switch = crate::ui::theme::switch("orchestration-skill", cx)
+            .checked(crate::core::orchestration_skill::installed())
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_orchestration_skill(*on, cx)))
             .into_any_element();
         page = page.child(self.settings_row(
-            "Agent coordination",
-            "Teach agents the `tty7` session CLI (ls / agents / send / wait / capture) via a \
-             note in ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md, so they can start, drive, \
-             and wait on each other's sessions",
-            coordinate_switch,
+            "Orchestration skill",
+            "Install a Claude Code skill (~/.claude/skills/tty7-orchestration) that teaches a \
+             primary agent to delegate work to worker panes over the `tty7` CLI — spawn, send, \
+             wait, capture — invoked explicitly, never injected globally",
+            skill_switch,
             cx,
         ));
 

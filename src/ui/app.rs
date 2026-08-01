@@ -4317,23 +4317,17 @@ impl Tty7App {
         Some((host, Some(home)))
     }
 
-    /// Settings → Agents: the "Agent coordination" switch — install or remove
-    /// the session-CLI note in the agents' instruction files. Flipping it is
-    /// also an explicit decision, so the one-time coordination prompt is
-    /// marked seen and will never second-guess the user.
-    pub(crate) fn set_agents_coordinate(&mut self, on: bool, cx: &mut Context<Self>) {
+    /// Settings → Agents: the "Orchestration skill" switch — install or
+    /// remove the Claude Code skill that teaches a primary agent the
+    /// delegation workflow over the session CLI.
+    pub(crate) fn set_orchestration_skill(&mut self, on: bool, cx: &mut Context<Self>) {
         let result = if on {
-            crate::core::agent_note::install()
+            crate::core::orchestration_skill::install()
         } else {
-            crate::core::agent_note::uninstall()
+            crate::core::orchestration_skill::uninstall()
         };
         if let Err(e) = result {
-            log::warn!("agent-coordination note change failed: {e}");
-        }
-        let config = cx.global_mut::<crate::core::config::Config>();
-        if !config.agents_coordinate_prompt_seen {
-            config.agents_coordinate_prompt_seen = true;
-            config.save();
+            log::warn!("orchestration-skill change failed: {e}");
         }
         cx.notify();
     }
