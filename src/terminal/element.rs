@@ -17,6 +17,8 @@ use gpui_component::ActiveTheme as _;
 use super::view::TerminalView;
 use crate::core::config::Config;
 
+const DIM_OPACITY: f32 = 0.66;
+
 #[derive(Clone, Copy, PartialEq, Default, Debug)]
 enum UnderlineKind {
     #[default]
@@ -196,6 +198,9 @@ fn snapshot_cell(
 
     if selection.is_some_and(|s| s.contains(point)) {
         rc.selected = true;
+    }
+    if flags.contains(Flags::DIM) {
+        rc.fg.a *= DIM_OPACITY;
     }
     rc
 }
@@ -2171,6 +2176,28 @@ mod tests {
         let rc = snapshot_cell(&on_colored, point, &palette, &colors, None);
         assert_eq!(rc.fg, to_hsla(palette[1]));
         assert_eq!(rc.fg, rc.bg);
+    }
+
+    #[test]
+    fn dim_flag_reduces_foreground_intensity() {
+        let palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
+        let colors = test_colors();
+        let point = AlacPoint::new(AlacLine(0), AlacColumn(0));
+        let cell = Cell {
+            c: 'f',
+            flags: Flags::DIM,
+            ..Cell::default()
+        };
+
+        let rc = snapshot_cell(&cell, point, &palette, &colors, None);
+
+        assert_eq!(rc.fg.h, colors.default_fg.h);
+        assert_eq!(rc.fg.s, colors.default_fg.s);
+        assert_eq!(rc.fg.l, colors.default_fg.l);
+        assert!(
+            rc.fg.a < colors.default_fg.a,
+            "SGR 2 text must paint with reduced intensity"
+        );
     }
 
     #[test]
