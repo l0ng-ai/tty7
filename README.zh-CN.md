@@ -2,9 +2,9 @@
 
 <img src="assets/app-icon.svg" alt="tty7" width="88" height="88" />
 
-# tty7
+### tty7
 
-**高性能终端：常驻会话、远程工作区和 coding agent 支持。**
+**高性能终端工作台：常驻会话、远程工作区、coding agent。**
 
 <sub>纯 Rust · GPU 渲染基于 Zed 的 gpui · VT 内核来自 Alacritty</sub>
 
@@ -19,24 +19,42 @@
 
 </div>
 
-tty7 是用于本地和远程开发的桌面终端。后台 server 持有工作区和 pane；关闭窗口不会结束
-其中运行的 shell 或 coding agent。
+## 为什么
+
+- **性能** —— 吞吐约为 Alacritty、Ghostty、Kitty 的 2 倍（[基准测试](#基准测试)）
+- **会话常驻** —— 退出应用、重启机器后，shell 和已支持的 agent 会话照样运行；无需 tmux
+- **远程工作区** —— 文件、仓库、标签页、pane、diff 和 worktree 都运行在远端机器上，而不只是一个 SSH shell
+- **Agent-aware** —— 识别 pane 里的 Claude Code、Codex 等：状态、通知、分支 + diff、会话恢复
+- **CLI + Skills** —— 为 coding agent 提供操作接口：创建 pane、在真实 TTY 中运行命令、读取输出、跨已连接机器工作
 
 ## 安装
 
-在 [**Releases**](https://github.com/l0ng-ai/tty7/releases) 下载对应平台的原生构建。
+三平台原生构建都在 [**Releases**](https://github.com/l0ng-ai/tty7/releases)：
 
-| 平台 | 下载 | 安装方式 |
+| | | |
 |---|---|---|
 | **macOS** | `…-macos-arm64.dmg` · `…-x86_64.dmg` | 拖进「应用程序」 |
-| **Windows** | `…-setup.exe` · 便携版 `….zip` | 运行安装程序，或解压使用 |
-| **Linux** | `…-x86_64.AppImage` | `chmod +x` 后直接运行；X11/Wayland 依赖已打包 |
+| **Windows** | `…-setup.exe` · 便携版 `….zip` | |
+| **Linux** | `…-x86_64.AppImage` | `chmod +x` 直接运行，X11/Wayland 依赖已打包 |
 
-每个安装包都包含 `tty7` CLI，并会将其加入 PATH。
+## 有什么
 
-## 性能
+| | |
+|---|---|
+| **输入** | 历史影子建议 · 带说明的 Tab 补全 · 语法高亮 · 多行编辑 · 点击定位光标 · <kbd>⌃ R</kbd> 模糊历史搜索 |
+| **窗口** | 标签页与分屏 · <kbd>⌘ P</kbd> 命令面板 · <kbd>⌘ F</kbd> 回滚搜索 · 9 套主题 · 输入法 |
+| **Agent-aware** | 按 pane 识别约 17 个 CLI agent：状态点 · 通知 · 分支 + diff · 重启后续上会话 · 托盘图标提醒需要输入 |
+| **远程工作区** | 远端文件、仓库、Changes、diff、worktree、标签页和 pane · 任意客户端重连后原地继续 |
+| **CLI + Skills** | 安装包自带 `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · pane/工作区控制 · 真实 PTY 命令 · 输出、进程、端口和 agent 状态 |
+| **SSH** | 原生 russh 栈：profile 凭据进 keychain · SFTP 面板 · 端口转发 · 跳板机 · 一次无 sudo 安装 `tty7-server` |
 
-Apple M1 Pro、macOS 26.3.1、155×40 网格、五次运行平均值（2026-07-04）：
+终端和快捷键参考：[docs/features.zh-CN.md](docs/features.zh-CN.md)。面向 agent 的 CLI 接口见
+[skills/tty7/SKILL.md](skills/tty7/SKILL.md)。
+
+## 基准测试
+
+同一台机器、同一天、统一 155×40 网格 —— Apple M1 Pro，macOS 26.3.1，
+取五次运行的平均值（2026-07-04）：
 
 | | **tty7** | Alacritty | Ghostty | Kitty |
 |---|---:|---:|---:|---:|
@@ -46,57 +64,7 @@ Apple M1 Pro、macOS 26.3.1、155×40 网格、五次运行平均值（2026-07-0
 
 <sub>¹ GUI 105 MB + 常驻 server 11 MB。</sub>
 
-测试方法和一键复现脚本：[`scripts/bench/`](scripts/bench/README.md)。
-
-## 终端功能
-
-- 输入：历史影子建议、带说明的 Tab 补全、语法高亮、模糊搜索、多行编辑和鼠标定位光标。
-- 窗口：标签页、分屏、命令面板、回滚搜索、输入法、9 套主题、主题编辑、跟随系统外观和 tmux 快捷键预设。
-- Agent：会话 fork、上下文命令，以及 agent 等待输入时的托盘提醒。
-
-详细说明见 [功能列表](docs/features.zh-CN.md) · [English](docs/features.md)。
-
-## 常驻会话
-
-应用退出后，server 仍会保持 shell 和 pane；机器重启后可恢复。这样即使不使用 tmux，
-终端中的工作也不会因为关闭窗口而中断。
-
-## 远程工作区
-
-tty7 使用原生 Rust SSH 实现（russh），支持保存的 profile、OS keychain 中的凭据、
-`~/.ssh/config` alias、GUI 认证、SFTP、端口转发和跳板机。
-
-打开远程工作区时，tty7 会通过现有 SSH 连接在主机上安装 `tty7-server`。这项安装只需一次，
-不需要 `sudo`。远端 server 持有工作区及其 pane；本地应用关闭或连接暂时不可用时，它们仍会
-继续运行。之后可从当前或另一台客户端重新连接。
-
-## Agent 感知
-
-tty7 会按 pane 识别已支持的 coding agent，包括 Claude Code、Codex、Gemini CLI、Aider 和
-OpenCode。它会显示状态、在 agent 等待输入时发送通知，并显示该 pane 的 git 分支和工作区改动。
-已支持的 agent 对话可在重启后恢复。
-
-## CLI + Skills
-
-`tty7` CLI 将工作区和 pane 暴露给 coding agent。配套的 [agent skill](skills/tty7/SKILL.md) 会把
-这套接口教给 agent：每个命令的作用、工作区和 pane 的寻址方式，以及什么任务需要真实终端而不是普通
-shell 命令。
-
-两者结合后，agent 可以把 tty7 当成与用户共享的终端环境：为任务创建 pane，在其中运行服务器或交互式
-程序，之后继续发送输入、读取输出、检查进程和端口；本地和已连接远端的工作区都使用同一套操作。
-
-```sh
-tty7 ls                                  # 列出工作区和 pane
-tty7 pane split %42 --v                  # 新建同级 pane，并打印其 id
-tty7 send %83 'pnpm dev' --enter          # 在该 pane 中启动任务
-tty7 capture %83 --plain                 # 读取其输出
-tty7 procs %83                           # 查看其进程和监听端口
-tty7 run -- cargo test                   # 在真实 PTY 中运行一次性命令
-tty7 -m devbox ls                        # 对已连接远端使用同一套接口
-```
-
-`--json` 让 agent 可以根据工作区、pane、进程、端口或 agent 状态的结构化结果做决定。完整接口见
-[`skills/tty7/SKILL.md`](skills/tty7/SKILL.md)。
+测试方法与一键复现脚本：[`scripts/bench/`](scripts/bench/README.md)。
 
 ---
 
