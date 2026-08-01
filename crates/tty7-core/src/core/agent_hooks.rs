@@ -337,11 +337,36 @@ impl<'a> HookTarget<'a> {
     }
 
     fn hook_command(&self, agent: HookAgent, event: &str) -> String {
+        if let Some(exe) = self.hook_command_exe() {
+            return format!("{exe} agent-hook {} {event}", agent.slug());
+        }
         format!(
             "\"{}\" agent-hook {} {event}",
             self.exe.display(),
             agent.slug()
         )
+    }
+
+    /// A shell-safe executable path for generated hook commands.
+    ///
+    /// On Windows, Codex runs hook commands through the session's shell, which
+    /// is frequently PowerShell. `pwsh -Command` drops the quotes around a
+    /// path containing spaces, so the usual `"C:\Program Files\..."` form is
+    /// parsed as `C:\Program` and fails — and even a quoted path without
+    /// spaces is a syntax error in PowerShell (invoking a quoted path requires
+    /// the `&` call operator). Resolving the space-free 8.3 short path lets us
+    /// emit the path bare, which both `cmd.exe` and PowerShell execute.
+    ///
+    /// Returns `None` when no space-free short path is available; callers then
+    /// fall back to the quoted long path.
+    fn hook_command_exe(&self) -> Option<String> {
+        #[cfg(windows)]
+        if self.is_local() {
+            if let Some(short) = short_path(&self.exe) {
+                return Some(short);
+            }
+        }
+        None
     }
 
     fn read(&self, p: &Path) -> io::Result<String> {
@@ -653,6 +678,32 @@ fn marker_command<'a>(matcher: &'a serde_json::Value, marker: &str) -> Option<&'
                 .and_then(|c| c.as_str())
                 .filter(|c| c.contains(marker))
         })
+}
+
+/// Resolves `path` to its Windows 8.3 short form when one exists and is free
+/// of spaces, so generated hook commands survive PowerShell's `-Command`
+/// quoting. Returns `None` when short names are unavailable or the short path
+/// still contains spaces; callers then fall back to the long path.
+#[cfg(windows)]
+fn short_path(path: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let len = GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0);
+        if len == 0 {
+            return None;
+        }
+        let mut buf = vec![0u16; len as usize];
+        let written = GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), len);
+        if written == 0 {
+            return None;
+        }
+        let short = String::from_utf16(&buf[..written as usize]).ok()?;
+        let short = short.trim_end_matches('\0');
+        (!short.contains(' ')).then(|| short.to_string())
+    }
 }
 
 fn enable_codex_hooks_feature() -> Result<(), String> {
@@ -1100,6 +1151,10 @@ mod tests {
         let host = local_host();
         let target = HookTarget::local(&*host).expect("home resolves in tests");
         let cmd = target.hook_command(HookAgent::Claude, "stop");
+        // On Windows the executable may be rewritten to a space-free 8.3 short
+        // path, which must be emitted bare: PowerShell cannot invoke a quoted
+        // path without the `&` call operator.
+        #[cfg(not(windows))]
         assert!(cmd.starts_with('"'));
         assert!(cmd.ends_with("agent-hook claude stop"));
     }
