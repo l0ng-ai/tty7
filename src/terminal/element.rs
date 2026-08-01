@@ -10,7 +10,8 @@ use gpui::{
     App, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, Element, ElementId, Font,
     FontStyle, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, Hsla, IntoElement,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba,
-    SharedString, Style, TextAlign, TextRun, Window, fill, outline, point, px, relative, size,
+    SharedString, StrikethroughStyle, Style, TextAlign, TextRun, Window, fill, outline, point, px,
+    relative, size,
 };
 use gpui_component::ActiveTheme as _;
 
@@ -39,6 +40,7 @@ struct RenderCell {
     draw_bg: bool,
     bold: bool,
     italic: bool,
+    strikeout: bool,
     underline: UnderlineKind,
     underline_color: Option<Hsla>,
     spacer: bool,
@@ -58,6 +60,7 @@ impl Default for RenderCell {
             draw_bg: false,
             bold: false,
             italic: false,
+            strikeout: false,
             underline: UnderlineKind::None,
             underline_color: None,
             spacer: false,
@@ -177,6 +180,7 @@ fn snapshot_cell(
         draw_bg,
         bold: flags.contains(Flags::BOLD) || flags.contains(Flags::BOLD_ITALIC),
         italic: flags.contains(Flags::ITALIC) || flags.contains(Flags::BOLD_ITALIC),
+        strikeout: flags.contains(Flags::STRIKEOUT),
         underline: if flags.contains(Flags::DOUBLE_UNDERLINE) {
             UnderlineKind::Double
         } else if flags.contains(Flags::UNDERCURL) {
@@ -320,11 +324,94 @@ fn paint_cell_runs(
     }
 }
 
+fn for_each_special_underline(
+    bounds: Bounds<Pixels>,
+    kind: UnderlineKind,
+    scale: f32,
+    mut draw: impl FnMut(Bounds<Pixels>),
+) {
+    let scale = scale.max(0.1);
+    let snap = |v: f32| (v * scale).round() / scale;
+    let device_px = 1. / scale;
+    let x0 = snap(bounds.origin.x.as_f32());
+    let x1 = snap((bounds.origin.x + bounds.size.width).as_f32());
+    let y1 = snap((bounds.origin.y + bounds.size.height).as_f32());
+    let line = |y: f32, start: f32, end: f32| {
+        Bounds::new(
+            point(px(start), px(y)),
+            size(px((end - start).max(0.)), px(device_px)),
+        )
+    };
+
+    match kind {
+        UnderlineKind::Double => {
+            draw(line(y1 - 4. * device_px, x0, x1));
+            draw(line(y1 - 2. * device_px, x0, x1));
+        }
+        UnderlineKind::Dotted | UnderlineKind::Dashed => {
+            // The ink is one device pixel thick, but its rhythm is measured in
+            // logical pixels. Otherwise at 2x a dotted underline alternates a
+            // single physical pixel on/off and reads as a grey solid line.
+            let (on, off) = if kind == UnderlineKind::Dotted {
+                (1., 1.)
+            } else {
+                (3., 2.)
+            };
+            let mut x = x0;
+            while x < x1 {
+                draw(line(y1 - 2. * device_px, x, (x + on).min(x1)));
+                x += on + off;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn paint_special_underlines(window: &mut Window, geom: &CellGeom, buf: &[RenderCell], scale: f32) {
+    for row in 0..geom.rows {
+        let row_base = row * geom.cols;
+        let mut col = 0;
+        while col < geom.cols {
+            let cell = &buf[row_base + col];
+            if !matches!(
+                cell.underline,
+                UnderlineKind::Double | UnderlineKind::Dotted | UnderlineKind::Dashed
+            ) {
+                col += 1;
+                continue;
+            }
+            let kind = cell.underline;
+            let color = cell.underline_color.unwrap_or(cell.fg);
+            let start = col;
+            col += 1;
+            while col < geom.cols {
+                let next = &buf[row_base + col];
+                if next.spacer
+                    || (next.underline == kind && next.underline_color.unwrap_or(next.fg) == color)
+                {
+                    col += 1;
+                } else {
+                    break;
+                }
+            }
+            for_each_special_underline(
+                geom.cell_rect(row, start, col - start),
+                kind,
+                scale,
+                |rect| {
+                    window.paint_quad(fill(rect, color));
+                },
+            );
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 struct GlyphStyle {
     fg: Hsla,
     bold: bool,
     italic: bool,
+    strikeout: bool,
     underline: UnderlineKind,
     underline_color: Option<Hsla>,
     link_hover: bool,
@@ -336,6 +423,7 @@ impl GlyphStyle {
             fg: cell.fg,
             bold: cell.bold,
             italic: cell.italic,
+            strikeout: cell.strikeout,
             underline: cell.underline,
             underline_color: cell.underline_color,
             link_hover: cell.link_hover,
@@ -343,22 +431,26 @@ impl GlyphStyle {
     }
 
     fn draws_on_blanks(&self) -> bool {
-        self.underline != UnderlineKind::None || self.link_hover
+        self.underline != UnderlineKind::None || self.strikeout || self.link_hover
     }
 
     fn underline_style(&self) -> Option<gpui::UnderlineStyle> {
-        self.draws_on_blanks().then(|| {
-            let wavy = self.underline == UnderlineKind::Curly;
-            let thickness = if self.underline == UnderlineKind::Double {
-                px(2.)
-            } else {
-                px(1.)
-            };
-            gpui::UnderlineStyle {
-                thickness,
-                color: Some(self.underline_color.unwrap_or(self.fg)),
-                wavy,
-            }
+        (matches!(self.underline, UnderlineKind::Single | UnderlineKind::Curly)
+            || (self.link_hover && self.underline == UnderlineKind::None))
+            .then(|| {
+                let wavy = self.underline == UnderlineKind::Curly;
+                gpui::UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(self.underline_color.unwrap_or(self.fg)),
+                    wavy,
+                }
+            })
+    }
+
+    fn strikethrough_style(&self) -> Option<StrikethroughStyle> {
+        self.strikeout.then_some(StrikethroughStyle {
+            thickness: px(1.),
+            color: Some(self.fg),
         })
     }
 }
@@ -409,8 +501,31 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
     let mut col = 0;
     while col < row.len() {
         let cell = &row[col];
-        if cell.spacer || is_blank(cell) {
+        if cell.spacer {
             col += 1;
+            continue;
+        }
+        if is_blank(cell) {
+            let style = GlyphStyle::of(cell);
+            if style.underline == UnderlineKind::None && !style.strikeout {
+                col += 1;
+                continue;
+            }
+            let start = col;
+            let mut text = String::new();
+            while col < row.len()
+                && !row[col].spacer
+                && is_blank(&row[col])
+                && GlyphStyle::of(&row[col]) == style
+            {
+                text.push(' ');
+                col += 1;
+            }
+            segs.push(RowSeg::Run {
+                start,
+                cells: col - start,
+                text,
+            });
             continue;
         }
         if let Some(marks) = &cell.marks {
@@ -580,7 +695,15 @@ fn powerline_path(bounds: Bounds<Pixels>, shape: PowerlineShape) -> gpui::Path<P
 }
 
 fn native_cell_residue(style: &GlyphStyle) -> Option<char> {
-    style.draws_on_blanks().then_some(' ')
+    // Special underlines are painted directly from the cell buffer, so a
+    // shaped blank is only needed for decorations GPUI owns.
+    (style.strikeout
+        || matches!(
+            style.underline,
+            UnderlineKind::Single | UnderlineKind::Curly
+        )
+        || style.link_hover)
+        .then_some(' ')
 }
 
 fn seg_clip_width(solo: bool, cells: usize, cell_width: Pixels) -> Pixels {
@@ -693,7 +816,7 @@ fn paint_glyphs(
                 color: style.fg,
                 background_color: None,
                 underline: style.underline_style(),
-                strikethrough: None,
+                strikethrough: style.strikethrough_style(),
             };
 
             let shaped = window
@@ -1336,6 +1459,8 @@ impl Element for TerminalElement {
                 bold_font.as_ref(),
                 italic_font.as_ref(),
             );
+            let scale = window.scale_factor();
+            paint_special_underlines(window, &geom, &buf, scale);
             // Kitty-graphics images, painted over the placeholder cells they
             // occupy. `anchor_row` is absolute (measured from the top of
             // scrollback); convert it to a screen row with the same scroll state
@@ -1417,6 +1542,7 @@ impl Element for TerminalElement {
                     bold_font.as_ref(),
                     italic_font.as_ref(),
                 );
+                paint_special_underlines(window, &sg, row, scale);
             }
             if !editor_active {
                 paint_cursor(
@@ -1710,13 +1836,31 @@ mod tests {
         for c in &mut row {
             c.underline = UnderlineKind::Single;
         }
-        assert_eq!(segment_row(&row), [run(0, 2, "ab"), run(3, 2, "cd")]);
+        assert_eq!(
+            segment_row(&row),
+            [run(0, 2, "ab"), run(2, 1, " "), run(3, 2, "cd")]
+        );
 
         let mut row: Vec<_> = "ab cd".chars().map(cell).collect();
         for c in &mut row {
             c.link_hover = true;
         }
         assert_eq!(segment_row(&row), [run(0, 2, "ab"), run(3, 2, "cd")]);
+    }
+
+    #[test]
+    fn segment_row_keeps_decorated_blank_runs() {
+        let mut row: Vec<_> = "   ".chars().map(cell).collect();
+        for c in &mut row {
+            c.strikeout = true;
+        }
+        assert_eq!(segment_row(&row), [run(0, 3, "   ")]);
+
+        for c in &mut row {
+            c.strikeout = false;
+            c.underline = UnderlineKind::Dotted;
+        }
+        assert_eq!(segment_row(&row), [run(0, 3, "   ")]);
     }
 
     #[test]
@@ -1835,7 +1979,7 @@ mod tests {
     }
 
     #[test]
-    fn natively_drawn_cells_still_carry_their_underline() {
+    fn natively_drawn_cells_keep_decorations_owned_by_text_shaping() {
         let plain = GlyphStyle::of(&cell('│'));
         assert_eq!(
             native_cell_residue(&plain),
@@ -1843,11 +1987,7 @@ mod tests {
             "an unstyled box character has nothing left to shape"
         );
 
-        for kind in [
-            UnderlineKind::Single,
-            UnderlineKind::Double,
-            UnderlineKind::Curly,
-        ] {
+        for kind in [UnderlineKind::Single, UnderlineKind::Curly] {
             let mut c = cell('│');
             c.underline = kind;
             assert_eq!(
@@ -2224,6 +2364,88 @@ mod tests {
             kind(Flags::UNDERLINE | Flags::UNDERCURL),
             UnderlineKind::Curly
         );
+    }
+
+    #[test]
+    fn strikeout_flag_maps_to_a_text_decoration() {
+        let palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
+        let colors = test_colors();
+        let point = AlacPoint::new(AlacLine(0), AlacColumn(0));
+        let cell = Cell {
+            c: 's',
+            flags: Flags::STRIKEOUT,
+            ..Cell::default()
+        };
+
+        let rc = snapshot_cell(&cell, point, &palette, &colors, None);
+        let style = GlyphStyle::of(&rc).strikethrough_style().unwrap();
+        assert_eq!(style.thickness, px(1.));
+        assert_eq!(style.color, Some(rc.fg));
+    }
+
+    #[test]
+    fn special_underlines_have_distinct_device_pixel_geometry() {
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(12.), px(20.)));
+        let ink = |kind| {
+            let mut rects = Vec::new();
+            for_each_special_underline(bounds, kind, 2., |rect| rects.push(rect));
+            rects
+        };
+
+        let double = ink(UnderlineKind::Double);
+        assert_eq!(
+            double.len(),
+            2,
+            "double underline uses two separate strokes"
+        );
+        assert_ne!(double[0].origin.y, double[1].origin.y);
+
+        let dotted = ink(UnderlineKind::Dotted);
+        let dashed = ink(UnderlineKind::Dashed);
+        assert!(
+            dotted.len() > dashed.len(),
+            "dots repeat more often than dashes"
+        );
+        assert!(dotted.len() > 1 && dashed.len() > 1);
+        assert!(
+            dotted.iter().all(|r| r.size.width == px(1.)),
+            "each dot is a logical pixel wide at 2x"
+        );
+        assert!(
+            dashed.iter().all(|r| r.size.width <= px(3.)),
+            "each dash is at most three logical pixels wide at 2x"
+        );
+    }
+
+    #[test]
+    fn special_underlines_are_not_overpainted_by_link_hover() {
+        for kind in [
+            UnderlineKind::Double,
+            UnderlineKind::Dotted,
+            UnderlineKind::Dashed,
+        ] {
+            let mut c = cell('l');
+            c.underline = kind;
+            c.link_hover = true;
+            assert_eq!(GlyphStyle::of(&c).underline_style(), None, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn native_cells_keep_only_decorations_that_need_glyph_shaping() {
+        for kind in [
+            UnderlineKind::Double,
+            UnderlineKind::Dotted,
+            UnderlineKind::Dashed,
+        ] {
+            let mut c = cell('│');
+            c.underline = kind;
+            assert_eq!(native_cell_residue(&GlyphStyle::of(&c)), None);
+        }
+
+        let mut c = cell('│');
+        c.strikeout = true;
+        assert_eq!(native_cell_residue(&GlyphStyle::of(&c)), Some(' '));
     }
 
     #[test]
