@@ -22,8 +22,8 @@
 ## Why
 
 - **Performance** — ~2× the throughput of Alacritty, Ghostty, or Kitty ([benchmarks](#benchmarks))
-- **Sessions persist** — quit or reboot; your shells and supported agent sessions keep running, no tmux
-- **Remote workspaces** — files, repos, panes, and git data stay on the remote machine
+- **Persistent sessions** — quit or reboot; your shells and supported agent sessions keep running, no tmux
+- **Remote development** — files, repos, panes, and git data stay on the remote machine
 - **Agent-aware** — Claude Code, Codex & co.: status, notifications, git context
 - **CLI + Skills** — agents create panes, run commands, and inspect output
 
