@@ -398,8 +398,8 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     t.caret = rgb(m.caret).into();
     t.selection = rgb(m.selection).into();
 
-    let scrollbar_thumb: Hsla = rgb(presets::mix(m.background, m.foreground, 0.26)).into();
-    let scrollbar_thumb_hover: Hsla = rgb(presets::mix(m.background, m.foreground, 0.42)).into();
+    let scrollbar_thumb: Hsla = rgb(presets::mix(m.background, m.foreground, 0.18)).into();
+    let scrollbar_thumb_hover: Hsla = rgb(presets::mix(m.background, m.foreground, 0.34)).into();
     t.scrollbar = gpui::transparent_black();
     t.scrollbar_thumb = scrollbar_thumb;
     t.scrollbar_thumb_hover = scrollbar_thumb_hover;
