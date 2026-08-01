@@ -672,6 +672,14 @@ impl TerminalView {
         })
         .detach();
 
+        cx.on_release_in(window, |view, window, cx| {
+            view.terminal.detach_link();
+            for image in view.terminal.images().take_for_release() {
+                cx.drop_image(image, Some(window));
+            }
+        })
+        .detach();
+
         window.focus(&focus_handle, cx);
 
         let history = super::history::load(&super::history::Scope::Local);
