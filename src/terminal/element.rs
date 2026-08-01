@@ -716,6 +716,9 @@ fn paint_glyphs(
 struct GridCursor {
     row: usize,
     col: usize,
+    // Where the IME candidate window should anchor: the fake caret drawn by
+    // cursor-hiding TUIs when one is identifiable, else `col`.
+    ime_col: usize,
     hidden: bool,
     style: crate::core::config::CursorStyle,
 }
@@ -859,11 +862,35 @@ impl TerminalElement {
             history_size = term.grid().history_size();
             let selection = content.selection;
 
+            let cur = content.cursor;
+            let cursor_row = cur.point.line.0 + display_offset;
+            let cursor_hidden = matches!(cur.shape, CursorShape::Hidden);
+            // TUIs that hide the hardware cursor (Kimi CLI, Ink apps) draw
+            // their own caret as a reverse-video cell and park the real
+            // cursor wherever the frame's last write ended, which strands
+            // the IME candidate window there (#275). A lone short inverse
+            // run on the cursor's row is that fake caret; collect runs so
+            // the IME anchor can snap to it.
+            let mut inverse_runs: Vec<(usize, usize)> = Vec::new();
+
             for cell in content.display_iter {
                 let row = cell.point.line.0 + display_offset;
                 let col = cell.point.column.0;
                 if row < 0 || row as usize >= rows || col >= cols {
                     continue;
+                }
+                if cursor_hidden
+                    && row == cursor_row
+                    && cell.cell.flags.contains(Flags::INVERSE)
+                    && !cell
+                        .cell
+                        .flags
+                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    match inverse_runs.last_mut() {
+                        Some((start, len)) if *start + *len == col => *len += 1,
+                        _ => inverse_runs.push((col, 1)),
+                    }
                 }
                 let rc = snapshot_cell(cell.cell, cell.point, &palette, colors, selection.as_ref());
                 any_selected |= rc.selected;
@@ -891,14 +918,20 @@ impl TerminalElement {
                 sliver = Some(row_buf);
             }
 
-            let cur = content.cursor;
-            let row = cur.point.line.0 + display_offset;
+            let row = cursor_row;
             let col = cur.point.column.0;
             if row >= 0 && (row as usize) < rows && col < cols {
+                // Snap the IME anchor to the fake caret when there is
+                // exactly one caret-sized inverse run on the row.
+                let ime_col = match inverse_runs.as_slice() {
+                    [(start, len)] if cursor_hidden && *len <= 2 => *start,
+                    _ => col,
+                };
                 cursor = Some(GridCursor {
                     row: row as usize,
                     col,
-                    hidden: matches!(cur.shape, CursorShape::Hidden),
+                    ime_col,
+                    hidden: cursor_hidden,
                     style: cursor_style_from_shape(cur.shape),
                 });
             }
@@ -1238,7 +1271,7 @@ impl Element for TerminalElement {
         let cursor = snap.cursor;
         let sliver = snap.sliver.as_ref();
 
-        let cursor_cell = cursor.map(|c| (c.row, c.col));
+        let cursor_cell = cursor.map(|c| (c.row, c.ime_col));
         let render_cursor = cursor
             .filter(|c| !c.hidden)
             .map(|c| (c.row, c.col, c.style));

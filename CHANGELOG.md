@@ -5,9 +5,128 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [26.8.1] - 2026-08-01
 
 ### Added
+
+- **A remote workspace is a window that is one machine, not a pane that
+  happens to be SSH'd somewhere** — pick a host from **Home → Connect to
+  Host** (or the workspace switcher) and tty7 opens a window bound to that
+  machine: its own tab and pane tree, file browser and editor, repo grouping,
+  branch line, Changes panel, diff overlay and worktree list, all answered by
+  *that* machine rather than read off the client's disk. Before this, reaching
+  a remote box meant an SSH pane from the command palette — a shell and
+  nothing else. Repo grouping, the diff overlay, the right-panel Changes list,
+  worktrees: all of it read the client's local disk, so none of it existed
+  over SSH. The file tree was SFTP browsing, a separate, lesser thing from the
+  local editor. And the moment you closed the lid or lost the network, the
+  agent running in that pane died with the connection — there was nothing on
+  the far side to keep it alive.
+
+  A remote workspace fixes all four at once by putting the same code on both
+  ends. `tty7-server` — a new headless binary built on `tty7-core`, the crate
+  the GUI's own daemon logic was extracted into — runs on the far machine and
+  serves the identical `LocalHost` implementation the GUI uses for your own
+  disk, over one control connection. Because both sides run the *same* code
+  rather than a client-only reimplementation, a remote workspace has the exact
+  feature set a local one does, not a cut-down version of it. Sessions live in
+  that server, not in the window: closing the window detaches rather than
+  kills, panes and agent conversations keep running on the far side, and
+  reconnecting — from this laptop or another one — lands back where you left
+  it.
+
+  Local and remote workspaces are two different features, not one with a flag:
+  a window is never a mix of an SSH pane and a real workspace, and that split
+  is enforced rather than left to convention. The install itself is one-time
+  and unprivileged — the server is a static binary pushed over the same
+  connection, no `sudo`, confirmed once per machine. This is the foundation
+  the WSL-machines, incremental git-streaming and per-machine `⌃R` history
+  entries below build on: none of them had anywhere to attach to before this
+  landed. (#235)
+
+- **`tty7` is now a CLI, not just the app you launch by clicking an icon** —
+  a new scriptable command-line client, built for coding agents to drive
+  panes without a window in the way. The GUI binary is renamed `tty7-app`
+  (bundle id, icons and display name unchanged); `tty7`, the name you type,
+  is now the CLI. Both are clients of the same `tty7-server` a remote
+  workspace runs, talking the same control and pane protocols the window
+  does — an agent reaching through the CLI can do exactly what the CLI
+  exposes, no more, no less.
+
+  | | |
+  |---|---|
+  | Hot path | `ls`, `run -- <cmd>` (real exit code, `--keep` keeps the pane around), `new`, `send`, `capture`, `split`, `procs` |
+  | Addressing | `ws` / `tab` (`@N`) / `pane` (`%N`) / `machine` / `server` |
+  | Introspection | `agents`, `events` (NDJSON), `status`, `doctor` |
+  | Global | `-m <machine>` routes over the server's existing SSH/WSL links; `--json` everywhere; implicit context from `TTY7_PANE` / `TTY7_WS` / `TTY7_SOCKET`, injected into every spawned shell |
+
+  The server's control dialect grew several additive verbs to carry this: a
+  read-only `Observe` for watching a pane without owning it, budgeted per
+  observer; pane exit codes, which previously were always reported `None`
+  and now actually carry the code; and aggregate `AgentStates` / `Routes` /
+  `Status` queries. Writing into a pane now hands off cleanly instead of
+  fighting the previous controller for it — a displaced client gets a clean
+  EOF and its stale input is dropped, closing a long-standing hazard where
+  two writers on one pane could leave it looking frozen. `tty7_core::client`
+  exposes the `ControlClient`/`PaneClient` pair the CLI is built on as a
+  public library, with zero behavior change to the GUI's own connection code.
+
+  There is deliberately no interactive `attach` verb — agents drive panes
+  with `run` / `send` / `capture` / `events` instead of taking one over
+  interactively. An `attach` verb was designed and partway built during this
+  work and then dropped before it ever reached a release, so this is design
+  history, not a behavior change for anyone — the CLI itself is new in this
+  release, so there was no previous `tty7 attach` to remove out from under
+  existing scripts. The protocol-level `Attach` call the GUI's own panes use
+  is untouched.
+
+  Every unimplemented verb (`ws stop`, `machine connect`/`disconnect`, bare
+  `tty7` launching the GUI) says so in `--help` rather than only failing at
+  runtime. Along the way, the GUI's own copy was reworded for the same two
+  concepts the CLI now names — "server" for the background process, "shell"
+  for what runs in a pane — replacing inconsistent uses of "daemon" and
+  "session" in the tray, palette and confirmation dialogs (no behavior
+  change, wording only). (#274)
+
+- **The CLI ships in every install and lands on PATH automatically** —
+  previously it was built by every release and then discarded: the bundle
+  scripts copied only `tty7-app`, and the upload glob never reached the CLI
+  binary. It now ships inside the macOS `.app`, the Linux tarball and
+  AppImage, and the Windows installer and zip, and a fresh launch puts it
+  where a shell can find it without you doing anything.
+
+  The install is split into two halves on purpose. The **environment half**
+  prepends the CLI's directory to the GUI process's own PATH before the
+  server is spawned, so every pane — which inherits its environment from the
+  server, which inherits it from the GUI — can run `tty7` immediately. It
+  writes nothing to disk and cannot fail. The **on-disk half** covers typing
+  `tty7` in some other terminal, and is allowed to fail safely: on Unix it
+  symlinks into a fixed, ordered list of candidate directories
+  (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/bin`,
+  `~/.cargo/bin`) rather than scanning PATH for the first writable entry —
+  version-manager shim directories (pyenv, rbenv, asdf, mise) sit at the
+  front of many people's PATH and are writable, and a binary dropped there
+  survives only until that tool next rehashes and silently deletes it. On
+  Windows it appends the app's directory to `HKCU\Environment` through the
+  registry API rather than `setx`, which truncates and corrupts anything
+  over 1024 characters, and reads/writes the value as UTF-16 end to end so a
+  PATH entry Rust can't represent as a `String` survives untouched.
+
+  It is deliberately conservative about what it touches: only a symlink (or,
+  on the AppImage, a copy) this installer itself created is ever replaced —
+  marked as ours with a small marker file so a user who moves from the
+  AppImage to the tarball still gets recognized and re-linked rather than
+  mistaken for someone else's binary — and a real file or a symlink aimed
+  elsewhere is left alone. An occupied candidate directory doesn't end the
+  scan, and every platform now reports whether the install actually wins the
+  lookup (`InstalledShadowed` names whichever `tty7` beats it on PATH).
+  Debug builds and cargo build trees only get the environment half, so a
+  `cargo run` can't repoint your real `tty7` at a binary the next `cargo
+  clean` deletes. The Windows uninstaller removes the PATH entry it added;
+  on Unix there is no uninstall hook, so the symlink is left dangling and
+  that limitation is stated in the module docs rather than left to be
+  discovered. The whole thing turns off from Settings → About, or
+  `install_cli_on_path: false` in `config.json`. (#277)
 
 - **Pi is a first-class agent, not a fallback one** — Pi panes drew the generic
   robot glyph every unbranded agent shares, so a Pi tab was indistinguishable
@@ -22,7 +141,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--resume` / `-r` / `--continue` / `-c` stripped off the replayed launch
   flags so the restored id wins. A pane launched with `--no-session` is not
   resumed at all — that pane never wrote a session to disk, and reopening one
-  would override the choice to keep it ephemeral. (#225)
+  would override the choice to keep it ephemeral. (#240)
 
 - **Fork an agent session** — branch a live agent conversation into a second,
   independent one, so a risky direction can be tried without losing the thread
@@ -49,7 +168,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fork at all (the command would run against the *local* agent). Forking while a
   turn is in flight is allowed but says so: agents fork from the persisted
   transcript, so the turn you're watching won't be in the copy. The parent is
-  never modified either way. (#211)
+  never modified either way. (#241)
 
 - **Your WSL distributions are machines you can open a workspace on** — the
   transport for them has been there since remote workspaces landed
@@ -88,7 +207,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the File menu. Codex has no copy-or-duplicate subcommand — forking *is* how
   you duplicate a conversation there — so copying the id is what "copy the
   session" means: paste it into `codex resume`, a bug report, or another tool.
-  (#211)
+  (#241)
 
 - **Remote panes read big git output incrementally** — `Host` grew a streaming
   companion to its buffered `git`, implemented on both the local host and the
@@ -100,7 +219,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slow-but-alive `git diff` still runs to completion. And the queue *between*
   the two ends is bounded as well, not just the reads at either end: a peer that
   pushes faster than this side can parse is cut off at 32 MiB of arrears with an
-  error, rather than quietly reassembling the whole diff in a channel. (#239)
+  error, rather than quietly reassembling the whole diff in a channel. (#247)
 
 - **Sidebar diff preview is optional** — clicking a sidebar row's `+N −N`
   working-tree counts opens the diff overlay, which is the point of them for
@@ -109,7 +228,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `config.json`, on by default). Off, the branch and the counts stay exactly
   where they are and read exactly the same; they simply stop being their own
   click target, so the press falls through to ordinary tab activation like any
-  other part of the row. (#239)
+  other part of the row. (#247)
+
+- **Kitty graphics protocol, with a shared-memory fast path** — TUIs that
+  draw images now render inline in a pane. The daemon intercepts kitty
+  graphics escape sequences (`ESC _G…`) in the pane reader before they reach
+  scrollback or the client's VT parser — a zero-copy sniff on ordinary
+  output, allocating only once a chunk actually carries a graphics command —
+  and answers `a=q` capability queries directly on the PTY so probing
+  senders see support. Images and deletes travel to the client as compact
+  binary frames interleaved with normal output in stream order, so an image
+  lands at the cell the sender drew it at; decoding (inflate, BGRA swap,
+  atlas placement) runs off the render thread with newest-frame-per-id
+  coalescing, so a full frame from a graphics-heavy TUI can't stall PTY
+  output or scrolling. For a local pane, file and POSIX shared-memory
+  transfers are honored directly — the daemon reads the object and hands the
+  client raw pixels, skipping the zlib inflate the compressed-inline path
+  would otherwise force. A remote (SSH) pane keeps refusing shm/file and
+  rides the compressed-inline path over the tunnel instead. (by @ayamir in
+  #272)
 
 ### Changed
 
@@ -152,7 +289,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   movement in the prompt editor lives on Ctrl+←/→ — the Windows/Linux text
   convention, which already worked — with Ctrl+Shift+←/→ and Alt+Shift+←/→
   both selecting by word. macOS bindings are untouched. Anything you rebound
-  yourself still wins; only the defaults moved. (#269)
+  yourself still wins; only the defaults moved. (#270)
 
 - **Ctrl+Shift+C and Ctrl+Shift+V copy and paste, like every GUI terminal** —
   the chord GNOME Terminal, Konsole, Windows Terminal and WezTerm all teach.
@@ -161,7 +298,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and Paste now sit in the default keymap table rather than being installed
   behind the scenes, so Settings → Keybindings lists them, records new chords
   for them, and warns when another binding would collide — previously
-  Shift+Insert was invisible there and could not be reassigned. (#269)
+  Shift+Insert was invisible there and could not be reassigned. (#271)
 
 - **The machine that runs your panes now owns their layout** — the workspace,
   tab and pane tree has moved out of the app and into the background service, so
@@ -209,7 +346,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plain `Enter` remains the key that accepts it. And `Shift+Alt+Enter`, which
   the old modifier test caught by accident, now submits like any other `Enter`:
   keybindings match modifiers exactly, and no terminal treats that three-key
-  chord as a newline. (#182)
+  chord as a newline. (#246)
 
 - **Every header in the window moves it now** — grabbing the window by a header
   is a property of the whole app rather than a per-surface feature, so you never
@@ -226,7 +363,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   absorbed the "⋯" menu in #169/#188 — so the row's width budget was ~20px of a
   lie. It now measures the group it is reserving for, ~121px of fixed chrome plus
   the 80px grab handle, so chips reach their minimum width and truncate a tab or
-  two sooner. (#221)
+  two sooner. (#252)
 
 - **Large working-tree diffs no longer stall the window** — the diff overlay
   had five costs that all scaled with the size of the tree rather than with
@@ -277,9 +414,160 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlay each ran their own full-diff probe and kept their own snapshot of the
   same repository. They now share one probe and one snapshot, so opening both
   costs one shell-out and one parse, and opening the overlay while the panel is
-  already showing that repo paints immediately instead of re-probing. (#239)
+  already showing that repo paints immediately instead of re-probing. (#247)
 
 ### Fixed
+
+- **A remote workspace no longer loses or crosses its own layout on reopen
+  or restart** — two related failure modes in the same area, closed
+  together. Reopening a remote workspace, or coming back to one whose
+  `tty7-server` had been replaced, could land on permanently `disconnected`
+  panes with the coding-agent conversations gone: there was no way to tell a
+  genuinely restarted server (which needs a rebuild from the saved layout
+  and fresh shells) from a link that had merely blinked (which just needs
+  re-attaching). A new `ControlHelloOk.instance` identifies the server
+  *process* so a reconnect can tell the two apart — an absent instance reads
+  as unknown, never as a restart — attach failures now fall back to
+  spawning instead of stranding the pane in a link-down state, and "End
+  Sessions" clears the recorded pane ids so reopening spawns fresh shells
+  with `--resume` rather than trying to re-attach to panes that are already
+  dead.
+
+  Separately, a restart could materialize one *local* workspace's tabs
+  inside a different workspace's window and auto-resume every one of their
+  agents a second time — real, duplicate `claude --resume` calls against
+  conversations already running elsewhere. The root corruption that seeded
+  a workspace's records with another one's panes is still unattributed, but
+  every way it could propagate or amplify is now closed: `Spawn` carries
+  its owning workspace so restore refuses to attach a pane owned by another
+  one; pane ids are bound to the daemon instance that issued them, so an id
+  recorded against a dead process can't attach to an unrelated shell after a
+  reboot (agent resume still happens on this path, since the pane really is
+  gone); deduping two claims on one pane id now strips the loser's agent
+  session id and launch flags along with the id, so a corrupted record can't
+  double-resume an agent the winner already runs; and saving a session now
+  logs an error naming both workspace ids if a window is ever caught holding
+  a pane it doesn't own, so a recurrence is caught rather than silently
+  re-amplified. All wire and schema changes are backward and forward
+  compatible. (#257)
+
+- **A captured pane reads like text, not a stream of raw escape codes, and a
+  broken pipe ends quietly** — `tty7 capture --plain` replays a pane's bytes
+  through the same `alacritty_terminal` grid the window renders panes with,
+  instead of leaving a script to regex-strip escape sequences itself.
+  Stripping alone gets the easy 90% and invents the rest: whether 200
+  characters with no trailing newline in a 249-column pane is one logical
+  line or a soft wrap is a fact about the terminal grid, not about the
+  bytes, and the same is true of a `\r`-overwritten progress bar, a
+  redrawing shell prompt, and cursor-addressed text. `--plain` now replays
+  each streamed segment at the width the daemon actually recorded it with —
+  panes on different machines are different widths, and a hardcoded
+  assumption would rewrap both wrong — so a captured pane matches what the
+  window would have shown. Raw `capture` (no `--plain`) is unchanged: still
+  the exact bytes the daemon stored.
+
+  Separately, every CLI verb that outputs to a pipe now ends the way `cat`
+  does when the reader hangs up — silently, with the shell's own SIGPIPE
+  exit code — instead of a Rust panic and a backtrace on stderr, which most
+  verbs produced on something as ordinary as `tty7 ls | head -1`. Rust
+  disables `SIGPIPE` by default, so a doomed write surfaces as an
+  `io::Error` and `println!` turns that into a panic; the fix restores the
+  default disposition on Unix so the kernel handles it directly, and
+  recognizes the Windows equivalent (`ERROR_NO_DATA`) at every stdout write
+  site since Windows has no signal to hand back to. (#283)
+
+- **Restarting the server no longer strands the window on the home page** —
+  after confirming "Restart Server?", the window's post-restart resync could
+  go out on the control link to the server that had just been killed: the
+  connected flag is an `AtomicBool` the reader thread only flips on EOF, so
+  right after `restart()` returns the link often still read as up, the
+  layout pull failed against a dead socket, and the failure was logged and
+  discarded rather than retried — leaving the window sitting on an empty
+  home page with no hint anything was owed to it. A failed hydration is now
+  recorded as debt and retried on the next sync, and a window that hasn't
+  yet recovered its layout no longer pushes its own (empty) state back to
+  the server in the meantime — previously that could diff into "close every
+  tab" and erase the layout on disk for a window that was only ever waiting
+  its turn. (#282)
+
+- **Tab no longer clears your command line when a remote pane's link is
+  down** — `Tab` reaches the prompt editor through a `SendTab` action that
+  bypassed the same-input guard ordinary typing goes through, so on a
+  reconnecting remote workspace a completion with no candidates handed the
+  line off to a dead link anyway: the command vanished, the editor stood
+  down for the rest of the prompt cycle, and every keystroke after it —
+  Enter included — was swallowed by the very guard the Tab had skipped. The
+  guard now covers the Tab path too, so the line stays put and typing
+  resumes once the link is back; a late-arriving SFTP completion result is
+  also dropped, with the reason logged, rather than acting on a line the
+  editor no longer owns. A local pane, which has no notion of a down link,
+  is unaffected. (#273)
+
+- **The IME candidate window follows the actual caret, not a parked
+  cursor** — typing Chinese in a Kimi CLI pane on Windows stranded the
+  candidate list at the input box's bottom-right corner instead of
+  following it. Two independent causes stacked: gpui never answered
+  `WM_IME_REQUEST` / `IMR_QUERYCHARPOSITION`, which is how Windows 11's
+  default Microsoft Pinyin IME asks for caret position — it ignores the
+  older `CANDIDATEFORM` call tty7 was already making once per composition —
+  so an unanswered query fell back to the IME's own default spot; and Kimi
+  CLI itself hides the hardware cursor and draws its own caret as a
+  reverse-video cell that never gets parked at the logical input point,
+  landing the only real anchor tty7 had at the right edge of the input box's
+  border. The fix answers the position query from the input handler and
+  re-anchors on every composition update instead of sampling once, and when
+  the hardware cursor is hidden and its row holds exactly one caret-sized
+  (≤2 cell) inverse run, that run is now read as the IME anchor. Apps that
+  show the real cursor (pwsh, vim, current Claude Code) are unaffected; the
+  heuristic only applies with the cursor hidden, where the previous anchor
+  was arbitrary anyway. (#284)
+
+- **A link that wraps across rows opens the whole URL, not just the clicked
+  line** — ⌘-click and ⌘-hover resolved a URL only from the physical grid
+  row under the pointer, so a soft-wrapped URL opened its first line only
+  and 404'd. OSC 8 hyperlinks now resolve across a soft wrap as one
+  contiguous run, using the link's own declared URI rather than
+  reconstructing it from the clicked row; bare URLs and file paths resolve
+  through the existing soft-wrap stitching, plus a new opt-in mode that also
+  bridges a program's own *hard* newline when the row is full to the right
+  edge and the last character continues the link into the next row's first
+  column — so an ordinary short line is never glued to the next paragraph.
+  Double-click word/smart-select is unaffected; only link click and hover
+  bridge hard wraps. (by @ayamir in #258)
+
+- **A workspace title stays tied to the workspace** — foreground process and
+  agent names no longer replace the workspace title in the sidebar or its
+  switcher button. An explicit workspace name wins; otherwise the title is
+  derived from the workspace's repo/cwd, with `Untitled` as the final fallback.
+
+- **Fullwidth CJK punctuation no longer overlaps, and prompt-mark scanning
+  is faster** — wide glyphs are now shaped independently instead of being
+  batched together, which was producing the overlap; OSC prompt-mark
+  scanning moves from a byte-by-byte scan to SIMD-backed `memchr`; and Thai
+  and Lao SARA AM combining-mark clustering is reconciled with upstream.
+  (by @ChihGodlee in #250)
+
+- **tty7 gets a taskbar icon and identity on Linux** — the window now sets
+  `app_id: "tty7"` on every platform, which X11 uses as `WM_CLASS` and
+  Wayland matches against the packaged `tty7.desktop` entry, so taskbars and
+  window switchers can resolve the app's identity and icon where they
+  previously couldn't. X11 additionally needs the icon on the window itself
+  (`_NET_WM_ICON` ships raw pixels per window rather than reading the
+  desktop entry), so `assets/app-icon.png` is decoded once and downscaled to
+  256px — the most a taskbar uses — and attached via `WindowOptions::icon`.
+  macOS and Windows already got their icons through the bundle and the
+  embedded `.ico` respectively and are unaffected. (by @zerolover in #254)
+
+- **Installing a remote server keys off the wire dialect it actually
+  speaks, not its version string** — two builds between releases can share a
+  version string but not a dialect, which previously let a client adopt an
+  incompatible remote server and fail permanently in the handshake instead
+  of reinstalling. (#264)
+
+- **Listing WSL distributions no longer hangs the shell menu** — a
+  starting-up, updating, or wedged `wsl.exe` is now given a bounded wait
+  before the probe reports no distributions, matching what an unreachable
+  WSL already produced instead of holding the whole menu open.
 
 - **⌃R on a remote machine searches that machine's history** — tty7 owns ⌃R at
   the prompt and shows its own fuzzy menu, but the store behind it had no notion
@@ -292,7 +580,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `~/.bash_history` through the same channel it already uses for git and file
   listings, so the first ⌃R on a freshly connected box has something in it
   rather than starting empty. Switching a pane between machines swaps the store
-  under it, and the local history file is untouched by the upgrade. (#269)
+  under it, and the local history file is untouched by the upgrade. (#270)
 
 - **A Windows clipboard pastes like every other clipboard** — text copied on
   Windows carries `\r\n`, and a bracketed paste forwarded it byte for byte. vim
@@ -301,7 +589,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Bracketed pastes now fold `\r\n` down to a single `\n`, which is exactly what
   the same paste already produced on Linux and macOS. The non-bracketed path is
   untouched: with no paste mode to distinguish text from typing, a line break
-  still has to arrive as the CR the Return key sends. (#269)
+  still has to arrive as the CR the Return key sends. (#270)
 
 - **Closing every window before quitting no longer loses your place** — launch
   only ever restored a workspace that still had a window at quit, so closing them
@@ -311,7 +599,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "where you left off" as one that still had a window on screen. Launch now falls
   back to the workspace closed last, and the only launch that comes up on a fresh
   workspace is a genuine first run. Deleting a workspace still means deleting it —
-  that is the one gesture that drops it from the file.
+  that is the one gesture that drops it from the file. (#267)
 
 - **An unsubscribed directory watch stops delivering immediately** — dropping a
   local watch handle now closes its delivery channel rather than only asking the
@@ -319,7 +607,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on Windows a `ReadDirectoryChangesW` completion can fire *during* teardown and
   reach a consumer that has already unsubscribed. Batches already queued stay
   readable, which is the one thing a consumer racing its own drop may
-  legitimately still see. (#239)
+  legitimately still see. (#247)
 
 - **Rounded UI controls no longer square off their corners**
   ([#236](https://github.com/l0ng-ai/tty7/issues/236)) — the cursor-shape
@@ -336,7 +624,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than bulging past it: the segmented controls, the −/value/+ steppers'
   hover fills, the theme picker's flush previews, and the diff overlay's card
   headers and closing rows. Most visible at a device pixel ratio of 1, where the
-  hard clip edge is a whole physical pixel wide.
+  hard clip edge is a whole physical pixel wide. (#244)
 
 - **Dragging the window by a title bar worked only rarely with a trackpad** —
   five rows that stand in for the caption (the tab rail's top zone, the settings
@@ -350,7 +638,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without translating, and almost never did. The terminal's cursor blink disarmed
   it on its own even without a press. The arm now lives in element state, which
   survives frames — where gpui-component's own `TitleBar` has always kept it,
-  which is why the ordinary caption strip was never affected. (#221)
+  which is why the ordinary caption strip was never affected. (#252)
 
 - **An idle window stays idle while a file in the Files panel is being written**
   — the tree watches its roots plus every directory you have expanded, so what
@@ -383,7 +671,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Note the redraw behaviour is platform-independent and is what that number is
   about; the reporter's ~15% CPU figure, and whether their flicker also
   involved something in the Wayland presentation path, were not reproducible on
-  macOS and are not claimed to be confirmed. (#243)
+  macOS and are not claimed to be confirmed. (#249)
 
 - **Return no longer confirms the file tree's delete prompt** — it was the only
   destructive prompt in tty7 with the destructive action first, and on macOS
@@ -391,7 +679,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default, so pressing Return deleted — recursive folder deletion included. The
   buttons now put the safe option first, matching every other destructive
   prompt, with Escape still cancelling. Linux uses gpui's click-only fallback
-  dialog, so the swap only reorders the buttons there.
+  dialog, so the swap only reorders the buttons there. (#255)
 
 - **"Finder" is no longer named on Linux and Windows** — the file-tree context
   menu and the SFTP job list's reveal tooltip hardcoded Finder-flavoured
@@ -399,7 +687,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   three sites now share that one conditional, so the action reads "Reveal in
   Finder" on macOS and "Open Folder" everywhere else. On macOS the SFTP
   tooltip's "Show in Finder" becomes "Reveal in Finder" too, retiring a third
-  name for the same action.
+  name for the same action. (#255)
 
 - **Grok Build turns up in settings search** — the agent renders a Settings →
   Agents row but had no search-index entry, so searching could never surface
@@ -408,7 +696,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   acts as Meta" from the rendered "Option (⌥) acts as Meta"; the index titles
   now match the rows, the mechanism words (hooks / plugin / extension) stay
   behind as search keywords, and a test derives the Agents index from the
-  agent list so a future agent can't ship unsearchable.
+  agent list so a future agent can't ship unsearchable. (#255)
 
 ## [26.7.6] - 2026-07-28
 

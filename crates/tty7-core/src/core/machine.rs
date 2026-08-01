@@ -258,6 +258,8 @@ pub struct PaneRecord {
     #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
+    pub title: String,
+    #[serde(default)]
     pub ssh_spec: Option<Box<NativeSshSpec>>,
     #[serde(default)]
     pub agent: Option<AgentFacts>,
@@ -270,6 +272,7 @@ impl PaneRecord {
         PaneRecord {
             id,
             cwd: None,
+            title: String::new(),
             ssh_spec: None,
             agent: None,
             live: false,
@@ -313,6 +316,7 @@ impl PaneSeed {
         PaneRecord {
             id: self.pane,
             cwd: self.cwd,
+            title: String::new(),
             ssh_spec: self.ssh_spec.map(|s| Box::new(s.without_secrets())),
             agent: self.agent,
             live,

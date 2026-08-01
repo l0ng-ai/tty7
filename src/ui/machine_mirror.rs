@@ -501,15 +501,26 @@ mod tests {
     #[test]
     fn display_names_derive_from_the_tree_with_the_session_precedence() {
         let mut ws = Workspace::default();
-        let panes = vec![PaneRecord {
+        let mut panes = vec![PaneRecord {
             cwd: Some("/home/me/scratch".into()),
             ..PaneRecord::new(1)
         }];
         ws.tabs = vec![leaf_tab(1)];
         assert_eq!(display_name_of(&ws, &panes), "scratch");
 
+        panes[0].title = "nvim".into();
+        assert_eq!(
+            display_name_of(&ws, &panes),
+            "scratch",
+            "a pane's process title must not rename its workspace"
+        );
+
         ws.tabs[0].sidebar_group = Some("/repo/tty7".into());
-        assert_eq!(display_name_of(&ws, &panes), "tty7");
+        assert_eq!(
+            display_name_of(&ws, &panes),
+            "tty7",
+            "the repo group wins over the raw cwd"
+        );
 
         ws.name = Some("  Release prep  ".into());
         assert_eq!(display_name_of(&ws, &panes), "Release prep");
