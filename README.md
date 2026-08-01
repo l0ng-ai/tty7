@@ -24,6 +24,7 @@
 - **Performance** — ~2× the throughput of Alacritty, Ghostty, or Kitty ([benchmarks](#benchmarks))
 - **Persistent sessions** — quit or reboot; your shells and supported agent sessions keep running, no tmux
 - **Remote development** — files, repos, panes, and git data stay on the remote machine
+- **Native SSH** — profiles, SFTP, port forwarding, and jump hosts
 - **Agent-aware** — Claude Code, Codex & co.: status, notifications, git context
 - **CLI + Skills** — agents create panes, run commands, and inspect output
 
