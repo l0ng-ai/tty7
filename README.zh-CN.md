@@ -4,7 +4,7 @@
 
 ### tty7
 
-**高性能终端：常驻会话、远程工作、coding agent。**
+**高性能终端：常驻会话、远程工作、agent。**
 
 <sub>纯 Rust · GPU 渲染基于 Zed 的 gpui · VT 内核来自 Alacritty</sub>
 

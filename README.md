@@ -4,7 +4,7 @@
 
 ### tty7
 
-**A high-performance terminal: persistent sessions, remote work, coding agents.**
+**High-performance terminal: persistent sessions, remote work, agents.**
 
 <sub>Pure Rust · GPU rendering on Zed's gpui · VT core from Alacritty</sub>
 
