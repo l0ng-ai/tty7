@@ -159,6 +159,7 @@ pub struct TerminalView {
     remote_completion_inflight: bool,
     completion_generation: u64,
     editor_handoff: Option<u64>,
+    editor_handoff_interrupt_seq: Option<u64>,
     reverse_search: Option<ReverseSearch>,
     integration_notice: Option<String>,
     integration_notice_shown: bool,
@@ -760,6 +761,7 @@ impl TerminalView {
             completion: None,
             completion_generation: 0,
             editor_handoff: None,
+            editor_handoff_interrupt_seq: None,
             remote_completion_inflight: false,
             reverse_search: None,
             integration_notice: None,
@@ -1127,6 +1129,15 @@ impl TerminalView {
             && cx.global::<Config>().history_search
         {
             self.note_integration_gap(cx);
+        }
+
+        if m.control && !m.platform && !m.alt && ks.key == "c" && self.handoff_active() {
+            // A Tab/unknown-chord handoff leaves the daemon at_prompt: the shell
+            // never saw Enter, so there is no C mark. Ctrl-C makes readline draw
+            // a fresh prompt whose A/B report is consequently true -> true and
+            // does not advance prompt_cycle. Remember this report boundary so
+            // that fresh prompt can still return ownership to the local editor.
+            self.editor_handoff_interrupt_seq = Some(self.terminal.prompt_seq());
         }
 
         let kitty = self.kitty_flags();
@@ -2485,7 +2496,7 @@ impl TerminalView {
         if self.shell_vi_prompt() {
             return Some("the shell prompt is in vi mode");
         }
-        if self.editor_handoff == Some(self.terminal.prompt_cycle()) {
+        if self.handoff_active() {
             return Some("this prompt's line was already handed to the shell");
         }
         if !self.at_shell_prompt() {
@@ -2504,6 +2515,9 @@ impl TerminalView {
 
     fn handoff_active(&self) -> bool {
         self.editor_handoff == Some(self.terminal.prompt_cycle())
+            && self
+                .editor_handoff_interrupt_seq
+                .is_none_or(|seq| self.terminal.prompt_seq() <= seq)
             && self.terminal.at_prompt()
             && !self.on_alt_screen()
     }
@@ -2903,6 +2917,7 @@ impl TerminalView {
         }
         self.cmd.clear();
         self.editor_handoff = Some(self.terminal.prompt_cycle());
+        self.editor_handoff_interrupt_seq = None;
         self.send_to_pty(chord, cx);
     }
 
@@ -5978,6 +5993,72 @@ mod gpui_tests {
         .encode(&mut daemon)
         .unwrap();
         wait_for_input_active(&window, cx);
+    }
+
+    #[gpui::test]
+    fn ctrl_c_after_tab_handoff_returns_the_fresh_prompt_to_the_editor(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for_input_active(&window, cx);
+
+        window
+            .update(cx, |view, window, cx| {
+                for ch in ["z", "z", "q", "q", "x"] {
+                    type_char(view, ch, window, cx);
+                }
+                view.complete_tab(true, cx);
+                assert!(!view.input_active(), "Tab handed this line to the shell");
+                view.on_key_down(
+                    &KeyDownEvent {
+                        keystroke: key("ctrl-c"),
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"zzqqx".to_vec())
+        );
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(b"\t".to_vec()));
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x03]));
+
+        // Tab handoff never emitted C, so the shell integration reports the
+        // interrupted prompt as another A/B while the daemon is still at_prompt.
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: Some(130),
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for_input_active(&window, cx);
+
+        window
+            .update(cx, |view, window, cx| {
+                type_char(view, "n", window, cx);
+                assert_eq!(
+                    view.cmd.text(),
+                    "n",
+                    "the first character on the fresh line belongs to tty7's editor"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "the fresh line must not keep going raw to the shell"
+        );
     }
 
     #[gpui::test]
