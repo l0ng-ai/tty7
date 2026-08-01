@@ -427,16 +427,6 @@ const EXIT_CODE_PROBE_WINDOW: Duration = Duration::from_millis(500);
 
 const EXIT_CODE_PROBE_INTERVAL: Duration = Duration::from_millis(10);
 
-// On Windows the process handle can signal before ConPTY has delivered the
-// final output bytes to the reader thread. Give that reader a bounded chance
-// to report first so Exited remains ordered after the pane's last output. The
-// process monitor still reports after the grace period if the pipe never ends.
-#[cfg(windows)]
-const WINDOWS_OUTPUT_DRAIN_GRACE: Duration = Duration::from_millis(500);
-
-#[cfg(windows)]
-const WINDOWS_OUTPUT_DRAIN_POLL: Duration = Duration::from_millis(5);
-
 struct Observer {
     id: u64,
     tx: Sender<DaemonMsg>,
@@ -543,7 +533,14 @@ struct ForegroundProbes {
 }
 
 struct PtyBackend {
-    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    /// Owns the PTY master until the pane is closed.
+    ///
+    /// Windows takes this value when the shell process exits. Dropping the
+    /// ConPTY master calls `ClosePseudoConsole`, which closes the output side
+    /// only after its pending bytes can be consumed by the dedicated reader.
+    /// Keeping the slot optional lets that monitor end the stream without
+    /// racing the reader for ownership of the exit notification.
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     #[cfg_attr(windows, allow(dead_code))]
     shell_pid: Option<u32>,
@@ -624,18 +621,16 @@ impl DeathReporter {
     }
 }
 
-/// Waits briefly for the ConPTY reader to publish the ordered exit event.
+/// Releases the PTY master without holding its slot mutex during destruction.
 ///
-/// The process monitor is only a fallback for Windows pipes that never reach
-/// EOF. If the reader has already claimed the reporter, it is either emitting
-/// the final Output frames or resolving the exit code, so no second report is
-/// needed. Otherwise the deadline preserves the monitor's liveness guarantee.
-#[cfg(windows)]
-fn wait_for_windows_reader_report(death: &DeathReporter) {
-    let deadline = std::time::Instant::now() + WINDOWS_OUTPUT_DRAIN_GRACE;
-    while !death.reported.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
-        std::thread::sleep(WINDOWS_OUTPUT_DRAIN_POLL);
-    }
+/// `ClosePseudoConsole` may wait while the output pipe is drained. Dropping the
+/// master after releasing the mutex is essential because the reader's
+/// foreground probes use the same slot between reads; holding the lock across
+/// the close could prevent the reader from returning to the pipe and deadlock
+/// both threads.
+fn close_pty_master(master: &Mutex<Option<Box<dyn MasterPty + Send>>>) {
+    let owned = master.lock().ok().and_then(|mut slot| slot.take());
+    drop(owned);
 }
 
 /// One out-of-band frame the reader forwards to the subscriber, kept in stream
@@ -707,7 +702,7 @@ impl DaemonPane {
         let shutting_down = Arc::new(AtomicBool::new(false));
         let gate = Arc::new(OutputGate::new());
 
-        let master = Arc::new(Mutex::new(pair.master));
+        let master = Arc::new(Mutex::new(Some(pair.master)));
 
         let pane = Arc::new(Self {
             id,
@@ -754,12 +749,7 @@ impl DaemonPane {
         });
 
         #[cfg(windows)]
-        Self::spawn_exit_monitor(
-            shell_pid,
-            state.clone(),
-            pane.shutting_down.clone(),
-            death.clone(),
-        );
+        Self::spawn_exit_monitor(shell_pid, master.clone());
 
         let fg_master = master.clone();
         let remote_master = master.clone();
@@ -1196,7 +1186,9 @@ impl DaemonPane {
         match &self.backend {
             PaneBackend::Pty(p) => {
                 if let Ok(master) = p.master.lock() {
-                    let _ = master.resize(pty_size(size));
+                    if let Some(master) = master.as_ref() {
+                        let _ = master.resize(pty_size(size));
+                    }
                 }
             }
             PaneBackend::NativeSsh(b) => b.handle.resize(size),
@@ -1261,9 +1253,7 @@ impl DaemonPane {
     #[cfg(windows)]
     fn spawn_exit_monitor(
         shell_pid: Option<u32>,
-        state: Arc<Mutex<PaneState>>,
-        shutting_down: Arc<AtomicBool>,
-        death: Arc<DeathReporter>,
+        master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     ) {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
@@ -1273,14 +1263,13 @@ impl DaemonPane {
         let Some(pid) = shell_pid else { return };
         let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
         if handle.is_null() {
-            // The process may have exited before OpenProcess ran. Report from
-            // a helper thread so the ConPTY reader can start and drain output
-            // while the bounded grace period is in progress.
+            // The process may have exited before OpenProcess ran. Close the
+            // pseudoconsole from a helper thread so its potentially blocking
+            // destructor runs concurrently with the reader that drains it.
             std::thread::Builder::new()
                 .name("tty7-daemon-pane-exit-fallback".to_string())
                 .spawn(move || {
-                    wait_for_windows_reader_report(&death);
-                    death.report(&state, &shutting_down);
+                    close_pty_master(&master);
                 })
                 .expect("spawn daemon pane exit fallback thread");
             return;
@@ -1294,8 +1283,10 @@ impl DaemonPane {
                     WaitForSingleObject(handle, INFINITE);
                     CloseHandle(handle);
                 }
-                wait_for_windows_reader_report(&death);
-                death.report(&state, &shutting_down);
+                // Releasing the ConPTY master closes its output pipe. The
+                // reader remains the sole exit reporter: it first consumes
+                // every byte preceding EOF, then publishes `Exited`.
+                close_pty_master(&master);
             })
             .expect("spawn daemon pane exit monitor thread");
     }
@@ -1311,7 +1302,7 @@ impl DaemonPane {
             .master
             .lock()
             .ok()
-            .and_then(|m| m.process_group_leader());
+            .and_then(|m| m.as_ref().and_then(|m| m.process_group_leader()));
         if let Some(fg) = fg {
             if Some(fg as u32) != pty.shell_pid {
                 unsafe {
@@ -1334,7 +1325,7 @@ impl DaemonPane {
         pty.master
             .lock()
             .ok()
-            .and_then(|m| m.process_group_leader())
+            .and_then(|m| m.as_ref().and_then(|m| m.process_group_leader()))
             .and_then(proc_name)
             .unwrap_or_default()
     }
@@ -1776,19 +1767,22 @@ fn stamp_launch_argv(st: &mut PaneState, argv: Option<Vec<String>>) {
 }
 
 fn foreground_command_running(
-    master: &Mutex<Box<dyn MasterPty + Send>>,
+    master: &Mutex<Option<Box<dyn MasterPty + Send>>>,
     shell_pid: Option<u32>,
 ) -> bool {
     is_foreground_command(pty_foreground_pgid(master), shell_pid)
 }
 
 #[cfg(unix)]
-fn pty_foreground_pgid(master: &Mutex<Box<dyn MasterPty + Send>>) -> Option<i32> {
-    master.lock().ok().and_then(|m| m.process_group_leader())
+fn pty_foreground_pgid(master: &Mutex<Option<Box<dyn MasterPty + Send>>>) -> Option<i32> {
+    master
+        .lock()
+        .ok()
+        .and_then(|m| m.as_ref().and_then(|m| m.process_group_leader()))
 }
 
 #[cfg(not(unix))]
-fn pty_foreground_pgid(_master: &Mutex<Box<dyn MasterPty + Send>>) -> Option<i32> {
+fn pty_foreground_pgid(_master: &Mutex<Option<Box<dyn MasterPty + Send>>>) -> Option<i32> {
     None
 }
 
@@ -1801,7 +1795,7 @@ fn is_foreground_command(fg_pgid: Option<i32>, shell_pid: Option<u32>) -> bool {
 
 #[cfg(target_os = "macos")]
 fn foreground_cwd(
-    master: &Mutex<Box<dyn MasterPty + Send>>,
+    master: &Mutex<Option<Box<dyn MasterPty + Send>>>,
     shell_pid: Option<u32>,
 ) -> Option<PathBuf> {
     use std::ffi::CStr;
@@ -1841,7 +1835,7 @@ fn foreground_cwd(
 
 #[cfg(target_os = "linux")]
 fn foreground_cwd(
-    master: &Mutex<Box<dyn MasterPty + Send>>,
+    master: &Mutex<Option<Box<dyn MasterPty + Send>>>,
     shell_pid: Option<u32>,
 ) -> Option<PathBuf> {
     let read_cwd = |pid: i32| -> Option<PathBuf> {
@@ -1858,30 +1852,40 @@ fn foreground_cwd(
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn foreground_cwd(
-    _master: &Mutex<Box<dyn MasterPty + Send>>,
+    _master: &Mutex<Option<Box<dyn MasterPty + Send>>>,
     _shell_pid: Option<u32>,
 ) -> Option<PathBuf> {
     None
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn foreground_remote_context(master: &Mutex<Box<dyn MasterPty + Send>>) -> Option<RemoteContext> {
-    let pid = master.lock().ok().and_then(|m| m.process_group_leader())?;
+fn foreground_remote_context(
+    master: &Mutex<Option<Box<dyn MasterPty + Send>>>,
+) -> Option<RemoteContext> {
+    let pid = master
+        .lock()
+        .ok()
+        .and_then(|m| m.as_ref().and_then(|m| m.process_group_leader()))?;
     let argv = crate::daemon::remote::foreground_argv(pid)?;
     crate::daemon::remote::parse_ssh_invocation(&argv).map(|inv| inv.context)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn foreground_remote_context(_master: &Mutex<Box<dyn MasterPty + Send>>) -> Option<RemoteContext> {
+fn foreground_remote_context(
+    _master: &Mutex<Option<Box<dyn MasterPty + Send>>>,
+) -> Option<RemoteContext> {
     None
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn foreground_agent(
-    master: &Mutex<Box<dyn MasterPty + Send>>,
+    master: &Mutex<Option<Box<dyn MasterPty + Send>>>,
 ) -> Option<Option<(crate::core::cli_agent::CLIAgent, Vec<String>)>> {
     let detect = || {
-        let pid = master.lock().ok().and_then(|m| m.process_group_leader())?;
+        let pid = master
+            .lock()
+            .ok()
+            .and_then(|m| m.as_ref().and_then(|m| m.process_group_leader()))?;
         let argv = crate::daemon::remote::foreground_argv(pid)?;
         let agent = crate::core::cli_agent::CLIAgent::detect_from_argv_with(
             &argv,
@@ -1894,7 +1898,7 @@ fn foreground_agent(
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn foreground_agent(
-    _master: &Mutex<Box<dyn MasterPty + Send>>,
+    _master: &Mutex<Option<Box<dyn MasterPty + Send>>>,
 ) -> Option<Option<(crate::core::cli_agent::CLIAgent, Vec<String>)>> {
     None
 }
@@ -2176,7 +2180,7 @@ mod tests {
         let mut cmd = CommandBuilder::new("bash");
         cmd.args(["-c", "exec -a codex cat"]);
         let mut child = pty.slave.spawn_command(cmd).expect("spawn child");
-        let master = Mutex::new(pty.master);
+        let master = Mutex::new(Some(pty.master));
 
         let mut detected = None;
         for _ in 0..200 {
@@ -3512,6 +3516,111 @@ mod tests {
             !dead.load(Ordering::SeqCst),
             "an attached death is the detach path's to reclaim, not on_dead's"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn closing_conpty_waits_for_delayed_reader_output_before_exit() {
+        /// A master whose destruction opens the simulated ConPTY output pipe.
+        /// The production `ConPtyMasterPty` performs the equivalent transition
+        /// by calling `ClosePseudoConsole` from its destructor.
+        struct SignallingMaster {
+            released: Arc<(Mutex<bool>, Condvar)>,
+        }
+
+        impl Drop for SignallingMaster {
+            fn drop(&mut self) {
+                let (lock, ready) = &*self.released;
+                *lock.lock().unwrap() = true;
+                ready.notify_all();
+            }
+        }
+
+        impl MasterPty for SignallingMaster {
+            fn resize(&self, _size: PtySize) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            fn get_size(&self) -> anyhow::Result<PtySize> {
+                Ok(PtySize::default())
+            }
+
+            fn try_clone_reader(&self) -> anyhow::Result<Box<dyn Read + Send>> {
+                Ok(Box::new(std::io::empty()))
+            }
+
+            fn take_writer(&self) -> anyhow::Result<Box<dyn Write + Send>> {
+                Ok(Box::new(std::io::sink()))
+            }
+        }
+
+        /// Models a reader that remains delayed well beyond the removed 500ms
+        /// grace period, then receives a final output chunk followed by EOF.
+        struct DelayedTailReader {
+            released: Arc<(Mutex<bool>, Condvar)>,
+            tail: std::io::Cursor<Vec<u8>>,
+            delayed: bool,
+        }
+
+        impl Read for DelayedTailReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if !self.delayed {
+                    let (lock, ready) = &*self.released;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = ready.wait(released).unwrap();
+                    }
+                    drop(released);
+                    std::thread::sleep(Duration::from_millis(800));
+                    self.delayed = true;
+                }
+                self.tail.read(buf)
+            }
+        }
+
+        let released = Arc::new((Mutex::new(false), Condvar::new()));
+        let master: Mutex<Option<Box<dyn MasterPty + Send>>> =
+            Mutex::new(Some(Box::new(SignallingMaster {
+                released: released.clone(),
+            })));
+        let state = Arc::new(Mutex::new(test_state(true)));
+        let (sub_tx, sub_rx) = mpsc::channel();
+        state.lock().unwrap().subscriber = Some(sub_tx);
+
+        let reader = DaemonPane::spawn_reader(
+            state,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(OutputGate::new()),
+            Box::new(DelayedTailReader {
+                released,
+                tail: std::io::Cursor::new(b"final output".to_vec()),
+                delayed: false,
+            }),
+            null_writer(),
+            || false,
+            ForegroundProbes {
+                remote: Box::new(|| None),
+                agent: Box::new(|| None),
+                cwd: Box::new(|| None),
+            },
+            Arc::new(DeathReporter::new(|| {})),
+        );
+
+        close_pty_master(&master);
+        assert!(
+            sub_rx.recv_timeout(Duration::from_millis(600)).is_err(),
+            "closing the master must not publish Exited while the reader is still delayed"
+        );
+        assert!(matches!(
+            sub_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(DaemonMsg::Output(bytes)) if bytes == b"final output"
+        ));
+        assert!(matches!(
+            sub_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(DaemonMsg::Exited { code: None })
+        ));
+        assert!(sub_rx.try_recv().is_err(), "no output may follow Exited");
+        reader.join().unwrap();
     }
 
     /// Issue #213 end-to-end at the reader: a chunk carrying text plus a
