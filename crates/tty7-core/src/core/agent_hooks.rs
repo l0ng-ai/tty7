@@ -354,16 +354,18 @@ impl<'a> HookTarget<'a> {
     /// path containing spaces, so the usual `"C:\Program Files\..."` form is
     /// parsed as `C:\Program` and fails — and even a quoted path without
     /// spaces is a syntax error in PowerShell (invoking a quoted path requires
-    /// the `&` call operator). Resolving the space-free 8.3 short path lets us
-    /// emit the path bare, which both `cmd.exe` and PowerShell execute.
+    /// the `&` call operator). When the executable resolves by its bare file
+    /// name from PATH, we can emit the name without any quoting, which every
+    /// shell (`cmd.exe`, PowerShell, bash) executes correctly.
     ///
-    /// Returns `None` when no space-free short path is available; callers then
-    /// fall back to the quoted long path.
+    /// Returns `None` when the executable is not resolvable by name from PATH,
+    /// or when the first PATH match is a different binary; callers then fall
+    /// back to the quoted full path.
     fn hook_command_exe(&self) -> Option<String> {
         #[cfg(windows)]
         if self.is_local() {
-            if let Some(short) = short_path(&self.exe) {
-                return Some(short);
+            if let Some(name) = path_resolvable_name(&self.exe) {
+                return Some(name);
             }
         }
         None
@@ -680,30 +682,32 @@ fn marker_command<'a>(matcher: &'a serde_json::Value, marker: &str) -> Option<&'
         })
 }
 
-/// Resolves `path` to its Windows 8.3 short form when one exists and is free
-/// of spaces, so generated hook commands survive PowerShell's `-Command`
-/// quoting. Returns `None` when short names are unavailable or the short path
-/// still contains spaces; callers then fall back to the long path.
+/// Returns the bare file name of `exe` when resolving that name from PATH
+/// yields the same binary. Returns `None` when the name does not resolve, or
+/// when an earlier PATH entry contains a different file with the same name
+/// (a bare-name command would then invoke the wrong binary).
 #[cfg(windows)]
-fn short_path(path: &Path) -> Option<String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
-
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    unsafe {
-        let len = GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0);
-        if len == 0 {
-            return None;
+fn path_resolvable_name(exe: &Path) -> Option<String> {
+    let name = exe.file_name()?.to_str()?;
+    let path_var = std::env::var_os("PATH")?;
+    let exe_canonical = std::fs::canonicalize(exe).ok()?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        let Ok(candidate_canonical) = std::fs::canonicalize(&candidate) else {
+            continue;
+        };
+        if same_windows_path(&candidate_canonical, &exe_canonical) {
+            return Some(name.to_string());
         }
-        let mut buf = vec![0u16; len as usize];
-        let written = GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), len);
-        if written == 0 {
-            return None;
-        }
-        let short = String::from_utf16(&buf[..written as usize]).ok()?;
-        let short = short.trim_end_matches('\0');
-        (!short.contains(' ')).then(|| short.to_string())
+        return None;
     }
+    None
+}
+
+#[cfg(windows)]
+fn same_windows_path(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy()
+        .eq_ignore_ascii_case(&b.to_string_lossy())
 }
 
 fn enable_codex_hooks_feature() -> Result<(), String> {
@@ -1151,9 +1155,9 @@ mod tests {
         let host = local_host();
         let target = HookTarget::local(&*host).expect("home resolves in tests");
         let cmd = target.hook_command(HookAgent::Claude, "stop");
-        // On Windows the executable may be rewritten to a space-free 8.3 short
-        // path, which must be emitted bare: PowerShell cannot invoke a quoted
-        // path without the `&` call operator.
+        // On Windows the executable may be emitted as a bare PATH-resolvable
+        // name: PowerShell cannot invoke a quoted path without the `&` call
+        // operator, so quoting is avoided whenever possible.
         #[cfg(not(windows))]
         assert!(cmd.starts_with('"'));
         assert!(cmd.ends_with("agent-hook claude stop"));
