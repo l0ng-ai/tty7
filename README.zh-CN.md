@@ -23,6 +23,7 @@
 
 - **性能** —— 吞吐约为 Alacritty、Ghostty、Kitty 的 2 倍（[基准测试](#基准测试)）
 - **持久会话** —— 退出应用、重启机器后，shell 和已支持的 agent 会话照样运行；无需 tmux
+- **编辑器级输入** —— 建议、补全、语法高亮、历史搜索
 - **远程开发** —— 文件、仓库、pane 和 git 信息都留在远端机器上
 - **原生 SSH** —— profile、SFTP、端口转发和跳板机
 - **Agent-aware** —— Claude Code、Codex 等：状态、通知、git 上下文
