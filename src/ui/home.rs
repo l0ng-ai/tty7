@@ -78,9 +78,7 @@ pub(crate) fn relative_time(now: u64, then: u64) -> String {
         s if s < 60 => t(L10nKey::HomeTimeJustNow).to_string(),
         s if s < 3_600 => t_plural(L10nKey::HomeTimeMinutesAgo, (s / 60) as usize, &[]),
         s if s < 7_200 => t(L10nKey::HomeTimeHourAgo).to_string(),
-        s if s < 86_400 => {
-            t_plural(L10nKey::HomeTimeHoursAgo, (s / 3_600) as usize, &[])
-        }
+        s if s < 86_400 => t_plural(L10nKey::HomeTimeHoursAgo, (s / 3_600) as usize, &[]),
         s if s < 172_800 => t(L10nKey::HomeTimeYesterday).to_string(),
         s if s < 604_800 => t_plural(L10nKey::HomeTimeDaysAgo, (s / 86_400) as usize, &[]),
         _ => t(L10nKey::HomeTimeOverWeekAgo).to_string(),

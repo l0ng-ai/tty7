@@ -367,7 +367,7 @@ impl Tty7App {
                         return Err(t_fmt(
                             L10nKey::EditorCantOpen,
                             &[("path", &path.display().to_string()), ("e", &e.to_string())],
-                        ))
+                        ));
                     }
                 };
                 if meta.len > MAX_FILE_BYTES {
@@ -385,7 +385,7 @@ impl Tty7App {
                         return Err(t_fmt(
                             L10nKey::EditorCantRead,
                             &[("path", &path.display().to_string()), ("e", &e.to_string())],
-                        ))
+                        ));
                     }
                 };
                 if looks_binary(&bytes) {
@@ -395,7 +395,10 @@ impl Tty7App {
                     ));
                 }
                 let text = String::from_utf8(bytes).map_err(|_| {
-                    t_fmt(L10nKey::EditorNotUtf8, &[("path", &path.display().to_string())])
+                    t_fmt(
+                        L10nKey::EditorNotUtf8,
+                        &[("path", &path.display().to_string())],
+                    )
                 })?;
                 Ok((path, text, meta.mtime))
             },
@@ -677,7 +680,11 @@ impl Tty7App {
             PromptLevel::Warning,
             &t_fmt(L10nKey::EditorUnsavedChanges, &[("name", &name)]),
             None,
-            &[t(L10nKey::Save), t(L10nKey::EditorDiscard), t(L10nKey::Cancel)],
+            &[
+                t(L10nKey::Save),
+                t(L10nKey::EditorDiscard),
+                t(L10nKey::Cancel),
+            ],
             cx,
         );
         let id = f.input.entity_id();
@@ -954,7 +961,9 @@ impl Tty7App {
                     .when(name.is_none(), |d| {
                         d.text_color(cx.theme().muted_foreground)
                     })
-                    .child(name.unwrap_or_else(|| SharedString::from(t(L10nKey::EditorNoFileOpen)))),
+                    .child(
+                        name.unwrap_or_else(|| SharedString::from(t(L10nKey::EditorNoFileOpen))),
+                    ),
             )
             .when(dirty, |d| {
                 d.child(

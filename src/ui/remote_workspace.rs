@@ -41,27 +41,25 @@ impl RemoteStatus {
     pub fn strip_message(&self, machine: &str) -> Option<String> {
         match self {
             RemoteStatus::Attached => None,
-            RemoteStatus::Disconnected => {
-                Some(t_fmt(L10nKey::RemoteStripDisconnected, &[("machine", machine)]))
-            }
-            RemoteStatus::Connecting => {
-                Some(t_fmt(L10nKey::RemoteStripConnecting, &[("machine", machine)]))
-            }
+            RemoteStatus::Disconnected => Some(t_fmt(
+                L10nKey::RemoteStripDisconnected,
+                &[("machine", machine)],
+            )),
+            RemoteStatus::Connecting => Some(t_fmt(
+                L10nKey::RemoteStripConnecting,
+                &[("machine", machine)],
+            )),
             RemoteStatus::Reconnecting { attempt: 0 } => Some(t_fmt(
                 L10nKey::RemoteStripReconnecting,
                 &[("machine", machine)],
             )),
             RemoteStatus::Reconnecting { attempt } => Some(t_fmt(
                 L10nKey::RemoteStripReconnectingAttempt,
-                &[
-                    ("machine", machine),
-                    ("count", &(attempt + 1).to_string()),
-                ],
+                &[("machine", machine), ("count", &(attempt + 1).to_string())],
             )),
-            RemoteStatus::Preempted { by } => Some(t_fmt(
-                L10nKey::RemoteStripPreempted,
-                &[("by", by)],
-            )),
+            RemoteStatus::Preempted { by } => {
+                Some(t_fmt(L10nKey::RemoteStripPreempted, &[("by", by)]))
+            }
             RemoteStatus::Failed(e) => Some(t_fmt(
                 L10nKey::RemoteStripFailed,
                 &[("machine", machine), ("error", e)],
@@ -199,10 +197,7 @@ impl Tty7App {
             _ => {
                 let machine = self.remote_machine_label(cx);
                 window.push_notification(
-                    t_fmt(
-                        L10nKey::RemoteNoConnectionDetails,
-                        &[("machine", &machine)],
-                    ),
+                    t_fmt(L10nKey::RemoteNoConnectionDetails, &[("machine", &machine)]),
                     cx,
                 );
                 false
@@ -519,10 +514,7 @@ impl Tty7App {
         let answer = window.prompt(
             PromptLevel::Warning,
             &t_fmt(L10nKey::RemoteRestartTitle, &[("machine", &label)]),
-            Some(&t_fmt(
-                L10nKey::RemoteRestartBody,
-                &[("machine", &label)],
-            )),
+            Some(&t_fmt(L10nKey::RemoteRestartBody, &[("machine", &label)])),
             &[t(L10nKey::Cancel), t(L10nKey::RestartServer)],
             cx,
         );
@@ -588,10 +580,7 @@ impl Tty7App {
         let answer = window.prompt(
             PromptLevel::Warning,
             &t_fmt(L10nKey::RemoteRestartTitle, &[("machine", &label)]),
-            Some(&t_fmt(
-                L10nKey::RemoteReplaceBody,
-                &[("machine", &label)],
-            )),
+            Some(&t_fmt(L10nKey::RemoteReplaceBody, &[("machine", &label)])),
             &[t(L10nKey::Cancel), t(L10nKey::RestartServer)],
             cx,
         );
@@ -1457,18 +1446,21 @@ mod tests {
         crate::ui::i18n::set_locale("en");
         assert_eq!(RemoteStatus::Attached.strip_message("build-box"), None);
         assert_eq!(
-            RemoteStatus::Disconnected
-                .strip_message("build-box"),
-            Some(t_fmt(L10nKey::RemoteStripDisconnected, &[("machine", "build-box")]))
+            RemoteStatus::Disconnected.strip_message("build-box"),
+            Some(t_fmt(
+                L10nKey::RemoteStripDisconnected,
+                &[("machine", "build-box")]
+            ))
         );
         assert_eq!(
-            RemoteStatus::Connecting
-                .strip_message("build-box"),
-            Some(t_fmt(L10nKey::RemoteStripConnecting, &[("machine", "build-box")]))
+            RemoteStatus::Connecting.strip_message("build-box"),
+            Some(t_fmt(
+                L10nKey::RemoteStripConnecting,
+                &[("machine", "build-box")]
+            ))
         );
         assert_eq!(
-            RemoteStatus::Failed("connection refused".into())
-                .strip_message("build-box"),
+            RemoteStatus::Failed("connection refused".into()).strip_message("build-box"),
             Some(t_fmt(
                 L10nKey::RemoteStripFailed,
                 &[("machine", "build-box"), ("error", "connection refused")]
@@ -1687,14 +1679,15 @@ mod tests {
     fn the_new_states_name_what_happened() {
         crate::ui::i18n::set_locale("en");
         assert_eq!(
-            RemoteStatus::Reconnecting { attempt: 0 }
-                .strip_message("build-box"),
-            Some(t_fmt(L10nKey::RemoteStripReconnecting, &[("machine", "build-box")])),
+            RemoteStatus::Reconnecting { attempt: 0 }.strip_message("build-box"),
+            Some(t_fmt(
+                L10nKey::RemoteStripReconnecting,
+                &[("machine", "build-box")]
+            )),
             "the first attempt does not need a count"
         );
         assert_eq!(
-            RemoteStatus::Reconnecting { attempt: 3 }
-                .strip_message("build-box"),
+            RemoteStatus::Reconnecting { attempt: 3 }.strip_message("build-box"),
             Some(t_fmt(
                 L10nKey::RemoteStripReconnectingAttempt,
                 &[("machine", "build-box"), ("count", "4")]

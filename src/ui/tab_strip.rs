@@ -523,7 +523,10 @@ impl Tty7App {
         let raw = tab.leaf_title(window, cx);
         let label = short_title(&raw);
         if label.trim().is_empty() {
-            t_fmt(L10nKey::TabUnnamedShell, &[("n", &((index + 1).to_string()))])
+            t_fmt(
+                L10nKey::TabUnnamedShell,
+                &[("n", &((index + 1).to_string()))],
+            )
         } else {
             label
         }
@@ -574,13 +577,13 @@ impl Tty7App {
             }
             if shells.is_empty() {
                 let open_default = app.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(t(L10nKey::AppMenuNewTab)).on_click(move |_, window, cx| {
+                menu = menu.item(PopupMenuItem::new(t(L10nKey::AppMenuNewTab)).on_click(
+                    move |_, window, cx| {
                         if let Some(app) = open_default.upgrade() {
                             app.update(cx, |this, cx| this.new_tab(window, cx));
                         }
-                    }),
-                );
+                    },
+                ));
             }
             menu
         })
@@ -628,14 +631,14 @@ impl Tty7App {
 
         let in_repo = this.tab_is_in_repo(index, window, cx);
         if in_repo {
-            menu = menu
-                .separator()
-                .item(PopupMenuItem::new(t(L10nKey::AppMenuNewWorktreeTab)).on_click({
+            menu = menu.separator().item(
+                PopupMenuItem::new(t(L10nKey::AppMenuNewWorktreeTab)).on_click({
                     let app = app.clone();
                     move |_, window, cx| {
                         let _ = app.update(cx, |this, cx| this.new_worktree_tab(index, window, cx));
                     }
-                }));
+                }),
+            );
         }
 
         let agent_session = this.tab_agent_session(index, window, cx);
@@ -710,12 +713,14 @@ impl Tty7App {
         }
 
         menu.separator()
-            .item(PopupMenuItem::new(t(L10nKey::TabContextCloseTab)).on_click({
-                let app = app.clone();
-                move |_, window, cx| {
-                    let _ = app.update(cx, |this, cx| this.close_tab(index, window, cx));
-                }
-            }))
+            .item(
+                PopupMenuItem::new(t(L10nKey::TabContextCloseTab)).on_click({
+                    let app = app.clone();
+                    move |_, window, cx| {
+                        let _ = app.update(cx, |this, cx| this.close_tab(index, window, cx));
+                    }
+                }),
+            )
             .item(
                 PopupMenuItem::new(t(L10nKey::AppMenuCloseOtherTabs))
                     .disabled(tab_count <= 1)

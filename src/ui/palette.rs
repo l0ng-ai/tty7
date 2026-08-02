@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::core::config::{Config, RightPanelTab, TabBarPosition};
 use crate::core::ssh_profile::parse_quick_connect;
-use crate::ui::i18n::{t, t_fmt, L10nKey};
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum CommandKind {
@@ -420,7 +420,10 @@ impl Command {
                 },
                 ToggleTabSidebar,
             ),
-            Command::new(t(L10nKey::CmdRightPanelInfo), ShowRightPanel(RightPanelTab::Info)),
+            Command::new(
+                t(L10nKey::CmdRightPanelInfo),
+                ShowRightPanel(RightPanelTab::Info),
+            ),
             Command::new(
                 t(L10nKey::CmdRightPanelOutline),
                 ShowRightPanel(RightPanelTab::Outline),
@@ -429,7 +432,10 @@ impl Command {
                 t(L10nKey::CmdRightPanelChanges),
                 ShowRightPanel(RightPanelTab::Changes),
             ),
-            Command::new(t(L10nKey::CmdRightPanelFiles), ShowRightPanel(RightPanelTab::Files)),
+            Command::new(
+                t(L10nKey::CmdRightPanelFiles),
+                ShowRightPanel(RightPanelTab::Files),
+            ),
             Command::new(t(L10nKey::CmdChangeTheme), OpenThemePicker),
             Command::new(t(L10nKey::CmdResetFontSize), ResetFontSize),
             Command::new(t(L10nKey::CmdEnterFullScreen), ToggleFullscreen),

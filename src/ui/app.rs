@@ -536,7 +536,9 @@ impl Tty7App {
         let mf_bind_port = cx.new(|cx| InputState::new(window, cx).placeholder("8080"));
         let mf_target_host = cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1"));
         let mf_target_port = cx.new(|cx| InputState::new(window, cx).placeholder("80"));
-        let mf_description = cx.new(|cx| InputState::new(window, cx).placeholder(t(L10nKey::AppPlaceholderDescription)));
+        let mf_description = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t(L10nKey::AppPlaceholderDescription))
+        });
         let sidebar_width = cx.global::<Config>().sidebar_width;
         let right_panel_width = cx.global::<Config>().right_panel_width;
         let right_panel_visible = cx.global::<Config>().right_panel_visible;
@@ -1111,10 +1113,7 @@ impl Tty7App {
         let label = crate::ui::remote_connect::label_for(&target, cx);
         if !target.is_ssh() {
             window.push_notification(
-                t_fmt(
-                    L10nKey::AppRestartServerNotSsh,
-                    &[("label", &label)],
-                ),
+                t_fmt(L10nKey::AppRestartServerNotSsh, &[("label", &label)]),
                 cx,
             );
             return;
@@ -1513,14 +1512,26 @@ impl Tty7App {
                 t(L10nKey::AppThemeColorBackground),
                 theme.background_color(),
             ),
-            (ThemeEdit::Foreground, t(L10nKey::AppThemeColorForeground), theme.foreground),
-            (ThemeEdit::Accent, t(L10nKey::AppThemeColorAccent), theme.accent),
+            (
+                ThemeEdit::Foreground,
+                t(L10nKey::AppThemeColorForeground),
+                theme.foreground,
+            ),
+            (
+                ThemeEdit::Accent,
+                t(L10nKey::AppThemeColorAccent),
+                theme.accent,
+            ),
             (
                 ThemeEdit::Cursor,
                 t(L10nKey::AppThemeColorCursor),
                 theme.caret.unwrap_or(theme.accent),
             ),
-            (ThemeEdit::Selection, t(L10nKey::AppThemeColorSelection), neutrals.selection),
+            (
+                ThemeEdit::Selection,
+                t(L10nKey::AppThemeColorSelection),
+                neutrals.selection,
+            ),
         ];
 
         let mut subs = Vec::new();
@@ -2261,7 +2272,10 @@ impl Tty7App {
             Err(e) => {
                 log::error!("native SSH spawn failed: {e}");
                 window.push_notification(
-                    t_fmt(L10nKey::AppSshConnectionFailed, &[("error", &e.to_string())]),
+                    t_fmt(
+                        L10nKey::AppSshConnectionFailed,
+                        &[("error", &e.to_string())],
+                    ),
                     cx,
                 );
                 return;
@@ -2331,7 +2345,10 @@ impl Tty7App {
                 Err(e) => {
                     log::error!("native SSH split spawn failed: {e}");
                     window.push_notification(
-                        t_fmt(L10nKey::AppSshConnectionFailed, &[("error", &e.to_string())]),
+                        t_fmt(
+                            L10nKey::AppSshConnectionFailed,
+                            &[("error", &e.to_string())],
+                        ),
                         cx,
                     );
                     return;
@@ -2653,7 +2670,13 @@ impl Tty7App {
                 };
                 cx.spawn(async move |this, cx| {
                     let Ok(answer) = this.update_in(cx, |_, window, cx| {
-                        window.prompt(level, &title, Some(&detail), &[t(L10nKey::AppWorktreeKeep), remove_label], cx)
+                        window.prompt(
+                            level,
+                            &title,
+                            Some(&detail),
+                            &[t(L10nKey::AppWorktreeKeep), remove_label],
+                            cx,
+                        )
                     }) else {
                         return;
                     };
@@ -2673,14 +2696,13 @@ impl Tty7App {
                                     t_fmt(L10nKey::AppWorktreeRemoved, &[("branch", &branch)]),
                                     cx,
                                 ),
-                                Err(e) => window
-                                    .push_notification(
-                                        t_fmt(
-                                            L10nKey::AppWorktreeRemoveFailed,
-                                            &[("error", &e.to_string())],
-                                        ),
-                                        cx,
-                                    )
+                                Err(e) => window.push_notification(
+                                    t_fmt(
+                                        L10nKey::AppWorktreeRemoveFailed,
+                                        &[("error", &e.to_string())],
+                                    ),
+                                    cx,
+                                ),
                             },
                         );
                     });
@@ -2907,29 +2929,23 @@ impl Tty7App {
             return None;
         }
         if remote.is_some() {
-            window.push_notification(
-                t_fmt(L10nKey::AppForkLocalOnly, &[("name", &name)]),
-                cx,
-            );
+            window.push_notification(t_fmt(L10nKey::AppForkLocalOnly, &[("name", &name)]), cx);
             return None;
         }
         let session = session.unwrap_or_default();
         let Some(id) = session.session_id.as_deref() else {
-            window.push_notification(
-                t_fmt(L10nKey::AppForkNoSessionId, &[("name", &name)]),
-                cx,
-            );
+            window.push_notification(t_fmt(L10nKey::AppForkNoSessionId, &[("name", &name)]), cx);
             return None;
         };
         let Some(cmd) = agent.fork_command(id, session.launch_argv.as_deref()) else {
-            window.push_notification(t_fmt(L10nKey::AppForkSessionIdNotToken, &[("name", &name)]), cx);
+            window.push_notification(
+                t_fmt(L10nKey::AppForkSessionIdNotToken, &[("name", &name)]),
+                cx,
+            );
             return None;
         };
         if session.status == AgentStatus::Working {
-            window.push_notification(
-                t_fmt(L10nKey::AppForkMidTurn, &[("name", &name)]),
-                cx,
-            );
+            window.push_notification(t_fmt(L10nKey::AppForkMidTurn, &[("name", &name)]), cx);
         }
         Some(cmd)
     }
@@ -2987,7 +3003,10 @@ impl Tty7App {
             move |h| crate::core::worktree::defaults(h, &probe_cwd),
             move |this, result, window, cx| match result {
                 Ok(defaults) => this.open_worktree_prompt(sheet_host, cwd, defaults, window, cx),
-                Err(e) => window.push_notification(t_fmt(L10nKey::AppNewWorktreeFailed, &[("error", &e.to_string())]), cx),
+                Err(e) => window.push_notification(
+                    t_fmt(L10nKey::AppNewWorktreeFailed, &[("error", &e.to_string())]),
+                    cx,
+                ),
             },
         );
     }
@@ -3370,10 +3389,7 @@ impl Tty7App {
 
     fn deliver_agent_prompt(&mut self, prompt: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.agent_target_leaf(cx) else {
-            crate::terminal::notify_desktop(
-                Some("tty7"),
-                t(L10nKey::AppNoRunningCodingAgent),
-            );
+            crate::terminal::notify_desktop(Some("tty7"), t(L10nKey::AppNoRunningCodingAgent));
             return;
         };
         target.read(cx).send_agent_prompt(prompt);
@@ -3396,10 +3412,7 @@ impl Tty7App {
             None => (None, None),
         };
         let Some(selection) = selection else {
-            crate::terminal::notify_desktop(
-                Some("tty7"),
-                t(L10nKey::AppNothingSelected),
-            );
+            crate::terminal::notify_desktop(Some("tty7"), t(L10nKey::AppNothingSelected));
             return;
         };
         let cwd = cwd.map(|c| c.to_string_lossy().into_owned());
@@ -3498,8 +3511,9 @@ impl Tty7App {
             }),
         );
 
-        let ssh_quick_connect =
-            cx.new(|cx| InputState::new(window, cx).placeholder(t(L10nKey::AppPlaceholderSshQuickConnect)));
+        let ssh_quick_connect = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t(L10nKey::AppPlaceholderSshQuickConnect))
+        });
         subs.push(
             cx.subscribe_in(&ssh_quick_connect, window, |_this, _i, ev, _w, cx| {
                 if matches!(ev, InputEvent::Change) {
@@ -4270,8 +4284,7 @@ impl Tty7App {
         };
         let Some((host, home)) = self.agent_hooks_link(host_id, cx) else {
             if let Some(s) = self.settings.as_mut() {
-                s.agent_hooks_states =
-                    AgentHooksView::Unavailable(Self::agent_hooks_offline_msg());
+                s.agent_hooks_states = AgentHooksView::Unavailable(Self::agent_hooks_offline_msg());
             }
             cx.notify();
             return;
@@ -4376,8 +4389,9 @@ impl Tty7App {
             move |h| {
                 let target = match &home {
                     Some(home) => HookTarget::remote(h, home.clone()),
-                    None => HookTarget::local(h)
-                        .ok_or_else(|| anyhow::anyhow!("{}", t(L10nKey::AppAgentHooksHomeDirUnresolved)))?,
+                    None => HookTarget::local(h).ok_or_else(|| {
+                        anyhow::anyhow!("{}", t(L10nKey::AppAgentHooksHomeDirUnresolved))
+                    })?,
                 };
                 if install {
                     crate::core::agent_hooks::install_hooks(&target, agent)
@@ -4391,10 +4405,9 @@ impl Tty7App {
                         agent,
                         match result {
                             Ok(summary) => summary,
-                            Err(e) => t_fmt(
-                                L10nKey::AppAgentHooksOpFailed,
-                                &[("error", &e.to_string())],
-                            ),
+                            Err(e) => {
+                                t_fmt(L10nKey::AppAgentHooksOpFailed, &[("error", &e.to_string())])
+                            }
                         },
                     ));
                 }
@@ -5765,7 +5778,12 @@ pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, S
                     i += 1;
                     match words.get(i) {
                         Some(v) => v.clone(),
-                        None => return Err(t_fmt(L10nKey::AppSshParseFlagNeedsValue, &[("flag", &flag.to_string())])),
+                        None => {
+                            return Err(t_fmt(
+                                L10nKey::AppSshParseFlagNeedsValue,
+                                &[("flag", &flag.to_string())],
+                            ));
+                        }
                     }
                 }
             } else {
@@ -5778,7 +5796,9 @@ pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, S
                             .parse::<u16>()
                             .ok()
                             .filter(|&p| p != 0)
-                            .ok_or_else(|| t_fmt(L10nKey::AppSshParseInvalidPort, &[("value", &value)]))?,
+                            .ok_or_else(|| {
+                                t_fmt(L10nKey::AppSshParseInvalidPort, &[("value", &value)])
+                            })?,
                     )
                 }
                 'l' => user = Some(value),
@@ -5788,7 +5808,10 @@ pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, S
                 _ => {}
             }
         } else if word.starts_with('-') {
-            return Err(t_fmt(L10nKey::AppSshParseUnsupportedOption, &[("option", &word)]));
+            return Err(t_fmt(
+                L10nKey::AppSshParseUnsupportedOption,
+                &[("option", &word)],
+            ));
         } else if target.is_none() {
             target = Some(word);
         } else {

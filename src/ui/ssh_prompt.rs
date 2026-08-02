@@ -701,9 +701,9 @@ impl Tty7App {
                     c = c.child(self.render_ssh_input(i));
                 }
                 c.child(self.render_ssh_actions(
-                        crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptSubmit),
-                        cx,
-                    ))
+                    crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptSubmit),
+                    cx,
+                ))
             }
             PromptModel::HostKeyUnknown {
                 algorithm,
@@ -746,14 +746,9 @@ impl Tty7App {
                 port,
                 host,
             } => card
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(danger)
-                        .child(crate::ui::i18n::t(
-                            crate::ui::i18n::L10nKey::SshPromptHostKeyChangedBody,
-                        )),
-                )
+                .child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+                    crate::ui::i18n::L10nKey::SshPromptHostKeyChangedBody,
+                )))
                 .child(div().text_xs().child(format!("{host}:{port}  {algorithm}")))
                 .child(
                     div()

@@ -707,7 +707,8 @@ impl Tty7App {
                         mode,
                     }),
                     Err(_) => {
-                        self.sftp_panel.error = Some(t(L10nKey::SftpErrorInvalidOctalMode).to_string());
+                        self.sftp_panel.error =
+                            Some(t(L10nKey::SftpErrorInvalidOctalMode).to_string());
                         cx.notify();
                         return;
                     }
@@ -854,7 +855,13 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let controls = self.sftp_controls(cx);
-        let title = self.panel_title(t(L10nKey::SftpPanelTitleFiles), Some(host), Some(controls), window, cx);
+        let title = self.panel_title(
+            t(L10nKey::SftpPanelTitleFiles),
+            Some(host),
+            Some(controls),
+            window,
+            cx,
+        );
         let breadcrumb = self.render_sftp_breadcrumb(cx);
         let filter = div()
             .id("panel-sftp-filter")
@@ -1058,10 +1065,7 @@ impl Tty7App {
             SftpEdit::Chmod {
                 readable, input, ..
             } => (
-                t_fmt(
-                    L10nKey::SftpEditPermissions,
-                    &[("mode", readable)],
-                ),
+                t_fmt(L10nKey::SftpEditPermissions, &[("mode", readable)]),
                 input,
             ),
         };
@@ -1266,14 +1270,16 @@ impl Tty7App {
         }));
 
         if is_symlink {
-            menu = menu.item(PopupMenuItem::new(t(L10nKey::SftpContextFollowSymlink)).on_click({
-                let app = app.clone();
-                let entry = entry.clone();
-                move |_, _window, cx| {
+            menu = menu.item(
+                PopupMenuItem::new(t(L10nKey::SftpContextFollowSymlink)).on_click({
+                    let app = app.clone();
                     let entry = entry.clone();
-                    let _ = app.update(cx, |this, cx| this.sftp_follow_symlink(entry, cx));
-                }
-            }));
+                    move |_, _window, cx| {
+                        let entry = entry.clone();
+                        let _ = app.update(cx, |this, cx| this.sftp_follow_symlink(entry, cx));
+                    }
+                }),
+            );
         }
 
         menu = menu
@@ -1297,18 +1303,16 @@ impl Tty7App {
 
         menu.item(
             PopupMenuItem::element(move |_window, _cx| {
-                div()
-                    .text_color(danger)
-                    .child(t(L10nKey::Delete))
+                div().text_color(danger).child(t(L10nKey::Delete))
             })
-                .on_click({
-                    let app = app.clone();
+            .on_click({
+                let app = app.clone();
+                let entry = entry.clone();
+                move |_, _window, cx| {
                     let entry = entry.clone();
-                    move |_, _window, cx| {
-                        let entry = entry.clone();
-                        let _ = app.update(cx, |this, cx| this.sftp_delete_entry(entry, cx));
-                    }
-                }),
+                    let _ = app.update(cx, |this, cx| this.sftp_delete_entry(entry, cx));
+                }
+            }),
         )
     }
 
@@ -1359,7 +1363,10 @@ impl Tty7App {
                 ],
             )
         } else if failed > 0 {
-            t_fmt(L10nKey::SftpTransferSummaryFailed, &[("count", &failed.to_string())])
+            t_fmt(
+                L10nKey::SftpTransferSummaryFailed,
+                &[("count", &failed.to_string())],
+            )
         } else {
             t(L10nKey::SftpTransferSummaryIdle).to_string()
         };

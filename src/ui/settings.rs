@@ -670,7 +670,12 @@ fn seed_forward_row(
         bind_port: seed_hinted(window, cx, &port(rule.bind.port), "8080"),
         target_host: seed_hinted(window, cx, &rule.target.host, "127.0.0.1"),
         target_port: seed_hinted(window, cx, &port(rule.target.port), "80"),
-        description: seed_hinted(window, cx, &rule.description, t(L10nKey::ForwardDescriptionPlaceholder)),
+        description: seed_hinted(
+            window,
+            cx,
+            &rule.description,
+            t(L10nKey::ForwardDescriptionPlaceholder),
+        ),
     }
 }
 
@@ -2462,10 +2467,7 @@ impl Tty7App {
             return;
         };
         profile.id = Uuid::new_v4();
-        profile.name = t_fmt(
-            L10nKey::SettingsProfileCopied,
-            &[("name", &profile.name)],
-        );
+        profile.name = t_fmt(L10nKey::SettingsProfileCopied, &[("name", &profile.name)]);
         self.update_config(cx, |cfg| cfg.ssh_profiles.push(profile.clone()));
         self.ssh_form_load(&profile, window, cx);
     }
@@ -3771,12 +3773,11 @@ impl Tty7App {
                         })),
                 )
                 .when(offline > 0, |col| {
-                    col.child(
-                        div()
-                            .text_xs()
-                            .text_color(muted_fg)
-                            .child(t_plural(L10nKey::SettingsOfflineMachines, offline, &[])),
-                    )
+                    col.child(div().text_xs().text_color(muted_fg).child(t_plural(
+                        L10nKey::SettingsOfflineMachines,
+                        offline,
+                        &[],
+                    )))
                 }),
         )
     }
@@ -4861,7 +4862,9 @@ mod tests {
             "Option (⌥) acts as Meta",
         ] {
             assert!(
-                settings_search_entries().iter().any(|e| t(e.title) == title),
+                settings_search_entries()
+                    .iter()
+                    .any(|e| t(e.title) == title),
                 "no index entry titled {title:?}"
             );
         }
@@ -4871,9 +4874,10 @@ mod tests {
     fn agent_rows_are_in_the_search_index() {
         for agent in crate::core::agent_hooks::HookAgent::ALL {
             assert!(
-                settings_search_entries().iter().any(
-                    |e| e.section == SettingsSection::Agents && t(e.title) == agent.display_name()
-                ),
+                settings_search_entries()
+                    .iter()
+                    .any(|e| e.section == SettingsSection::Agents
+                        && t(e.title) == agent.display_name()),
                 "no Agents index entry titled {:?}",
                 agent.display_name()
             );

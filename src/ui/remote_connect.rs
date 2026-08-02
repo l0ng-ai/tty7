@@ -261,22 +261,42 @@ pub fn connect_blocking(
     label: &str,
 ) -> Result<Connected, String> {
     note_origin(&header.target, target);
-    crate::daemon::spawn::ensure_running()
-        .map_err(|e| t_fmt(L10nKey::RemoteDaemonStartFailed, &[("error", &e.to_string())]))?;
+    crate::daemon::spawn::ensure_running().map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteDaemonStartFailed,
+            &[("error", &e.to_string())],
+        )
+    })?;
 
-    let stream = crate::daemon::transport::connect()
-        .map_err(|e| t_fmt(L10nKey::RemoteDaemonUnreachable, &[("error", &e.to_string())]))?;
+    let stream = crate::daemon::transport::connect().map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteDaemonUnreachable,
+            &[("error", &e.to_string())],
+        )
+    })?;
 
     let mut stream = stream;
-    crate::daemon::router::negotiate(&mut stream, &header)
-        .map_err(|e| t_fmt(L10nKey::RemoteHostUnreachable, &[("machine", label), ("error", &e.to_string())]))?;
+    crate::daemon::router::negotiate(&mut stream, &header).map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteHostUnreachable,
+            &[("machine", label), ("error", &e.to_string())],
+        )
+    })?;
 
     let hello = ControlHello::host_rpc(new_session_token(), client_hostname());
-    let host = handshake(stream, &target.connection_key(), &hello)
-        .map_err(|e| t_fmt(L10nKey::RemoteHostNotTty7, &[("machine", label), ("error", &e.to_string())]))?;
+    let host = handshake(stream, &target.connection_key(), &hello).map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteHostNotTty7,
+            &[("machine", label), ("error", &e.to_string())],
+        )
+    })?;
 
-    let rows = list_workspaces(&host)
-        .map_err(|e| t_fmt(L10nKey::RemoteWorkspaceListFailed, &[("machine", label), ("error", &e.to_string())]))?;
+    let rows = list_workspaces(&host).map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteWorkspaceListFailed,
+            &[("machine", label), ("error", &e.to_string())],
+        )
+    })?;
     let home = host.home();
     refresh_agent_hooks_once(&host, &home);
     Ok(Connected { host, home, rows })
@@ -432,10 +452,7 @@ pub fn install_detail(request: &InstallRequest) -> String {
 }
 
 pub fn install_title(request: &InstallRequest) -> String {
-    t_fmt(
-        L10nKey::RemoteInstallTitle,
-        &[("machine", &request.host)],
-    )
+    t_fmt(L10nKey::RemoteInstallTitle, &[("machine", &request.host)])
 }
 
 pub fn human_bytes(n: u64) -> String {
@@ -629,13 +646,12 @@ pub fn mismatch_answers() -> [&'static str; 2] {
 
 pub fn mismatch_detail(m: &MismatchedRemoteDaemon) -> String {
     let running = match (&m.running_version, &m.running_exe) {
-        (Some(v), Some(exe)) => {
-            t_fmt(L10nKey::RemoteMismatchVersionFromExe, &[("version", v), ("exe", exe)])
-        }
+        (Some(v), Some(exe)) => t_fmt(
+            L10nKey::RemoteMismatchVersionFromExe,
+            &[("version", v), ("exe", exe)],
+        ),
         (Some(v), None) => v.clone(),
-        (None, Some(exe)) => {
-            t_fmt(L10nKey::RemoteMismatchUnknownBuildFromExe, &[("exe", exe)])
-        }
+        (None, Some(exe)) => t_fmt(L10nKey::RemoteMismatchUnknownBuildFromExe, &[("exe", exe)]),
         (None, None) => t(L10nKey::RemoteMismatchUnknownBuild).to_string(),
     };
     t_fmt(
@@ -660,17 +676,26 @@ pub fn mismatch_target(m: &MismatchedRemoteDaemon) -> Option<RemoteTarget> {
 
 pub fn restart_server_blocking(header: RouteHeader, label: &str) -> Result<(), String> {
     let action = header.action;
-    crate::daemon::spawn::ensure_running()
-        .map_err(|e| t_fmt(L10nKey::RemoteDaemonStartFailed, &[("error", &e.to_string())]))?;
-    let mut stream = crate::daemon::transport::connect()
-        .map_err(|e| t_fmt(L10nKey::RemoteDaemonUnreachable, &[("error", &e.to_string())]))?;
-    let ack = crate::daemon::router::negotiate(&mut stream, &header)
-        .map_err(|e| t_fmt(L10nKey::RemoteServerRestartFailed, &[("machine", label), ("error", &e.to_string())]))?;
+    crate::daemon::spawn::ensure_running().map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteDaemonStartFailed,
+            &[("error", &e.to_string())],
+        )
+    })?;
+    let mut stream = crate::daemon::transport::connect().map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteDaemonUnreachable,
+            &[("error", &e.to_string())],
+        )
+    })?;
+    let ack = crate::daemon::router::negotiate(&mut stream, &header).map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteServerRestartFailed,
+            &[("machine", label), ("error", &e.to_string())],
+        )
+    })?;
     if !ack.performed(action) {
-        return Err(t_fmt(
-            L10nKey::RemoteDaemonTooOld,
-            &[("machine", label)],
-        ));
+        return Err(t_fmt(L10nKey::RemoteDaemonTooOld, &[("machine", label)]));
     }
     Ok(())
 }
@@ -711,7 +736,10 @@ mod tests {
         assert!(detail.contains("9.0 MiB"), "{detail}");
         assert_eq!(
             install_title(&request),
-            t_fmt(L10nKey::RemoteInstallTitle, &[("machine", "me@build-box:22")])
+            t_fmt(
+                L10nKey::RemoteInstallTitle,
+                &[("machine", "me@build-box:22")]
+            )
         );
     }
 
@@ -894,7 +922,10 @@ mod tests {
         assert!(detail.contains("me@build-box:22"), "{detail}");
         assert_eq!(
             mismatch_title(&m),
-            t_fmt(L10nKey::RemoteMismatchTitle, &[("machine", "me@build-box:22")])
+            t_fmt(
+                L10nKey::RemoteMismatchTitle,
+                &[("machine", "me@build-box:22")]
+            )
         );
 
         let unknown = MismatchedRemoteDaemon {

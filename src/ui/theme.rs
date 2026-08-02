@@ -44,7 +44,10 @@ pub(crate) fn set_menus(cx: &mut App) {
             MenuItem::action(t(L10nKey::AppMenuSplitDown), SplitDown),
             MenuItem::separator(),
             MenuItem::action(t(L10nKey::AppMenuRenameTab), RenameTab),
-            MenuItem::action(t(L10nKey::AppMenuCopyWorkingDirectory), CopyWorkingDirectory),
+            MenuItem::action(
+                t(L10nKey::AppMenuCopyWorkingDirectory),
+                CopyWorkingDirectory,
+            ),
             MenuItem::action(t(L10nKey::AppMenuCopySessionId), CopyAgentSessionId),
             MenuItem::action(t(L10nKey::AppMenuForkSession), ForkAgentSession),
             MenuItem::separator(),
@@ -152,7 +155,10 @@ fn window_menu_items(cx: &App) -> Vec<MenuItem> {
         });
     }
     if items.len() == workspace_start {
-        items.push(MenuItem::action(t(L10nKey::AppMenuNewWorkspace), NewWorkspace));
+        items.push(MenuItem::action(
+            t(L10nKey::AppMenuNewWorkspace),
+            NewWorkspace,
+        ));
     }
     items
 }

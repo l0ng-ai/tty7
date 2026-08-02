@@ -48,10 +48,7 @@ impl Tty7App {
                     .child(if host.is_empty() {
                         t(L10nKey::ForwardDisconnected).to_string()
                     } else {
-                        t_fmt(
-                            L10nKey::ForwardDisconnectedFrom,
-                            &[("host", &host)],
-                        )
+                        t_fmt(L10nKey::ForwardDisconnectedFrom, &[("host", &host)])
                     }),
             )
             .child(div().child("· ⌘⇧R"))
@@ -155,7 +152,11 @@ impl Tty7App {
         .w(px(24.))
         .h(px(24.))
         .rounded_md()
-        .tooltip(if open { t(L10nKey::Cancel) } else { t(L10nKey::ForwardTooltipAdd) })
+        .tooltip(if open {
+            t(L10nKey::Cancel)
+        } else {
+            t(L10nKey::ForwardTooltipAdd)
+        })
         .on_click(cx.listener(move |this, _, window, cx| {
             this.toggle_managed_forward_form(pane_id, window, cx)
         }))

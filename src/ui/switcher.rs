@@ -156,7 +156,11 @@ impl Tty7App {
             let store = WorkspaceStore::all(app);
             for w in &store.views {
                 let (key, label, target) = match w.host.as_ref() {
-                    None => (String::new(), t(L10nKey::SwitcherThisComputer).to_string(), None),
+                    None => (
+                        String::new(),
+                        t(L10nKey::SwitcherThisComputer).to_string(),
+                        None,
+                    ),
                     Some(r) => {
                         let key = r.target.to_string();
                         (key.clone(), key, Some(r.target.clone()))
@@ -701,10 +705,7 @@ impl Tty7App {
             InstallPhase::Downloading { done, total } => match total {
                 Some(total) => t_fmt(
                     L10nKey::SwitcherDownloadingServerWithTotal,
-                    &[
-                        ("done", &human_bytes(done)),
-                        ("total", &human_bytes(total)),
-                    ],
+                    &[("done", &human_bytes(done)), ("total", &human_bytes(total))],
                 ),
                 None => t_fmt(
                     L10nKey::SwitcherDownloadingServerNoTotal,
@@ -713,10 +714,7 @@ impl Tty7App {
             },
             InstallPhase::Uploading { done, total } => t_fmt(
                 L10nKey::SwitcherCopyingServer,
-                &[
-                    ("done", &human_bytes(done)),
-                    ("total", &human_bytes(total)),
-                ],
+                &[("done", &human_bytes(done)), ("total", &human_bytes(total))],
             ),
         };
 
@@ -795,14 +793,22 @@ impl Tty7App {
         let (dot, word): (Option<gpui::Hsla>, Option<&'static str>) = match group.link {
             Link::Local => (None, None),
             Link::Connected => (Some(gpui::rgb(crate::ui::tab_strip::LIVE_DOT).into()), None),
-            Link::Connecting if matches!(group.installing, Some(InstallPhase::Restarting)) => {
-                (Some(theme.warning), Some(t(L10nKey::SwitcherStatusRestarting)))
-            }
-            Link::Connecting if group.installing.is_some() => {
-                (Some(theme.warning), Some(t(L10nKey::SwitcherStatusInstalling)))
-            }
-            Link::Connecting => (Some(theme.warning), Some(t(L10nKey::SwitcherStatusConnecting))),
-            Link::Failed => (Some(theme.danger), Some(t(L10nKey::SwitcherStatusConnectFailed))),
+            Link::Connecting if matches!(group.installing, Some(InstallPhase::Restarting)) => (
+                Some(theme.warning),
+                Some(t(L10nKey::SwitcherStatusRestarting)),
+            ),
+            Link::Connecting if group.installing.is_some() => (
+                Some(theme.warning),
+                Some(t(L10nKey::SwitcherStatusInstalling)),
+            ),
+            Link::Connecting => (
+                Some(theme.warning),
+                Some(t(L10nKey::SwitcherStatusConnecting)),
+            ),
+            Link::Failed => (
+                Some(theme.danger),
+                Some(t(L10nKey::SwitcherStatusConnectFailed)),
+            ),
             Link::Offline => (
                 Some(gpui::rgb(crate::ui::tab_strip::UNKNOWN_DOT).into()),
                 Some(t(L10nKey::SwitcherStatusNotConnected)),

@@ -395,7 +395,10 @@ impl Tty7App {
             }
             if let Some(git) = tab.git_status(Some(window), cx) {
                 rows.push((t(L10nKey::PanelBranch), git.branch.clone()));
-                rows.push((t(L10nKey::PanelChangesRow), format!("+{} −{}", git.added, git.removed)));
+                rows.push((
+                    t(L10nKey::PanelChangesRow),
+                    format!("+{} −{}", git.added, git.removed),
+                ));
             }
             if let Some(agent) = tab.agent(cx) {
                 let name = agent.display_name();

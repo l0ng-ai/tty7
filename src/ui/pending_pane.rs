@@ -94,29 +94,19 @@ impl Render for PendingPane {
                             },
                         ),
                 )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted)
-                        .child(t_fmt(
-                        L10nKey::PendingConnecting,
-                        &[("machine", &self.machine)],
-                    )),
-                )
+                .child(div().text_sm().text_color(muted).child(t_fmt(
+                    L10nKey::PendingConnecting,
+                    &[("machine", &self.machine)],
+                )))
                 .into_any_element(),
             PendingState::Failed(reason) => v_flex()
                 .items_center()
                 .gap(px(10.))
                 .max_w(px(420.))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.foreground)
-                        .child(t_fmt(
-                        L10nKey::PendingUnreachable,
-                        &[("machine", &self.machine)],
-                    )),
-                )
+                .child(div().text_sm().text_color(theme.foreground).child(t_fmt(
+                    L10nKey::PendingUnreachable,
+                    &[("machine", &self.machine)],
+                )))
                 .child(
                     div()
                         .text_xs()

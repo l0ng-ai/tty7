@@ -6,7 +6,7 @@ use crate::core::config::RightPanelTab;
 use crate::ui::app::Tty7App;
 use crate::ui::host_ops::{ByHost, HostId, HostOps, InFlight, SharedHost, WatchSub};
 use crate::ui::host_registry::HostRegistry;
-use crate::ui::i18n::{t, t_fmt, L10nKey};
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton,
@@ -1097,7 +1097,12 @@ impl Tty7App {
                             }
                             Err(e) => {
                                 app.file_tree.rollback(id, &parent, rollback);
-                                HostOps::notify_err(window, cx, t(L10nKey::FileTreeDeleteFailed), &e);
+                                HostOps::notify_err(
+                                    window,
+                                    cx,
+                                    t(L10nKey::FileTreeDeleteFailed),
+                                    &e,
+                                );
                             }
                         }
                         cx.notify();
@@ -1124,10 +1129,7 @@ impl Tty7App {
 
     fn file_tree_attach_to_agent(&mut self, path: &Path, cx: &mut Context<Self>) {
         let Some(target) = self.agent_target_leaf(cx) else {
-            crate::terminal::notify_desktop(
-                Some("tty7"),
-                t(L10nKey::AppNoRunningCodingAgent),
-            );
+            crate::terminal::notify_desktop(Some("tty7"), t(L10nKey::AppNoRunningCodingAgent));
             return;
         };
         let rel = self
@@ -1354,86 +1356,110 @@ impl Tty7App {
         let p = path.to_path_buf();
 
         if !is_dir {
-            menu = menu.item(PopupMenuItem::new(t(L10nKey::FileTreeContextOpen)).on_click({
-                let app = app.clone();
-                let p = p.clone();
-                move |_, window, cx| {
-                    let _ = app.update(cx, |this, cx| this.open_file_in_editor(&p, window, cx));
-                }
-            }));
+            menu = menu.item(
+                PopupMenuItem::new(t(L10nKey::FileTreeContextOpen)).on_click({
+                    let app = app.clone();
+                    let p = p.clone();
+                    move |_, window, cx| {
+                        let _ = app.update(cx, |this, cx| this.open_file_in_editor(&p, window, cx));
+                    }
+                }),
+            );
         }
         if is_dir {
-            menu = menu.item(PopupMenuItem::new(t(L10nKey::FileTreeContextCdHere)).on_click({
-                let app = app.clone();
-                let p = p.clone();
-                move |_, window, cx| {
-                    let _ = app.update(cx, |this, cx| this.file_tree_cd(&p, window, cx));
-                }
-            }));
+            menu = menu.item(
+                PopupMenuItem::new(t(L10nKey::FileTreeContextCdHere)).on_click({
+                    let app = app.clone();
+                    let p = p.clone();
+                    move |_, window, cx| {
+                        let _ = app.update(cx, |this, cx| this.file_tree_cd(&p, window, cx));
+                    }
+                }),
+            );
         }
         menu = menu
-            .item(PopupMenuItem::new(t(L10nKey::FileTreeContextInsertPath)).on_click({
-                let app = app.clone();
-                let p = p.clone();
-                move |_, window, cx| {
-                    let _ = app.update(cx, |this, cx| {
-                        if let Some(leaf) = this
-                            .tabs
-                            .get(this.active)
-                            .and_then(|t| t.pane.focused_or_first(window, cx))
-                        {
-                            leaf.update(cx, |view, cx| view.paste(shell_quote(&p), cx));
-                        }
-                    });
-                }
-            }))
-            .item(PopupMenuItem::new(t(L10nKey::FileTreeContextAttachAgent)).on_click({
-                let app = app.clone();
-                let p = p.clone();
-                move |_, _window, cx| {
-                    let _ = app.update(cx, |this, cx| this.file_tree_attach_to_agent(&p, cx));
-                }
-            }))
+            .item(
+                PopupMenuItem::new(t(L10nKey::FileTreeContextInsertPath)).on_click({
+                    let app = app.clone();
+                    let p = p.clone();
+                    move |_, window, cx| {
+                        let _ = app.update(cx, |this, cx| {
+                            if let Some(leaf) = this
+                                .tabs
+                                .get(this.active)
+                                .and_then(|t| t.pane.focused_or_first(window, cx))
+                            {
+                                leaf.update(cx, |view, cx| view.paste(shell_quote(&p), cx));
+                            }
+                        });
+                    }
+                }),
+            )
+            .item(
+                PopupMenuItem::new(t(L10nKey::FileTreeContextAttachAgent)).on_click({
+                    let app = app.clone();
+                    let p = p.clone();
+                    move |_, _window, cx| {
+                        let _ = app.update(cx, |this, cx| this.file_tree_attach_to_agent(&p, cx));
+                    }
+                }),
+            )
             .separator()
-            .item(PopupMenuItem::new(t(L10nKey::FileTreeContextNewFile)).on_click({
-                let app = app.clone();
-                let p = p.clone();
-                move |_, window, cx| {
-                    let _ = app.update(cx, |this, cx| {
-                        this.file_tree_begin_edit(TreeEditKind::NewFile, &p, is_dir, window, cx)
-                    });
-                }
-            }))
-            .item(PopupMenuItem::new(t(L10nKey::FileTreeContextNewFolder)).on_click({
-                let app = app.clone();
-                let p = p.clone();
-                move |_, window, cx| {
-                    let _ = app.update(cx, |this, cx| {
-                        this.file_tree_begin_edit(TreeEditKind::NewFolder, &p, is_dir, window, cx)
-                    });
-                }
-            }));
+            .item(
+                PopupMenuItem::new(t(L10nKey::FileTreeContextNewFile)).on_click({
+                    let app = app.clone();
+                    let p = p.clone();
+                    move |_, window, cx| {
+                        let _ = app.update(cx, |this, cx| {
+                            this.file_tree_begin_edit(TreeEditKind::NewFile, &p, is_dir, window, cx)
+                        });
+                    }
+                }),
+            )
+            .item(
+                PopupMenuItem::new(t(L10nKey::FileTreeContextNewFolder)).on_click({
+                    let app = app.clone();
+                    let p = p.clone();
+                    move |_, window, cx| {
+                        let _ = app.update(cx, |this, cx| {
+                            this.file_tree_begin_edit(
+                                TreeEditKind::NewFolder,
+                                &p,
+                                is_dir,
+                                window,
+                                cx,
+                            )
+                        });
+                    }
+                }),
+            );
 
         if !is_root {
-            menu = menu.item(PopupMenuItem::new(t(L10nKey::FileTreeContextRename)).on_click({
-                let app = app.clone();
-                let p = p.clone();
-                move |_, window, cx| {
-                    let _ = app.update(cx, |this, cx| {
-                        this.file_tree_begin_edit(TreeEditKind::Rename, &p, is_dir, window, cx)
-                    });
-                }
-            }));
+            menu = menu.item(
+                PopupMenuItem::new(t(L10nKey::FileTreeContextRename)).on_click({
+                    let app = app.clone();
+                    let p = p.clone();
+                    move |_, window, cx| {
+                        let _ = app.update(cx, |this, cx| {
+                            this.file_tree_begin_edit(TreeEditKind::Rename, &p, is_dir, window, cx)
+                        });
+                    }
+                }),
+            );
         }
 
         menu = menu
             .separator()
-            .item(PopupMenuItem::new(t(L10nKey::FileTreeContextCopyPath)).on_click({
-                let p = p.clone();
-                move |_, _window, cx| {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(p.display().to_string()));
-                }
-            }))
+            .item(
+                PopupMenuItem::new(t(L10nKey::FileTreeContextCopyPath)).on_click({
+                    let p = p.clone();
+                    move |_, _window, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                            p.display().to_string(),
+                        ));
+                    }
+                }),
+            )
             .item(
                 PopupMenuItem::new(crate::ui::right_panel::reveal_label()).on_click({
                     let p = p.clone();
@@ -1448,9 +1474,7 @@ impl Tty7App {
         if !is_root {
             menu = menu.separator().item(
                 PopupMenuItem::element(move |_window, _cx| {
-                    div()
-                        .text_color(danger)
-                        .child(t(L10nKey::Delete))
+                    div().text_color(danger).child(t(L10nKey::Delete))
                 })
                 .on_click({
                     let app = app.clone();

@@ -369,8 +369,7 @@ impl Tty7App {
                 |bar| {
                     let mut summary = t_plural(L10nKey::DiffChangedFiles, files, &[]);
                     if untracked > 0 {
-                        summary.push_str(&t_plural(L10nKey::DiffUntrackedCount, untracked, &[]),
-                        );
+                        summary.push_str(&t_plural(L10nKey::DiffUntrackedCount, untracked, &[]));
                     }
                     bar.child(
                         div()

@@ -60,9 +60,18 @@ impl TraySnapshot {
         let count = |s: AgentStatus| self.agents.iter().filter(|a| a.status == s).count();
         let mut parts = Vec::new();
         for (n, word) in [
-            (count(AgentStatus::Waiting), t(crate::ui::i18n::L10nKey::PanelAgentWaiting)),
-            (count(AgentStatus::Working), t(crate::ui::i18n::L10nKey::PanelAgentWorking)),
-            (count(AgentStatus::Done), t(crate::ui::i18n::L10nKey::PanelAgentDone)),
+            (
+                count(AgentStatus::Waiting),
+                t(crate::ui::i18n::L10nKey::PanelAgentWaiting),
+            ),
+            (
+                count(AgentStatus::Working),
+                t(crate::ui::i18n::L10nKey::PanelAgentWorking),
+            ),
+            (
+                count(AgentStatus::Done),
+                t(crate::ui::i18n::L10nKey::PanelAgentDone),
+            ),
         ] {
             if n > 0 {
                 parts.push(format!("{n} {word}"));
@@ -100,8 +109,12 @@ pub(crate) fn menu_spec(snap: &TraySnapshot) -> Vec<SpecItem> {
     let mut items = vec![item("show", t(L10nKey::TrayShowTty7)), SpecItem::Separator];
     for a in &snap.agents {
         let state = match a.status {
-            AgentStatus::Waiting => format!(" — {}", t(crate::ui::i18n::L10nKey::TrayAgentNeedsInput)),
-            AgentStatus::Working => format!(" — {}", t(crate::ui::i18n::L10nKey::PanelAgentWorking)),
+            AgentStatus::Waiting => {
+                format!(" — {}", t(crate::ui::i18n::L10nKey::TrayAgentNeedsInput))
+            }
+            AgentStatus::Working => {
+                format!(" — {}", t(crate::ui::i18n::L10nKey::PanelAgentWorking))
+            }
             AgentStatus::Done => format!(" — {}", t(crate::ui::i18n::L10nKey::PanelAgentDone)),
             AgentStatus::Idle => String::new(),
         };
@@ -124,13 +137,21 @@ pub(crate) fn menu_spec(snap: &TraySnapshot) -> Vec<SpecItem> {
     items.push(SpecItem::Submenu {
         label: t(L10nKey::TrayNotifications).to_string(),
         items: vec![
-            notify("notify:never", t(L10nKey::NotifyModeNever), NotifyMode::Never),
+            notify(
+                "notify:never",
+                t(L10nKey::NotifyModeNever),
+                NotifyMode::Never,
+            ),
             notify(
                 "notify:unfocused",
                 t(L10nKey::NotifyModeUnfocused),
                 NotifyMode::Unfocused,
             ),
-            notify("notify:always", t(L10nKey::NotifyModeAlways), NotifyMode::Always),
+            notify(
+                "notify:always",
+                t(L10nKey::NotifyModeAlways),
+                NotifyMode::Always,
+            ),
         ],
     });
     items.push(item("settings", t(L10nKey::AppMenuSettings)));
@@ -213,7 +234,10 @@ mod tests {
         assert!(!snapshot_with_agent(AgentStatus::Done).attention());
         assert_eq!(
             snapshot_with_agent(AgentStatus::Waiting).tooltip(),
-            format!("tty7 — 1 {}", t(crate::ui::i18n::L10nKey::PanelAgentWaiting))
+            format!(
+                "tty7 — 1 {}",
+                t(crate::ui::i18n::L10nKey::PanelAgentWaiting)
+            )
         );
         assert_eq!(TraySnapshot::default().tooltip(), "tty7");
     }
