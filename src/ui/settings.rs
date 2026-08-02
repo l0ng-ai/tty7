@@ -1173,7 +1173,7 @@ impl Tty7App {
                 .small()
                 .w(px(180.))
                 .h(control_h)
-                .search_placeholder("Search fonts…")
+                .search_placeholder(crate::ui::i18n::t(crate::ui::i18n::L10nKey::SearchFonts))
                 .menu_max_h(px(224.))
                 .into_any_element()
         };

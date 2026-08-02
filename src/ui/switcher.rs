@@ -108,8 +108,11 @@ impl Tty7App {
     pub(crate) fn open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         remote_connect::register(cx);
         remote_connect::sweep_wsl(cx);
-        let query =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search workspaces and machines"));
+        let query = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(crate::ui::i18n::t(
+                crate::ui::i18n::L10nKey::SearchWorkspacesAndMachines,
+            ))
+        });
         query.update(cx, |state, cx| state.focus(window, cx));
         let subs = vec![cx.subscribe_in(
             &query,

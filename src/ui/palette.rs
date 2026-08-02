@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::core::config::{Config, RightPanelTab, TabBarPosition};
 use crate::core::ssh_profile::parse_quick_connect;
+use crate::ui::i18n::t;
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum CommandKind {
@@ -958,8 +959,8 @@ impl PaletteView {
     fn search_placeholder(&self) -> &'static str {
         match self.menu {
             PaletteMenu::SshConnect => "user@host [-p 2222 -J jump]",
-            PaletteMenu::Root => "Search or type user@host to connect…",
-            PaletteMenu::Theme => "Search…",
+            PaletteMenu::Root => t(crate::ui::i18n::L10nKey::SearchCommandsOrHost),
+            PaletteMenu::Theme => t(crate::ui::i18n::L10nKey::SearchTheme),
         }
     }
 

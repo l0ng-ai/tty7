@@ -12,6 +12,13 @@ pub enum L10nKey {
     SearchThemes,
     SearchSettings,
     FilterHosts,
+    SearchCommandsOrHost,
+    SearchTheme,
+    Search,
+    SearchWorkspacesAndMachines,
+    SearchFonts,
+    NewFolderName,
+    NewFileName,
     CloseWindowTitle,
     CloseWindowBody,
     Cancel,
@@ -79,6 +86,18 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SearchThemes => ("Search themes…", "搜索主题…"),
         L10nKey::SearchSettings => ("Search settings…", "搜索设置…"),
         L10nKey::FilterHosts => ("Filter hosts…", "筛选主机…"),
+        L10nKey::SearchCommandsOrHost => (
+            "Search or type user@host to connect…",
+            "搜索或输入 user@host 连接…",
+        ),
+        L10nKey::SearchTheme => ("Search…", "搜索…"),
+        L10nKey::Search => ("Search", "搜索"),
+        L10nKey::SearchWorkspacesAndMachines => {
+            ("Search workspaces and machines", "搜索工作区与机器")
+        }
+        L10nKey::SearchFonts => ("Search fonts…", "搜索字体…"),
+        L10nKey::NewFolderName => ("New folder name", "新文件夹名称"),
+        L10nKey::NewFileName => ("New file name", "新文件名称"),
         L10nKey::CloseWindowTitle => ("Close Window?", "是否关闭窗口？"),
         L10nKey::CloseWindowBody => (
             "Your sessions keep running in the background. This workspace will be \
@@ -121,6 +140,13 @@ mod tests {
             L10nKey::SearchThemes,
             L10nKey::SearchSettings,
             L10nKey::FilterHosts,
+            L10nKey::SearchCommandsOrHost,
+            L10nKey::SearchTheme,
+            L10nKey::Search,
+            L10nKey::SearchWorkspacesAndMachines,
+            L10nKey::SearchFonts,
+            L10nKey::NewFolderName,
+            L10nKey::NewFileName,
             L10nKey::CloseWindowTitle,
             L10nKey::CloseWindowBody,
             L10nKey::Cancel,

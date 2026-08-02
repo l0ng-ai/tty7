@@ -146,7 +146,10 @@ pub(crate) struct SftpPanelState {
 
 impl SftpPanelState {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Tty7App>) -> Self {
-        let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let filter_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Search))
+        });
         let sub = cx.subscribe_in(&filter_input, window, |_this, _input, ev, _w, cx| {
             if matches!(ev, gpui_component::input::InputEvent::Change) {
                 cx.notify();
@@ -595,13 +598,19 @@ impl Tty7App {
     }
 
     pub(crate) fn sftp_begin_new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("New folder name"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::ui::i18n::t(crate::ui::i18n::L10nKey::NewFolderName))
+        });
         self.sftp_panel.editing = Some(SftpEdit::NewFolder(input));
         cx.notify();
     }
 
     pub(crate) fn sftp_begin_new_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("New file name"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::ui::i18n::t(crate::ui::i18n::L10nKey::NewFileName))
+        });
         self.sftp_panel.editing = Some(SftpEdit::NewFile(input));
         cx.notify();
     }
