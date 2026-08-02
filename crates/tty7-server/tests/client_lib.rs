@@ -354,7 +354,11 @@ fn input_reaches_the_shell_and_a_reattach_replays_it() {
         "the refusal was {refused}"
     );
 
-    reattached.kill().expect("kill the pane");
+    // This test covers attach replay rather than the streaming connection's
+    // Kill command. Close that connection explicitly, then use the one-shot
+    // PaneClient path for deterministic cleanup on loaded Windows runners.
+    drop(reattached);
+    panes.kill(pane_id).expect("kill the pane");
     let deadline = Instant::now() + STREAM_WITHIN;
     loop {
         let listed = panes.list().expect("list panes after the kill");

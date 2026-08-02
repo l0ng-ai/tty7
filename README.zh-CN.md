@@ -53,6 +53,12 @@
 终端和快捷键参考：[docs/features.zh-CN.md](docs/features.zh-CN.md)。面向 agent 的 CLI 接口见
 [skills/tty7/SKILL.md](skills/tty7/SKILL.md)。
 
+通过以下命令安装 skill：
+
+```sh
+npx skills add l0ng-ai/tty7
+```
+
 ## 基准测试
 
 同一台机器、同一天、统一 155×40 网格 —— Apple M1 Pro，macOS 26.3.1，
