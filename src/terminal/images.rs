@@ -26,8 +26,9 @@
 //! `image` crate `RgbaImage` — see `gpui::img`), so [`decode`] does the swap once
 //! at ingest; the placed [`RenderImage`] is uploaded verbatim thereafter.
 
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
-use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 use gpui::RenderImage;
@@ -58,6 +59,10 @@ pub struct PlacedImage {
     /// `id == 0` is an anonymous image, removable only by a delete-all.
     pub id: u32,
     pub placement: u32,
+    /// Set immediately before the paint path hands this frame to GPUI. Frames
+    /// replaced before their first paint have no atlas allocation to evict and
+    /// can release their pixel buffer immediately.
+    pub painted: Arc<AtomicBool>,
 }
 
 /// A pane's placed images plus the retired render images awaiting atlas
@@ -104,7 +109,7 @@ impl ImageStore {
             placed.retain(|p| {
                 let same = p.id == img.id && p.placement == img.placement;
                 if same {
-                    retired.push(p.data.clone());
+                    retire_if_painted(p, retired);
                 }
                 !same
             });
@@ -112,7 +117,9 @@ impl ImageStore {
         placed.push(img);
         let overflow = placed.len().saturating_sub(MAX_IMAGES);
         if overflow > 0 {
-            retired.extend(placed.drain(..overflow).map(|p| p.data));
+            for p in placed.drain(..overflow) {
+                retire_if_painted(&p, retired);
+            }
         }
     }
 
@@ -124,7 +131,7 @@ impl ImageStore {
         let Ok(mut inner) = self.0.lock() else { return };
         let retire = |p: &PlacedImage, keep: bool, retired: &mut Vec<Arc<RenderImage>>| {
             if !keep {
-                retired.push(p.data.clone());
+                retire_if_painted(p, retired);
             }
             keep
         };
@@ -133,7 +140,9 @@ impl ImageStore {
             // All visible placements. Case only governs whether kitty also frees
             // the image data; the client frees unconditionally, so both clear.
             b'a' | b'A' => {
-                retired.extend(placed.drain(..).map(|p| p.data));
+                for p in placed.drain(..) {
+                    retire_if_painted(&p, retired);
+                }
             }
             // By image id.
             b'i' | b'I' => placed.retain(|p| retire(p, p.id != del.id, retired)),
@@ -153,6 +162,27 @@ impl ImageStore {
         self.0.lock().map(|s| s.placed.clone()).unwrap_or_default()
     }
 
+    /// Claim one still-current placement immediately before painting it.
+    ///
+    /// The store lock closes the race with replacement: once this returns true,
+    /// a replacing frame must retire the old atlas image. If the snapshot is
+    /// already stale, it is not painted and needs no later atlas cleanup.
+    pub fn claim_for_paint(&self, image: &PlacedImage) -> bool {
+        self.0
+            .lock()
+            .map(|inner| {
+                let current = inner
+                    .placed
+                    .iter()
+                    .any(|placed| Arc::ptr_eq(&placed.data, &image.data));
+                if current {
+                    image.painted.store(true, Ordering::Release);
+                }
+                current
+            })
+            .unwrap_or(false)
+    }
+
     /// Take the render images retired since the last call, for the paint path to
     /// evict from the sprite atlas (`Window::drop_image`). Draining here — the
     /// one place with `&mut Window` — is what stops a 60fps re-transmitting
@@ -164,13 +194,39 @@ impl ImageStore {
             .unwrap_or_default()
     }
 
+    /// Drain every image that may have an atlas allocation when its pane is
+    /// released. The caller must stop the decode worker first so no new frame
+    /// can land after this drain.
+    pub fn take_for_release(&self) -> Vec<Arc<RenderImage>> {
+        self.0
+            .lock()
+            .map(|mut inner| {
+                let mut images = std::mem::take(&mut inner.retired);
+                for placed in inner.placed.drain(..) {
+                    if placed.painted.load(Ordering::Acquire) {
+                        images.push(placed.data);
+                    }
+                }
+                images
+            })
+            .unwrap_or_default()
+    }
+
     /// Drop everything (the grid was cleared, so every anchor is meaningless).
     /// Placed frames are retired so their atlas tiles are still evicted.
     pub fn clear(&self) {
         if let Ok(mut inner) = self.0.lock() {
-            let gone: Vec<_> = inner.placed.drain(..).map(|p| p.data).collect();
-            inner.retired.extend(gone);
+            let StoreInner { placed, retired } = &mut *inner;
+            for p in placed.drain(..) {
+                retire_if_painted(&p, retired);
+            }
         }
+    }
+}
+
+fn retire_if_painted(img: &PlacedImage, retired: &mut Vec<Arc<RenderImage>>) {
+    if img.painted.load(Ordering::Acquire) {
+        retired.push(img.data.clone());
     }
 }
 
@@ -182,6 +238,246 @@ pub struct PendingFrame {
     pub img: Image,
     pub anchor_row: i64,
     pub anchor_col: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrameIdentity {
+    id: u32,
+    placement: u32,
+}
+
+impl FrameIdentity {
+    fn of(img: &Image) -> Self {
+        Self {
+            id: img.id,
+            placement: img.placement,
+        }
+    }
+
+    fn deleted_by(self, del: &ImageDelete) -> bool {
+        match del.target {
+            b'a' | b'A' => true,
+            b'i' | b'I' => self.id == del.id,
+            b'p' | b'P' => self.placement == del.placement && (del.id == 0 || self.id == del.id),
+            _ => false,
+        }
+    }
+}
+
+struct QueuedFrame {
+    frame: PendingFrame,
+    identity: FrameIdentity,
+    replaceable: bool,
+    sequence: u64,
+}
+
+#[derive(Default)]
+struct InboxState {
+    pending: VecDeque<QueuedFrame>,
+    pending_bytes: usize,
+    latest: Vec<(FrameIdentity, u64)>,
+    in_flight: Option<(u64, FrameIdentity)>,
+    cancelled_in_flight: Option<u64>,
+    next_sequence: u64,
+    closed: bool,
+}
+
+struct DecodeInbox {
+    state: Mutex<InboxState>,
+    ready: Condvar,
+}
+
+const MAX_PENDING_FRAMES: usize = 4;
+const MAX_PENDING_BYTES: usize = tty7_core::core::kitty_graphics::MAX_IMAGE_BYTES;
+
+impl DecodeInbox {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(InboxState::default()),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn submit(&self, frame: PendingFrame) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.closed {
+            return;
+        }
+
+        state.next_sequence = state.next_sequence.wrapping_add(1);
+        let sequence = state.next_sequence;
+        let identity = FrameIdentity::of(&frame.img);
+        let replaceable = frame.img.id != 0;
+        if replaceable {
+            if let Some(index) = state
+                .pending
+                .iter()
+                .position(|queued| queued.replaceable && queued.identity == identity)
+                && let Some(old) = state.pending.remove(index)
+            {
+                state.pending_bytes = state.pending_bytes.saturating_sub(old.frame.img.data.len());
+            }
+            if let Some((_, latest)) = state
+                .latest
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == identity)
+            {
+                *latest = sequence;
+            } else {
+                state.latest.push((identity, sequence));
+            }
+        }
+
+        state.pending_bytes = state.pending_bytes.saturating_add(frame.img.data.len());
+        state.pending.push_back(QueuedFrame {
+            frame,
+            identity,
+            replaceable,
+            sequence,
+        });
+        while state.pending.len() > MAX_PENDING_FRAMES
+            || (state.pending.len() > 1 && state.pending_bytes > MAX_PENDING_BYTES)
+        {
+            if let Some(old) = state.pending.pop_front() {
+                state.pending_bytes = state.pending_bytes.saturating_sub(old.frame.img.data.len());
+                remove_latest_if(
+                    &mut state.latest,
+                    old.replaceable.then_some(old.identity),
+                    old.sequence,
+                );
+            }
+        }
+        drop(state);
+        self.ready.notify_one();
+    }
+
+    fn delete(&self, del: &ImageDelete, store: &ImageStore) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state
+            .latest
+            .retain(|(identity, _)| !identity.deleted_by(del));
+        if let Some((sequence, identity)) = state.in_flight
+            && identity.deleted_by(del)
+        {
+            state.cancelled_in_flight = Some(sequence);
+        }
+        let mut kept = VecDeque::with_capacity(state.pending.len());
+        while let Some(queued) = state.pending.pop_front() {
+            if queued.identity.deleted_by(del) {
+                state.pending_bytes = state
+                    .pending_bytes
+                    .saturating_sub(queued.frame.img.data.len());
+            } else {
+                kept.push_back(queued);
+            }
+        }
+        state.pending = kept;
+        store.delete(del);
+    }
+
+    fn recv(&self) -> Option<QueuedFrame> {
+        let mut state = self.state.lock().ok()?;
+        while state.pending.is_empty() && !state.closed {
+            state = self.ready.wait(state).ok()?;
+        }
+        let queued = state.pending.pop_front()?;
+        state.pending_bytes = state
+            .pending_bytes
+            .saturating_sub(queued.frame.img.data.len());
+        state.in_flight = Some((queued.sequence, queued.identity));
+        Some(queued)
+    }
+
+    fn place_if_current(
+        &self,
+        queued: QueuedFrame,
+        decoded: (Arc<RenderImage>, u32, u32),
+        store: &ImageStore,
+    ) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        state.in_flight = None;
+        if state.cancelled_in_flight == Some(queued.sequence) {
+            state.cancelled_in_flight = None;
+            remove_latest_if(
+                &mut state.latest,
+                queued.replaceable.then_some(queued.identity),
+                queued.sequence,
+            );
+            return false;
+        }
+        if queued.replaceable
+            && !state.latest.iter().any(|(identity, sequence)| {
+                *identity == queued.identity && *sequence == queued.sequence
+            })
+        {
+            return false;
+        }
+
+        remove_latest_if(
+            &mut state.latest,
+            queued.replaceable.then_some(queued.identity),
+            queued.sequence,
+        );
+        let (data, width_px, height_px) = decoded;
+        store.place(PlacedImage {
+            data,
+            anchor_row: queued.frame.anchor_row,
+            anchor_col: queued.frame.anchor_col,
+            width_px,
+            height_px,
+            cols: queued.frame.img.cols,
+            rows: queued.frame.img.rows,
+            id: queued.frame.img.id,
+            placement: queued.frame.img.placement,
+            painted: Arc::new(AtomicBool::new(false)),
+        });
+        true
+    }
+
+    fn discard(&self, queued: QueuedFrame) {
+        if let Ok(mut state) = self.state.lock() {
+            state.in_flight = None;
+            if state.cancelled_in_flight == Some(queued.sequence) {
+                state.cancelled_in_flight = None;
+            }
+            remove_latest_if(
+                &mut state.latest,
+                queued.replaceable.then_some(queued.identity),
+                queued.sequence,
+            );
+        }
+    }
+
+    fn close(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.closed = true;
+        }
+        self.ready.notify_one();
+    }
+
+    #[cfg(test)]
+    fn pending_frames(&self) -> usize {
+        self.state
+            .lock()
+            .map(|state| state.pending.len())
+            .unwrap_or(0)
+    }
+}
+
+fn remove_latest_if(
+    latest: &mut Vec<(FrameIdentity, u64)>,
+    key: Option<FrameIdentity>,
+    sequence: u64,
+) {
+    if let Some(key) = key {
+        latest.retain(|(candidate, current)| *candidate != key || *current != sequence);
+    }
 }
 
 /// Off-thread image decoder with newest-frame-wins coalescing — the crux of the
@@ -203,7 +499,8 @@ pub struct PendingFrame {
 ///
 /// [`inbox`]: DecodeWorker::inbox
 pub struct DecodeWorker {
-    tx: Option<Sender<PendingFrame>>,
+    inbox: Arc<DecodeInbox>,
+    store: ImageStore,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -211,16 +508,27 @@ impl DecodeWorker {
     /// Spawn the decode thread. `store` is the shared placement store the worker
     /// writes decoded frames into; `wake` is called after each successful decode
     /// so the view repaints (a cloned `EventProxy::send_event(Wakeup)` in
-    /// practice). The thread ends when the returned worker is dropped (the
-    /// channel closes).
+    /// practice). The thread ends after the returned worker closes and drains
+    /// its bounded inbox.
     pub fn spawn(store: ImageStore, wake: impl Fn() + Send + 'static) -> Self {
-        let (tx, rx) = channel::<PendingFrame>();
+        Self::spawn_with_decoder(store, wake, decode)
+    }
+
+    fn spawn_with_decoder(
+        store: ImageStore,
+        wake: impl Fn() + Send + 'static,
+        decoder: impl Fn(&Image) -> Option<(Arc<RenderImage>, u32, u32)> + Send + 'static,
+    ) -> Self {
+        let inbox = Arc::new(DecodeInbox::new());
+        let worker_inbox = inbox.clone();
+        let worker_store = store.clone();
         let handle = std::thread::Builder::new()
             .name("tty7-image-decode".to_string())
-            .spawn(move || Self::run(rx, store, wake))
+            .spawn(move || Self::run(worker_inbox, worker_store, wake, decoder))
             .ok();
         Self {
-            tx: Some(tx),
+            inbox,
+            store,
             handle,
         }
     }
@@ -229,76 +537,43 @@ impl DecodeWorker {
     /// thread): the frame is queued and decoded asynchronously. If the worker
     /// has gone away the frame is silently dropped — the pane is tearing down.
     pub fn submit(&self, frame: PendingFrame) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(frame);
-        }
+        self.inbox.submit(frame);
     }
 
-    /// The decode loop. Blocks for the next frame, then **coalesces**: drains
-    /// everything already queued and keeps only the last frame per image id, so
-    /// a burst that piled up during a slow inflate collapses to one decode per
-    /// image. Decodes the survivors newest-first and places them.
-    fn run(rx: Receiver<PendingFrame>, store: ImageStore, wake: impl Fn()) {
-        while let Ok(first) = rx.recv() {
-            // Collect the blocking frame plus any that arrived while we were
-            // busy, newest-per-id winning (a later frame with the same id
-            // supersedes an earlier one — exactly what `place` would do, but
-            // without paying to decode the ones we'd immediately retire).
-            let mut latest: Vec<PendingFrame> = vec![first];
-            loop {
-                match rx.try_recv() {
-                    Ok(next) => {
-                        if next.img.id != 0
-                            && let Some(slot) = latest.iter_mut().find(|p| p.img.id == next.img.id)
-                        {
-                            *slot = next; // supersede the queued frame for this id
-                        } else {
-                            latest.push(next);
-                        }
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        // Decode whatever we already gathered, then exit.
-                        Self::place_all(&store, latest, &wake);
-                        return;
+    pub fn delete(&self, del: &ImageDelete) {
+        self.inbox.delete(del, &self.store);
+    }
+
+    /// The decode loop blocks for the next already-coalesced frame. Replacement
+    /// happens synchronously in `submit`, before a large payload can accumulate
+    /// behind a slow inflate.
+    fn run(
+        inbox: Arc<DecodeInbox>,
+        store: ImageStore,
+        wake: impl Fn(),
+        decoder: impl Fn(&Image) -> Option<(Arc<RenderImage>, u32, u32)>,
+    ) {
+        while let Some(queued) = inbox.recv() {
+            match decoder(&queued.frame.img) {
+                Some(decoded) => {
+                    if inbox.place_if_current(queued, decoded, &store) {
+                        wake();
                     }
                 }
+                None => inbox.discard(queued),
             }
-            Self::place_all(&store, latest, &wake);
         }
     }
 
-    fn place_all(store: &ImageStore, frames: Vec<PendingFrame>, wake: &impl Fn()) {
-        let mut placed_any = false;
-        for pf in frames {
-            if let Some((data, w, h)) = decode(&pf.img) {
-                store.place(PlacedImage {
-                    data,
-                    anchor_row: pf.anchor_row,
-                    anchor_col: pf.anchor_col,
-                    width_px: w,
-                    height_px: h,
-                    cols: pf.img.cols,
-                    rows: pf.img.rows,
-                    id: pf.img.id,
-                    placement: pf.img.placement,
-                });
-                placed_any = true;
-            }
-        }
-        if placed_any {
-            wake();
-        }
+    #[cfg(test)]
+    fn pending_frames(&self) -> usize {
+        self.inbox.pending_frames()
     }
 }
 
 impl Drop for DecodeWorker {
     fn drop(&mut self) {
-        // Drop the sender first so the worker sees `Disconnected` and returns;
-        // then join so its store writes are visible and it doesn't outlive the
-        // pane. Joining before dropping `tx` would deadlock — the loop only ends
-        // once the channel closes.
-        self.tx = None;
+        self.inbox.close();
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
@@ -377,6 +652,7 @@ mod tests {
             rows: 0,
             id,
             placement,
+            painted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -472,6 +748,8 @@ mod tests {
     fn replacing_a_frame_retires_the_old_render_image() {
         let store = ImageStore::new();
         store.place(placed(7, 1));
+        let image = store.snapshot().pop().unwrap();
+        assert!(store.claim_for_paint(&image));
         // A same-id re-transmit (what a 60fps browser does) must retire the old
         // frame's render image so the paint path can evict its atlas tile.
         store.place(placed(7, 1));
@@ -489,6 +767,9 @@ mod tests {
         let store = ImageStore::new();
         store.place(placed(1, 0));
         store.place(placed(2, 0));
+        for image in store.snapshot() {
+            assert!(store.claim_for_paint(&image));
+        }
         let _ = store.take_retired(); // drain the (none) from placement
         store.delete(&ImageDelete {
             target: b'i',
@@ -508,11 +789,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unpainted_replacements_do_not_accumulate_retired_pixels() {
+        let store = ImageStore::new();
+        for _ in 0..100 {
+            store.place(placed(7, 1));
+        }
+        assert_eq!(store.snapshot().len(), 1);
+        assert!(
+            store.take_retired().is_empty(),
+            "a background tab never uploaded these frames to the atlas"
+        );
+    }
+
+    #[test]
+    fn release_drains_retired_and_current_atlas_images() {
+        let store = ImageStore::new();
+        store.place(placed(1, 0));
+        store.place(placed(2, 0));
+        for image in store.snapshot() {
+            assert!(store.claim_for_paint(&image));
+        }
+        store.delete(&delete_id(1));
+
+        assert_eq!(
+            store.take_for_release().len(),
+            2,
+            "release evicts both a retired frame and the current painted frame"
+        );
+        assert!(store.snapshot().is_empty());
+        assert!(store.take_for_release().is_empty());
+    }
+
+    #[test]
+    fn stale_snapshot_cannot_be_claimed_after_replacement() {
+        let store = ImageStore::new();
+        store.place(placed(7, 1));
+        let stale = store.snapshot().pop().unwrap();
+        store.place(placed(7, 1));
+
+        assert!(
+            !store.claim_for_paint(&stale),
+            "a snapshot replaced before paint must not allocate an orphan atlas tile"
+        );
+    }
+
     fn frame(id: u32) -> PendingFrame {
         PendingFrame {
             img: Image { id, ..red_pixel() },
             anchor_row: 0,
             anchor_col: 0,
+        }
+    }
+
+    fn delete_id(id: u32) -> ImageDelete {
+        ImageDelete {
+            target: b'I',
+            id,
+            placement: 0,
         }
     }
 
@@ -554,6 +888,140 @@ mod tests {
             store.snapshot().len(),
             1,
             "a same-id burst leaves exactly one live frame"
+        );
+    }
+
+    #[test]
+    fn same_id_burst_is_bounded_before_decoder_can_drain() {
+        use std::sync::Barrier;
+
+        let store = ImageStore::new();
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let blocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker = DecodeWorker::spawn_with_decoder(store, || {}, {
+            let entered = entered.clone();
+            let release = release.clone();
+            move |img| {
+                if !blocked.swap(true, Ordering::SeqCst) {
+                    entered.wait();
+                    release.wait();
+                }
+                decode(img)
+            }
+        });
+
+        worker.submit(frame(9));
+        entered.wait();
+        for _ in 0..16 {
+            worker.submit(frame(9));
+        }
+        let pending = worker.pending_frames();
+        release.wait();
+        drop(worker);
+
+        assert_eq!(
+            pending, 1,
+            "same-id frames must replace the pending frame before decode"
+        );
+    }
+
+    #[test]
+    fn delete_cancels_a_frame_already_being_decoded() {
+        use std::sync::Barrier;
+
+        let store = ImageStore::new();
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let worker = DecodeWorker::spawn_with_decoder(store.clone(), || {}, {
+            let entered = entered.clone();
+            let release = release.clone();
+            move |img| {
+                entered.wait();
+                release.wait();
+                decode(img)
+            }
+        });
+
+        worker.submit(frame(9));
+        entered.wait();
+        worker.delete(&delete_id(9));
+        release.wait();
+        drop(worker);
+
+        assert!(
+            store.snapshot().is_empty(),
+            "an in-flight frame deleted before decode completed must stay deleted"
+        );
+    }
+
+    #[test]
+    fn delete_all_cancels_an_anonymous_frame_already_being_decoded() {
+        use std::sync::Barrier;
+
+        let store = ImageStore::new();
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let worker = DecodeWorker::spawn_with_decoder(store.clone(), || {}, {
+            let entered = entered.clone();
+            let release = release.clone();
+            move |img| {
+                entered.wait();
+                release.wait();
+                decode(img)
+            }
+        });
+
+        worker.submit(frame(0));
+        entered.wait();
+        worker.delete(&ImageDelete {
+            target: b'A',
+            id: 0,
+            placement: 0,
+        });
+        release.wait();
+        drop(worker);
+
+        assert!(
+            store.snapshot().is_empty(),
+            "delete-all must cancel anonymous in-flight frames too"
+        );
+    }
+
+    #[test]
+    fn retransmit_after_delete_wins_over_the_old_in_flight_frame() {
+        use std::sync::Barrier;
+
+        let store = ImageStore::new();
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let blocked = Arc::new(AtomicBool::new(false));
+        let worker = DecodeWorker::spawn_with_decoder(store.clone(), || {}, {
+            let entered = entered.clone();
+            let release = release.clone();
+            move |img| {
+                if !blocked.swap(true, Ordering::SeqCst) {
+                    entered.wait();
+                    release.wait();
+                }
+                decode(img)
+            }
+        });
+
+        worker.submit(frame(9));
+        entered.wait();
+        worker.delete(&delete_id(9));
+        let mut replacement = frame(9);
+        replacement.anchor_row = 42;
+        worker.submit(replacement);
+        release.wait();
+        drop(worker);
+
+        let placed = store.snapshot();
+        assert_eq!(placed.len(), 1);
+        assert_eq!(
+            placed[0].anchor_row, 42,
+            "the pre-delete decode must not overwrite its retransmission"
         );
     }
 

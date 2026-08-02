@@ -1375,6 +1375,9 @@ impl Element for TerminalElement {
                 if screen_row + span_rows as i64 <= 0 || screen_row >= geom.rows as i64 {
                     continue;
                 }
+                if !image_store.claim_for_paint(img) {
+                    continue;
+                }
                 let top = geom.origin.y + geom.line_height * screen_row as f32;
                 let left = geom.origin.x + geom.cell_width * img.anchor_col as f32;
                 let bounds = Bounds {

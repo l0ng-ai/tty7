@@ -4,7 +4,7 @@
 
 ### tty7
 
-**A terminal workbench: shells, sessions, SSH, coding agents.**
+**A terminal workbench: persistent sessions, remote work, agents.**
 
 <sub>Pure Rust · GPU rendering on Zed's gpui · VT core from Alacritty</sub>
 
@@ -21,10 +21,13 @@
 
 ## Why
 
-- **Fast** — ~2× the throughput of Alacritty, Ghostty, or Kitty ([benchmarks](#benchmarks))
-- **Sessions persist** — quit or reboot; your shells keep running, no tmux
-- **Editor-grade input** — completion, syntax highlighting, history search built in; zero config for zsh, bash, fish, PowerShell
-- **Agent-aware** — recognizes Claude Code & co. in a pane: status, notifications, session resume
+- **Performance** — ~2× the throughput of Alacritty, Ghostty, or Kitty ([benchmarks](#benchmarks))
+- **Persistent sessions** — quit or reboot; your shells and supported agent sessions keep running, no tmux
+- **Editor-grade input** — suggestions, completion, highlighting, history search
+- **Remote development** — files, repos, panes, and git data stay on the remote machine
+- **Native SSH** — profiles, SFTP, port forwarding, and jump hosts
+- **Agent-aware** — Claude Code, Codex & co.: status, notifications, git context
+- **CLI + Skills** — agents create panes, run commands, and inspect output
 
 ## Install
 
@@ -34,20 +37,21 @@ Native builds for each platform on [**Releases**](https://github.com/l0ng-ai/tty
 |---|---|---|
 | **macOS** | `…-macos-arm64.dmg` · `…-x86_64.dmg` | drag into Applications |
 | **Windows** | `…-setup.exe` · portable `….zip` | |
-| **Linux** | `…-x86_64.AppImage` | `chmod +x` and run — x11/wayland libs bundled |
+| **Linux** | `…-x86_64.AppImage` | `chmod +x` and run — X11/Wayland libraries bundled |
 
 ## What's inside
 
 | | |
 |---|---|
-| **Input** | ghost suggestions from history · explained tab completion · syntax highlighting · multi-line editing · click places the caret · <kbd>⌃ R</kbd> fuzzy history |
+| **Editor-grade input** | ghost suggestions from history · explained tab completion · syntax highlighting · multi-line editing · click places the caret · <kbd>⌃ R</kbd> fuzzy history |
 | **Window** | tabs & splits · <kbd>⌘ P</kbd> palette · <kbd>⌘ F</kbd> scrollback search · nine themes · IME |
-| **Coding agents** | per-pane agent detection (~17 CLIs): status dot, notifications, branch + diff, resume after reboot, tray icon that signals "needs your input" |
-| **SSH** | native russh stack: profiles with keychain secrets, SFTP panel, port forwarding, jump hosts |
+| **Agent-aware** | per-pane detection (~17 CLIs): status dot · notifications · branch + diff · resume after reboot · tray icon when input is needed |
+| **Remote workspaces** | remote files, repos, changes, diffs, worktrees, tabs, and panes · reconnect from any client and continue where you left off |
+| **CLI + Skills** | bundled `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · pane/workspace control · real PTY commands · output, process, port, and agent status |
+| **SSH** | native russh stack: profiles with keychain secrets · SFTP panel · port forwarding · jump hosts · one-time, unprivileged `tty7-server` install |
 
-Details for every row: [docs/features.md](docs/features.md). Keybindings: <kbd>⌘ ,</kbd>
-opens Settings — browse and remap everything, tmux preset included
-([full list](docs/features.md#keybindings)).
+Terminal and keybinding reference: [docs/features.md](docs/features.md). The agent-facing CLI
+interface is documented in [skills/tty7/SKILL.md](skills/tty7/SKILL.md).
 
 ## Benchmarks
 
@@ -56,11 +60,11 @@ five-run averages (2026-07-04):
 
 | | **tty7** | Alacritty | Ghostty | Kitty |
 |---|---:|---:|---:|---:|
-| Plaintext IO — 11 MB `cat` <sub>(lower = better)</sub> | **95 ms** | 239 ms | 179 ms | 185 ms |
+| Plaintext I/O — 11 MB `cat` <sub>(lower = better)</sub> | **95 ms** | 239 ms | 179 ms | 185 ms |
 | [DOOM-fire](https://github.com/const-void/DOOM-fire-zig) frame rate <sub>(higher = better)</sub> | **888 fps** | 485 fps | 552 fps | 617 fps |
 | Cold-launch memory | 116 MB¹ | 105 MB | 128 MB | 130 MB |
 
-<sub>¹ GUI 105 MB + the persistent daemon 11 MB.</sub>
+<sub>¹ GUI 105 MB + the persistent server 11 MB.</sub>
 
 Methodology and one-command reproduction: [`scripts/bench/`](scripts/bench/README.md).
 
