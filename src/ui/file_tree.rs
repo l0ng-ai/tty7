@@ -1126,7 +1126,7 @@ impl Tty7App {
         let Some(target) = self.agent_target_leaf(cx) else {
             crate::terminal::notify_desktop(
                 Some("tty7"),
-                "No running coding agent found — start one (claude, codex, …) in a pane first.",
+                t(L10nKey::AppNoRunningCodingAgent),
             );
             return;
         };

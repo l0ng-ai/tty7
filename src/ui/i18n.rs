@@ -688,6 +688,17 @@ pub enum L10nKey {
     RemoteHostNotTty7,
     RemoteWorkspaceListFailed,
     RemoteServerRestartFailed,
+    AppNoRunningCodingAgent,
+    SwitcherThisComputer,
+    SwitcherRestartingServer,
+    SwitcherDownloadingServerWithTotal,
+    SwitcherDownloadingServerNoTotal,
+    SwitcherCopyingServer,
+    SwitcherThisWindow,
+    SwitcherOpen,
+    SwitcherDisconnect,
+    SwitcherOpenInNewWindow,
+    SwitcherRename,
 }
 
 pub fn set_locale(gui_language: &str) {
@@ -2123,6 +2134,29 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "could not restart tty7's server on {machine}: {error}",
             "无法重启 {machine} 上的 tty7 服务器：{error}",
         ),
+        L10nKey::AppNoRunningCodingAgent => (
+            "No running coding agent found — start one (claude, codex, …) in a pane first.",
+            "未找到运行中的编码智能体——请先在某个窗格中启动一个（claude、codex 等）。",
+        ),
+        L10nKey::SwitcherThisComputer => ("This Computer", "本机"),
+        L10nKey::SwitcherRestartingServer => ("Restarting tty7's server…", "正在重启 tty7 服务器…"),
+        L10nKey::SwitcherDownloadingServerWithTotal => (
+            "Downloading tty7's server… {done} / {total}",
+            "正在下载 tty7 服务器… {done} / {total}",
+        ),
+        L10nKey::SwitcherDownloadingServerNoTotal => (
+            "Downloading tty7's server… {done}",
+            "正在下载 tty7 服务器… {done}",
+        ),
+        L10nKey::SwitcherCopyingServer => (
+            "Copying tty7's server… {done} / {total}",
+            "正在复制 tty7 服务器… {done} / {total}",
+        ),
+        L10nKey::SwitcherThisWindow => ("this window", "当前窗口"),
+        L10nKey::SwitcherOpen => ("open", "已打开"),
+        L10nKey::SwitcherDisconnect => ("Disconnect", "断开连接"),
+        L10nKey::SwitcherOpenInNewWindow => ("Open in New Window", "在新窗口中打开"),
+        L10nKey::SwitcherRename => ("Rename…", "重命名…"),
         L10nKey::PanelMoreChangedFiles => (
             "… and {count} more changed files — run `git diff` to see them.",
             "…还有 {count} 个变更文件——运行 `git diff` 查看。",
@@ -3018,6 +3052,17 @@ mod tests {
             L10nKey::RemoteHostNotTty7,
             L10nKey::RemoteWorkspaceListFailed,
             L10nKey::RemoteServerRestartFailed,
+            L10nKey::AppNoRunningCodingAgent,
+            L10nKey::SwitcherThisComputer,
+            L10nKey::SwitcherRestartingServer,
+            L10nKey::SwitcherDownloadingServerWithTotal,
+            L10nKey::SwitcherDownloadingServerNoTotal,
+            L10nKey::SwitcherCopyingServer,
+            L10nKey::SwitcherThisWindow,
+            L10nKey::SwitcherOpen,
+            L10nKey::SwitcherDisconnect,
+            L10nKey::SwitcherOpenInNewWindow,
+            L10nKey::SwitcherRename,
         ] {
             assert!(
                 !translate(Locale::ZhHans, key).is_empty(),
