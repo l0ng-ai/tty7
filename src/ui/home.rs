@@ -69,6 +69,21 @@ pub(crate) fn now_secs() -> u64 {
 }
 
 pub(crate) fn relative_time(now: u64, then: u64) -> String {
+    relative_time_in(crate::ui::i18n::is_zh_hans(), now, then)
+}
+
+fn relative_time_in(zh_hans: bool, now: u64, then: u64) -> String {
+    if zh_hans {
+        return match now.saturating_sub(then) {
+            0..=59 => "刚刚".to_string(),
+            s if s < 3_600 => format!("{} 分钟前", s / 60),
+            s if s < 7_200 => "1 小时前".to_string(),
+            s if s < 86_400 => format!("{} 小时前", s / 3_600),
+            s if s < 172_800 => "昨天".to_string(),
+            s if s < 604_800 => format!("{} 天前", s / 86_400),
+            _ => "超过一周".to_string(),
+        };
+    }
     if then == 0 || then >= now {
         return "just now".to_string();
     }
@@ -312,14 +327,22 @@ mod tests {
     #[test]
     fn relative_time_reads_coarsely_across_the_ranges() {
         let now = 10_000_000u64;
-        assert_eq!(relative_time(now, now), "just now");
-        assert_eq!(relative_time(now, now - 30), "just now");
-        assert_eq!(relative_time(now, now - 120), "2 min ago");
-        assert_eq!(relative_time(now, now - 3600), "1 hour ago");
-        assert_eq!(relative_time(now, now - 4 * 3600), "4 hours ago");
-        assert_eq!(relative_time(now, now - 90_000), "yesterday");
-        assert_eq!(relative_time(now, now - 3 * 86_400), "3 days ago");
-        assert_eq!(relative_time(now, now - 30 * 86_400), "over a week ago");
+        assert_eq!(relative_time_in(false, now, now), "just now");
+        assert_eq!(relative_time_in(false, now, now - 30), "just now");
+        assert_eq!(relative_time_in(false, now, now - 120), "2 min ago");
+        assert_eq!(relative_time_in(false, now, now - 3600), "1 hour ago");
+        assert_eq!(relative_time_in(false, now, now - 4 * 3600), "4 hours ago");
+        assert_eq!(relative_time_in(false, now, now - 90_000), "yesterday");
+        assert_eq!(relative_time_in(false, now, now - 3 * 86_400), "3 days ago");
+        assert_eq!(
+            relative_time_in(false, now, now - 30 * 86_400),
+            "over a week ago"
+        );
+
+        assert_eq!(relative_time_in(true, now, now - 30), "刚刚");
+        assert_eq!(relative_time_in(true, now, now - 120), "2 分钟前");
+        assert_eq!(relative_time_in(true, now, now - 3600), "1 小时前");
+        assert_eq!(relative_time_in(true, now, now - 90_000), "昨天");
     }
 
     #[test]

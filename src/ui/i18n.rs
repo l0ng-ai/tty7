@@ -9,6 +9,9 @@ static CURRENT: AtomicU8 = AtomicU8::new(EN);
 pub enum L10nKey {
     SearchTabs,
     SearchFiles,
+    SearchThemes,
+    SearchSettings,
+    FilterHosts,
     CloseWindowTitle,
     CloseWindowBody,
     Cancel,
@@ -37,6 +40,10 @@ pub fn set_locale(gui_language: &str) {
 
 pub fn t(key: L10nKey) -> &'static str {
     translate(current_locale(), key)
+}
+
+pub fn is_zh_hans() -> bool {
+    current_locale() == Locale::ZhHans
 }
 
 fn current_locale() -> Locale {
@@ -69,6 +76,9 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
     let (en, zh) = match key {
         L10nKey::SearchTabs => ("Search tabs…", "搜索标签页…"),
         L10nKey::SearchFiles => ("Search files…", "搜索文件…"),
+        L10nKey::SearchThemes => ("Search themes…", "搜索主题…"),
+        L10nKey::SearchSettings => ("Search settings…", "搜索设置…"),
+        L10nKey::FilterHosts => ("Filter hosts…", "筛选主机…"),
         L10nKey::CloseWindowTitle => ("Close Window?", "是否关闭窗口？"),
         L10nKey::CloseWindowBody => (
             "Your sessions keep running in the background. This workspace will be \
@@ -108,6 +118,9 @@ mod tests {
         for key in [
             L10nKey::SearchTabs,
             L10nKey::SearchFiles,
+            L10nKey::SearchThemes,
+            L10nKey::SearchSettings,
+            L10nKey::FilterHosts,
             L10nKey::CloseWindowTitle,
             L10nKey::CloseWindowBody,
             L10nKey::Cancel,

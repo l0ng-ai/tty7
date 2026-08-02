@@ -3453,7 +3453,9 @@ impl Tty7App {
         let link_file_command_input = self.build_link_file_command_input(&mut subs, window, cx);
         let scroll_slider = self.build_scroll_slider(&mut subs, window, cx);
         let window_opacity_slider = self.build_window_opacity_slider(&mut subs, window, cx);
-        let theme_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search themes…"));
+        let theme_search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t(crate::ui::i18n::L10nKey::SearchThemes))
+        });
         subs.push(
             cx.subscribe_in(&theme_search, window, |_this, _i, ev, _w, cx| {
                 if matches!(ev, InputEvent::Change) {
@@ -3461,8 +3463,9 @@ impl Tty7App {
                 }
             }),
         );
-        let settings_search =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search settings…"));
+        let settings_search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t(crate::ui::i18n::L10nKey::SearchSettings))
+        });
         subs.push(
             cx.subscribe_in(&settings_search, window, |this, _i, ev, _w, cx| {
                 if matches!(ev, InputEvent::Change) {
@@ -3472,7 +3475,9 @@ impl Tty7App {
             }),
         );
 
-        let ssh_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter hosts…"));
+        let ssh_filter = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t(crate::ui::i18n::L10nKey::FilterHosts))
+        });
         subs.push(
             cx.subscribe_in(&ssh_filter, window, |_this, _i, ev, _w, cx| {
                 if matches!(ev, InputEvent::Change) {
