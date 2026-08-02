@@ -1240,6 +1240,20 @@ impl TerminalView {
                     self.close_completion();
                     self.cursor_visible = true;
                     cx.notify();
+                } else if cfg!(target_os = "macos") && self.accepts_input(cx) {
+                    let shell_owns_prompt = self.shell_owns_prompt();
+                    self.release_hold();
+                    self.send_to_pty(&[0x15], cx);
+                    if !shell_owns_prompt {
+                        let alt = self.on_alt_screen();
+                        self.typeahead.observe(
+                            RawInput::Key {
+                                key: "u",
+                                plain: false,
+                            },
+                            alt,
+                        );
+                    }
                 }
                 CmdKey::Consumed
             }
@@ -7849,6 +7863,98 @@ mod gpui_tests {
             .unwrap();
         let text = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
         assert_eq!(text.as_deref(), Some("hello"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn cmd_backspace_reaches_a_foreground_tui_as_ctrl_u(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, window, cx| {
+                assert!(
+                    !view.input_active(),
+                    "the foreground process, not tty7's editor, owns input"
+                );
+                view.on_key_down(
+                    &KeyDownEvent {
+                        keystroke: gpui::Keystroke {
+                            modifiers: Modifiers {
+                                platform: true,
+                                ..Modifiers::default()
+                            },
+                            key: "backspace".into(),
+                            key_char: None,
+                        },
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x15]));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn cmd_backspace_releases_held_input_before_ctrl_u(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: false,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        for _ in 0..200 {
+            cx.run_until_parked();
+            let gap = window
+                .update(cx, |view, _, _| {
+                    view.terminal.shell_active() && !view.terminal.at_prompt()
+                })
+                .unwrap();
+            if gap {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, window, cx| {
+                view.commit_text("ls", cx);
+                view.on_key_down(
+                    &KeyDownEvent {
+                        keystroke: gpui::Keystroke {
+                            modifiers: Modifiers {
+                                platform: true,
+                                ..Modifiers::default()
+                            },
+                            key: "backspace".into(),
+                            key_char: None,
+                        },
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"ls".to_vec()),
+            "held text must reach the PTY before the line-kill"
+        );
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(vec![0x15]),
+            "Ctrl-U must follow the text it clears"
+        );
     }
 
     #[gpui::test]
