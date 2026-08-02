@@ -141,9 +141,11 @@ getrandom = "0.3"
 # tree on hangup (ConPTY's `kill` only reaches the shell itself).
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_System_Console",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]
