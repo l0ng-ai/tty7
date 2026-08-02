@@ -529,6 +529,14 @@ pub enum L10nKey {
     PanelAgentDone,
     PanelRevealInFinder,
     PanelOpenFolder,
+    WindowStop,
+    WindowDelete,
+    WindowThisWorkspace,
+    WindowConfirmTitle,
+    WindowStopUnreachable,
+    WindowDeleteUnreachable,
+    WindowStopShells,
+    WindowDeleteShells,
 }
 
 pub fn set_locale(gui_language: &str) {
@@ -1698,6 +1706,29 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::PanelAgentDone => ("done", "已完成"),
         L10nKey::PanelRevealInFinder => ("Reveal in Finder", "在 Finder 中显示"),
         L10nKey::PanelOpenFolder => ("Open Folder", "打开文件夹"),
+        L10nKey::WindowStop => ("Stop", "停止"),
+        L10nKey::WindowDelete => ("Delete", "删除"),
+        L10nKey::WindowThisWorkspace => ("this workspace", "此工作区"),
+        L10nKey::WindowConfirmTitle => (
+            "{verb} Workspace \"{name}\"?",
+            "{verb}工作区\"{name}\"？",
+        ),
+        L10nKey::WindowStopUnreachable => (
+            "Its machine could not be reached. Any shells still running there will be ended.",
+            "无法连接到其所在机器。仍在运行的 shell 将会被终止。",
+        ),
+        L10nKey::WindowDeleteUnreachable => (
+            "Its machine could not be reached. Any shells still running there will be ended, and the layout forgotten.",
+            "无法连接到其所在机器。仍在运行的 shell 将会被终止，布局也将被清除。",
+        ),
+        L10nKey::WindowStopShells => (
+            "{count} running shells will be ended.",
+            "{count} 个正在运行的 shell 将会被终止。",
+        ),
+        L10nKey::WindowDeleteShells => (
+            "{count} running shells will be ended and the layout forgotten.",
+            "{count} 个正在运行的 shell 将会被终止，布局也将被清除。",
+        ),
         L10nKey::PanelMoreChangedFiles => (
             "… and {count} more changed files — run `git diff` to see them.",
             "…还有 {count} 个变更文件——运行 `git diff` 查看。",
@@ -1766,6 +1797,32 @@ fn translate_variant(locale: Locale, key: L10nKey, branch: &'static str) -> &'st
         (PanelMoreChangedFiles, "other") => (
             "… and {count} more changed files — run `git diff` to see them.",
             "…还有 {count} 个变更文件——运行 `git diff` 查看。",
+        ),
+
+        // --- Window stop/delete shells ---
+        (WindowStopShells, "zero") => (
+            "Its layout and working directories will be forgotten.",
+            "其布局和工作目录将被清除。",
+        ),
+        (WindowStopShells, "one") => (
+            "1 running shell will be ended.",
+            "1 个正在运行的 shell 将会被终止。",
+        ),
+        (WindowStopShells, "other") => (
+            "{count} running shells will be ended.",
+            "{count} 个正在运行的 shell 将会被终止。",
+        ),
+        (WindowDeleteShells, "zero") => (
+            "Its layout and working directories will be forgotten.",
+            "其布局和工作目录将被清除。",
+        ),
+        (WindowDeleteShells, "one") => (
+            "1 running shell will be ended and its layout forgotten.",
+            "1 个正在运行的 shell 将会被终止，其布局也将被清除。",
+        ),
+        (WindowDeleteShells, "other") => (
+            "{count} running shells will be ended and the layout forgotten.",
+            "{count} 个正在运行的 shell 将会被终止，布局也将被清除。",
         ),
 
         _ => return t(key),
@@ -2288,6 +2345,14 @@ mod tests {
             L10nKey::PanelAgentDone,
             L10nKey::PanelRevealInFinder,
             L10nKey::PanelOpenFolder,
+            L10nKey::WindowStop,
+            L10nKey::WindowDelete,
+            L10nKey::WindowThisWorkspace,
+            L10nKey::WindowConfirmTitle,
+            L10nKey::WindowStopUnreachable,
+            L10nKey::WindowDeleteUnreachable,
+            L10nKey::WindowStopShells,
+            L10nKey::WindowDeleteShells,
         ] {
             assert!(
                 !translate(Locale::ZhHans, key).is_empty(),
@@ -2318,6 +2383,8 @@ mod tests {
             L10nKey::SettingsOfflineMachines,
             L10nKey::PanelUntracked,
             L10nKey::PanelMoreChangedFiles,
+            L10nKey::WindowStopShells,
+            L10nKey::WindowDeleteShells,
         ];
         for key in plural_keys {
             for branch in ["zero", "one", "other"] {
