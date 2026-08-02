@@ -215,6 +215,16 @@ fn basename(program: &str) -> String {
     }
 }
 
+/// Keeps conventional executable names for POSIX shells while giving Nushell
+/// the same product name in the menu on every supported desktop platform.
+fn shell_label(name: &str) -> String {
+    if name.eq_ignore_ascii_case("nu") {
+        "Nushell".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 #[cfg_attr(windows, allow(dead_code))]
 fn parse_etc_shells(content: &str) -> Vec<String> {
     content
@@ -238,7 +248,7 @@ fn unix_shells_from(
         }
         let name = basename(&path);
         if seen.insert(name.clone()) {
-            out.push(DetectedShell::bare(name, path));
+            out.push(DetectedShell::bare(shell_label(&name), path));
         }
     }
     out
@@ -523,6 +533,29 @@ mod tests {
         assert!(cands.contains(&"/opt/homebrew/bin/nu".to_string()));
         assert!(cands.iter().all(|c| c.starts_with('/')));
         assert_eq!(cands.len(), PATH_PROBED_SHELLS.len() * 2);
+    }
+
+    #[test]
+    fn nushell_is_probed_from_every_unix_path_directory() {
+        let candidates = path_shell_candidates("/opt/homebrew/bin:/home/user/.local/bin");
+        let nushell: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| candidate.ends_with("/nu"))
+            .map(String::as_str)
+            .collect();
+
+        assert_eq!(
+            nushell,
+            ["/opt/homebrew/bin/nu", "/home/user/.local/bin/nu"]
+        );
+
+        let detected = unix_shells_from(candidates, |candidate| {
+            candidate == "/home/user/.local/bin/nu"
+        });
+        assert_eq!(
+            detected,
+            [DetectedShell::bare("Nushell", "/home/user/.local/bin/nu")]
+        );
     }
 
     #[test]
