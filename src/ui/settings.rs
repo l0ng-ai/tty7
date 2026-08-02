@@ -87,6 +87,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
     &[
         SearchEntry {
             section: Appearance,
+            title: SettingsLanguage,
+            keywords: SettingsSearchLanguageKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
             title: SettingsThemeIntroTitle,
             keywords: SettingsSearchThemeKeywords,
         },
@@ -415,6 +420,7 @@ pub(crate) struct SettingsState {
     pub(crate) font_select: Entity<SelectState<SearchableVec<String>>>,
     pub(crate) font_bold_select: Entity<SelectState<SearchableVec<String>>>,
     pub(crate) font_italic_select: Entity<SelectState<SearchableVec<String>>>,
+    pub(crate) language_select: Entity<SelectState<SearchableVec<String>>>,
     pub(crate) shell_program_input: Entity<InputState>,
     pub(crate) shell_args_input: Entity<InputState>,
     pub(crate) wd_path_input: Entity<InputState>,
@@ -1075,14 +1081,16 @@ impl Tty7App {
         let hover_bg = gpui::rgb(cx.global::<presets::Surfaces>().window.hover);
         let stepper_bg = theme.secondary.opacity(0.35);
         let font_size = self.font_size;
-        let (font_select, font_bold_select, font_italic_select) = match self.active_settings() {
-            Some(s) => (
-                s.font_select.clone(),
-                s.font_bold_select.clone(),
-                s.font_italic_select.clone(),
-            ),
-            None => return div().into_any_element(),
-        };
+        let (font_select, font_bold_select, font_italic_select, language_select) =
+            match self.active_settings() {
+                Some(s) => (
+                    s.font_select.clone(),
+                    s.font_bold_select.clone(),
+                    s.font_italic_select.clone(),
+                    s.language_select.clone(),
+                ),
+                None => return div().into_any_element(),
+            };
         let cfg = cx.global::<Config>();
         let cursor_style = cfg.cursor_style;
         let cursor_blink = cfg.cursor_blink;
@@ -1189,6 +1197,12 @@ impl Tty7App {
             .checked(font_ligatures)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_font_ligatures(*on, cx)))
             .into_any_element();
+        let language_control = Select::new(&language_select)
+            .small()
+            .w(px(180.))
+            .h(control_h)
+            .menu_max_h(px(224.))
+            .into_any_element();
 
         let cursor_idx = match cursor_style {
             CursorStyle::Block => 0,
@@ -1224,6 +1238,14 @@ impl Tty7App {
             .child(self.render_custom_themes(cx))
             .child(self.section_rule(cx))
             .child(self.render_window_section(cx))
+            .child(self.section_rule(cx))
+            .child(self.section_header(t(L10nKey::SettingsLanguage), cx))
+            .child(self.settings_row(
+                t(L10nKey::SettingsLanguage),
+                t(L10nKey::SettingsLanguageDesc),
+                language_control,
+                cx,
+            ))
             .child(self.section_rule(cx))
             .child(self.section_header(t(L10nKey::SettingsTypography), cx))
             .child(self.settings_row(

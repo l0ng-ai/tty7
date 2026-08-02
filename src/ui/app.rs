@@ -27,7 +27,7 @@ use crate::core::window_state::{WindowGeometry as _, WindowState};
 use crate::daemon::protocol::{RemoteContext, ShellSpec, ssh_option_takes_value};
 use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::host_registry::HostId;
-use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::i18n::{L10nKey, set_locale, t, t_fmt};
 use crate::ui::palette::{
     ChromeState, Command, CommandGroup, CommandKind, PaletteEvent, PaletteView,
 };
@@ -3473,6 +3473,7 @@ impl Tty7App {
         let mut subs = Vec::new();
         let (font_select, font_bold_select, font_italic_select) =
             self.build_font_selects(&mut subs, window, cx);
+        let language_select = self.build_language_select(&mut subs, window, cx);
         let (shell_program_input, shell_args_input, wd_path_input) =
             self.build_shell_inputs(&mut subs, window, cx);
         let link_file_command_input = self.build_link_file_command_input(&mut subs, window, cx);
@@ -3529,6 +3530,7 @@ impl Tty7App {
             font_select,
             font_bold_select,
             font_italic_select,
+            language_select,
             shell_program_input,
             shell_args_input,
             wd_path_input,
@@ -3648,6 +3650,86 @@ impl Tty7App {
             },
         ));
         (font_select, font_bold_select, font_italic_select)
+    }
+
+    fn build_language_select(
+        &mut self,
+        subs: &mut Vec<Subscription>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SelectState<SearchableVec<String>>> {
+        const CODES: &[&str] = &["auto", "en", "zh-CN"];
+        let labels = || {
+            vec![
+                t(L10nKey::SettingsLanguageAuto).to_string(),
+                t(L10nKey::SettingsLanguageEnglish).to_string(),
+                t(L10nKey::SettingsLanguageChinese).to_string(),
+            ]
+        };
+        let cfg = cx.global::<Config>();
+        let current = Self::normalize_gui_language(&cfg.gui_language);
+        let rows = labels();
+        let selected = CODES.iter().position(|c| *c == current).unwrap_or(0);
+        let language_select = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(rows),
+                Some(IndexPath::default().row(selected)),
+                window,
+                cx,
+            )
+        });
+        subs.push(cx.subscribe_in(
+            &language_select,
+            window,
+            move |this, _select, ev: &SelectEvent<SearchableVec<String>>, window, cx| {
+                if let SelectEvent::Confirm(Some(label)) = ev {
+                    let rows = labels();
+                    if let Some(idx) = rows.iter().position(|r| r == label) {
+                        this.set_gui_language(CODES[idx], window, cx);
+                    }
+                }
+            },
+        ));
+        language_select
+    }
+
+    fn normalize_gui_language(code: &str) -> &'static str {
+        match code {
+            "auto" => "auto",
+            "en" => "en",
+            "zh" | "zh-CN" | "zh-Hans" | "zh_CN" | "zh_Hans" => "zh-CN",
+            _ => "auto",
+        }
+    }
+
+    pub(crate) fn set_gui_language(
+        &mut self,
+        code: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        const CODES: &[&str] = &["auto", "en", "zh-CN"];
+        let code = Self::normalize_gui_language(code);
+        {
+            let cfg = cx.global_mut::<Config>();
+            cfg.gui_language = code.to_string();
+        }
+        set_locale(code);
+        cx.global::<Config>().save();
+        set_menus(cx);
+        if let Some(s) = self.active_settings() {
+            let rows = vec![
+                t(L10nKey::SettingsLanguageAuto).to_string(),
+                t(L10nKey::SettingsLanguageEnglish).to_string(),
+                t(L10nKey::SettingsLanguageChinese).to_string(),
+            ];
+            let selected = CODES.iter().position(|c| *c == code).unwrap_or(0);
+            s.language_select.update(cx, |state, cx| {
+                state.set_items(SearchableVec::new(rows), window, cx);
+                state.set_selected_index(Some(IndexPath::default().row(selected)), window, cx);
+            });
+        }
+        cx.notify();
     }
 
     fn build_shell_inputs(
