@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use std::ffi::OsStr;
 use std::path::Path;
 #[cfg(windows)]
 use std::path::PathBuf;
@@ -239,7 +241,18 @@ fn pick_first_existing(candidates: impl IntoIterator<Item = PathBuf>) -> Option<
 #[cfg(windows)]
 fn find_in_path(exe: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
+    find_in_path_var(exe, &path)
+}
+
+/// Finds an exact executable name using Windows' ordered `PATH` directories.
+///
+/// The caller supplies the `.exe` suffix explicitly so a directory with the
+/// same name is never mistaken for a launchable shell. Keeping the path value
+/// separate also makes the lookup testable without mutating process-global
+/// environment variables while other tests are running.
+#[cfg(windows)]
+fn find_in_path_var(exe: &str, path: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
         .map(|dir| dir.join(exe))
         .find(|p| p.is_file())
 }
@@ -254,6 +267,16 @@ fn detect_windows() -> Vec<DetectedShell> {
         out.push(DetectedShell::bare(
             "PowerShell 7",
             pwsh.to_string_lossy().into_owned(),
+        ));
+    }
+
+    // Nushell has no stable Windows installation directory across package
+    // managers, so mirror command resolution and offer the first `nu.exe`
+    // reachable through the current system PATH.
+    if let Some(nu) = find_in_path("nu.exe") {
+        out.push(DetectedShell::bare(
+            "Nushell",
+            nu.to_string_lossy().into_owned(),
         ));
     }
 
@@ -547,6 +570,20 @@ mod tests {
             assert_eq!(basename(r"C:\Program Files\PowerShell\7\pwsh.exe"), "pwsh");
             assert_eq!(basename("CMD.EXE"), "cmd");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_probe_finds_the_first_nushell_file() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let directory_named_like_nu = first.path().join("nu.exe");
+        std::fs::create_dir(&directory_named_like_nu).unwrap();
+        let expected = second.path().join("nu.exe");
+        std::fs::write(&expected, b"test executable placeholder").unwrap();
+
+        let path = std::env::join_paths([first.path(), second.path()]).unwrap();
+        assert_eq!(find_in_path_var("nu.exe", &path), Some(expected));
     }
 
     #[test]
