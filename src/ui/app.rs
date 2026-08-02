@@ -27,6 +27,7 @@ use crate::core::window_state::{WindowGeometry as _, WindowState};
 use crate::daemon::protocol::{RemoteContext, ShellSpec, ssh_option_takes_value};
 use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::host_registry::HostId;
+use crate::ui::i18n::t;
 use crate::ui::palette::{
     ChromeState, Command, CommandGroup, CommandKind, PaletteEvent, PaletteView,
 };
@@ -608,14 +609,18 @@ impl Tty7App {
             },
             some => tabs_from_session(pane_ws.as_ref(), workspace, some, font_size, window, cx),
         };
-        let sidebar_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search tabs…"));
+        let sidebar_search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t(crate::ui::i18n::L10nKey::SearchTabs))
+        });
         let sidebar_search_sub =
             cx.subscribe_in(&sidebar_search, window, |_this, _i, ev, _w, cx| {
                 if matches!(ev, InputEvent::Change) {
                     cx.notify();
                 }
             });
-        let file_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search files…"));
+        let file_search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t(crate::ui::i18n::L10nKey::SearchFiles))
+        });
         let file_search_sub = cx.subscribe_in(&file_search, window, |_this, _i, ev, _w, cx| {
             if matches!(ev, InputEvent::Change) {
                 cx.notify();
@@ -734,14 +739,12 @@ impl Tty7App {
 
             let answer = window.prompt(
                 PromptLevel::Info,
-                "Close Window?",
-                Some(
-                    "Your sessions keep running in the background. This \
-                     workspace will be waiting on the home page, and in the \
-                     workspace menu in the title bar, the next time you open \
-                     tty7.",
-                ),
-                &["Cancel", "Close"],
+                t(crate::ui::i18n::L10nKey::CloseWindowTitle),
+                Some(t(crate::ui::i18n::L10nKey::CloseWindowBody)),
+                &[
+                    t(crate::ui::i18n::L10nKey::Cancel),
+                    t(crate::ui::i18n::L10nKey::Close),
+                ],
                 cx,
             );
             let close_confirmed = close_confirmed.clone();
@@ -1086,14 +1089,12 @@ impl Tty7App {
         window.activate_window();
         let answer = window.prompt(
             PromptLevel::Warning,
-            "Quit and Stop Server?",
-            Some(
-                "This quits tty7 and stops the background server — anything \
-                 still running in your shells is terminated. Your tabs and \
-                 layout are kept and reopen with fresh shells next launch. \
-                 (Plain Quit keeps shells running.)",
-            ),
-            &["Cancel", "Quit and Stop"],
+            t(crate::ui::i18n::L10nKey::QuitStopServerTitle),
+            Some(t(crate::ui::i18n::L10nKey::QuitStopServerBody)),
+            &[
+                t(crate::ui::i18n::L10nKey::Cancel),
+                t(crate::ui::i18n::L10nKey::QuitAndStop),
+            ],
             cx,
         );
         cx.spawn(async move |_this, cx| {

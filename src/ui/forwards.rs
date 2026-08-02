@@ -6,6 +6,7 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_f
 use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind};
 use crate::terminal::view::TerminalView;
 use crate::ui::app::{CONTENT_INSET, Tty7App};
+use crate::ui::i18n::t;
 
 impl Tty7App {
     pub(crate) fn render_ssh_status_strip(
@@ -92,13 +93,13 @@ impl Tty7App {
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("Close this SSH connection?"),
+                    .child(t(crate::ui::i18n::L10nKey::CloseSshConnectionTitle)),
             )
             .child(
                 div()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child("The connection is live. Closing will end it."),
+                    .child(t(crate::ui::i18n::L10nKey::CloseSshConnectionBody)),
             )
             .child(
                 h_flex()
@@ -106,7 +107,7 @@ impl Tty7App {
                     .gap_2()
                     .child(
                         Button::new("ssh-close-cancel")
-                            .label("Keep")
+                            .label(t(crate::ui::i18n::L10nKey::Keep))
                             .small()
                             .on_click(
                                 cx.listener(|this, _, _window, cx| this.cancel_ssh_close(cx)),
@@ -114,7 +115,7 @@ impl Tty7App {
                     )
                     .child(
                         Button::new("ssh-close-confirm")
-                            .label("Close")
+                            .label(t(crate::ui::i18n::L10nKey::Close))
                             .primary()
                             .small()
                             .on_click(cx.listener(|this, _, window, cx| {

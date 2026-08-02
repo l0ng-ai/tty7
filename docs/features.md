@@ -120,3 +120,16 @@ a brief pause; `prefix` + an unbound key passes straight through.
 - The PTY is read at device speed and parsed in large batches, off the render path
 - Hot paths are lock-free — a big `cat` never waits on drawing
 - The daemon buffers up to 16 MiB ahead of the window before backpressure applies
+
+## Localization
+
+The GUI starts with English and Simplified Chinese strings. Pick a locale in
+`config.json`:
+
+```json
+{ "gui_language": "auto" }
+```
+
+`auto` follows the system language, `en` forces English, and `zh-CN`/`zh-Hans`
+forces Simplified Chinese. The CLI output stays English so agent and script
+integrations keep a stable, predictable surface.

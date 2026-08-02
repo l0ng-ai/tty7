@@ -74,7 +74,9 @@ fn spawn_config_watcher(cx: &mut App) {
             while rx.try_recv().is_ok() {}
 
             cx.update(|cx| {
-                cx.set_global(Config::load());
+                let config = Config::load();
+                crate::ui::i18n::set_locale(&config.gui_language);
+                cx.set_global(config);
                 crate::ui::presets::load_registry(cx);
                 crate::ui::theme::apply_cursor_hide_mode(cx);
                 crate::ui::theme::apply_theme(None, cx);
@@ -213,6 +215,7 @@ fn main() {
     enrich_path_from_login_shell();
 
     let config = crate::core::config::Config::load();
+    let gui_language = config.gui_language.clone();
 
     // After the PATH enrichment above, which is what makes the candidate scan
     // see the user's real PATH rather than the stub a Finder launch inherits —
@@ -238,6 +241,7 @@ fn main() {
             cx.activate(true);
             #[cfg(target_os = "macos")]
             set_dock_icon_for_bare_binary();
+            crate::ui::i18n::set_locale(&gui_language);
             cx.set_global(Config::load());
             crate::ui::theme::refresh_system_appearance(cx);
             crate::core::session::WorkspaceStore::init(cx);
