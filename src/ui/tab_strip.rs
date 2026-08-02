@@ -19,6 +19,7 @@ use crate::core::config::RightPanelTab;
 use crate::daemon::protocol::ShellSpec;
 use crate::ui::app::{TILE_GLYPH, TILE_GLYPH_LINE, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
 use crate::ui::hints::tab_badge_label;
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::reorder::{self, Reorder, Surface};
 
 pub(crate) const REORDER_SLIDE_MS: u64 = 140;
@@ -315,14 +316,14 @@ impl Tty7App {
                 cx,
             )
             .rounded_lg()
-            .tooltip("More")
+            .tooltip(t(L10nKey::TabTooltipMore))
             .dropdown_menu_with_anchor(
                 gpui::Anchor::TopRight,
                 move |menu, _window, _cx| {
                     menu.min_w(px(200.))
                         .action_context(action_ctx.clone())
-                        .menu("Command Palette…", Box::new(TogglePalette))
-                        .menu("Settings…", Box::new(OpenSettings))
+                        .menu(t(L10nKey::AppMenuCommandPalette), Box::new(TogglePalette))
+                        .menu(t(L10nKey::AppMenuSettings), Box::new(OpenSettings))
                 },
             ),
         )
@@ -350,9 +351,9 @@ impl Tty7App {
                     )
                     .rounded_lg()
                     .tooltip(if panel_open {
-                        "Hide Detail Panel"
+                        t(L10nKey::TabTooltipHideDetailPanel)
                     } else {
-                        "Show Detail Panel"
+                        t(L10nKey::TabTooltipShowDetailPanel)
                     })
                     .on_click(cx.listener(|this, _, _window, cx| {
                         this.toggle_right_panel(cx);
@@ -375,26 +376,26 @@ impl Tty7App {
             (
                 RightPanelTab::Info,
                 Icon::empty().path("icons/info.svg"),
-                "Info",
+                L10nKey::PanelInfoTitle,
             ),
             (
                 RightPanelTab::Outline,
                 Icon::empty().path("icons/list.svg"),
-                "Outline",
+                L10nKey::PanelOutlineTitle,
             ),
             (
                 RightPanelTab::Changes,
                 Icon::empty().path("icons/git-branch.svg"),
-                "Changes",
+                L10nKey::PanelChangesTitle,
             ),
             (
                 RightPanelTab::Files,
                 Icon::new(IconName::FolderClosed),
-                "Files",
+                L10nKey::PanelFilesTitle,
             ),
         ]
         .into_iter()
-        .map(|(tab, icon, label)| {
+        .map(|(tab, icon, label_key)| {
             div()
                 .occlude()
                 .flex_shrink_0()
@@ -407,9 +408,9 @@ impl Tty7App {
                     .rounded_lg()
                     .tooltip(match (tab, changed) {
                         (RightPanelTab::Changes, Some(n)) => {
-                            SharedString::from(format!("{label} · {n}"))
+                            SharedString::from(format!("{} · {n}", t(label_key)))
                         }
-                        _ => SharedString::from(label),
+                        _ => SharedString::from(t(label_key)),
                     })
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.set_right_panel_tab(tab, cx);
@@ -522,7 +523,7 @@ impl Tty7App {
         let raw = tab.leaf_title(window, cx);
         let label = short_title(&raw);
         if label.trim().is_empty() {
-            format!("Shell {}", index + 1)
+            t_fmt(L10nKey::TabUnnamedShell, &[("n", &((index + 1).to_string()))])
         } else {
             label
         }
@@ -557,7 +558,7 @@ impl Tty7App {
                             .child(
                                 div()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("default"),
+                                    .child(t(L10nKey::ShellDefault)),
                             )
                     })
                 } else {
@@ -574,7 +575,7 @@ impl Tty7App {
             if shells.is_empty() {
                 let open_default = app.clone();
                 menu = menu.item(
-                    PopupMenuItem::new("New Tab").on_click(move |_, window, cx| {
+                    PopupMenuItem::new(t(L10nKey::AppMenuNewTab)).on_click(move |_, window, cx| {
                         if let Some(app) = open_default.upgrade() {
                             app.update(cx, |this, cx| this.new_tab(window, cx));
                         }
@@ -602,7 +603,7 @@ impl Tty7App {
         let has_cwd = cwd.is_some();
         let mut menu = menu.min_w(px(200.));
 
-        menu = menu.item(PopupMenuItem::new("Rename Tab").on_click({
+        menu = menu.item(PopupMenuItem::new(t(L10nKey::AppMenuRenameTab)).on_click({
             let app = app.clone();
             move |_, window, cx| {
                 let _ = app.update(cx, |this, cx| this.start_rename(index, window, cx));
@@ -614,7 +615,7 @@ impl Tty7App {
             let done = tab.and_then(|t| t.agent_status(cx))
                 == Some(crate::core::cli_agent::AgentStatus::Done);
             menu = menu.item(
-                PopupMenuItem::new("Mark as Unread")
+                PopupMenuItem::new(t(L10nKey::TabContextMarkUnread))
                     .disabled(!done)
                     .on_click({
                         let app = app.clone();
@@ -629,7 +630,7 @@ impl Tty7App {
         if in_repo {
             menu = menu
                 .separator()
-                .item(PopupMenuItem::new("New Worktree Tab").on_click({
+                .item(PopupMenuItem::new(t(L10nKey::AppMenuNewWorktreeTab)).on_click({
                     let app = app.clone();
                     move |_, window, cx| {
                         let _ = app.update(cx, |this, cx| this.new_worktree_tab(index, window, cx));
@@ -665,7 +666,7 @@ impl Tty7App {
 
         menu = menu
             .separator()
-            .item(PopupMenuItem::new("Split Right").on_click({
+            .item(PopupMenuItem::new(t(L10nKey::AppMenuSplitRight)).on_click({
                 let app = app.clone();
                 move |_, window, cx| {
                     let _ = app.update(cx, |this, cx| {
@@ -674,7 +675,7 @@ impl Tty7App {
                     });
                 }
             }))
-            .item(PopupMenuItem::new("Split Down").on_click({
+            .item(PopupMenuItem::new(t(L10nKey::AppMenuSplitDown)).on_click({
                 let app = app.clone();
                 move |_, window, cx| {
                     let _ = app.update(cx, |this, cx| {
@@ -685,7 +686,7 @@ impl Tty7App {
             }));
 
         menu = menu.separator().item(
-            PopupMenuItem::new("Copy Working Directory")
+            PopupMenuItem::new(t(L10nKey::AppMenuCopyWorkingDirectory))
                 .disabled(!has_cwd)
                 .on_click(move |_, _window, cx| {
                     if let Some(cwd) = cwd.as_ref() {
@@ -698,7 +699,7 @@ impl Tty7App {
 
         if let Some(session_id) = agent_session.map(|(_, s)| s.session_id) {
             menu = menu.item(
-                PopupMenuItem::new("Copy Session ID")
+                PopupMenuItem::new(t(L10nKey::AppMenuCopySessionId))
                     .disabled(session_id.is_none())
                     .on_click(move |_, _window, cx| {
                         if let Some(id) = session_id.as_ref() {
@@ -709,14 +710,14 @@ impl Tty7App {
         }
 
         menu.separator()
-            .item(PopupMenuItem::new("Close Tab").on_click({
+            .item(PopupMenuItem::new(t(L10nKey::TabContextCloseTab)).on_click({
                 let app = app.clone();
                 move |_, window, cx| {
                     let _ = app.update(cx, |this, cx| this.close_tab(index, window, cx));
                 }
             }))
             .item(
-                PopupMenuItem::new("Close Other Tabs")
+                PopupMenuItem::new(t(L10nKey::AppMenuCloseOtherTabs))
                     .disabled(tab_count <= 1)
                     .on_click({
                         let app = app.clone();
@@ -728,9 +729,9 @@ impl Tty7App {
             )
             .item(
                 PopupMenuItem::new(if below_wording {
-                    "Close Tabs Below"
+                    t(L10nKey::TabContextCloseTabsBelow)
                 } else {
-                    "Close Tabs to the Right"
+                    t(L10nKey::AppMenuCloseTabsRight)
                 })
                 .disabled(index + 1 >= tab_count)
                 .on_click({
@@ -1046,7 +1047,7 @@ impl Tty7App {
                             cx,
                         )
                         .rounded_lg()
-                        .tooltip("Show Sidebar")
+                        .tooltip(t(L10nKey::TabTooltipShowSidebar))
                         .on_click(cx.listener(|this, _, _window, cx| this.toggle_left_panel(cx))),
                     ),
                 )

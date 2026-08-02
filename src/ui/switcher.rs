@@ -16,7 +16,7 @@ use crate::core::session::WorkspaceStore;
 use crate::daemon::install::InstallPhase;
 use crate::terminal::pane_liveness::Liveness;
 use crate::ui::app::Tty7App;
-use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::i18n::{L10nKey, t};
 use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow, human_bytes};
 use crate::ui::remote_workspace::ConnectFlow;
 
