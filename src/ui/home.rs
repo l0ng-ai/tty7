@@ -20,14 +20,14 @@ const LOGO: [&str; 4] = [
 
 const LOGO_PX: f32 = 20.0;
 
-const HOME_SHORTCUTS: [(&str, &str); 7] = [
-    ("NewTab", "New Tab"),
-    ("ReopenClosedTab", "Reopen Closed Tab"),
-    ("ToggleSwitcher", "Switch Workspace"),
-    ("TogglePalette", "Command Palette"),
-    ("SplitRight", "Split Right"),
-    ("SplitDown", "Split Down"),
-    ("OpenSettings", "Settings…"),
+const HOME_SHORTCUTS: [&str; 7] = [
+    "NewTab",
+    "ReopenClosedTab",
+    "ToggleSwitcher",
+    "TogglePalette",
+    "SplitRight",
+    "SplitDown",
+    "OpenSettings",
 ];
 
 const CLOSED_LABEL_MAX: usize = 20;
@@ -124,6 +124,29 @@ fn key_hint(action: &str, cx: &App) -> Option<String> {
     Some(Kbd::format(&stroke))
 }
 
+fn home_shortcut_label(action: &str, closed: Option<&str>) -> String {
+    let label = match action {
+        "NewTab" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeNewTab),
+        "ReopenClosedTab" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeReopenClosedTab),
+        "ToggleSwitcher" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSwitchWorkspace),
+        "TogglePalette" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeCommandPalette),
+        "SplitRight" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSplitRight),
+        "SplitDown" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSplitDown),
+        "OpenSettings" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSettings),
+        _ => action,
+    };
+    if action == "ReopenClosedTab" {
+        if let Some(name) = closed {
+            return if crate::ui::i18n::is_zh_hans() {
+                format!("重新打开“{name}”")
+            } else {
+                format!("Reopen \u{201c}{name}\u{201d}")
+            };
+        }
+    }
+    label.to_string()
+}
+
 impl Tty7App {
     pub(crate) fn render_home(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
@@ -148,11 +171,9 @@ impl Tty7App {
 
         let closed_hint = self.closed.last().and_then(closed_tab_label);
         let mut list = v_flex().gap_2().w(px(300.)).text_sm().text_color(muted);
-        for (action, label) in HOME_SHORTCUTS {
-            let (label, emphasized) = match (&closed_hint, action) {
-                (Some(name), "ReopenClosedTab") => (format!("Reopen \u{201c}{name}\u{201d}"), true),
-                _ => (label.to_string(), false),
-            };
+        for action in HOME_SHORTCUTS {
+            let emphasized = closed_hint.is_some() && action == "ReopenClosedTab";
+            let label = home_shortcut_label(action, closed_hint.as_deref());
             list = list.child(
                 h_flex()
                     .items_center()
