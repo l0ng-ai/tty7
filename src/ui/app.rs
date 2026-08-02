@@ -27,7 +27,7 @@ use crate::core::window_state::{WindowGeometry as _, WindowState};
 use crate::daemon::protocol::{RemoteContext, ShellSpec, ssh_option_takes_value};
 use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::host_registry::HostId;
-use crate::ui::i18n::t;
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::palette::{
     ChromeState, Command, CommandGroup, CommandKind, PaletteEvent, PaletteView,
 };
@@ -471,27 +471,21 @@ impl Tty7App {
         };
         let ours = crate::daemon::protocol::PROTOCOL_VERSION;
         let detail = match mismatch.version {
-            Some(v) => format!(
-                "The server holding your shells is from another build \
-                 (v{}, protocol {} — this app speaks {}). You can keep using it and \
-                 your shells stay, but features whose wire format changed may \
-                 misbehave until it's restarted. Restarting starts a clean server: \
-                 tabs reopen with fresh shells and anything running in them is \
-                 terminated.",
-                v.build, v.protocol, ours
+            Some(v) => t_fmt(
+                L10nKey::AppRestartServerMismatchDetail,
+                &[
+                    ("build", &v.build.to_string()),
+                    ("protocol", &v.protocol.to_string()),
+                    ("ours", &ours.to_string()),
+                ],
             ),
-            None => "The server holding your shells is from an older \
-                 version of the app. You can keep using it and your shells stay, \
-                 but newer features may misbehave until it's restarted. Restarting \
-                 starts a clean server: tabs reopen with fresh shells and anything \
-                 running in them is terminated."
-                .to_string(),
+            None => t(L10nKey::AppRestartServerOldDetail).to_string(),
         };
         let answer = window.prompt(
             PromptLevel::Warning,
-            "Restart Server?",
+            t(L10nKey::AppRestartServerTitle),
             Some(&detail),
-            &["Keep Shells", "Restart"],
+            &[t(L10nKey::AppKeepShells), t(L10nKey::AppRestart)],
             cx,
         );
         cx.spawn(async move |this, cx| {
@@ -542,7 +536,7 @@ impl Tty7App {
         let mf_bind_port = cx.new(|cx| InputState::new(window, cx).placeholder("8080"));
         let mf_target_host = cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1"));
         let mf_target_port = cx.new(|cx| InputState::new(window, cx).placeholder("80"));
-        let mf_description = cx.new(|cx| InputState::new(window, cx).placeholder("description"));
+        let mf_description = cx.new(|cx| InputState::new(window, cx).placeholder(t(L10nKey::AppPlaceholderDescription)));
         let sidebar_width = cx.global::<Config>().sidebar_width;
         let right_panel_width = cx.global::<Config>().right_panel_width;
         let right_panel_visible = cx.global::<Config>().right_panel_visible;
@@ -960,7 +954,7 @@ impl Tty7App {
             window,
             cx,
         ) else {
-            window.push_notification("Could not reopen the tab: no terminal started", cx);
+            window.push_notification(t(L10nKey::AppReopenTabFailed), cx);
             self.closed.push(st);
             return;
         };
@@ -1117,9 +1111,9 @@ impl Tty7App {
         let label = crate::ui::remote_connect::label_for(&target, cx);
         if !target.is_ssh() {
             window.push_notification(
-                format!(
-                    "tty7 can only restart the server on machines it reaches over SSH. \
-                     {label} is served from this computer — stop its workspace instead."
+                t_fmt(
+                    L10nKey::AppRestartServerNotSsh,
+                    &[("label", &label)],
                 ),
                 cx,
             );
@@ -1131,13 +1125,9 @@ impl Tty7App {
     pub(crate) fn restart_daemon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let answer = window.prompt(
             PromptLevel::Warning,
-            "Restart Server?",
-            Some(
-                "This stops every running shell on this computer — anything still \
-                 running in them will be terminated. Your tabs and layout are kept \
-                 and reopened with fresh shells.",
-            ),
-            &["Cancel", "Restart"],
+            t(L10nKey::AppRestartServerTitle),
+            Some(t(L10nKey::AppRestartServerBody)),
+            &[t(crate::ui::i18n::L10nKey::Cancel), t(L10nKey::AppRestart)],
             cx,
         );
         cx.spawn(async move |this, cx| {
@@ -1520,17 +1510,17 @@ impl Tty7App {
         let seed_specs: [(ThemeEdit, &str, u32); 5] = [
             (
                 ThemeEdit::Background,
-                "Background",
+                t(L10nKey::AppThemeColorBackground),
                 theme.background_color(),
             ),
-            (ThemeEdit::Foreground, "Foreground", theme.foreground),
-            (ThemeEdit::Accent, "Accent", theme.accent),
+            (ThemeEdit::Foreground, t(L10nKey::AppThemeColorForeground), theme.foreground),
+            (ThemeEdit::Accent, t(L10nKey::AppThemeColorAccent), theme.accent),
             (
                 ThemeEdit::Cursor,
-                "Cursor",
+                t(L10nKey::AppThemeColorCursor),
                 theme.caret.unwrap_or(theme.accent),
             ),
-            (ThemeEdit::Selection, "Selection", neutrals.selection),
+            (ThemeEdit::Selection, t(L10nKey::AppThemeColorSelection), neutrals.selection),
         ];
 
         let mut subs = Vec::new();
@@ -2238,7 +2228,10 @@ impl Tty7App {
             Ok(view) => view,
             Err(e) => {
                 log::error!("new tab spawn failed: {e}");
-                window.push_notification(format!("Could not open a terminal: {e}"), cx);
+                window.push_notification(
+                    t_fmt(L10nKey::AppOpenTerminalFailed, &[("error", &e.to_string())]),
+                    cx,
+                );
                 return;
             }
         };
@@ -2267,7 +2260,10 @@ impl Tty7App {
             Ok(view) => view,
             Err(e) => {
                 log::error!("native SSH spawn failed: {e}");
-                window.push_notification(format!("SSH connection failed: {e}"), cx);
+                window.push_notification(
+                    t_fmt(L10nKey::AppSshConnectionFailed, &[("error", &e.to_string())]),
+                    cx,
+                );
                 return;
             }
         };
@@ -2294,7 +2290,10 @@ impl Tty7App {
             Ok(view) => view,
             Err(e) => {
                 log::error!("native SSH respawn failed: {e}");
-                window.push_notification(format!("SSH reconnect failed: {e}"), cx);
+                window.push_notification(
+                    t_fmt(L10nKey::AppSshReconnectFailed, &[("error", &e.to_string())]),
+                    cx,
+                );
                 return;
             }
         };
@@ -2331,7 +2330,10 @@ impl Tty7App {
                 Ok(view) => PaneSlot::Ready(view),
                 Err(e) => {
                     log::error!("native SSH split spawn failed: {e}");
-                    window.push_notification(format!("SSH connection failed: {e}"), cx);
+                    window.push_notification(
+                        t_fmt(L10nKey::AppSshConnectionFailed, &[("error", &e.to_string())]),
+                        cx,
+                    );
                     return;
                 }
             }
@@ -2350,7 +2352,10 @@ impl Tty7App {
                 Ok(view) => view,
                 Err(e) => {
                     log::error!("split spawn failed: {e}");
-                    window.push_notification(format!("Could not split the pane: {e}"), cx);
+                    window.push_notification(
+                        t_fmt(L10nKey::AppSplitPaneFailed, &[("error", &e.to_string())]),
+                        cx,
+                    );
                     return;
                 }
             }
@@ -2629,31 +2634,26 @@ impl Tty7App {
             },
             move |_this, found, cx| {
                 let Some(wt) = found else { return };
+                let path = wt.path.display().to_string();
                 let detail = if wt.dirty {
-                    format!(
-                        "The closed tab's worktree at {} has uncommitted changes.",
-                        wt.path.display()
-                    )
+                    t_fmt(L10nKey::AppWorktreeRemoveDetailDirty, &[("path", &path)])
                 } else {
-                    format!(
-                        "The closed tab's worktree at {} is clean.",
-                        wt.path.display()
-                    )
+                    t_fmt(L10nKey::AppWorktreeRemoveDetailClean, &[("path", &path)])
                 };
-                let title = format!("Remove worktree \"{}\"?", wt.branch);
+                let title = t_fmt(L10nKey::AppWorktreeRemoveTitle, &[("branch", &wt.branch)]);
                 let level = if wt.dirty {
                     PromptLevel::Warning
                 } else {
                     PromptLevel::Info
                 };
                 let remove_label = if wt.dirty {
-                    "Discard Changes & Remove"
+                    t(L10nKey::AppWorktreeDiscardAndRemove)
                 } else {
-                    "Remove Worktree"
+                    t(L10nKey::AppWorktreeRemove)
                 };
                 cx.spawn(async move |this, cx| {
                     let Ok(answer) = this.update_in(cx, |_, window, cx| {
-                        window.prompt(level, &title, Some(&detail), &["Keep", remove_label], cx)
+                        window.prompt(level, &title, Some(&detail), &[t(L10nKey::AppWorktreeKeep), remove_label], cx)
                     }) else {
                         return;
                     };
@@ -2670,11 +2670,17 @@ impl Tty7App {
                             move |h| crate::core::worktree::remove(h, &wt, force),
                             move |_this, result, window, cx| match result {
                                 Ok(()) => window.push_notification(
-                                    format!("Removed worktree \"{branch}\""),
+                                    t_fmt(L10nKey::AppWorktreeRemoved, &[("branch", &branch)]),
                                     cx,
                                 ),
                                 Err(e) => window
-                                    .push_notification(format!("Worktree removal failed: {e}"), cx),
+                                    .push_notification(
+                                        t_fmt(
+                                            L10nKey::AppWorktreeRemoveFailed,
+                                            &[("error", &e.to_string())],
+                                        ),
+                                        cx,
+                                    )
                             },
                         );
                     });
@@ -2817,13 +2823,16 @@ impl Tty7App {
             Ok(view) => view,
             Err(e) => {
                 log::error!("fork spawn failed: {e}");
-                window.push_notification(format!("Could not open a terminal: {e}"), cx);
+                window.push_notification(
+                    t_fmt(L10nKey::AppOpenTerminalFailed, &[("error", &e.to_string())]),
+                    cx,
+                );
                 return;
             }
         };
         let Some(terminal) = new.terminal() else {
             log::error!("fork spawn produced a pane that is still connecting");
-            window.push_notification("Could not fork: the pane is still connecting", cx);
+            window.push_notification(t(L10nKey::AppForkStillConnecting), cx);
             return;
         };
         terminal.read(cx).run_command_line(&cmd);
@@ -2889,17 +2898,17 @@ impl Tty7App {
         let view = source.read(cx);
         let (agent, session, remote) = (view.agent(), view.agent_session(), view.remote_context());
         let Some(agent) = agent else {
-            window.push_notification("This pane isn't running a coding agent", cx);
+            window.push_notification(t(L10nKey::AppPaneNoCodingAgent), cx);
             return None;
         };
         let name = agent.display_name();
         if agent.fork_label().is_none() {
-            window.push_notification(format!("tty7 has no fork command for {name}"), cx);
+            window.push_notification(t_fmt(L10nKey::AppForkNoCommand, &[("name", &name)]), cx);
             return None;
         }
         if remote.is_some() {
             window.push_notification(
-                format!("{name} sessions can only be forked from a local pane"),
+                t_fmt(L10nKey::AppForkLocalOnly, &[("name", &name)]),
                 cx,
             );
             return None;
@@ -2907,18 +2916,18 @@ impl Tty7App {
         let session = session.unwrap_or_default();
         let Some(id) = session.session_id.as_deref() else {
             window.push_notification(
-                format!("tty7 hasn't seen a {name} session id in this pane — install its hooks in Settings → Agents"),
+                t_fmt(L10nKey::AppForkNoSessionId, &[("name", &name)]),
                 cx,
             );
             return None;
         };
         let Some(cmd) = agent.fork_command(id, session.launch_argv.as_deref()) else {
-            window.push_notification(format!("{name}'s session id isn't a plain token"), cx);
+            window.push_notification(t_fmt(L10nKey::AppForkSessionIdNotToken, &[("name", &name)]), cx);
             return None;
         };
         if session.status == AgentStatus::Working {
             window.push_notification(
-                format!("{name} is mid-turn — the fork won't include the turn in flight"),
+                t_fmt(L10nKey::AppForkMidTurn, &[("name", &name)]),
                 cx,
             );
         }
@@ -2966,7 +2975,7 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         let Some((host, cwd)) = self.tab_host_cwd(index, window, cx) else {
-            window.push_notification("This tab has no working directory yet", cx);
+            window.push_notification(t(L10nKey::AppTabNoWorkingDirectory), cx);
             return;
         };
         let sheet_host = host.clone();
@@ -2978,7 +2987,7 @@ impl Tty7App {
             move |h| crate::core::worktree::defaults(h, &probe_cwd),
             move |this, result, window, cx| match result {
                 Ok(defaults) => this.open_worktree_prompt(sheet_host, cwd, defaults, window, cx),
-                Err(e) => window.push_notification(format!("New worktree failed: {e}"), cx),
+                Err(e) => window.push_notification(t_fmt(L10nKey::AppNewWorktreeFailed, &[("error", &e.to_string())]), cx),
             },
         );
     }
@@ -3002,7 +3011,10 @@ impl Tty7App {
             Ok(view) => view,
             Err(e) => {
                 log::error!("worktree tab spawn failed: {e}");
-                window.push_notification(format!("Could not open a terminal: {e}"), cx);
+                window.push_notification(
+                    t_fmt(L10nKey::AppOpenTerminalFailed, &[("error", &e.to_string())]),
+                    cx,
+                );
                 return;
             }
         };
@@ -3142,7 +3154,7 @@ impl Tty7App {
             };
             commands.push(
                 Command::new(
-                    format!("SSH: {title}"),
+                    t_fmt(L10nKey::AppCmdSshProfileTitle, &[("title", &title)]),
                     CommandKind::ConnectSavedProfile(p.id),
                 )
                 .with_subtitle(subtitle)
@@ -3157,7 +3169,7 @@ impl Tty7App {
             let label = self.tab_label(tab, i, None, cx);
             commands.push(
                 Command::new(
-                    format!("Switch to Tab: {label}"),
+                    t_fmt(L10nKey::AppCmdSwitchToTab, &[("label", &label)]),
                     CommandKind::ActivateTab(i),
                 )
                 .in_group(CommandGroup::TabsPanes),
@@ -3360,7 +3372,7 @@ impl Tty7App {
         let Some(target) = self.agent_target_leaf(cx) else {
             crate::terminal::notify_desktop(
                 Some("tty7"),
-                "No running coding agent found — start one (claude, codex, …) in a pane first.",
+                t(L10nKey::AppNoRunningCodingAgent),
             );
             return;
         };
@@ -3386,7 +3398,7 @@ impl Tty7App {
         let Some(selection) = selection else {
             crate::terminal::notify_desktop(
                 Some("tty7"),
-                "Nothing selected — select some terminal output first.",
+                t(L10nKey::AppNothingSelected),
             );
             return;
         };
@@ -3408,7 +3420,7 @@ impl Tty7App {
             Some((view.host(cx)?, view.host_cwd()?))
         });
         let Some((host, cwd)) = target else {
-            crate::terminal::notify_desktop(Some("tty7"), "This pane has no known directory.");
+            crate::terminal::notify_desktop(Some("tty7"), t(L10nKey::AppPaneNoKnownDirectory));
             return;
         };
         crate::ui::host_ops::HostOps::run_in(
@@ -3431,7 +3443,7 @@ impl Tty7App {
                     Some(prompt) => this.deliver_agent_prompt(&prompt, window, cx),
                     None => crate::terminal::notify_desktop(
                         Some("tty7"),
-                        &format!("No uncommitted changes in {cwd_s} (or not a git repository)."),
+                        &t_fmt(L10nKey::AppNoUncommittedChanges, &[("cwd", &cwd_s)]),
                     ),
                 }
             },
@@ -3487,7 +3499,7 @@ impl Tty7App {
         );
 
         let ssh_quick_connect =
-            cx.new(|cx| InputState::new(window, cx).placeholder("user@host  or  user@host:port"));
+            cx.new(|cx| InputState::new(window, cx).placeholder(t(L10nKey::AppPlaceholderSshQuickConnect)));
         subs.push(
             cx.subscribe_in(&ssh_quick_connect, window, |_this, _i, ev, _w, cx| {
                 if matches!(ev, InputEvent::Change) {
@@ -3639,7 +3651,7 @@ impl Tty7App {
         let platform_default = if cfg!(windows) {
             "PowerShell"
         } else {
-            "login shell"
+            t(L10nKey::AppPlaceholderLoginShell)
         };
         let shell_program_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -3648,7 +3660,7 @@ impl Tty7App {
         });
         let shell_args_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("none")
+                .placeholder(t(L10nKey::AppPlaceholderNone))
                 .default_value(shell_args)
         });
         let wd_path_input = cx.new(|cx| {
@@ -3697,7 +3709,7 @@ impl Tty7App {
             .unwrap_or_default();
         let input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("open in default app")
+                .placeholder(t(L10nKey::AppPlaceholderOpenInDefaultApp))
                 .default_value(value)
         });
         subs.push(
@@ -4196,7 +4208,7 @@ impl Tty7App {
         use crate::ui::settings::AgentHooksMachine;
         let mut out = vec![AgentHooksMachine {
             host: crate::ui::host_ops::HostId::LOCAL,
-            label: "This Computer".to_string(),
+            label: t(L10nKey::AppAgentHooksThisComputer).to_string(),
         }];
         let configured = crate::ui::remote_connect::available_hosts(cx);
         for id in crate::ui::host_registry::HostRegistry::ids(cx) {
@@ -4207,7 +4219,7 @@ impl Tty7App {
                 .iter()
                 .find(|h| h.target.host_id() == id)
                 .map(|h| h.label.clone())
-                .unwrap_or_else(|| "Remote machine".to_string());
+                .unwrap_or_else(|| t(L10nKey::AppAgentHooksRemoteMachine).to_string());
             out.push(AgentHooksMachine { host: id, label });
         }
         out
@@ -4259,7 +4271,7 @@ impl Tty7App {
         let Some((host, home)) = self.agent_hooks_link(host_id, cx) else {
             if let Some(s) = self.settings.as_mut() {
                 s.agent_hooks_states =
-                    AgentHooksView::Unavailable(Self::AGENT_HOOKS_OFFLINE.into());
+                    AgentHooksView::Unavailable(Self::agent_hooks_offline_msg());
             }
             cx.notify();
             return;
@@ -4291,9 +4303,7 @@ impl Tty7App {
                     s.agent_hooks_states = match rows {
                         Some(rows) => AgentHooksView::Ready(rows),
                         None => AgentHooksView::Unavailable(
-                            "tty7 could not work out this computer's home directory, so there is \
-                             nowhere to install to."
-                                .into(),
+                            t(L10nKey::AppAgentHooksNoHomeDir).to_string(),
                         ),
                     };
                     cx.notify();
@@ -4302,10 +4312,9 @@ impl Tty7App {
         );
     }
 
-    const AGENT_HOOKS_OFFLINE: &'static str = concat!(
-        "Not connected to this machine, so its agent config can't be read or ",
-        "written. Open a workspace on it and come back."
-    );
+    fn agent_hooks_offline_msg() -> String {
+        t(L10nKey::AppAgentHooksOffline).to_string()
+    }
 
     fn agent_hooks_link(
         &self,
@@ -4352,9 +4361,9 @@ impl Tty7App {
         };
         let Some((host, home)) = self.agent_hooks_link(host_id, cx) else {
             if let Some(s) = self.settings.as_mut() {
-                s.agent_hooks_note = Some((agent, Self::AGENT_HOOKS_OFFLINE.to_string()));
+                s.agent_hooks_note = Some((agent, Self::agent_hooks_offline_msg()));
                 s.agent_hooks_states = crate::ui::settings::AgentHooksView::Unavailable(
-                    Self::AGENT_HOOKS_OFFLINE.into(),
+                    Self::agent_hooks_offline_msg(),
                 );
             }
             cx.notify();
@@ -4368,7 +4377,7 @@ impl Tty7App {
                 let target = match &home {
                     Some(home) => HookTarget::remote(h, home.clone()),
                     None => HookTarget::local(h)
-                        .ok_or_else(|| anyhow::anyhow!("cannot resolve home directory"))?,
+                        .ok_or_else(|| anyhow::anyhow!("{}", t(L10nKey::AppAgentHooksHomeDirUnresolved)))?,
                 };
                 if install {
                     crate::core::agent_hooks::install_hooks(&target, agent)
@@ -4382,7 +4391,10 @@ impl Tty7App {
                         agent,
                         match result {
                             Ok(summary) => summary,
-                            Err(e) => format!("Failed: {e}"),
+                            Err(e) => t_fmt(
+                                L10nKey::AppAgentHooksOpFailed,
+                                &[("error", &e.to_string())],
+                            ),
                         },
                     ));
                 }
@@ -4526,10 +4538,12 @@ impl Tty7App {
             .find(|(a, k)| *k == spec && *a != action)
             .map(|(a, _)| a);
         let note = displaced.as_ref().map(|other| {
-            format!(
-                "{} took the shortcut from {}, which is now unset.",
-                humanize_action(&action),
-                humanize_action(other)
+            t_fmt(
+                L10nKey::AppKeybindingDisplacedNote,
+                &[
+                    ("action", &humanize_action(&action)),
+                    ("previous", &humanize_action(other)),
+                ],
             )
         });
         self.update_config(cx, |cfg| {
@@ -5560,7 +5574,7 @@ pub(crate) fn new_terminal(
         .workspace
         .as_ref()
         .map(|w| w.target.to_string())
-        .unwrap_or_else(|| "the local server".to_string());
+        .unwrap_or_else(|| t(L10nKey::AppLocalServerName).to_string());
     let pending = cx.new(|cx| crate::ui::pending_pane::PendingPane::new(machine, spawn, cx));
     cx.subscribe_in(
         &pending,
@@ -5726,7 +5740,7 @@ pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, S
     use crate::core::ssh_profile::{SshProfile, parse_quick_connect};
 
     let mut words = parse_ssh_option_words(input)
-        .map_err(|_| "Unbalanced quotes in the SSH command".to_string())?;
+        .map_err(|_| t(L10nKey::AppSshParseUnbalancedQuotes).to_string())?;
     if words.first().is_some_and(|word| word == "ssh") {
         words.remove(0);
     }
@@ -5741,7 +5755,7 @@ pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, S
     while i < words.len() {
         let word = words[i].clone();
         if word == "--" {
-            return Err("Remote commands aren't supported here".to_string());
+            return Err(t(L10nKey::AppSshParseNoRemoteCommands).to_string());
         }
         if let Some((flag, attached)) = ssh_short_flag(&word) {
             let value = if ssh_option_takes_value(flag) {
@@ -5751,7 +5765,7 @@ pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, S
                     i += 1;
                     match words.get(i) {
                         Some(v) => v.clone(),
-                        None => return Err(format!("-{flag} needs a value")),
+                        None => return Err(t_fmt(L10nKey::AppSshParseFlagNeedsValue, &[("flag", &flag.to_string())])),
                     }
                 }
             } else {
@@ -5764,7 +5778,7 @@ pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, S
                             .parse::<u16>()
                             .ok()
                             .filter(|&p| p != 0)
-                            .ok_or_else(|| format!("Invalid port \u{201c}{value}\u{201d}"))?,
+                            .ok_or_else(|| t_fmt(L10nKey::AppSshParseInvalidPort, &[("value", &value)]))?,
                     )
                 }
                 'l' => user = Some(value),
@@ -5774,7 +5788,7 @@ pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, S
                 _ => {}
             }
         } else if word.starts_with('-') {
-            return Err(format!("Unsupported option \u{201c}{word}\u{201d}"));
+            return Err(t_fmt(L10nKey::AppSshParseUnsupportedOption, &[("option", &word)]));
         } else if target.is_none() {
             target = Some(word);
         } else {
@@ -5783,9 +5797,9 @@ pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, S
         i += 1;
     }
 
-    let target = target.ok_or_else(|| "Enter a host to connect to".to_string())?;
+    let target = target.ok_or_else(|| t(L10nKey::AppSshParseEnterHost).to_string())?;
     let qc = parse_quick_connect(&target)
-        .ok_or_else(|| format!("Can't parse host \u{201c}{target}\u{201d}"))?;
+        .ok_or_else(|| t_fmt(L10nKey::AppSshParseBadHost, &[("host", &target)]))?;
 
     let mut profile = SshProfile::new(qc.host.clone());
     profile.host = qc.host;
@@ -5827,7 +5841,7 @@ fn apply_ssh_o_option(
                 val.parse::<u16>()
                     .ok()
                     .filter(|&p| p != 0)
-                    .ok_or_else(|| format!("Invalid port \u{201c}{val}\u{201d}"))?,
+                    .ok_or_else(|| t_fmt(L10nKey::AppSshParseInvalidPort, &[("value", val)]))?,
             )
         }
         "proxyjump" => *jump = Some(val.to_string()),
