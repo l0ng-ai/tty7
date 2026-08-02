@@ -337,11 +337,38 @@ impl<'a> HookTarget<'a> {
     }
 
     fn hook_command(&self, agent: HookAgent, event: &str) -> String {
+        if let Some(exe) = self.hook_command_exe() {
+            return format!("{exe} agent-hook {} {event}", agent.slug());
+        }
         format!(
             "\"{}\" agent-hook {} {event}",
             self.exe.display(),
             agent.slug()
         )
+    }
+
+    /// A shell-safe executable path for generated hook commands.
+    ///
+    /// On Windows, Codex runs hook commands through the session's shell, which
+    /// is frequently PowerShell. `pwsh -Command` drops the quotes around a
+    /// path containing spaces, so the usual `"C:\Program Files\..."` form is
+    /// parsed as `C:\Program` and fails — and even a quoted path without
+    /// spaces is a syntax error in PowerShell (invoking a quoted path requires
+    /// the `&` call operator). When the executable resolves by its bare file
+    /// name from PATH, we can emit the name without any quoting, which every
+    /// shell (`cmd.exe`, PowerShell, bash) executes correctly.
+    ///
+    /// Returns `None` when the executable is not resolvable by name from PATH,
+    /// or when the first PATH match is a different binary; callers then fall
+    /// back to the quoted full path.
+    fn hook_command_exe(&self) -> Option<String> {
+        #[cfg(windows)]
+        if self.is_local() {
+            if let Some(name) = path_resolvable_name(&self.exe) {
+                return Some(name);
+            }
+        }
+        None
     }
 
     fn read(&self, p: &Path) -> io::Result<String> {
@@ -653,6 +680,34 @@ fn marker_command<'a>(matcher: &'a serde_json::Value, marker: &str) -> Option<&'
                 .and_then(|c| c.as_str())
                 .filter(|c| c.contains(marker))
         })
+}
+
+/// Returns the bare file name of `exe` when resolving that name from PATH
+/// yields the same binary. Returns `None` when the name does not resolve, or
+/// when an earlier PATH entry contains a different file with the same name
+/// (a bare-name command would then invoke the wrong binary).
+#[cfg(windows)]
+fn path_resolvable_name(exe: &Path) -> Option<String> {
+    let name = exe.file_name()?.to_str()?;
+    let path_var = std::env::var_os("PATH")?;
+    let exe_canonical = std::fs::canonicalize(exe).ok()?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        let Ok(candidate_canonical) = std::fs::canonicalize(&candidate) else {
+            continue;
+        };
+        if same_windows_path(&candidate_canonical, &exe_canonical) {
+            return Some(name.to_string());
+        }
+        return None;
+    }
+    None
+}
+
+#[cfg(windows)]
+fn same_windows_path(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy()
+        .eq_ignore_ascii_case(&b.to_string_lossy())
 }
 
 fn enable_codex_hooks_feature() -> Result<(), String> {
@@ -1100,6 +1155,10 @@ mod tests {
         let host = local_host();
         let target = HookTarget::local(&*host).expect("home resolves in tests");
         let cmd = target.hook_command(HookAgent::Claude, "stop");
+        // On Windows the executable may be emitted as a bare PATH-resolvable
+        // name: PowerShell cannot invoke a quoted path without the `&` call
+        // operator, so quoting is avoided whenever possible.
+        #[cfg(not(windows))]
         assert!(cmd.starts_with('"'));
         assert!(cmd.ends_with("agent-hook claude stop"));
     }
@@ -1147,9 +1206,12 @@ mod tests {
         let local = local_host();
         let here = HookTarget::local(&*local).expect("home resolves in tests");
         let exe = std::env::current_exe().unwrap();
+        let command_exe = here
+            .hook_command_exe()
+            .unwrap_or_else(|| format!("\"{}\"", exe.display()));
         assert_eq!(
             here.hook_command(HookAgent::Claude, "stop"),
-            format!("\"{}\" agent-hook claude stop", exe.display())
+            format!("{command_exe} agent-hook claude stop")
         );
     }
 
@@ -1191,6 +1253,9 @@ mod tests {
         let exe = exe_json.trim_matches('"').to_string();
         let host = local_host();
         let target = HookTarget::local(&*host).expect("home resolves in tests");
+        let hook_exe_raw = target.hook_command_exe().unwrap_or_else(|| exe_raw.clone());
+        let hook_exe_json = serde_json::to_string(&hook_exe_raw).unwrap();
+        let hook_exe = hook_exe_json.trim_matches('"');
 
         let copilot = copilot_hooks_json(&target).expect("copilot content builds");
         let parsed: serde_json::Value = serde_json::from_str(&copilot).expect("valid JSON");
@@ -1208,11 +1273,11 @@ mod tests {
                 "copilot {event} carries the emitter"
             );
         }
-        assert!(copilot.contains(&exe));
+        assert!(copilot.contains(hook_exe));
 
         let opencode = opencode_plugin_js(&target).expect("opencode content builds");
         assert!(opencode.contains("agent-hook opencode"));
-        assert!(opencode.contains(&exe));
+        assert!(opencode.contains(hook_exe));
         assert!(opencode.contains(r#"process.env["TTY7"]"#));
 
         let pi = pi_extension_ts(&target).expect("pi content builds");
@@ -1241,7 +1306,7 @@ mod tests {
                 "grok {event} matcher"
             );
         }
-        assert!(grok.contains(&exe));
+        assert!(grok.contains(hook_exe));
     }
 
     #[test]

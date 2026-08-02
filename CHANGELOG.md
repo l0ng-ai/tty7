@@ -5,6 +5,53 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`tty7 wait` — the primitive an agent team was missing** — block until a
+  pane's agent needs input, finishes its turn, or dies:
+  `tty7 wait %3 --until waiting,done --changed --timeout 600`. The daemon
+  already tracked, per pane, which coding agent runs there and its status
+  (idle / working / **waiting on the user** / done, plus the agent's native
+  session id), but the only consumer was the GUI's status dots. This hands
+  the same view to programs: one agent can start a worker in another pane,
+  sleep until its peer blocks on a permission prompt, answer it, and read
+  the result — which a tmux-based agent team has to fake by screen-scraping
+  `capture-pane` on a timer.
+
+  The status the server keeps is a *level*, not an event: `done` stands
+  until the next turn begins, `waiting` until the agent moves again. So
+  `--changed` is not optional dressing — it ignores the state the pane was
+  already in when the wait began, which is what every round after the first
+  needs. Without it, a wait issued right after a `send` answers with the
+  *previous* turn's state before the worker has even read the input; the
+  JSON's `stale` flag says when that happened. Exit codes are made for
+  scripts: `0` matched, `124` timed out (the `timeout(1)` convention), `1`
+  with `"status": "exit"` when the worker died before it could get there.
+  The reply carries the agent's message and native session id, so a wake-up
+  is directly actionable.
+
+  Polling `AgentStates` rather than subscribing to events, on purpose: a
+  stateless question composes into scripts (`tty7 wait %3 && tty7 capture %3
+  --plain`), survives a server restart mid-wait, and needs no cursor. The
+  cost is one aggregate request per tick — the same one `tty7 agents` makes
+  once. (#248)
+
+- **An orchestration skill for Claude Code** — a switch under
+  **Settings → Agents** installs `~/.claude/skills/tty7-orchestration`, a
+  skill teaching a *primary* agent the whole delegation loop: open a worker
+  pane, send it one bounded task, `wait` on it, answer what it asks, collect
+  the result, close the pane. A skill rather than a global instruction on
+  purpose — an earlier cut appended this to `~/.claude/CLAUDE.md`, which
+  taxed every session's context window and, worse, encouraged *every* agent
+  to go orchestrate its neighbours. As a skill, only its one-line
+  description rides in context until something explicitly reaches for it,
+  and worker agents never inherit orchestration authority. The file carries
+  an ownership marker: uninstall removes a file tty7 wrote and refuses to
+  touch one it didn't, so a hand-written skill that happens to share the
+  directory name survives. (#248)
+
 ## [26.8.1] - 2026-08-01
 
 ### Added
