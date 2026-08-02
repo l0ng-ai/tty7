@@ -77,309 +77,310 @@ impl SettingsSection {
 
 struct SearchEntry {
     section: SettingsSection,
-    title: &'static str,
-    keywords: &'static str,
+    title: L10nKey,
+    keywords: L10nKey,
 }
 
 fn settings_search_entries() -> &'static [SearchEntry] {
+    use L10nKey::*;
     use SettingsSection::*;
     &[
         SearchEntry {
             section: Appearance,
-            title: "Theme",
-            keywords: "appearance color colours scheme dark light palette background foreground accent sync system os auto follow",
+            title: SettingsThemeIntroTitle,
+            keywords: SettingsSearchThemeKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Sync with system",
-            keywords: "theme dark light auto follow os appearance mode",
+            title: SettingsSyncWithSystem,
+            keywords: SettingsSearchSyncWithSystemKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Custom themes",
-            keywords: "theme duplicate edit colors folder yaml import",
+            title: SettingsCustomThemes,
+            keywords: SettingsSearchCustomThemesKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Opacity",
-            keywords: "transparency translucent see through window alpha",
+            title: SettingsOpacity,
+            keywords: SettingsSearchOpacityKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Blur",
-            keywords: "transparency translucent frosted vibrancy window background",
+            title: SettingsBlur,
+            keywords: SettingsSearchBlurKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Dim inactive panes",
-            keywords: "fade unfocused inactive split pane focus opacity highlight active dimming",
+            title: SettingsDimInactivePanes,
+            keywords: SettingsSearchDimInactivePanesKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Font size",
-            keywords: "typography text bigger smaller zoom",
+            title: SettingsFontSize,
+            keywords: SettingsSearchFontSizeKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Line height",
-            keywords: "typography leading spacing",
+            title: SettingsLineHeight,
+            keywords: SettingsSearchLineHeightKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Font family",
-            keywords: "typeface monospace typography",
+            title: SettingsFontFamily,
+            keywords: SettingsSearchFontFamilyKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Bold font",
-            keywords: "typeface weight",
+            title: SettingsBoldFont,
+            keywords: SettingsSearchBoldFontKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Italic font",
-            keywords: "typeface oblique",
+            title: SettingsItalicFont,
+            keywords: SettingsSearchItalicFontKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Font ligatures",
-            keywords: "typography glyph fira",
+            title: SettingsFontLigatures,
+            keywords: SettingsSearchFontLigaturesKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Cursor shape",
-            keywords: "caret block bar underline beam",
+            title: SettingsCursorShape,
+            keywords: SettingsSearchCursorShapeKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Cursor blink",
-            keywords: "caret blinking flash",
+            title: SettingsCursorBlink,
+            keywords: SettingsSearchCursorBlinkKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "ANSI colors",
-            keywords: "palette 16 terminal colours theme",
+            title: SettingsAnsiColors,
+            keywords: SettingsSearchAnsiColorsKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Program",
-            keywords: "shell binary zsh bash fish pwsh powershell executable launch",
+            title: SettingsProgram,
+            keywords: SettingsSearchProgramKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Arguments",
-            keywords: "shell flags login args",
+            title: SettingsArguments,
+            keywords: SettingsSearchArgumentsKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Start in",
-            keywords: "cwd working directory start folder path home inherit custom",
+            title: SettingsStartIn,
+            keywords: SettingsSearchStartInKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Scrollback",
-            keywords: "history buffer lines scroll",
+            title: SettingsScrollback,
+            keywords: SettingsSearchScrollbackKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Scroll speed",
-            keywords: "mouse wheel multiplier scrolling",
+            title: SettingsScrollSpeed,
+            keywords: SettingsSearchScrollSpeedKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Focus follows mouse",
-            keywords: "pane hover activate",
+            title: SettingsFocusFollowsMouse,
+            keywords: SettingsSearchFocusFollowsMouseKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Hide mouse while typing",
-            keywords: "cursor pointer autohide",
+            title: SettingsHideMouseWhileTyping,
+            keywords: SettingsSearchHideMouseWhileTypingKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Report mouse to apps",
-            keywords: "mouse reporting vim tmux click scroll shift passthrough",
+            title: SettingsReportMouseToApps,
+            keywords: SettingsSearchReportMouseToAppsKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Terminal bell",
-            keywords: "bell audible visual flash sound silence beep ^g",
+            title: SettingsTerminalBell,
+            keywords: SettingsSearchTerminalBellKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Detect URLs",
-            keywords: "links hyperlink clickable open",
+            title: DetectUrls,
+            keywords: SettingsSearchDetectUrlsKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Forward SSH loopback links",
-            keywords: "ssh remote port tunnel localhost forward links",
+            title: ForwardSshLoopbackLinks,
+            keywords: SettingsSearchForwardSshLoopbackLinksKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Open files with",
-            keywords: "links file editor command external app path line column",
+            title: OpenFilesWith,
+            keywords: SettingsSearchOpenFilesWithKeywords,
         },
         SearchEntry {
             section: Input,
-            title: "Tab completion",
-            keywords: "complete completion menu suggestions tab prompt",
+            title: SettingsTabCompletion,
+            keywords: SettingsSearchTabCompletionKeywords,
         },
         SearchEntry {
             section: Input,
-            title: "History search",
-            keywords: "ctrl-r reverse search fuzzy history recall fzf prompt",
+            title: SettingsHistorySearch,
+            keywords: SettingsSearchHistorySearchKeywords,
         },
         SearchEntry {
             section: Input,
-            title: "Option (⌥) acts as Meta",
-            keywords: "alt keyboard modifier escape macos option meta option acts as meta",
+            title: SettingsOptionAsMeta,
+            keywords: SettingsSearchOptionAsMetaKeywords,
         },
         SearchEntry {
             section: Input,
-            title: "Smart selection",
-            keywords: "double click word url path select semantic bracket email",
+            title: SettingsSmartSelection,
+            keywords: SettingsSearchSmartSelectionKeywords,
         },
         SearchEntry {
             section: Input,
-            title: "Copy on select",
-            keywords: "clipboard selection yank mouse",
+            title: SettingsCopyOnSelect,
+            keywords: SettingsSearchCopyOnSelectKeywords,
         },
         SearchEntry {
             section: Input,
-            title: "Trim trailing spaces on copy",
-            keywords: "clipboard whitespace copy",
+            title: SettingsTrimTrailingSpaces,
+            keywords: SettingsSearchTrimTrailingSpacesKeywords,
         },
         SearchEntry {
             section: Ssh,
-            title: "Hosts",
-            keywords: "ssh host connection saved profile import ssh_config manage add edit \
-                       quick connect",
+            title: SettingsHosts,
+            keywords: SettingsSearchHostsKeywords,
         },
         SearchEntry {
             section: Ssh,
-            title: "Verify host keys",
-            keywords: "ssh security known_hosts fingerprint mitm host key verification",
+            title: SettingsVerifyHostKeys,
+            keywords: SettingsSearchVerifyHostKeysKeywords,
         },
         SearchEntry {
             section: Ssh,
-            title: "Warn before closing",
-            keywords: "ssh confirm close tab pane live session security",
+            title: WarnBeforeClosing,
+            keywords: SettingsSearchWarnBeforeClosingKeywords,
         },
         SearchEntry {
             section: Ssh,
-            title: "Port forwarding",
-            keywords: "ssh tunnel local remote dynamic socks forward rule",
+            title: SettingsPortForwarding,
+            keywords: SettingsSearchPortForwardingKeywords,
         },
         SearchEntry {
             section: Agents,
-            title: "Claude Code",
-            keywords: "agent integration hooks install uninstall status rich session working waiting tab bar sidebar badge claude",
+            title: SettingsAgentClaudeCode,
+            keywords: SettingsSearchClaudeCodeKeywords,
         },
         SearchEntry {
             section: Agents,
-            title: "Codex",
-            keywords: "agent integration hooks install openai codex",
+            title: SettingsAgentCodex,
+            keywords: SettingsSearchCodexKeywords,
         },
         SearchEntry {
             section: Agents,
-            title: "Copilot CLI",
-            keywords: "agent integration hooks install github copilot",
+            title: SettingsAgentCopilotCli,
+            keywords: SettingsSearchCopilotCliKeywords,
         },
         SearchEntry {
             section: Agents,
-            title: "OpenCode",
-            keywords: "agent integration plugin install opencode",
+            title: SettingsAgentOpencode,
+            keywords: SettingsSearchOpencodeKeywords,
         },
         SearchEntry {
             section: Agents,
-            title: "Pi",
-            keywords: "agent integration extension install pi",
+            title: SettingsAgentPi,
+            keywords: SettingsSearchPiKeywords,
         },
         SearchEntry {
             section: Agents,
-            title: "Grok Build",
-            keywords: "agent integration hooks install xai grok build",
+            title: SettingsAgentGrokBuild,
+            keywords: SettingsSearchGrokBuildKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Startup window",
-            keywords: "launch open maximized fullscreen normal",
+            title: SettingsStartupWindow,
+            keywords: SettingsSearchStartupWindowKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Remember window size & position",
-            keywords: "window size position bounds geometry launch startup remember",
+            title: SettingsRememberWindowSize,
+            keywords: SettingsSearchRememberWindowSizeKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Restore last layout",
-            keywords: "restore session previous tabs splits reopen launch startup layout",
+            title: SettingsRestoreLastLayout,
+            keywords: SettingsSearchRestoreLastLayoutKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Confirm before closing the last window",
-            keywords: "close quit confirm prompt dialog ask again warn last window cmd-w ctrl-w",
+            title: SettingsConfirmLastWindowClose,
+            keywords: SettingsSearchConfirmLastWindowCloseKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Show tray icon",
-            keywords: "tray menu bar status item agent attention system icon",
+            title: SettingsShowTrayIcon,
+            keywords: SettingsSearchShowTrayIconKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "New tab position",
-            keywords: "tabs order end after current",
+            title: SettingsNewTabPosition,
+            keywords: SettingsSearchNewTabPositionKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Tab bar position",
-            keywords: "tabs vertical sidebar left top layout rail",
+            title: SettingsTabBarPosition,
+            keywords: SettingsSearchTabBarPositionKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Sidebar grouping",
-            keywords: "tabs group repo repository git scratch header sidebar flat",
+            title: SettingsSidebarGrouping,
+            keywords: SettingsSearchSidebarGroupingKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Open diff preview from sidebar counts",
-            keywords: "diff overlay preview sidebar counts git changes click branch lines",
+            title: SettingsDiffPreviewFromCounts,
+            keywords: SettingsSearchDiffPreviewFromCountsKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Notify on command finish",
-            keywords: "notification alert done osc desktop banner long command",
+            title: SettingsNotifyOnCommandFinish,
+            keywords: SettingsSearchNotifyOnCommandFinishKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Notify threshold",
-            keywords: "notification alert seconds duration long command delay",
+            title: SettingsNotifyThreshold,
+            keywords: SettingsSearchNotifyThresholdKeywords,
         },
         SearchEntry {
             section: Keybindings,
-            title: "Keybindings",
-            keywords: "shortcut hotkey keyboard binding chord tmux preset rebind prefix",
+            title: SettingsSearchKeybindingsTitle,
+            keywords: SettingsSearchKeybindingsKeywords,
         },
         SearchEntry {
             section: About,
-            title: "About",
-            keywords: "version license credits build update check github",
+            title: SettingsNavAbout,
+            keywords: SettingsSearchAboutKeywords,
         },
         SearchEntry {
             section: About,
-            title: "How shells work",
-            keywords: "shell session daemon server detach persist background close quit stop delete workspace layout survive reboot tmux",
+            title: SettingsSearchHowShellsWorkTitle,
+            keywords: SettingsSearchHowShellsWorkKeywords,
         },
         SearchEntry {
             section: About,
-            title: "Command line tool",
-            keywords: "cli tty7 path shell command install symlink terminal iterm agent script",
+            title: SettingsSearchCommandLineToolTitle,
+            keywords: SettingsSearchCommandLineToolKeywords,
         },
     ]
 }
 
 fn entry_matches(entry: &SearchEntry, query: &str) -> bool {
-    entry.title.to_lowercase().contains(query) || entry.keywords.contains(query)
+    t(entry.title).to_lowercase().contains(query)
+        || t(entry.keywords).to_lowercase().contains(query)
 }
 
 pub(crate) fn section_match_count(section: SettingsSection, query: &str) -> usize {
@@ -4789,7 +4790,7 @@ mod tests {
                 .iter()
                 .find(|e| e.section == section)
                 .expect("checked by every_section_has_search_entries");
-            let query = entry.title.to_lowercase();
+            let query = t(entry.title).to_lowercase();
             let landed = best_matching_section(&query);
             assert!(
                 landed.is_some(),
@@ -4858,7 +4859,7 @@ mod tests {
             "Option (⌥) acts as Meta",
         ] {
             assert!(
-                settings_search_entries().iter().any(|e| e.title == title),
+                settings_search_entries().iter().any(|e| t(e.title) == title),
                 "no index entry titled {title:?}"
             );
         }
@@ -4869,7 +4870,7 @@ mod tests {
         for agent in crate::core::agent_hooks::HookAgent::ALL {
             assert!(
                 settings_search_entries().iter().any(
-                    |e| e.section == SettingsSection::Agents && e.title == agent.display_name()
+                    |e| e.section == SettingsSection::Agents && t(e.title) == agent.display_name()
                 ),
                 "no Agents index entry titled {:?}",
                 agent.display_name()

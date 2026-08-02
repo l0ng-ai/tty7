@@ -6,7 +6,7 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_f
 use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind};
 use crate::terminal::view::TerminalView;
 use crate::ui::app::{CONTENT_INSET, Tty7App};
-use crate::ui::i18n::t;
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 impl Tty7App {
     pub(crate) fn render_ssh_status_strip(
@@ -46,9 +46,12 @@ impl Tty7App {
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.foreground)
                     .child(if host.is_empty() {
-                        "Disconnected".to_string()
+                        t(L10nKey::ForwardDisconnected).to_string()
                     } else {
-                        format!("Disconnected from {host}")
+                        t_fmt(
+                            L10nKey::ForwardDisconnectedFrom,
+                            &[("host", &host)],
+                        )
                     }),
             )
             .child(div().child("· ⌘⇧R"))
@@ -152,7 +155,7 @@ impl Tty7App {
         .w(px(24.))
         .h(px(24.))
         .rounded_md()
-        .tooltip(if open { "Cancel" } else { "Add forward" })
+        .tooltip(if open { t(L10nKey::Cancel) } else { t(L10nKey::ForwardTooltipAdd) })
         .on_click(cx.listener(move |this, _, window, cx| {
             this.toggle_managed_forward_form(pane_id, window, cx)
         }))
@@ -174,7 +177,7 @@ impl Tty7App {
 
         Some(
             v_flex()
-                .child(self.panel_subtitle("Forwards", true, Some(add), cx))
+                .child(self.panel_subtitle(t(L10nKey::ForwardPanelTitle), true, Some(add), cx))
                 .when(managed.is_empty() && !open, |this| {
                     this.child(
                         div()
@@ -294,7 +297,7 @@ impl Tty7App {
                         .w(px(18.))
                         .h(px(18.))
                         .rounded(px(4.))
-                        .tooltip("Remove")
+                        .tooltip(t(L10nKey::ForwardTooltipRemove))
                         .on_click(cx.listener(
                             move |this, _, _window, cx| {
                                 this.remove_managed_forward(pane_id, forward_id, cx)
@@ -344,7 +347,11 @@ impl Tty7App {
             .child(self.segmented_on(
                 sf,
                 "ssh-managed-forward-kind",
-                &["Local", "Remote", "Dynamic"],
+                &[
+                    t(L10nKey::ForwardLocal),
+                    t(L10nKey::ForwardRemote),
+                    t(L10nKey::ForwardDynamic),
+                ],
                 selected,
                 cx,
                 move |this, ix, _window, cx| {
@@ -357,7 +364,7 @@ impl Tty7App {
                 },
             ))
             .child(pair(
-                "bind",
+                t(L10nKey::ForwardBindLabel),
                 &self.loopback_panel.mf_bind_host,
                 &self.loopback_panel.mf_bind_port,
             ))
@@ -365,7 +372,11 @@ impl Tty7App {
                 div()
                     .opacity(if needs_target { 1.0 } else { 0.4 })
                     .child(pair(
-                        if needs_target { "to" } else { "SOCKS" },
+                        if needs_target {
+                            t(L10nKey::ForwardToLabel)
+                        } else {
+                            t(L10nKey::ForwardSocksLabel)
+                        },
                         &self.loopback_panel.mf_target_host,
                         &self.loopback_panel.mf_target_port,
                     )),
@@ -378,7 +389,7 @@ impl Tty7App {
                     .pt(px(1.))
                     .child(
                         Button::new(("ssh-managed-forward-cancel", pane_id))
-                            .label("Cancel")
+                            .label(t(L10nKey::Cancel))
                             .ghost()
                             .xsmall()
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -387,7 +398,11 @@ impl Tty7App {
                     )
                     .child(
                         Button::new(("ssh-managed-forward-add", pane_id))
-                            .label(if editing { "Save" } else { "Add" })
+                            .label(if editing {
+                                t(L10nKey::Save)
+                            } else {
+                                t(L10nKey::ForwardAdd)
+                            })
                             .primary()
                             .xsmall()
                             .on_click(cx.listener(move |this, _, window, cx| {

@@ -6,6 +6,7 @@ use crate::core::config::RightPanelTab;
 use crate::ui::app::Tty7App;
 use crate::ui::host_ops::{ByHost, HostId, HostOps, InFlight, SharedHost, WatchSub};
 use crate::ui::host_registry::HostRegistry;
+use crate::ui::i18n::{t, t_fmt, L10nKey};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton,
@@ -904,9 +905,9 @@ impl Tty7App {
         };
         let input = cx.new(|cx| {
             let mut st = InputState::new(window, cx).placeholder(match edit_for {
-                TreeEditKind::NewFile => "file name",
-                TreeEditKind::NewFolder => "folder name",
-                TreeEditKind::Rename => "new name",
+                TreeEditKind::NewFile => t(L10nKey::FileTreePlaceholderFileName),
+                TreeEditKind::NewFolder => t(L10nKey::FileTreePlaceholderFolderName),
+                TreeEditKind::Rename => t(L10nKey::FileTreePlaceholderNewName),
             });
             st.set_value(initial, window, cx);
             st
@@ -1048,15 +1049,15 @@ impl Tty7App {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.display().to_string());
         let detail = if is_dir {
-            "The folder and everything inside it will be deleted."
+            t(L10nKey::FileTreeDeleteFolderBody)
         } else {
-            "The file will be deleted."
+            t(L10nKey::FileTreeDeleteFileBody)
         };
         let answer = window.prompt(
             PromptLevel::Warning,
-            &format!("Delete \"{name}\"?"),
+            &t_fmt(L10nKey::FileTreeDeleteTitle, &[("name", &name)]),
             Some(detail),
-            &["Cancel", "Delete"],
+            &[t(L10nKey::Cancel), t(L10nKey::Delete)],
             cx,
         );
         cx.spawn_in(window, async move |app, cx| {
@@ -1096,7 +1097,7 @@ impl Tty7App {
                             }
                             Err(e) => {
                                 app.file_tree.rollback(id, &parent, rollback);
-                                HostOps::notify_err(window, cx, "Delete failed", &e);
+                                HostOps::notify_err(window, cx, t(L10nKey::FileTreeDeleteFailed), &e);
                             }
                         }
                         cx.notify();
@@ -1353,7 +1354,7 @@ impl Tty7App {
         let p = path.to_path_buf();
 
         if !is_dir {
-            menu = menu.item(PopupMenuItem::new("Open").on_click({
+            menu = menu.item(PopupMenuItem::new(t(L10nKey::FileTreeContextOpen)).on_click({
                 let app = app.clone();
                 let p = p.clone();
                 move |_, window, cx| {
@@ -1362,7 +1363,7 @@ impl Tty7App {
             }));
         }
         if is_dir {
-            menu = menu.item(PopupMenuItem::new("cd Here").on_click({
+            menu = menu.item(PopupMenuItem::new(t(L10nKey::FileTreeContextCdHere)).on_click({
                 let app = app.clone();
                 let p = p.clone();
                 move |_, window, cx| {
@@ -1371,7 +1372,7 @@ impl Tty7App {
             }));
         }
         menu = menu
-            .item(PopupMenuItem::new("Insert Path in Terminal").on_click({
+            .item(PopupMenuItem::new(t(L10nKey::FileTreeContextInsertPath)).on_click({
                 let app = app.clone();
                 let p = p.clone();
                 move |_, window, cx| {
@@ -1386,7 +1387,7 @@ impl Tty7App {
                     });
                 }
             }))
-            .item(PopupMenuItem::new("Attach to Agent").on_click({
+            .item(PopupMenuItem::new(t(L10nKey::FileTreeContextAttachAgent)).on_click({
                 let app = app.clone();
                 let p = p.clone();
                 move |_, _window, cx| {
@@ -1394,7 +1395,7 @@ impl Tty7App {
                 }
             }))
             .separator()
-            .item(PopupMenuItem::new("New File").on_click({
+            .item(PopupMenuItem::new(t(L10nKey::FileTreeContextNewFile)).on_click({
                 let app = app.clone();
                 let p = p.clone();
                 move |_, window, cx| {
@@ -1403,7 +1404,7 @@ impl Tty7App {
                     });
                 }
             }))
-            .item(PopupMenuItem::new("New Folder").on_click({
+            .item(PopupMenuItem::new(t(L10nKey::FileTreeContextNewFolder)).on_click({
                 let app = app.clone();
                 let p = p.clone();
                 move |_, window, cx| {
@@ -1414,7 +1415,7 @@ impl Tty7App {
             }));
 
         if !is_root {
-            menu = menu.item(PopupMenuItem::new("Rename").on_click({
+            menu = menu.item(PopupMenuItem::new(t(L10nKey::FileTreeContextRename)).on_click({
                 let app = app.clone();
                 let p = p.clone();
                 move |_, window, cx| {
@@ -1427,7 +1428,7 @@ impl Tty7App {
 
         menu = menu
             .separator()
-            .item(PopupMenuItem::new("Copy Path").on_click({
+            .item(PopupMenuItem::new(t(L10nKey::FileTreeContextCopyPath)).on_click({
                 let p = p.clone();
                 move |_, _window, cx| {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(p.display().to_string()));
@@ -1449,7 +1450,7 @@ impl Tty7App {
                 PopupMenuItem::element(move |_window, _cx| {
                     div()
                         .text_color(danger)
-                        .child(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Delete))
+                        .child(t(L10nKey::Delete))
                 })
                 .on_click({
                     let app = app.clone();
@@ -1468,9 +1469,9 @@ impl Tty7App {
 fn dotfiles_menu_item(show_hidden: bool, app: &gpui::WeakEntity<Tty7App>) -> PopupMenuItem {
     let app = app.clone();
     PopupMenuItem::new(if show_hidden {
-        "Hide Dotfiles"
+        t(L10nKey::FileTreeContextHideDotfiles)
     } else {
-        "Show Dotfiles"
+        t(L10nKey::FileTreeContextShowDotfiles)
     })
     .on_click(move |_, _window, cx| {
         let _ = app.update(cx, |this, cx| {
