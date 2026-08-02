@@ -115,8 +115,8 @@ fn window_menu_items(cx: &App) -> Vec<MenuItem> {
     let slot_action = crate::ui::tab_strip::select_workspace_action;
 
     let mut items = vec![
-        MenuItem::action("Minimize", MinimizeWindow),
-        MenuItem::action("Zoom", ZoomWindow),
+        MenuItem::action(t(L10nKey::AppMenuMinimize), MinimizeWindow),
+        MenuItem::action(t(L10nKey::AppMenuZoom), ZoomWindow),
         MenuItem::separator(),
     ];
     let workspace_start = items.len();
@@ -152,7 +152,7 @@ fn window_menu_items(cx: &App) -> Vec<MenuItem> {
         });
     }
     if items.len() == workspace_start {
-        items.push(MenuItem::action("New Workspace", NewWorkspace));
+        items.push(MenuItem::action(t(L10nKey::AppMenuNewWorkspace), NewWorkspace));
     }
     items
 }

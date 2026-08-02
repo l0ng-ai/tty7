@@ -796,16 +796,16 @@ impl Tty7App {
             Link::Local => (None, None),
             Link::Connected => (Some(gpui::rgb(crate::ui::tab_strip::LIVE_DOT).into()), None),
             Link::Connecting if matches!(group.installing, Some(InstallPhase::Restarting)) => {
-                (Some(theme.warning), Some("restarting…"))
+                (Some(theme.warning), Some(t(L10nKey::SwitcherStatusRestarting)))
             }
             Link::Connecting if group.installing.is_some() => {
-                (Some(theme.warning), Some("installing…"))
+                (Some(theme.warning), Some(t(L10nKey::SwitcherStatusInstalling)))
             }
-            Link::Connecting => (Some(theme.warning), Some("connecting…")),
-            Link::Failed => (Some(theme.danger), Some("couldn't connect")),
+            Link::Connecting => (Some(theme.warning), Some(t(L10nKey::SwitcherStatusConnecting))),
+            Link::Failed => (Some(theme.danger), Some(t(L10nKey::SwitcherStatusConnectFailed))),
             Link::Offline => (
                 Some(gpui::rgb(crate::ui::tab_strip::UNKNOWN_DOT).into()),
-                Some("not connected"),
+                Some(t(L10nKey::SwitcherStatusNotConnected)),
             ),
         };
         let word_color = match group.link {

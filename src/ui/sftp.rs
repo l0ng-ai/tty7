@@ -71,7 +71,10 @@ impl SftpRoute {
         };
         match RemoteTerminal::on_workspace(req) {
             Ok(crate::daemon::protocol::DaemonMsg::SftpEntries(e)) => Ok(e),
-            Ok(other) => Err(format!("unexpected reply: {other:?}")),
+            Ok(other) => Err(t_fmt(
+                L10nKey::SftpErrorUnexpectedReply,
+                &[("reply", &format!("{other:?}"))],
+            )),
             Err(e) => Err(e.to_string()),
         }
     }
@@ -84,7 +87,10 @@ impl SftpRoute {
         };
         match RemoteTerminal::on_workspace(req) {
             Ok(crate::daemon::protocol::DaemonMsg::SftpOpResult(r)) => r,
-            Ok(other) => SftpOpResult::Error(format!("unexpected reply: {other:?}")),
+            Ok(other) => SftpOpResult::Error(t_fmt(
+                L10nKey::SftpErrorUnexpectedReply,
+                &[("reply", &format!("{other:?}"))],
+            )),
             Err(e) => SftpOpResult::Error(e.to_string()),
         }
     }
@@ -99,7 +105,10 @@ impl SftpRoute {
         };
         match RemoteTerminal::on_workspace(req) {
             Ok(crate::daemon::protocol::DaemonMsg::SftpTransferStarted { job_id }) => Ok(job_id),
-            Ok(other) => Err(format!("unexpected reply: {other:?}")),
+            Ok(other) => Err(t_fmt(
+                L10nKey::SftpErrorUnexpectedReply,
+                &[("reply", &format!("{other:?}"))],
+            )),
             Err(e) => Err(e.to_string()),
         }
     }
@@ -500,7 +509,10 @@ impl Tty7App {
             return;
         };
         if !safe_local_name(&entry.name) {
-            self.sftp_panel.error = Some(format!("refusing unsafe remote name {:?}", entry.name));
+            self.sftp_panel.error = Some(t_fmt(
+                L10nKey::SftpErrorUnsafeRemoteName,
+                &[("name", &format!("{:?}", entry.name))],
+            ));
             cx.notify();
             return;
         }
@@ -695,7 +707,7 @@ impl Tty7App {
                         mode,
                     }),
                     Err(_) => {
-                        self.sftp_panel.error = Some("invalid octal mode".to_string());
+                        self.sftp_panel.error = Some(t(L10nKey::SftpErrorInvalidOctalMode).to_string());
                         cx.notify();
                         return;
                     }

@@ -595,7 +595,9 @@ pub(crate) struct Recording {
     pub(crate) _intercept: Subscription,
 }
 
-pub(crate) const FONT_DEFAULT_LABEL: &str = "Default (match primary)";
+pub(crate) fn font_default_label() -> &'static str {
+    t(L10nKey::SettingsFontDefault)
+}
 
 #[cfg(target_os = "macos")]
 const LINK_MODIFIER_LABEL: &str = "⌘";
@@ -668,7 +670,7 @@ fn seed_forward_row(
         bind_port: seed_hinted(window, cx, &port(rule.bind.port), "8080"),
         target_host: seed_hinted(window, cx, &rule.target.host, "127.0.0.1"),
         target_port: seed_hinted(window, cx, &port(rule.target.port), "80"),
-        description: seed_hinted(window, cx, &rule.description, "what it's for"),
+        description: seed_hinted(window, cx, &rule.description, t(L10nKey::ForwardDescriptionPlaceholder)),
     }
 }
 
@@ -3242,7 +3244,7 @@ impl Tty7App {
         let platform_default = if cfg!(windows) {
             "PowerShell"
         } else {
-            "your login shell"
+            t(L10nKey::SettingsShellDefaultLoginShell)
         };
 
         let program_control = div()

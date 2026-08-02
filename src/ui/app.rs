@@ -3588,7 +3588,7 @@ impl Tty7App {
                                      window: &mut Window,
                                      cx: &mut Context<Self>| {
             let mut rows = Vec::with_capacity(names.len() + 1);
-            rows.push(crate::ui::settings::FONT_DEFAULT_LABEL.to_string());
+            rows.push(crate::ui::settings::font_default_label().to_string());
             rows.extend(names.iter().cloned());
             let selected = value
                 .as_ref()
@@ -3869,7 +3869,7 @@ impl Tty7App {
     }
 
     fn commit_font_family_emphasis(&mut self, bold: bool, name: String, cx: &mut Context<Self>) {
-        let family = (name != crate::ui::settings::FONT_DEFAULT_LABEL).then_some(name);
+        let family = (name != crate::ui::settings::font_default_label()).then_some(name);
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
                 let family = family.clone();
