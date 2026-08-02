@@ -16,6 +16,7 @@ use crate::core::session::WorkspaceStore;
 use crate::daemon::install::InstallPhase;
 use crate::terminal::pane_liveness::Liveness;
 use crate::ui::app::Tty7App;
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow, human_bytes};
 use crate::ui::remote_workspace::ConnectFlow;
 
@@ -439,7 +440,7 @@ impl Tty7App {
                     .py(px(14.))
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("No workspace or machine matches."),
+                    .child(t(L10nKey::SwitcherNoMatch)),
             );
         }
 
@@ -540,7 +541,7 @@ impl Tty7App {
                         GUTTER,
                         Icon::new(IconName::Plus).size(px(ICON)).text_color(dim),
                     ))
-                    .child("Add SSH Host…")
+                    .child(t(L10nKey::AddSshHost))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.close_switcher(window, cx);
                         this.open_settings_section(
@@ -566,7 +567,7 @@ impl Tty7App {
                             .border_color(border)
                             .child("⌘"),
                     )
-                    .child("click for a new window"),
+                    .child(t(L10nKey::ClickForNewWindow)),
             )
     }
 
@@ -633,7 +634,7 @@ impl Tty7App {
                                         "switcher-retry:{}",
                                         group.key
                                     )))
-                                    .label("Try Again")
+                                    .label(t(L10nKey::TryAgain))
                                     .ghost()
                                     .xsmall()
                                     .on_click(cx.listener(move |this, _, _window, cx| {
@@ -658,7 +659,7 @@ impl Tty7App {
                                                 "switcher-replace:{}",
                                                 group.key
                                             )))
-                                            .label("Restart Server")
+                                            .label(t(L10nKey::RestartServer))
                                             .ghost()
                                             .xsmall()
                                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -1057,7 +1058,12 @@ impl Tty7App {
                     GUTTER,
                     Icon::new(IconName::Globe).size(px(ICON)).text_color(dim),
                 ))
-                .child(div().text_sm().text_color(muted).child("Other Machines"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(t(L10nKey::OtherMachines)),
+                )
                 .child(div().flex_1())
                 .child(
                     div()

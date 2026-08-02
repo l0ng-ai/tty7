@@ -731,14 +731,20 @@ impl Tty7App {
                     div()
                         .text_xs()
                         .font_family("monospace")
-                        .child(format!("new {fingerprint}")),
+                        .child(crate::ui::i18n::t_fmt(
+                            crate::ui::i18n::L10nKey::SshPromptNewKey,
+                            &[("fingerprint", &fingerprint)],
+                        )),
                 )
                 .child(
                     div()
                         .text_xs()
                         .font_family("monospace")
                         .text_color(cx.theme().muted_foreground)
-                        .child(format!("old {old_fingerprint}")),
+                        .child(crate::ui::i18n::t_fmt(
+                            crate::ui::i18n::L10nKey::SshPromptOldKey,
+                            &[("old_fingerprint", &old_fingerprint)],
+                        )),
                 )
                 .child(div().text_xs().child(crate::ui::i18n::t(
                     crate::ui::i18n::L10nKey::HostKeyOverrideMessage,
