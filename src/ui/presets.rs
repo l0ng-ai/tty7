@@ -5,6 +5,7 @@ use gpui::{App, Global, Hsla};
 use serde::Deserialize;
 
 use crate::terminal::palette::ActivePalette;
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Fill {
@@ -499,7 +500,10 @@ pub fn fork_to_file(t: &Theme) -> std::io::Result<String> {
         n += 1;
     }
     let mut copy = t.clone();
-    copy.name = format!("{} (custom)", t.name.trim_end_matches(" (custom)"));
+    copy.name = t_fmt(
+        L10nKey::ThemeCustomSuffix,
+        &[("name", t.name.trim_end_matches(" (custom)"))],
+    );
     crate::core::config::write_atomic(
         &dir.join(format!("{stem}.yaml")),
         to_yaml(&copy).as_bytes(),
@@ -592,7 +596,7 @@ fn id_and_name(path: &std::path::Path) -> (String, String) {
     (
         stem,
         if name.is_empty() {
-            "Theme".into()
+            t(L10nKey::ThemeFallbackName).to_string()
         } else {
             name
         },

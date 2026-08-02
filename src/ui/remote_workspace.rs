@@ -502,7 +502,7 @@ impl Tty7App {
     ) {
         let label = mismatch.host.clone();
         match remote_connect::mismatch_target(&mismatch)
-            .ok_or_else(|| format!("tty7 no longer has a way to reach {label}"))
+            .ok_or_else(|| t_fmt(L10nKey::RemoteNoRouteToHost, &[("machine", &label)]))
         {
             Ok(target) => self.restart_remote_server(target, label, window, cx),
             Err(e) => Tty7App::report_restart_failure(&label, &e, window, cx),

@@ -590,23 +590,37 @@ impl Tty7App {
     fn render_ssh_sheet(&self, model: &PromptModel, cx: &mut Context<Self>) -> AnyElement {
         let danger = cx.theme().danger;
         let (title, danger_sheet) = match model {
-            PromptModel::Password { user, host, .. } => {
-                (format!("Password for {user}@{host}"), false)
-            }
-            PromptModel::KeyPassphrase { key_path, .. } => {
-                (format!("Passphrase for {key_path}"), false)
-            }
+            PromptModel::Password { user, host, .. } => (
+                crate::ui::i18n::t_fmt(
+                    crate::ui::i18n::L10nKey::SshPromptPasswordFor,
+                    &[("user", user), ("host", host)],
+                ),
+                false,
+            ),
+            PromptModel::KeyPassphrase { key_path, .. } => (
+                crate::ui::i18n::t_fmt(
+                    crate::ui::i18n::L10nKey::SshPromptPassphraseFor,
+                    &[("key_path", key_path)],
+                ),
+                false,
+            ),
             PromptModel::KeyboardInteractive { name, .. } => {
                 let label = if name.is_empty() {
-                    "Two-factor authentication".to_string()
+                    crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptTwoFactor).to_string()
                 } else {
                     name.clone()
                 };
                 (label, false)
             }
-            PromptModel::HostKeyUnknown { host, .. } => (format!("Unknown host {host}"), false),
+            PromptModel::HostKeyUnknown { host, .. } => (
+                crate::ui::i18n::t_fmt(
+                    crate::ui::i18n::L10nKey::SshPromptUnknownHost,
+                    &[("host", host)],
+                ),
+                false,
+            ),
             PromptModel::HostKeyChanged { .. } => (
-                "Host key CHANGED — possible man-in-the-middle".to_string(),
+                crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptHostKeyChanged).to_string(),
                 true,
             ),
         };
@@ -651,7 +665,10 @@ impl Tty7App {
                 }
                 c.child(self.render_ssh_input(0))
                     .child(self.render_ssh_remember(cx))
-                    .child(self.render_ssh_actions("Connect", cx))
+                    .child(self.render_ssh_actions(
+                        crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptConnect),
+                        cx,
+                    ))
             }
             PromptModel::KeyPassphrase { comment, .. } => {
                 let mut c = card;
@@ -665,7 +682,10 @@ impl Tty7App {
                 }
                 c.child(self.render_ssh_input(0))
                     .child(self.render_ssh_remember(cx))
-                    .child(self.render_ssh_actions("Unlock", cx))
+                    .child(self.render_ssh_actions(
+                        crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptUnlock),
+                        cx,
+                    ))
             }
             PromptModel::KeyboardInteractive {
                 instructions,
@@ -680,7 +700,10 @@ impl Tty7App {
                     c = c.child(div().text_xs().child(row.text.clone()));
                     c = c.child(self.render_ssh_input(i));
                 }
-                c.child(self.render_ssh_actions("Submit", cx))
+                c.child(self.render_ssh_actions(
+                        crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptSubmit),
+                        cx,
+                    ))
             }
             PromptModel::HostKeyUnknown {
                 algorithm,
@@ -723,9 +746,14 @@ impl Tty7App {
                 port,
                 host,
             } => card
-                .child(div().text_xs().text_color(danger).child(
-                    "The host key differs from the one previously trusted. This may be an attack.",
-                ))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(danger)
+                        .child(crate::ui::i18n::t(
+                            crate::ui::i18n::L10nKey::SshPromptHostKeyChangedBody,
+                        )),
+                )
                 .child(div().text_xs().child(format!("{host}:{port}  {algorithm}")))
                 .child(
                     div()

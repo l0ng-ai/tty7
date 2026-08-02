@@ -322,7 +322,10 @@ pub fn list_workspaces(host: &Arc<RemoteHost>) -> io::Result<Vec<RemoteWorkspace
         ReplyOk::MachineTree(machine) => Ok(rows_from_machine(&machine)),
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("the server answered a machine tree with {other:?}"),
+            t_fmt(
+                L10nKey::RemoteMachineTreeUnexpectedReply,
+                &[("reply", &format!("{other:?}"))],
+            ),
         )),
     }
 }
@@ -626,7 +629,9 @@ pub fn mismatch_answers() -> [&'static str; 2] {
 
 pub fn mismatch_detail(m: &MismatchedRemoteDaemon) -> String {
     let running = match (&m.running_version, &m.running_exe) {
-        (Some(v), Some(exe)) => format!("{v} (from {exe})"),
+        (Some(v), Some(exe)) => {
+            t_fmt(L10nKey::RemoteMismatchVersionFromExe, &[("version", v), ("exe", exe)])
+        }
         (Some(v), None) => v.clone(),
         (None, Some(exe)) => {
             t_fmt(L10nKey::RemoteMismatchUnknownBuildFromExe, &[("exe", exe)])
