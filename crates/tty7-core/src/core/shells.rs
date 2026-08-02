@@ -31,10 +31,7 @@ pub struct ShellInventory {
 
 pub fn inventory() -> ShellInventory {
     let configured = crate::core::config::shell_command();
-    ShellInventory {
-        shells: detect_shells(),
-        default_name: default_shell_name(configured.as_ref().map(|(p, _)| p.as_str())),
-    }
+    inventory_from(detect_shells(), configured, &login_shell())
 }
 
 pub fn detect_shells() -> Vec<DetectedShell> {
@@ -54,6 +51,90 @@ pub fn default_shell_name(configured: Option<&str>) -> String {
         _ => login_shell(),
     };
     basename(&program)
+}
+
+/// Combines the detected shells with the explicit shell from Settings.
+///
+/// A bare configured command such as `nu` matches the detected executable with
+/// the same basename because both resolve through PATH. Explicit paths only
+/// match the same path, so choosing a second installation of the same shell
+/// still creates a useful, distinct menu entry. The detected label wins for a
+/// match, preserving friendly names such as "Nushell" and "PowerShell 7".
+fn inventory_from(
+    mut shells: Vec<DetectedShell>,
+    configured: Option<(String, Vec<String>)>,
+    fallback_program: &str,
+) -> ShellInventory {
+    let configured = configured.filter(|(program, _)| !program.trim().is_empty());
+    let default_program = configured
+        .as_ref()
+        .map_or(fallback_program, |(program, _)| program.as_str());
+
+    if let Some(default_name) = shells
+        .iter()
+        .find(|shell| same_shell_program(&shell.program, default_program))
+        .map(|shell| shell.label.clone())
+    {
+        return ShellInventory {
+            shells,
+            default_name,
+        };
+    }
+
+    let default_name = basename(default_program);
+    if let Some((program, args)) = configured {
+        // The configured shell is the platform default, so keep it at the top
+        // just like the detected login shell while retaining its custom args.
+        shells.insert(
+            0,
+            DetectedShell {
+                label: default_name.clone(),
+                program,
+                args,
+            },
+        );
+    }
+
+    ShellInventory {
+        shells,
+        default_name,
+    }
+}
+
+/// Compares executable identities without collapsing two explicit installs.
+fn same_shell_program(detected: &str, configured: &str) -> bool {
+    let detected = detected.trim();
+    let configured = configured.trim();
+    if detected.is_empty() || configured.is_empty() {
+        return false;
+    }
+
+    let detected_path = Path::new(detected);
+    let configured_path = Path::new(configured);
+    if is_bare_program(configured_path) {
+        return basename(detected) == basename(configured);
+    }
+    if is_bare_program(detected_path) {
+        return false;
+    }
+
+    comparable_program_path(detected_path) == comparable_program_path(configured_path)
+}
+
+fn is_bare_program(program: &Path) -> bool {
+    program.components().count() <= 1
+}
+
+/// Canonicalization folds harmless `.` and `..` differences when the target
+/// exists. The textual fallback still gives stable behavior for configured
+/// paths that have not been installed yet.
+fn comparable_program_path(program: &Path) -> String {
+    let resolved = std::fs::canonicalize(program).unwrap_or_else(|_| program.to_path_buf());
+    let mut value = resolved.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        value = value.replace('/', "\\").to_ascii_lowercase();
+    }
+    value
 }
 
 /// The user's login shell, straight from the passwd database.
@@ -584,6 +665,101 @@ mod tests {
 
         let path = std::env::join_paths([first.path(), second.path()]).unwrap();
         assert_eq!(find_in_path_var("nu.exe", &path), Some(expected));
+    }
+
+    #[test]
+    fn a_unique_configured_shell_is_added_first_with_its_args() {
+        let detected = vec![DetectedShell::bare("System Shell", "system-shell")];
+        let inventory = inventory_from(
+            detected,
+            Some((
+                "custom-shell".into(),
+                vec!["--login".into(), "--verbose".into()],
+            )),
+            "system-shell",
+        );
+
+        assert_eq!(inventory.default_name, "custom-shell");
+        assert_eq!(inventory.shells.len(), 2);
+        assert_eq!(inventory.shells[0].label, "custom-shell");
+        assert_eq!(inventory.shells[0].program, "custom-shell");
+        assert_eq!(inventory.shells[0].args, ["--login", "--verbose"]);
+    }
+
+    #[test]
+    fn a_bare_configured_name_reuses_the_detected_friendly_entry() {
+        let detected_program = if cfg!(windows) {
+            r"C:\Tools\Nushell\nu.exe"
+        } else {
+            "/opt/nushell/bin/nu"
+        };
+        let inventory = inventory_from(
+            vec![DetectedShell::bare("Nushell", detected_program)],
+            Some(("nu".into(), vec!["--login".into()])),
+            "fallback-shell",
+        );
+
+        assert_eq!(inventory.shells.len(), 1, "the same shell was duplicated");
+        assert_eq!(inventory.default_name, "Nushell");
+    }
+
+    #[test]
+    fn explicit_same_named_shells_at_different_paths_stay_distinct() {
+        let first = if cfg!(windows) {
+            r"C:\Shells\first\custom.exe"
+        } else {
+            "/opt/shells/first/custom"
+        };
+        let second = if cfg!(windows) {
+            r"D:\Shells\second\custom.exe"
+        } else {
+            "/opt/shells/second/custom"
+        };
+        let inventory = inventory_from(
+            vec![DetectedShell::bare("custom", first)],
+            Some((second.into(), Vec::new())),
+            "fallback-shell",
+        );
+
+        assert_eq!(inventory.shells.len(), 2);
+        assert_eq!(inventory.shells[0].program, second);
+        assert_eq!(inventory.default_name, "custom");
+    }
+
+    #[test]
+    fn an_explicit_configured_path_does_not_collapse_a_bare_detected_name() {
+        let configured = if cfg!(windows) {
+            r"C:\Shells\custom.exe"
+        } else {
+            "/opt/shells/custom"
+        };
+        let detected = if cfg!(windows) {
+            "custom.exe"
+        } else {
+            "custom"
+        };
+        let inventory = inventory_from(
+            vec![DetectedShell::bare("custom", detected)],
+            Some((configured.into(), Vec::new())),
+            "fallback-shell",
+        );
+
+        assert_eq!(inventory.shells.len(), 2);
+        assert_eq!(inventory.shells[0].program, configured);
+    }
+
+    #[test]
+    fn detected_label_names_the_unconfigured_platform_default() {
+        let program = if cfg!(windows) {
+            r"C:\Program Files\PowerShell\7\pwsh.exe"
+        } else {
+            "/opt/homebrew/bin/zsh"
+        };
+        let label = if cfg!(windows) { "PowerShell 7" } else { "zsh" };
+        let inventory = inventory_from(vec![DetectedShell::bare(label, program)], None, program);
+
+        assert_eq!(inventory.default_name, label);
+        assert_eq!(inventory.shells.len(), 1);
     }
 
     #[test]

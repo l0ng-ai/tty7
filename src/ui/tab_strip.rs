@@ -15,7 +15,8 @@ use crate::core::actions::{
     SelectWorkspace5, SelectWorkspace6, SelectWorkspace7, SelectWorkspace8, SelectWorkspace9,
     TogglePalette,
 };
-use crate::core::config::RightPanelTab;
+use crate::core::config::{RightPanelTab, ShellConfig};
+use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
 use crate::ui::app::{TILE_GLYPH, TILE_GLYPH_LINE, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
 use crate::ui::hints::tab_badge_label;
@@ -27,6 +28,16 @@ const CHIP_GAP: f32 = 6.;
 pub(crate) const GRAB_HANDLE_W: f32 = 80.;
 
 const KEEP_SEGMENTS: usize = 3;
+
+/// Distinguishes built-in launch flags from arguments authored in Settings.
+/// User arguments must retain their existing shell-integration semantics when
+/// the configured shell is launched through the dropdown instead of the main
+/// new-tab action.
+fn shell_args_are_tty7_defaults(shell: &DetectedShell, configured: Option<&ShellConfig>) -> bool {
+    !configured.is_some_and(|configured| {
+        configured.program == shell.program && configured.args == shell.args
+    })
+}
 
 pub(crate) fn abbreviate_home(path: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
@@ -535,6 +546,11 @@ impl Tty7App {
     ) -> impl IntoElement + use<> {
         let shells = self.shells.shells.clone();
         let default_name = self.default_shell_label(cx);
+        let configured = self
+            .shells_host
+            .is_local()
+            .then(|| cx.global::<crate::core::config::Config>().shell.clone())
+            .flatten();
         let app = cx.entity().downgrade();
         button.dropdown_menu(move |menu, _window, _cx| {
             let mut menu = menu.min_w(px(220.));
@@ -542,7 +558,10 @@ impl Tty7App {
                 let spec = ShellSpec {
                     program: shell.program.clone(),
                     args: shell.args.clone(),
-                    args_are_tty7_defaults: true,
+                    args_are_tty7_defaults: shell_args_are_tty7_defaults(
+                        shell,
+                        configured.as_ref(),
+                    ),
                 };
                 let open = app.clone();
                 let item = if shell.label == default_name {
@@ -1114,5 +1133,21 @@ mod tests {
         let out = short_title(&long);
         assert_eq!(out.chars().count(), 41);
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn configured_shell_arguments_remain_user_authored_in_the_menu() {
+        let shell = DetectedShell {
+            label: "custom".into(),
+            program: "custom-shell".into(),
+            args: vec!["--login".into()],
+        };
+        let configured = ShellConfig {
+            program: shell.program.clone(),
+            args: shell.args.clone(),
+        };
+
+        assert!(!shell_args_are_tty7_defaults(&shell, Some(&configured)));
+        assert!(shell_args_are_tty7_defaults(&shell, None));
     }
 }
