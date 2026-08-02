@@ -1,4 +1,4 @@
-use std::ffi::{OsStr, OsString};
+use std::ffi::{OsStr, OsString, c_void};
 use std::io;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
@@ -7,11 +7,11 @@ use std::ptr;
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Threading::{
-    CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
-    DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetProcessMitigationPolicy,
-    InitializeProcThreadAttributeList, OpenProcess, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS,
-    PROCESS_CREATE_PROCESS, PROCESS_INFORMATION, ProcessRedirectionTrustPolicy, STARTUPINFOEXW,
-    UpdateProcThreadAttribute,
+    CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CreateProcessW, DETACHED_PROCESS,
+    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
+    GetProcessMitigationPolicy, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+    OpenProcess, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, PROCESS_CREATE_PROCESS, PROCESS_INFORMATION,
+    ProcessRedirectionTrustPolicy, STARTUPINFOEXW, UpdateProcThreadAttribute,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId};
 
@@ -81,22 +81,35 @@ impl Drop for OwnedHandle {
     }
 }
 
-/// Owns an initialized PROC_THREAD_ATTRIBUTE_LIST and its parent handle value.
-struct ParentAttributeList {
+/// The only attribute a daemon spawn sets.
+///
+/// Deliberately just the logical parent. Handing the child a `NUL` handle for
+/// its standard streams — the Win32 spelling of the ordinary path's
+/// `Stdio::null()` — is not possible here: naming a logical parent makes
+/// handle inheritance follow *that* process, not tty7, so a handle from our
+/// own table would not survive the transition. The daemon therefore starts
+/// with no standard handles at all, and `daemon::server` is written to
+/// tolerate that.
+const ATTRIBUTE_COUNT: u32 = 1;
+
+/// Owns an initialized PROC_THREAD_ATTRIBUTE_LIST and the values it points at.
+struct SpawnAttributes {
     // The native structure is opaque but contains pointer-width fields. usize
     // storage guarantees the required alignment instead of relying on Vec<u8>.
     storage: Vec<usize>,
-    // UpdateProcThreadAttribute receives a pointer to this HANDLE value. Keep
-    // its address stable alongside the list until CreateProcessW returns.
+    // UpdateProcThreadAttribute stores pointers to these values rather than
+    // copying them. Keep their addresses stable until CreateProcessW returns.
     _parent_value: Box<HANDLE>,
 }
 
-impl ParentAttributeList {
+impl SpawnAttributes {
     fn new(parent: HANDLE) -> io::Result<Self> {
         let mut bytes = 0usize;
         // The first call is the documented size query and is expected to fail
         // while filling `bytes` with the required allocation size.
-        unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &raw mut bytes) };
+        unsafe {
+            InitializeProcThreadAttributeList(ptr::null_mut(), ATTRIBUTE_COUNT, 0, &raw mut bytes)
+        };
         if bytes == 0 {
             let error = io::Error::last_os_error();
             return Err(io::Error::new(
@@ -110,7 +123,9 @@ impl ParentAttributeList {
         let list = storage.as_mut_ptr().cast();
         // SAFETY: The buffer is aligned, large enough for the reported byte
         // count, and will not be reallocated while the native list is alive.
-        if unsafe { InitializeProcThreadAttributeList(list, 1, 0, &raw mut bytes) } == 0 {
+        if unsafe { InitializeProcThreadAttributeList(list, ATTRIBUTE_COUNT, 0, &raw mut bytes) }
+            == 0
+        {
             let error = io::Error::last_os_error();
             return Err(io::Error::new(
                 error.kind(),
@@ -119,28 +134,36 @@ impl ParentAttributeList {
         }
 
         let parent_value = Box::new(parent);
-        // SAFETY: `list` is initialized, and the boxed HANDLE value has the
-        // exact size and stable address required by PARENT_PROCESS.
-        let updated = unsafe {
-            UpdateProcThreadAttribute(
-                list,
-                0,
-                PROC_THREAD_ATTRIBUTE_PARENT_PROCESS as usize,
-                (&raw const *parent_value).cast(),
-                size_of::<HANDLE>(),
-                ptr::null_mut(),
-                ptr::null(),
-            )
-        };
-        if updated == 0 {
-            // SAFETY: Initialization succeeded, so the native list must be
-            // released before returning the attribute update error.
-            unsafe { windows_sys::Win32::System::Threading::DeleteProcThreadAttributeList(list) };
-            let error = io::Error::last_os_error();
-            return Err(io::Error::new(
-                error.kind(),
-                format!("set logical parent process attribute: {error}"),
-            ));
+        // PARENT_PROCESS supplies the token, device map, and mitigation policy.
+        let attributes: [(u32, *const c_void, usize); ATTRIBUTE_COUNT as usize] = [(
+            PROC_THREAD_ATTRIBUTE_PARENT_PROCESS,
+            (&raw const *parent_value).cast(),
+            size_of::<HANDLE>(),
+        )];
+        for (attribute, value, size) in attributes {
+            // SAFETY: `list` is initialized, and each value has the exact size
+            // and a stable address that outlives the attribute list.
+            let updated = unsafe {
+                UpdateProcThreadAttribute(
+                    list,
+                    0,
+                    attribute as usize,
+                    value,
+                    size,
+                    ptr::null_mut(),
+                    ptr::null(),
+                )
+            };
+            if updated == 0 {
+                let error = io::Error::last_os_error();
+                // SAFETY: Initialization succeeded, so the native list must be
+                // released before returning the attribute update error.
+                unsafe { DeleteProcThreadAttributeList(list) };
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("set process attribute {attribute:#x}: {error}"),
+                ));
+            }
         }
 
         Ok(Self {
@@ -149,20 +172,16 @@ impl ParentAttributeList {
         })
     }
 
-    fn as_mut_ptr(
-        &mut self,
-    ) -> windows_sys::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST {
+    fn as_mut_ptr(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
         self.storage.as_mut_ptr().cast()
     }
 }
 
-impl Drop for ParentAttributeList {
+impl Drop for SpawnAttributes {
     fn drop(&mut self) {
         // SAFETY: Construction only succeeds after native initialization, and
         // the backing storage remains allocated until this destructor returns.
-        unsafe {
-            windows_sys::Win32::System::Threading::DeleteProcThreadAttributeList(self.as_mut_ptr())
-        };
+        unsafe { DeleteProcThreadAttributeList(self.as_mut_ptr()) };
     }
 }
 
@@ -201,6 +220,8 @@ pub(super) fn spawn_detached_with_parent(
 ) -> io::Result<()> {
     // PROCESS_CREATE_PROCESS is the only access right required when a process
     // handle is supplied through PROC_THREAD_ATTRIBUTE_PARENT_PROCESS.
+    // SAFETY: OpenProcess only reads `parent_pid` and returns an owned handle
+    // or NULL; nothing here outlives the wrapper installed below.
     let parent = unsafe { OpenProcess(PROCESS_CREATE_PROCESS, 0, parent_pid) };
     if parent.is_null() {
         let error = io::Error::last_os_error();
@@ -210,7 +231,7 @@ pub(super) fn spawn_detached_with_parent(
         ));
     }
     let parent = OwnedHandle(parent);
-    let mut attributes = ParentAttributeList::new(parent.0)?;
+    let mut attributes = SpawnAttributes::new(parent.0)?;
 
     let application: Vec<u16> = program.as_os_str().encode_wide().chain([0]).collect();
     let mut command_line = Vec::new();
@@ -231,7 +252,6 @@ pub(super) fn spawn_detached_with_parent(
     let flags = DETACHED_PROCESS
         | CREATE_NEW_PROCESS_GROUP
         | CREATE_NO_WINDOW
-        | CREATE_UNICODE_ENVIRONMENT
         | EXTENDED_STARTUPINFO_PRESENT;
     // SAFETY: Both strings are NUL-terminated, the command line is writable,
     // and every pointer, handle, and output structure remains alive throughout
@@ -263,4 +283,30 @@ pub(super) fn spawn_detached_with_parent(
     let _process = OwnedHandle(process_info.hProcess);
     let _thread = OwnedHandle(process_info.hThread);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn quoted(arg: &str) -> String {
+        let mut units = Vec::new();
+        push_quoted_arg(&mut units, OsStr::new(arg));
+        String::from_utf16(&units).expect("the quoter only emits units it was given plus ASCII")
+    }
+
+    /// The daemon's `--config-dir` argument is a user path, so it can end in a
+    /// backslash or carry a quote. Both need the CRT's doubling rules; getting
+    /// them wrong silently merges the argument with the next one.
+    #[test]
+    fn arguments_survive_the_crt_quoting_rules() {
+        assert_eq!(quoted("--daemon"), r#""--daemon""#);
+        assert_eq!(quoted(""), r#""""#);
+        assert_eq!(quoted(r"C:\Users\me\tty7"), r#""C:\Users\me\tty7""#);
+        // A trailing backslash must not escape the closing quote.
+        assert_eq!(quoted(r"C:\Program Files\"), r#""C:\Program Files\\""#);
+        // A literal quote takes one escape, and the run before it doubles.
+        assert_eq!(quoted(r#"a"b"#), r#""a\"b""#);
+        assert_eq!(quoted(r#"a\"b"#), r#""a\\\"b""#);
+    }
 }

@@ -589,6 +589,11 @@ impl DeathReporter {
         *self.exit_code.lock().unwrap() = Some(Box::new(probe));
     }
 
+    #[cfg(windows)]
+    fn has_reported(&self) -> bool {
+        self.reported.load(Ordering::SeqCst)
+    }
+
     fn report(&self, state: &Mutex<PaneState>, shutting_down: &AtomicBool) {
         if self.reported.swap(true, Ordering::SeqCst) {
             return;
@@ -623,14 +628,58 @@ impl DeathReporter {
 
 /// Releases the PTY master without holding its slot mutex during destruction.
 ///
-/// `ClosePseudoConsole` may wait while the output pipe is drained. Dropping the
-/// master after releasing the mutex is essential because the reader's
-/// foreground probes use the same slot between reads; holding the lock across
-/// the close could prevent the reader from returning to the pipe and deadlock
-/// both threads.
+/// `ClosePseudoConsole` may wait while the output pipe is drained, and the same
+/// slot is what `resize` locks. Dropping the master only after releasing the
+/// mutex keeps a concurrent resize from parking behind a close that is itself
+/// waiting on the reader.
+#[cfg(windows)]
 fn close_pty_master(master: &Mutex<Option<Box<dyn MasterPty + Send>>>) {
     let owned = master.lock().ok().and_then(|mut slot| slot.take());
     drop(owned);
+}
+
+/// How long the Windows exit monitor lets the reader announce the death on its
+/// own before doing it itself.
+///
+/// The reader is the better reporter: it publishes `Exited` only after it has
+/// forwarded every byte that preceded EOF, which is what keeps a short-lived
+/// command's final frame ahead of its exit. But EOF is not guaranteed. A
+/// grandchild that inherited the ConPTY output pipe holds it open after the
+/// shell is gone — `cmd /c start …` is enough — and `ClosePseudoConsole` then
+/// never completes. Without this window such a pane would read as alive
+/// forever to every attached client.
+#[cfg(windows)]
+const EXIT_DRAIN_WINDOW: Duration = Duration::from_secs(2);
+
+#[cfg(windows)]
+const EXIT_DRAIN_POLL: Duration = Duration::from_millis(10);
+
+/// Releases the pseudoconsole, then reports the pane's death — preferring the
+/// reader's EOF-ordered report and falling back to its own after `window`.
+///
+/// Must run on a background thread: both halves block.
+#[cfg(windows)]
+fn drain_then_report(
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
+    state: Arc<Mutex<PaneState>>,
+    shutting_down: Arc<AtomicBool>,
+    death: Arc<DeathReporter>,
+    window: Duration,
+) {
+    // `ClosePseudoConsole` can block until the reader drains the pipe, so it
+    // cannot run on the thread that owns the deadline below.
+    std::thread::Builder::new()
+        .name("tty7-daemon-pane-pty-close".to_string())
+        .spawn(move || close_pty_master(&master))
+        .expect("spawn daemon pane pty close thread");
+
+    let deadline = std::time::Instant::now() + window;
+    while !death.has_reported() && std::time::Instant::now() < deadline {
+        std::thread::sleep(EXIT_DRAIN_POLL);
+    }
+    // `DeathReporter` is idempotent, so this is a no-op whenever the reader
+    // already got there — which is the ordinary case.
+    death.report(&state, &shutting_down);
 }
 
 /// One out-of-band frame the reader forwards to the subscriber, kept in stream
@@ -749,7 +798,13 @@ impl DaemonPane {
         });
 
         #[cfg(windows)]
-        Self::spawn_exit_monitor(shell_pid, master.clone());
+        Self::spawn_exit_monitor(
+            shell_pid,
+            master.clone(),
+            state.clone(),
+            pane.shutting_down.clone(),
+            death.clone(),
+        );
 
         let fg_master = master.clone();
         let remote_master = master.clone();
@@ -936,7 +991,11 @@ impl DaemonPane {
 
                 loop {
                     if trace && tr_last.elapsed() >= std::time::Duration::from_secs(1) {
-                        eprintln!(
+                        // Not `eprintln!`: a daemon can be running without any
+                        // standard error at all (see `daemon::server`), and a
+                        // failed write there would panic the reader thread.
+                        let _ = writeln!(
+                            std::io::stderr(),
                             "[trace daemon] {:.1} MB/s | {} reads ({} B/read) | pty wait {:?} dispatch {:?}",
                             tr_bytes as f64 / tr_last.elapsed().as_secs_f64() / 1e6,
                             tr_reads,
@@ -1254,6 +1313,9 @@ impl DaemonPane {
     fn spawn_exit_monitor(
         shell_pid: Option<u32>,
         master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
+        state: Arc<Mutex<PaneState>>,
+        shutting_down: Arc<AtomicBool>,
+        death: Arc<DeathReporter>,
     ) {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
@@ -1263,13 +1325,13 @@ impl DaemonPane {
         let Some(pid) = shell_pid else { return };
         let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
         if handle.is_null() {
-            // The process may have exited before OpenProcess ran. Close the
-            // pseudoconsole from a helper thread so its potentially blocking
-            // destructor runs concurrently with the reader that drains it.
+            // The process may have exited before OpenProcess ran, so go
+            // straight to the close-and-report path — off this thread, since
+            // pane construction is what calls us.
             std::thread::Builder::new()
                 .name("tty7-daemon-pane-exit-fallback".to_string())
                 .spawn(move || {
-                    close_pty_master(&master);
+                    drain_then_report(master, state, shutting_down, death, EXIT_DRAIN_WINDOW);
                 })
                 .expect("spawn daemon pane exit fallback thread");
             return;
@@ -1283,10 +1345,7 @@ impl DaemonPane {
                     WaitForSingleObject(handle, INFINITE);
                     CloseHandle(handle);
                 }
-                // Releasing the ConPTY master closes its output pipe. The
-                // reader remains the sole exit reporter: it first consumes
-                // every byte preceding EOF, then publishes `Exited`.
-                close_pty_master(&master);
+                drain_then_report(master, state, shutting_down, death, EXIT_DRAIN_WINDOW);
             })
             .expect("spawn daemon pane exit monitor thread");
     }
@@ -3554,8 +3613,8 @@ mod tests {
             }
         }
 
-        /// Models a reader that remains delayed well beyond the removed 500ms
-        /// grace period, then receives a final output chunk followed by EOF.
+        /// Models a reader that stays delayed well past any plausible grace
+        /// period, then receives a final output chunk followed by EOF.
         struct DelayedTailReader {
             released: Arc<(Mutex<bool>, Condvar)>,
             tail: std::io::Cursor<Vec<u8>>,
@@ -3620,6 +3679,140 @@ mod tests {
             Ok(DaemonMsg::Exited { code: None })
         ));
         assert!(sub_rx.try_recv().is_err(), "no output may follow Exited");
+        reader.join().unwrap();
+    }
+
+    /// An inert stand-in for the ConPTY master: releasing it is instant, which
+    /// is what `ClosePseudoConsole` does once the pipe has no pending bytes.
+    #[cfg(windows)]
+    struct InertMaster;
+
+    #[cfg(windows)]
+    impl MasterPty for InertMaster {
+        fn resize(&self, _size: PtySize) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn get_size(&self) -> anyhow::Result<PtySize> {
+            Ok(PtySize::default())
+        }
+
+        fn try_clone_reader(&self) -> anyhow::Result<Box<dyn Read + Send>> {
+            Ok(Box::new(std::io::empty()))
+        }
+
+        fn take_writer(&self) -> anyhow::Result<Box<dyn Write + Send>> {
+            Ok(Box::new(std::io::sink()))
+        }
+    }
+
+    #[cfg(windows)]
+    fn exit_drain_fixture() -> (
+        Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
+        Arc<Mutex<PaneState>>,
+        Arc<AtomicBool>,
+        Arc<DeathReporter>,
+        mpsc::Receiver<DaemonMsg>,
+    ) {
+        let state = Arc::new(Mutex::new(test_state(true)));
+        let (sub_tx, sub_rx) = mpsc::channel();
+        state.lock().unwrap().subscriber = Some(sub_tx);
+        (
+            Arc::new(Mutex::new(Some(
+                Box::new(InertMaster) as Box<dyn MasterPty + Send>
+            ))),
+            state,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(DeathReporter::new(|| {})),
+            sub_rx,
+        )
+    }
+
+    /// A grandchild that inherited the ConPTY output pipe keeps it open after
+    /// the shell is gone, so the reader never sees EOF and can never publish
+    /// the exit. The monitor's drain window is the only thing that stops such
+    /// a pane from reading as alive forever.
+    #[cfg(windows)]
+    #[test]
+    fn a_pty_that_never_reaches_eof_still_reports_the_exit() {
+        struct NeverEofReader;
+
+        impl Read for NeverEofReader {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                // Long enough to outlast the window below, bounded so the
+                // thread cannot outlive the test binary.
+                std::thread::sleep(Duration::from_secs(5));
+                Ok(0)
+            }
+        }
+
+        let (master, state, shutting_down, death, sub_rx) = exit_drain_fixture();
+        let _reader = DaemonPane::spawn_reader(
+            state.clone(),
+            shutting_down.clone(),
+            Arc::new(OutputGate::new()),
+            Box::new(NeverEofReader),
+            null_writer(),
+            || false,
+            ForegroundProbes {
+                remote: Box::new(|| None),
+                agent: Box::new(|| None),
+                cwd: Box::new(|| None),
+            },
+            death.clone(),
+        );
+
+        drain_then_report(
+            master,
+            state,
+            shutting_down,
+            death,
+            Duration::from_millis(50),
+        );
+        assert!(
+            matches!(
+                sub_rx.recv_timeout(Duration::from_secs(1)),
+                Ok(DaemonMsg::Exited { code: None })
+            ),
+            "the monitor must report the exit once its drain window elapses"
+        );
+    }
+
+    /// The ordinary case: EOF arrives, the reader reports, and the monitor
+    /// neither waits out its window nor publishes a second `Exited`.
+    #[cfg(windows)]
+    #[test]
+    fn the_exit_monitor_defers_to_the_reader_that_saw_eof() {
+        let (master, state, shutting_down, death, sub_rx) = exit_drain_fixture();
+        let reader = DaemonPane::spawn_reader(
+            state.clone(),
+            shutting_down.clone(),
+            Arc::new(OutputGate::new()),
+            Box::new(std::io::empty()),
+            null_writer(),
+            || false,
+            ForegroundProbes {
+                remote: Box::new(|| None),
+                agent: Box::new(|| None),
+                cwd: Box::new(|| None),
+            },
+            death.clone(),
+        );
+
+        let started = std::time::Instant::now();
+        drain_then_report(master, state, shutting_down, death, Duration::from_secs(30));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the monitor must stop waiting as soon as the reader has reported"
+        );
+        assert!(matches!(
+            sub_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(DaemonMsg::Exited { code: None })
+        ));
+        assert!(
+            sub_rx.try_recv().is_err(),
+            "the idempotent reporter must not publish a second Exited"
+        );
         reader.join().unwrap();
     }
 

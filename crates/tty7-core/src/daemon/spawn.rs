@@ -293,12 +293,19 @@ fn spawn_detached() -> anyhow::Result<()> {
             args.push(std::ffi::OsString::from("--config-dir"));
             args.push(dir.as_os_str().to_owned());
         }
-        windows::spawn_detached_with_clean_parent(&exe, &args).map_err(|error| {
-            anyhow::anyhow!(
-                "failed to spawn daemon through the Windows desktop shell while Redirection Trust is enforced: {error}"
-            )
-        })?;
-        return Ok(());
+        match windows::spawn_detached_with_clean_parent(&exe, &args) {
+            Ok(()) => return Ok(()),
+            // The clean parent is unavailable whenever there is no interactive
+            // Explorer to borrow — it is restarting, the shell was replaced, or
+            // the session has no desktop at all. Losing it only costs junction
+            // traversal inside the shells, so degrade to the ordinary path
+            // instead of refusing to start tty7 at all.
+            Err(error) => log::warn!(
+                "could not spawn the daemon through the Windows desktop shell while \
+                 Redirection Trust is enforced ({error}); falling back to the ordinary \
+                 path, where Scoop-style junctions may be unreachable"
+            ),
+        }
     }
 
     let mut cmd = Command::new(exe);
@@ -442,11 +449,17 @@ mod windows_spawn_tests {
                 .env(CLEAN_PARENT_ENV, std::process::id().to_string())
                 .output()
                 .expect("spawn isolated mitigation test process");
+            let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(
                 output.status.success(),
-                "isolated mitigation test failed:\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
+                "isolated mitigation test failed:\nstdout:\n{stdout}\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stderr)
+            );
+            // libtest exits 0 when `--exact` matches nothing, so a stale
+            // TEST_NAME would turn this whole regression into a silent pass.
+            assert!(
+                stdout.contains("1 passed"),
+                "the isolated mitigation test must actually run; TEST_NAME is probably stale:\n{stdout}"
             );
             return;
         }
