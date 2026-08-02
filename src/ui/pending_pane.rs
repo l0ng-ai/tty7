@@ -9,6 +9,7 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_f
 
 use crate::daemon::protocol::ShellSpec;
 use crate::terminal::PaneWorkspace;
+use crate::ui::i18n::{L10nKey, t_fmt};
 
 #[derive(Clone)]
 pub struct PendingSpawn {
@@ -97,7 +98,10 @@ impl Render for PendingPane {
                     div()
                         .text_sm()
                         .text_color(muted)
-                        .child(format!("Connecting to {}…", self.machine)),
+                        .child(t_fmt(
+                        L10nKey::PendingConnecting,
+                        &[("machine", &self.machine)],
+                    )),
                 )
                 .into_any_element(),
             PendingState::Failed(reason) => v_flex()
@@ -108,7 +112,10 @@ impl Render for PendingPane {
                     div()
                         .text_sm()
                         .text_color(theme.foreground)
-                        .child(format!("Couldn't reach {}", self.machine)),
+                        .child(t_fmt(
+                        L10nKey::PendingUnreachable,
+                        &[("machine", &self.machine)],
+                    )),
                 )
                 .child(
                     div()

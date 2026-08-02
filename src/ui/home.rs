@@ -10,6 +10,7 @@ use gpui_component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 
 use crate::core::session::{SessionPane, SessionTab};
 use crate::ui::app::Tty7App;
+use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 
 const LOGO: [&str; 4] = [
     " ▄▄▄ ▄▄▄ ▄  ▄ ▄▄▄▄",
@@ -69,33 +70,20 @@ pub(crate) fn now_secs() -> u64 {
 }
 
 pub(crate) fn relative_time(now: u64, then: u64) -> String {
-    relative_time_in(crate::ui::i18n::is_zh_hans(), now, then)
-}
-
-fn relative_time_in(zh_hans: bool, now: u64, then: u64) -> String {
-    if zh_hans {
-        return match now.saturating_sub(then) {
-            0..=59 => "刚刚".to_string(),
-            s if s < 3_600 => format!("{} 分钟前", s / 60),
-            s if s < 7_200 => "1 小时前".to_string(),
-            s if s < 86_400 => format!("{} 小时前", s / 3_600),
-            s if s < 172_800 => "昨天".to_string(),
-            s if s < 604_800 => format!("{} 天前", s / 86_400),
-            _ => "超过一周".to_string(),
-        };
-    }
     if then == 0 || then >= now {
-        return "just now".to_string();
+        return t(L10nKey::HomeTimeJustNow).to_string();
     }
     let secs = now - then;
     match secs {
-        s if s < 60 => "just now".to_string(),
-        s if s < 3600 => format!("{} min ago", s / 60),
-        s if s < 7200 => "1 hour ago".to_string(),
-        s if s < 86_400 => format!("{} hours ago", s / 3600),
-        s if s < 172_800 => "yesterday".to_string(),
-        s if s < 604_800 => format!("{} days ago", s / 86_400),
-        _ => "over a week ago".to_string(),
+        s if s < 60 => t(L10nKey::HomeTimeJustNow).to_string(),
+        s if s < 3_600 => t_plural(L10nKey::HomeTimeMinutesAgo, (s / 60) as usize, &[]),
+        s if s < 7_200 => t(L10nKey::HomeTimeHourAgo).to_string(),
+        s if s < 86_400 => {
+            t_plural(L10nKey::HomeTimeHoursAgo, (s / 3_600) as usize, &[])
+        }
+        s if s < 172_800 => t(L10nKey::HomeTimeYesterday).to_string(),
+        s if s < 604_800 => t_plural(L10nKey::HomeTimeDaysAgo, (s / 86_400) as usize, &[]),
+        _ => t(L10nKey::HomeTimeOverWeekAgo).to_string(),
     }
 }
 
@@ -137,11 +125,7 @@ fn home_shortcut_label(action: &str, closed: Option<&str>) -> String {
     };
     if action == "ReopenClosedTab" {
         if let Some(name) = closed {
-            return if crate::ui::i18n::is_zh_hans() {
-                format!("重新打开“{name}”")
-            } else {
-                format!("Reopen \u{201c}{name}\u{201d}")
-            };
+            return t_fmt(L10nKey::HomeReopenNamed, &[("name", name)]);
         }
     }
     label.to_string()
@@ -255,6 +239,7 @@ impl Tty7App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::i18n::set_locale;
     use std::path::PathBuf;
 
     fn leaf(cwd: Option<&str>) -> SessionPane {
@@ -347,27 +332,27 @@ mod tests {
 
     #[test]
     fn relative_time_reads_coarsely_across_the_ranges() {
+        set_locale("en");
         let now = 10_000_000u64;
-        assert_eq!(relative_time_in(false, now, now), "just now");
-        assert_eq!(relative_time_in(false, now, now - 30), "just now");
-        assert_eq!(relative_time_in(false, now, now - 120), "2 min ago");
-        assert_eq!(relative_time_in(false, now, now - 3600), "1 hour ago");
-        assert_eq!(relative_time_in(false, now, now - 4 * 3600), "4 hours ago");
-        assert_eq!(relative_time_in(false, now, now - 90_000), "yesterday");
-        assert_eq!(relative_time_in(false, now, now - 3 * 86_400), "3 days ago");
-        assert_eq!(
-            relative_time_in(false, now, now - 30 * 86_400),
-            "over a week ago"
-        );
+        assert_eq!(relative_time(now, now), "just now");
+        assert_eq!(relative_time(now, now - 30), "just now");
+        assert_eq!(relative_time(now, now - 120), "2 min ago");
+        assert_eq!(relative_time(now, now - 3600), "1 hour ago");
+        assert_eq!(relative_time(now, now - 4 * 3600), "4 hours ago");
+        assert_eq!(relative_time(now, now - 90_000), "yesterday");
+        assert_eq!(relative_time(now, now - 3 * 86_400), "3 days ago");
+        assert_eq!(relative_time(now, now - 30 * 86_400), "over a week ago");
 
-        assert_eq!(relative_time_in(true, now, now - 30), "刚刚");
-        assert_eq!(relative_time_in(true, now, now - 120), "2 分钟前");
-        assert_eq!(relative_time_in(true, now, now - 3600), "1 小时前");
-        assert_eq!(relative_time_in(true, now, now - 90_000), "昨天");
+        set_locale("zh-CN");
+        assert_eq!(relative_time(now, now - 30), "刚刚");
+        assert_eq!(relative_time(now, now - 120), "2 分钟前");
+        assert_eq!(relative_time(now, now - 3600), "1 小时前");
+        assert_eq!(relative_time(now, now - 90_000), "昨天");
     }
 
     #[test]
     fn relative_time_never_renders_a_negative_age() {
+        set_locale("en");
         let now = 1_000_000u64;
         assert_eq!(relative_time(now, 0), "just now");
         assert_eq!(relative_time(now, now + 5_000), "just now");

@@ -556,6 +556,24 @@ pub enum L10nKey {
     DiffBudget,
     DiffPerFileCap,
     DiffUntrackedSummary,
+    PendingConnecting,
+    PendingUnreachable,
+    WorktreePromptNeedsName,
+    WorktreePromptTitle,
+    WorktreePromptName,
+    WorktreePromptBranch,
+    WorktreePromptBase,
+    WorktreePromptCreating,
+    WorktreePromptCreate,
+    AppNewWorktreeFailed,
+    HomeTimeJustNow,
+    HomeTimeMinutesAgo,
+    HomeTimeHourAgo,
+    HomeTimeHoursAgo,
+    HomeTimeYesterday,
+    HomeTimeDaysAgo,
+    HomeTimeOverWeekAgo,
+    HomeReopenNamed,
 }
 
 pub fn set_locale(gui_language: &str) {
@@ -1791,6 +1809,27 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::DiffBudget => ("tty7's budget", "tty7 的预算"),
         L10nKey::DiffPerFileCap => ("the per-file cap", "单文件上限"),
         L10nKey::DiffUntrackedSummary => ("{count} untracked", "{count} 个未跟踪"),
+        L10nKey::PendingConnecting => ("Connecting to {machine}…", "正在连接 {machine}…"),
+        L10nKey::PendingUnreachable => ("Couldn't reach {machine}", "无法连接到 {machine}"),
+        L10nKey::WorktreePromptNeedsName => ("The worktree needs a name", "工作区需要一个名称"),
+        L10nKey::WorktreePromptTitle => ("New Worktree Tab", "新建工作区标签页"),
+        L10nKey::WorktreePromptName => ("Worktree Name", "工作区名称"),
+        L10nKey::WorktreePromptBranch => ("New Branch", "新分支"),
+        L10nKey::WorktreePromptBase => ("Start From", "起始分支"),
+        L10nKey::WorktreePromptCreating => ("Creating…", "正在创建…"),
+        L10nKey::WorktreePromptCreate => ("Create", "创建"),
+        L10nKey::AppNewWorktreeFailed => ("New worktree failed: {error}", "新建工作区失败：{error}"),
+        L10nKey::HomeTimeJustNow => ("just now", "刚刚"),
+        L10nKey::HomeTimeMinutesAgo => ("{count} min ago", "{count} 分钟前"),
+        L10nKey::HomeTimeHourAgo => ("1 hour ago", "1 小时前"),
+        L10nKey::HomeTimeHoursAgo => ("{count} hours ago", "{count} 小时前"),
+        L10nKey::HomeTimeYesterday => ("yesterday", "昨天"),
+        L10nKey::HomeTimeDaysAgo => ("{count} days ago", "{count} 天前"),
+        L10nKey::HomeTimeOverWeekAgo => ("over a week ago", "超过一周"),
+        L10nKey::HomeReopenNamed => (
+            "Reopen \"{name}\"",
+            "重新打开\"{name}\"",
+        ),
         L10nKey::PanelMoreChangedFiles => (
             "… and {count} more changed files — run `git diff` to see them.",
             "…还有 {count} 个变更文件——运行 `git diff` 查看。",
@@ -1901,6 +1940,14 @@ fn translate_variant(locale: Locale, key: L10nKey, branch: &'static str) -> &'st
         (DiffUntrackedSummary, "zero") => ("0 untracked", "0 个未跟踪"),
         (DiffUntrackedSummary, "one") => ("1 untracked", "1 个未跟踪"),
         (DiffUntrackedSummary, "other") => ("{count} untracked", "{count} 个未跟踪"),
+
+        // --- Home relative time ---
+        (HomeTimeMinutesAgo, "one") => ("1 min ago", "1 分钟前"),
+        (HomeTimeMinutesAgo, "other") => ("{count} min ago", "{count} 分钟前"),
+        (HomeTimeHoursAgo, "one") => ("1 hour ago", "1 小时前"),
+        (HomeTimeHoursAgo, "other") => ("{count} hours ago", "{count} 小时前"),
+        (HomeTimeDaysAgo, "one") => ("1 day ago", "1 天前"),
+        (HomeTimeDaysAgo, "other") => ("{count} days ago", "{count} 天前"),
 
         // --- Window stop/delete shells ---
         (WindowStopShells, "zero") => (
@@ -2475,6 +2522,24 @@ mod tests {
             L10nKey::DiffBudget,
             L10nKey::DiffPerFileCap,
             L10nKey::DiffUntrackedSummary,
+            L10nKey::PendingConnecting,
+            L10nKey::PendingUnreachable,
+            L10nKey::WorktreePromptNeedsName,
+            L10nKey::WorktreePromptTitle,
+            L10nKey::WorktreePromptName,
+            L10nKey::WorktreePromptBranch,
+            L10nKey::WorktreePromptBase,
+            L10nKey::WorktreePromptCreating,
+            L10nKey::WorktreePromptCreate,
+            L10nKey::AppNewWorktreeFailed,
+            L10nKey::HomeTimeJustNow,
+            L10nKey::HomeTimeMinutesAgo,
+            L10nKey::HomeTimeHourAgo,
+            L10nKey::HomeTimeHoursAgo,
+            L10nKey::HomeTimeYesterday,
+            L10nKey::HomeTimeDaysAgo,
+            L10nKey::HomeTimeOverWeekAgo,
+            L10nKey::HomeReopenNamed,
         ] {
             assert!(
                 !translate(Locale::ZhHans, key).is_empty(),
@@ -2513,6 +2578,9 @@ mod tests {
             L10nKey::DiffUntrackedHeader,
             L10nKey::DiffMoreUntracked,
             L10nKey::DiffUntrackedSummary,
+            L10nKey::HomeTimeMinutesAgo,
+            L10nKey::HomeTimeHoursAgo,
+            L10nKey::HomeTimeDaysAgo,
         ];
         for key in plural_keys {
             for branch in ["zero", "one", "other"] {
