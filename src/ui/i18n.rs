@@ -537,6 +537,25 @@ pub enum L10nKey {
     WindowDeleteUnreachable,
     WindowStopShells,
     WindowDeleteShells,
+    DiffReading,
+    DiffNotARepo,
+    DiffReadFailed,
+    DiffWorkingTreeClean,
+    DiffCloseTooltip,
+    DiffChangedFiles,
+    DiffUntrackedCount,
+    DiffMoreFiles,
+    DiffOversizedNotice,
+    DiffTruncatedPerFile,
+    DiffTruncatedBudget,
+    DiffUntrackedHeader,
+    DiffMoreUntracked,
+    DiffLines,
+    DiffChangedLines,
+    DiffBudgetAndCap,
+    DiffBudget,
+    DiffPerFileCap,
+    DiffUntrackedSummary,
 }
 
 pub fn set_locale(gui_language: &str) {
@@ -1729,6 +1748,49 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "{count} running shells will be ended and the layout forgotten.",
             "{count} 个正在运行的 shell 将会被终止，布局也将被清除。",
         ),
+        L10nKey::DiffReading => ("Reading diff…", "正在读取差异…"),
+        L10nKey::DiffNotARepo => ("Not a git repository", "不是 git 仓库"),
+        L10nKey::DiffReadFailed => (
+            "Couldn't read the working-tree diff — retrying on the next refresh.",
+            "无法读取工作树差异——下次刷新时重试。",
+        ),
+        L10nKey::DiffWorkingTreeClean => ("Working tree clean", "工作树干净"),
+        L10nKey::DiffCloseTooltip => ("Close Diff (Esc)", "关闭差异 (Esc)"),
+        L10nKey::DiffChangedFiles => ("{count} changed files", "{count} 个变更文件"),
+        L10nKey::DiffUntrackedCount => (" · {count} untracked", " · {count} 个未跟踪文件"),
+        L10nKey::DiffMoreFiles => (
+            "… and {count} more changed files — run `git diff` in the terminal to see them.",
+            "…还有 {count} 个变更文件——在终端中运行 `git diff` 查看。",
+        ),
+        L10nKey::DiffOversizedNotice => (
+            "This working tree is too large to render efficiently ({summary}). Every file is collapsed — expand individual files, or run `git diff` in the terminal.",
+            "此工作树太大，无法高效渲染（{summary}）。每个文件都已折叠——可展开单个文件，或在终端中运行 `git diff`。",
+        ),
+        L10nKey::DiffTruncatedPerFile => (
+            "Diff truncated at {limit} lines — run `git diff` in the terminal for the rest.",
+            "差异在 {limit} 行处截断——在终端中运行 `git diff` 查看其余部分。",
+        ),
+        L10nKey::DiffTruncatedBudget => (
+            "Body not loaded — this working tree is past tty7's diff budget. Run `git diff` in the terminal for this file.",
+            "内容未加载——此工作树已超出 tty7 的差异预算。在终端中运行 `git diff` 查看此文件。",
+        ),
+        L10nKey::DiffUntrackedHeader => ("Untracked files ({count})", "未跟踪文件 ({count})"),
+        L10nKey::DiffMoreUntracked => (
+            "… and {count} more — run `git status` in the terminal to see them.",
+            "…还有 {count} 个——在终端中运行 `git status` 查看。",
+        ),
+        L10nKey::DiffLines => ("{count} diff lines", "{count} 行差异"),
+        L10nKey::DiffChangedLines => (
+            "{total} changed lines, {loaded} diff rows loaded before {cap} cut the rest",
+            "{total} 行变更，在 {cap} 截断前已加载 {loaded} 行差异",
+        ),
+        L10nKey::DiffBudgetAndCap => (
+            "tty7's budget and the per-file cap",
+            "tty7 的预算和单文件上限",
+        ),
+        L10nKey::DiffBudget => ("tty7's budget", "tty7 的预算"),
+        L10nKey::DiffPerFileCap => ("the per-file cap", "单文件上限"),
+        L10nKey::DiffUntrackedSummary => ("{count} untracked", "{count} 个未跟踪"),
         L10nKey::PanelMoreChangedFiles => (
             "… and {count} more changed files — run `git diff` to see them.",
             "…还有 {count} 个变更文件——运行 `git diff` 查看。",
@@ -1798,6 +1860,47 @@ fn translate_variant(locale: Locale, key: L10nKey, branch: &'static str) -> &'st
             "… and {count} more changed files — run `git diff` to see them.",
             "…还有 {count} 个变更文件——运行 `git diff` 查看。",
         ),
+
+        // --- Diff summary counts ---
+        (DiffChangedFiles, "zero") => ("0 changed files", "0 个变更文件"),
+        (DiffChangedFiles, "one") => ("1 changed file", "1 个变更文件"),
+        (DiffChangedFiles, "other") => ("{count} changed files", "{count} 个变更文件"),
+        (DiffUntrackedCount, "zero") => (" · 0 untracked", " · 0 个未跟踪文件"),
+        (DiffUntrackedCount, "one") => (" · 1 untracked", " · 1 个未跟踪文件"),
+        (DiffUntrackedCount, "other") => (" · {count} untracked", " · {count} 个未跟踪文件"),
+        (DiffMoreFiles, "zero") => (
+            "… and 0 more changed files — run `git diff` in the terminal to see them.",
+            "…还有 0 个变更文件——在终端中运行 `git diff` 查看。",
+        ),
+        (DiffMoreFiles, "one") => (
+            "… and 1 more changed file — run `git diff` in the terminal to see it.",
+            "…还有 1 个变更文件——在终端中运行 `git diff` 查看。",
+        ),
+        (DiffMoreFiles, "other") => (
+            "… and {count} more changed files — run `git diff` in the terminal to see them.",
+            "…还有 {count} 个变更文件——在终端中运行 `git diff` 查看。",
+        ),
+        (DiffUntrackedHeader, "zero") => ("Untracked files (0)", "未跟踪文件 (0)"),
+        (DiffUntrackedHeader, "one") => ("Untracked files (1)", "未跟踪文件 (1)"),
+        (DiffUntrackedHeader, "other") => (
+            "Untracked files ({count})",
+            "未跟踪文件 ({count})",
+        ),
+        (DiffMoreUntracked, "zero") => (
+            "… and 0 more — run `git status` in the terminal to see them.",
+            "…还有 0 个——在终端中运行 `git status` 查看。",
+        ),
+        (DiffMoreUntracked, "one") => (
+            "… and 1 more — run `git status` in the terminal to see it.",
+            "…还有 1 个——在终端中运行 `git status` 查看。",
+        ),
+        (DiffMoreUntracked, "other") => (
+            "… and {count} more — run `git status` in the terminal to see them.",
+            "…还有 {count} 个——在终端中运行 `git status` 查看。",
+        ),
+        (DiffUntrackedSummary, "zero") => ("0 untracked", "0 个未跟踪"),
+        (DiffUntrackedSummary, "one") => ("1 untracked", "1 个未跟踪"),
+        (DiffUntrackedSummary, "other") => ("{count} untracked", "{count} 个未跟踪"),
 
         // --- Window stop/delete shells ---
         (WindowStopShells, "zero") => (
@@ -2353,6 +2456,25 @@ mod tests {
             L10nKey::WindowDeleteUnreachable,
             L10nKey::WindowStopShells,
             L10nKey::WindowDeleteShells,
+            L10nKey::DiffReading,
+            L10nKey::DiffNotARepo,
+            L10nKey::DiffReadFailed,
+            L10nKey::DiffWorkingTreeClean,
+            L10nKey::DiffCloseTooltip,
+            L10nKey::DiffChangedFiles,
+            L10nKey::DiffUntrackedCount,
+            L10nKey::DiffMoreFiles,
+            L10nKey::DiffOversizedNotice,
+            L10nKey::DiffTruncatedPerFile,
+            L10nKey::DiffTruncatedBudget,
+            L10nKey::DiffUntrackedHeader,
+            L10nKey::DiffMoreUntracked,
+            L10nKey::DiffLines,
+            L10nKey::DiffChangedLines,
+            L10nKey::DiffBudgetAndCap,
+            L10nKey::DiffBudget,
+            L10nKey::DiffPerFileCap,
+            L10nKey::DiffUntrackedSummary,
         ] {
             assert!(
                 !translate(Locale::ZhHans, key).is_empty(),
@@ -2385,6 +2507,12 @@ mod tests {
             L10nKey::PanelMoreChangedFiles,
             L10nKey::WindowStopShells,
             L10nKey::WindowDeleteShells,
+            L10nKey::DiffChangedFiles,
+            L10nKey::DiffUntrackedCount,
+            L10nKey::DiffMoreFiles,
+            L10nKey::DiffUntrackedHeader,
+            L10nKey::DiffMoreUntracked,
+            L10nKey::DiffUntrackedSummary,
         ];
         for key in plural_keys {
             for branch in ["zero", "one", "other"] {
