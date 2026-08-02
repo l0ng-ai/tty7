@@ -1447,7 +1447,9 @@ impl Tty7App {
         if !is_root {
             menu = menu.separator().item(
                 PopupMenuItem::element(move |_window, _cx| {
-                    div().text_color(danger).child("Delete")
+                    div()
+                        .text_color(danger)
+                        .child(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Delete))
                 })
                 .on_click({
                     let app = app.clone();

@@ -54,7 +54,7 @@ impl Tty7App {
             .child(div().child("· ⌘⇧R"))
             .child(
                 Button::new("ssh-reconnect")
-                    .label("Reconnect")
+                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Reconnect))
                     .primary()
                     .small()
                     .on_click(
@@ -182,7 +182,7 @@ impl Tty7App {
                             .py(px(2.))
                             .text_size(px(12.))
                             .text_color(cx.theme().muted_foreground)
-                            .child("None."),
+                            .child(crate::ui::i18n::t(crate::ui::i18n::L10nKey::None)),
                     )
                 })
                 .when(!managed.is_empty(), |this| this.child(list))

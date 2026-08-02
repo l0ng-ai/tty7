@@ -406,7 +406,7 @@ impl Tty7App {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("refreshing…"),
+                            .child(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Refreshing)),
                     )
                 },
             )
@@ -607,7 +607,7 @@ impl Tty7App {
                     .flex_shrink_0()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("binary"),
+                    .child(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Binary)),
             );
         }
         if file.added > 0 {

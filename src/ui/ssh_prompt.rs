@@ -579,7 +579,7 @@ impl Tty7App {
             .child(div().flex_1().text_sm().child(text.to_string()))
             .child(
                 Button::new(("ssh-banner-dismiss", ix))
-                    .label("Dismiss")
+                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Dismiss))
                     .small()
                     .ghost()
                     .on_click(cx.listener(move |this, _, _w, cx| this.dismiss_ssh_banner(ix, cx))),
@@ -645,12 +645,9 @@ impl Tty7App {
             PromptModel::Password { rejected, .. } => {
                 let mut c = card;
                 if *rejected {
-                    c = c.child(
-                        div()
-                            .text_xs()
-                            .text_color(danger)
-                            .child("The stored password was rejected. Enter a new one."),
-                    );
+                    c = c.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+                        crate::ui::i18n::L10nKey::StoredPasswordRejected,
+                    )));
                 }
                 c.child(self.render_ssh_input(0))
                     .child(self.render_ssh_remember(cx))
@@ -703,16 +700,21 @@ impl Tty7App {
                         .gap_2()
                         .child(
                             Button::new("ssh-hk-trust")
-                                .label("Trust")
+                                .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Trust))
                                 .small()
                                 .primary()
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.trust_ssh_host_key(window, cx)
                                 })),
                         )
-                        .child(Button::new("ssh-hk-abort").label("Abort").small().on_click(
-                            cx.listener(|this, _, window, cx| this.cancel_ssh_prompt(window, cx)),
-                        )),
+                        .child(
+                            Button::new("ssh-hk-abort")
+                                .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Abort))
+                                .small()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.cancel_ssh_prompt(window, cx)
+                                })),
+                        ),
                 ),
             PromptModel::HostKeyChanged {
                 algorithm,
@@ -738,18 +740,16 @@ impl Tty7App {
                         .text_color(cx.theme().muted_foreground)
                         .child(format!("old {old_fingerprint}")),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .child("Type \"yes\" to override and trust the new key, or Esc to abort."),
-                )
+                .child(div().text_xs().child(crate::ui::i18n::t(
+                    crate::ui::i18n::L10nKey::HostKeyOverrideMessage,
+                )))
                 .child(self.render_ssh_input(0))
                 .child(
                     h_flex()
                         .gap_2()
                         .child(
                             Button::new("ssh-hkc-abort")
-                                .label("Abort")
+                                .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Abort))
                                 .small()
                                 .primary()
                                 .on_click(cx.listener(|this, _, window, cx| {
@@ -758,7 +758,7 @@ impl Tty7App {
                         )
                         .child(
                             Button::new("ssh-hkc-override")
-                                .label("Override")
+                                .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Override))
                                 .small()
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.submit_ssh_prompt(window, cx)
@@ -781,7 +781,9 @@ impl Tty7App {
         h_flex()
             .child(
                 Checkbox::new("ssh-remember")
-                    .label("Remember (keychain)")
+                    .label(crate::ui::i18n::t(
+                        crate::ui::i18n::L10nKey::RememberKeychain,
+                    ))
                     .checked(self.ssh_prompt.remember)
                     .on_click(cx.listener(|this, _, _w, cx| this.toggle_ssh_remember(cx))),
             )
@@ -802,9 +804,12 @@ impl Tty7App {
                     ),
             )
             .child(
-                Button::new("ssh-cancel").label("Cancel").small().on_click(
-                    cx.listener(|this, _, window, cx| this.cancel_ssh_prompt(window, cx)),
-                ),
+                Button::new("ssh-cancel")
+                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Cancel))
+                    .small()
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.cancel_ssh_prompt(window, cx)),
+                    ),
             )
             .into_any_element()
     }

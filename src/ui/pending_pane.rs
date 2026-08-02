@@ -119,7 +119,7 @@ impl Render for PendingPane {
                 )
                 .child(
                     Button::new("pending-pane-retry")
-                        .label("Try Again")
+                        .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::TryAgain))
                         .ghost()
                         .small()
                         .on_click(cx.listener(|this, _, _window, cx| {

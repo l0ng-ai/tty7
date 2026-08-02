@@ -1069,7 +1069,9 @@ impl Tty7App {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Open a file from the file tree"),
+                    .child(crate::ui::i18n::t(
+                        crate::ui::i18n::L10nKey::OpenFileFromTree,
+                    )),
             )
     }
 
@@ -1087,10 +1089,12 @@ impl Tty7App {
             .border_b_1()
             .border_color(cx.theme().border)
             .text_sm()
-            .child(div().flex_1().child("File changed on disk"))
+            .child(div().flex_1().child(crate::ui::i18n::t(
+                crate::ui::i18n::L10nKey::FileChangedOnDisk,
+            )))
             .child(
                 Button::new("editor-conflict-reload")
-                    .label("Reload")
+                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Reload))
                     .small()
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.editor_reload_from_disk(tab_ix, ix, window, cx);
@@ -1098,7 +1102,7 @@ impl Tty7App {
             )
             .child(
                 Button::new("editor-conflict-keep")
-                    .label("Keep mine")
+                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::KeepMine))
                     .ghost()
                     .small()
                     .on_click(cx.listener(move |this, _, _w, cx| {
