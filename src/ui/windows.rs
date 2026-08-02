@@ -63,6 +63,29 @@ impl WindowRegistry {
             .or_else(|| registry.windows.first().map(|w| w.workspace))
     }
 
+    pub fn most_recent_local(cx: &mut App) -> Option<WorkspaceId> {
+        Self::sweep(cx);
+        let views = WorkspaceStore::all(cx);
+        let registry = cx.global::<Self>();
+        let is_open_local = |id: WorkspaceId| {
+            registry.windows.iter().any(|window| window.workspace == id)
+                && views.get(id).is_some_and(|view| !view.is_remote())
+        };
+        views.active.filter(|id| is_open_local(*id)).or_else(|| {
+            registry
+                .windows
+                .iter()
+                .filter(|window| is_open_local(window.workspace))
+                .max_by_key(|window| {
+                    views
+                        .get(window.workspace)
+                        .map(|view| view.last_active)
+                        .unwrap_or_default()
+                })
+                .map(|window| window.workspace)
+        })
+    }
+
     pub fn app_in(cx: &mut App, window: &Window) -> Option<gpui::Entity<Tty7App>> {
         Self::sweep(cx);
         let handle = window.window_handle();
@@ -130,6 +153,14 @@ impl WindowRegistry {
 }
 
 pub fn open(cx: &mut App, workspace: Option<WorkspaceId>) {
+    open_at(cx, workspace, None);
+}
+
+pub fn open_at(
+    cx: &mut App,
+    workspace: Option<WorkspaceId>,
+    initial_cwd: Option<std::path::PathBuf>,
+) {
     if let Some(id) = workspace
         && let Some(handle) = WindowRegistry::window_for(cx, id)
     {
@@ -140,7 +171,10 @@ pub fn open(cx: &mut App, workspace: Option<WorkspaceId>) {
     let options = window_options(cx, workspace);
     let mut created: Option<gpui::Entity<Tty7App>> = None;
     let opened = cx.open_window(options, |window, cx| {
-        let app = cx.new(|cx| Tty7App::for_workspace(workspace, window, cx));
+        let app = cx.new(|cx| match initial_cwd.clone() {
+            Some(cwd) => Tty7App::for_workspace_at(workspace, Some(cwd), window, cx),
+            None => Tty7App::for_workspace(workspace, window, cx),
+        });
         created = Some(app.clone());
         cx.new(|cx| Root::new(app, window, cx).bg(gpui::transparent_black()))
     });
@@ -160,6 +194,37 @@ pub fn open(cx: &mut App, workspace: Option<WorkspaceId>) {
     let id = app.read(cx).workspace;
     WindowRegistry::register(cx, id, handle.into(), app.downgrade());
     refresh_menu(cx);
+}
+
+pub fn open_from_cli(cx: &mut App, path: Option<std::path::PathBuf>) {
+    // Only the GUI process knows which of its windows was focused most recently.
+    // The daemon deliberately routes to a process, then leaves window selection
+    // to this registry.
+    let workspace = if path.is_some() {
+        WindowRegistry::most_recent_local(cx)
+    } else {
+        WindowRegistry::most_recent(cx)
+    };
+    let Some(workspace) = workspace else {
+        if path.is_some() {
+            open_at(cx, None, path);
+        }
+        return;
+    };
+    let Some(handle) = WindowRegistry::window_for(cx, workspace) else {
+        return;
+    };
+    let Some(app) = WindowRegistry::app_for(cx, workspace).and_then(|app| app.upgrade()) else {
+        return;
+    };
+
+    cx.activate(true);
+    let _ = handle.update(cx, move |_, window, cx| {
+        if let Some(path) = path {
+            app.update(cx, |app, cx| app.new_tab_at(path, window, cx));
+        }
+        window.activate_window();
+    });
 }
 
 pub fn refresh_menu(cx: &mut App) {
