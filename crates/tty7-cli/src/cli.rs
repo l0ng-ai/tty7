@@ -82,6 +82,12 @@ pub enum Command {
     #[command(about = "Every agent on this machine: running, waiting for a reply, idle")]
     Agents,
 
+    #[command(
+        about = "Block until a pane's agent needs input, finishes its turn, or the pane \
+                 exits — the orchestration primitive: `tty7 wait %3 && tty7 capture %3 --plain`"
+    )]
+    Wait(WaitArgs),
+
     #[command(about = "Stream server events, one per line (NDJSON with --json)")]
     Events,
 
@@ -186,6 +192,83 @@ pub struct SendArgs {
 
     #[arg(long, help = "Press Enter after the text")]
     pub enter: bool,
+}
+
+/// One resting place a `wait` can end on. `Exit` is pane-level (the child
+/// died or the pane is gone), the rest are the agent-status ladder the
+/// server maintains from hook events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum WaitState {
+    Idle,
+    Working,
+    Waiting,
+    Done,
+    Exit,
+}
+
+impl WaitState {
+    /// The wire spelling: what `--until` accepts and what `--json` reports.
+    /// Written out rather than derived from the variant name so renaming a
+    /// variant cannot silently rewrite the JSON contract.
+    pub fn name(self) -> &'static str {
+        match self {
+            WaitState::Idle => "idle",
+            WaitState::Working => "working",
+            WaitState::Waiting => "waiting",
+            WaitState::Done => "done",
+            WaitState::Exit => "exit",
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct WaitArgs {
+    #[arg(
+        value_name = "%PANE",
+        help = "Pane to watch; defaults to $TTY7_PANE inside a tty7 shell"
+    )]
+    pub target: Option<String>,
+
+    // The default is the two states worth waking for plus the one nobody can
+    // wait past: "my peer needs input", "my peer finished", "my peer died".
+    #[arg(
+        long,
+        value_name = "STATE,…",
+        value_delimiter = ',',
+        default_values = ["waiting", "done", "exit"],
+        help = "States that end the wait"
+    )]
+    pub until: Vec<WaitState>,
+
+    #[arg(
+        long,
+        value_name = "SECS",
+        help = "Give up after this many seconds, with exit code 124 (the `timeout(1)` \
+                convention, so scripts can tell \"not yet\" from \"broken\")"
+    )]
+    pub timeout: Option<u64>,
+
+    // The agent status the server keeps is a level, not an edge: `done` stands
+    // until the next turn starts, `waiting` until the agent moves again. So a
+    // wait issued right after a `send` would answer with last turn's status
+    // before the agent has even read the input. `--changed` refuses the state
+    // the pane was already in, which is what a delegation loop wants on every
+    // round after the first.
+    #[arg(
+        long,
+        help = "Ignore the state the pane was already in — only wake on a state it \
+                moved into after the wait began (use this after `send`)"
+    )]
+    pub changed: bool,
+
+    #[arg(
+        long,
+        value_name = "MS",
+        default_value_t = 500,
+        value_parser = clap::value_parser!(u64).range(50..=3_600_000),
+        help = "Poll every this many milliseconds"
+    )]
+    pub interval: u64,
 }
 
 #[derive(Debug, Args)]

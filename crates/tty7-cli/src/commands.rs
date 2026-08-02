@@ -9,7 +9,7 @@ use crate::address::{self, Context, WorkspaceAddress};
 use crate::backend::{Backend, RunSpec};
 use crate::cli::{
     CaptureArgs, Cli, Command, MachineCmd, PaneCmd, RunArgs, SendArgs, ServerCmd, SplitArgs,
-    TabCmd, WsCmd,
+    TabCmd, WaitArgs, WaitState, WsCmd,
 };
 use crate::output;
 use crate::resolve;
@@ -87,6 +87,7 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
         }
         Some(Command::Events) => events(json_mode, backend),
         Some(Command::Agents) => agents(backend),
+        Some(Command::Wait(args)) => wait(args, ctx, backend),
         Some(Command::Status) | Some(Command::Server(ServerCmd::Status)) => status(backend),
         Some(Command::Machine(MachineCmd::Ls)) => machine_ls(backend),
         Some(Command::Machine(MachineCmd::Connect { .. }))
@@ -625,6 +626,149 @@ fn event_line(event: &ControlEvent) -> String {
         ControlEvent::LayoutResync => "layout resync".to_string(),
         other => format!("{other:?}"),
     }
+}
+
+/// The one verb that *blocks*: poll until the watched pane's agent reaches a
+/// requested state, then report it. This is what turns the CLI into an
+/// orchestration tool — "wake me when my peer agent needs input, or finishes
+/// its turn" — without the screen-scraping a tmux-based agent team resorts to.
+///
+/// A poll of `AgentStates` rather than an `events` subscription on purpose: a
+/// one-shot, stateless question composes into scripts (`tty7 wait %3 &&
+/// tty7 capture %3 --plain`), survives a server restart mid-wait, and needs no
+/// cursor management. At the default 500ms interval the cost is one aggregate
+/// control request per tick — the same request `tty7 agents` makes once.
+fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
+    use std::time::{Duration, Instant};
+    use tty7_core::core::cli_agent::AgentStatus;
+
+    /// How many polls may pass before liveness is re-checked. The agent
+    /// snapshot carries no liveness of its own and the daemon keeps a dead
+    /// pane in its registry until it is closed, so an agent that died
+    /// mid-turn would otherwise report `working` until the timeout. Every
+    /// few polls is cheap; the fast path — the first poll already answers —
+    /// still costs exactly one request.
+    const LIVENESS_EVERY: u32 = 4;
+
+    /// Where the pane stood the moment we looked. `None` is "no agent state
+    /// at all", which is itself a position: an agent appearing is a change.
+    type Cursor = Option<(AgentStatus, u64)>;
+
+    let pane = address::pane_or_context(args.target.as_deref(), ctx)?;
+    // `checked_add` rather than `+`: an absurd `--timeout` must not panic.
+    let deadline = args
+        .timeout
+        .and_then(|t| Instant::now().checked_add(Duration::from_secs(t)));
+    let interval = Duration::from_millis(args.interval);
+    let mut baseline: Option<Cursor> = None;
+    let mut polls: u32 = 0;
+    loop {
+        let states = match backend.control(ControlRequest::AgentStates)? {
+            ReplyOk::AgentStates(states) => states,
+            other => bail!("the server answered AgentStates with {other:?}"),
+        };
+        let entry = states.into_iter().find(|s| s.pane_id == pane);
+        let mut current = match &entry {
+            Some(e) => match e.state.status {
+                AgentStatus::Idle => WaitState::Idle,
+                AgentStatus::Working => WaitState::Working,
+                AgentStatus::Waiting => WaitState::Waiting,
+                AgentStatus::Done => WaitState::Done,
+            },
+            // No agent state for the pane: an agentless-but-live pane reads
+            // as idle; a dead or vanished one as exit. The machine tree is
+            // only fetched on this branch — while an agent is reporting, its
+            // state alone answers the question.
+            None if pane_is_live(backend, pane)? => WaitState::Idle,
+            None => WaitState::Exit,
+        };
+
+        // Status is a level, not an edge (see `--changed` in cli.rs): the
+        // position we arrived at is last turn's answer until the agent moves.
+        let cursor: Cursor = entry.as_ref().map(|e| (e.state.status, e.state.activity));
+        let baseline = *baseline.get_or_insert(cursor);
+        let changed = cursor != baseline;
+
+        let mut matched = args.until.contains(&current) && (changed || !args.changed);
+        polls += 1;
+        // A reporting agent can outlive its pane; re-check on a throttle so a
+        // crashed worker ends the wait instead of spinning on a stale status.
+        if !matched
+            && entry.is_some()
+            && polls.is_multiple_of(LIVENESS_EVERY)
+            && !pane_is_live(backend, pane)?
+        {
+            current = WaitState::Exit;
+            matched = args.until.contains(&current);
+        }
+
+        // Exit ends every wait, requested or not: whatever the caller was
+        // waiting for can no longer happen, and reporting beats spinning
+        // forever on a ghost. `--changed` does not veto it either — a pane
+        // that was already dead is not going to move.
+        if matched || current == WaitState::Exit {
+            let session = entry.as_ref().map(|e| &e.state);
+            let json = json!({
+                "pane": pane,
+                "status": current.name(),
+                "matched": matched,
+                // False means the pane moved into this state while we watched;
+                // true means it was already there when the wait began, i.e.
+                // the answer may belong to a previous turn.
+                "stale": !changed,
+                "activity": session.map(|s| s.activity),
+                "message": session.and_then(|s| s.message.clone()),
+                "session_id": session.and_then(|s| s.session_id.clone()),
+            });
+            if !matched {
+                // Structured even here: a script has to tell "my peer died"
+                // apart from "the daemon is unreachable", and an anyhow error
+                // would leave --json with nothing to read.
+                return Ok(Outcome::Exit(
+                    1,
+                    Report {
+                        human: format!("pane %{pane} exited before reaching the awaited state"),
+                        json,
+                    },
+                ));
+            }
+            let mut human = format!("pane %{pane}: {}", current.name());
+            if let Some(msg) = session.and_then(|s| s.message.as_deref()) {
+                human.push_str(&format!(" — {msg}"));
+            }
+            if !changed {
+                human.push_str(" (unchanged since the wait began)");
+            }
+            return report(human, json);
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            // 124 = the `timeout(1)` convention: "gave up", distinct from
+            // both success and error, so orchestration scripts can branch.
+            return Ok(Outcome::Exit(
+                124,
+                Report {
+                    human: format!("pane %{pane}: still {} — timed out", current.name()),
+                    json: json!({ "pane": pane, "status": current.name(), "timed_out": true }),
+                },
+            ));
+        }
+        // Never sleep past the deadline: a long `--interval` must not turn a
+        // short `--timeout` into a long one.
+        let nap = match deadline {
+            Some(d) => interval.min(d.saturating_duration_since(Instant::now())),
+            None => interval,
+        };
+        std::thread::sleep(nap);
+    }
+}
+
+/// Whether the daemon still has a live pane behind this id. Absent from the
+/// tree counts as dead: a closed pane is as gone as an exited one.
+fn pane_is_live(backend: &mut dyn Backend, pane: u64) -> Result<bool> {
+    Ok(fetch_machine(backend)?
+        .panes
+        .iter()
+        .any(|p| p.id == pane && p.live))
 }
 
 fn agents(backend: &mut dyn Backend) -> Result<Outcome> {
@@ -1541,6 +1685,229 @@ mod tests {
                 backend.control_calls.is_empty(),
                 "{args:?} must not invent protocol traffic"
             );
+        }
+    }
+
+    fn agent_state(
+        pane_id: u64,
+        status: tty7_core::core::cli_agent::AgentStatus,
+    ) -> tty7_core::daemon::control::PaneAgentState {
+        agent_state_at(pane_id, status, 0)
+    }
+
+    fn agent_state_at(
+        pane_id: u64,
+        status: tty7_core::core::cli_agent::AgentStatus,
+        activity: u64,
+    ) -> tty7_core::daemon::control::PaneAgentState {
+        tty7_core::daemon::control::PaneAgentState {
+            pane_id,
+            agent: None,
+            state: tty7_core::core::cli_agent::AgentSessionState {
+                status,
+                message: Some("needs permission".into()),
+                session_id: Some("sess-9".into()),
+                activity,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// The happy path is one aggregate poll: a matching agent state answers
+    /// immediately, carrying the event's message and native session id — the
+    /// two things an orchestrator needs to act on the wake-up.
+    #[test]
+    fn wait_returns_the_moment_the_state_matches() {
+        use tty7_core::core::cli_agent::AgentStatus;
+        let mut backend = mock();
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![agent_state(
+                3,
+                AgentStatus::Waiting,
+            )]));
+        let out = run_cli(&["tty7", "wait", "%3"], &Context::default(), &mut backend);
+        let json = json_of(out);
+        assert_eq!(json["status"], "waiting");
+        assert_eq!(json["matched"], true);
+        assert_eq!(json["message"], "needs permission");
+        assert_eq!(json["session_id"], "sess-9");
+        // …and flagged as a state we merely walked in on, not one we watched
+        // the pane move into: it may be answering a previous turn.
+        assert_eq!(json["stale"], true);
+        // The machine tree was never consulted — the agent state alone answered.
+        assert_eq!(backend.control_calls, vec![ControlRequest::AgentStates]);
+    }
+
+    /// `--changed` is the fix for a level-triggered status: right after a
+    /// `send`, the agent still reports last turn's state. The flag refuses the
+    /// position the wait arrived at and wakes only once the pane moves.
+    #[test]
+    fn wait_changed_refuses_the_state_it_arrived_in() {
+        use tty7_core::core::cli_agent::AgentStatus;
+
+        // Already `waiting` when the wait began, and it never moves: timeout,
+        // not a bogus wake-up carrying the previous turn's message.
+        let mut backend = mock();
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![agent_state(
+                3,
+                AgentStatus::Waiting,
+            )]));
+        let out = execute(
+            cli(&[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "waiting",
+                "--changed",
+                "--timeout",
+                "0",
+            ]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect("a timeout is an exit code, not an error");
+        assert!(
+            matches!(out, Outcome::Exit(124, _)),
+            "a state that was already standing must not satisfy --changed"
+        );
+
+        // The same state again, but this time the agent moved under it: the
+        // activity counter ticks even when the status letter does not.
+        let mut backend = mock();
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![agent_state_at(
+                3,
+                AgentStatus::Waiting,
+                0,
+            )]));
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![agent_state_at(
+                3,
+                AgentStatus::Waiting,
+                1,
+            )]));
+        let json = json_of(run_cli(
+            &[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "waiting",
+                "--changed",
+                "--interval",
+                "50",
+            ],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["status"], "waiting");
+        assert_eq!(json["matched"], true);
+        assert_eq!(json["stale"], false, "this one we watched it move into");
+        assert_eq!(json["activity"], 1);
+    }
+
+    /// An agent state outlives the pane's child — the daemon keeps a dead pane
+    /// registered until it is closed. Without a liveness re-check a crashed
+    /// worker would report `working` right up to the timeout.
+    #[test]
+    fn wait_ends_when_a_reporting_agents_pane_dies() {
+        use tty7_core::core::cli_agent::AgentStatus;
+        let mut backend = mock();
+        for p in &mut backend.machine.panes {
+            if p.id == 3 {
+                p.live = false;
+            }
+        }
+        for _ in 0..4 {
+            backend
+                .replies
+                .push_back(ReplyOk::AgentStates(vec![agent_state(
+                    3,
+                    AgentStatus::Working,
+                )]));
+        }
+        let json = json_of(run_cli(
+            &["tty7", "wait", "%3", "--interval", "50"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["status"], "exit");
+        assert_eq!(json["matched"], true, "the default until-set covers exit");
+        assert!(
+            backend.control_calls.contains(&ControlRequest::MachineGet),
+            "liveness has to come from the tree; the agent snapshot has none"
+        );
+    }
+
+    /// Panes without an agent state fall back to the machine tree: live means
+    /// idle, dead-or-gone means exit — which ends every wait, but only counts
+    /// as *matched* when the caller listed it.
+    #[test]
+    fn wait_reads_agentless_panes_from_the_tree() {
+        let mut backend = mock();
+        backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+        let out = run_cli(
+            &["tty7", "wait", "%3", "--until", "idle"],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(json_of(out)["status"], "idle");
+
+        // Pane 9 exists nowhere: "exit", matched by the default until-set.
+        let mut backend = mock();
+        backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+        let out = run_cli(&["tty7", "wait", "%9"], &Context::default(), &mut backend);
+        let json = json_of(out);
+        assert_eq!(json["status"], "exit");
+        assert_eq!(json["matched"], true);
+
+        // Waiting for a state a dead pane can never reach is a failure, not a
+        // silent success — but a *structured* one: a script has to tell "my
+        // peer died" apart from "the daemon is unreachable", and an anyhow
+        // error would leave --json with nothing to read.
+        let mut backend = mock();
+        backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+        let out = execute(
+            cli(&["tty7", "wait", "%9", "--until", "done"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect("a dead pane is an exit code with a report, not a bare error");
+        let Outcome::Exit(1, r) = out else {
+            panic!("a dead pane that cannot reach `done` must exit 1 with its report");
+        };
+        assert_eq!(r.json["status"], "exit");
+        assert_eq!(r.json["matched"], false);
+        assert!(r.human.contains("exited"), "{}", r.human);
+    }
+
+    /// A `--timeout` that runs out exits 124 — the `timeout(1)` convention —
+    /// so scripts can branch on "not yet" separately from "broken".
+    #[test]
+    fn wait_timeout_exits_124() {
+        use tty7_core::core::cli_agent::AgentStatus;
+        let mut backend = mock();
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![agent_state(
+                3,
+                AgentStatus::Working,
+            )]));
+        let out = execute(
+            cli(&["tty7", "wait", "%3", "--until", "done", "--timeout", "0"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect("a timeout is an exit code, not an error");
+        match out {
+            Outcome::Exit(124, r) => assert_eq!(r.json["timed_out"], true),
+            other => panic!("expected exit 124, got {other:?}"),
         }
     }
 
