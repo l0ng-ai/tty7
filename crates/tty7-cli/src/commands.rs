@@ -1,5 +1,6 @@
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
+use std::time::Duration;
 use tty7_core::core::machine::{Axis, Machine, PaneSeed, Workspace};
 use tty7_core::core::session::WorkspaceId;
 use tty7_core::daemon::control::{CONTROL_VERSION, ControlEvent, ControlRequest, ReplyOk};
@@ -442,6 +443,8 @@ fn pane_split(args: SplitArgs, ctx: &Context, backend: &mut dyn Backend) -> Resu
 }
 
 fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
+    const ENTER_GAP: Duration = Duration::from_millis(200);
+
     let (target, text) = match &args.second {
         Some(text) => (Some(args.first.as_str()), text.as_str()),
         None => {
@@ -452,11 +455,14 @@ fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
         }
     };
     let pane = address::pane_or_context(target, ctx)?;
-    let mut bytes = text.as_bytes().to_vec();
+    backend.send_input(pane, text.as_bytes().to_vec())?;
     if args.enter {
-        bytes.push(b'\r');
+        // Raw-mode TUIs detect a fast stream as pasted input and intentionally
+        // absorb Enter as a newline. Keep the public one-shot command, but let
+        // the text leave that burst window before delivering the key itself.
+        std::thread::sleep(ENTER_GAP);
+        backend.send_input(pane, vec![b'\r'])?;
     }
-    backend.send_input(pane, bytes)?;
     report(
         "",
         json!({ "pane": pane, "sent": text, "enter": args.enter }),
@@ -1434,7 +1440,10 @@ mod tests {
             &Context::default(),
             &mut backend,
         );
-        assert_eq!(backend.sent, vec![(1, b"make -j8\r".to_vec())]);
+        assert_eq!(
+            backend.sent,
+            vec![(1, b"make -j8".to_vec()), (1, b"\r".to_vec())]
+        );
         assert!(backend.control_calls.is_empty());
 
         let ctx = Context {
