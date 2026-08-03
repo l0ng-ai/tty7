@@ -53,6 +53,12 @@ Native builds for each platform on [**Releases**](https://github.com/l0ng-ai/tty
 Terminal and keybinding reference: [docs/features.md](docs/features.md). The agent-facing CLI
 interface is documented in [skills/tty7/SKILL.md](skills/tty7/SKILL.md).
 
+Install the skill with:
+
+```sh
+npx skills add l0ng-ai/tty7
+```
+
 ## Benchmarks
 
 Same machine, same day, same 155×40 grid — Apple M1 Pro, macOS 26.3.1,

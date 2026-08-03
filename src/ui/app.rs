@@ -3518,8 +3518,6 @@ impl Tty7App {
             agent_hooks_states: crate::ui::settings::AgentHooksView::Loading,
             agent_hooks_seq: 0,
             agent_hooks_note: None,
-            orchestration_skill: None,
-            orchestration_skill_note: None,
             _subs: subs,
         });
         let search_focus = self
@@ -4170,7 +4168,6 @@ impl Tty7App {
             s.recording = None;
             if target == SettingsSection::Agents {
                 s.agent_hooks_states = crate::ui::settings::AgentHooksView::Loading;
-                s.orchestration_skill_note = None;
             }
         }
         self.ensure_agent_hooks_loaded(cx);
@@ -4183,7 +4180,6 @@ impl Tty7App {
             .is_some_and(|s| s.section == SettingsSection::Agents)
         {
             self.load_agent_hooks_states(cx);
-            self.load_orchestration_skill_state(cx);
         }
     }
 
@@ -4319,60 +4315,6 @@ impl Tty7App {
         }
         let home = crate::ui::remote_connect::HostLinks::home(cx, host_id)?;
         Some((host, Some(home)))
-    }
-
-    /// Settings → Agents: the "Orchestration skill" switch — install or
-    /// remove the Claude Code skill that teaches a primary agent the
-    /// delegation workflow over the session CLI.
-    ///
-    /// Off the UI thread and with the outcome surfaced, like the hook rows:
-    /// the one error a user actually hits — uninstall refusing a file tty7
-    /// did not write — is exactly the case where a switch that silently
-    /// springs back explains nothing.
-    pub(crate) fn set_orchestration_skill(&mut self, on: bool, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    if on {
-                        crate::core::orchestration_skill::install()
-                    } else {
-                        crate::core::orchestration_skill::uninstall()
-                    }
-                })
-                .await;
-            let note = match result {
-                Ok(summary) => summary,
-                Err(e) => {
-                    log::warn!("orchestration-skill change failed: {e}");
-                    format!("Failed: {e}")
-                }
-            };
-            let _ = this.update(cx, |this, cx| {
-                if let Some(s) = this.settings.as_mut() {
-                    s.orchestration_skill_note = Some(note);
-                }
-                this.load_orchestration_skill_state(cx);
-            });
-        })
-        .detach();
-    }
-
-    /// Re-read the skill's presence from disk into `SettingsState`. The file
-    /// is the truth — an edit made outside this panel shows up here — but it
-    /// is read on open and after a change, never once per rendered frame.
-    fn load_orchestration_skill_state(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            let installed = cx
-                .background_spawn(async { crate::core::orchestration_skill::installed() })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if let Some(s) = this.settings.as_mut() {
-                    s.orchestration_skill = Some(installed);
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     pub(crate) fn settings_install_agent_hooks(
