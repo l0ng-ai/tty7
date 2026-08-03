@@ -40,7 +40,7 @@ pub struct Cli {
         value_name = "PATH",
         help = "Launch or activate the GUI, opening a new tab at PATH if given"
     )]
-    pub path: Option<String>,
+    pub path: Option<std::path::PathBuf>,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -470,7 +470,24 @@ mod tests {
     fn a_path_that_is_not_a_verb_still_launches_the_gui() {
         let cli = parse(&["tty7", "C:\\Users\\me\\proj"]);
         assert!(cli.command.is_none());
-        assert_eq!(cli.path.as_deref(), Some("C:\\Users\\me\\proj"));
+        assert_eq!(
+            cli.path.as_deref(),
+            Some(std::path::Path::new("C:\\Users\\me\\proj"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_gui_path_preserves_native_windows_arguments() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let native_path =
+            OsString::from_wide(&[b'C' as u16, b':' as u16, b'\\' as u16, 0xD800, b'x' as u16]);
+        let cli = Cli::try_parse_from([OsString::from("tty7"), native_path.clone()])
+            .expect("PathBuf arguments accept native Windows strings");
+
+        assert_eq!(cli.path, Some(std::path::PathBuf::from(native_path)));
     }
 
     #[test]

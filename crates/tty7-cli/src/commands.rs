@@ -48,9 +48,11 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
             // Treat a word that is not a path as the typo it almost certainly
             // is: launching the GUI for `tty7 statu` would hide the typo.
             Some(word) if !looks_like_a_path(&word) => bail!(
-                "unknown subcommand '{word}' — run `tty7 --help` for the list. \
+                "unknown subcommand '{}' — run `tty7 --help` for the list. \
                  (A path in this position would open the GUI there, but \
-                 '{word}' does not name one.)"
+                 '{}' does not name one.)",
+                word.display(),
+                word.display(),
             ),
             path => launch_gui(path, machine.as_deref(), backend),
         },
@@ -130,17 +132,18 @@ fn local_server(
 /// Anything with a separator, a leading `.`/`~`, or that actually exists on
 /// disk counts. A plain word like `tree` or `statu` does not — it is a
 /// mistyped subcommand, and saying so beats offering to open the GUI there.
-fn looks_like_a_path(s: &str) -> bool {
-    s.starts_with('/')
-        || s.starts_with('.')
-        || s.starts_with('~')
-        || s.contains('/')
-        || s.contains('\\')
-        || std::path::Path::new(s).exists()
+fn looks_like_a_path(path: &std::path::Path) -> bool {
+    path.to_str().is_some_and(|s| {
+        s.starts_with('/')
+            || s.starts_with('.')
+            || s.starts_with('~')
+            || s.contains('/')
+            || s.contains('\\')
+    }) || path.exists()
 }
 
 fn launch_gui(
-    path: Option<String>,
+    path: Option<std::path::PathBuf>,
     machine: Option<&str>,
     backend: &mut dyn Backend,
 ) -> Result<Outcome> {
@@ -151,16 +154,24 @@ fn launch_gui(
     }
 
     let path = path.map(resolve_gui_path).transpose()?;
-    let wire_path = path.as_deref().map(gui_wire_path).transpose()?;
+    let wire_path = path.as_deref().and_then(gui_wire_path);
     // A live GUI receives the request through the daemon. If the daemon itself
     // is absent, the same fallback as "no GUI registered" starts the app, which
     // will start its daemon during normal initialization.
-    let delivered = match backend.control(ControlRequest::GuiOpen {
-        path: wire_path.clone(),
-    }) {
-        Ok(ReplyOk::Bool(delivered)) => delivered,
-        Ok(other) => bail!("the server answered GuiOpen with {other:?}"),
-        Err(_) => false,
+    let request_path = path
+        .is_none()
+        .then_some(None)
+        .or_else(|| wire_path.clone().map(Some));
+    let delivered = match request_path {
+        Some(path) => match backend.control(ControlRequest::GuiOpen { path }) {
+            Ok(ReplyOk::Bool(delivered)) => delivered,
+            Ok(other) => bail!("the server answered GuiOpen with {other:?}"),
+            Err(_) => false,
+        },
+        // The JSON control protocol cannot preserve a native non-Unicode path.
+        // Launching the app does: Command passes the Path as an OsStr, and the
+        // app keeps it locally when it cannot forward it to another process.
+        None => false,
     };
 
     if !delivered {
@@ -176,18 +187,12 @@ fn launch_gui(
     )
 }
 
-fn gui_wire_path(path: &std::path::Path) -> Result<String> {
-    let Some(path_text) = path.to_str() else {
-        bail!(
-            "cannot open {} through the GUI protocol because the path is not valid UTF-8",
-            path.display()
-        );
-    };
-    Ok(path_text.to_owned())
+fn gui_wire_path(path: &std::path::Path) -> Option<String> {
+    path.to_str().map(str::to_owned)
 }
 
-fn resolve_gui_path(raw: String) -> Result<std::path::PathBuf> {
-    let expanded = expand_home(&raw).unwrap_or_else(|| std::path::PathBuf::from(&raw));
+fn resolve_gui_path(raw: std::path::PathBuf) -> Result<std::path::PathBuf> {
+    let expanded = raw.to_str().and_then(expand_home).unwrap_or(raw);
     // Do not canonicalize here: preserving the caller's junction or symlink
     // spelling keeps shell cwd reporting and tab labels consistent.
     let path = if expanded.is_absolute() {
@@ -1764,14 +1769,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_non_utf8_gui_path_is_rejected_instead_of_changed() {
+    fn a_non_utf8_gui_path_stays_off_the_string_protocol() {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt as _;
 
         let path = std::env::temp_dir().join(OsString::from_vec(b"tty7-\xff".to_vec()));
-        let error = gui_wire_path(&path).expect_err("the string protocol cannot preserve bytes");
-
-        assert!(error.to_string().contains("not valid UTF-8"), "{error:#}");
+        assert_eq!(gui_wire_path(&path), None);
     }
 
     #[test]
