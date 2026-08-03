@@ -11,6 +11,7 @@ use crate::core::session::{RemoteRef, RemoteTarget, WorkspaceId, WorkspaceStore}
 use crate::daemon::control::{ControlEvent, ControlRequest, ReplyOk};
 use crate::daemon::install::InstallDecision;
 use crate::ui::app::Tty7App;
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow};
 
 pub enum ConnectFlow {
@@ -40,35 +41,47 @@ impl RemoteStatus {
     pub fn strip_message(&self, machine: &str) -> Option<String> {
         match self {
             RemoteStatus::Attached => None,
-            RemoteStatus::Disconnected => Some(format!("Not connected to {machine}")),
-            RemoteStatus::Connecting => Some(format!("Connecting to {machine}…")),
-            RemoteStatus::Reconnecting { attempt: 0 } => {
-                Some(format!("Reconnecting to {machine}…"))
-            }
-            RemoteStatus::Reconnecting { attempt } => Some(format!(
-                "Reconnecting to {machine}… (attempt {})",
-                attempt + 1
+            RemoteStatus::Disconnected => Some(t_fmt(
+                L10nKey::RemoteStripDisconnected,
+                &[("machine", machine)],
             )),
-            RemoteStatus::Preempted { by } => Some(format!("This workspace was opened on {by}")),
-            RemoteStatus::Failed(e) => Some(format!("Not connected to {machine} — {e}")),
+            RemoteStatus::Connecting => Some(t_fmt(
+                L10nKey::RemoteStripConnecting,
+                &[("machine", machine)],
+            )),
+            RemoteStatus::Reconnecting { attempt: 0 } => Some(t_fmt(
+                L10nKey::RemoteStripReconnecting,
+                &[("machine", machine)],
+            )),
+            RemoteStatus::Reconnecting { attempt } => Some(t_fmt(
+                L10nKey::RemoteStripReconnectingAttempt,
+                &[("machine", machine), ("count", &(attempt + 1).to_string())],
+            )),
+            RemoteStatus::Preempted { by } => {
+                Some(t_fmt(L10nKey::RemoteStripPreempted, &[("by", by)]))
+            }
+            RemoteStatus::Failed(e) => Some(t_fmt(
+                L10nKey::RemoteStripFailed,
+                &[("machine", machine), ("error", e)],
+            )),
         }
     }
 
     pub fn input_notice(&self) -> Option<&'static str> {
         match self {
             RemoteStatus::Attached => None,
-            RemoteStatus::Preempted { .. } => Some("Opened elsewhere — typing has no effect"),
-            _ => Some("Not connected — typing has no effect"),
+            RemoteStatus::Preempted { .. } => Some(t(L10nKey::RemoteNoticePreempted)),
+            _ => Some(t(L10nKey::RemoteNoticeDisconnected)),
         }
     }
 
     pub fn action_label(&self) -> Option<&'static str> {
         match self {
             RemoteStatus::Attached | RemoteStatus::Connecting => None,
-            RemoteStatus::Reconnecting { .. } => Some("Retry Now"),
-            RemoteStatus::Preempted { .. } => Some("Take Back"),
-            RemoteStatus::Disconnected => Some("Connect"),
-            RemoteStatus::Failed(_) => Some("Retry"),
+            RemoteStatus::Reconnecting { .. } => Some(t(L10nKey::RemoteActionRetryNow)),
+            RemoteStatus::Preempted { .. } => Some(t(L10nKey::RemoteActionTakeBack)),
+            RemoteStatus::Disconnected => Some(t(L10nKey::RemoteActionConnect)),
+            RemoteStatus::Failed(_) => Some(t(L10nKey::RemoteActionRetry)),
         }
     }
 
@@ -184,11 +197,7 @@ impl Tty7App {
             _ => {
                 let machine = self.remote_machine_label(cx);
                 window.push_notification(
-                    format!(
-                        "This window is a workspace on {machine}, but tty7 has no connection \
-                         details for it any more — check that its SSH profile or ~/.ssh/config \
-                         entry still exists."
-                    ),
+                    t_fmt(L10nKey::RemoteNoConnectionDetails, &[("machine", &machine)]),
                     cx,
                 );
                 false
@@ -206,7 +215,7 @@ impl Tty7App {
     pub(crate) fn remote_machine_label(&self, cx: &gpui::App) -> String {
         match WorkspaceStore::remote_ref(cx, self.workspace) {
             Some(host) => host.target.to_string(),
-            None => "this computer".to_string(),
+            None => t(L10nKey::RemoteThisComputer).to_string(),
         }
     }
 
@@ -437,7 +446,7 @@ impl Tty7App {
             PromptLevel::Warning,
             &title,
             Some(&detail),
-            &["Cancel", "Install"],
+            &[t(L10nKey::Cancel), t(L10nKey::SettingsInstall)],
             cx,
         );
         cx.spawn(async move |_, _| {
@@ -458,7 +467,7 @@ impl Tty7App {
                 PromptLevel::Warning,
                 &title,
                 Some(&detail),
-                &remote_connect::MISMATCH_ANSWERS,
+                &remote_connect::mismatch_answers(),
                 cx,
             );
             cx.spawn(async move |this, cx| {
@@ -481,7 +490,7 @@ impl Tty7App {
     ) {
         let label = mismatch.host.clone();
         match remote_connect::mismatch_target(&mismatch)
-            .ok_or_else(|| format!("tty7 no longer has a way to reach {label}"))
+            .ok_or_else(|| t_fmt(L10nKey::RemoteNoRouteToHost, &[("machine", &label)]))
         {
             Ok(target) => self.restart_remote_server(target, label, window, cx),
             Err(e) => Tty7App::report_restart_failure(&label, &e, window, cx),
@@ -497,13 +506,9 @@ impl Tty7App {
     ) {
         let answer = window.prompt(
             PromptLevel::Warning,
-            &format!("Restart tty7's server on \u{201c}{label}\u{201d}?"),
-            Some(&format!(
-                "This stops every shell on {label} — anything still running in them \
-                 will be terminated, including shells this window is not showing. \
-                 Workspaces and layouts are kept and come back with fresh shells."
-            )),
-            &["Cancel", "Restart Server"],
+            &t_fmt(L10nKey::RemoteRestartTitle, &[("machine", &label)]),
+            Some(&t_fmt(L10nKey::RemoteRestartBody, &[("machine", &label)])),
+            &[t(L10nKey::Cancel), t(L10nKey::RestartServer)],
             cx,
         );
         cx.spawn(async move |this, cx| {
@@ -567,16 +572,9 @@ impl Tty7App {
     ) {
         let answer = window.prompt(
             PromptLevel::Warning,
-            &format!("Restart tty7's server on \u{201c}{label}\u{201d}?"),
-            Some(&format!(
-                "The tty7-server running on {label} speaks a protocol this client cannot. \
-                 tty7 will restart the service there onto one that does, installing it \
-                 first if {label} does not already have it.\n\
-                 \n\
-                 Every session running on {label} ends, including any this window is not \
-                 connected to."
-            )),
-            &["Cancel", "Restart Server"],
+            &t_fmt(L10nKey::RemoteRestartTitle, &[("machine", &label)]),
+            Some(&t_fmt(L10nKey::RemoteReplaceBody, &[("machine", &label)])),
+            &[t(L10nKey::Cancel), t(L10nKey::RestartServer)],
             cx,
         );
         cx.spawn(async move |this, cx| {
@@ -640,12 +638,12 @@ impl Tty7App {
     ) {
         let answer = window.prompt(
             PromptLevel::Warning,
-            &format!("tty7's server on \u{201c}{label}\u{201d} was not restarted"),
-            Some(&format!(
-                "{error}\n\nSessions still running there are on the older build. If they are \
-                 gone, reconnecting starts this build's server."
+            &t_fmt(L10nKey::RemoteRestartFailedTitle, &[("machine", label)]),
+            Some(&t_fmt(
+                L10nKey::RemoteRestartFailedBody,
+                &[("error", error)],
             )),
-            &["OK"],
+            &[t(L10nKey::Ok)],
             cx,
         );
         cx.spawn(async move |_, _| {
@@ -1441,24 +1439,28 @@ mod tests {
 
     #[test]
     fn the_status_strip_speaks_unless_everything_is_working() {
+        crate::ui::i18n::set_locale("en");
         assert_eq!(RemoteStatus::Attached.strip_message("build-box"), None);
         assert_eq!(
-            RemoteStatus::Disconnected
-                .strip_message("build-box")
-                .as_deref(),
-            Some("Not connected to build-box")
+            RemoteStatus::Disconnected.strip_message("build-box"),
+            Some(t_fmt(
+                L10nKey::RemoteStripDisconnected,
+                &[("machine", "build-box")]
+            ))
         );
         assert_eq!(
-            RemoteStatus::Connecting
-                .strip_message("build-box")
-                .as_deref(),
-            Some("Connecting to build-box…")
+            RemoteStatus::Connecting.strip_message("build-box"),
+            Some(t_fmt(
+                L10nKey::RemoteStripConnecting,
+                &[("machine", "build-box")]
+            ))
         );
         assert_eq!(
-            RemoteStatus::Failed("connection refused".into())
-                .strip_message("build-box")
-                .as_deref(),
-            Some("Not connected to build-box — connection refused")
+            RemoteStatus::Failed("connection refused".into()).strip_message("build-box"),
+            Some(t_fmt(
+                L10nKey::RemoteStripFailed,
+                &[("machine", "build-box"), ("error", "connection refused")]
+            ))
         );
     }
 
@@ -1626,39 +1628,40 @@ mod tests {
 
     #[test]
     fn every_state_says_what_it_means_for_the_keyboard() {
+        crate::ui::i18n::set_locale("en");
         let cases = [
             (RemoteStatus::Attached, true, None, None),
             (
                 RemoteStatus::Disconnected,
                 false,
-                Some("Not connected — typing has no effect"),
-                Some("Connect"),
+                Some(t(L10nKey::RemoteNoticeDisconnected)),
+                Some(t(L10nKey::RemoteActionConnect)),
             ),
             (
                 RemoteStatus::Connecting,
                 false,
-                Some("Not connected — typing has no effect"),
+                Some(t(L10nKey::RemoteNoticeDisconnected)),
                 None,
             ),
             (
                 RemoteStatus::Reconnecting { attempt: 2 },
                 false,
-                Some("Not connected — typing has no effect"),
-                Some("Retry Now"),
+                Some(t(L10nKey::RemoteNoticeDisconnected)),
+                Some(t(L10nKey::RemoteActionRetryNow)),
             ),
             (
                 RemoteStatus::Preempted {
                     by: "desktop".into(),
                 },
                 false,
-                Some("Opened elsewhere — typing has no effect"),
-                Some("Take Back"),
+                Some(t(L10nKey::RemoteNoticePreempted)),
+                Some(t(L10nKey::RemoteActionTakeBack)),
             ),
             (
                 RemoteStatus::Failed("no route to host".into()),
                 false,
-                Some("Not connected — typing has no effect"),
-                Some("Retry"),
+                Some(t(L10nKey::RemoteNoticeDisconnected)),
+                Some(t(L10nKey::RemoteActionRetry)),
             ),
         ];
         for (status, accepts, notice, action) in cases {
@@ -1670,26 +1673,28 @@ mod tests {
 
     #[test]
     fn the_new_states_name_what_happened() {
+        crate::ui::i18n::set_locale("en");
         assert_eq!(
-            RemoteStatus::Reconnecting { attempt: 0 }
-                .strip_message("build-box")
-                .as_deref(),
-            Some("Reconnecting to build-box…"),
+            RemoteStatus::Reconnecting { attempt: 0 }.strip_message("build-box"),
+            Some(t_fmt(
+                L10nKey::RemoteStripReconnecting,
+                &[("machine", "build-box")]
+            )),
             "the first attempt does not need a count"
         );
         assert_eq!(
-            RemoteStatus::Reconnecting { attempt: 3 }
-                .strip_message("build-box")
-                .as_deref(),
-            Some("Reconnecting to build-box… (attempt 4)")
+            RemoteStatus::Reconnecting { attempt: 3 }.strip_message("build-box"),
+            Some(t_fmt(
+                L10nKey::RemoteStripReconnectingAttempt,
+                &[("machine", "build-box"), ("count", "4")]
+            ))
         );
         assert_eq!(
             RemoteStatus::Preempted {
                 by: "desktop".into()
             }
-            .strip_message("build-box")
-            .as_deref(),
-            Some("This workspace was opened on desktop")
+            .strip_message("build-box"),
+            Some(t_fmt(L10nKey::RemoteStripPreempted, &[("by", "desktop")]))
         );
     }
 

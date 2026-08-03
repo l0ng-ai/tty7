@@ -579,7 +579,7 @@ impl Tty7App {
             .child(div().flex_1().text_sm().child(text.to_string()))
             .child(
                 Button::new(("ssh-banner-dismiss", ix))
-                    .label("Dismiss")
+                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Dismiss))
                     .small()
                     .ghost()
                     .on_click(cx.listener(move |this, _, _w, cx| this.dismiss_ssh_banner(ix, cx))),
@@ -590,23 +590,37 @@ impl Tty7App {
     fn render_ssh_sheet(&self, model: &PromptModel, cx: &mut Context<Self>) -> AnyElement {
         let danger = cx.theme().danger;
         let (title, danger_sheet) = match model {
-            PromptModel::Password { user, host, .. } => {
-                (format!("Password for {user}@{host}"), false)
-            }
-            PromptModel::KeyPassphrase { key_path, .. } => {
-                (format!("Passphrase for {key_path}"), false)
-            }
+            PromptModel::Password { user, host, .. } => (
+                crate::ui::i18n::t_fmt(
+                    crate::ui::i18n::L10nKey::SshPromptPasswordFor,
+                    &[("user", user), ("host", host)],
+                ),
+                false,
+            ),
+            PromptModel::KeyPassphrase { key_path, .. } => (
+                crate::ui::i18n::t_fmt(
+                    crate::ui::i18n::L10nKey::SshPromptPassphraseFor,
+                    &[("key_path", key_path)],
+                ),
+                false,
+            ),
             PromptModel::KeyboardInteractive { name, .. } => {
                 let label = if name.is_empty() {
-                    "Two-factor authentication".to_string()
+                    crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptTwoFactor).to_string()
                 } else {
                     name.clone()
                 };
                 (label, false)
             }
-            PromptModel::HostKeyUnknown { host, .. } => (format!("Unknown host {host}"), false),
+            PromptModel::HostKeyUnknown { host, .. } => (
+                crate::ui::i18n::t_fmt(
+                    crate::ui::i18n::L10nKey::SshPromptUnknownHost,
+                    &[("host", host)],
+                ),
+                false,
+            ),
             PromptModel::HostKeyChanged { .. } => (
-                "Host key CHANGED — possible man-in-the-middle".to_string(),
+                crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptHostKeyChanged).to_string(),
                 true,
             ),
         };
@@ -645,16 +659,16 @@ impl Tty7App {
             PromptModel::Password { rejected, .. } => {
                 let mut c = card;
                 if *rejected {
-                    c = c.child(
-                        div()
-                            .text_xs()
-                            .text_color(danger)
-                            .child("The stored password was rejected. Enter a new one."),
-                    );
+                    c = c.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+                        crate::ui::i18n::L10nKey::StoredPasswordRejected,
+                    )));
                 }
                 c.child(self.render_ssh_input(0))
                     .child(self.render_ssh_remember(cx))
-                    .child(self.render_ssh_actions("Connect", cx))
+                    .child(self.render_ssh_actions(
+                        crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptConnect),
+                        cx,
+                    ))
             }
             PromptModel::KeyPassphrase { comment, .. } => {
                 let mut c = card;
@@ -668,7 +682,10 @@ impl Tty7App {
                 }
                 c.child(self.render_ssh_input(0))
                     .child(self.render_ssh_remember(cx))
-                    .child(self.render_ssh_actions("Unlock", cx))
+                    .child(self.render_ssh_actions(
+                        crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptUnlock),
+                        cx,
+                    ))
             }
             PromptModel::KeyboardInteractive {
                 instructions,
@@ -683,7 +700,10 @@ impl Tty7App {
                     c = c.child(div().text_xs().child(row.text.clone()));
                     c = c.child(self.render_ssh_input(i));
                 }
-                c.child(self.render_ssh_actions("Submit", cx))
+                c.child(self.render_ssh_actions(
+                    crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptSubmit),
+                    cx,
+                ))
             }
             PromptModel::HostKeyUnknown {
                 algorithm,
@@ -703,16 +723,21 @@ impl Tty7App {
                         .gap_2()
                         .child(
                             Button::new("ssh-hk-trust")
-                                .label("Trust")
+                                .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Trust))
                                 .small()
                                 .primary()
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.trust_ssh_host_key(window, cx)
                                 })),
                         )
-                        .child(Button::new("ssh-hk-abort").label("Abort").small().on_click(
-                            cx.listener(|this, _, window, cx| this.cancel_ssh_prompt(window, cx)),
-                        )),
+                        .child(
+                            Button::new("ssh-hk-abort")
+                                .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Abort))
+                                .small()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.cancel_ssh_prompt(window, cx)
+                                })),
+                        ),
                 ),
             PromptModel::HostKeyChanged {
                 algorithm,
@@ -721,35 +746,39 @@ impl Tty7App {
                 port,
                 host,
             } => card
-                .child(div().text_xs().text_color(danger).child(
-                    "The host key differs from the one previously trusted. This may be an attack.",
-                ))
+                .child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+                    crate::ui::i18n::L10nKey::SshPromptHostKeyChangedBody,
+                )))
                 .child(div().text_xs().child(format!("{host}:{port}  {algorithm}")))
                 .child(
                     div()
                         .text_xs()
                         .font_family("monospace")
-                        .child(format!("new {fingerprint}")),
+                        .child(crate::ui::i18n::t_fmt(
+                            crate::ui::i18n::L10nKey::SshPromptNewKey,
+                            &[("fingerprint", &fingerprint)],
+                        )),
                 )
                 .child(
                     div()
                         .text_xs()
                         .font_family("monospace")
                         .text_color(cx.theme().muted_foreground)
-                        .child(format!("old {old_fingerprint}")),
+                        .child(crate::ui::i18n::t_fmt(
+                            crate::ui::i18n::L10nKey::SshPromptOldKey,
+                            &[("old_fingerprint", &old_fingerprint)],
+                        )),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .child("Type \"yes\" to override and trust the new key, or Esc to abort."),
-                )
+                .child(div().text_xs().child(crate::ui::i18n::t(
+                    crate::ui::i18n::L10nKey::HostKeyOverrideMessage,
+                )))
                 .child(self.render_ssh_input(0))
                 .child(
                     h_flex()
                         .gap_2()
                         .child(
                             Button::new("ssh-hkc-abort")
-                                .label("Abort")
+                                .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Abort))
                                 .small()
                                 .primary()
                                 .on_click(cx.listener(|this, _, window, cx| {
@@ -758,7 +787,7 @@ impl Tty7App {
                         )
                         .child(
                             Button::new("ssh-hkc-override")
-                                .label("Override")
+                                .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Override))
                                 .small()
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.submit_ssh_prompt(window, cx)
@@ -781,7 +810,9 @@ impl Tty7App {
         h_flex()
             .child(
                 Checkbox::new("ssh-remember")
-                    .label("Remember (keychain)")
+                    .label(crate::ui::i18n::t(
+                        crate::ui::i18n::L10nKey::RememberKeychain,
+                    ))
                     .checked(self.ssh_prompt.remember)
                     .on_click(cx.listener(|this, _, _w, cx| this.toggle_ssh_remember(cx))),
             )
@@ -802,9 +833,12 @@ impl Tty7App {
                     ),
             )
             .child(
-                Button::new("ssh-cancel").label("Cancel").small().on_click(
-                    cx.listener(|this, _, window, cx| this.cancel_ssh_prompt(window, cx)),
-                ),
+                Button::new("ssh-cancel")
+                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Cancel))
+                    .small()
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.cancel_ssh_prompt(window, cx)),
+                    ),
             )
             .into_any_element()
     }

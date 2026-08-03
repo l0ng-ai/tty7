@@ -1,17 +1,24 @@
-use std::io::{BufRead as _, Read as _};
+use std::io::{BufRead as _, Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use tty7_core::client::{ControlClient, PaneClient};
 use tty7_core::daemon::control::ControlHello;
-use tty7_core::daemon::protocol::PROTOCOL_VERSION;
+use tty7_core::daemon::protocol::{DaemonMsg, PROTOCOL_VERSION, ShellSpec, WinSize};
 
 const DAEMON_ENV: &str = "TTY7_CLI_E2E_DAEMON";
+const PASTE_AWARE_FIXTURE_ARG: &str = "--tty7-e2e-paste-aware-fixture";
+const PASTE_AWARE_TEXT: &str = "tty7 paste aware input";
+const PASTE_BURST_WINDOW: Duration = Duration::from_millis(120);
 const READY_WITHIN: Duration = Duration::from_secs(30);
 const SETTLE_WITHIN: Duration = Duration::from_secs(60);
 
 fn main() {
+    if std::env::args().any(|arg| arg == PASTE_AWARE_FIXTURE_ARG) {
+        run_paste_aware_fixture();
+        return;
+    }
     if std::env::var(DAEMON_ENV).as_deref() == Ok("1") {
         if let Err(e) = tty7_core::daemon::server::run_daemon() {
             eprintln!("e2e daemon exited with error: {e}");
@@ -35,6 +42,10 @@ fn main() {
             run_keep_files_the_pane_so_ls_shows_it,
         ),
         ("send_then_capture_round_trip", send_then_capture_round_trip),
+        (
+            "send_enter_submits_in_a_paste_aware_raw_mode_tui",
+            send_enter_submits_in_a_paste_aware_raw_mode_tui,
+        ),
         (
             "status_reports_the_live_server",
             status_reports_the_live_server,
@@ -73,6 +84,111 @@ fn main() {
     if failed > 0 {
         eprintln!("{failed} e2e test(s) failed");
         std::process::exit(1);
+    }
+}
+
+fn run_paste_aware_fixture() {
+    let _raw = raw_mode::enable();
+    println!("TTY7_PASTE_AWARE_READY");
+    std::io::stdout().flush().expect("flush fixture readiness");
+
+    let mut input = Vec::new();
+    let mut last_text_at = None;
+    let mut chunk = [0_u8; 256];
+    loop {
+        let read = std::io::stdin()
+            .read(&mut chunk)
+            .expect("read fixture input");
+        assert_ne!(read, 0, "fixture input ended before Enter");
+        let read_at = Instant::now();
+        for &byte in &chunk[..read] {
+            if byte == b'\r' {
+                let submitted = input == PASTE_AWARE_TEXT.as_bytes()
+                    && last_text_at.is_some_and(|at| {
+                        read_at.saturating_duration_since(at) > PASTE_BURST_WINDOW
+                    });
+                if submitted {
+                    println!("TTY7_PASTE_AWARE_SUBMITTED");
+                } else {
+                    println!("TTY7_PASTE_AWARE_NOT_SUBMITTED");
+                }
+                std::io::stdout().flush().expect("flush fixture verdict");
+                return;
+            }
+            input.push(byte);
+            last_text_at = Some(read_at);
+        }
+    }
+}
+
+#[cfg(unix)]
+mod raw_mode {
+    pub struct Guard(libc::termios);
+
+    pub fn enable() -> Guard {
+        let mut original = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut original) },
+            0,
+            "read fixture terminal mode"
+        );
+        let mut raw = original;
+        unsafe { libc::cfmakeraw(&mut raw) };
+        assert_eq!(
+            unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) },
+            0,
+            "enable fixture raw mode"
+        );
+        Guard(original)
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            unsafe {
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+mod raw_mode {
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::Console::{
+        ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
+        ENABLE_VIRTUAL_TERMINAL_INPUT, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE,
+        SetConsoleMode,
+    };
+
+    pub struct Guard {
+        input: HANDLE,
+        mode: u32,
+    }
+
+    pub fn enable() -> Guard {
+        let input = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        let mut mode = 0;
+        assert_ne!(
+            unsafe { GetConsoleMode(input, &mut mode) },
+            0,
+            "read fixture terminal mode"
+        );
+        let raw = (mode & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT))
+            | ENABLE_VIRTUAL_TERMINAL_INPUT;
+        assert_ne!(
+            unsafe { SetConsoleMode(input, raw) },
+            0,
+            "enable fixture raw mode"
+        );
+        Guard { input, mode }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            unsafe {
+                SetConsoleMode(self.input, self.mode);
+            }
+        }
     }
 }
 
@@ -406,6 +522,62 @@ fn send_then_capture_round_trip(daemon: &Daemon) {
             "the sent text never showed up in the capture; last capture:\n{seen}"
         );
         std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn send_enter_submits_in_a_paste_aware_raw_mode_tui(daemon: &Daemon) {
+    let fixture = std::env::current_exe().expect("locate the paste-aware fixture");
+    let shell = ShellSpec {
+        program: fixture.display().to_string(),
+        args: vec![PASTE_AWARE_FIXTURE_ARG.into()],
+        args_are_tty7_defaults: false,
+    };
+    let mut pane = PaneClient::at(daemon.pane_endpoint())
+        .spawn(
+            None,
+            WinSize {
+                cols: 80,
+                rows: 24,
+                cell_w: 8,
+                cell_h: 16,
+            },
+            Some(shell),
+            Some("paste-aware-e2e".into()),
+            None,
+        )
+        .expect("spawn the paste-aware raw-mode fixture");
+    pane.set_recv_timeout(Some(SETTLE_WITHIN))
+        .expect("bound fixture output reads");
+    collect_pane_output_until(&mut pane, b"TTY7_PASTE_AWARE_READY");
+
+    let address = format!("%{}", pane.pane_id());
+    daemon.run_ok(&["send", &address, PASTE_AWARE_TEXT, "--enter"]);
+
+    collect_pane_output_until(&mut pane, b"TTY7_PASTE_AWARE_SUBMITTED");
+}
+
+fn collect_pane_output_until(session: &mut tty7_core::client::PaneSession, marker: &[u8]) {
+    let mut seen = Vec::new();
+    loop {
+        match session.recv() {
+            Ok(DaemonMsg::Output(bytes)) | Ok(DaemonMsg::Snapshot(bytes)) => {
+                seen.extend_from_slice(&bytes);
+                if seen.windows(marker.len()).any(|window| window == marker) {
+                    return;
+                }
+            }
+            Ok(DaemonMsg::Exited { code }) => panic!(
+                "paste-aware fixture exited ({code:?}) before {:?}; saw {:?}",
+                String::from_utf8_lossy(marker),
+                String::from_utf8_lossy(&seen)
+            ),
+            Ok(_) => {}
+            Err(error) => panic!(
+                "paste-aware fixture ended before {:?}: {error}; saw {:?}",
+                String::from_utf8_lossy(marker),
+                String::from_utf8_lossy(&seen)
+            ),
+        }
     }
 }
 

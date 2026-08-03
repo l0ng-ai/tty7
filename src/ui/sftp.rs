@@ -20,6 +20,7 @@ use crate::daemon::protocol::{
 use crate::daemon::ssh::sftp::{remote_basename, remote_join, remote_parent, safe_local_name};
 use crate::terminal::RemoteTerminal;
 use crate::ui::app::{CONTENT_INSET, Tty7App};
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 #[derive(Clone, Copy)]
 enum SftpMenuAction {
@@ -70,7 +71,10 @@ impl SftpRoute {
         };
         match RemoteTerminal::on_workspace(req) {
             Ok(crate::daemon::protocol::DaemonMsg::SftpEntries(e)) => Ok(e),
-            Ok(other) => Err(format!("unexpected reply: {other:?}")),
+            Ok(other) => Err(t_fmt(
+                L10nKey::SftpErrorUnexpectedReply,
+                &[("reply", &format!("{other:?}"))],
+            )),
             Err(e) => Err(e.to_string()),
         }
     }
@@ -83,7 +87,10 @@ impl SftpRoute {
         };
         match RemoteTerminal::on_workspace(req) {
             Ok(crate::daemon::protocol::DaemonMsg::SftpOpResult(r)) => r,
-            Ok(other) => SftpOpResult::Error(format!("unexpected reply: {other:?}")),
+            Ok(other) => SftpOpResult::Error(t_fmt(
+                L10nKey::SftpErrorUnexpectedReply,
+                &[("reply", &format!("{other:?}"))],
+            )),
             Err(e) => SftpOpResult::Error(e.to_string()),
         }
     }
@@ -98,7 +105,10 @@ impl SftpRoute {
         };
         match RemoteTerminal::on_workspace(req) {
             Ok(crate::daemon::protocol::DaemonMsg::SftpTransferStarted { job_id }) => Ok(job_id),
-            Ok(other) => Err(format!("unexpected reply: {other:?}")),
+            Ok(other) => Err(t_fmt(
+                L10nKey::SftpErrorUnexpectedReply,
+                &[("reply", &format!("{other:?}"))],
+            )),
             Err(e) => Err(e.to_string()),
         }
     }
@@ -146,7 +156,10 @@ pub(crate) struct SftpPanelState {
 
 impl SftpPanelState {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Tty7App>) -> Self {
-        let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let filter_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Search))
+        });
         let sub = cx.subscribe_in(&filter_input, window, |_this, _input, ev, _w, cx| {
             if matches!(ev, gpui_component::input::InputEvent::Change) {
                 cx.notify();
@@ -496,7 +509,10 @@ impl Tty7App {
             return;
         };
         if !safe_local_name(&entry.name) {
-            self.sftp_panel.error = Some(format!("refusing unsafe remote name {:?}", entry.name));
+            self.sftp_panel.error = Some(t_fmt(
+                L10nKey::SftpErrorUnsafeRemoteName,
+                &[("name", &format!("{:?}", entry.name))],
+            ));
             cx.notify();
             return;
         }
@@ -595,13 +611,19 @@ impl Tty7App {
     }
 
     pub(crate) fn sftp_begin_new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("New folder name"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::ui::i18n::t(crate::ui::i18n::L10nKey::NewFolderName))
+        });
         self.sftp_panel.editing = Some(SftpEdit::NewFolder(input));
         cx.notify();
     }
 
     pub(crate) fn sftp_begin_new_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("New file name"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::ui::i18n::t(crate::ui::i18n::L10nKey::NewFileName))
+        });
         self.sftp_panel.editing = Some(SftpEdit::NewFile(input));
         cx.notify();
     }
@@ -685,7 +707,8 @@ impl Tty7App {
                         mode,
                     }),
                     Err(_) => {
-                        self.sftp_panel.error = Some("invalid octal mode".to_string());
+                        self.sftp_panel.error =
+                            Some(t(L10nKey::SftpErrorInvalidOctalMode).to_string());
                         cx.notify();
                         return;
                     }
@@ -832,7 +855,13 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let controls = self.sftp_controls(cx);
-        let title = self.panel_title("Files", Some(host), Some(controls), window, cx);
+        let title = self.panel_title(
+            t(L10nKey::SftpPanelTitleFiles),
+            Some(host),
+            Some(controls),
+            window,
+            cx,
+        );
         let breadcrumb = self.render_sftp_breadcrumb(cx);
         let filter = div()
             .id("panel-sftp-filter")
@@ -885,7 +914,7 @@ impl Tty7App {
                         false,
                         cx,
                     )
-                    .tooltip("Refresh")
+                    .tooltip(t(L10nKey::SftpTooltipRefresh))
                     .on_click(cx.listener(|this, _, _w, cx| this.sftp_refresh(cx))),
                 ),
             )
@@ -897,16 +926,19 @@ impl Tty7App {
                         false,
                         cx,
                     )
-                    .tooltip("More")
+                    .tooltip(t(L10nKey::SftpTooltipMore))
                     .dropdown_menu_with_anchor(gpui::Anchor::TopRight, {
                         let app = cx.entity().downgrade();
                         move |menu, _window, _cx| {
                             let mut menu = menu.min_w(px(190.));
                             for (label, action) in [
-                                ("New folder", SftpMenuAction::NewFolder),
-                                ("New file", SftpMenuAction::NewFile),
-                                ("Upload…", SftpMenuAction::Upload),
-                                ("Go to shell directory", SftpMenuAction::GotoShellCwd),
+                                (t(L10nKey::SftpMenuNewFolder), SftpMenuAction::NewFolder),
+                                (t(L10nKey::SftpMenuNewFile), SftpMenuAction::NewFile),
+                                (t(L10nKey::SftpMenuUpload), SftpMenuAction::Upload),
+                                (
+                                    t(L10nKey::SftpMenuGotoShellCwd),
+                                    SftpMenuAction::GotoShellCwd,
+                                ),
                             ] {
                                 menu = menu.item(PopupMenuItem::new(label).on_click({
                                     let app = app.clone();
@@ -919,9 +951,9 @@ impl Tty7App {
                             }
                             menu.separator().item(
                                 PopupMenuItem::new(if history {
-                                    "Hide transfer history"
+                                    t(L10nKey::SftpMenuHideTransferHistory)
                                 } else {
-                                    "Transfer history"
+                                    t(L10nKey::SftpMenuTransferHistory)
                                 })
                                 .on_click({
                                     let app = app.clone();
@@ -1027,12 +1059,15 @@ impl Tty7App {
         let border = cx.theme().border;
         let foreground = cx.theme().foreground;
         let (title, input): (String, _) = match self.sftp_panel.editing.as_ref()? {
-            SftpEdit::NewFolder(input) => ("New folder".to_string(), input),
-            SftpEdit::NewFile(input) => ("New file".to_string(), input),
-            SftpEdit::Rename { input, .. } => ("Rename".to_string(), input),
+            SftpEdit::NewFolder(input) => (t(L10nKey::SftpEditNewFolder).to_string(), input),
+            SftpEdit::NewFile(input) => (t(L10nKey::SftpEditNewFile).to_string(), input),
+            SftpEdit::Rename { input, .. } => (t(L10nKey::SftpEditRename).to_string(), input),
             SftpEdit::Chmod {
                 readable, input, ..
-            } => (format!("Permissions · {readable}"), input),
+            } => (
+                t_fmt(L10nKey::SftpEditPermissions, &[("mode", readable)]),
+                input,
+            ),
         };
         Some(
             v_flex()
@@ -1058,14 +1093,14 @@ impl Tty7App {
                         .justify_end()
                         .child(
                             Button::new("sftp-edit-cancel")
-                                .label("Cancel")
+                                .label(t(L10nKey::Cancel))
                                 .ghost()
                                 .xsmall()
                                 .on_click(cx.listener(|this, _, _w, cx| this.sftp_cancel_edit(cx))),
                         )
                         .child(
                             Button::new("sftp-edit-ok")
-                                .label("OK")
+                                .label(t(L10nKey::Ok))
                                 .xsmall()
                                 .primary()
                                 .on_click(cx.listener(|this, _, _w, cx| this.sftp_commit_edit(cx))),
@@ -1105,12 +1140,12 @@ impl Tty7App {
         let show_go_up = self.sftp_panel.cwd != "/" && filter.trim().is_empty();
 
         if entries.is_empty() && !show_go_up {
-            let text = if self.sftp_panel.loading {
-                "Loading…"
+            let text: gpui::SharedString = if self.sftp_panel.loading {
+                t(L10nKey::SftpLoading).into()
             } else {
-                "Empty directory."
+                t(L10nKey::SftpEmptyDirectory).into()
             };
-            return container.child(note(text.into(), muted));
+            return container.child(note(text, muted));
         }
 
         let mut list = v_flex().gap(px(1.)).py(px(2.));
@@ -1220,7 +1255,11 @@ impl Tty7App {
     ) -> gpui_component::menu::PopupMenu {
         let mut menu = menu.min_w(px(180.));
 
-        let primary_label = if dir_like { "Open" } else { "Download" };
+        let primary_label = if dir_like {
+            t(L10nKey::SftpContextOpen)
+        } else {
+            t(L10nKey::Download)
+        };
         menu = menu.item(PopupMenuItem::new(primary_label).on_click({
             let app = app.clone();
             let entry = entry.clone();
@@ -1231,18 +1270,20 @@ impl Tty7App {
         }));
 
         if is_symlink {
-            menu = menu.item(PopupMenuItem::new("Follow symlink").on_click({
-                let app = app.clone();
-                let entry = entry.clone();
-                move |_, _window, cx| {
+            menu = menu.item(
+                PopupMenuItem::new(t(L10nKey::SftpContextFollowSymlink)).on_click({
+                    let app = app.clone();
                     let entry = entry.clone();
-                    let _ = app.update(cx, |this, cx| this.sftp_follow_symlink(entry, cx));
-                }
-            }));
+                    move |_, _window, cx| {
+                        let entry = entry.clone();
+                        let _ = app.update(cx, |this, cx| this.sftp_follow_symlink(entry, cx));
+                    }
+                }),
+            );
         }
 
         menu = menu
-            .item(PopupMenuItem::new("Rename").on_click({
+            .item(PopupMenuItem::new(t(L10nKey::SftpContextRename)).on_click({
                 let app = app.clone();
                 let name = entry.name.clone();
                 move |_, window, cx| {
@@ -1250,7 +1291,7 @@ impl Tty7App {
                     let _ = app.update(cx, |this, cx| this.sftp_begin_rename(name, window, cx));
                 }
             }))
-            .item(PopupMenuItem::new("chmod…").on_click({
+            .item(PopupMenuItem::new(t(L10nKey::SftpContextChmod)).on_click({
                 let app = app.clone();
                 let entry = entry.clone();
                 move |_, window, cx| {
@@ -1261,15 +1302,17 @@ impl Tty7App {
             .separator();
 
         menu.item(
-            PopupMenuItem::element(move |_window, _cx| div().text_color(danger).child("Delete"))
-                .on_click({
-                    let app = app.clone();
+            PopupMenuItem::element(move |_window, _cx| {
+                div().text_color(danger).child(t(L10nKey::Delete))
+            })
+            .on_click({
+                let app = app.clone();
+                let entry = entry.clone();
+                move |_, _window, cx| {
                     let entry = entry.clone();
-                    move |_, _window, cx| {
-                        let entry = entry.clone();
-                        let _ = app.update(cx, |this, cx| this.sftp_delete_entry(entry, cx));
-                    }
-                }),
+                    let _ = app.update(cx, |this, cx| this.sftp_delete_entry(entry, cx));
+                }
+            }),
         )
     }
 
@@ -1312,11 +1355,20 @@ impl Tty7App {
             0.0
         };
         let summary = if running > 0 {
-            format!("{running} transferring · {pct:.0}%")
+            t_fmt(
+                L10nKey::SftpTransferSummaryRunning,
+                &[
+                    ("count", &running.to_string()),
+                    ("pct", &format!("{pct:.0}")),
+                ],
+            )
         } else if failed > 0 {
-            format!("{failed} failed")
+            t_fmt(
+                L10nKey::SftpTransferSummaryFailed,
+                &[("count", &failed.to_string())],
+            )
         } else {
-            "Transfers".to_string()
+            t(L10nKey::SftpTransferSummaryIdle).to_string()
         };
         let summary_color = if running == 0 && failed > 0 {
             danger
@@ -1363,7 +1415,7 @@ impl Tty7App {
                         .w(px(18.))
                         .h(px(18.))
                         .rounded(px(4.))
-                        .tooltip("Dismiss")
+                        .tooltip(t(L10nKey::Dismiss))
                         .on_click(cx.listener(|this, _, _w, cx| this.sftp_dismiss_tray(cx))),
                     ),
             );
@@ -1383,7 +1435,7 @@ impl Tty7App {
                         .py(px(3.))
                         .text_size(px(11.5))
                         .text_color(muted)
-                        .child("No transfers yet."),
+                        .child(t(L10nKey::SftpNoTransfers)),
                 )
             } else {
                 let mut list = v_flex().px(px(CONTENT_INSET)).pb(px(6.)).gap(px(6.));
@@ -1430,14 +1482,20 @@ impl Tty7App {
             0.0
         };
         let status = match job.state {
-            SftpJobState::Running => format!(
-                "{} / {} ({pct:.0}%)",
-                human_size(job.bytes_done),
-                human_size(job.bytes_total)
+            SftpJobState::Running => t_fmt(
+                L10nKey::SftpTransferProgress,
+                &[
+                    ("done", &human_size(job.bytes_done)),
+                    ("total", &human_size(job.bytes_total)),
+                    ("pct", &format!("{pct:.0}")),
+                ],
             ),
-            SftpJobState::Done => "done".to_string(),
-            SftpJobState::Cancelled => "cancelled".to_string(),
-            SftpJobState::Error => job.error.clone().unwrap_or_else(|| "error".to_string()),
+            SftpJobState::Done => t(L10nKey::SftpTransferDone).to_string(),
+            SftpJobState::Cancelled => t(L10nKey::SftpTransferCancelled).to_string(),
+            SftpJobState::Error => job
+                .error
+                .clone()
+                .unwrap_or_else(|| t(L10nKey::SftpTransferError).to_string()),
         };
         let status_color = match job.state {
             SftpJobState::Error => danger,

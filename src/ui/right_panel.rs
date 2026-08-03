@@ -14,6 +14,7 @@ use crate::ui::app::{
     CONTENT_INSET, TILE_GLYPH_SM, TILE_SIZE_SM, Tty7App, tile_trailing_inset,
     tile_trailing_inset_sm,
 };
+use crate::ui::i18n::{L10nKey, t, t_plural};
 use crate::ui::scrollbar::with_vertical_scrollbar;
 
 pub(crate) const MIN_WIDTH: f32 = 216.;
@@ -355,7 +356,7 @@ impl Tty7App {
     }
 
     fn render_panel_info(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let title = self.panel_title("Info", None, None, window, cx);
+        let title = self.panel_title(t(L10nKey::PanelInfoTitle), None, None, window, cx);
         let mut rows: Vec<(&'static str, String)> = Vec::new();
         let mut cwd_for_actions: Option<PathBuf> = None;
         let mut pane_id: Option<u64> = None;
@@ -370,16 +371,16 @@ impl Tty7App {
                     .map(|p| p.to_path_buf())
                     .or_else(|| view.cwd())
                 {
-                    rows.push(("cwd", compact_path(&cwd)));
+                    rows.push((t(L10nKey::PanelCwd), compact_path(&cwd)));
                     cwd_for_actions = Some(cwd);
                 }
                 let shell = match view.shell_spec().map(|s| s.program.clone()) {
                     Some(program) => crate::core::shells::default_shell_name(Some(&program)),
                     None => self.default_shell_label(cx),
                 };
-                rows.push(("shell", shell));
+                rows.push((t(L10nKey::PanelShell), shell));
                 if let Some(ssh) = view.ssh_spec() {
-                    rows.push(("ssh", ssh.host.clone()));
+                    rows.push((t(L10nKey::PanelSsh), ssh.host.clone()));
                 }
                 let connected_ssh = view
                     .remote_context()
@@ -393,8 +394,11 @@ impl Tty7App {
                 }
             }
             if let Some(git) = tab.git_status(Some(window), cx) {
-                rows.push(("branch", git.branch.clone()));
-                rows.push(("changes", format!("+{} −{}", git.added, git.removed)));
+                rows.push((t(L10nKey::PanelBranch), git.branch.clone()));
+                rows.push((
+                    t(L10nKey::PanelChangesRow),
+                    format!("+{} −{}", git.added, git.removed),
+                ));
             }
             if let Some(agent) = tab.agent(cx) {
                 let name = agent.display_name();
@@ -402,15 +406,15 @@ impl Tty7App {
                     Some(s) => format!("{name} · {}", agent_status_label(s)),
                     None => name.to_string(),
                 };
-                rows.push(("agent", status));
+                rows.push((t(L10nKey::PanelAgent), status));
             }
         }
 
         if rows.is_empty() {
             return self.panel_scroll(
                 self.panel_empty(
-                    "No active session.",
-                    Some("Open a tab to see its shell, directory, and processes here."),
+                    t(L10nKey::PanelNoSession),
+                    Some(t(L10nKey::PanelNoSessionHint)),
                     cx,
                 ),
                 title,
@@ -449,7 +453,7 @@ impl Tty7App {
         }
 
         let inner = v_flex()
-            .child(self.panel_subtitle("Session", false, None, cx))
+            .child(self.panel_subtitle(t(L10nKey::PanelSessionSubtitle), false, None, cx))
             .child(list)
             .when_some(cwd_for_actions, |this, cwd| {
                 this.child(self.cwd_actions(cwd, cx))
@@ -491,7 +495,7 @@ impl Tty7App {
                     cx,
                 )
                 .rounded_md()
-                .tooltip("Copy Path")
+                .tooltip(t(L10nKey::FileTreeContextCopyPath))
                 .on_click(move |_, _window, cx| {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                         cwd.display().to_string(),
@@ -575,7 +579,7 @@ impl Tty7App {
         }
         Some(
             v_flex()
-                .child(self.panel_subtitle("Processes", true, None, cx))
+                .child(self.panel_subtitle(t(L10nKey::PanelProcessesSubtitle), true, None, cx))
                 .child(list)
                 .into_any_element(),
         )
@@ -613,7 +617,7 @@ impl Tty7App {
         }
         Some(
             v_flex()
-                .child(self.panel_subtitle("Ports", true, None, cx))
+                .child(self.panel_subtitle(t(L10nKey::PanelPortsSubtitle), true, None, cx))
                 .child(list)
                 .into_any_element(),
         )
@@ -708,11 +712,11 @@ impl Tty7App {
             .get(self.active)
             .and_then(|t| t.detail_pane(window, cx))
         else {
-            let title = self.panel_title("Outline", None, None, window, cx);
+            let title = self.panel_title(t(L10nKey::PanelOutlineTitle), None, None, window, cx);
             return self.panel_scroll(
                 self.panel_empty(
-                    "No active session.",
-                    Some("Open a tab to see its shell, directory, and processes here."),
+                    t(L10nKey::PanelNoSession),
+                    Some(t(L10nKey::PanelNoSessionHint)),
                     cx,
                 ),
                 title,
@@ -720,17 +724,23 @@ impl Tty7App {
         };
         let count = leaf.read(cx).command_marks().len();
         if count == 0 {
-            let title = self.panel_title("Outline", None, None, window, cx);
+            let title = self.panel_title(t(L10nKey::PanelOutlineTitle), None, None, window, cx);
             return self.panel_scroll(
                 self.panel_empty(
-                    "No commands recorded for this pane.",
-                    Some("Run a command — shell integration marks each one so you can jump back to it."),
+                    t(L10nKey::PanelNoCommands),
+                    Some(t(L10nKey::PanelNoCommandsHint)),
                     cx,
                 ),
                 title,
             );
         }
-        let title = self.panel_title("Outline", Some(count.to_string()), None, window, cx);
+        let title = self.panel_title(
+            t(L10nKey::PanelOutlineTitle),
+            Some(count.to_string()),
+            None,
+            window,
+            cx,
+        );
 
         let mono = cx.theme().mono_font_family.clone();
         let mut list = v_flex().px(px(CONTENT_INSET - 4.)).py(px(2.)).gap(px(1.));
@@ -812,11 +822,11 @@ impl Tty7App {
             });
 
         let Some((host, cwd)) = target else {
-            let title = self.panel_title("Changes", None, None, window, cx);
+            let title = self.panel_title(t(L10nKey::PanelChangesTitle), None, None, window, cx);
             return self.panel_scroll(
                 self.panel_empty(
-                    "No working directory.",
-                    Some("This pane has not reported one yet."),
+                    t(L10nKey::PanelNoWorkingDirectory),
+                    Some(t(L10nKey::PanelNoWorkingDirectoryHint)),
                     cx,
                 ),
                 title,
@@ -838,20 +848,20 @@ impl Tty7App {
             }
             _ => None,
         };
-        let title = self.panel_title("Changes", count, None, window, cx);
+        let title = self.panel_title(t(L10nKey::PanelChangesTitle), count, None, window, cx);
         let mono = cx.theme().mono_font_family.clone();
 
         let inner = match &self.right_panel.diff {
-            None => self.panel_empty("Loading…", None, cx),
+            None => self.panel_empty(t(L10nKey::PanelLoading), None, cx),
             Some(None) => self.panel_empty(
-                "Not a git repository.",
-                Some("cd into one and this tab lists its uncommitted changes."),
+                t(L10nKey::PanelNotAGitRepo),
+                Some(t(L10nKey::PanelNotAGitRepoHint)),
                 cx,
             ),
             Some(Some(snap)) if snap.files.is_empty() && snap.untracked.is_empty() => self
                 .panel_empty(
-                    "No uncommitted changes.",
-                    Some("The working tree is clean."),
+                    t(L10nKey::PanelNoChanges),
+                    Some(t(L10nKey::PanelNoChangesHint)),
                     cx,
                 ),
             Some(Some(snap)) => {
@@ -930,10 +940,7 @@ impl Tty7App {
                             .py(px(3.))
                             .text_size(px(11.5))
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "… and {rest} more changed file{} — run `git diff` to see them.",
-                                if rest == 1 { "" } else { "s" }
-                            )),
+                            .child(t_plural(L10nKey::PanelMoreChangedFiles, rest, &[])),
                     );
                 }
                 if untracked > 0 {
@@ -952,7 +959,7 @@ impl Tty7App {
                                 div()
                                     .text_size(px(11.5))
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(format!("{untracked} untracked")),
+                                    .child(t_plural(L10nKey::PanelUntracked, untracked, &[])),
                             ),
                     );
                 }
@@ -1007,7 +1014,7 @@ impl Tty7App {
             return self.render_panel_sftp(host.unwrap_or_default(), window, cx);
         }
 
-        let title = self.panel_title("Files", None, None, window, cx);
+        let title = self.panel_title(t(L10nKey::PanelFilesTitle), None, None, window, cx);
         let search = self.panel_search(&self.file_search.clone(), cx);
         let rows = self.render_file_tree_rows(window, cx);
         v_flex()
@@ -1071,19 +1078,19 @@ pub(crate) fn info_chip(
 
 pub fn reveal_label() -> &'static str {
     if cfg!(target_os = "macos") {
-        "Reveal in Finder"
+        t(L10nKey::PanelRevealInFinder)
     } else {
-        "Open Folder"
+        t(L10nKey::PanelOpenFolder)
     }
 }
 
 fn agent_status_label(status: crate::core::cli_agent::AgentStatus) -> &'static str {
     use crate::core::cli_agent::AgentStatus::*;
     match status {
-        Idle => "idle",
-        Working => "working",
-        Waiting => "waiting",
-        Done => "done",
+        Idle => t(L10nKey::PanelAgentIdle),
+        Working => t(L10nKey::PanelAgentWorking),
+        Waiting => t(L10nKey::PanelAgentWaiting),
+        Done => t(L10nKey::PanelAgentDone),
     }
 }
 

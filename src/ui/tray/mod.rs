@@ -11,6 +11,7 @@ use sni::Backend;
 
 use crate::core::cli_agent::AgentStatus;
 use crate::core::config::{Config, NotifyMode};
+use crate::ui::i18n::{L10nKey, t};
 use gpui::App;
 
 const POLL: std::time::Duration = std::time::Duration::from_millis(1000);
@@ -59,9 +60,18 @@ impl TraySnapshot {
         let count = |s: AgentStatus| self.agents.iter().filter(|a| a.status == s).count();
         let mut parts = Vec::new();
         for (n, word) in [
-            (count(AgentStatus::Waiting), "waiting"),
-            (count(AgentStatus::Working), "working"),
-            (count(AgentStatus::Done), "done"),
+            (
+                count(AgentStatus::Waiting),
+                t(crate::ui::i18n::L10nKey::PanelAgentWaiting),
+            ),
+            (
+                count(AgentStatus::Working),
+                t(crate::ui::i18n::L10nKey::PanelAgentWorking),
+            ),
+            (
+                count(AgentStatus::Done),
+                t(crate::ui::i18n::L10nKey::PanelAgentDone),
+            ),
         ] {
             if n > 0 {
                 parts.push(format!("{n} {word}"));
@@ -90,19 +100,23 @@ pub(crate) enum SpecItem {
 }
 
 pub(crate) fn menu_spec(snap: &TraySnapshot) -> Vec<SpecItem> {
-    let item = |id: &str, label: String| SpecItem::Item {
+    let item = |id: &str, label: &str| SpecItem::Item {
         id: id.to_string(),
-        label,
+        label: label.to_string(),
         checked: None,
         avatar: None,
     };
-    let mut items = vec![item("show", "Show tty7".into()), SpecItem::Separator];
+    let mut items = vec![item("show", t(L10nKey::TrayShowTty7)), SpecItem::Separator];
     for a in &snap.agents {
         let state = match a.status {
-            AgentStatus::Waiting => " — needs input",
-            AgentStatus::Working => " — working",
-            AgentStatus::Done => " — done",
-            AgentStatus::Idle => "",
+            AgentStatus::Waiting => {
+                format!(" — {}", t(crate::ui::i18n::L10nKey::TrayAgentNeedsInput))
+            }
+            AgentStatus::Working => {
+                format!(" — {}", t(crate::ui::i18n::L10nKey::PanelAgentWorking))
+            }
+            AgentStatus::Done => format!(" — {}", t(crate::ui::i18n::L10nKey::PanelAgentDone)),
+            AgentStatus::Idle => String::new(),
         };
         items.push(SpecItem::Item {
             id: format!("agent:{}", a.leaf_id),
@@ -121,18 +135,33 @@ pub(crate) fn menu_spec(snap: &TraySnapshot) -> Vec<SpecItem> {
         avatar: None,
     };
     items.push(SpecItem::Submenu {
-        label: "Notifications".into(),
+        label: t(L10nKey::TrayNotifications).to_string(),
         items: vec![
-            notify("notify:never", "Never", NotifyMode::Never),
-            notify("notify:unfocused", "When Unfocused", NotifyMode::Unfocused),
-            notify("notify:always", "Always", NotifyMode::Always),
+            notify(
+                "notify:never",
+                t(L10nKey::NotifyModeNever),
+                NotifyMode::Never,
+            ),
+            notify(
+                "notify:unfocused",
+                t(L10nKey::NotifyModeUnfocused),
+                NotifyMode::Unfocused,
+            ),
+            notify(
+                "notify:always",
+                t(L10nKey::NotifyModeAlways),
+                NotifyMode::Always,
+            ),
         ],
     });
-    items.push(item("settings", "Settings…".into()));
-    items.push(item("updates", "Check for Updates…".into()));
+    items.push(item("settings", t(L10nKey::AppMenuSettings)));
+    items.push(item("updates", t(L10nKey::AppMenuCheckForUpdates)));
     items.push(SpecItem::Separator);
-    items.push(item("quit", "Quit tty7".into()));
-    items.push(item("quit-stop", "Quit and Stop Server…".into()));
+    items.push(item("quit", t(L10nKey::AppMenuQuit)));
+    items.push(item(
+        "quit-stop",
+        crate::ui::i18n::t(crate::ui::i18n::L10nKey::TrayQuitStopServer),
+    ));
     items
 }
 
@@ -199,18 +228,23 @@ mod tests {
 
     #[test]
     fn attention_follows_waiting_and_tooltip_counts() {
+        crate::ui::i18n::set_locale("en");
         assert!(snapshot_with_agent(AgentStatus::Waiting).attention());
         assert!(!snapshot_with_agent(AgentStatus::Working).attention());
         assert!(!snapshot_with_agent(AgentStatus::Done).attention());
         assert_eq!(
             snapshot_with_agent(AgentStatus::Waiting).tooltip(),
-            "tty7 — 1 waiting"
+            format!(
+                "tty7 — 1 {}",
+                t(crate::ui::i18n::L10nKey::PanelAgentWaiting)
+            )
         );
         assert_eq!(TraySnapshot::default().tooltip(), "tty7");
     }
 
     #[test]
     fn menu_spec_shape() {
+        crate::ui::i18n::set_locale("en");
         let empty = menu_spec(&TraySnapshot::default());
         let labels: Vec<_> = empty
             .iter()
@@ -223,12 +257,12 @@ mod tests {
         assert_eq!(
             labels,
             [
-                "Show tty7",
-                "Notifications",
-                "Settings…",
-                "Check for Updates…",
-                "Quit tty7",
-                "Quit and Stop Server…"
+                t(L10nKey::TrayShowTty7),
+                t(L10nKey::TrayNotifications),
+                t(L10nKey::AppMenuSettings),
+                t(L10nKey::AppMenuCheckForUpdates),
+                t(L10nKey::AppMenuQuit),
+                t(L10nKey::TrayQuitStopServer),
             ]
         );
         assert!(
