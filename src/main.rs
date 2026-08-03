@@ -153,7 +153,14 @@ fn forward_open_path_with(
         }
     };
 
-    match dispatch(path.to_string_lossy().into_owned()) {
+    let Some(wire_path) = path.to_str().map(str::to_owned) else {
+        // Keep the native PathBuf in this process. Returning false continues
+        // normal startup, which opens the path without crossing the protocol.
+        log::debug!("the explicit GUI open path is not valid UTF-8; opening it locally");
+        return false;
+    };
+
+    match dispatch(wire_path) {
         Ok(ReplyOk::Bool(true)) => true,
         Ok(ReplyOk::Bool(false)) => false,
         Ok(other) => {
@@ -396,7 +403,7 @@ mod argument_tests {
     #[test]
     fn early_dispatch_exits_only_after_a_gui_accepts_the_path() {
         let path = std::env::current_dir().unwrap().join("folder with spaces");
-        let expected = path.to_string_lossy().into_owned();
+        let expected = path.to_str().unwrap().to_owned();
         let delivered = forward_open_path_with(Some(&path), |actual| {
             assert_eq!(actual, expected);
             Ok(ReplyOk::Bool(true))
@@ -421,12 +428,27 @@ mod argument_tests {
         let expected = std::env::current_dir()
             .unwrap()
             .join(relative)
-            .to_string_lossy()
-            .into_owned();
+            .to_str()
+            .unwrap()
+            .to_owned();
 
         assert!(forward_open_path_with(Some(relative), |actual| {
             assert_eq!(actual, expected);
             Ok(ReplyOk::Bool(true))
         }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn early_dispatch_keeps_non_utf8_paths_in_the_current_process() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let path = std::env::temp_dir().join(OsString::from_vec(b"tty7-\xff".to_vec()));
+        let delivered = forward_open_path_with(Some(&path), |_| {
+            panic!("a non-UTF-8 path must never be changed and sent over the string protocol")
+        });
+
+        assert!(!delivered);
     }
 }
