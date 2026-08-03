@@ -85,9 +85,15 @@ fn inventory_from(
         .position(|shell| same_shell_program(&shell.program, default_program))
     {
         // A configured command may resolve to an already detected executable.
-        // Keep the detected path and friendly label, but retain the user's launch
-        // arguments and their origin so local and remote menus behave identically.
-        if let Some((_, args)) = configured.as_ref() {
+        // Keep the detected friendly label, but retain the user's command,
+        // launch arguments, and their origin so local and remote menus behave
+        // identically.
+        if let Some((program, args)) = configured.as_ref() {
+            // Keep a bare command bare: it must continue to resolve through PATH.
+            // The detected entry can be the login shell (which intentionally wins
+            // inventory deduplication), and that absolute path is not necessarily
+            // the executable the configured bare command would resolve to.
+            shells[default_index].program.clone_from(program);
             shells[default_index].args.clone_from(args);
             shells[default_index].args_are_tty7_defaults = false;
         }
@@ -98,8 +104,11 @@ fn inventory_from(
         };
     }
 
-    let default_name = basename(default_program);
+    let mut default_name = basename(default_program);
     if let Some((program, args)) = configured {
+        if shells.iter().any(|shell| shell.label == default_name) {
+            default_name.push_str(" (Configured)");
+        }
         // The configured shell is the platform default, so keep it at the top
         // just like the detected login shell while retaining its custom args.
         shells.insert(
@@ -755,8 +764,22 @@ mod tests {
 
         assert_eq!(inventory.shells.len(), 1, "the same shell was duplicated");
         assert_eq!(inventory.default_name, "Nushell");
+        assert_eq!(inventory.shells[0].program, "nu");
         assert_eq!(inventory.shells[0].args, ["--login"]);
         assert!(!inventory.shells[0].args_are_tty7_defaults);
+    }
+
+    #[test]
+    fn a_bare_configured_command_keeps_path_resolution_after_deduplication() {
+        let inventory = inventory_from(
+            vec![DetectedShell::bare("bash", "/bin/bash")],
+            Some(("bash".into(), Vec::new())),
+            "fallback-shell",
+        );
+
+        assert_eq!(inventory.shells.len(), 1);
+        assert_eq!(inventory.shells[0].program, "bash");
+        assert_eq!(inventory.default_name, "bash");
     }
 
     #[test]
@@ -779,7 +802,9 @@ mod tests {
 
         assert_eq!(inventory.shells.len(), 2);
         assert_eq!(inventory.shells[0].program, second);
-        assert_eq!(inventory.default_name, "custom");
+        assert_eq!(inventory.shells[0].label, "custom (Configured)");
+        assert_eq!(inventory.shells[1].label, "custom");
+        assert_eq!(inventory.default_name, "custom (Configured)");
     }
 
     #[test]
