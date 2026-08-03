@@ -1535,8 +1535,14 @@ impl TerminalView {
                 self.cmd.move_home();
             }
             "e" => {
-                self.cmd.clear_selection();
-                self.cmd.move_end();
+                if self.cmd.selection().is_none()
+                    && let Some(full) = self.ghost_suggestion()
+                {
+                    self.cmd.set(&full);
+                } else {
+                    self.cmd.clear_selection();
+                    self.cmd.move_end();
+                }
             }
             "b" => {
                 self.cmd.clear_selection();
@@ -7101,6 +7107,50 @@ mod gpui_tests {
                 assert_eq!(view.cmd.text(), "echo hello");
                 view.handle_editor_key(&key("ctrl-n"), cx);
                 assert_eq!(view.cmd.text(), "");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn ctrl_e_accepts_a_ghost_suggestion_at_the_end(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        prompt_ready(&window, cx, &mut daemon);
+
+        window
+            .update(cx, |view, _, cx| {
+                assert!(view.input_active(), "the local editor owns a fresh prompt");
+                view.history_ranked = vec!["git log --oneline".to_string()];
+                view.cmd.set("git l");
+
+                view.handle_editor_key(&key("ctrl-e"), cx);
+
+                assert_eq!(view.cmd.text(), "git log --oneline");
+                assert!(
+                    view.editor_handoff.is_none(),
+                    "accepting a local suggestion must not hand input to the shell"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "the local editor must consume Ctrl+E instead of forwarding 0x05"
+        );
+    }
+
+    #[gpui::test]
+    fn ctrl_e_only_moves_to_the_end_when_no_ghost_is_visible(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.history_ranked = vec!["git log --oneline".to_string()];
+                view.cmd.set_with_cursor("git l", 2);
+
+                view.handle_editor_key(&key("ctrl-e"), cx);
+
+                assert_eq!(view.cmd.text(), "git l");
+                assert_eq!(view.cmd.cursor(), view.cmd.len());
             })
             .unwrap();
     }
