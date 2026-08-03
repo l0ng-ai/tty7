@@ -17,6 +17,9 @@ pub const RELEASES_URL: &str = "https://github.com/l0ng-ai/tty7/releases/latest"
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[cfg(target_os = "windows")]
+const WINDOWS_INSTALL_MARKER: &str = ".tty7-inno-install";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AvailableUpdate {
     pub version: String,
@@ -487,6 +490,17 @@ fn package_for_current_install(version: &str) -> Option<String> {
         };
         return Some(format!("tty7-{version}-macos-{arch}.zip"));
     }
+    #[cfg(target_os = "windows")]
+    {
+        current_windows_install_dir()?;
+        bundled_updater()?;
+        let arch = if cfg!(target_arch = "x86_64") {
+            "x86_64"
+        } else {
+            return None;
+        };
+        return Some(format!("tty7-{version}-windows-{arch}-setup.exe"));
+    }
     #[allow(unreachable_code)]
     None
 }
@@ -507,8 +521,9 @@ fn unsupported_install_reason() -> String {
     }
     #[cfg(target_os = "windows")]
     {
-        return "The first in-app updater supports packaged macOS app bundles. Open the release page \
-                to update this Windows installation."
+        return "Automatic Windows updates are available for tty7 installations created by the \
+                setup program. This copy is portable or is missing its installation marker, so \
+                open the release page to update it manually."
             .to_string();
     }
     #[allow(unreachable_code)]
@@ -525,7 +540,16 @@ fn prepare_update(version: &str, asset: &ReleaseAsset) -> Result<PreparedUpdate>
         .get(&asset.url)
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("downloading {}", asset.name))?;
-    prepare_macos_update(version, &asset.name, &archive, &checksums)
+    #[cfg(target_os = "macos")]
+    {
+        return prepare_macos_update(version, &asset.name, &archive, &checksums);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return prepare_windows_update(version, &asset.name, &archive, &checksums);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    anyhow::bail!("automatic installation is not supported on this platform")
 }
 
 #[derive(Debug)]
@@ -544,7 +568,7 @@ impl PreparedUpdate {
         if let Some(config_dir) = self.config_dir {
             command.env("TTY7_CONFIG_DIR", config_dir);
         }
-        command
+        tty7_core::core::proc::hide_console(&mut command)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -557,11 +581,20 @@ impl PreparedUpdate {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn update_staging_dir(parent: &Path) -> Result<tempfile::TempDir> {
     tempfile::Builder::new()
         .prefix(".tty7-update-")
         .tempdir_in(parent)
         .context("creating update staging directory")
+}
+
+#[cfg(target_os = "windows")]
+fn system_update_staging_dir() -> Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix("tty7-update-")
+        .tempdir()
+        .context("creating the Windows update staging directory")
 }
 
 fn write_staged_asset(dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf> {
@@ -620,14 +653,63 @@ fn prepare_macos_update(
     })
 }
 
-#[cfg(not(target_os = "macos"))]
-fn prepare_macos_update(
-    _version: &str,
-    _asset_name: &str,
-    _archive: &[u8],
-    _checksums: &[u8],
+#[cfg(target_os = "windows")]
+fn prepare_windows_update(
+    version: &str,
+    asset_name: &str,
+    installer: &[u8],
+    checksums: &[u8],
 ) -> Result<PreparedUpdate> {
-    anyhow::bail!("the first in-app updater only supports macOS")
+    let install_dir = current_windows_install_dir()
+        .context("tty7 is not running from an Inno Setup installation")?;
+    let bundled = bundled_updater().context("tty7-updater.exe is not bundled with this app")?;
+    let staging = system_update_staging_dir()?;
+    let dir = staging.path().to_path_buf();
+    let installer = write_staged_asset(&dir, asset_name, installer)?;
+    let checksums = write_staged_asset(&dir, "checksums.txt", checksums)?;
+
+    // Verification runs before the GUI commits to quitting. The helper repeats
+    // the same checks after the parent exits so a local process cannot swap the
+    // staged installer in the gap between user consent and installation.
+    run_updater(
+        &bundled,
+        [
+            PathBuf::from("verify"),
+            installer.clone(),
+            checksums.clone(),
+            PathBuf::from(asset_name),
+            PathBuf::from(version),
+        ],
+    )?;
+
+    // Windows locks a running executable. Run a private copy from the staging
+    // directory so Inno can replace the bundled helper in the installation.
+    let updater = dir.join("tty7-updater.exe");
+    std::fs::copy(&bundled, &updater)
+        .with_context(|| format!("copying the Windows updater to {}", updater.display()))?;
+
+    let log =
+        crate::core::config::config_path("update.log").unwrap_or_else(|| dir.join("update.log"));
+    if let Some(parent) = log.parent() {
+        std::fs::create_dir_all(parent).context("creating the update log directory")?;
+    }
+    let dir = staging.keep();
+    Ok(PreparedUpdate {
+        updater,
+        args: vec![
+            PathBuf::from("install"),
+            std::process::id().to_string().into(),
+            installer,
+            checksums,
+            PathBuf::from(asset_name),
+            install_dir,
+            PathBuf::from(version),
+            log,
+            dir.clone(),
+        ],
+        config_dir: crate::core::config::config_dir_path(),
+        stage: dir,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -648,14 +730,30 @@ fn bundled_updater() -> Option<PathBuf> {
     updater.is_file().then_some(updater)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn bundled_updater() -> Option<PathBuf> {
+    let updater = current_windows_install_dir()?.join("tty7-updater.exe");
+    updater.is_file().then_some(updater)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn bundled_updater() -> Option<PathBuf> {
     None
 }
 
-#[cfg(not(target_os = "macos"))]
-fn current_macos_app_bundle() -> Option<PathBuf> {
-    None
+#[cfg(target_os = "windows")]
+fn current_windows_install_dir() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    windows_install_dir_for(&executable)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_install_dir_for(executable: &Path) -> Option<PathBuf> {
+    let directory = executable.parent()?;
+    directory
+        .join(WINDOWS_INSTALL_MARKER)
+        .is_file()
+        .then(|| directory.to_path_buf())
 }
 
 #[cfg(target_os = "macos")]
@@ -667,8 +765,9 @@ fn can_stage_replacement_in(dir: &Path) -> bool {
 }
 
 fn run_updater(updater: &Path, args: impl IntoIterator<Item = PathBuf>) -> Result<()> {
-    let output = Command::new(updater)
-        .args(args)
+    let mut command = Command::new(updater);
+    command.args(args);
+    let output = tty7_core::core::proc::hide_console(&mut command)
         .output()
         .context("running tty7-updater verification")?;
     if !output.status.success() {
@@ -829,5 +928,20 @@ mod tests {
         assert_eq!(UpdateState::load().last_prompted.as_deref(), Some("0.4.0"));
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_install_marker_distinguishes_inno_from_portable_layouts() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("tty7-app.exe");
+        std::fs::write(&executable, b"test app").unwrap();
+        assert_eq!(windows_install_dir_for(&executable), None);
+
+        std::fs::write(root.path().join(WINDOWS_INSTALL_MARKER), b"inno-v1").unwrap();
+        assert_eq!(
+            windows_install_dir_for(&executable).as_deref(),
+            Some(root.path())
+        );
     }
 }
