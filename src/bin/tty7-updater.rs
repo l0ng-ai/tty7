@@ -419,6 +419,28 @@ mod macos {
             let error = verify_archive(&archive, &manifest, "tty7.zip").unwrap_err();
             assert!(error.contains("failed sha256 verification"), "{error}");
         }
+
+        #[test]
+        fn bundle_version_preserves_the_complete_nightly_identity() {
+            let root = tempfile::tempdir().unwrap();
+            let app = root.path().join("tty7.app");
+            let contents = app.join("Contents");
+            fs::create_dir_all(&contents).unwrap();
+            fs::write(
+                contents.join("Info.plist"),
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+    <key>CFBundleShortVersionString</key>
+    <string>26.8.2-nightly.20260803</string>
+</dict>
+</plist>
+"#,
+            )
+            .unwrap();
+
+            assert_eq!(bundle_version(&app).unwrap(), "26.8.2-nightly.20260803");
+        }
     }
 }
 
@@ -1002,12 +1024,12 @@ mod windows {
         if marker != PORTABLE_MARKER_CONTENT {
             return Err("the portable ZIP has an invalid .tty7-portable marker".to_string());
         }
-        verify_file_version(
+        verify_binary_version(
             &payload.join("tty7-app.exe"),
             expected_version,
             "staged portable tty7-app.exe",
         )?;
-        verify_file_version(
+        verify_binary_version(
             &payload.join("tty7-updater.exe"),
             expected_version,
             "staged portable tty7-updater.exe",
@@ -1021,7 +1043,7 @@ mod windows {
                 app.display()
             ));
         }
-        verify_file_version(app, expected_version, "installed tty7-app.exe")
+        verify_binary_version(app, expected_version, "installed tty7-app.exe")
     }
 
     fn verify_archive(archive: &Path, checksums: &Path, asset_name: &str) -> Result<(), String> {
@@ -1338,30 +1360,21 @@ mod windows {
         Ok(())
     }
 
+    fn verify_binary_version(path: &Path, expected: &str, label: &str) -> Result<(), String> {
+        verify_file_version(path, expected, label)?;
+        let expected = expected.trim().trim_start_matches('v');
+        let actual = product_version(path)?;
+        if actual != expected {
+            return Err(format!(
+                "the {label} reports product version {actual:?} but the release expects {expected:?}"
+            ));
+        }
+        Ok(())
+    }
+
     fn file_version(path: &Path) -> Result<(u16, u16, u16), String> {
-        let wide = wide_path(path);
-        let mut ignored = 0u32;
-        let size = unsafe { GetFileVersionInfoSizeW(wide.as_ptr(), &mut ignored) };
-        if size == 0 {
-            return Err(format!(
-                "reading the version resource from {}: OS error {}",
-                path.display(),
-                unsafe { GetLastError() }
-            ));
-        }
-        let mut data = vec![0u8; size as usize];
-        if unsafe { GetFileVersionInfoW(wide.as_ptr(), 0, size, data.as_mut_ptr() as *mut c_void) }
-            == 0
-        {
-            return Err(format!(
-                "reading the version resource from {}",
-                path.display()
-            ));
-        }
-        let root: Vec<u16> = OsStr::new("\\")
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
+        let data = version_resource(path)?;
+        let root = wide_string("\\");
         let mut value: *mut c_void = null_mut();
         let mut value_len = 0u32;
         if unsafe {
@@ -1388,6 +1401,96 @@ mod windows {
         ))
     }
 
+    fn product_version(path: &Path) -> Result<String, String> {
+        let data = version_resource(path)?;
+        let translation_path = wide_string("\\VarFileInfo\\Translation");
+        let mut translations: *mut c_void = null_mut();
+        let mut translations_len = 0u32;
+        if unsafe {
+            VerQueryValueW(
+                data.as_ptr() as *const c_void,
+                translation_path.as_ptr(),
+                &mut translations,
+                &mut translations_len,
+            )
+        } == 0
+            || translations.is_null()
+            || translations_len < 4
+        {
+            return Err(format!(
+                "the version resource in {} has no language translation",
+                path.display()
+            ));
+        }
+
+        // Translation entries are two little-endian u16 values: language and
+        // code page. Try every advertised string table instead of assuming the
+        // common en-US/Unicode pair.
+        for offset in (0..translations_len as usize).step_by(4) {
+            if offset + 4 > translations_len as usize {
+                break;
+            }
+            let entry = unsafe { (translations as *const u8).add(offset) };
+            let language = u16::from_le_bytes(unsafe { [*entry, *entry.add(1)] });
+            let code_page = u16::from_le_bytes(unsafe { [*entry.add(2), *entry.add(3)] });
+            let query = wide_string(&format!(
+                "\\StringFileInfo\\{language:04x}{code_page:04x}\\ProductVersion"
+            ));
+            let mut value: *mut c_void = null_mut();
+            let mut value_len = 0u32;
+            if unsafe {
+                VerQueryValueW(
+                    data.as_ptr() as *const c_void,
+                    query.as_ptr(),
+                    &mut value,
+                    &mut value_len,
+                )
+            } == 0
+                || value.is_null()
+                || value_len == 0
+            {
+                continue;
+            }
+            let value =
+                unsafe { std::slice::from_raw_parts(value as *const u16, value_len as usize) };
+            let value = value.strip_suffix(&[0]).unwrap_or(value);
+            return String::from_utf16(value).map_err(|error| {
+                format!(
+                    "the ProductVersion string in {} is invalid UTF-16: {error}",
+                    path.display()
+                )
+            });
+        }
+
+        Err(format!(
+            "the version resource in {} has no ProductVersion string",
+            path.display()
+        ))
+    }
+
+    fn version_resource(path: &Path) -> Result<Vec<u8>, String> {
+        let wide = wide_path(path);
+        let mut ignored = 0u32;
+        let size = unsafe { GetFileVersionInfoSizeW(wide.as_ptr(), &mut ignored) };
+        if size == 0 {
+            return Err(format!(
+                "reading the version resource from {}: OS error {}",
+                path.display(),
+                unsafe { GetLastError() }
+            ));
+        }
+        let mut data = vec![0u8; size as usize];
+        if unsafe { GetFileVersionInfoW(wide.as_ptr(), 0, size, data.as_mut_ptr() as *mut c_void) }
+            == 0
+        {
+            return Err(format!(
+                "reading the version resource from {}",
+                path.display()
+            ));
+        }
+        Ok(data)
+    }
+
     fn parse_version(version: &str) -> Option<(u16, u16, u16)> {
         let core = version
             .trim()
@@ -1405,6 +1508,13 @@ mod windows {
 
     fn wide_path(path: &Path) -> Vec<u16> {
         path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    fn wide_string(value: &str) -> Vec<u16> {
+        OsStr::new(value)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect()
@@ -1478,8 +1588,18 @@ mod windows {
         fn parses_release_versions_for_windows_resources() {
             assert_eq!(parse_version("27.1.2"), Some((27, 1, 2)));
             assert_eq!(parse_version("v27.1.2+build.4"), Some((27, 1, 2)));
+            assert_eq!(parse_version("27.1.3-nightly.20260803"), Some((27, 1, 3)));
             assert_eq!(parse_version("27.1"), None);
             assert_eq!(parse_version("27.1.2.3"), None);
+        }
+
+        #[test]
+        fn reads_the_complete_product_version_from_the_current_binary() {
+            let executable = std::env::current_exe().unwrap();
+            assert_eq!(
+                product_version(&executable).unwrap(),
+                env!("CARGO_PKG_VERSION")
+            );
         }
 
         #[test]

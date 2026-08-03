@@ -14,6 +14,8 @@ use crate::core::config::Config;
 const REPO: &str = "l0ng-ai/tty7";
 
 pub const RELEASES_URL: &str = "https://github.com/l0ng-ai/tty7/releases/latest";
+const NIGHTLY_RELEASES_URL: &str = "https://github.com/l0ng-ai/tty7/releases/tag/nightly";
+const NIGHTLY_UPDATE_MANIFEST: &str = "update-manifest.json";
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -23,6 +25,37 @@ const WINDOWS_INNO_INSTALL_MARKER: &str = ".tty7-inno-install";
 const WINDOWS_PORTABLE_MARKER: &str = ".tty7-portable";
 #[cfg(target_os = "windows")]
 const WINDOWS_PORTABLE_MARKER_CONTENT: &[u8] = b"portable-v1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateChannel {
+    Stable,
+    Nightly,
+}
+
+impl UpdateChannel {
+    fn for_version(version: &str) -> Self {
+        if version.trim_start_matches('v').contains("-nightly.") {
+            Self::Nightly
+        } else {
+            Self::Stable
+        }
+    }
+
+    fn api_url(self) -> String {
+        let endpoint = match self {
+            Self::Stable => "latest",
+            Self::Nightly => "tags/nightly",
+        };
+        format!("https://api.github.com/repos/{REPO}/releases/{endpoint}")
+    }
+
+    fn releases_url(self) -> &'static str {
+        match self {
+            Self::Stable => RELEASES_URL,
+            Self::Nightly => NIGHTLY_RELEASES_URL,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AvailableUpdate {
@@ -84,7 +117,8 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
 
     cx.spawn(async move |cx| {
         let current = env!("CARGO_PKG_VERSION");
-        let release = match fetch_latest_release()
+        let channel = UpdateChannel::for_version(current);
+        let release = match fetch_latest_release(channel)
             .or(async {
                 cx.background_executor().timer(CHECK_TIMEOUT).await;
                 Err(anyhow::anyhow!("timed out after {CHECK_TIMEOUT:?}"))
@@ -112,10 +146,10 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
             }
         };
 
-        if !is_update_available(&release.tag_name, current) {
+        if !is_update_available(&release.version, current) {
             log::debug!(
                 "update check: up to date (latest {}, running {current})",
-                release.tag_name
+                release.version
             );
             cx.update(|cx| {
                 set_status(
@@ -129,7 +163,7 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
             return;
         }
 
-        let version = release.tag_name.trim_start_matches('v').to_string();
+        let version = release.version;
         let selection = select_release_asset(&version, &release.assets);
         let available = AvailableUpdate {
             version: version.clone(),
@@ -337,7 +371,8 @@ pub fn open_releases_page() {
     } else {
         "xdg-open"
     };
-    if let Err(e) = std::process::Command::new(opener).arg(RELEASES_URL).spawn() {
+    let url = UpdateChannel::for_version(env!("CARGO_PKG_VERSION")).releases_url();
+    if let Err(e) = std::process::Command::new(opener).arg(url).spawn() {
         log::warn!("failed to open releases page: {e}");
     }
 }
@@ -384,8 +419,13 @@ impl UpdateState {
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
-struct LatestRelease {
+struct GitHubRelease {
     tag_name: String,
+    assets: Vec<GitHubAsset>,
+}
+
+struct LatestRelease {
+    version: String,
     assets: Vec<GitHubAsset>,
 }
 
@@ -395,11 +435,19 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
-async fn fetch_latest_release() -> Result<LatestRelease> {
+#[derive(Debug, serde::Deserialize)]
+struct NightlyUpdateManifest {
+    schema: u32,
+    channel: String,
+    version: String,
+    commit: String,
+}
+
+async fn fetch_latest_release(channel: UpdateChannel) -> Result<LatestRelease> {
     let client = ReqwestClient::user_agent(concat!("tty7/", env!("CARGO_PKG_VERSION")))
         .context("building HTTP client")?;
 
-    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+    let url = channel.api_url();
     let request = http_client::Request::get(&url)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
@@ -423,8 +471,86 @@ async fn fetch_latest_release() -> Result<LatestRelease> {
         .await
         .context("reading response body")?;
 
-    let release: LatestRelease = serde_json::from_slice(&body).context("parsing release JSON")?;
-    Ok(release)
+    let release: GitHubRelease = serde_json::from_slice(&body).context("parsing release JSON")?;
+    let version = match channel {
+        UpdateChannel::Stable => release
+            .tag_name
+            .strip_prefix('v')
+            .unwrap_or(&release.tag_name)
+            .to_string(),
+        UpdateChannel::Nightly => {
+            if release.tag_name != "nightly" {
+                anyhow::bail!(
+                    "rolling Nightly release returned unexpected tag {:?}",
+                    release.tag_name
+                );
+            }
+            let manifest = release
+                .assets
+                .iter()
+                .find(|asset| asset.name == NIGHTLY_UPDATE_MANIFEST)
+                .context("rolling Nightly release has no update-manifest.json")?;
+            fetch_nightly_version(&client, &manifest.browser_download_url).await?
+        }
+    };
+    Ok(LatestRelease {
+        version,
+        assets: release.assets,
+    })
+}
+
+async fn fetch_nightly_version(client: &ReqwestClient, url: &str) -> Result<String> {
+    let request = http_client::Request::get(url)
+        .follow_redirects(RedirectPolicy::FollowAll)
+        .body(AsyncBody::default())
+        .context("building Nightly manifest request")?;
+    let mut response = client
+        .send(request)
+        .await
+        .context("requesting Nightly update manifest")?;
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "Nightly update manifest returned HTTP {}",
+            response.status().as_u16()
+        );
+    }
+    let mut body = Vec::new();
+    response
+        .body_mut()
+        .read_to_end(&mut body)
+        .await
+        .context("reading Nightly update manifest")?;
+    parse_nightly_manifest(&body)
+}
+
+fn parse_nightly_manifest(body: &[u8]) -> Result<String> {
+    let manifest: NightlyUpdateManifest =
+        serde_json::from_slice(body).context("parsing Nightly update manifest")?;
+    if manifest.schema != 1 {
+        anyhow::bail!(
+            "unsupported Nightly update manifest schema {}",
+            manifest.schema
+        );
+    }
+    if manifest.channel != "nightly" {
+        anyhow::bail!(
+            "Nightly update manifest declares unexpected channel {:?}",
+            manifest.channel
+        );
+    }
+    if manifest.commit.trim().is_empty() {
+        anyhow::bail!("Nightly update manifest has no commit identity");
+    }
+    if !matches!(
+        parse_version(&manifest.version),
+        Some((_, _, _, VersionStage::Nightly(_)))
+    ) {
+        anyhow::bail!(
+            "Nightly update manifest declares invalid version {:?}",
+            manifest.version
+        );
+    }
+    Ok(manifest.version)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -849,11 +975,35 @@ fn run_updater(updater: &Path, args: impl IntoIterator<Item = PathBuf>) -> Resul
     Ok(())
 }
 
-fn parse_version(s: &str) -> Option<(u64, u64, u64, bool)> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VersionStage {
+    OtherPrerelease,
+    Nightly(u64),
+    Release,
+}
+
+fn parse_version(s: &str) -> Option<(u64, u64, u64, VersionStage)> {
     let trimmed = s.trim();
-    let core = trimmed.strip_prefix('v').unwrap_or(trimmed);
-    let is_release = !core.split('+').next().unwrap_or(core).contains('-');
-    let core = core.split(['-', '+']).next().unwrap_or(core);
+    let version = trimmed.strip_prefix('v').unwrap_or(trimmed);
+    let version = version.split_once('+').map_or(version, |(base, _)| base);
+    let (core, stage) = match version.split_once('-') {
+        None => (version, VersionStage::Release),
+        Some((core, prerelease)) => {
+            if prerelease.is_empty() {
+                return None;
+            }
+            let stage = prerelease
+                .strip_prefix("nightly.")
+                .and_then(|date| {
+                    (date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()))
+                        .then(|| date.parse().ok())
+                        .flatten()
+                })
+                .map(VersionStage::Nightly)
+                .unwrap_or(VersionStage::OtherPrerelease);
+            (core, stage)
+        }
+    };
     let mut parts = core.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next().unwrap_or("0").parse().ok()?;
@@ -861,12 +1011,24 @@ fn parse_version(s: &str) -> Option<(u64, u64, u64, bool)> {
     if parts.next().is_some() {
         return None;
     }
-    Some((major, minor, patch, is_release))
+    Some((major, minor, patch, stage))
 }
 
 fn is_update_available(latest: &str, current: &str) -> bool {
     match (parse_version(latest), parse_version(current)) {
-        (Some(latest), Some(current)) => latest > current,
+        (Some(latest), Some(current)) => {
+            let latest_core = (latest.0, latest.1, latest.2);
+            let current_core = (current.0, current.1, current.2);
+            if latest_core != current_core {
+                return latest_core > current_core;
+            }
+            match (latest.3, current.3) {
+                (VersionStage::Release, VersionStage::Release) => false,
+                (VersionStage::Release, _) => true,
+                (VersionStage::Nightly(latest), VersionStage::Nightly(current)) => latest > current,
+                _ => false,
+            }
+        }
         _ => false,
     }
 }
@@ -931,17 +1093,35 @@ mod tests {
 
     #[test]
     fn parses_versions_with_and_without_prefix() {
-        assert_eq!(parse_version("v0.3.1"), Some((0, 3, 1, true)));
-        assert_eq!(parse_version("0.3.1"), Some((0, 3, 1, true)));
-        assert_eq!(parse_version(" 1.2.0 "), Some((1, 2, 0, true)));
-        assert_eq!(parse_version("v2"), Some((2, 0, 0, true)));
-        assert_eq!(parse_version("v2.5"), Some((2, 5, 0, true)));
-        assert_eq!(parse_version("v0.4.0-rc.1"), Some((0, 4, 0, false)));
+        assert_eq!(
+            parse_version("v0.3.1"),
+            Some((0, 3, 1, VersionStage::Release))
+        );
+        assert_eq!(
+            parse_version("0.3.1"),
+            Some((0, 3, 1, VersionStage::Release))
+        );
+        assert_eq!(
+            parse_version(" 1.2.0 "),
+            Some((1, 2, 0, VersionStage::Release))
+        );
+        assert_eq!(parse_version("v2"), Some((2, 0, 0, VersionStage::Release)));
+        assert_eq!(
+            parse_version("v2.5"),
+            Some((2, 5, 0, VersionStage::Release))
+        );
+        assert_eq!(
+            parse_version("v0.4.0-rc.1"),
+            Some((0, 4, 0, VersionStage::OtherPrerelease))
+        );
         assert_eq!(
             parse_version("26.7.1-nightly.20260716"),
-            Some((26, 7, 1, false))
+            Some((26, 7, 1, VersionStage::Nightly(20260716)))
         );
-        assert_eq!(parse_version("0.4.0+ci.7"), Some((0, 4, 0, true)));
+        assert_eq!(
+            parse_version("0.4.0+ci.7"),
+            Some((0, 4, 0, VersionStage::Release))
+        );
         assert_eq!(parse_version("nightly"), None);
         assert_eq!(parse_version(""), None);
         assert_eq!(parse_version("v0.3.1.1"), None);
@@ -965,14 +1145,67 @@ mod tests {
     }
 
     #[test]
-    fn nightly_binaries_prompt_when_their_stable_ships() {
+    fn compares_stable_and_nightly_versions() {
         assert!(is_update_available("v26.7.1", "26.7.1-nightly.20260716"));
         assert!(!is_update_available("v26.7.0", "26.7.1-nightly.20260716"));
         assert!(!is_update_available("v26.7.1-rc.1", "26.7.1"));
-        assert!(!is_update_available(
+        assert!(is_update_available(
             "26.7.1-nightly.20260717",
             "26.7.1-nightly.20260716"
         ));
+        assert!(!is_update_available(
+            "26.7.1-nightly.20260715",
+            "26.7.1-nightly.20260716"
+        ));
+        assert!(!is_update_available(
+            "26.7.1-nightly.20260716",
+            "26.7.1-nightly.20260716"
+        ));
+    }
+
+    #[test]
+    fn build_version_selects_its_own_update_channel() {
+        assert_eq!(UpdateChannel::for_version("26.8.1"), UpdateChannel::Stable);
+        assert_eq!(
+            UpdateChannel::for_version("26.8.2-nightly.20260803"),
+            UpdateChannel::Nightly
+        );
+        assert!(
+            UpdateChannel::Stable
+                .api_url()
+                .ends_with("/releases/latest")
+        );
+        assert!(
+            UpdateChannel::Nightly
+                .api_url()
+                .ends_with("/releases/tags/nightly")
+        );
+    }
+
+    #[test]
+    fn nightly_manifest_requires_channel_version_and_commit_identity() {
+        let version = parse_nightly_manifest(
+            br#"{"schema":1,"channel":"nightly","version":"26.8.2-nightly.20260803","commit":"0123456789abcdef"}"#,
+        )
+        .unwrap();
+        assert_eq!(version, "26.8.2-nightly.20260803");
+
+        assert!(parse_nightly_manifest(
+            br#"{"schema":1,"channel":"stable","version":"26.8.2-nightly.20260803","commit":"0123456789abcdef"}"#,
+        )
+        .is_err());
+        assert!(parse_nightly_manifest(
+            br#"{"schema":1,"channel":"nightly","version":"26.8.2","commit":"0123456789abcdef"}"#,
+        )
+        .is_err());
+        assert!(parse_nightly_manifest(
+            br#"{"schema":1,"channel":"nightly","version":"26.8.2-nightly.invalid","commit":"0123456789abcdef"}"#,
+        )
+        .is_err());
+        assert!(parse_nightly_manifest(
+            br#"{"schema":1,"channel":"nightly","version":"26.8.2-nightly.20260803","commit":""}"#,
+        )
+        .is_err());
     }
 
     #[test]

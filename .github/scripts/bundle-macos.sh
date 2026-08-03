@@ -23,9 +23,6 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
   exit 1
 fi
 PACKAGE_UPDATE_ZIP="${TTY7_PACKAGE_UPDATE_ZIP:-1}"
-if [[ "$VERSION" == *-nightly.* ]]; then
-    PACKAGE_UPDATE_ZIP=0
-fi
 APP="dist/tty7.app"
 
 rm -rf dist
@@ -42,9 +39,8 @@ chmod +x "$APP/Contents/MacOS/tty7"
 if [[ "$PACKAGE_UPDATE_ZIP" != "0" ]]; then
     # A focused out-of-process updater can replace the bundle after the GUI
     # exits, then relaunch or roll back without teaching the GUI to mutate
-    # itself. Stable macOS builds carry it beside the app/CLI so its signature
-    # is covered by the outer bundle; Nightly remains byte-for-byte on its old
-    # packaging path for the first updater release.
+    # itself. Stable and Nightly macOS builds carry it beside the app/CLI so its
+    # signature is covered by the outer bundle.
     cp "target/${TARGET}/release/tty7-updater" "$APP/Contents/MacOS/tty7-updater"
     chmod +x "$APP/Contents/MacOS/tty7-updater"
 fi
@@ -155,10 +151,9 @@ else
     codesign --force --deep --sign - "$APP"
 fi
 
-# The stable-channel in-app updater needs the signed, notarized .app itself
-# rather than a disk image that requires Finder interaction. Nightly versions
-# skip this path above: their rolling release remains unchanged until the stable
-# updater has shipped and been exercised.
+# The in-app updater needs the signed, notarized .app itself rather than a disk
+# image that requires Finder interaction. The full embedded build version tells
+# Stable and Nightly clients which release channel owns this archive.
 ZIP=""
 if [[ "$PACKAGE_UPDATE_ZIP" != "0" ]]; then
     ZIP="dist/tty7-${VERSION}-macos-${ARCH}.zip"

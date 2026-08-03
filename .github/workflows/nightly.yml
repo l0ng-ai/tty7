@@ -112,7 +112,13 @@ jobs:
 
       - name: Build
         working-directory: tty7
-        run: cargo build --release --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          cargo build --release --target "${{ matrix.target }}"
+          if [[ "${{ matrix.os }}" == "macos" || "${{ matrix.os }}" == "windows" ]]; then
+            cargo build --release --features updater \
+              --bin tty7-updater --target "${{ matrix.target }}"
+          fi
 
       - name: Bundle macOS DMG
         if: matrix.os == 'macos'
@@ -126,6 +132,25 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: bash .github/scripts/bundle-macos.sh "${{ matrix.target }}" "${{ matrix.arch }}"
+
+      - name: Verify macOS Nightly update archive
+        if: matrix.os == 'macos'
+        working-directory: tty7
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.plan.outputs.version }}"
+          ZIP="dist/tty7-${VERSION}-macos-${{ matrix.arch }}.zip"
+          VERIFY_ROOT="$RUNNER_TEMP/tty7-nightly-update-verify"
+          rm -rf "$VERIFY_ROOT"
+          mkdir -p "$VERIFY_ROOT"
+          /usr/bin/ditto -x -k "$ZIP" "$VERIFY_ROOT"
+          APP="$VERIFY_ROOT/tty7.app"
+          test -x "$APP/Contents/MacOS/tty7-updater"
+          ACTUAL_VERSION="$(/usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+          test "$ACTUAL_VERSION" = "$VERSION"
+          /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP"
 
       - name: Package Linux tarball
         if: matrix.os == 'linux'
@@ -276,6 +301,23 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      # The rolling tag is deliberately not a semantic version. Publish the
+      # stamped build identity separately so clients never need to parse the
+      # human-facing release title.
+      - name: Generate update-manifest.json
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg version "$VERSION" \
+            --arg commit "$GITHUB_SHA" \
+            '{schema: 1, channel: "nightly", version: $version, commit: $commit}' \
+            > dist/update-manifest.json
+          jq -e \
+            --arg version "$VERSION" \
+            --arg commit "$GITHUB_SHA" \
+            '.schema == 1 and .channel == "nightly" and .version == $version and .commit == $commit' \
+            dist/update-manifest.json >/dev/null
 
       # Same contract as release.yml — see `install::asset`. Written
       # into dist/ before the upload below so it ships as an asset like any

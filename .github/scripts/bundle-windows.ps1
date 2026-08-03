@@ -23,7 +23,6 @@ $VersionInfoVersion = "${VersionCore}.0"
 $Name  = "tty7-$Version-windows-$Arch"
 $Stage = "dist/$Name"
 $PackageUpdater = $env:TTY7_PACKAGE_UPDATE_HELPER -ne '0'
-if ($Version -like '*-nightly.*') { $PackageUpdater = $false }
 
 Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
@@ -65,8 +64,9 @@ if (Test-Path $ServerSrc) {
     Write-Warning "no $ServerAsset to bundle - this build cannot serve WSL distros"
 }
 
-# Stable portable archives carry their own update authority. Nightly omits both
-# the helper and marker so it cannot switch itself onto the stable update path.
+# Portable archives carry their own update authority. The embedded build
+# version selects Stable or Nightly discovery, so the layout marker never
+# changes update channels.
 if ($PackageUpdater) {
     Set-Content -Path "$Stage/.tty7-portable" -Value 'portable-v1' -NoNewline -Encoding ascii
 }
