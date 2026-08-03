@@ -4,8 +4,6 @@ const RECORD_CAP: usize = 4096;
 pub struct Typeahead {
     text: String,
     tainted: bool,
-    // TUI input must not trigger a shell-line wipe when it is the only record.
-    alt_screen_tainted: bool,
 }
 
 pub enum RawInput<'a> {
@@ -20,7 +18,6 @@ impl Typeahead {
 
     pub fn observe(&mut self, input: RawInput, alt_screen: bool) {
         if alt_screen {
-            self.alt_screen_tainted = true;
             return;
         }
         match input {
@@ -35,6 +32,12 @@ impl Typeahead {
             } => self.record_backspace(),
             RawInput::Key { .. } => self.taint(),
         }
+    }
+
+    /// Discard a record at an input-ownership boundary without producing a
+    /// shell-line wipe.
+    pub fn discard(&mut self) {
+        *self = Self::default();
     }
 
     pub fn drain(&mut self) -> Option<String> {
@@ -78,7 +81,7 @@ impl Typeahead {
             }
             return None;
         }
-        if self.tainted || self.alt_screen_tainted {
+        if self.tainted {
             return Some(String::new());
         }
         let seed = self.text.rsplit('\r').next().unwrap_or("");
@@ -152,19 +155,29 @@ mod tests {
     }
 
     #[test]
-    fn alt_screen_input_still_wipes_a_preexisting_shell_gap() {
+    fn alt_screen_input_does_not_taint_later_shell_input() {
         let mut t = Typeahead::new();
-        t.observe(RawInput::Text("ls"), false);
         t.observe(RawInput::Text("q"), true);
-        assert_eq!(t.drain(), Some(String::new()));
+        t.observe(RawInput::Text("ls"), false);
+        assert_eq!(t.drain(), Some("ls".to_string()));
     }
 
     #[test]
-    fn alt_screen_input_prevents_seeding_later_shell_text() {
+    fn discarding_a_tainted_record_starts_a_fresh_gap_without_a_shell_wipe() {
         let mut t = Typeahead::new();
-        t.observe(RawInput::Text("q"), true);
         t.observe(RawInput::Text("ls"), false);
-        assert_eq!(t.drain(), Some(String::new()));
+        t.observe(
+            RawInput::Key {
+                key: "up",
+                plain: true,
+            },
+            false,
+        );
+        t.discard();
+        assert_eq!(t.drain(), None);
+
+        t.observe(RawInput::Text("git status"), false);
+        assert_eq!(t.drain(), Some("git status".to_string()));
     }
 
     #[test]

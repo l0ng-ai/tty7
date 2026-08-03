@@ -129,6 +129,7 @@ pub struct TerminalView {
     pub bell_flash: bool,
     pub report_mouse: bool,
     last_at_prompt: bool,
+    last_alt_screen: bool,
     running_since: Option<std::time::Instant>,
     running_title: String,
     running_agent: Option<crate::core::cli_agent::CLIAgent>,
@@ -731,6 +732,7 @@ impl TerminalView {
             search_last_query: String::new(),
             bell_flash: false,
             last_at_prompt: false,
+            last_alt_screen: false,
             running_since: None,
             running_title: String::new(),
             running_agent: None,
@@ -965,6 +967,7 @@ impl TerminalView {
 
     fn handle_event(&mut self, ev: AlacEvent, cx: &mut Context<Self>) {
         self.terminal.poll_exited();
+        self.sync_alt_screen();
         if self.terminal.has_pending_auth() {
             cx.emit(AuthPromptReady);
         }
@@ -1150,13 +1153,10 @@ impl TerminalView {
                 self.release_hold();
                 self.terminal.write(bytes);
                 if !shell_owns_prompt {
-                    self.typeahead.observe(
-                        RawInput::Key {
-                            key: ks.key.as_str(),
-                            plain,
-                        },
-                        self.on_alt_screen(),
-                    );
+                    self.observe_typeahead(RawInput::Key {
+                        key: ks.key.as_str(),
+                        plain,
+                    });
                 }
             }
             self.cursor_visible = true;
@@ -1402,13 +1402,10 @@ impl TerminalView {
             "backspace" => {
                 if self.cmd.is_empty() {
                     self.terminal.write(vec![0x7f]);
-                    self.typeahead.observe(
-                        RawInput::Key {
-                            key: "backspace",
-                            plain: true,
-                        },
-                        false,
-                    );
+                    self.observe_typeahead(RawInput::Key {
+                        key: "backspace",
+                        plain: true,
+                    });
                     return;
                 }
                 if m.alt && self.cmd.selection().is_none() {
@@ -2520,6 +2517,22 @@ impl TerminalView {
             .contains(TermMode::ALT_SCREEN)
     }
 
+    fn sync_alt_screen(&mut self) -> bool {
+        // ALT_SCREEN changes keyboard ownership; never replay a record across
+        // that boundary as shell input.
+        let alt_screen = self.on_alt_screen();
+        if alt_screen != self.last_alt_screen {
+            self.typeahead.discard();
+            self.last_alt_screen = alt_screen;
+        }
+        alt_screen
+    }
+
+    fn observe_typeahead(&mut self, input: RawInput<'_>) {
+        let alt_screen = self.sync_alt_screen();
+        self.typeahead.observe(input, alt_screen);
+    }
+
     fn flush_typeahead(&mut self) {
         let Some(seed) = self.typeahead.drain() else {
             return;
@@ -2560,15 +2573,13 @@ impl TerminalView {
             self.release_hold();
         }
         self.terminal.write(bytes);
-        let alt = self.on_alt_screen();
-        self.typeahead.observe(RawInput::Text(text), alt);
+        self.observe_typeahead(RawInput::Text(text));
     }
 
     fn release_hold(&mut self) {
         if let Some((net, bytes)) = self.hold.release() {
             self.terminal.write(bytes);
-            let alt = self.on_alt_screen();
-            self.typeahead.observe(RawInput::Text(&net), alt);
+            self.observe_typeahead(RawInput::Text(&net));
         }
     }
 
@@ -2587,8 +2598,7 @@ impl TerminalView {
         }
         if let Some((net, bytes)) = self.hold.timeout(epoch) {
             self.terminal.write(bytes);
-            let alt = self.on_alt_screen();
-            self.typeahead.observe(RawInput::Text(&net), alt);
+            self.observe_typeahead(RawInput::Text(&net));
             cx.notify();
         }
     }
@@ -4232,6 +4242,7 @@ impl Drop for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_alt_screen();
         if self.shell_owns_prompt() {
             if let Some((_net, bytes)) = self.hold.release() {
                 self.terminal.write(bytes);
