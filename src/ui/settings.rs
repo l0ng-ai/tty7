@@ -36,6 +36,10 @@ use crate::ui::presets;
 use crate::ui::rounding;
 use crate::ui::rounding::RoundedCorners as _;
 
+fn settings_row_id(label: &str, _desc: &str) -> SharedString {
+    SharedString::from(format!("settings-row-{label}"))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsSection {
     Appearance,
@@ -962,7 +966,9 @@ impl Tty7App {
         let theme = cx.theme();
         let label = label.into();
         let desc = desc.into();
-        let element_id = SharedString::from(format!("settings-row-{label}:{desc}"));
+        // Descriptions can contain live status (for example an agent hook target), so they
+        // must not participate in the identity that preserves GPUI's hover state.
+        let element_id = settings_row_id(&label, &desc);
         h_flex()
             .id(element_id)
             .items_center()
@@ -4672,6 +4678,18 @@ impl Tty7App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_row_identity_depends_only_on_its_stable_label() {
+        assert_eq!(
+            settings_row_id("Claude Code", "Installingâ€¦"),
+            settings_row_id("Claude Code", "Installed in C:\\tools")
+        );
+        assert_ne!(
+            settings_row_id("Claude Code", "Installed"),
+            settings_row_id("Codex", "Installed")
+        );
+    }
 
     #[test]
     fn every_section_has_search_entries() {
