@@ -1420,7 +1420,10 @@ impl Tty7App {
             .child(div().flex_1().child(Slider::new(&slider)))
             .child(
                 div()
-                    .w(px(36.))
+                    .w(px(38.))
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .text_right()
                     .text_sm()
                     .text_color(cx.theme().foreground)
                     .child(format!("{:.0}%", opacity * 100.)),
@@ -1544,7 +1547,10 @@ impl Tty7App {
                     .child(div().flex_1().child(Slider::new(&slider)))
                     .child(
                         div()
-                            .w(px(36.))
+                            .w(px(38.))
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .text_right()
                             .text_sm()
                             .text_color(cx.theme().foreground)
                             .child(format!("{:.0}%", readout * 100.)),
@@ -3554,7 +3560,10 @@ impl Tty7App {
             .child(div().flex_1().child(Slider::new(&scroll_slider)))
             .child(
                 div()
-                    .w(px(36.))
+                    .w(px(38.))
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .text_right()
                     .text_sm()
                     .text_color(foreground)
                     .child(format!("{scroll_mult:.2}×")),
