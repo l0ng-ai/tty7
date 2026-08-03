@@ -11,6 +11,7 @@ use crate::terminal::view::{
     ClearScrollback, CopyText, CutText, FindInTerminal, FindNext, FindPrevious, PasteText,
     RedoEdit, SelectAll, UndoEdit,
 };
+use crate::ui::i18n::{L10nKey, t};
 use crate::ui::presets;
 use crate::ui::presets::Fill;
 
@@ -21,84 +22,87 @@ pub(crate) fn traffic_light_position() -> Point<Pixels> {
 pub(crate) fn set_menus(cx: &mut App) {
     cx.set_menus([
         Menu::new("tty7").items([
-            MenuItem::action("About tty7", About),
-            MenuItem::action("Check for Updates…", CheckForUpdates),
+            MenuItem::action(t(L10nKey::AppMenuAbout), About),
+            MenuItem::action(t(L10nKey::AppMenuCheckForUpdates), CheckForUpdates),
             MenuItem::separator(),
-            MenuItem::action("Settings…", OpenSettings),
+            MenuItem::action(t(L10nKey::AppMenuSettings), OpenSettings),
             MenuItem::separator(),
-            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::os_submenu(t(L10nKey::AppMenuServices), SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action("Hide tty7", HideApp),
-            MenuItem::action("Hide Others", HideOthers),
-            MenuItem::action("Show All", ShowAll),
+            MenuItem::action(t(L10nKey::AppMenuHideApp), HideApp),
+            MenuItem::action(t(L10nKey::AppMenuHideOthers), HideOthers),
+            MenuItem::action(t(L10nKey::AppMenuShowAll), ShowAll),
             MenuItem::separator(),
-            MenuItem::action("Quit tty7", Quit),
+            MenuItem::action(t(L10nKey::AppMenuQuit), Quit),
         ]),
-        Menu::new("File").items([
-            MenuItem::action("New Tab", NewTab),
-            MenuItem::action("New Workspace", NewWorkspace),
-            MenuItem::action("New Worktree Tab", NewWorktreeTab),
+        Menu::new(t(L10nKey::AppMenuFile)).items([
+            MenuItem::action(t(L10nKey::AppMenuNewTab), NewTab),
+            MenuItem::action(t(L10nKey::AppMenuNewWorkspace), NewWorkspace),
+            MenuItem::action(t(L10nKey::AppMenuNewWorktreeTab), NewWorktreeTab),
             MenuItem::separator(),
-            MenuItem::action("Split Right", SplitRight),
-            MenuItem::action("Split Down", SplitDown),
+            MenuItem::action(t(L10nKey::AppMenuSplitRight), SplitRight),
+            MenuItem::action(t(L10nKey::AppMenuSplitDown), SplitDown),
             MenuItem::separator(),
-            MenuItem::action("Rename Tab…", RenameTab),
-            MenuItem::action("Copy Working Directory", CopyWorkingDirectory),
-            MenuItem::action("Copy Session ID", CopyAgentSessionId),
-            MenuItem::action("Fork Session", ForkAgentSession),
+            MenuItem::action(t(L10nKey::AppMenuRenameTab), RenameTab),
+            MenuItem::action(
+                t(L10nKey::AppMenuCopyWorkingDirectory),
+                CopyWorkingDirectory,
+            ),
+            MenuItem::action(t(L10nKey::AppMenuCopySessionId), CopyAgentSessionId),
+            MenuItem::action(t(L10nKey::AppMenuForkSession), ForkAgentSession),
             MenuItem::separator(),
-            MenuItem::action("Close Pane / Tab", CloseActiveTab),
-            MenuItem::action("Close Other Tabs", CloseOtherTabs),
-            MenuItem::action("Close Tabs to the Right", CloseTabsToTheRight),
-            MenuItem::action("Reopen Closed Tab", ReopenClosedTab),
+            MenuItem::action(t(L10nKey::AppMenuClosePaneTab), CloseActiveTab),
+            MenuItem::action(t(L10nKey::AppMenuCloseOtherTabs), CloseOtherTabs),
+            MenuItem::action(t(L10nKey::AppMenuCloseTabsRight), CloseTabsToTheRight),
+            MenuItem::action(t(L10nKey::AppMenuReopenClosedTab), ReopenClosedTab),
             MenuItem::separator(),
-            MenuItem::action("Rename Workspace…", RenameWorkspace),
-            MenuItem::action("Stop Workspace…", StopWorkspace),
+            MenuItem::action(t(L10nKey::AppMenuRenameWorkspace), RenameWorkspace),
+            MenuItem::action(t(L10nKey::AppMenuStopWorkspace), StopWorkspace),
             MenuItem::separator(),
-            MenuItem::action("Delete Workspace…", DeleteWorkspace),
+            MenuItem::action(t(L10nKey::AppMenuDeleteWorkspace), DeleteWorkspace),
         ]),
-        Menu::new("Edit").items([
-            MenuItem::os_action("Undo", UndoEdit, OsAction::Undo),
-            MenuItem::os_action("Redo", RedoEdit, OsAction::Redo),
+        Menu::new(t(L10nKey::AppMenuEdit)).items([
+            MenuItem::os_action(t(L10nKey::AppMenuUndo), UndoEdit, OsAction::Undo),
+            MenuItem::os_action(t(L10nKey::AppMenuRedo), RedoEdit, OsAction::Redo),
             MenuItem::separator(),
-            MenuItem::os_action("Cut", CutText, OsAction::Cut),
-            MenuItem::os_action("Copy", CopyText, OsAction::Copy),
-            MenuItem::os_action("Paste", PasteText, OsAction::Paste),
-            MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
+            MenuItem::os_action(t(L10nKey::AppMenuCut), CutText, OsAction::Cut),
+            MenuItem::os_action(t(L10nKey::AppMenuCopy), CopyText, OsAction::Copy),
+            MenuItem::os_action(t(L10nKey::AppMenuPaste), PasteText, OsAction::Paste),
+            MenuItem::os_action(t(L10nKey::AppMenuSelectAll), SelectAll, OsAction::SelectAll),
             MenuItem::separator(),
-            MenuItem::action("Find…", FindInTerminal),
-            MenuItem::action("Find Next", FindNext),
-            MenuItem::action("Find Previous", FindPrevious),
+            MenuItem::action(t(L10nKey::AppMenuFind), FindInTerminal),
+            MenuItem::action(t(L10nKey::AppMenuFindNext), FindNext),
+            MenuItem::action(t(L10nKey::AppMenuFindPrevious), FindPrevious),
         ]),
-        Menu::new("View").items([
-            MenuItem::action("Command Palette…", TogglePalette),
+        Menu::new(t(L10nKey::AppMenuView)).items([
+            MenuItem::action(t(L10nKey::AppMenuCommandPalette), TogglePalette),
             MenuItem::separator(),
-            MenuItem::action("Increase Font Size", IncreaseFontSize),
-            MenuItem::action("Decrease Font Size", DecreaseFontSize),
-            MenuItem::action("Reset Font Size", ResetFontSize),
+            MenuItem::action(t(L10nKey::AppMenuIncreaseFontSize), IncreaseFontSize),
+            MenuItem::action(t(L10nKey::AppMenuDecreaseFontSize), DecreaseFontSize),
+            MenuItem::action(t(L10nKey::AppMenuResetFontSize), ResetFontSize),
             MenuItem::separator(),
-            MenuItem::action("Left Sidebar", ToggleLeftPanel),
-            MenuItem::action("Right Panel", ToggleRightPanel),
-            MenuItem::action("Code Panel", ToggleCodePanel),
-            MenuItem::action("Tab Bar Position", ToggleTabSidebar),
+            MenuItem::action(t(L10nKey::AppMenuLeftSidebar), ToggleLeftPanel),
+            MenuItem::action(t(L10nKey::AppMenuRightPanel), ToggleRightPanel),
+            MenuItem::action(t(L10nKey::AppMenuCodePanel), ToggleCodePanel),
+            MenuItem::action(t(L10nKey::AppMenuTabBarPosition), ToggleTabSidebar),
             MenuItem::separator(),
-            MenuItem::action("Focus Next Pane", FocusNextPane),
-            MenuItem::action("Focus Previous Pane", FocusPrevPane),
-            MenuItem::action("Zoom Pane", ToggleMaximizePane),
+            MenuItem::action(t(L10nKey::AppMenuFocusNextPane), FocusNextPane),
+            MenuItem::action(t(L10nKey::AppMenuFocusPreviousPane), FocusPrevPane),
+            MenuItem::action(t(L10nKey::AppMenuZoomPane), ToggleMaximizePane),
             MenuItem::separator(),
-            MenuItem::action("Clear Scrollback", ClearScrollback),
+            MenuItem::action(t(L10nKey::AppMenuClearScrollback), ClearScrollback),
             MenuItem::separator(),
-            MenuItem::action("Enter Full Screen", ToggleFullscreen),
+            MenuItem::action(t(L10nKey::AppMenuEnterFullscreen), ToggleFullscreen),
         ]),
-        Menu::new("Window").items(window_menu_items(cx)),
-        Menu::new("Help").items([
-            MenuItem::action("tty7 Documentation", OpenDocumentation),
-            MenuItem::action("Keyboard Shortcuts", ShowKeyboardShortcuts),
+        Menu::new(t(L10nKey::AppMenuWindow)).items(window_menu_items(cx)),
+        Menu::new(t(L10nKey::AppMenuHelp)).items([
+            MenuItem::action(t(L10nKey::AppMenuDocumentation), OpenDocumentation),
+            MenuItem::action(t(L10nKey::AppMenuKeyboardShortcuts), ShowKeyboardShortcuts),
             MenuItem::separator(),
-            MenuItem::action("Join the Discord", OpenDiscord),
-            MenuItem::action("Report an Issue…", ReportIssue),
+            MenuItem::action(t(L10nKey::AppMenuJoinDiscord), OpenDiscord),
+            MenuItem::action(t(L10nKey::AppMenuReportIssue), ReportIssue),
             MenuItem::separator(),
-            MenuItem::action("Restart Server…", RestartDaemon),
+            MenuItem::action(t(L10nKey::AppMenuRestartServer), RestartDaemon),
         ]),
     ]);
 }
@@ -114,8 +118,8 @@ fn window_menu_items(cx: &App) -> Vec<MenuItem> {
     let slot_action = crate::ui::tab_strip::select_workspace_action;
 
     let mut items = vec![
-        MenuItem::action("Minimize", MinimizeWindow),
-        MenuItem::action("Zoom", ZoomWindow),
+        MenuItem::action(t(L10nKey::AppMenuMinimize), MinimizeWindow),
+        MenuItem::action(t(L10nKey::AppMenuZoom), ZoomWindow),
         MenuItem::separator(),
     ];
     let workspace_start = items.len();
@@ -132,7 +136,7 @@ fn window_menu_items(cx: &App) -> Vec<MenuItem> {
             }
         }
         let name = crate::ui::machine_mirror::display_name(cx, workspace)
-            .unwrap_or_else(|| "Untitled".to_string());
+            .unwrap_or_else(|| t(L10nKey::WindowUntitled).to_string());
         let label = if *open {
             name
         } else {
@@ -151,7 +155,10 @@ fn window_menu_items(cx: &App) -> Vec<MenuItem> {
         });
     }
     if items.len() == workspace_start {
-        items.push(MenuItem::action("New Workspace", NewWorkspace));
+        items.push(MenuItem::action(
+            t(L10nKey::AppMenuNewWorkspace),
+            NewWorkspace,
+        ));
     }
     items
 }

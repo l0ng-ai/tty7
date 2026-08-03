@@ -15,6 +15,7 @@ use crate::daemon::install::{
 };
 use crate::daemon::protocol::{AuthPromptKind, AuthResponse, NativeSshSpec};
 use crate::daemon::router::RouteHeader;
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 use tty7_core::host::remote::RemoteHost;
 use tty7_core::host::{Host as _, HostId};
 
@@ -106,12 +107,14 @@ fn local_stdio_host() -> Option<HostChoice> {
     };
     Some(HostChoice {
         label: format!("{target}"),
-        detail: format!("{program} --stdio (this computer)"),
+        detail: format!("{program} --stdio ({})", t(L10nKey::RemoteThisComputer)),
         target,
     })
 }
 
-const WSL_DETAIL: &str = "WSL · this computer";
+fn wsl_detail() -> String {
+    format!("WSL · {}", t(L10nKey::RemoteThisComputer))
+}
 
 fn wsl_hosts(cx: &App) -> Vec<HostChoice> {
     let names = cx
@@ -129,7 +132,7 @@ fn wsl_choices(names: &[String]) -> Vec<HostChoice> {
                 distro: distro.clone(),
             },
             label: distro.clone(),
-            detail: WSL_DETAIL.to_string(),
+            detail: wsl_detail(),
         })
         .collect()
 }
@@ -197,7 +200,7 @@ pub fn spec_for(target: &RemoteTarget, cx: &App) -> Result<NativeSshSpec, String
                 .ssh_profiles
                 .iter()
                 .find(|p| p.id == *id)
-                .ok_or_else(|| "that saved SSH profile no longer exists".to_string())?;
+                .ok_or_else(|| t(L10nKey::RemoteProfileMissing).to_string())?;
             Ok(crate::ui::ssh_connect::build_native_ssh_spec(
                 profile,
                 &cfg.ssh_profiles,
@@ -207,7 +210,7 @@ pub fn spec_for(target: &RemoteTarget, cx: &App) -> Result<NativeSshSpec, String
         }
         RemoteTarget::Alias { alias } => {
             let resolved = crate::core::ssh_config::resolve_alias_to_profile(alias)
-                .ok_or_else(|| format!("`{alias}` is no longer in ~/.ssh/config"))?;
+                .ok_or_else(|| t_fmt(L10nKey::RemoteAliasMissing, &[("alias", alias)]))?;
             Ok(crate::ui::ssh_connect::native_spec_from_transient_profile(
                 &resolved.profile,
                 resolved.proxy_jump,
@@ -228,10 +231,8 @@ pub fn spec_for(target: &RemoteTarget, cx: &App) -> Result<NativeSshSpec, String
                 cfg.verify_host_keys,
             ))
         }
-        RemoteTarget::Wsl { .. } => Err("a WSL workspace has no SSH connection".to_string()),
-        RemoteTarget::LocalStdio { .. } => {
-            Err("a local --stdio workspace has no SSH connection".to_string())
-        }
+        RemoteTarget::Wsl { .. } => Err(t(L10nKey::RemoteWslNoSsh).to_string()),
+        RemoteTarget::LocalStdio { .. } => Err(t(L10nKey::RemoteLocalStdioNoSsh).to_string()),
     }
 }
 
@@ -260,22 +261,42 @@ pub fn connect_blocking(
     label: &str,
 ) -> Result<Connected, String> {
     note_origin(&header.target, target);
-    crate::daemon::spawn::ensure_running()
-        .map_err(|e| format!("tty7's local server could not be started: {e}"))?;
+    crate::daemon::spawn::ensure_running().map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteDaemonStartFailed,
+            &[("error", &e.to_string())],
+        )
+    })?;
 
-    let stream = crate::daemon::transport::connect()
-        .map_err(|e| format!("could not reach tty7's local server: {e}"))?;
+    let stream = crate::daemon::transport::connect().map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteDaemonUnreachable,
+            &[("error", &e.to_string())],
+        )
+    })?;
 
     let mut stream = stream;
-    crate::daemon::router::negotiate(&mut stream, &header)
-        .map_err(|e| format!("could not reach {label}: {e}"))?;
+    crate::daemon::router::negotiate(&mut stream, &header).map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteHostUnreachable,
+            &[("machine", label), ("error", &e.to_string())],
+        )
+    })?;
 
     let hello = ControlHello::host_rpc(new_session_token(), client_hostname());
-    let host = handshake(stream, &target.connection_key(), &hello)
-        .map_err(|e| format!("{label} answered, but not as a tty7 server: {e}"))?;
+    let host = handshake(stream, &target.connection_key(), &hello).map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteHostNotTty7,
+            &[("machine", label), ("error", &e.to_string())],
+        )
+    })?;
 
-    let rows = list_workspaces(&host)
-        .map_err(|e| format!("connected to {label}, but its workspace list failed: {e}"))?;
+    let rows = list_workspaces(&host).map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteWorkspaceListFailed,
+            &[("machine", label), ("error", &e.to_string())],
+        )
+    })?;
     let home = host.home();
     refresh_agent_hooks_once(&host, &home);
     Ok(Connected { host, home, rows })
@@ -321,7 +342,10 @@ pub fn list_workspaces(host: &Arc<RemoteHost>) -> io::Result<Vec<RemoteWorkspace
         ReplyOk::MachineTree(machine) => Ok(rows_from_machine(&machine)),
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("the server answered a machine tree with {other:?}"),
+            t_fmt(
+                L10nKey::RemoteMachineTreeUnexpectedReply,
+                &[("reply", &format!("{other:?}"))],
+            ),
         )),
     }
 }
@@ -405,36 +429,37 @@ impl HostLinks {
 }
 
 pub fn install_detail(request: &InstallRequest) -> String {
-    format!(
-        "tty7 will write its server binary to {machine} so this machine can host \
-         workspaces there. Nothing else on {machine} is touched, and no sudo is used.\n\
-         \n\
-         Path\u{2003}{path}\n\
-         Version\u{2003}{version} ({asset})\n\
-         Size\u{2003}{size}\n\
-         From\u{2003}{url}\n\
-         SHA-256\u{2003}{sha}\n\
-         \n\
-         Later upgrades on this machine install silently.",
-        machine = request.host,
-        path = request.remote_path,
-        version = request.version,
-        asset = request.asset,
-        size = human_bytes(request.size_bytes),
-        url = request.source_url,
-        sha = request.sha256,
+    t_fmt(
+        L10nKey::RemoteInstallDetail,
+        &[
+            ("machine", &request.host),
+            ("path", &request.remote_path),
+            (
+                "version",
+                &format!("{} ({})", request.version, request.asset),
+            ),
+            ("size", &human_bytes(request.size_bytes)),
+            ("from", &request.source_url),
+            ("sha256", &request.sha256),
+            ("path_label", t(L10nKey::RemoteInstallPathLabel)),
+            ("version_label", t(L10nKey::RemoteInstallVersionLabel)),
+            ("size_label", t(L10nKey::RemoteInstallSizeLabel)),
+            ("from_label", t(L10nKey::RemoteInstallFromLabel)),
+            ("sha_label", t(L10nKey::RemoteInstallShaLabel)),
+            ("silent_upgrades", t(L10nKey::RemoteInstallSilentUpgrades)),
+        ],
     )
 }
 
 pub fn install_title(request: &InstallRequest) -> String {
-    format!("Install tty7's server on \u{201c}{}\u{201d}?", request.host)
+    t_fmt(L10nKey::RemoteInstallTitle, &[("machine", &request.host)])
 }
 
 pub fn human_bytes(n: u64) -> String {
     const KIB: f64 = 1024.0;
     let n = n as f64;
     if n < KIB {
-        return format!("{} bytes", n as u64);
+        return format!("{} {}", n as u64, t(L10nKey::RemoteInstallBytes));
     }
     let units = ["KiB", "MiB", "GiB"];
     let mut value = n / KIB;
@@ -615,29 +640,34 @@ pub(crate) fn claim_mailbox() -> std::sync::MutexGuard<'static, ()> {
     MAILBOX_TURN.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-pub const MISMATCH_ANSWERS: [&str; 2] = ["Cancel", "Restart Server"];
+pub fn mismatch_answers() -> [&'static str; 2] {
+    [t(L10nKey::Cancel), t(L10nKey::RestartServer)]
+}
 
 pub fn mismatch_detail(m: &MismatchedRemoteDaemon) -> String {
     let running = match (&m.running_version, &m.running_exe) {
-        (Some(v), Some(exe)) => format!("{v} (from {exe})"),
+        (Some(v), Some(exe)) => t_fmt(
+            L10nKey::RemoteMismatchVersionFromExe,
+            &[("version", v), ("exe", exe)],
+        ),
         (Some(v), None) => v.clone(),
-        (None, Some(exe)) => format!("an unknown build (from {exe})"),
-        (None, None) => "an unknown build".to_string(),
+        (None, Some(exe)) => t_fmt(L10nKey::RemoteMismatchUnknownBuildFromExe, &[("exe", exe)]),
+        (None, None) => t(L10nKey::RemoteMismatchUnknownBuild).to_string(),
     };
-    format!(
-        "{host} is serving tty7 sessions from {running}, which speaks a protocol \
-         this client ({wanted}) cannot. tty7 has installed a matching server there, \
-         but the one already running is the one your sessions are on.\n\
-         \n\
-         Restart Server\u{2003}starts {wanted} there and ends every session it is hosting.\n\
-         Cancel\u{2003}leaves {host} exactly as it is. This window will not connect.",
-        host = m.host,
-        wanted = m.wanted_version,
+    t_fmt(
+        L10nKey::RemoteMismatchDetail,
+        &[
+            ("machine", &m.host),
+            ("running", &running),
+            ("wanted", &m.wanted_version),
+            ("restart_server", t(L10nKey::RestartServer)),
+            ("cancel", t(L10nKey::Cancel)),
+        ],
     )
 }
 
 pub fn mismatch_title(m: &MismatchedRemoteDaemon) -> String {
-    format!("Restart tty7's server on \u{201c}{}\u{201d}?", m.host)
+    t_fmt(L10nKey::RemoteMismatchTitle, &[("machine", &m.host)])
 }
 
 pub fn mismatch_target(m: &MismatchedRemoteDaemon) -> Option<RemoteTarget> {
@@ -646,17 +676,26 @@ pub fn mismatch_target(m: &MismatchedRemoteDaemon) -> Option<RemoteTarget> {
 
 pub fn restart_server_blocking(header: RouteHeader, label: &str) -> Result<(), String> {
     let action = header.action;
-    crate::daemon::spawn::ensure_running()
-        .map_err(|e| format!("tty7's local server could not be started: {e}"))?;
-    let mut stream = crate::daemon::transport::connect()
-        .map_err(|e| format!("could not reach tty7's local server: {e}"))?;
-    let ack = crate::daemon::router::negotiate(&mut stream, &header)
-        .map_err(|e| format!("could not restart tty7's server on {label}: {e}"))?;
+    crate::daemon::spawn::ensure_running().map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteDaemonStartFailed,
+            &[("error", &e.to_string())],
+        )
+    })?;
+    let mut stream = crate::daemon::transport::connect().map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteDaemonUnreachable,
+            &[("error", &e.to_string())],
+        )
+    })?;
+    let ack = crate::daemon::router::negotiate(&mut stream, &header).map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteServerRestartFailed,
+            &[("machine", label), ("error", &e.to_string())],
+        )
+    })?;
     if !ack.performed(action) {
-        return Err(format!(
-            "this machine's tty7 daemon is an older build and cannot restart the server on \
-             {label}. Quit tty7 (which stops the daemon) and open it again, then retry."
-        ));
+        return Err(t_fmt(L10nKey::RemoteDaemonTooOld, &[("machine", label)]));
     }
     Ok(())
 }
@@ -679,6 +718,7 @@ mod tests {
 
     #[test]
     fn the_install_prompt_states_every_field_of_the_request() {
+        crate::ui::i18n::set_locale("en");
         let request = request();
         let detail = install_detail(&request);
         for needle in [
@@ -694,12 +734,22 @@ mod tests {
             );
         }
         assert!(detail.contains("9.0 MiB"), "{detail}");
-        assert!(install_title(&request).contains("me@build-box:22"));
+        assert_eq!(
+            install_title(&request),
+            t_fmt(
+                L10nKey::RemoteInstallTitle,
+                &[("machine", "me@build-box:22")]
+            )
+        );
     }
 
     #[test]
     fn human_bytes_reads_in_binary_units() {
-        assert_eq!(human_bytes(512), "512 bytes");
+        crate::ui::i18n::set_locale("en");
+        assert_eq!(
+            human_bytes(512),
+            format!("512 {}", t(L10nKey::RemoteInstallBytes))
+        );
         assert_eq!(human_bytes(1024), "1.0 KiB");
         assert_eq!(human_bytes(1_572_864), "1.5 MiB");
         assert_eq!(human_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
@@ -859,6 +909,7 @@ mod tests {
 
     #[test]
     fn the_mismatch_prompt_names_the_host_and_both_versions() {
+        crate::ui::i18n::set_locale("en");
         let m = MismatchedRemoteDaemon {
             host: "me@build-box:22".into(),
             running_version: Some("0.8.0".into()),
@@ -869,25 +920,35 @@ mod tests {
         assert!(detail.contains("0.8.0"), "{detail}");
         assert!(detail.contains("0.9.1"), "{detail}");
         assert!(detail.contains("me@build-box:22"), "{detail}");
-        assert!(mismatch_title(&m).contains("me@build-box:22"));
+        assert_eq!(
+            mismatch_title(&m),
+            t_fmt(
+                L10nKey::RemoteMismatchTitle,
+                &[("machine", "me@build-box:22")]
+            )
+        );
 
         let unknown = MismatchedRemoteDaemon {
             running_version: None,
             running_exe: None,
             ..m
         };
-        assert!(mismatch_detail(&unknown).contains("an unknown build"));
+        assert!(
+            mismatch_detail(&unknown).contains(t(L10nKey::RemoteMismatchUnknownBuild)),
+            "{detail}"
+        );
     }
 
     #[test]
     fn the_mismatch_detail_explains_every_answer_the_prompt_offers() {
+        crate::ui::i18n::set_locale("en");
         let detail = mismatch_detail(&MismatchedRemoteDaemon {
             host: "me@build-box:22".into(),
             running_version: Some("0.8.0".into()),
             running_exe: None,
             wanted_version: "0.9.1".into(),
         });
-        for answer in MISMATCH_ANSWERS {
+        for answer in mismatch_answers() {
             assert!(detail.contains(answer), "{answer} is unexplained: {detail}");
         }
     }

@@ -5,6 +5,8 @@ use std::hash::Hash;
 use gpui::{App, Context, Window};
 use gpui_component::WindowExt as _;
 
+use crate::ui::i18n::{L10nKey, t_fmt};
+
 #[allow(unused_imports)]
 pub use tty7_core::host::{
     Entry, Host, HostId, MTime, Meta, Output, SearchHit, SharedHost, WatchSub,
@@ -200,7 +202,13 @@ impl HostOps {
     }
 
     pub fn notify_err(window: &mut Window, cx: &mut App, context: &str, err: &std::io::Error) {
-        window.push_notification(format!("{context}: {err}"), cx);
+        window.push_notification(
+            t_fmt(
+                L10nKey::HostOpsError,
+                &[("context", context), ("error", &err.to_string())],
+            ),
+            cx,
+        );
     }
 }
 

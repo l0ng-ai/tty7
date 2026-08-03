@@ -16,6 +16,7 @@ use crate::core::session::WorkspaceStore;
 use crate::daemon::install::InstallPhase;
 use crate::terminal::pane_liveness::Liveness;
 use crate::ui::app::Tty7App;
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow, human_bytes};
 use crate::ui::remote_workspace::ConnectFlow;
 
@@ -108,8 +109,11 @@ impl Tty7App {
     pub(crate) fn open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         remote_connect::register(cx);
         remote_connect::sweep_wsl(cx);
-        let query =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search workspaces and machines"));
+        let query = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(crate::ui::i18n::t(
+                crate::ui::i18n::L10nKey::SearchWorkspacesAndMachines,
+            ))
+        });
         query.update(cx, |state, cx| state.focus(window, cx));
         let subs = vec![cx.subscribe_in(
             &query,
@@ -152,7 +156,11 @@ impl Tty7App {
             let store = WorkspaceStore::all(app);
             for w in &store.views {
                 let (key, label, target) = match w.host.as_ref() {
-                    None => (String::new(), "This Computer".to_string(), None),
+                    None => (
+                        String::new(),
+                        t(L10nKey::SwitcherThisComputer).to_string(),
+                        None,
+                    ),
                     Some(r) => {
                         let key = r.target.to_string();
                         (key.clone(), key, Some(r.target.clone()))
@@ -175,7 +183,7 @@ impl Tty7App {
                 groups[slot].rows.push(Row {
                     id: w.id,
                     name: crate::ui::machine_mirror::display_name(app, w)
-                        .unwrap_or_else(|| "Untitled".to_string()),
+                        .unwrap_or_else(|| t(L10nKey::WindowUntitled).to_string()),
                     path: crate::ui::machine_mirror::subject_path(app, w)
                         .map(|p| crate::ui::home::display_path(std::path::Path::new(&p)))
                         .unwrap_or_default(),
@@ -213,7 +221,7 @@ impl Tty7App {
                 0,
                 Group {
                     key: String::new(),
-                    label: "This Computer".to_string(),
+                    label: t(L10nKey::SwitcherThisComputer).to_string(),
                     endpoint: String::new(),
                     target: None,
                     link: Link::Offline,
@@ -436,7 +444,7 @@ impl Tty7App {
                     .py(px(14.))
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("No workspace or machine matches."),
+                    .child(t(L10nKey::SwitcherNoMatch)),
             );
         }
 
@@ -537,7 +545,7 @@ impl Tty7App {
                         GUTTER,
                         Icon::new(IconName::Plus).size(px(ICON)).text_color(dim),
                     ))
-                    .child("Add SSH Host…")
+                    .child(t(L10nKey::AddSshHost))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.close_switcher(window, cx);
                         this.open_settings_section(
@@ -563,7 +571,7 @@ impl Tty7App {
                             .border_color(border)
                             .child("⌘"),
                     )
-                    .child("click for a new window"),
+                    .child(t(L10nKey::ClickForNewWindow)),
             )
     }
 
@@ -630,7 +638,7 @@ impl Tty7App {
                                         "switcher-retry:{}",
                                         group.key
                                     )))
-                                    .label("Try Again")
+                                    .label(t(L10nKey::TryAgain))
                                     .ghost()
                                     .xsmall()
                                     .on_click(cx.listener(move |this, _, _window, cx| {
@@ -655,7 +663,7 @@ impl Tty7App {
                                                 "switcher-replace:{}",
                                                 group.key
                                             )))
-                                            .label("Restart Server")
+                                            .label(t(L10nKey::RestartServer))
                                             .ghost()
                                             .xsmall()
                                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -693,19 +701,20 @@ impl Tty7App {
         let accent = theme.warning;
         let fraction = phase.fraction().unwrap_or(0.0);
         let caption = match phase {
-            InstallPhase::Restarting => "Restarting tty7's server\u{2026}".to_string(),
+            InstallPhase::Restarting => t(L10nKey::SwitcherRestartingServer).to_string(),
             InstallPhase::Downloading { done, total } => match total {
-                Some(total) => format!(
-                    "Downloading tty7's server\u{2026} {} / {}",
-                    human_bytes(done),
-                    human_bytes(total)
+                Some(total) => t_fmt(
+                    L10nKey::SwitcherDownloadingServerWithTotal,
+                    &[("done", &human_bytes(done)), ("total", &human_bytes(total))],
                 ),
-                None => format!("Downloading tty7's server\u{2026} {}", human_bytes(done)),
+                None => t_fmt(
+                    L10nKey::SwitcherDownloadingServerNoTotal,
+                    &[("done", &human_bytes(done))],
+                ),
             },
-            InstallPhase::Uploading { done, total } => format!(
-                "Copying tty7's server\u{2026} {} / {}",
-                human_bytes(done),
-                human_bytes(total)
+            InstallPhase::Uploading { done, total } => t_fmt(
+                L10nKey::SwitcherCopyingServer,
+                &[("done", &human_bytes(done)), ("total", &human_bytes(total))],
             ),
         };
 
@@ -784,17 +793,25 @@ impl Tty7App {
         let (dot, word): (Option<gpui::Hsla>, Option<&'static str>) = match group.link {
             Link::Local => (None, None),
             Link::Connected => (Some(gpui::rgb(crate::ui::tab_strip::LIVE_DOT).into()), None),
-            Link::Connecting if matches!(group.installing, Some(InstallPhase::Restarting)) => {
-                (Some(theme.warning), Some("restarting…"))
-            }
-            Link::Connecting if group.installing.is_some() => {
-                (Some(theme.warning), Some("installing…"))
-            }
-            Link::Connecting => (Some(theme.warning), Some("connecting…")),
-            Link::Failed => (Some(theme.danger), Some("couldn't connect")),
+            Link::Connecting if matches!(group.installing, Some(InstallPhase::Restarting)) => (
+                Some(theme.warning),
+                Some(t(L10nKey::SwitcherStatusRestarting)),
+            ),
+            Link::Connecting if group.installing.is_some() => (
+                Some(theme.warning),
+                Some(t(L10nKey::SwitcherStatusInstalling)),
+            ),
+            Link::Connecting => (
+                Some(theme.warning),
+                Some(t(L10nKey::SwitcherStatusConnecting)),
+            ),
+            Link::Failed => (
+                Some(theme.danger),
+                Some(t(L10nKey::SwitcherStatusConnectFailed)),
+            ),
             Link::Offline => (
                 Some(gpui::rgb(crate::ui::tab_strip::UNKNOWN_DOT).into()),
-                Some("not connected"),
+                Some(t(L10nKey::SwitcherStatusNotConnected)),
             ),
         };
         let word_color = match group.link {
@@ -927,9 +944,9 @@ impl Tty7App {
         let key = row.id.element_key() as usize;
 
         let badge = if row.current {
-            Some(("this window", true))
+            Some((t(L10nKey::SwitcherThisWindow), true))
         } else if row.open {
-            Some(("open", false))
+            Some((t(L10nKey::SwitcherOpen), false))
         } else {
             None
         };
@@ -1054,7 +1071,12 @@ impl Tty7App {
                     GUTTER,
                     Icon::new(IconName::Globe).size(px(ICON)).text_color(dim),
                 ))
-                .child(div().text_sm().text_color(muted).child("Other Machines"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(t(L10nKey::OtherMachines)),
+                )
                 .child(div().flex_1())
                 .child(
                     div()
@@ -1202,7 +1224,7 @@ fn group_menu(
     let gref = group.clone();
     let can_create = group.target.is_none() || group.home.is_some();
     let menu = menu.item(
-        PopupMenuItem::new("New Workspace")
+        PopupMenuItem::new(t(L10nKey::AppMenuNewWorkspace))
             .disabled(!can_create)
             .on_click(move |_, window, cx| {
                 let _ = a1.update(cx, |this, cx| this.switcher_new(&gref, window, cx));
@@ -1215,7 +1237,7 @@ fn group_menu(
     let restartable = target.is_ssh();
     let (label, for_restart) = (group.label.clone(), target.clone());
     let menu = menu.separator().item(
-        PopupMenuItem::new("Disconnect")
+        PopupMenuItem::new(t(L10nKey::SwitcherDisconnect))
             .disabled(!connected)
             .on_click(move |_, _window, cx| {
                 let _ = a2.update(cx, |this, cx| this.switcher_disconnect(&target, cx));
@@ -1225,7 +1247,7 @@ fn group_menu(
         return menu;
     }
     menu.item(
-        PopupMenuItem::new("Restart Server…").on_click(move |_, window, cx| {
+        PopupMenuItem::new(t(L10nKey::AppMenuRestartServer)).on_click(move |_, window, cx| {
             let _ = a3.update(cx, |this, cx| {
                 this.confirm_restart_remote_server(for_restart.clone(), label.clone(), window, cx);
             });
@@ -1242,14 +1264,14 @@ fn row_menu(
     let (id, adopt) = (row.id, row.adopt.is_some());
     let stoppable = row.live;
     menu.item(
-        PopupMenuItem::new("Rename…")
+        PopupMenuItem::new(t(L10nKey::SwitcherRename))
             .disabled(adopt)
             .on_click(move |_, window, cx| {
                 let _ = a1.update(cx, |this, cx| this.switcher_rename(id, window, cx));
             }),
     )
     .item(
-        PopupMenuItem::new("Open in New Window")
+        PopupMenuItem::new(t(L10nKey::SwitcherOpenInNewWindow))
             .disabled(adopt)
             .on_click(move |_, window, cx| {
                 let _ = a2.update(cx, |this, cx| {
@@ -1260,7 +1282,7 @@ fn row_menu(
     )
     .separator()
     .item(
-        PopupMenuItem::new("Stop Workspace…")
+        PopupMenuItem::new(t(L10nKey::AppMenuStopWorkspace))
             .disabled(adopt || !stoppable)
             .on_click(move |_, window, cx| {
                 let _ = a3.update(cx, |this, cx| {
@@ -1270,7 +1292,7 @@ fn row_menu(
             }),
     )
     .item(
-        PopupMenuItem::new("Delete Workspace…")
+        PopupMenuItem::new(t(L10nKey::AppMenuDeleteWorkspace))
             .disabled(adopt)
             .on_click(move |_, window, cx| {
                 let _ = a4.update(cx, |this, cx| {

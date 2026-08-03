@@ -10,6 +10,7 @@ use gpui_component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 
 use crate::core::session::{SessionPane, SessionTab};
 use crate::ui::app::Tty7App;
+use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 
 const LOGO: [&str; 4] = [
     " ▄▄▄ ▄▄▄ ▄  ▄ ▄▄▄▄",
@@ -20,14 +21,14 @@ const LOGO: [&str; 4] = [
 
 const LOGO_PX: f32 = 20.0;
 
-const HOME_SHORTCUTS: [(&str, &str); 7] = [
-    ("NewTab", "New Tab"),
-    ("ReopenClosedTab", "Reopen Closed Tab"),
-    ("ToggleSwitcher", "Switch Workspace"),
-    ("TogglePalette", "Command Palette"),
-    ("SplitRight", "Split Right"),
-    ("SplitDown", "Split Down"),
-    ("OpenSettings", "Settings…"),
+const HOME_SHORTCUTS: [&str; 7] = [
+    "NewTab",
+    "ReopenClosedTab",
+    "ToggleSwitcher",
+    "TogglePalette",
+    "SplitRight",
+    "SplitDown",
+    "OpenSettings",
 ];
 
 const CLOSED_LABEL_MAX: usize = 20;
@@ -70,17 +71,17 @@ pub(crate) fn now_secs() -> u64 {
 
 pub(crate) fn relative_time(now: u64, then: u64) -> String {
     if then == 0 || then >= now {
-        return "just now".to_string();
+        return t(L10nKey::HomeTimeJustNow).to_string();
     }
     let secs = now - then;
     match secs {
-        s if s < 60 => "just now".to_string(),
-        s if s < 3600 => format!("{} min ago", s / 60),
-        s if s < 7200 => "1 hour ago".to_string(),
-        s if s < 86_400 => format!("{} hours ago", s / 3600),
-        s if s < 172_800 => "yesterday".to_string(),
-        s if s < 604_800 => format!("{} days ago", s / 86_400),
-        _ => "over a week ago".to_string(),
+        s if s < 60 => t(L10nKey::HomeTimeJustNow).to_string(),
+        s if s < 3_600 => t_plural(L10nKey::HomeTimeMinutesAgo, (s / 60) as usize, &[]),
+        s if s < 7_200 => t(L10nKey::HomeTimeHourAgo).to_string(),
+        s if s < 86_400 => t_plural(L10nKey::HomeTimeHoursAgo, (s / 3_600) as usize, &[]),
+        s if s < 172_800 => t(L10nKey::HomeTimeYesterday).to_string(),
+        s if s < 604_800 => t_plural(L10nKey::HomeTimeDaysAgo, (s / 86_400) as usize, &[]),
+        _ => t(L10nKey::HomeTimeOverWeekAgo).to_string(),
     }
 }
 
@@ -109,6 +110,25 @@ fn key_hint(action: &str, cx: &App) -> Option<String> {
     Some(Kbd::format(&stroke))
 }
 
+fn home_shortcut_label(action: &str, closed: Option<&str>) -> String {
+    let label = match action {
+        "NewTab" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeNewTab),
+        "ReopenClosedTab" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeReopenClosedTab),
+        "ToggleSwitcher" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSwitchWorkspace),
+        "TogglePalette" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeCommandPalette),
+        "SplitRight" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSplitRight),
+        "SplitDown" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSplitDown),
+        "OpenSettings" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSettings),
+        _ => action,
+    };
+    if action == "ReopenClosedTab" {
+        if let Some(name) = closed {
+            return t_fmt(L10nKey::HomeReopenNamed, &[("name", name)]);
+        }
+    }
+    label.to_string()
+}
+
 impl Tty7App {
     pub(crate) fn render_home(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
@@ -133,11 +153,9 @@ impl Tty7App {
 
         let closed_hint = self.closed.last().and_then(closed_tab_label);
         let mut list = v_flex().gap_2().w(px(300.)).text_sm().text_color(muted);
-        for (action, label) in HOME_SHORTCUTS {
-            let (label, emphasized) = match (&closed_hint, action) {
-                (Some(name), "ReopenClosedTab") => (format!("Reopen \u{201c}{name}\u{201d}"), true),
-                _ => (label.to_string(), false),
-            };
+        for action in HOME_SHORTCUTS {
+            let emphasized = closed_hint.is_some() && action == "ReopenClosedTab";
+            let label = home_shortcut_label(action, closed_hint.as_deref());
             list = list.child(
                 h_flex()
                     .items_center()
@@ -219,6 +237,7 @@ impl Tty7App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::i18n::set_locale;
     use std::path::PathBuf;
 
     fn leaf(cwd: Option<&str>) -> SessionPane {
@@ -311,6 +330,7 @@ mod tests {
 
     #[test]
     fn relative_time_reads_coarsely_across_the_ranges() {
+        set_locale("en");
         let now = 10_000_000u64;
         assert_eq!(relative_time(now, now), "just now");
         assert_eq!(relative_time(now, now - 30), "just now");
@@ -320,10 +340,17 @@ mod tests {
         assert_eq!(relative_time(now, now - 90_000), "yesterday");
         assert_eq!(relative_time(now, now - 3 * 86_400), "3 days ago");
         assert_eq!(relative_time(now, now - 30 * 86_400), "over a week ago");
+
+        set_locale("zh-CN");
+        assert_eq!(relative_time(now, now - 30), "刚刚");
+        assert_eq!(relative_time(now, now - 120), "2 分钟前");
+        assert_eq!(relative_time(now, now - 3600), "1 小时前");
+        assert_eq!(relative_time(now, now - 90_000), "昨天");
     }
 
     #[test]
     fn relative_time_never_renders_a_negative_age() {
+        set_locale("en");
         let now = 1_000_000u64;
         assert_eq!(relative_time(now, 0), "just now");
         assert_eq!(relative_time(now, now + 5_000), "just now");

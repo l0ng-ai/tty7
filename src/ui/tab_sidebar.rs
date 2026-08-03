@@ -16,6 +16,7 @@ use crate::core::config::{Config, SidebarGrouping};
 use crate::terminal::git_status::GitStatusCache;
 use crate::ui::app::{TITLE_BAR_HEIGHT, Tty7App};
 use crate::ui::hints::tab_badge_label;
+use crate::ui::i18n::{L10nKey, t};
 use crate::ui::reorder::{self, Reorder, Surface};
 use crate::ui::tab_strip::{DragTab, REORDER_SLIDE_MS};
 
@@ -554,7 +555,7 @@ impl Tty7App {
                         cx,
                     )
                     .rounded_lg()
-                    .tooltip("Hide Sidebar")
+                    .tooltip(t(L10nKey::TabTooltipHideSidebar))
                     .on_click(cx.listener(|this, _, _window, cx| this.toggle_left_panel(cx))),
                 ),
             );
@@ -784,7 +785,7 @@ fn sidebar_sections(keys: &[Option<PathBuf>]) -> Vec<Section> {
     if !scratch.is_empty() {
         sections.push(Section {
             key: None,
-            name: Some("Scratch".into()),
+            name: Some(t(L10nKey::SidebarScratchGroup).to_string()),
             tabs: scratch,
         });
     }
