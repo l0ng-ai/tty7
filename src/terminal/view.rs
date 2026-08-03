@@ -129,7 +129,7 @@ pub struct TerminalView {
     pub bell_flash: bool,
     pub report_mouse: bool,
     last_at_prompt: bool,
-    last_alt_screen: bool,
+    last_typeahead_blocked: bool,
     running_since: Option<std::time::Instant>,
     running_title: String,
     running_agent: Option<crate::core::cli_agent::CLIAgent>,
@@ -740,7 +740,7 @@ impl TerminalView {
             search_last_query: String::new(),
             bell_flash: false,
             last_at_prompt: false,
-            last_alt_screen: false,
+            last_typeahead_blocked: false,
             running_since: None,
             running_title: String::new(),
             running_agent: None,
@@ -976,7 +976,7 @@ impl TerminalView {
 
     fn handle_event(&mut self, ev: AlacEvent, cx: &mut Context<Self>) {
         self.terminal.poll_exited();
-        self.sync_alt_screen();
+        self.sync_typeahead_owner();
         if self.terminal.has_pending_auth() {
             cx.emit(AuthPromptReady);
         }
@@ -1153,6 +1153,7 @@ impl TerminalView {
         let kitty = self.kitty_flags();
         if let Some(bytes) = super::input::keystroke_to_bytes(ks, kitty) {
             let plain = !m.control && !m.alt && !m.platform;
+            let interrupt = is_typeahead_interrupt(ks.key.as_str(), m);
             let shell_owns_prompt = self.shell_owns_prompt();
             let held = plain
                 && ks.key == "backspace"
@@ -1169,8 +1170,14 @@ impl TerminalView {
                 };
             if !held {
                 self.release_hold();
+                if !shell_owns_prompt && interrupt {
+                    // Ctrl-C cancels the foreground input transaction. Clear
+                    // the gap before delivering it so a prompt transition
+                    // cannot flush this interrupt as a later Ctrl-U.
+                    self.observe_typeahead(RawInput::Interrupt);
+                }
                 self.terminal.write(bytes);
-                if !shell_owns_prompt {
+                if !shell_owns_prompt && !interrupt {
                     self.observe_typeahead(RawInput::Key {
                         key: ks.key.as_str(),
                         plain,
@@ -2538,21 +2545,29 @@ impl TerminalView {
             .contains(TermMode::ALT_SCREEN)
     }
 
-    fn sync_alt_screen(&mut self) {
-        let alt_screen = self.on_alt_screen();
-        sync_alt_screen_state(&mut self.typeahead, &mut self.last_alt_screen, alt_screen);
+    fn typeahead_blocked(&self) -> bool {
+        self.on_alt_screen()
+            || self.terminal.foreground_agent().is_some()
+            || self.terminal.agent_session().is_some()
+    }
+
+    fn sync_typeahead_owner(&mut self) {
+        let blocked = self.typeahead_blocked();
+        sync_typeahead_owner_state(
+            &mut self.typeahead,
+            &mut self.last_typeahead_blocked,
+            blocked,
+        );
     }
 
     fn observe_typeahead(&mut self, input: RawInput<'_>) {
-        // The input that crosses the mode boundary belongs to neither side;
-        // in particular, the Ctrl-C that exits a TUI must not become a tainted
-        // shell record and later synthesize Ctrl-U.
-        let alt_screen = self.on_alt_screen();
-        observe_typeahead_for_mode(
+        // The input that crosses an ownership boundary belongs to neither side.
+        let blocked = self.typeahead_blocked();
+        observe_typeahead_for_owner(
             &mut self.typeahead,
-            &mut self.last_alt_screen,
+            &mut self.last_typeahead_blocked,
             input,
-            alt_screen,
+            blocked,
         );
     }
 
@@ -4261,29 +4276,33 @@ impl TerminalView {
     }
 }
 
-fn sync_alt_screen_state(
+fn is_typeahead_interrupt(key: &str, modifiers: &Modifiers) -> bool {
+    modifiers.control && !modifiers.alt && !modifiers.platform && key == "c"
+}
+
+fn sync_typeahead_owner_state(
     typeahead: &mut Typeahead,
-    last_alt_screen: &mut bool,
-    alt_screen: bool,
+    last_blocked: &mut bool,
+    blocked: bool,
 ) -> bool {
-    // ALT_SCREEN changes keyboard ownership; never replay a record across
-    // that boundary as shell input.
-    let changed = alt_screen != *last_alt_screen;
+    // Alternate-screen TUIs and known agents own their input. Never replay a
+    // record across an ownership boundary as shell input.
+    let changed = blocked != *last_blocked;
     if changed {
         typeahead.discard();
-        *last_alt_screen = alt_screen;
+        *last_blocked = blocked;
     }
     changed
 }
 
-fn observe_typeahead_for_mode(
+fn observe_typeahead_for_owner(
     typeahead: &mut Typeahead,
-    last_alt_screen: &mut bool,
+    last_blocked: &mut bool,
     input: RawInput<'_>,
-    alt_screen: bool,
+    blocked: bool,
 ) {
-    if !sync_alt_screen_state(typeahead, last_alt_screen, alt_screen) {
-        typeahead.observe(input, *last_alt_screen);
+    if !sync_typeahead_owner_state(typeahead, last_blocked, blocked) {
+        typeahead.observe(input, *last_blocked);
     }
 }
 
@@ -4301,7 +4320,7 @@ impl Drop for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_alt_screen();
+        self.sync_typeahead_owner();
         if self.shell_owns_prompt() {
             if let Some((_net, bytes)) = self.hold.release() {
                 self.terminal.write(bytes);
@@ -4895,7 +4914,8 @@ fn drag_scroll_step(overshoot: f32) -> i32 {
 mod tests {
     use super::{
         LoopbackPlan, RawInput, SelectEndCopy, Typeahead, WheelRoute, clipboard_paste_text,
-        cwd_is_on_host, display_width, loopback_plan, observe_typeahead_for_mode,
+        cwd_is_on_host, display_width, is_typeahead_interrupt, loopback_plan,
+        observe_typeahead_for_owner,
     };
     use super::{
         drag_scroll_step, encode_mouse, escape_candidate, expand_file_command_template,
@@ -4915,12 +4935,12 @@ mod tests {
     #[test]
     fn alt_screen_exit_discards_the_boundary_input_before_recording_shell_text() {
         let mut typeahead = Typeahead::new();
-        let mut last_alt_screen = true;
+        let mut last_blocked = true;
         typeahead.observe(RawInput::Text("stale"), false);
 
-        observe_typeahead_for_mode(
+        observe_typeahead_for_owner(
             &mut typeahead,
-            &mut last_alt_screen,
+            &mut last_blocked,
             RawInput::Key {
                 key: "c",
                 plain: false,
@@ -4933,13 +4953,104 @@ mod tests {
             "the Ctrl-C crossing TUI exit must not become a tainted shell record"
         );
 
-        observe_typeahead_for_mode(
+        observe_typeahead_for_owner(
             &mut typeahead,
-            &mut last_alt_screen,
+            &mut last_blocked,
             RawInput::Text("ls"),
             false,
         );
         assert_eq!(typeahead.drain(), Some("ls".to_string()));
+    }
+
+    #[test]
+    fn agent_interrupt_discards_typeahead_without_an_alt_screen_transition() {
+        let mut typeahead = Typeahead::new();
+        let mut last_blocked = false;
+        typeahead.observe(RawInput::Text("agent input"), false);
+        typeahead.observe(
+            RawInput::Key {
+                key: "up",
+                plain: true,
+            },
+            false,
+        );
+
+        observe_typeahead_for_owner(
+            &mut typeahead,
+            &mut last_blocked,
+            RawInput::Interrupt,
+            false,
+        );
+        assert_eq!(
+            typeahead.drain(),
+            None,
+            "Ctrl-C must cancel a stable non-ALT_SCREEN agent gap"
+        );
+
+        observe_typeahead_for_owner(
+            &mut typeahead,
+            &mut last_blocked,
+            RawInput::Text("ls"),
+            false,
+        );
+        assert_eq!(typeahead.drain(), Some("ls".to_string()));
+    }
+
+    #[test]
+    fn known_agent_input_is_discarded_at_both_ownership_boundaries() {
+        let mut typeahead = Typeahead::new();
+        let mut last_blocked = false;
+        typeahead.observe(RawInput::Text("stale shell gap"), false);
+
+        observe_typeahead_for_owner(
+            &mut typeahead,
+            &mut last_blocked,
+            RawInput::Text("agent input"),
+            true,
+        );
+        observe_typeahead_for_owner(
+            &mut typeahead,
+            &mut last_blocked,
+            RawInput::Key {
+                key: "up",
+                plain: true,
+            },
+            true,
+        );
+        assert_eq!(typeahead.drain(), None);
+
+        observe_typeahead_for_owner(
+            &mut typeahead,
+            &mut last_blocked,
+            RawInput::Text("boundary input"),
+            false,
+        );
+        assert_eq!(typeahead.drain(), None);
+
+        observe_typeahead_for_owner(
+            &mut typeahead,
+            &mut last_blocked,
+            RawInput::Text("ls"),
+            false,
+        );
+        assert_eq!(typeahead.drain(), Some("ls".to_string()));
+    }
+
+    #[test]
+    fn only_plain_ctrl_c_is_a_typeahead_interrupt() {
+        let ctrl = Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        assert!(is_typeahead_interrupt("c", &ctrl));
+        assert!(!is_typeahead_interrupt("d", &ctrl));
+
+        let ctrl_alt = Modifiers {
+            control: true,
+            alt: true,
+            ..Default::default()
+        };
+        assert!(!is_typeahead_interrupt("c", &ctrl_alt));
     }
 
     fn ws(target: RemoteTarget, with_spec: bool) -> PaneWorkspace {
@@ -5936,6 +6047,43 @@ mod gpui_tests {
             .unwrap();
 
         assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x0c]));
+    }
+
+    #[gpui::test]
+    fn passthrough_ctrl_c_discards_typeahead_before_the_shell_can_resume(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, window, cx| {
+                assert!(!view.input_active(), "the foreground process owns input");
+                view.typeahead.observe(RawInput::Text("agent input"), false);
+                view.typeahead.observe(
+                    RawInput::Key {
+                        key: "up",
+                        plain: true,
+                    },
+                    false,
+                );
+
+                view.on_key_down(
+                    &KeyDownEvent {
+                        keystroke: key("ctrl-c"),
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+                assert_eq!(view.typeahead.drain(), None);
+                view.flush_typeahead();
+            })
+            .unwrap();
+
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x03]));
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "resuming the shell must not synthesize Ctrl-U after Ctrl-C"
+        );
     }
 
     #[gpui::test]

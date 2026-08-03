@@ -9,6 +9,7 @@ pub struct Typeahead {
 pub enum RawInput<'a> {
     Text(&'a str),
     Key { key: &'a str, plain: bool },
+    Interrupt,
 }
 
 impl Typeahead {
@@ -16,11 +17,10 @@ impl Typeahead {
         Self::default()
     }
 
-    pub fn observe(&mut self, input: RawInput, alt_screen: bool) {
-        if alt_screen {
-            return;
-        }
+    pub fn observe(&mut self, input: RawInput, externally_owned: bool) {
         match input {
+            RawInput::Interrupt => self.discard(),
+            _ if externally_owned => {}
             RawInput::Text(s) => self.record_text(s),
             RawInput::Key {
                 key: "enter",
@@ -160,6 +160,22 @@ mod tests {
         t.observe(RawInput::Text("q"), true);
         t.observe(RawInput::Text("ls"), false);
         assert_eq!(t.drain(), Some("ls".to_string()));
+    }
+
+    #[test]
+    fn interrupt_discards_a_gap_even_without_alt_screen() {
+        let mut t = Typeahead::new();
+        t.observe(RawInput::Text("agent input"), false);
+        t.observe(
+            RawInput::Key {
+                key: "up",
+                plain: true,
+            },
+            false,
+        );
+
+        t.observe(RawInput::Interrupt, false);
+        assert_eq!(t.drain(), None);
     }
 
     #[test]
