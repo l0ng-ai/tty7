@@ -1,4 +1,5 @@
 use anyhow::Result;
+use tty7_core::core::agent_hooks::{HookAgent, HooksState};
 use tty7_core::core::session::WorkspaceId;
 use tty7_core::daemon::control::{ControlEvent, ControlHelloOk, ControlRequest, ReplyOk};
 use tty7_core::daemon::protocol::{PaneInfo, PaneProcs, WinSize};
@@ -42,6 +43,11 @@ pub trait Backend {
 
     fn procs(&mut self, pane: u64) -> Result<PaneProcs>;
 
+    /// The install state for an agent's status hooks on the machine this
+    /// backend addresses. Routed machines return `None`: their config belongs
+    /// to the remote host and must not be guessed from the local filesystem.
+    fn agent_hooks_state(&mut self, agent: HookAgent) -> Option<HooksState>;
+
     /// Every pane the server is actually running, straight from its registry —
     /// including ones no workspace tree references. The machine tree cannot see
     /// those, so this is the only way an orphan becomes visible.
@@ -63,6 +69,7 @@ pub mod mock {
     use std::collections::VecDeque;
 
     use anyhow::Result;
+    use tty7_core::core::agent_hooks::{HookAgent, HooksState};
     use tty7_core::core::machine::Machine;
     use tty7_core::core::session::WorkspaceId;
     use tty7_core::daemon::control::{
@@ -83,6 +90,7 @@ pub mod mock {
         pub capture_segments: Vec<CaptureSegment>,
         pub procs_calls: Vec<u64>,
         pub procs_reply: PaneProcs,
+        pub agent_hooks_states: Vec<(HookAgent, HooksState)>,
         pub registry: Vec<PaneInfo>,
         pub killed: Vec<u64>,
         pub kill_failures: Vec<u64>,
@@ -104,6 +112,7 @@ pub mod mock {
                 capture_segments: Vec::new(),
                 procs_calls: Vec::new(),
                 procs_reply: PaneProcs::default(),
+                agent_hooks_states: Vec::new(),
                 registry: Vec::new(),
                 killed: Vec::new(),
                 kill_failures: Vec::new(),
@@ -165,6 +174,12 @@ pub mod mock {
         fn procs(&mut self, pane: u64) -> Result<PaneProcs> {
             self.procs_calls.push(pane);
             Ok(self.procs_reply.clone())
+        }
+
+        fn agent_hooks_state(&mut self, agent: HookAgent) -> Option<HooksState> {
+            self.agent_hooks_states
+                .iter()
+                .find_map(|(candidate, state)| (*candidate == agent).then_some(*state))
         }
 
         fn list_panes(&mut self) -> Result<Vec<PaneInfo>> {

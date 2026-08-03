@@ -1,6 +1,7 @@
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 use std::time::Duration;
+use tty7_core::core::agent_hooks::{HookAgent, HooksState};
 use tty7_core::core::machine::{Axis, Machine, PaneSeed, Workspace};
 use tty7_core::core::session::WorkspaceId;
 use tty7_core::daemon::control::{CONTROL_VERSION, ControlEvent, ControlRequest, ReplyOk};
@@ -880,12 +881,128 @@ fn pane_is_live(backend: &mut dyn Backend, pane: u64) -> Result<bool> {
 
 fn agents(backend: &mut dyn Backend) -> Result<Outcome> {
     match backend.control(ControlRequest::AgentStates)? {
-        ReplyOk::AgentStates(states) => report(
-            output::agents_table(&states),
-            json!({ "agents": serde_json::to_value(&states)? }),
-        ),
+        ReplyOk::AgentStates(states) => {
+            // AgentStates only contains panes that have already emitted a hook
+            // event. The machine snapshot independently records the daemon's
+            // foreground-process detection, including a supported agent that
+            // has not been able to report yet.
+            let diagnostics = fetch_machine(backend)
+                .map(|machine| agent_hook_diagnostics(&states, &machine, backend))
+                .unwrap_or_default();
+            let mut json = json!({ "agents": serde_json::to_value(&states)? });
+            if !diagnostics.is_empty() {
+                json["diagnostics"] =
+                    Value::Array(diagnostics.iter().map(AgentHookDiagnostic::json).collect());
+            }
+            report(agents_human(&states, &diagnostics), json)
+        }
         other => bail!("the server answered AgentStates with {other:?}"),
     }
+}
+
+/// The two hook states worth reporting. Building one of these is the only way
+/// to reach a diagnostic, so "installed hooks are not a diagnostic" is a shape
+/// the type cannot hold rather than a branch that has to stay unreachable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HookGap {
+    Missing,
+    Outdated,
+}
+
+impl HookGap {
+    fn of(state: HooksState) -> Option<HookGap> {
+        match state {
+            HooksState::NotInstalled => Some(HookGap::Missing),
+            HooksState::Outdated => Some(HookGap::Outdated),
+            HooksState::Installed => None,
+        }
+    }
+
+    /// The verb of the Settings button that closes the gap.
+    fn action(self) -> &'static str {
+        match self {
+            HookGap::Missing => "install",
+            HookGap::Outdated => "update",
+        }
+    }
+
+    fn slug(self) -> &'static str {
+        match self {
+            HookGap::Missing => "not_installed",
+            HookGap::Outdated => "outdated",
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            HookGap::Missing => "not installed",
+            HookGap::Outdated => "outdated",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AgentHookDiagnostic {
+    agent: HookAgent,
+    gap: HookGap,
+}
+
+impl AgentHookDiagnostic {
+    fn json(&self) -> Value {
+        json!({
+            "kind": "agent_status_hooks_unavailable",
+            "agent": self.agent.slug(),
+            "hooks_state": self.gap.slug(),
+            "action": self.gap.action(),
+        })
+    }
+}
+
+fn agent_hook_diagnostics(
+    states: &[tty7_core::daemon::control::PaneAgentState],
+    machine: &Machine,
+    backend: &mut dyn Backend,
+) -> Vec<AgentHookDiagnostic> {
+    HookAgent::ALL
+        .into_iter()
+        .filter(|hook_agent| {
+            machine.panes.iter().any(|pane| {
+                pane.live
+                    && !states.iter().any(|state| state.pane_id == pane.id)
+                    && pane.agent.as_ref().is_some_and(|facts| {
+                        HookAgent::of_detected(facts.agent) == Some(*hook_agent)
+                    })
+            })
+        })
+        .filter_map(|agent| {
+            let gap = HookGap::of(backend.agent_hooks_state(agent)?)?;
+            Some(AgentHookDiagnostic { agent, gap })
+        })
+        .collect()
+}
+
+fn agents_human(
+    states: &[tty7_core::daemon::control::PaneAgentState],
+    diagnostics: &[AgentHookDiagnostic],
+) -> String {
+    if diagnostics.is_empty() {
+        return output::agents_table(states);
+    }
+    let mut human = if states.is_empty() {
+        "no agents reporting status\n".to_string()
+    } else {
+        output::agents_table(states)
+    };
+    for diagnostic in diagnostics {
+        let state = diagnostic.gap.describe();
+        human.push_str(&format!(
+            "{} is running, but its tty7 agent-status hooks are {state}. Open Settings → Agents to {} the hooks, then start a new {} session.\n",
+            diagnostic.agent.display_name(),
+            diagnostic.gap.action(),
+            diagnostic.agent.display_name(),
+        ));
+    }
+    human
 }
 
 fn status(backend: &mut dyn Backend) -> Result<Outcome> {
@@ -994,6 +1111,7 @@ mod tests {
     use crate::backend::mock::MockBackend;
     use crate::testbed::two_workspace_machine;
     use clap::Parser;
+    use tty7_core::core::cli_agent::CLIAgent;
     use tty7_core::core::machine::Tab;
 
     fn cli(args: &[&str]) -> Cli {
@@ -1943,6 +2061,24 @@ mod tests {
         }
     }
 
+    fn detect_agent(backend: &mut MockBackend, pane_id: u64, agent: CLIAgent) {
+        use tty7_core::core::machine::AgentFacts;
+
+        let pane = backend
+            .machine
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == pane_id)
+            .expect("test pane exists");
+        pane.live = true;
+        pane.agent = Some(AgentFacts {
+            agent,
+            session_id: None,
+            launch_argv: None,
+            status: None,
+        });
+    }
+
     /// The happy path is one aggregate poll: a matching agent state answers
     /// immediately, carrying the event's message and native session id — the
     /// two things an orchestrator needs to act on the wake-up.
@@ -2142,14 +2278,116 @@ mod tests {
     }
 
     #[test]
-    fn agents_status_and_machine_ls_are_single_aggregate_requests() {
-        use tty7_core::daemon::control::{RouteInfo, ServerStatus};
+    fn agents_distinguishes_no_agent_from_a_healthy_agent() {
+        use tty7_core::core::cli_agent::AgentStatus;
 
         let mut backend = mock();
         backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
         let out = run_cli(&["tty7", "agents"], &Context::default(), &mut backend);
-        assert_eq!(backend.control_calls, vec![ControlRequest::AgentStates]);
-        assert!(human(out).contains("no agents"), "an empty panel says so");
+        assert_eq!(
+            backend.control_calls,
+            vec![ControlRequest::AgentStates, ControlRequest::MachineGet]
+        );
+        assert_eq!(human(out), "no agents running\n");
+
+        let mut backend = mock();
+        detect_agent(&mut backend, 1, CLIAgent::Codex);
+        backend.agent_hooks_states = vec![(HookAgent::Codex, HooksState::NotInstalled)];
+        let mut reporting = agent_state(1, AgentStatus::Working);
+        reporting.agent = Some(CLIAgent::Codex);
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![reporting]));
+        let out = run_cli(&["tty7", "agents"], &Context::default(), &mut backend);
+        let rendered = human(out);
+        assert!(rendered.contains("codex"), "{rendered}");
+        assert!(
+            !rendered.contains("hooks"),
+            "an agent already reporting status is healthy: {rendered}"
+        );
+
+        let mut backend = mock();
+        detect_agent(&mut backend, 1, CLIAgent::Codex);
+        backend.agent_hooks_states = vec![(HookAgent::Codex, HooksState::Installed)];
+        backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+        let out = run_cli(&["tty7", "agents"], &Context::default(), &mut backend);
+        assert_eq!(
+            human(out),
+            "no agents running\n",
+            "installed hooks are not diagnosed during the gap before the first event"
+        );
+    }
+
+    #[test]
+    fn agents_reports_missing_hooks_once_per_agent_without_failing() {
+        let mut backend = mock();
+        detect_agent(&mut backend, 1, CLIAgent::Codex);
+        detect_agent(&mut backend, 2, CLIAgent::Codex);
+        backend.agent_hooks_states = vec![(HookAgent::Codex, HooksState::NotInstalled)];
+        backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+
+        let out = run_cli(&["tty7", "agents"], &Context::default(), &mut backend);
+        let Outcome::Report(report) = out else {
+            panic!("a successful diagnosis must not be a command failure");
+        };
+        assert_eq!(report.human.matches("Codex is running").count(), 1);
+        assert!(report.human.contains("hooks are not installed"));
+        assert!(report.human.contains("install the hooks"));
+        assert_eq!(
+            report.json,
+            json!({
+                "agents": [],
+                "diagnostics": [{
+                    "kind": "agent_status_hooks_unavailable",
+                    "agent": "codex",
+                    "hooks_state": "not_installed",
+                    "action": "install",
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn agents_reports_outdated_hooks_with_the_update_action() {
+        let mut backend = mock();
+        detect_agent(&mut backend, 3, CLIAgent::Claude);
+        backend.agent_hooks_states = vec![(HookAgent::Claude, HooksState::Outdated)];
+        backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+
+        let report = match run_cli(&["tty7", "agents"], &Context::default(), &mut backend) {
+            Outcome::Report(report) => report,
+            Outcome::Exit(code, _) => panic!("diagnosis unexpectedly exited {code}"),
+        };
+        assert!(report.human.contains("Claude Code is running"));
+        assert!(report.human.contains("hooks are outdated"));
+        assert!(report.human.contains("update the hooks"));
+        assert_eq!(report.json["diagnostics"][0]["agent"], "claude");
+        assert_eq!(report.json["diagnostics"][0]["hooks_state"], "outdated");
+        assert_eq!(report.json["diagnostics"][0]["action"], "update");
+    }
+
+    #[test]
+    fn agents_json_keeps_the_existing_agents_shape_when_there_is_no_diagnostic() {
+        use tty7_core::core::cli_agent::AgentStatus;
+
+        let mut backend = mock();
+        let mut reporting = agent_state(1, AgentStatus::Waiting);
+        reporting.agent = Some(CLIAgent::Codex);
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![reporting.clone()]));
+        let json = json_of(run_cli(
+            &["tty7", "--json", "agents"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json, json!({ "agents": [reporting] }));
+        assert!(json.get("diagnostics").is_none());
+    }
+
+    #[test]
+    fn status_and_machine_ls_are_single_aggregate_requests() {
+        use tty7_core::daemon::control::{RouteInfo, ServerStatus};
 
         let mut backend = mock();
         backend.replies.push_back(ReplyOk::Status(ServerStatus {
