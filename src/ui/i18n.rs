@@ -353,6 +353,21 @@ pub enum L10nKey {
     SettingsCommandLine,
     SettingsCommandLineDesc,
     SettingsInstallCliOnPath,
+    SettingsExplorerContextMenu,
+    SettingsExplorerContextMenuDesc,
+    SettingsExplorerNotRegistered,
+    SettingsExplorerRegistered,
+    SettingsExplorerNeedsUpdate,
+    SettingsExplorerUnavailable,
+    SettingsExplorerStatusUnavailable,
+    SettingsExplorerRegister,
+    SettingsExplorerUpdate,
+    SettingsExplorerUnregister,
+    SettingsExplorerRegisteredNote,
+    SettingsExplorerUnregisteredNote,
+    SettingsExplorerRegisterFailed,
+    SettingsExplorerUnregisterFailed,
+    SettingsExplorerWindows11Note,
     SettingsServer,
     SettingsServerDesc,
     SettingsRestartServer,
@@ -380,6 +395,7 @@ pub enum L10nKey {
     SettingsSearchDetectUrlsKeywords,
     SettingsSearchDiffPreviewFromCountsKeywords,
     SettingsSearchDimInactivePanesKeywords,
+    SettingsSearchExplorerContextMenuKeywords,
     SettingsSearchFocusFollowsMouseKeywords,
     SettingsSearchFontFamilyKeywords,
     SettingsSearchFontLigaturesKeywords,
@@ -1647,6 +1663,37 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "Install the `tty7` command on PATH",
             "将 `tty7` 命令安装到 PATH",
         ),
+        L10nKey::SettingsExplorerContextMenu => ("Windows Explorer", "Windows 文件资源管理器"),
+        L10nKey::SettingsExplorerContextMenuDesc => (
+            "Add “Open in tty7” when you right-click a folder and “Open tty7 here” when you right-click a folder background. This is off by default and is registered only for your Windows account.",
+            "右键单击文件夹时添加“Open in tty7”，右键单击文件夹背景时添加“Open tty7 here”。此功能默认关闭，且只为当前 Windows 帐户注册。",
+        ),
+        L10nKey::SettingsExplorerNotRegistered => ("Not registered", "未注册"),
+        L10nKey::SettingsExplorerRegistered => ("Registered", "已注册"),
+        L10nKey::SettingsExplorerNeedsUpdate => ("Needs update", "需要更新"),
+        L10nKey::SettingsExplorerUnavailable => ("Unavailable", "不可用"),
+        L10nKey::SettingsExplorerStatusUnavailable => ("Status unavailable", "无法获取状态"),
+        L10nKey::SettingsExplorerRegister => ("Register", "注册"),
+        L10nKey::SettingsExplorerUpdate => ("Update", "更新"),
+        L10nKey::SettingsExplorerUnregister => ("Unregister", "取消注册"),
+        L10nKey::SettingsExplorerRegisteredNote => (
+            "Registered. Right-click a folder or folder background in Explorer to open it in tty7.",
+            "已注册。现在可以在文件资源管理器中右键单击文件夹或文件夹背景，以在 tty7 中打开。",
+        ),
+        L10nKey::SettingsExplorerUnregisteredNote => (
+            "Unregistered from Windows Explorer.",
+            "已从 Windows 文件资源管理器中取消注册。",
+        ),
+        L10nKey::SettingsExplorerRegisterFailed => {
+            ("Could not register: {error}", "无法注册：{error}")
+        }
+        L10nKey::SettingsExplorerUnregisterFailed => {
+            ("Could not unregister: {error}", "无法取消注册：{error}")
+        }
+        L10nKey::SettingsExplorerWindows11Note => (
+            "On Windows 11, classic shell entries may appear under “Show more options”.",
+            "在 Windows 11 上，经典右键菜单项可能显示在“显示更多选项”中。",
+        ),
         L10nKey::SettingsServer => ("Server", "服务器"),
         L10nKey::SettingsServerDesc => (
             "Restart the server on this computer to pick up a newly granted macOS permission, recover if it stops responding, or start from a clean slate. This ends all running shells here; your tabs and layout reopen with fresh shells. A remote machine's server is restarted from its own menu in the workspace switcher.",
@@ -1727,6 +1774,10 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchDimInactivePanesKeywords => (
             "fade unfocused inactive split pane focus opacity highlight active dimming",
             "调暗 非活动窗格 淡化 未聚焦 分屏 高亮 active dimming pane focus",
+        ),
+        L10nKey::SettingsSearchExplorerContextMenuKeywords => (
+            "windows explorer context menu right click folder directory background shell menu register unregister open here",
+            "Windows 文件资源管理器 右键 菜单 文件夹 目录 背景 注册 取消注册 打开 explorer context menu right click folder directory background shell register unregister open here",
         ),
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => (
             "pane hover activate",
@@ -3186,6 +3237,21 @@ mod tests {
             L10nKey::SettingsCommandLine,
             L10nKey::SettingsCommandLineDesc,
             L10nKey::SettingsInstallCliOnPath,
+            L10nKey::SettingsExplorerContextMenu,
+            L10nKey::SettingsExplorerContextMenuDesc,
+            L10nKey::SettingsExplorerNotRegistered,
+            L10nKey::SettingsExplorerRegistered,
+            L10nKey::SettingsExplorerNeedsUpdate,
+            L10nKey::SettingsExplorerUnavailable,
+            L10nKey::SettingsExplorerStatusUnavailable,
+            L10nKey::SettingsExplorerRegister,
+            L10nKey::SettingsExplorerUpdate,
+            L10nKey::SettingsExplorerUnregister,
+            L10nKey::SettingsExplorerRegisteredNote,
+            L10nKey::SettingsExplorerUnregisteredNote,
+            L10nKey::SettingsExplorerRegisterFailed,
+            L10nKey::SettingsExplorerUnregisterFailed,
+            L10nKey::SettingsExplorerWindows11Note,
             L10nKey::SettingsServer,
             L10nKey::SettingsServerDesc,
             L10nKey::SettingsRestartServer,
@@ -3213,6 +3279,7 @@ mod tests {
             L10nKey::SettingsSearchDetectUrlsKeywords,
             L10nKey::SettingsSearchDiffPreviewFromCountsKeywords,
             L10nKey::SettingsSearchDimInactivePanesKeywords,
+            L10nKey::SettingsSearchExplorerContextMenuKeywords,
             L10nKey::SettingsSearchFocusFollowsMouseKeywords,
             L10nKey::SettingsSearchFontFamilyKeywords,
             L10nKey::SettingsSearchFontLigaturesKeywords,
@@ -3739,6 +3806,44 @@ mod tests {
         assert_eq!(current_locale(), Locale::En);
         set_locale("ko");
         assert_eq!(current_locale(), Locale::En);
+    }
+
+    #[test]
+    fn explorer_settings_are_translated_with_error_details() {
+        let keys = [
+            L10nKey::SettingsExplorerContextMenu,
+            L10nKey::SettingsExplorerContextMenuDesc,
+            L10nKey::SettingsExplorerNotRegistered,
+            L10nKey::SettingsExplorerRegistered,
+            L10nKey::SettingsExplorerNeedsUpdate,
+            L10nKey::SettingsExplorerUnavailable,
+            L10nKey::SettingsExplorerStatusUnavailable,
+            L10nKey::SettingsExplorerRegister,
+            L10nKey::SettingsExplorerUpdate,
+            L10nKey::SettingsExplorerUnregister,
+            L10nKey::SettingsExplorerRegisteredNote,
+            L10nKey::SettingsExplorerUnregisteredNote,
+            L10nKey::SettingsExplorerRegisterFailed,
+            L10nKey::SettingsExplorerUnregisterFailed,
+            L10nKey::SettingsExplorerWindows11Note,
+            L10nKey::SettingsSearchExplorerContextMenuKeywords,
+        ];
+        for key in keys {
+            assert_ne!(
+                translate(Locale::En, key),
+                translate(Locale::ZhHans, key),
+                "Simplified Chinese should not fall back to English for {key:?}"
+            );
+        }
+
+        assert_eq!(
+            apply_template(
+                translate(Locale::ZhHans, L10nKey::SettingsExplorerRegisterFailed),
+                &[("error", "access denied")],
+                None,
+            ),
+            "无法注册：access denied"
+        );
     }
 
     #[test]

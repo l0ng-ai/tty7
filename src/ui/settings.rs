@@ -85,6 +85,30 @@ struct SearchEntry {
     keywords: L10nKey,
 }
 
+#[derive(Clone)]
+pub(crate) enum ExplorerContextMenuNote {
+    Registered,
+    Unregistered,
+    RegisterFailed(String),
+    UnregisterFailed(String),
+}
+
+impl ExplorerContextMenuNote {
+    fn localized(&self) -> String {
+        match self {
+            Self::Registered => t(L10nKey::SettingsExplorerRegisteredNote).to_string(),
+            Self::Unregistered => t(L10nKey::SettingsExplorerUnregisteredNote).to_string(),
+            Self::RegisterFailed(error) => {
+                t_fmt(L10nKey::SettingsExplorerRegisterFailed, &[("error", error)])
+            }
+            Self::UnregisterFailed(error) => t_fmt(
+                L10nKey::SettingsExplorerUnregisterFailed,
+                &[("error", error)],
+            ),
+        }
+    }
+}
+
 fn settings_search_entries() -> &'static [SearchEntry] {
     use L10nKey::*;
     use SettingsSection::*;
@@ -386,8 +410,8 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: About,
-            title: "Windows Explorer context menu",
-            keywords: "windows explorer right click folder directory background shell menu register unregister open here",
+            title: SettingsExplorerContextMenu,
+            keywords: SettingsSearchExplorerContextMenuKeywords,
         },
     ]
 }
@@ -444,7 +468,7 @@ pub(crate) struct SettingsState {
     pub(crate) rebinding_note: Option<String>,
     pub(crate) explorer_context_menu_status:
         Result<crate::core::explorer_context_menu::Status, String>,
-    pub(crate) explorer_context_menu_note: Option<String>,
+    pub(crate) explorer_context_menu_note: Option<ExplorerContextMenuNote>,
     pub(crate) ssh_form: Option<SshProfileForm>,
     pub(crate) ssh_detail: SshDetail,
     pub(crate) ssh_filter: Entity<InputState>,
@@ -4668,21 +4692,46 @@ impl Tty7App {
             register_disabled,
             unregister_disabled,
         ) = match explorer_status.as_ref() {
-            Ok(crate::core::explorer_context_menu::Status::NotRegistered) => {
-                ("Not registered", muted_fg, "Register", false, true)
-            }
-            Ok(crate::core::explorer_context_menu::Status::Registered) => {
-                ("Registered", success, "Register", true, false)
-            }
-            Ok(crate::core::explorer_context_menu::Status::NeedsUpdate) => {
-                ("Needs update", warning, "Update", false, false)
-            }
-            Ok(crate::core::explorer_context_menu::Status::Unsupported) => {
-                ("Unavailable", muted_fg, "Register", true, true)
-            }
-            Err(_) => ("Status unavailable", warning, "Register", false, false),
+            Ok(crate::core::explorer_context_menu::Status::NotRegistered) => (
+                t(L10nKey::SettingsExplorerNotRegistered),
+                muted_fg,
+                t(L10nKey::SettingsExplorerRegister),
+                false,
+                true,
+            ),
+            Ok(crate::core::explorer_context_menu::Status::Registered) => (
+                t(L10nKey::SettingsExplorerRegistered),
+                success,
+                t(L10nKey::SettingsExplorerRegister),
+                true,
+                false,
+            ),
+            Ok(crate::core::explorer_context_menu::Status::NeedsUpdate) => (
+                t(L10nKey::SettingsExplorerNeedsUpdate),
+                warning,
+                t(L10nKey::SettingsExplorerUpdate),
+                false,
+                false,
+            ),
+            Ok(crate::core::explorer_context_menu::Status::Unsupported) => (
+                t(L10nKey::SettingsExplorerUnavailable),
+                muted_fg,
+                t(L10nKey::SettingsExplorerRegister),
+                true,
+                true,
+            ),
+            Err(_) => (
+                t(L10nKey::SettingsExplorerStatusUnavailable),
+                warning,
+                t(L10nKey::SettingsExplorerRegister),
+                false,
+                false,
+            ),
         };
-        let explorer_feedback = explorer_note.or_else(|| explorer_status.err());
+        let explorer_feedback = explorer_note
+            .as_ref()
+            .map(ExplorerContextMenuNote::localized)
+            .or_else(|| explorer_status.err());
 
         let logo = Arc::new(Image::from_bytes(
             ImageFormat::Png,
@@ -4840,11 +4889,14 @@ impl Tty7App {
                                 .text_sm()
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(foreground)
-                                .child("Windows Explorer"),
+                                .child(t(L10nKey::SettingsExplorerContextMenu)),
                         )
-                        .child(div().text_sm().text_color(muted_fg).child(
-                            "Add “Open in tty7” when you right-click a folder and “Open tty7 here” when you right-click a folder background. This is off by default and is registered only for your Windows account.",
-                        ))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted_fg)
+                                .child(t(L10nKey::SettingsExplorerContextMenuDesc)),
+                        )
                         .child(
                             h_flex()
                                 .gap_2()
@@ -4871,7 +4923,7 @@ impl Tty7App {
                                 )
                                 .child(
                                     Button::new("explorer-menu-unregister")
-                                        .label("Unregister")
+                                        .label(t(L10nKey::SettingsExplorerUnregister))
                                         .small()
                                         .disabled(unregister_disabled)
                                         .on_click(cx.listener(|this, _, _window, cx| {
@@ -4887,9 +4939,12 @@ impl Tty7App {
                                     .child(message),
                             )
                         })
-                        .child(div().text_xs().text_color(muted_fg).child(
-                            "On Windows 11, classic shell entries may appear under “Show more options”.",
-                        )),
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted_fg)
+                                .child(t(L10nKey::SettingsExplorerWindows11Note)),
+                        ),
                 )
             })
             .child(
@@ -5036,6 +5091,20 @@ mod tests {
                 expected.profile_label()
             );
         }
+    }
+
+    #[test]
+    fn explorer_context_menu_search_entry_uses_localized_keys() {
+        let entry = settings_search_entries()
+            .iter()
+            .find(|entry| entry.title == L10nKey::SettingsExplorerContextMenu)
+            .expect("Explorer settings should be searchable");
+
+        assert_eq!(entry.section.profile_label(), "settings:about");
+        assert_eq!(
+            entry.keywords,
+            L10nKey::SettingsSearchExplorerContextMenuKeywords
+        );
     }
 
     #[test]

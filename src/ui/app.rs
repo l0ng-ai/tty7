@@ -34,7 +34,8 @@ use crate::ui::palette::{
 use crate::ui::pane::{CloseOutcome, Dir, Pane, PaneSlot};
 use crate::ui::presets::Fill;
 use crate::ui::settings::{
-    Recording, SettingsSection, SettingsState, ThemeEditor, humanize_action,
+    ExplorerContextMenuNote, Recording, SettingsSection, SettingsState, ThemeEditor,
+    humanize_action,
 };
 use crate::ui::theme::{apply_theme, set_menus, window_background};
 
@@ -1958,13 +1959,10 @@ impl Tty7App {
             crate::core::explorer_context_menu::unregister()
         };
         let note = match result {
-            Ok(()) if register => {
-                "Registered. Right-click a folder or folder background in Explorer to open it in tty7."
-                    .to_string()
-            }
-            Ok(()) => "Unregistered from Windows Explorer.".to_string(),
-            Err(error) if register => format!("Could not register: {error}"),
-            Err(error) => format!("Could not unregister: {error}"),
+            Ok(()) if register => ExplorerContextMenuNote::Registered,
+            Ok(()) => ExplorerContextMenuNote::Unregistered,
+            Err(error) if register => ExplorerContextMenuNote::RegisterFailed(error.to_string()),
+            Err(error) => ExplorerContextMenuNote::UnregisterFailed(error.to_string()),
         };
         let status =
             crate::core::explorer_context_menu::status().map_err(|error| error.to_string());
