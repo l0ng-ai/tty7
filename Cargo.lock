@@ -9682,6 +9682,7 @@ dependencies = [
  "serde_yaml",
  "smallvec",
  "smol",
+ "tempfile",
  "tray-icon",
  "tty7-core",
  "uuid",

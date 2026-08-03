@@ -2,6 +2,7 @@ mod address;
 mod backend;
 mod cli;
 mod commands;
+mod gui;
 mod output;
 mod resolve;
 mod screen;

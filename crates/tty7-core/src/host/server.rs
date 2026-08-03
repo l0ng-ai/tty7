@@ -54,6 +54,7 @@ impl Services {
 #[derive(Default)]
 pub struct AttachRegistry {
     live: Mutex<Vec<Live>>,
+    guis: Mutex<Vec<GuiLive>>,
     handover: Mutex<()>,
 }
 
@@ -74,6 +75,11 @@ struct Evicted {
     dedicated: bool,
 }
 
+struct GuiLive {
+    conn: u64,
+    sink: Arc<Sink>,
+}
+
 impl AttachRegistry {
     fn handover(&self) -> std::sync::MutexGuard<'_, ()> {
         self.handover.lock().unwrap_or_else(|e| e.into_inner())
@@ -92,6 +98,41 @@ impl AttachRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    fn register_gui(&self, conn: u64, sink: Arc<Sink>) {
+        let mut guis = self.guis.lock().unwrap_or_else(|e| e.into_inner());
+        guis.retain(|gui| gui.conn != conn);
+        guis.push(GuiLive { conn, sink });
+    }
+
+    fn unregister_gui(&self, conn: u64) {
+        self.guis
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|gui| gui.conn != conn);
+    }
+
+    fn open_gui(&self, path: Option<String>) -> bool {
+        // The newest GUI connection belongs to the most recently started app
+        // process. Window recency is resolved inside that process, where GPUI
+        // owns the authoritative focus state.
+        loop {
+            let target = self
+                .guis
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .last()
+                .map(|gui| (gui.conn, Arc::clone(&gui.sink)));
+            let Some((conn, sink)) = target else {
+                return false;
+            };
+            let event = ControlServerMsg::Event(ControlEvent::GuiOpen { path: path.clone() });
+            if sink.send(&event).is_ok() {
+                return true;
+            }
+            self.unregister_gui(conn);
+        }
     }
 
     fn claim(
@@ -252,6 +293,14 @@ where
         },
     });
 
+    if hello.gui {
+        // GUI registration starts only after a successful version handshake,
+        // so an incompatible app can never be reported as a live receiver.
+        services
+            .attachments
+            .register_gui(conn.id, Arc::clone(&sink));
+    }
+
     if let Some(workspace) = hello.workspace.as_deref()
         && let Err(e) = attach_workspace(&conn, workspace, true)
     {
@@ -266,6 +315,8 @@ where
         .unwrap_or_else(|e| e.into_inner())
         .clear();
     conn.release_all_workspaces();
+    // Every exit path converges here, including EOF and protocol errors.
+    conn.attachments.unregister_gui(conn.id);
     drop(machine_sub);
     sink.retire();
     let _ = shutdown.shutdown_link();
@@ -609,6 +660,9 @@ fn run_request(
         ControlRequest::WorkspaceDetach { id } => {
             detach_workspace(conn, &id)?;
             (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::GuiOpen { path } => {
+            (ReplyOk::Bool(conn.attachments.open_gui(path)), Vec::new())
         }
 
         ControlRequest::MachineGet => (
@@ -1825,6 +1879,47 @@ mod pool_tests {
     }
 }
 
+#[cfg(test)]
+mod gui_registry_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn gui_open_is_delivered_only_while_a_gui_is_registered() {
+        let registry = AttachRegistry::default();
+        assert!(!registry.open_gui(Some("/work".into())));
+
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::new(Sink::new(SharedWriter(Arc::clone(&bytes))));
+        registry.register_gui(7, sink);
+        assert!(registry.open_gui(Some("/work".into())));
+
+        let frame = bytes.lock().unwrap().clone();
+        assert_eq!(
+            ControlServerMsg::read(&mut Cursor::new(frame)).unwrap(),
+            ControlServerMsg::Event(ControlEvent::GuiOpen {
+                path: Some("/work".into())
+            })
+        );
+
+        registry.unregister_gui(7);
+        assert!(!registry.open_gui(None));
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -1885,6 +1980,7 @@ mod tests {
             workspace: Some(workspace.to_string()),
             client_token: token.to_string(),
             client_hostname: hostname.to_string(),
+            gui: false,
         }
     }
 

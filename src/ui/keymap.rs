@@ -3,7 +3,8 @@ use gpui::{App, Global, KeyBinding, Keystroke, NoAction};
 use crate::core::actions::*;
 use crate::core::config::Config;
 use crate::terminal::view::{
-    ClearScrollback, CopyText, FindInTerminal, FindNext, FindPrevious, InsertNewline, PasteText,
+    ClearScrollback, CopyText, FindInTerminal, FindNext, FindPrevious, InsertNewline,
+    InsertNewlineFallback, PasteText,
 };
 use crate::ui::theme::set_menus;
 
@@ -74,6 +75,10 @@ fn extra_keystrokes(effective: &[(String, String)]) -> Vec<(&'static str, &'stat
         .collect()
 }
 
+fn is_default_insert_newline_binding(action: &str, key: &str) -> bool {
+    action == "InsertNewline" && key == INSERT_NEWLINE_DEFAULT
+}
+
 pub(crate) fn extra_bindings(cx: &App) -> Vec<(String, String)> {
     extra_keystrokes(&effective_bindings(cx))
         .into_iter()
@@ -97,7 +102,16 @@ fn action_bindings(effective: &[(String, String)]) -> Vec<KeyBinding> {
             continue;
         }
         match make_binding(action, key) {
-            Some(b) => bindings.push(b),
+            Some(b) => {
+                bindings.push(b);
+                if is_default_insert_newline_binding(action, key) {
+                    bindings.push(KeyBinding::new(
+                        INSERT_NEWLINE_DEFAULT,
+                        InsertNewlineFallback,
+                        Some("Terminal"),
+                    ));
+                }
+            }
             None => log::warn!("ignoring keybinding: unknown action '{action}'"),
         }
     }
@@ -695,6 +709,52 @@ mod tests {
             );
         }
         assert_eq!(key_tokens("shift-enter"), vec![SHIFT, "⏎"]);
+    }
+
+    #[test]
+    fn shift_enter_fallback_retires_with_an_insert_newline_rebind() {
+        assert!(is_default_insert_newline_binding(
+            "InsertNewline",
+            "shift-enter"
+        ));
+        assert!(!is_default_insert_newline_binding(
+            "InsertNewline",
+            "ctrl-o"
+        ));
+        assert!(!is_default_insert_newline_binding("InsertNewline", ""));
+    }
+
+    #[test]
+    fn shift_enter_prefix_binding_still_waits_for_its_second_key() {
+        let mut effective = default_bindings()
+            .into_iter()
+            .map(|(action, key)| (action.to_string(), key.to_string()))
+            .collect::<Vec<_>>();
+        effective
+            .iter_mut()
+            .find(|(action, _)| action == "OpenSettings")
+            .unwrap()
+            .1 = "shift-enter x".to_string();
+
+        let mut keymap = gpui::Keymap::default();
+        keymap.add_bindings(action_bindings(&effective));
+        let input = [gpui::Keystroke::parse("shift-enter").unwrap()];
+        let context = [gpui::KeyContext::parse("Terminal").unwrap()];
+        let (_, pending) = keymap.bindings_for_input(&input, &context);
+
+        assert!(pending, "the keymap must wait for the second key");
+
+        let input = [
+            gpui::Keystroke::parse("shift-enter").unwrap(),
+            gpui::Keystroke::parse("x").unwrap(),
+        ];
+        let (matched, pending) = keymap.bindings_for_input(&input, &context);
+        assert!(!pending);
+        assert!(
+            matched
+                .first()
+                .is_some_and(|binding| binding.action().partial_eq(&OpenSettings))
+        );
     }
 
     #[test]
