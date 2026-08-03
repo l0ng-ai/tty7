@@ -123,13 +123,13 @@ a brief pause; `prefix` + an unbound key passes straight through.
 
 ## Localization
 
-The GUI starts with English and Simplified Chinese strings. Pick a locale in
-`config.json`:
+The GUI ships English and Simplified Chinese strings. Pick one in Settings →
+Appearance → Language, or in `config.json`:
 
 ```json
-{ "gui_language": "auto" }
+{ "gui_language": "zh-CN" }
 ```
 
-`auto` follows the system language, `en` forces English, and `zh-CN`/`zh-Hans`
-forces Simplified Chinese. The CLI output stays English so agent and script
-integrations keep a stable, predictable surface.
+`en` and `zh-CN` are the only accepted values; anything else falls back to `en`.
+The choice is explicit — the system language is never inferred. CLI output stays
+English so agent and script integrations keep a stable, predictable surface.

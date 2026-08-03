@@ -5,6 +5,15 @@ const ZH_HANS: u8 = 1;
 
 static CURRENT: AtomicU8 = AtomicU8::new(EN);
 
+// Tests run in parallel and every one of them reads the same process-wide
+// locale, so a test that switches to Chinese would flip the language out from
+// under another thread's English assertions. libtest gives each test its own
+// thread, so an override that lives in thread-local storage keeps them apart.
+#[cfg(test)]
+thread_local! {
+    static TEST_LOCALE: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum L10nKey {
     SearchTabs,
@@ -732,8 +741,6 @@ pub enum L10nKey {
     SshPromptConnect,
     SshPromptUnlock,
     SshPromptSubmit,
-    ThemeCustomSuffix,
-    ThemeFallbackName,
     HostOpsError,
     CmdGroupTabsPanes,
     CmdGroupWorkspaces,
@@ -901,15 +908,14 @@ pub enum L10nKey {
 
 pub fn set_locale(gui_language: &str) {
     let locale = if gui_language == "zh-CN" { ZH_HANS } else { EN };
+    #[cfg(test)]
+    TEST_LOCALE.with(|slot| slot.set(Some(locale)));
+    #[cfg(not(test))]
     CURRENT.store(locale, Ordering::Relaxed);
 }
 
 pub fn t(key: L10nKey) -> &'static str {
     translate(current_locale(), key)
-}
-
-pub fn is_zh_hans() -> bool {
-    current_locale() == Locale::ZhHans
 }
 
 pub fn t_fmt(key: L10nKey, args: &[(&str, &str)]) -> String {
@@ -969,7 +975,15 @@ fn apply_template(template: &'static str, args: &[(&str, &str)], count: Option<u
 }
 
 fn current_locale() -> Locale {
-    if CURRENT.load(Ordering::Relaxed) == ZH_HANS {
+    #[cfg(test)]
+    if let Some(locale) = TEST_LOCALE.with(|slot| slot.get()) {
+        return locale_of(locale);
+    }
+    locale_of(CURRENT.load(Ordering::Relaxed))
+}
+
+fn locale_of(raw: u8) -> Locale {
+    if raw == ZH_HANS {
         Locale::ZhHans
     } else {
         Locale::En
@@ -1129,7 +1143,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsLanguageChinese => ("简体中文", "简体中文"),
         L10nKey::SettingsSearchLanguageKeywords => (
             "language, locale, english, chinese",
-            "语言, 区域设置, 英文, 中文",
+            "语言 区域设置 英文 中文 language locale english chinese",
         ),
         L10nKey::SettingsTransparency => ("Transparency", "透明度"),
         L10nKey::SettingsOpacity => ("Opacity", "不透明度"),
@@ -2396,8 +2410,6 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SshPromptConnect => ("Connect", "连接"),
         L10nKey::SshPromptUnlock => ("Unlock", "解锁"),
         L10nKey::SshPromptSubmit => ("Submit", "提交"),
-        L10nKey::ThemeCustomSuffix => ("{name} (custom)", "{name}（自定义）"),
-        L10nKey::ThemeFallbackName => ("Theme", "主题"),
         L10nKey::HostOpsError => ("{context}: {error}", "{context}：{error}"),
         L10nKey::CmdGroupTabsPanes => ("Tabs & Panes", "标签页与窗格"),
         L10nKey::CmdGroupWorkspaces => ("Workspaces", "工作区"),
@@ -3616,8 +3628,6 @@ mod tests {
             L10nKey::SshPromptConnect,
             L10nKey::SshPromptUnlock,
             L10nKey::SshPromptSubmit,
-            L10nKey::ThemeCustomSuffix,
-            L10nKey::ThemeFallbackName,
             L10nKey::HostOpsError,
             L10nKey::CmdGroupTabsPanes,
             L10nKey::CmdGroupWorkspaces,

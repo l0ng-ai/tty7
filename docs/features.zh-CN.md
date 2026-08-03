@@ -119,11 +119,12 @@ Aider、Amp、OpenCode 等约 17 个）并在其外围加功能 —— 绝不包
 
 ## 本地化
 
-GUI 目前提供英文和简体中文两套文案。在 `config.json` 中选择语言：
+GUI 目前提供英文和简体中文两套文案。在「设置 → 外观 → 语言」中选择，或直接改
+`config.json`：
 
 ```json
-{ "gui_language": "auto" }
+{ "gui_language": "zh-CN" }
 ```
 
-`auto` 跟随系统语言，`en` 强制英文，`zh-CN`/`zh-Hans` 强制简体中文。CLI
-输出保持英文，保证 agent、脚本和开发者工作流的输出稳定可预测。
+只接受 `en` 和 `zh-CN` 两个值，其它值一律回落到 `en`。语言必须显式指定，不会
+去猜系统语言。CLI 输出保持英文，保证 agent、脚本和开发者工作流的输出稳定可预测。

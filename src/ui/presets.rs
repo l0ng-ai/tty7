@@ -5,7 +5,6 @@ use gpui::{App, Global, Hsla};
 use serde::Deserialize;
 
 use crate::terminal::palette::ActivePalette;
-use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Fill {
@@ -500,10 +499,10 @@ pub fn fork_to_file(t: &Theme) -> std::io::Result<String> {
         n += 1;
     }
     let mut copy = t.clone();
-    copy.name = t_fmt(
-        L10nKey::ThemeCustomSuffix,
-        &[("name", t.name.trim_end_matches(" (custom)"))],
-    );
+    // The name lands in the YAML on disk and is matched back with
+    // `trim_end_matches(" (custom)")`, so it stays English in every locale —
+    // a translated suffix would survive a language switch and stack up.
+    copy.name = format!("{} (custom)", t.name.trim_end_matches(" (custom)"));
     crate::core::config::write_atomic(
         &dir.join(format!("{stem}.yaml")),
         to_yaml(&copy).as_bytes(),
@@ -596,7 +595,9 @@ fn id_and_name(path: &std::path::Path) -> (String, String) {
     (
         stem,
         if name.is_empty() {
-            t(L10nKey::ThemeFallbackName).to_string()
+            // Theme names are data — they get written back to the YAML file,
+            // so the fallback stays English rather than following the GUI.
+            "Theme".into()
         } else {
             name
         },
@@ -1444,6 +1445,15 @@ ansi:
         let (id, name) = id_and_name(std::path::Path::new("/x/solarized_dark.yaml"));
         assert_eq!(id, "solarized_dark");
         assert_eq!(name, "Solarized Dark");
+    }
+
+    #[test]
+    fn theme_names_stay_english_under_a_translated_gui() {
+        crate::ui::i18n::set_locale("zh-CN");
+        // A stem of only separators leaves nothing to title-case.
+        let (_, name) = id_and_name(std::path::Path::new("/x/_.yaml"));
+        assert_eq!(name, "Theme");
+        crate::ui::i18n::set_locale("en");
     }
 
     #[test]

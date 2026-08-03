@@ -80,6 +80,10 @@ fn spawn_config_watcher(cx: &mut App) {
                 crate::ui::presets::load_registry(cx);
                 crate::ui::theme::apply_cursor_hide_mode(cx);
                 crate::ui::theme::apply_theme(None, cx);
+                // The menu bar is built once from the current locale, so editing
+                // gui_language by hand has to rebuild it the same way the
+                // in-app language picker does.
+                crate::ui::theme::set_menus(cx);
                 crate::ui::windows::WindowRegistry::refresh_locale(cx, None);
                 cx.refresh_windows();
             });
