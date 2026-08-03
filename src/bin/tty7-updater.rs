@@ -40,6 +40,9 @@ mod macos {
                     .parse::<u32>()
                     .map_err(|_| "parent pid is not an unsigned integer".to_string())?;
                 let current = next_path(&mut args)?;
+                let archive = next_path(&mut args)?;
+                let checksums = next_path(&mut args)?;
+                let asset_name = next_string(&mut args)?;
                 let stage = next_path(&mut args)?;
                 let expected_version = next_string(&mut args)?;
                 let log = next_path(&mut args)?;
@@ -47,6 +50,9 @@ mod macos {
                 install(InstallPlan {
                     parent_pid,
                     current,
+                    archive,
+                    checksums,
+                    asset_name,
                     stage,
                     expected_version,
                     log,
@@ -59,7 +65,8 @@ mod macos {
     fn usage() -> String {
         "usage: tty7-updater verify <current.app> <archive.zip> <checksums.txt> \
          <asset-name> <stage-dir> <version>\n\
-         or: tty7-updater install <parent-pid> <current.app> <stage-dir> <version> <log-path>"
+         or: tty7-updater install <parent-pid> <current.app> <archive.zip> <checksums.txt> \
+         <asset-name> <stage-dir> <version> <log-path>"
             .to_string()
     }
 
@@ -84,16 +91,21 @@ mod macos {
     struct InstallPlan {
         parent_pid: u32,
         current: PathBuf,
+        archive: PathBuf,
+        checksums: PathBuf,
+        asset_name: String,
         stage: PathBuf,
         expected_version: String,
         log: PathBuf,
     }
 
     fn install(plan: InstallPlan) -> Result<(), String> {
-        log_line(&plan.log, "re-verifying staged tty7 update");
         let replacement = plan.stage.join("unpacked/tty7.app");
         wait_for_exit(plan.parent_pid);
-        if let Err(error) = verify_update(&plan.current, &replacement, &plan.expected_version) {
+        log_line(&plan.log, "re-verifying staged tty7 update");
+        let verification = verify_archive(&plan.archive, &plan.checksums, &plan.asset_name)
+            .and_then(|()| verify_update(&plan.current, &replacement, &plan.expected_version));
+        if let Err(error) = verification {
             log_line(&plan.log, &error);
             let _ = fs::remove_dir_all(&plan.stage);
             let _ = launch_app(&plan.current);
@@ -656,8 +668,7 @@ mod windows {
             return recover_from_failed_update(&plan, error);
         }
 
-        let installed = plan.install_dir.join("tty7-app.exe");
-        if let Err(error) = verify_installed_app(&installed, &plan.expected_version) {
+        if let Err(error) = verify_installed_payload(&plan.install_dir, &plan.expected_version) {
             return recover_from_failed_update(&plan, error);
         }
         log_line(&plan.log, "the Windows update completed; relaunching tty7");
@@ -712,7 +723,7 @@ mod windows {
             &plan.install_dir,
             &payload,
             |directory| {
-                verify_installed_app(&directory.join("tty7-app.exe"), &plan.expected_version)?;
+                verify_installed_payload(directory, &plan.expected_version)?;
                 launch_app(directory)
             },
             launch_app,
@@ -1036,14 +1047,23 @@ mod windows {
         )
     }
 
-    fn verify_installed_app(app: &Path, expected_version: &str) -> Result<(), String> {
-        if !app.is_file() {
-            return Err(format!(
-                "the Windows update did not create {}",
-                app.display()
-            ));
+    fn verify_installed_payload(install_dir: &Path, expected_version: &str) -> Result<(), String> {
+        // Validate the files at their final destination rather than trusting the
+        // installer or copy operation to preserve the already-verified payload.
+        for (name, label) in [
+            ("tty7-app.exe", "installed tty7-app.exe"),
+            ("tty7-updater.exe", "installed tty7-updater.exe"),
+        ] {
+            let binary = install_dir.join(name);
+            if !binary.is_file() {
+                return Err(format!(
+                    "the Windows update did not create {}",
+                    binary.display()
+                ));
+            }
+            verify_binary_version(&binary, expected_version, label)?;
         }
-        verify_binary_version(app, expected_version, "installed tty7-app.exe")
+        Ok(())
     }
 
     fn verify_archive(archive: &Path, checksums: &Path, asset_name: &str) -> Result<(), String> {
@@ -1600,6 +1620,20 @@ mod windows {
                 product_version(&executable).unwrap(),
                 env!("CARGO_PKG_VERSION")
             );
+        }
+
+        #[test]
+        fn installed_payload_verification_requires_matching_app_and_updater() {
+            let root = tempfile::tempdir().unwrap();
+            let executable = std::env::current_exe().unwrap();
+            fs::copy(&executable, root.path().join("tty7-app.exe")).unwrap();
+
+            let error =
+                verify_installed_payload(root.path(), env!("CARGO_PKG_VERSION")).unwrap_err();
+            assert!(error.contains("tty7-updater.exe"), "{error}");
+
+            fs::copy(&executable, root.path().join("tty7-updater.exe")).unwrap();
+            verify_installed_payload(root.path(), env!("CARGO_PKG_VERSION")).unwrap();
         }
 
         #[test]
