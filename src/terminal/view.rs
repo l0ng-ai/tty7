@@ -45,7 +45,8 @@ actions!(
         FindNext,
         FindPrevious,
         ClearScrollback,
-        InsertNewline
+        InsertNewline,
+        InsertNewlineFallback
     ]
 );
 
@@ -1184,6 +1185,17 @@ impl TerminalView {
         }
     }
 
+    fn send_shortcut_bytes(&mut self, bytes: &[u8], key: &str, cx: &mut Context<Self>) {
+        let shell_owns_prompt = self.shell_owns_prompt();
+        self.release_hold();
+        self.send_to_pty(bytes, cx);
+        if !shell_owns_prompt {
+            let alt = self.on_alt_screen();
+            self.typeahead
+                .observe(RawInput::Key { key, plain: false }, alt);
+        }
+    }
+
     fn handle_cmd_shortcut(
         &mut self,
         ks: &gpui::Keystroke,
@@ -1222,6 +1234,8 @@ impl TerminalView {
                 if self.input_active() {
                     self.editor_move_edge(false, m.shift);
                     cx.notify();
+                } else if cfg!(target_os = "macos") && self.accepts_input(cx) {
+                    self.send_shortcut_bytes(&[0x01], "a", cx);
                 }
                 CmdKey::Consumed
             }
@@ -1229,6 +1243,8 @@ impl TerminalView {
                 if self.input_active() {
                     self.editor_move_edge(true, m.shift);
                     cx.notify();
+                } else if cfg!(target_os = "macos") && self.accepts_input(cx) {
+                    self.send_shortcut_bytes(&[0x05], "e", cx);
                 }
                 CmdKey::Consumed
             }
@@ -1240,6 +1256,8 @@ impl TerminalView {
                     self.close_completion();
                     self.cursor_visible = true;
                     cx.notify();
+                } else if cfg!(target_os = "macos") && self.accepts_input(cx) {
+                    self.send_shortcut_bytes(&[0x15], "u", cx);
                 }
                 CmdKey::Consumed
             }
@@ -1251,6 +1269,8 @@ impl TerminalView {
                     self.close_completion();
                     self.cursor_visible = true;
                     cx.notify();
+                } else if cfg!(target_os = "macos") && self.accepts_input(cx) {
+                    self.send_shortcut_bytes(&[0x0b], "k", cx);
                 }
                 CmdKey::Consumed
             }
@@ -2627,6 +2647,19 @@ impl TerminalView {
         self.editor_goal_col = None;
         self.last_word_nav = None;
         cx.notify();
+    }
+
+    fn insert_newline_fallback_action(&mut self, cx: &mut Context<Self>) {
+        if self.input_active() {
+            self.insert_newline_action(cx);
+        } else if (self.search.is_some() && self.search_focused)
+            || self.kitty_flags().active()
+            || !self.accepts_input(cx)
+        {
+            cx.propagate();
+        } else {
+            self.send_shortcut_bytes(b"\n", "enter", cx);
+        }
     }
 
     fn accept_line(&mut self, cx: &mut Context<Self>) {
@@ -4345,6 +4378,9 @@ impl Render for TerminalView {
             .on_action(cx.listener(|this, _: &ClearScrollback, _w, cx| this.clear_scrollback(cx)))
             .on_action(cx.listener(|this, _: &InsertNewline, _w, cx| {
                 this.insert_newline_action(cx);
+            }))
+            .on_action(cx.listener(|this, _: &InsertNewlineFallback, _w, cx| {
+                this.insert_newline_fallback_action(cx);
             }))
             .on_action(cx.listener(|this, _: &SendTab, _w, cx| {
                 this.tab_pressed(true, cx);
@@ -6609,6 +6645,82 @@ mod gpui_tests {
     }
 
     #[gpui::test]
+    fn shift_enter_reaches_a_foreground_tui_with_kitty_encoding(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| crate::ui::keymap::init(cx));
+        DaemonMsg::Output(b"\x1b[>1u".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if window
+                .update(cx, |view, _, _| view.kitty_flags().active())
+                .unwrap()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        window
+            .update(cx, |view, window, cx| {
+                assert!(!view.input_active(), "the foreground TUI owns input");
+                window.activate_window();
+                view.focus_handle.focus(window, cx);
+            })
+            .unwrap();
+
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.simulate_keystrokes("shift-enter");
+
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"\x1b[13;2u".to_vec())
+        );
+    }
+
+    #[gpui::test]
+    fn shift_enter_reaches_a_foreground_tui_as_lf_without_kitty(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| crate::ui::keymap::init(cx));
+        window
+            .update(cx, |view, window, cx| {
+                assert!(!view.input_active(), "the foreground TUI owns input");
+                window.activate_window();
+                view.focus_handle.focus(window, cx);
+            })
+            .unwrap();
+
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.simulate_keystrokes("shift-enter");
+
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(b"\n".to_vec()));
+    }
+
+    #[gpui::test]
+    fn alt_enter_keeps_its_legacy_encoding_in_a_foreground_tui(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| crate::ui::keymap::init(cx));
+        window
+            .update(cx, |view, window, cx| {
+                assert!(!view.input_active(), "the foreground TUI owns input");
+                window.activate_window();
+                view.focus_handle.focus(window, cx);
+            })
+            .unwrap();
+
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.simulate_keystrokes("alt-enter");
+
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"\x1b\r".to_vec())
+        );
+    }
+
+    #[gpui::test]
     fn insert_newline_action_declines_when_the_editor_is_not_live(cx: &mut TestAppContext) {
         let (window, _daemon) = harness(cx);
         window
@@ -7849,6 +7961,130 @@ mod gpui_tests {
             .unwrap();
         let text = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
         assert_eq!(text.as_deref(), Some("hello"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn cmd_backspace_reaches_a_foreground_tui_as_ctrl_u(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, window, cx| {
+                assert!(
+                    !view.input_active(),
+                    "the foreground process, not tty7's editor, owns input"
+                );
+                view.on_key_down(
+                    &KeyDownEvent {
+                        keystroke: gpui::Keystroke {
+                            modifiers: Modifiers {
+                                platform: true,
+                                ..Modifiers::default()
+                            },
+                            key: "backspace".into(),
+                            key_char: None,
+                        },
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x15]));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn cmd_navigation_reaches_a_foreground_tui_as_readline_controls(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+
+        for (key, expected) in [("left", 0x01), ("right", 0x05), ("delete", 0x0b)] {
+            window
+                .update(cx, |view, window, cx| {
+                    assert!(!view.input_active(), "the foreground TUI owns input");
+                    view.on_key_down(
+                        &KeyDownEvent {
+                            keystroke: gpui::Keystroke {
+                                modifiers: Modifiers {
+                                    platform: true,
+                                    ..Modifiers::default()
+                                },
+                                key: key.into(),
+                                key_char: None,
+                            },
+                            is_held: false,
+                            prefer_character_input: false,
+                        },
+                        window,
+                        cx,
+                    );
+                })
+                .unwrap();
+            assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![expected]));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn cmd_backspace_releases_held_input_before_ctrl_u(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: false,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        for _ in 0..200 {
+            cx.run_until_parked();
+            let gap = window
+                .update(cx, |view, _, _| {
+                    view.terminal.shell_active() && !view.terminal.at_prompt()
+                })
+                .unwrap();
+            if gap {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, window, cx| {
+                view.commit_text("ls", cx);
+                view.on_key_down(
+                    &KeyDownEvent {
+                        keystroke: gpui::Keystroke {
+                            modifiers: Modifiers {
+                                platform: true,
+                                ..Modifiers::default()
+                            },
+                            key: "backspace".into(),
+                            key_char: None,
+                        },
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"ls".to_vec()),
+            "held text must reach the PTY before the line-kill"
+        );
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(vec![0x15]),
+            "Ctrl-U must follow the text it clears"
+        );
     }
 
     #[gpui::test]

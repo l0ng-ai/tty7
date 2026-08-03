@@ -1,7 +1,8 @@
 #!/bin/bash
 # Usage: bundle-macos.sh <target-triple> <arch-label>
-# Package the release binary into dist/tty7.app and wrap it in a
-# drag-to-Applications DMG: dist/tty7-<version>-macos-<arch>.dmg.
+# Package the release binary into dist/tty7.app, then publish both:
+#   dist/tty7-<version>-macos-<arch>.zip  (in-app updater)
+#   dist/tty7-<version>-macos-<arch>.dmg  (drag-to-Applications install)
 #
 # Signing posture is chosen from the environment:
 #   * Developer ID secrets present (APPLE_SIGNING_IDENTITY + APPLE_CERTIFICATE)
@@ -21,6 +22,10 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
   echo "bundle-macos: could not read a version from Cargo.toml (got '$VERSION')" >&2
   exit 1
 fi
+PACKAGE_UPDATE_ZIP="${TTY7_PACKAGE_UPDATE_ZIP:-1}"
+if [[ "$VERSION" == *-nightly.* ]]; then
+    PACKAGE_UPDATE_ZIP=0
+fi
 APP="dist/tty7.app"
 
 rm -rf dist
@@ -34,6 +39,15 @@ chmod +x "$APP/Contents/MacOS/tty7-app"
 # relative to its own executable.
 cp "target/${TARGET}/release/tty7" "$APP/Contents/MacOS/tty7"
 chmod +x "$APP/Contents/MacOS/tty7"
+if [[ "$PACKAGE_UPDATE_ZIP" != "0" ]]; then
+    # A focused out-of-process updater can replace the bundle after the GUI
+    # exits, then relaunch or roll back without teaching the GUI to mutate
+    # itself. Stable macOS builds carry it beside the app/CLI so its signature
+    # is covered by the outer bundle; Nightly remains byte-for-byte on its old
+    # packaging path for the first updater release.
+    cp "target/${TARGET}/release/tty7-updater" "$APP/Contents/MacOS/tty7-updater"
+    chmod +x "$APP/Contents/MacOS/tty7-updater"
+fi
 cp assets/tty7.icns "$APP/Contents/Resources/tty7.icns"
 # Completion signatures are loaded at runtime (not embedded), resolved relative
 # to the executable as ../Resources/completions — see terminal::signature.
@@ -112,6 +126,10 @@ ENT
     # them.
     codesign --force --options runtime --timestamp \
         --sign "$SIGN_ID" "$APP/Contents/MacOS/tty7"
+    if [[ "$PACKAGE_UPDATE_ZIP" != "0" ]]; then
+        codesign --force --options runtime --timestamp \
+            --sign "$SIGN_ID" "$APP/Contents/MacOS/tty7-updater"
+    fi
     codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" \
         --sign "$SIGN_ID" "$APP/Contents/MacOS/tty7-app"
     codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" \
@@ -137,6 +155,16 @@ else
     codesign --force --deep --sign - "$APP"
 fi
 
+# The stable-channel in-app updater needs the signed, notarized .app itself
+# rather than a disk image that requires Finder interaction. Nightly versions
+# skip this path above: their rolling release remains unchanged until the stable
+# updater has shipped and been exercised.
+ZIP=""
+if [[ "$PACKAGE_UPDATE_ZIP" != "0" ]]; then
+    ZIP="dist/tty7-${VERSION}-macos-${ARCH}.zip"
+    ditto -c -k --keepParent "$APP" "$ZIP"
+fi
+
 # Package the (now stapled) bundle as a drag-to-Applications DMG.
 DMG="dist/tty7-${VERSION}-macos-${ARCH}.dmg"
 STAGE="dist/dmg-stage"
@@ -148,5 +176,8 @@ hdiutil create -volname "tty7" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
 rm -rf "$STAGE"
 if [[ -n "$SIGN_ID" && -n "${APPLE_CERTIFICATE:-}" ]]; then
     codesign --force --timestamp --sign "$SIGN_ID" "$DMG"
+fi
+if [[ -n "$ZIP" ]]; then
+    echo "✅ $ZIP"
 fi
 echo "✅ $DMG"

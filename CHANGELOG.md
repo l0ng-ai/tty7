@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Update tty7 without leaving the app** — the launch check and
+  **Settings → About → Check Now** now offer **Update and Relaunch** for
+  packaged macOS installs instead of sending the user to GitHub Releases. A
+  dedicated `tty7-updater` helper verifies the release checksum, bundle
+  version, and code-signing requirement before replacing the app, and restores
+  the previous bundle if relaunch fails. The new GUI reuses a running local
+  server when its wire protocol is compatible, preserving shells; an
+  incompatible server keeps its shells too and raises the existing explicit
+  keep-or-restart prompt. Other platforms and unsupported layouts retain the
+  release-page fallback, and Nightly remains unchanged for the first version.
+
 - **`tty7 wait` — the primitive an agent team was missing** — block until a
   pane's agent needs input, finishes its turn, or dies:
   `tty7 wait %3 --until waiting,done --changed --timeout 600`. The daemon
