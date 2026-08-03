@@ -167,7 +167,7 @@ pub struct Config {
     /// package manager's copy — and do not want it shadowed.
     #[serde(default = "default_true")]
     pub install_cli_on_path: bool,
-    /// GUI-only locale selection. Values: `auto`, `en`, or `zh-CN`/`zh-Hans`.
+    /// GUI-only locale selection. Values: `en` or `zh-CN`.
     /// CLI output stays English so agent/script integrations are stable.
     #[serde(default = "default_gui_language")]
     pub gui_language: String,
@@ -501,11 +501,9 @@ impl Config {
         {
             self.link_file_command = None;
         }
-        if !matches!(
-            self.gui_language.as_str(),
-            "auto" | "en" | "zh" | "zh-CN" | "zh-Hans" | "zh_CN" | "zh_Hans"
-        ) {
-            self.gui_language = default_gui_language();
+        match self.gui_language.as_str() {
+            "en" | "zh-CN" => {}
+            _ => self.gui_language = default_gui_language(),
         }
     }
 
@@ -659,7 +657,7 @@ fn default_true() -> bool {
 }
 
 fn default_gui_language() -> String {
-    "auto".to_string()
+    "en".to_string()
 }
 
 fn default_word_separators() -> String {
@@ -1092,16 +1090,16 @@ mod tests {
     }
 
     #[test]
-    fn gui_language_defaults_to_auto_and_rejects_unknown_values() {
+    fn gui_language_defaults_to_english_and_rejects_unsupported_values() {
         let cfg = Config::default();
-        assert_eq!(cfg.gui_language, "auto");
+        assert_eq!(cfg.gui_language, "en");
 
         let cfg: Config = serde_json::from_str(r#"{"gui_language": "zh-CN"}"#).unwrap();
         assert_eq!(cfg.gui_language, "zh-CN");
 
         let mut cfg: Config = serde_json::from_str(r#"{"gui_language": "ko"}"#).unwrap();
         cfg.sanitize();
-        assert_eq!(cfg.gui_language, "auto");
+        assert_eq!(cfg.gui_language, "en");
     }
 
     #[test]

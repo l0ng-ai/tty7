@@ -93,7 +93,6 @@ pub enum L10nKey {
     SettingsCursorBlinkDesc,
     SettingsLanguage,
     SettingsLanguageDesc,
-    SettingsLanguageAuto,
     SettingsLanguageEnglish,
     SettingsLanguageChinese,
     SettingsSearchLanguageKeywords,
@@ -885,16 +884,7 @@ pub enum L10nKey {
 }
 
 pub fn set_locale(gui_language: &str) {
-    let locale = if gui_language == "auto" {
-        detect_system_language()
-    } else if matches!(
-        gui_language,
-        "zh-CN" | "zh-Hans" | "zh_CN" | "zh_Hans" | "zh"
-    ) {
-        ZH_HANS
-    } else {
-        EN
-    };
+    let locale = if gui_language == "zh-CN" { ZH_HANS } else { EN };
     CURRENT.store(locale, Ordering::Relaxed);
 }
 
@@ -967,46 +957,6 @@ fn current_locale() -> Locale {
         Locale::ZhHans
     } else {
         Locale::En
-    }
-}
-
-fn detect_system_language() -> u8 {
-    sys_locale::get_locale()
-        .as_deref()
-        .map(locale_identifier_language)
-        .unwrap_or(EN)
-}
-
-fn locale_identifier_language(identifier: &str) -> u8 {
-    let normalized = identifier
-        .split(['.', '@'])
-        .next()
-        .unwrap_or(identifier)
-        .replace('_', "-")
-        .to_ascii_lowercase();
-    let mut subtags = normalized.split('-');
-    if subtags.next() != Some("zh") {
-        return EN;
-    }
-
-    // Chinese defaults to Simplified when no script or region is specified.
-    // Traditional-script locales must be rejected before checking mainland and
-    // Singapore region aliases so malformed/conflicting identifiers fail safe.
-    let subtags: Vec<_> = subtags.collect();
-    if subtags
-        .iter()
-        .any(|part| matches!(*part, "hant" | "tw" | "hk" | "mo"))
-    {
-        return EN;
-    }
-    if subtags.is_empty()
-        || subtags
-            .iter()
-            .any(|part| matches!(*part, "hans" | "cn" | "sg"))
-    {
-        ZH_HANS
-    } else {
-        EN
     }
 }
 
@@ -1159,7 +1109,6 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "Choose the language used for the tty7 interface.",
             "选择 tty7 界面使用的语言。",
         ),
-        L10nKey::SettingsLanguageAuto => ("Auto", "自动"),
         L10nKey::SettingsLanguageEnglish => ("English", "English"),
         L10nKey::SettingsLanguageChinese => ("简体中文", "简体中文"),
         L10nKey::SettingsSearchLanguageKeywords => (
@@ -1869,8 +1818,8 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "端口转发 SSH 隧道 本地 远程 动态 SOCKS 转发 port forwarding ssh tunnel local remote",
         ),
         L10nKey::SettingsSearchProgramKeywords => (
-            "shell binary zsh bash fish pwsh powershell executable launch",
-            "程序 shell 二进制 zsh bash fish pwsh powershell 可执行文件 启动 program shell binary launch",
+            "shell binary zsh bash fish nu nushell pwsh powershell executable launch",
+            "程序 shell 二进制 zsh bash fish nu nushell pwsh powershell 可执行文件 启动 program shell binary launch",
         ),
         L10nKey::SettingsSearchRememberWindowSizeKeywords => (
             "window size position bounds geometry launch startup remember",
@@ -3761,7 +3710,6 @@ mod tests {
             L10nKey::SwitcherStatusNotConnected,
             L10nKey::SettingsLanguage,
             L10nKey::SettingsLanguageDesc,
-            L10nKey::SettingsLanguageAuto,
             L10nKey::SettingsLanguageEnglish,
             L10nKey::SettingsLanguageChinese,
             L10nKey::SettingsSearchLanguageKeywords,
@@ -3791,24 +3739,6 @@ mod tests {
         assert_eq!(current_locale(), Locale::En);
         set_locale("ko");
         assert_eq!(current_locale(), Locale::En);
-    }
-
-    #[test]
-    fn system_locale_only_selects_simplified_chinese() {
-        for locale in ["zh", "zh-CN", "zh_CN.UTF-8", "zh-Hans", "zh-Hans-SG"] {
-            assert_eq!(locale_identifier_language(locale), ZH_HANS, "{locale}");
-        }
-        for locale in [
-            "en-CN",
-            "zh-TW",
-            "zh_HK.UTF-8",
-            "zh-MO",
-            "zh-Hant",
-            "zh-Hant-CN",
-            "zh-US",
-        ] {
-            assert_eq!(locale_identifier_language(locale), EN, "{locale}");
-        }
     }
 
     #[test]

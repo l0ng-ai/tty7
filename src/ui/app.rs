@@ -3696,10 +3696,9 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<SelectState<SearchableVec<String>>> {
-        const CODES: &[&str] = &["auto", "en", "zh-CN"];
+        const CODES: &[&str] = &["en", "zh-CN"];
         let labels = || {
             vec![
-                t(L10nKey::SettingsLanguageAuto).to_string(),
                 t(L10nKey::SettingsLanguageEnglish).to_string(),
                 t(L10nKey::SettingsLanguageChinese).to_string(),
             ]
@@ -3733,10 +3732,8 @@ impl Tty7App {
 
     fn normalize_gui_language(code: &str) -> &'static str {
         match code {
-            "auto" => "auto",
-            "en" => "en",
-            "zh" | "zh-CN" | "zh-Hans" | "zh_CN" | "zh_Hans" => "zh-CN",
-            _ => "auto",
+            "zh-CN" => "zh-CN",
+            _ => "en",
         }
     }
 
@@ -3759,7 +3756,7 @@ impl Tty7App {
     }
 
     pub(crate) fn refresh_locale_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        const CODES: &[&str] = &["auto", "en", "zh-CN"];
+        const CODES: &[&str] = &["en", "zh-CN"];
         self.sidebar_search.update(cx, |state, cx| {
             state.set_placeholder(t(L10nKey::SearchTabs), window, cx)
         });
@@ -3768,7 +3765,6 @@ impl Tty7App {
         });
         if let Some(s) = self.active_settings() {
             let rows = vec![
-                t(L10nKey::SettingsLanguageAuto).to_string(),
                 t(L10nKey::SettingsLanguageEnglish).to_string(),
                 t(L10nKey::SettingsLanguageChinese).to_string(),
             ];
