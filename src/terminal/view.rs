@@ -2538,20 +2538,22 @@ impl TerminalView {
             .contains(TermMode::ALT_SCREEN)
     }
 
-    fn sync_alt_screen(&mut self) -> bool {
-        // ALT_SCREEN changes keyboard ownership; never replay a record across
-        // that boundary as shell input.
+    fn sync_alt_screen(&mut self) {
         let alt_screen = self.on_alt_screen();
-        if alt_screen != self.last_alt_screen {
-            self.typeahead.discard();
-            self.last_alt_screen = alt_screen;
-        }
-        alt_screen
+        sync_alt_screen_state(&mut self.typeahead, &mut self.last_alt_screen, alt_screen);
     }
 
     fn observe_typeahead(&mut self, input: RawInput<'_>) {
-        let alt_screen = self.sync_alt_screen();
-        self.typeahead.observe(input, alt_screen);
+        // The input that crosses the mode boundary belongs to neither side;
+        // in particular, the Ctrl-C that exits a TUI must not become a tainted
+        // shell record and later synthesize Ctrl-U.
+        let alt_screen = self.on_alt_screen();
+        observe_typeahead_for_mode(
+            &mut self.typeahead,
+            &mut self.last_alt_screen,
+            input,
+            alt_screen,
+        );
     }
 
     fn flush_typeahead(&mut self) {
@@ -4259,6 +4261,32 @@ impl TerminalView {
     }
 }
 
+fn sync_alt_screen_state(
+    typeahead: &mut Typeahead,
+    last_alt_screen: &mut bool,
+    alt_screen: bool,
+) -> bool {
+    // ALT_SCREEN changes keyboard ownership; never replay a record across
+    // that boundary as shell input.
+    let changed = alt_screen != *last_alt_screen;
+    if changed {
+        typeahead.discard();
+        *last_alt_screen = alt_screen;
+    }
+    changed
+}
+
+fn observe_typeahead_for_mode(
+    typeahead: &mut Typeahead,
+    last_alt_screen: &mut bool,
+    input: RawInput<'_>,
+    alt_screen: bool,
+) {
+    if !sync_alt_screen_state(typeahead, last_alt_screen, alt_screen) {
+        typeahead.observe(input, *last_alt_screen);
+    }
+}
+
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -4866,8 +4894,8 @@ fn drag_scroll_step(overshoot: f32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        LoopbackPlan, SelectEndCopy, WheelRoute, clipboard_paste_text, cwd_is_on_host,
-        display_width, loopback_plan,
+        LoopbackPlan, RawInput, SelectEndCopy, Typeahead, WheelRoute, clipboard_paste_text,
+        cwd_is_on_host, display_width, loopback_plan, observe_typeahead_for_mode,
     };
     use super::{
         drag_scroll_step, encode_mouse, escape_candidate, expand_file_command_template,
@@ -4883,6 +4911,36 @@ mod tests {
     use crate::core::session::{RemoteTarget, WorkspaceId};
     use crate::daemon::protocol::RemoteKind;
     use crate::terminal::PaneWorkspace;
+
+    #[test]
+    fn alt_screen_exit_discards_the_boundary_input_before_recording_shell_text() {
+        let mut typeahead = Typeahead::new();
+        let mut last_alt_screen = true;
+        typeahead.observe(RawInput::Text("stale"), false);
+
+        observe_typeahead_for_mode(
+            &mut typeahead,
+            &mut last_alt_screen,
+            RawInput::Key {
+                key: "c",
+                plain: false,
+            },
+            false,
+        );
+        assert_eq!(
+            typeahead.drain(),
+            None,
+            "the Ctrl-C crossing TUI exit must not become a tainted shell record"
+        );
+
+        observe_typeahead_for_mode(
+            &mut typeahead,
+            &mut last_alt_screen,
+            RawInput::Text("ls"),
+            false,
+        );
+        assert_eq!(typeahead.drain(), Some("ls".to_string()));
+    }
 
     fn ws(target: RemoteTarget, with_spec: bool) -> PaneWorkspace {
         PaneWorkspace {
