@@ -39,7 +39,7 @@ impl fmt::Display for ChecksumError {
             } => write!(
                 f,
                 "{asset} failed sha256 verification: release says {expected}, downloaded bytes are \
-                 {actual}. Install aborted; nothing was written to the remote machine"
+                 {actual}. Install aborted; the downloaded asset was not installed"
             ),
         }
     }

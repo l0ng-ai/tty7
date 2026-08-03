@@ -13,6 +13,11 @@ default-run = "tty7-app"
 name = "tty7-app"
 path = "src/main.rs"
 
+[[bin]]
+name = "tty7-updater"
+path = "src/bin/tty7-updater.rs"
+required-features = ["updater"]
+
 [dependencies]
 # The framework-free half of tty7: wire protocol, session daemon, PTY, the
 # native SSH engine, and the domain model the headless `tty7-server` shares with
@@ -47,6 +52,7 @@ smol.workspace = true
 smallvec.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
+tempfile = "3"
 
 # SSH profile ids in the connection manager UI (`ui::ssh_connect`,
 # `ui::settings`, the command palette). The profiles themselves — and the
@@ -186,6 +192,10 @@ gpui = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true
+
+[features]
+default = []
+updater = []
 
 # ---- Standalone workspace mirroring gpui-component's pins so the git/source
 # ---- caches are shared and versions stay aligned. ----

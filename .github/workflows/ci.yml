@@ -127,6 +127,11 @@ jobs:
         timeout-minutes: 20
         run: cargo test --locked --target ${{ matrix.target }}
 
+      - name: Test macOS updater
+        if: runner.os == 'macOS'
+        timeout-minutes: 10
+        run: cargo test --locked --features updater --bin tty7-updater --target ${{ matrix.target }}
+
       # There is deliberately no post-mortem step here, and that is worth
       # recording, because an earlier version of this file had one: on failure it
       # dumped the process table to find the surviving test binary.

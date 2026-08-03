@@ -76,7 +76,13 @@ jobs:
       # a plain checkout of the tagged commit.
       - name: Build
         working-directory: tty7
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          cargo build --release --locked --target "${{ matrix.target }}"
+          if [[ "${{ matrix.os }}" == "macos" ]]; then
+            cargo build --release --locked --features updater \
+              --bin tty7-updater --target "${{ matrix.target }}"
+          fi
 
       # ---- Packaging: one step per OS ----------------------------------------
       # macOS gets a signed + notarized drag-to-Applications DMG. Windows gets
@@ -254,7 +260,7 @@ jobs:
   # created as a **draft** and left that way: a draft is invisible to both
   # /releases/latest and the releases page, so nothing can prompt a user to
   # download a version whose asset set is incomplete or whose notes are still
-  # empty. Publishing is the release skill's job — it verifies the six assets and
+  # empty. Publishing is the release skill's job — it verifies the platform assets and
   # writes the body first, then flips the draft. See .claude/skills/release/SKILL.md.
   draft-release:
     needs: [build, server-musl]
