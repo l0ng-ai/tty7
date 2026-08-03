@@ -243,6 +243,13 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
         refresh_system_appearance(cx);
     }
     let theme = presets::by_id(cx, &effective_preset_id(cx));
+    // The daemon reloads this lightweight mode when it spawns a Windows pane,
+    // where ConPTY prevents OSC 11 background queries from reaching the GUI.
+    let hint = if theme.dark { "dark" } else { "light" };
+    if cx.global::<Config>().theme != hint {
+        cx.global_mut::<Config>().theme = hint.to_string();
+        cx.global::<Config>().save();
+    }
     let config = cx.global::<Config>();
     let mode = if theme.dark {
         ThemeMode::Dark
