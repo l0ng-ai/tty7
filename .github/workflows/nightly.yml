@@ -208,7 +208,7 @@ jobs:
         with:
           version: 0.16.0
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.5
         with:
           tool: cargo-zigbuild
 
