@@ -4517,6 +4517,11 @@ impl Tty7App {
             .cloned()
             .unwrap_or_default();
         let update = update_status.available.clone();
+        let current_update_channel = crate::core::update::UpdateChannel::current();
+        let switch_target = current_update_channel.other();
+        let channel_switch_pending = update
+            .as_ref()
+            .is_some_and(|available| available.channel_switch);
         let update_busy = matches!(
             update_status.phase,
             crate::core::update::UpdatePhase::Checking
@@ -4640,11 +4645,42 @@ impl Tty7App {
                             .text_color(foreground)
                             .child("Updates"),
                     )
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .items_center()
+                            .child(
+                                div().text_sm().text_color(foreground).child(format!(
+                                    "Current channel: {}",
+                                    current_update_channel.label()
+                                )),
+                            )
+                            .child(
+                                Button::new("switch-update-channel")
+                                    .label(format!("Switch to {}", switch_target.label()))
+                                    .small()
+                                    .disabled(update_busy || channel_switch_pending)
+                                    .on_click(cx.listener(move |_, _, _window, cx| {
+                                        crate::core::update::switch_channel(switch_target, cx)
+                                    })),
+                            ),
+                    )
                     .when_some(update, |this, upd| {
-                        let button_label = if upd.installable {
-                            "Update and Relaunch"
+                        let button_label = if upd.channel_switch && upd.installable {
+                            format!("Switch to {} and Relaunch", upd.channel.label())
+                        } else if upd.installable {
+                            "Update and Relaunch".to_string()
                         } else {
-                            "View Release"
+                            "View Release".to_string()
+                        };
+                        let availability = if upd.channel_switch {
+                            format!(
+                                "Version {} is the latest {} release.",
+                                upd.version,
+                                upd.channel.label()
+                            )
+                        } else {
+                            format!("Version {} is available.", upd.version)
                         };
                         this.child(
                             v_flex()
@@ -4653,9 +4689,12 @@ impl Tty7App {
                                     h_flex()
                                         .gap_3()
                                         .items_center()
-                                        .child(div().text_sm().text_color(foreground).child(
-                                            format!("Version {} is available.", upd.version),
-                                        ))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(foreground)
+                                                .child(availability),
+                                        )
                                         .child(
                                             Button::new("install-update")
                                                 .label(button_label)
@@ -4675,7 +4714,7 @@ impl Tty7App {
                         this.child(div().text_sm().text_color(muted_fg).child(text))
                     })
                     .child(div().text_sm().text_color(muted_fg).child(
-                        "tty7 checks stable releases and can update packaged macOS app bundles and Windows installations without opening a browser. Linux and unsupported layouts fall back to the release page.",
+                        "tty7 follows the current build's update channel automatically. You can explicitly switch between Stable and Nightly; packaged macOS and Windows installations update without opening a browser, while Linux and unsupported layouts fall back to the target release page.",
                     ))
                     .child(
                         h_flex().child(

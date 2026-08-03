@@ -27,12 +27,30 @@ const WINDOWS_PORTABLE_MARKER: &str = ".tty7-portable";
 const WINDOWS_PORTABLE_MARKER_CONTENT: &[u8] = b"portable-v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UpdateChannel {
+pub enum UpdateChannel {
     Stable,
     Nightly,
 }
 
 impl UpdateChannel {
+    pub fn current() -> Self {
+        Self::for_version(env!("CARGO_PKG_VERSION"))
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stable => "Stable",
+            Self::Nightly => "Nightly",
+        }
+    }
+
+    pub fn other(self) -> Self {
+        match self {
+            Self::Stable => Self::Nightly,
+            Self::Nightly => Self::Stable,
+        }
+    }
+
     fn for_version(version: &str) -> Self {
         if version.trim_start_matches('v').contains("-nightly.") {
             Self::Nightly
@@ -57,9 +75,45 @@ impl UpdateChannel {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateCheckIntent {
+    CurrentChannel,
+    SwitchTo(UpdateChannel),
+}
+
+impl UpdateCheckIntent {
+    fn target_channel(self, current_version: &str) -> UpdateChannel {
+        match self {
+            Self::CurrentChannel => UpdateChannel::for_version(current_version),
+            Self::SwitchTo(channel) => channel,
+        }
+    }
+
+    fn is_channel_switch(self, current_version: &str) -> bool {
+        matches!(
+            self,
+            Self::SwitchTo(channel) if channel != UpdateChannel::for_version(current_version)
+        )
+    }
+
+    fn accepts_release(self, latest: &str, current: &str) -> bool {
+        // An explicit channel switch is allowed to cross the normal version
+        // ordering boundary, but the target must still carry a valid identity
+        // for the requested channel. Integrity and binary checks continue in
+        // the unchanged preparation and updater paths after this selection.
+        if self.is_channel_switch(current) {
+            return parse_version(latest).is_some()
+                && self.target_channel(current) == UpdateChannel::for_version(latest);
+        }
+        is_update_available(latest, current)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AvailableUpdate {
     pub version: String,
+    pub channel: UpdateChannel,
+    pub channel_switch: bool,
     pub installable: bool,
     pub install_hint: Option<String>,
     asset: Option<ReleaseAsset>,
@@ -88,14 +142,18 @@ pub fn spawn_check(cx: &mut App) {
     if !cx.global::<Config>().check_for_updates {
         return;
     }
-    spawn_check_inner(false, cx);
+    spawn_check_inner(false, UpdateCheckIntent::CurrentChannel, cx);
 }
 
 pub fn spawn_check_forced(cx: &mut App) {
-    spawn_check_inner(true, cx);
+    spawn_check_inner(true, UpdateCheckIntent::CurrentChannel, cx);
 }
 
-fn spawn_check_inner(report_failure: bool, cx: &mut App) {
+pub fn switch_channel(channel: UpdateChannel, cx: &mut App) {
+    spawn_check_inner(true, UpdateCheckIntent::SwitchTo(channel), cx);
+}
+
+fn spawn_check_inner(report_failure: bool, intent: UpdateCheckIntent, cx: &mut App) {
     if cx.try_global::<UpdateStatus>().is_some_and(|status| {
         matches!(
             status.phase,
@@ -104,9 +162,15 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
     }) {
         return;
     }
-    let previous_available = cx
-        .try_global::<UpdateStatus>()
-        .and_then(|status| status.available.clone());
+    // A channel switch replaces any offer from the current channel. Keeping an
+    // unrelated Stable offer visible while resolving Nightly (or vice versa)
+    // would let the user launch the wrong update from the settings page.
+    let previous_available = match intent {
+        UpdateCheckIntent::CurrentChannel => cx
+            .try_global::<UpdateStatus>()
+            .and_then(|status| status.available.clone()),
+        UpdateCheckIntent::SwitchTo(_) => None,
+    };
     set_status(
         UpdateStatus {
             available: previous_available.clone(),
@@ -117,7 +181,7 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
 
     cx.spawn(async move |cx| {
         let current = env!("CARGO_PKG_VERSION");
-        let channel = UpdateChannel::for_version(current);
+        let channel = intent.target_channel(current);
         let release = match fetch_latest_release(channel)
             .or(async {
                 cx.background_executor().timer(CHECK_TIMEOUT).await;
@@ -146,7 +210,7 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
             }
         };
 
-        if !is_update_available(&release.version, current) {
+        if !intent.accepts_release(&release.version, current) {
             log::debug!(
                 "update check: up to date (latest {}, running {current})",
                 release.version
@@ -164,14 +228,24 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
         }
 
         let version = release.version;
+        let channel_switch = intent.is_channel_switch(current);
         let selection = select_release_asset(&version, &release.assets);
         let available = AvailableUpdate {
             version: version.clone(),
+            channel,
+            channel_switch,
             installable: selection.asset.is_some(),
             install_hint: selection.reason,
             asset: selection.asset,
         };
-        log::info!("update available: {version} (running {current})");
+        if channel_switch {
+            log::info!(
+                "{} channel switch available: {version} (running {current})",
+                channel.label()
+            );
+        } else {
+            log::info!("update available: {version} (running {current})");
+        }
 
         cx.update(|cx| {
             set_status(
@@ -183,7 +257,8 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
             )
         });
 
-        if UpdateState::load().last_prompted.as_deref() == Some(version.as_str()) {
+        if !channel_switch && UpdateState::load().last_prompted.as_deref() == Some(version.as_str())
+        {
             return;
         }
 
@@ -198,7 +273,7 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
                 .is_ok()
         });
 
-        if shown {
+        if shown && !channel_switch {
             UpdateState {
                 last_prompted: Some(version),
             }
@@ -226,7 +301,23 @@ async fn wait_for_window(cx: &mut AsyncApp) -> Option<AnyWindowHandle> {
 }
 
 fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
-    let detail = if update.installable {
+    let detail = if update.channel_switch {
+        let install = if update.installable {
+            "tty7 can download the verified release, install it, and restart the app."
+        } else {
+            update
+                .install_hint
+                .as_deref()
+                .unwrap_or("This installation cannot update itself.")
+        };
+        format!(
+            "Switch from {} to {} by installing tty7 {}. This may install an older version. {}",
+            UpdateChannel::current().label(),
+            update.channel.label(),
+            update.version,
+            install
+        )
+    } else if update.installable {
         let note = update
             .install_hint
             .as_deref()
@@ -249,14 +340,21 @@ fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
                 .unwrap_or("This installation cannot update itself.")
         )
     };
-    let action = if update.installable {
+    let action = if update.channel_switch && update.installable {
+        "Switch and Relaunch"
+    } else if update.installable {
         "Update and Relaunch"
     } else {
         "View Release"
     };
+    let title = if update.channel_switch {
+        "Switch update channel"
+    } else {
+        "Update available"
+    };
     let answer = window.prompt(
         PromptLevel::Info,
-        "Update available",
+        title,
         Some(&detail),
         &["Later", action],
         cx,
@@ -267,7 +365,7 @@ fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
             if update.installable {
                 let _ = cx.update(|cx| install(update, cx));
             } else {
-                open_releases_page();
+                open_releases_page_for(update.channel);
             }
         }
     })
@@ -284,7 +382,7 @@ pub fn install_available(cx: &mut App) {
     if update.installable {
         install(update, cx);
     } else {
-        open_releases_page();
+        open_releases_page_for(update.channel);
     }
 }
 
@@ -298,7 +396,7 @@ fn install(update: AvailableUpdate, cx: &mut App) {
         return;
     }
     let Some(asset) = update.asset.clone() else {
-        open_releases_page();
+        open_releases_page_for(update.channel);
         return;
     };
     set_status(
@@ -363,7 +461,7 @@ fn install(update: AvailableUpdate, cx: &mut App) {
     .detach();
 }
 
-pub fn open_releases_page() {
+fn open_releases_page_for(channel: UpdateChannel) {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(windows) {
@@ -371,7 +469,7 @@ pub fn open_releases_page() {
     } else {
         "xdg-open"
     };
-    let url = UpdateChannel::for_version(env!("CARGO_PKG_VERSION")).releases_url();
+    let url = channel.releases_url();
     if let Err(e) = std::process::Command::new(opener).arg(url).spawn() {
         log::warn!("failed to open releases page: {e}");
     }
@@ -1183,6 +1281,43 @@ mod tests {
                 .api_url()
                 .ends_with("/releases/tags/nightly")
         );
+        assert_eq!(UpdateChannel::Stable.other(), UpdateChannel::Nightly);
+        assert_eq!(UpdateChannel::Nightly.other(), UpdateChannel::Stable);
+    }
+
+    #[test]
+    fn explicit_cross_channel_switch_ignores_version_ordering() {
+        let to_stable = UpdateCheckIntent::SwitchTo(UpdateChannel::Stable);
+        let nightly = "27.1.0-nightly.20260803";
+        assert!(to_stable.is_channel_switch(nightly));
+        assert_eq!(to_stable.target_channel(nightly), UpdateChannel::Stable);
+        assert!(
+            to_stable.accepts_release("26.8.1", nightly),
+            "an explicit Nightly-to-Stable switch may install an older Stable release"
+        );
+
+        let to_nightly = UpdateCheckIntent::SwitchTo(UpdateChannel::Nightly);
+        let stable = "27.1.0";
+        assert!(to_nightly.is_channel_switch(stable));
+        assert_eq!(to_nightly.target_channel(stable), UpdateChannel::Nightly);
+        assert!(
+            to_nightly.accepts_release("26.8.1-nightly.20260803", stable),
+            "an explicit Stable-to-Nightly switch may install an older Nightly release"
+        );
+        assert!(!to_nightly.accepts_release("garbage", stable));
+        assert!(!to_nightly.accepts_release("26.8.1", stable));
+        assert!(!to_stable.accepts_release("26.8.1-nightly.20260803", nightly));
+    }
+
+    #[test]
+    fn normal_and_same_channel_checks_keep_version_ordering() {
+        let stable = "27.1.0";
+        assert!(!UpdateCheckIntent::CurrentChannel.accepts_release("26.8.1", stable));
+        assert!(UpdateCheckIntent::CurrentChannel.accepts_release("27.1.1", stable));
+
+        let same_channel = UpdateCheckIntent::SwitchTo(UpdateChannel::Stable);
+        assert!(!same_channel.is_channel_switch(stable));
+        assert!(!same_channel.accepts_release("26.8.1", stable));
     }
 
     #[test]
