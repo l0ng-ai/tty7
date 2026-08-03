@@ -145,6 +145,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# The standalone updater extracts only Windows release ZIPs. Reuse the async
+# reader already present in Cargo.lock and enable only the Deflate codec emitted
+# by PowerShell's Compress-Archive.
+async_zip = { version = "0.0.18", default-features = false, features = ["deflate"], optional = true }
 
 # Embeds `assets/favicon.ico` into the `.exe` so Windows shows the tty7 logo in
 # the taskbar / window / Explorer (macOS gets its icon from the `.app` bundle via
@@ -199,7 +203,7 @@ workspace = true
 
 [features]
 default = []
-updater = []
+updater = ["dep:async_zip"]
 
 # ---- Standalone workspace mirroring gpui-component's pins so the git/source
 # ---- caches are shared and versions stay aligned. ----

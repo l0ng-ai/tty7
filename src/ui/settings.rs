@@ -4675,7 +4675,7 @@ impl Tty7App {
                         this.child(div().text_sm().text_color(muted_fg).child(text))
                     })
                     .child(div().text_sm().text_color(muted_fg).child(
-                        "tty7 checks stable releases and can update packaged macOS app bundles and Windows installations without opening a browser. Windows portable archives, Linux, and unsupported layouts fall back to the release page.",
+                        "tty7 checks stable releases and can update packaged macOS app bundles and Windows installations without opening a browser. Linux and unsupported layouts fall back to the release page.",
                     ))
                     .child(
                         h_flex().child(

@@ -65,11 +65,15 @@ if (Test-Path $ServerSrc) {
     Write-Warning "no $ServerAsset to bundle - this build cannot serve WSL distros"
 }
 
-# Build the portable archive before adding the installer-only marker. The
-# application treats that marker as authority to run setup.exe automatically;
-# a portable extraction must therefore never carry it accidentally.
+# Stable portable archives carry their own update authority. Nightly omits both
+# the helper and marker so it cannot switch itself onto the stable update path.
+if ($PackageUpdater) {
+    Set-Content -Path "$Stage/.tty7-portable" -Value 'portable-v1' -NoNewline -Encoding ascii
+}
 Compress-Archive -Path "$Stage/*" -DestinationPath "dist/$Name.zip" -Force
 if ($PackageUpdater) {
+    # The Inno payload must never retain the mutually exclusive portable marker.
+    Remove-Item -LiteralPath "$Stage/.tty7-portable" -Force
     Set-Content -Path "$Stage/.tty7-inno-install" -Value 'inno-v1' -NoNewline -Encoding ascii
 }
 

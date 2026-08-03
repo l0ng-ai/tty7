@@ -18,7 +18,11 @@ pub const RELEASES_URL: &str = "https://github.com/l0ng-ai/tty7/releases/latest"
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[cfg(target_os = "windows")]
-const WINDOWS_INSTALL_MARKER: &str = ".tty7-inno-install";
+const WINDOWS_INNO_INSTALL_MARKER: &str = ".tty7-inno-install";
+#[cfg(target_os = "windows")]
+const WINDOWS_PORTABLE_MARKER: &str = ".tty7-portable";
+#[cfg(target_os = "windows")]
+const WINDOWS_PORTABLE_MARKER_CONTENT: &[u8] = b"portable-v1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AvailableUpdate {
@@ -492,14 +496,16 @@ fn package_for_current_install(version: &str) -> Option<String> {
     }
     #[cfg(target_os = "windows")]
     {
-        current_windows_install_dir()?;
-        bundled_updater()?;
-        let arch = if cfg!(target_arch = "x86_64") {
-            "x86_64"
-        } else {
+        let layout = current_windows_update_layout()?;
+        if matches!(&layout, WindowsUpdateLayout::Portable(directory) if !can_update_windows_portable(directory))
+        {
             return None;
-        };
-        return Some(format!("tty7-{version}-windows-{arch}-setup.exe"));
+        }
+        let updater = layout.directory().join("tty7-updater.exe");
+        if !updater.is_file() {
+            return None;
+        }
+        return windows_package_for_layout(version, &layout);
     }
     #[allow(unreachable_code)]
     None
@@ -521,9 +527,9 @@ fn unsupported_install_reason() -> String {
     }
     #[cfg(target_os = "windows")]
     {
-        return "Automatic Windows updates are available for tty7 installations created by the \
-                setup program. This copy is portable or is missing its installation marker, so \
-                open the release page to update it manually."
+        return "Automatic Windows updates are available for recognized Inno Setup and portable \
+                ZIP installations. This copy is missing a valid installation marker, updater, or \
+                writable portable directory, so open the release page to update it manually."
             .to_string();
     }
     #[allow(unreachable_code)]
@@ -657,30 +663,53 @@ fn prepare_macos_update(
 fn prepare_windows_update(
     version: &str,
     asset_name: &str,
-    installer: &[u8],
+    package: &[u8],
     checksums: &[u8],
 ) -> Result<PreparedUpdate> {
-    let install_dir = current_windows_install_dir()
-        .context("tty7 is not running from an Inno Setup installation")?;
+    let layout = current_windows_update_layout()
+        .context("tty7 is not running from a recognized Windows installation")?;
+    if matches!(&layout, WindowsUpdateLayout::Portable(directory) if !can_update_windows_portable(directory))
+    {
+        anyhow::bail!("the Windows portable directory is not writable");
+    }
+    let install_dir = layout.directory().to_path_buf();
     let bundled = bundled_updater().context("tty7-updater.exe is not bundled with this app")?;
     let staging = system_update_staging_dir()?;
     let dir = staging.path().to_path_buf();
-    let installer = write_staged_asset(&dir, asset_name, installer)?;
+    let package = write_staged_asset(&dir, asset_name, package)?;
     let checksums = write_staged_asset(&dir, "checksums.txt", checksums)?;
 
-    // Verification runs before the GUI commits to quitting. The helper repeats
-    // the same checks after the parent exits so a local process cannot swap the
-    // staged installer in the gap between user consent and installation.
-    run_updater(
-        &bundled,
-        [
-            PathBuf::from("verify"),
-            installer.clone(),
-            checksums.clone(),
-            PathBuf::from(asset_name),
-            PathBuf::from(version),
-        ],
-    )?;
+    // Verification runs before the GUI commits to quitting. Both Windows
+    // update modes repeat their archive checks after the parent exits.
+    let install_command = match &layout {
+        WindowsUpdateLayout::Inno(_) => {
+            run_updater(
+                &bundled,
+                [
+                    PathBuf::from("verify"),
+                    package.clone(),
+                    checksums.clone(),
+                    PathBuf::from(asset_name),
+                    PathBuf::from(version),
+                ],
+            )?;
+            "install"
+        }
+        WindowsUpdateLayout::Portable(_) => {
+            run_updater(
+                &bundled,
+                [
+                    PathBuf::from("verify-portable"),
+                    package.clone(),
+                    checksums.clone(),
+                    PathBuf::from(asset_name),
+                    PathBuf::from(version),
+                    dir.clone(),
+                ],
+            )?;
+            "install-portable"
+        }
+    };
 
     // Windows locks a running executable. Run a private copy from the staging
     // directory so Inno can replace the bundled helper in the installation.
@@ -697,9 +726,9 @@ fn prepare_windows_update(
     Ok(PreparedUpdate {
         updater,
         args: vec![
-            PathBuf::from("install"),
+            PathBuf::from(install_command),
             std::process::id().to_string().into(),
-            installer,
+            package,
             checksums,
             PathBuf::from(asset_name),
             install_dir,
@@ -732,7 +761,9 @@ fn bundled_updater() -> Option<PathBuf> {
 
 #[cfg(target_os = "windows")]
 fn bundled_updater() -> Option<PathBuf> {
-    let updater = current_windows_install_dir()?.join("tty7-updater.exe");
+    let updater = current_windows_update_layout()?
+        .directory()
+        .join("tty7-updater.exe");
     updater.is_file().then_some(updater)
 }
 
@@ -742,18 +773,57 @@ fn bundled_updater() -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-fn current_windows_install_dir() -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok()?;
-    windows_install_dir_for(&executable)
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum WindowsUpdateLayout {
+    Inno(PathBuf),
+    Portable(PathBuf),
 }
 
 #[cfg(target_os = "windows")]
-fn windows_install_dir_for(executable: &Path) -> Option<PathBuf> {
+impl WindowsUpdateLayout {
+    fn directory(&self) -> &Path {
+        match self {
+            Self::Inno(directory) | Self::Portable(directory) => directory,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_package_for_layout(version: &str, layout: &WindowsUpdateLayout) -> Option<String> {
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else {
+        return None;
+    };
+    Some(match layout {
+        WindowsUpdateLayout::Inno(_) => format!("tty7-{version}-windows-{arch}-setup.exe"),
+        WindowsUpdateLayout::Portable(_) => format!("tty7-{version}-windows-{arch}.zip"),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn current_windows_update_layout() -> Option<WindowsUpdateLayout> {
+    let executable = std::env::current_exe().ok()?;
+    windows_update_layout_for(&executable)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_update_layout_for(executable: &Path) -> Option<WindowsUpdateLayout> {
     let directory = executable.parent()?;
-    directory
-        .join(WINDOWS_INSTALL_MARKER)
-        .is_file()
-        .then(|| directory.to_path_buf())
+    if directory.join(WINDOWS_INNO_INSTALL_MARKER).is_file() {
+        return Some(WindowsUpdateLayout::Inno(directory.to_path_buf()));
+    }
+    let marker = std::fs::read(directory.join(WINDOWS_PORTABLE_MARKER)).ok()?;
+    (marker == WINDOWS_PORTABLE_MARKER_CONTENT)
+        .then(|| WindowsUpdateLayout::Portable(directory.to_path_buf()))
+}
+
+#[cfg(target_os = "windows")]
+fn can_update_windows_portable(directory: &Path) -> bool {
+    tempfile::Builder::new()
+        .prefix(".tty7-update-write-test-")
+        .tempfile_in(directory)
+        .is_ok()
 }
 
 #[cfg(target_os = "macos")]
@@ -932,16 +1002,42 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_install_marker_distinguishes_inno_from_portable_layouts() {
+    fn windows_markers_distinguish_inno_portable_and_unknown_layouts() {
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("tty7-app.exe");
         std::fs::write(&executable, b"test app").unwrap();
-        assert_eq!(windows_install_dir_for(&executable), None);
+        assert_eq!(windows_update_layout_for(&executable), None);
 
-        std::fs::write(root.path().join(WINDOWS_INSTALL_MARKER), b"inno-v1").unwrap();
+        std::fs::write(root.path().join(WINDOWS_PORTABLE_MARKER), b"portable-v1").unwrap();
         assert_eq!(
-            windows_install_dir_for(&executable).as_deref(),
-            Some(root.path())
+            windows_update_layout_for(&executable),
+            Some(WindowsUpdateLayout::Portable(root.path().to_path_buf()))
+        );
+
+        std::fs::write(root.path().join(WINDOWS_INNO_INSTALL_MARKER), b"inno-v1").unwrap();
+        assert_eq!(
+            windows_update_layout_for(&executable),
+            Some(WindowsUpdateLayout::Inno(root.path().to_path_buf()))
+        );
+
+        std::fs::remove_file(root.path().join(WINDOWS_INNO_INSTALL_MARKER)).unwrap();
+        std::fs::write(root.path().join(WINDOWS_PORTABLE_MARKER), b"invalid").unwrap();
+        assert_eq!(windows_update_layout_for(&executable), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_layout_selects_the_matching_release_package() {
+        let directory = PathBuf::from(r"C:\tty7");
+        assert_eq!(
+            windows_package_for_layout("26.8.2", &WindowsUpdateLayout::Inno(directory.clone()))
+                .as_deref(),
+            Some("tty7-26.8.2-windows-x86_64-setup.exe")
+        );
+        assert_eq!(
+            windows_package_for_layout("26.8.2", &WindowsUpdateLayout::Portable(directory))
+                .as_deref(),
+            Some("tty7-26.8.2-windows-x86_64.zip")
         );
     }
 }
