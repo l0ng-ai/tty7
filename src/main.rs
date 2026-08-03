@@ -94,32 +94,42 @@ fn is_theme_file(p: &std::path::Path) -> bool {
         })
 }
 
-fn apply_config_dir_arg() {
-    let mut args = std::env::args().skip(1);
+fn strip_os_arg_prefix(arg: &std::ffi::OsStr, prefix: &str) -> Option<std::ffi::OsString> {
+    let suffix = arg.as_encoded_bytes().strip_prefix(prefix.as_bytes())?;
+    // SAFETY: `prefix` is ASCII and is removed only from the beginning of an
+    // existing platform-encoded OsStr. ASCII bytes are self-synchronizing in
+    // Windows WTF-8 and Unix byte strings, so the suffix keeps valid encoding.
+    Some(unsafe { std::ffi::OsString::from_encoded_bytes_unchecked(suffix.to_vec()) })
+}
+
+fn config_dir_from(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
     while let Some(arg) = args.next() {
-        if let Some(path) = arg.strip_prefix("--config-dir=") {
-            crate::core::config::set_config_dir(path.into());
-            return;
+        if let Some(path) = strip_os_arg_prefix(&arg, "--config-dir=") {
+            return Some(path.into());
         }
-        if arg == "--config-dir" {
-            if let Some(path) = args.next() {
-                crate::core::config::set_config_dir(path.into());
-            }
-            return;
+        if arg == std::ffi::OsStr::new("--config-dir") {
+            return args.next().map(Into::into);
         }
+    }
+    None
+}
+
+fn apply_config_dir_arg(args: &[std::ffi::OsString]) {
+    if let Some(path) = config_dir_from(args.iter().cloned()) {
+        crate::core::config::set_config_dir(path);
     }
 }
 
-fn open_path_arg() -> Option<std::path::PathBuf> {
-    open_path_from(std::env::args().skip(1))
-}
-
-fn open_path_from(mut args: impl Iterator<Item = String>) -> Option<std::path::PathBuf> {
+fn open_path_from(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
     while let Some(arg) = args.next() {
-        if let Some(path) = arg.strip_prefix("--open-path=") {
+        if let Some(path) = strip_os_arg_prefix(&arg, "--open-path=") {
             return Some(path.into());
         }
-        if arg == "--open-path" {
+        if arg == std::ffi::OsStr::new("--open-path") {
             return args.next().map(Into::into);
         }
     }
@@ -262,34 +272,41 @@ fn set_dock_icon_for_bare_binary() {
 }
 
 fn main() {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     {
-        let args: Vec<String> = std::env::args().skip(1).take(3).collect();
-        if args.first().map(String::as_str) == Some("agent-hook") {
-            if let [_, agent, event] = args.as_slice() {
+        if args.first().map(std::ffi::OsString::as_os_str)
+            == Some(std::ffi::OsStr::new("agent-hook"))
+        {
+            if let (Some(agent), Some(event)) = (
+                args.get(1).and_then(|arg| arg.to_str()),
+                args.get(2).and_then(|arg| arg.to_str()),
+            ) {
                 crate::core::agent_hooks::run_agent_hook(agent, event);
             }
             return;
         }
     }
 
-    apply_config_dir_arg();
+    apply_config_dir_arg(&args);
 
-    let role = if std::env::args().any(|a| a == "--daemon") {
-        "daemon"
-    } else {
-        "gui"
-    };
+    let daemon = args
+        .iter()
+        .any(|arg| arg == std::ffi::OsStr::new("--daemon"));
+    let role = if daemon { "daemon" } else { "gui" };
     crate::core::crash::install(role);
     crate::core::logfile::install(role);
 
-    if std::env::args().any(|a| a == "--daemon") {
+    if daemon {
         if let Err(e) = crate::daemon::server::run_daemon() {
             log::error!("daemon exited with error: {e}");
         }
         return;
     }
 
-    if std::env::args().any(|a| a == "--stop-daemon") {
+    if args
+        .iter()
+        .any(|arg| arg == std::ffi::OsStr::new("--stop-daemon"))
+    {
         crate::daemon::spawn::stop();
         return;
     }
@@ -297,7 +314,7 @@ fn main() {
     #[cfg(unix)]
     enrich_path_from_login_shell();
 
-    let open_path = open_path_arg();
+    let open_path = open_path_from(args.into_iter());
     if forward_open_path(open_path.as_deref()) {
         return;
     }
@@ -374,7 +391,8 @@ mod tests {
 
 #[cfg(test)]
 mod argument_tests {
-    use super::{forward_open_path_with, open_path_from};
+    use super::{config_dir_from, forward_open_path_with, open_path_from};
+    use std::ffi::OsString;
     use std::path::PathBuf;
     use tty7_core::daemon::control::ReplyOk;
 
@@ -383,12 +401,42 @@ mod argument_tests {
         let separate = open_path_from(
             ["--config-dir", "/cfg", "--open-path", "/work"]
                 .into_iter()
-                .map(str::to_string),
+                .map(OsString::from),
         );
         assert_eq!(separate, Some(PathBuf::from("/work")));
 
-        let equals = open_path_from(["--open-path=C:\\work".to_string()].into_iter());
+        let equals = open_path_from([OsString::from("--open-path=C:\\work")].into_iter());
         assert_eq!(equals, Some(PathBuf::from("C:\\work")));
+    }
+
+    #[test]
+    fn config_dir_accepts_native_separate_and_equals_forms() {
+        let separate = config_dir_from(
+            [OsString::from("--config-dir"), OsString::from("C:\\cfg")].into_iter(),
+        );
+        assert_eq!(separate, Some(PathBuf::from("C:\\cfg")));
+
+        let equals = config_dir_from([OsString::from("--config-dir=C:\\cfg")].into_iter());
+        assert_eq!(equals, Some(PathBuf::from("C:\\cfg")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn open_path_preserves_unpaired_utf16_from_windows_arguments() {
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let native_path =
+            OsString::from_wide(&[b'C' as u16, b':' as u16, b'\\' as u16, 0xD800, b'x' as u16]);
+        let parsed =
+            open_path_from([OsString::from("--open-path"), native_path.clone()].into_iter());
+        assert_eq!(parsed, Some(PathBuf::from(native_path.clone())));
+
+        let mut equals_arg = OsString::from("--open-path=");
+        equals_arg.push(&native_path);
+        assert_eq!(
+            open_path_from([equals_arg].into_iter()),
+            Some(PathBuf::from(native_path))
+        );
     }
 
     #[test]

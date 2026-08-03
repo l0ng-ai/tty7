@@ -66,6 +66,35 @@ struct Registration {
     command: OsString,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RegistryShape {
+    values: u32,
+    subkeys: u32,
+}
+
+fn registration_tree_is_exact(root: RegistryShape, command: RegistryShape) -> bool {
+    root == (RegistryShape {
+        values: 2,
+        subkeys: 1,
+    }) && command
+        == (RegistryShape {
+            values: 1,
+            subkeys: 0,
+        })
+}
+
+fn replace_entry_with(
+    registration: &Registration,
+    delete: impl FnOnce(&str) -> Result<()>,
+    write: impl FnOnce(&Registration) -> Result<()>,
+) -> Result<()> {
+    // The verb root belongs exclusively to tty7. Replacing it at the operation
+    // boundary prevents stale shell values or handler subkeys from surviving
+    // an update and changing visibility or execution semantics.
+    delete(registration.location.key())?;
+    write(registration)
+}
+
 impl Registration {
     fn new(location: Location, app: &Path) -> Self {
         Self {
@@ -129,7 +158,8 @@ mod windows {
     };
     use windows_sys::Win32::System::Registry::{
         HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
-        RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+        RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW,
+        RegSetValueExW,
     };
     use windows_sys::Win32::UI::Shell::{SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify};
 
@@ -272,6 +302,35 @@ mod windows {
         }
     }
 
+    fn key_shape(key: &RegistryKey) -> Result<RegistryShape> {
+        let mut subkeys = 0u32;
+        let mut values = 0u32;
+        // SAFETY: `key` is live and the two count pointers reference writable
+        // locals. Every optional output that is not needed is passed as null,
+        // which `RegQueryInfoKeyW` explicitly permits.
+        let code = unsafe {
+            RegQueryInfoKeyW(
+                key.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut subkeys,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut values,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if code == ERROR_SUCCESS {
+            Ok(RegistryShape { values, subkeys })
+        } else {
+            Err(io_error("inspecting the tty7 Explorer registry key", code))
+        }
+    }
+
     fn entry_state(registration: &Registration) -> Result<EntryState> {
         let Some(root) = open_key(registration.location.key())? else {
             return Ok(EntryState::Missing);
@@ -280,13 +339,15 @@ mod windows {
         let icon = query_string(&root, Some(OsStr::new("Icon")))?;
 
         let command_path = format!(r"{}\command", registration.location.key());
-        let command = match open_key(&command_path)? {
-            Some(key) => query_string(&key, None)?,
-            None => None,
+        let command_key = match open_key(&command_path)? {
+            Some(key) => key,
+            None => return Ok(EntryState::Different),
         };
+        let command = query_string(&command_key, None)?;
         let matches = label.as_deref() == Some(&units(OsStr::new(registration.location.label())))
             && icon.as_deref() == Some(&units(&registration.icon))
-            && command.as_deref() == Some(&units(&registration.command));
+            && command.as_deref() == Some(&units(&registration.command))
+            && registration_tree_is_exact(key_shape(&root)?, key_shape(&command_key)?);
         Ok(if matches {
             EntryState::Matching
         } else {
@@ -294,7 +355,7 @@ mod windows {
         })
     }
 
-    fn write_entry(registration: &Registration) -> Result<()> {
+    fn write_entry_contents(registration: &Registration) -> Result<()> {
         let root = create_key(registration.location.key())?;
         set_string(&root, None, OsStr::new(registration.location.label()))?;
         set_string(&root, Some(OsStr::new("Icon")), &registration.icon)?;
@@ -343,7 +404,7 @@ mod windows {
     pub(super) fn register() -> Result<()> {
         let app = application_path()?;
         for registration in registrations(&app) {
-            write_entry(&registration)?;
+            replace_entry_with(&registration, delete_tree, write_entry_contents)?;
         }
         notify_explorer();
         Ok(())
@@ -422,6 +483,77 @@ mod tests {
         assert_eq!(
             quoted_open_command(Path::new(r"C:\tty7\tty7-app.exe"), "%1"),
             r#""C:\tty7\tty7-app.exe" --open-path "%1""#
+        );
+    }
+
+    #[test]
+    fn registration_shape_rejects_every_extra_value_or_subkey() {
+        assert!(registration_tree_is_exact(
+            RegistryShape {
+                values: 2,
+                subkeys: 1,
+            },
+            RegistryShape {
+                values: 1,
+                subkeys: 0,
+            },
+        ));
+        assert!(!registration_tree_is_exact(
+            RegistryShape {
+                values: 3,
+                subkeys: 1,
+            },
+            RegistryShape {
+                values: 1,
+                subkeys: 0,
+            },
+        ));
+        assert!(!registration_tree_is_exact(
+            RegistryShape {
+                values: 2,
+                subkeys: 1,
+            },
+            RegistryShape {
+                values: 2,
+                subkeys: 0,
+            },
+        ));
+        assert!(!registration_tree_is_exact(
+            RegistryShape {
+                values: 2,
+                subkeys: 2,
+            },
+            RegistryShape {
+                values: 1,
+                subkeys: 0,
+            },
+        ));
+    }
+
+    #[test]
+    fn registration_replaces_the_owned_tree_before_writing() {
+        let registration = Registration::new(
+            Location::Directory,
+            Path::new(r"C:\Program Files\tty7\tty7-app.exe"),
+        );
+        let operations = std::cell::RefCell::new(Vec::new());
+
+        replace_entry_with(
+            &registration,
+            |key| {
+                operations.borrow_mut().push(format!("delete:{key}"));
+                Ok(())
+            },
+            |_| {
+                operations.borrow_mut().push("write".to_string());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            operations.into_inner(),
+            vec![format!("delete:{DIRECTORY_KEY}"), "write".to_string()]
         );
     }
 }
