@@ -9683,6 +9683,7 @@ dependencies = [
  "smallvec",
  "smol",
  "sys-locale",
+ "tempfile",
  "tray-icon",
  "tty7-core",
  "uuid",
