@@ -294,7 +294,8 @@ fn ws_rename(ws: &str, name: String, backend: &mut dyn Backend) -> Result<Outcom
 fn ws_rm(ws: &str, backend: &mut dyn Backend) -> Result<Outcome> {
     let machine = fetch_machine(backend)?;
     let id = resolve::workspace(&machine, &address::parse_workspace(ws))?.id;
-    backend.control(ControlRequest::WorkspaceRemove { workspace: id })?;
+    let reply = backend.control(ControlRequest::WorkspaceRemove { workspace: id })?;
+    hang_up_removed_panes("WorkspaceRemove", reply, backend)?;
     report("", json!({ "removed": id.to_string() }))
 }
 
@@ -560,8 +561,30 @@ fn tab_close(tab: &str, backend: &mut dyn Backend) -> Result<Outcome> {
     let addr = address::parse_tab(tab)?;
     let machine = fetch_machine(backend)?;
     let (workspace, tab) = resolve::tab(&machine, &addr)?;
-    backend.control(ControlRequest::TabClose { workspace, tab })?;
+    let reply = backend.control(ControlRequest::TabClose { workspace, tab })?;
+    hang_up_removed_panes("TabClose", reply, backend)?;
     report("", json!({ "closed": tab.to_string() }))
+}
+
+fn hang_up_removed_panes(request: &str, reply: ReplyOk, backend: &mut dyn Backend) -> Result<()> {
+    let panes = match reply {
+        ReplyOk::Panes(panes) => panes,
+        other => bail!("the server answered {request} with {other:?}"),
+    };
+    let mut failures = Vec::new();
+    for pane in panes {
+        if let Err(error) = backend.kill_pane(pane) {
+            failures.push(format!("%{pane}: {error:#}"));
+        }
+    }
+    if !failures.is_empty() {
+        bail!(
+            "failed to hang up {} pane(s) removed by {request}: {}",
+            failures.len(),
+            failures.join("; ")
+        );
+    }
+    Ok(())
 }
 
 fn tab_rename(tab: &str, name: String, backend: &mut dyn Backend) -> Result<Outcome> {
@@ -669,7 +692,8 @@ fn pane_close(target: Option<&str>, ctx: &Context, backend: &mut dyn Backend) ->
     match resolve::workspace_of_pane(&machine, pane) {
         Ok(ws) => {
             let workspace = ws.id;
-            backend.control(ControlRequest::PaneClose { workspace, pane })?;
+            let reply = backend.control(ControlRequest::PaneClose { workspace, pane })?;
+            hang_up_removed_panes("PaneClose", reply, backend)?;
         }
         // No workspace holds it, so PaneClose has nothing to route through.
         // Hang it up directly instead of refusing — this is exactly the orphan
@@ -1101,15 +1125,13 @@ mod tests {
 
         // A pane the tree does hold still goes through PaneClose.
         let mut backend = mock();
+        backend.replies.push_back(ReplyOk::Panes(vec![1]));
         run_cli(
             &["tty7", "pane", "close", "%1"],
             &Context::default(),
             &mut backend,
         );
-        assert!(
-            backend.killed.is_empty(),
-            "a filed pane is closed, not killed"
-        );
+        assert_eq!(backend.killed, vec![1], "the removed pane is hung up");
         assert!(
             backend
                 .control_calls
@@ -1239,10 +1261,16 @@ mod tests {
         );
 
         backend.control_calls.clear();
+        backend.replies.push_back(ReplyOk::Panes(vec![3, 4]));
         run_cli(&["tty7", "ws", "rm", "web"], &ctx, &mut backend);
         assert_eq!(
             backend.control_calls[1],
             ControlRequest::WorkspaceRemove { workspace: web }
+        );
+        assert_eq!(
+            backend.killed,
+            vec![3, 4],
+            "removing a workspace must hang up the panes it held"
         );
 
         backend.control_calls.clear();
@@ -1274,6 +1302,7 @@ mod tests {
         let mut backend = mock();
         let web = backend.machine.workspaces[1].clone();
 
+        backend.replies.push_back(ReplyOk::Panes(Vec::new()));
         run_cli(&["tty7", "tab", "close", "@3"], &ctx, &mut backend);
         assert_eq!(
             backend.control_calls,
@@ -1311,6 +1340,63 @@ mod tests {
                 tab: api.tabs[1].id,
                 to: 0,
             }
+        );
+    }
+
+    #[test]
+    fn tab_close_hangs_up_every_pane_the_server_removed() {
+        let mut backend = mock();
+        backend.replies.push_back(ReplyOk::Panes(vec![2, 3]));
+
+        run_cli(
+            &["tty7", "tab", "close", "@2"],
+            &Context::default(),
+            &mut backend,
+        );
+
+        assert_eq!(
+            backend.killed,
+            vec![2, 3],
+            "every pane removed with the tab must be hung up"
+        );
+    }
+
+    #[test]
+    fn tab_close_attempts_every_hangup_before_reporting_failures() {
+        let mut backend = mock();
+        backend.replies.push_back(ReplyOk::Panes(vec![2, 3]));
+        backend.kill_failures.push(2);
+
+        let error = execute(
+            cli(&["tty7", "tab", "close", "@2"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect_err("a failed pane hangup must fail tab close");
+
+        assert_eq!(
+            backend.killed,
+            vec![2, 3],
+            "a failed hangup must not skip the remaining panes"
+        );
+        assert!(error.to_string().contains("%2"), "{error:#}");
+    }
+
+    #[test]
+    fn tab_close_rejects_an_unexpected_server_reply() {
+        let mut backend = mock();
+        let error = execute(
+            cli(&["tty7", "tab", "close", "@2"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect_err("TabClose must return the panes it removed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("the server answered TabClose with Unit"),
+            "{error:#}"
         );
     }
 
@@ -1414,6 +1500,7 @@ mod tests {
     #[test]
     fn pane_close_traces_the_pane_to_its_workspace() {
         let mut backend = mock();
+        backend.replies.push_back(ReplyOk::Panes(vec![5]));
         run_cli(
             &["tty7", "pane", "close", "%5"],
             &Context::default(),
@@ -1429,6 +1516,11 @@ mod tests {
                     pane: 5,
                 },
             ]
+        );
+        assert_eq!(
+            backend.killed,
+            vec![5],
+            "a pane removed from its workspace must also be hung up"
         );
     }
 

@@ -13,6 +13,7 @@ const PASTE_AWARE_TEXT: &str = "tty7 paste aware input";
 const PASTE_BURST_WINDOW: Duration = Duration::from_millis(120);
 const READY_WITHIN: Duration = Duration::from_secs(30);
 const SETTLE_WITHIN: Duration = Duration::from_secs(60);
+const CLOSE_WITHIN: Duration = Duration::from_secs(5);
 
 fn main() {
     if std::env::args().any(|arg| arg == PASTE_AWARE_FIXTURE_ARG) {
@@ -32,6 +33,10 @@ fn main() {
         (
             "new_builds_a_workspace_with_a_live_pane",
             new_builds_a_workspace_with_a_live_pane,
+        ),
+        (
+            "tab_close_terminates_every_pane_in_the_tab",
+            tab_close_terminates_every_pane_in_the_tab,
         ),
         (
             "run_streams_output_and_passes_the_exit_code",
@@ -387,6 +392,42 @@ fn new_builds_a_workspace_with_a_live_pane(daemon: &Daemon) {
 
     let panes = daemon.run_ok(&["pane", "ls"]);
     assert!(panes.contains(&format!("%{pane}")), "{panes}");
+}
+
+fn tab_close_terminates_every_pane_in_the_tab(daemon: &Daemon) {
+    let created = daemon.run_json(&["new", &workdir()]);
+    let ws_id = created["id"].as_str().expect("new prints the workspace id");
+    let tab = daemon.run_json(&["tab", "new", ws_id, "--cwd", &workdir()]);
+    let tab_id = tab["tab"].as_str().expect("tab new prints the tab id");
+    let first = tab["pane"].as_u64().expect("tab new prints the pane id");
+    let first_addr = format!("%{first}");
+    let split = daemon.run_json(&["split", &first_addr, "--horizontal"]);
+    let second = split["pane"]
+        .as_u64()
+        .expect("split prints the new pane id");
+
+    let tab_addr = format!("@{tab_id}");
+    daemon.run_ok(&["tab", "close", &tab_addr]);
+
+    let deadline = Instant::now() + CLOSE_WITHIN;
+    loop {
+        let listed = daemon.run_json(&["pane", "ls", "--all"]);
+        let running = listed["panes"]
+            .as_array()
+            .expect("pane ls --all prints the daemon registry");
+        let closed_are_gone = running
+            .iter()
+            .all(|pane| !matches!(pane["pane"].as_u64(), Some(id) if id == first || id == second));
+        if closed_are_gone {
+            assert_eq!(listed["orphans"].as_u64(), Some(0), "{listed}");
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "tab close left one of panes %{first} and %{second} live: {listed}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn run_streams_output_and_passes_the_exit_code(daemon: &Daemon) {

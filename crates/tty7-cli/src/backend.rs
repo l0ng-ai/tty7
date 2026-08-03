@@ -85,6 +85,7 @@ pub mod mock {
         pub procs_reply: PaneProcs,
         pub registry: Vec<PaneInfo>,
         pub killed: Vec<u64>,
+        pub kill_failures: Vec<u64>,
         pub runs: Vec<RunSpec>,
         pub run_exit: Option<i32>,
         pub events: Vec<ControlEvent>,
@@ -105,6 +106,7 @@ pub mod mock {
                 procs_reply: PaneProcs::default(),
                 registry: Vec::new(),
                 killed: Vec::new(),
+                kill_failures: Vec::new(),
                 runs: Vec::new(),
                 run_exit: Some(0),
                 events: Vec::new(),
@@ -171,6 +173,9 @@ pub mod mock {
 
         fn kill_pane(&mut self, pane: u64) -> Result<()> {
             self.killed.push(pane);
+            if self.kill_failures.contains(&pane) {
+                anyhow::bail!("mock hangup failure for pane %{pane}");
+            }
             Ok(())
         }
 
