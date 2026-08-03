@@ -70,6 +70,27 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
+    <!-- tty7 is a terminal workbench: users run shells and CLI tools inside it.
+         Declaring these TCC intent keys mirrors what kitty and Kaku ship, so the
+         forked child processes (shells, agents, mole, etc.) that touch protected
+         folders prompt once with a clear message instead of repeatedly asking
+         for access to other apps' data. -->
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>tty7 needs access to your Documents folder so shells and CLI tools run inside it can read and write files there.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>tty7 needs access to your Downloads folder so shells and CLI tools run inside it can read and write files there.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>tty7 needs access to your Desktop folder so shells and CLI tools run inside it can read and write files there.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>tty7 needs access to removable volumes so shells and CLI tools run inside it can read and write files there.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>tty7 needs access to network volumes so shells and CLI tools run inside it can read and write files there.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>tty7 needs access to your calendar data so shells and CLI tools run inside it can use it when you ask.</string>
+    <key>NSContactsUsageDescription</key>
+    <string>tty7 needs access to your contacts so shells and CLI tools run inside it can use them when you ask.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>tty7 needs permission to control other applications so scripts and CLI tools run inside it can send Apple Events.</string>
 </dict>
 </plist>
 PLIST
@@ -111,6 +132,15 @@ if [[ -n "$SIGN_ID" && -n "${APPLE_CERTIFICATE:-}" ]]; then
     <key>com.apple.security.cs.allow-jit</key><true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
     <key>com.apple.security.cs.disable-library-validation</key><true/>
+    <!-- Declare the privacy-sensitive categories the app's child processes can
+         touch, mirroring kitty/Kaku. These keys make the TCC prompt a one-time,
+         clear grant instead of a repeating "access other apps' data" dialog. -->
+    <key>com.apple.security.automation.apple-events</key><true/>
+    <key>com.apple.security.personal-information.addressbook</key><true/>
+    <key>com.apple.security.personal-information.calendars</key><true/>
+    <key>com.apple.security.personal-information.location</key><true/>
+    <key>com.apple.security.device.audio-input</key><true/>
+    <key>com.apple.security.device.camera</key><true/>
 </dict>
 </plist>
 ENT
