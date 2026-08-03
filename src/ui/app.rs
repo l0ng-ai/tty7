@@ -1938,6 +1938,41 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.install_cli_on_path = on);
     }
 
+    pub(crate) fn register_explorer_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.run_explorer_context_menu_action(true, cx);
+    }
+
+    pub(crate) fn unregister_explorer_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.run_explorer_context_menu_action(false, cx);
+    }
+
+    fn run_explorer_context_menu_action(&mut self, register: bool, cx: &mut Context<Self>) {
+        // Registry operations are tiny and synchronous. Keeping the action on
+        // the UI thread also makes the displayed status correspond to the
+        // completed write, without a task racing a closed Settings window.
+        let result = if register {
+            crate::core::explorer_context_menu::register()
+        } else {
+            crate::core::explorer_context_menu::unregister()
+        };
+        let note = match result {
+            Ok(()) if register => {
+                "Registered. Right-click a folder or folder background in Explorer to open it in tty7."
+                    .to_string()
+            }
+            Ok(()) => "Unregistered from Windows Explorer.".to_string(),
+            Err(error) if register => format!("Could not register: {error}"),
+            Err(error) => format!("Could not unregister: {error}"),
+        };
+        let status =
+            crate::core::explorer_context_menu::status().map_err(|error| error.to_string());
+        if let Some(settings) = self.settings.as_mut() {
+            settings.explorer_context_menu_status = status;
+            settings.explorer_context_menu_note = Some(note);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn set_dim_inactive_panes(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.dim_inactive_panes = on);
     }
@@ -3547,6 +3582,9 @@ impl Tty7App {
             theme_search,
             recording: None,
             rebinding_note: None,
+            explorer_context_menu_status: crate::core::explorer_context_menu::status()
+                .map_err(|error| error.to_string()),
+            explorer_context_menu_note: None,
             ssh_form: None,
             ssh_detail: crate::ui::settings::SshDetail::None,
             ssh_filter,

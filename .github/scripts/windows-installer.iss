@@ -176,8 +176,27 @@ begin
     RegWriteStringValue(HKEY_CURRENT_USER, 'Environment', 'Path', Rebuilt);
 end;
 
+(* Remove the optional Explorer verbs if this user enabled them in Settings.
+
+  The application owns only the final `tty7` subkeys. Deleting those trees
+  removes their command children without touching another application's verb
+  or a shared `shell` parent. Missing keys are the normal default and make both
+  calls harmless no-ops. This cleanup is uninstall-only: upgrades keep the
+  user's explicit registration, and the next app launch reports "Needs update"
+  if an install path ever changes. *)
+procedure RemoveExplorerContextMenu();
+begin
+  RegDeleteKeyIncludingSubkeys(
+    HKEY_CURRENT_USER, 'Software\Classes\Directory\shell\tty7');
+  RegDeleteKeyIncludingSubkeys(
+    HKEY_CURRENT_USER, 'Software\Classes\Directory\Background\shell\tty7');
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
+  begin
     RemoveAppDirFromUserPath();
+    RemoveExplorerContextMenu();
+  end;
 end;

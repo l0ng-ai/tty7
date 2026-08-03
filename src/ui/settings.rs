@@ -378,6 +378,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             title: "Command line tool",
             keywords: "cli tty7 path shell command install symlink terminal iterm agent script",
         },
+        SearchEntry {
+            section: About,
+            title: "Windows Explorer context menu",
+            keywords: "windows explorer right click folder directory background shell menu register unregister open here",
+        },
     ]
 }
 
@@ -429,6 +434,9 @@ pub(crate) struct SettingsState {
     pub(crate) theme_search: Entity<InputState>,
     pub(crate) recording: Option<Recording>,
     pub(crate) rebinding_note: Option<String>,
+    pub(crate) explorer_context_menu_status:
+        Result<crate::core::explorer_context_menu::Status, String>,
+    pub(crate) explorer_context_menu_note: Option<String>,
     pub(crate) ssh_form: Option<SshProfileForm>,
     pub(crate) ssh_detail: SshDetail,
     pub(crate) ssh_filter: Entity<InputState>,
@@ -4497,7 +4505,12 @@ impl Tty7App {
 
     fn render_settings_about(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (foreground, muted_fg) = (theme.foreground, theme.muted_foreground);
+        let (foreground, muted_fg, success, warning) = (
+            theme.foreground,
+            theme.muted_foreground,
+            theme.success,
+            theme.warning,
+        );
 
         let update_status = cx
             .try_global::<crate::core::update::UpdateStatus>()
@@ -4526,6 +4539,40 @@ impl Tty7App {
         };
         let check_for_updates = cx.global::<Config>().check_for_updates;
         let install_cli_on_path = cx.global::<Config>().install_cli_on_path;
+        let (explorer_status, explorer_note) = self
+            .active_settings()
+            .map(|settings| {
+                (
+                    settings.explorer_context_menu_status.clone(),
+                    settings.explorer_context_menu_note.clone(),
+                )
+            })
+            .unwrap_or((
+                Ok(crate::core::explorer_context_menu::Status::Unsupported),
+                None,
+            ));
+        let (
+            explorer_status_text,
+            explorer_status_color,
+            register_label,
+            register_disabled,
+            unregister_disabled,
+        ) = match explorer_status.as_ref() {
+            Ok(crate::core::explorer_context_menu::Status::NotRegistered) => {
+                ("Not registered", muted_fg, "Register", false, true)
+            }
+            Ok(crate::core::explorer_context_menu::Status::Registered) => {
+                ("Registered", success, "Register", true, false)
+            }
+            Ok(crate::core::explorer_context_menu::Status::NeedsUpdate) => {
+                ("Needs update", warning, "Update", false, false)
+            }
+            Ok(crate::core::explorer_context_menu::Status::Unsupported) => {
+                ("Unavailable", muted_fg, "Register", true, true)
+            }
+            Err(_) => ("Status unavailable", warning, "Register", false, false),
+        };
+        let explorer_feedback = explorer_note.or_else(|| explorer_status.err());
 
         let logo = Arc::new(Image::from_bytes(
             ImageFormat::Png,
@@ -4667,6 +4714,69 @@ impl Tty7App {
                             ),
                     ),
             )
+            .when(cfg!(windows), |page| {
+                page.child(
+                    v_flex()
+                        .mt_6()
+                        .gap_2()
+                        .child(self.section_rule(cx))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(foreground)
+                                .child("Windows Explorer"),
+                        )
+                        .child(div().text_sm().text_color(muted_fg).child(
+                            "Add “Open in tty7” when you right-click a folder and “Open tty7 here” when you right-click a folder background. This is off by default and is registered only for your Windows account.",
+                        ))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(div().size_2().rounded_full().bg(explorer_status_color))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(foreground)
+                                        .child(explorer_status_text),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("explorer-menu-register")
+                                        .label(register_label)
+                                        .small()
+                                        .disabled(register_disabled)
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.register_explorer_context_menu(cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("explorer-menu-unregister")
+                                        .label("Unregister")
+                                        .small()
+                                        .disabled(unregister_disabled)
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.unregister_explorer_context_menu(cx)
+                                        })),
+                                ),
+                        )
+                        .when_some(explorer_feedback, |section, message| {
+                            section.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted_fg)
+                                    .child(message),
+                            )
+                        })
+                        .child(div().text_xs().text_color(muted_fg).child(
+                            "On Windows 11, classic shell entries may appear under “Show more options”.",
+                        )),
+                )
+            })
             .child(
                 v_flex()
                     .mt_6()
@@ -4795,6 +4905,7 @@ mod tests {
             ("bell", Terminal),
             ("known_hosts", Ssh),
             ("claude", Agents),
+            ("right click", About),
         ];
         for (query, expected) in cases {
             assert_eq!(
