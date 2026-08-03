@@ -115,8 +115,41 @@ pub struct AvailableUpdate {
     pub channel: UpdateChannel,
     pub channel_switch: bool,
     pub installable: bool,
-    pub install_hint: Option<String>,
+    pub install_hint: Option<UpdateInstallHint>,
     asset: Option<ReleaseAsset>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateInstallHint {
+    #[cfg(target_os = "macos")]
+    UnsupportedMacos,
+    #[cfg(target_os = "linux")]
+    UnsupportedLinux,
+    #[cfg(target_os = "windows")]
+    UnsupportedWindows,
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    UnsupportedPlatform,
+    MissingPackage(String),
+    MissingChecksums,
+}
+
+impl UpdateInstallHint {
+    fn english(&self) -> String {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::UnsupportedMacos => "This copy is not running from a writable tty7.app bundle, so replacing it would be unsafe. Move tty7 to Applications or another writable folder, or open the release page to install the update.".to_string(),
+            #[cfg(target_os = "linux")]
+            Self::UnsupportedLinux => "The first in-app updater supports packaged macOS app bundles. Use the release page or your package manager to update this Linux installation.".to_string(),
+            #[cfg(target_os = "windows")]
+            Self::UnsupportedWindows => "Automatic Windows updates are available for recognized Inno Setup and portable ZIP installations. This copy is missing a valid installation marker, updater, or writable portable directory, so open the release page to update it manually.".to_string(),
+            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+            Self::UnsupportedPlatform => "Automatic installation is not available on this platform. Open the release page.".to_string(),
+            Self::MissingPackage(name) => format!(
+                "The release has no {name} package for this installation. Open the release page to choose another package."
+            ),
+            Self::MissingChecksums => "The release has no checksums.txt, so tty7 refuses to install it automatically.".to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -127,7 +160,14 @@ pub enum UpdatePhase {
     UpToDate,
     Downloading,
     Installing,
-    Failed(String),
+    Failed(UpdateFailure),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateFailure {
+    Check(String),
+    Prepare(String),
+    Launch(String),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -193,12 +233,12 @@ fn spawn_check_inner(report_failure: bool, intent: UpdateCheckIntent, cx: &mut A
             Err(e) => {
                 log::debug!("update check skipped: {e:#}");
                 if report_failure {
-                    let message = format!("Could not check for updates: {e:#}");
+                    let detail = format!("{e:#}");
                     cx.update(|cx| {
                         set_status(
                             UpdateStatus {
                                 available: previous_available,
-                                phase: UpdatePhase::Failed(message),
+                                phase: UpdatePhase::Failed(UpdateFailure::Check(detail)),
                             },
                             cx,
                         )
@@ -301,12 +341,12 @@ async fn wait_for_window(cx: &mut AsyncApp) -> Option<AnyWindowHandle> {
 }
 
 fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
+    let install_hint = update.install_hint.as_ref().map(UpdateInstallHint::english);
     let detail = if update.channel_switch {
         let install = if update.installable {
             "tty7 can download the verified release, install it, and restart the app."
         } else {
-            update
-                .install_hint
+            install_hint
                 .as_deref()
                 .unwrap_or("This installation cannot update itself.")
         };
@@ -318,8 +358,7 @@ fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
             install
         )
     } else if update.installable {
-        let note = update
-            .install_hint
+        let note = install_hint
             .as_deref()
             .map(|note| format!(" {note}"))
             .unwrap_or_default();
@@ -334,8 +373,7 @@ fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
             "tty7 {} is available — you're on {}. {}",
             update.version,
             env!("CARGO_PKG_VERSION"),
-            update
-                .install_hint
+            install_hint
                 .as_deref()
                 .unwrap_or("This installation cannot update itself.")
         )
@@ -415,13 +453,13 @@ fn install(update: AvailableUpdate, cx: &mut App) {
         let prepared = match task.await {
             Ok(prepared) => prepared,
             Err(error) => {
-                let message = format!("Update failed: {error:#}");
-                log::error!("{message}");
+                let detail = format!("{error:#}");
+                log::error!("update failed: {detail}");
                 cx.update(|cx| {
                     set_status(
                         UpdateStatus {
                             available: Some(update),
-                            phase: UpdatePhase::Failed(message),
+                            phase: UpdatePhase::Failed(UpdateFailure::Prepare(detail)),
                         },
                         cx,
                     )
@@ -444,13 +482,13 @@ fn install(update: AvailableUpdate, cx: &mut App) {
                 let _ = cx.update(|cx| cx.quit());
             }
             Err(error) => {
-                let message = format!("Could not start the installer: {error:#}");
-                log::error!("{message}");
+                let detail = format!("{error:#}");
+                log::error!("could not start the installer: {detail}");
                 cx.update(|cx| {
                     set_status(
                         UpdateStatus {
                             available: Some(update),
-                            phase: UpdatePhase::Failed(message),
+                            phase: UpdatePhase::Failed(UpdateFailure::Launch(detail)),
                         },
                         cx,
                     )
@@ -660,7 +698,7 @@ struct ReleaseAsset {
 
 struct AssetSelection {
     asset: Option<ReleaseAsset>,
-    reason: Option<String>,
+    reason: Option<UpdateInstallHint>,
 }
 
 fn select_release_asset(version: &str, assets: &[GitHubAsset]) -> AssetSelection {
@@ -677,19 +715,13 @@ fn select_release_asset_for(package: Option<String>, assets: &[GitHubAsset]) -> 
     let Some(asset) = assets.iter().find(|asset| asset.name == name) else {
         return AssetSelection {
             asset: None,
-            reason: Some(format!(
-                "The release has no {name} package for this installation. Open the release page \
-                 to choose another package."
-            )),
+            reason: Some(UpdateInstallHint::MissingPackage(name)),
         };
     };
     let Some(checksums) = assets.iter().find(|asset| asset.name == "checksums.txt") else {
         return AssetSelection {
             asset: None,
-            reason: Some(
-                "The release has no checksums.txt, so tty7 refuses to install it automatically."
-                    .to_string(),
-            ),
+            reason: Some(UpdateInstallHint::MissingChecksums),
         };
     };
     AssetSelection {
@@ -735,29 +767,23 @@ fn package_for_current_install(version: &str) -> Option<String> {
     None
 }
 
-fn unsupported_install_reason() -> String {
+fn unsupported_install_reason() -> UpdateInstallHint {
     #[cfg(target_os = "macos")]
     {
-        return "This copy is not running from a writable tty7.app bundle, so replacing it would be \
-                unsafe. Move tty7 to Applications or another writable folder, or open the release \
-                page to install the update."
-            .to_string();
+        return UpdateInstallHint::UnsupportedMacos;
     }
     #[cfg(target_os = "linux")]
     {
-        return "The first in-app updater supports packaged macOS app bundles. Use the release page \
-                or your package manager to update this Linux installation."
-            .to_string();
+        return UpdateInstallHint::UnsupportedLinux;
     }
     #[cfg(target_os = "windows")]
     {
-        return "Automatic Windows updates are available for recognized Inno Setup and portable \
-                ZIP installations. This copy is missing a valid installation marker, updater, or \
-                writable portable directory, so open the release page to update it manually."
-            .to_string();
+        return UpdateInstallHint::UnsupportedWindows;
     }
-    #[allow(unreachable_code)]
-    "Automatic installation is not available on this platform. Open the release page.".to_string()
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        UpdateInstallHint::UnsupportedPlatform
+    }
 }
 
 fn prepare_update(version: &str, asset: &ReleaseAsset) -> Result<PreparedUpdate> {
@@ -1166,12 +1192,7 @@ mod tests {
         let name = "tty7-27.1.0-macos-arm64.zip";
         let selected = select_release_asset_for(Some(name.to_string()), &[github_asset(name)]);
         assert!(selected.asset.is_none());
-        assert!(
-            selected
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("checksums.txt"))
-        );
+        assert_eq!(selected.reason, Some(UpdateInstallHint::MissingChecksums));
     }
 
     #[test]
@@ -1184,11 +1205,11 @@ mod tests {
             ],
         );
         assert!(selected.asset.is_none());
-        assert!(
-            selected
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("macos-arm64"))
+        assert_eq!(
+            selected.reason,
+            Some(UpdateInstallHint::MissingPackage(
+                "tty7-27.1.0-macos-arm64.zip".to_string()
+            ))
         );
     }
 

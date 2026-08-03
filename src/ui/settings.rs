@@ -109,6 +109,62 @@ impl ExplorerContextMenuNote {
     }
 }
 
+fn localized_update_channel(channel: crate::core::update::UpdateChannel) -> &'static str {
+    match channel {
+        crate::core::update::UpdateChannel::Stable => t(L10nKey::SettingsUpdateChannelStable),
+        crate::core::update::UpdateChannel::Nightly => t(L10nKey::SettingsUpdateChannelNightly),
+    }
+}
+
+fn localized_update_phase(phase: &crate::core::update::UpdatePhase) -> Option<String> {
+    use crate::core::update::{UpdateFailure, UpdatePhase};
+
+    match phase {
+        UpdatePhase::Idle => None,
+        UpdatePhase::Checking => Some(t(L10nKey::SettingsUpdateChecking).to_string()),
+        UpdatePhase::UpToDate => Some(t(L10nKey::SettingsUpdateUpToDate).to_string()),
+        UpdatePhase::Downloading => Some(t(L10nKey::SettingsUpdateDownloading).to_string()),
+        UpdatePhase::Installing => Some(t(L10nKey::SettingsUpdateInstalling).to_string()),
+        UpdatePhase::Failed(failure) => {
+            let (key, error) = match failure {
+                UpdateFailure::Check(error) => (L10nKey::SettingsUpdateCheckFailed, error),
+                UpdateFailure::Prepare(error) => (L10nKey::SettingsUpdatePrepareFailed, error),
+                UpdateFailure::Launch(error) => (L10nKey::SettingsUpdateLaunchFailed, error),
+            };
+            Some(t_fmt(key, &[("error", error)]))
+        }
+    }
+}
+
+fn localized_update_install_hint(hint: &crate::core::update::UpdateInstallHint) -> String {
+    use crate::core::update::UpdateInstallHint;
+
+    match hint {
+        #[cfg(target_os = "macos")]
+        UpdateInstallHint::UnsupportedMacos => {
+            t(L10nKey::SettingsUpdateUnsupportedMacos).to_string()
+        }
+        #[cfg(target_os = "linux")]
+        UpdateInstallHint::UnsupportedLinux => {
+            t(L10nKey::SettingsUpdateUnsupportedLinux).to_string()
+        }
+        #[cfg(target_os = "windows")]
+        UpdateInstallHint::UnsupportedWindows => {
+            t(L10nKey::SettingsUpdateUnsupportedWindows).to_string()
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        UpdateInstallHint::UnsupportedPlatform => {
+            t(L10nKey::SettingsUpdateUnsupportedPlatform).to_string()
+        }
+        UpdateInstallHint::MissingPackage(name) => {
+            t_fmt(L10nKey::SettingsUpdateMissingPackage, &[("name", name)])
+        }
+        UpdateInstallHint::MissingChecksums => {
+            t(L10nKey::SettingsUpdateMissingChecksums).to_string()
+        }
+    }
+}
+
 fn settings_search_entries() -> &'static [SearchEntry] {
     use L10nKey::*;
     use SettingsSection::*;
@@ -4662,20 +4718,7 @@ impl Tty7App {
                 | crate::core::update::UpdatePhase::Downloading
                 | crate::core::update::UpdatePhase::Installing
         );
-        let phase_text = match &update_status.phase {
-            crate::core::update::UpdatePhase::Idle => None,
-            crate::core::update::UpdatePhase::Checking => Some("Checking for updates…".to_string()),
-            crate::core::update::UpdatePhase::UpToDate => {
-                Some("You're running the latest version.".to_string())
-            }
-            crate::core::update::UpdatePhase::Downloading => {
-                Some("Downloading and verifying the update…".to_string())
-            }
-            crate::core::update::UpdatePhase::Installing => {
-                Some("Relaunching with the update…".to_string())
-            }
-            crate::core::update::UpdatePhase::Failed(message) => Some(message.clone()),
-        };
+        let phase_text = localized_update_phase(&update_status.phase);
         let check_for_updates = cx.global::<Config>().check_for_updates;
         let install_cli_on_path = cx.global::<Config>().install_cli_on_path;
         let (explorer_status, explorer_note) = self
@@ -4812,15 +4855,16 @@ impl Tty7App {
                         h_flex()
                             .gap_3()
                             .items_center()
-                            .child(
-                                div().text_sm().text_color(foreground).child(format!(
-                                    "Current channel: {}",
-                                    current_update_channel.label()
-                                )),
-                            )
+                            .child(div().text_sm().text_color(foreground).child(t_fmt(
+                                L10nKey::SettingsUpdateCurrentChannel,
+                                &[("channel", localized_update_channel(current_update_channel))],
+                            )))
                             .child(
                                 Button::new("switch-update-channel")
-                                    .label(format!("Switch to {}", switch_target.label()))
+                                    .label(t_fmt(
+                                        L10nKey::SettingsUpdateSwitchTo,
+                                        &[("channel", localized_update_channel(switch_target))],
+                                    ))
                                     .small()
                                     .disabled(update_busy || channel_switch_pending)
                                     .on_click(cx.listener(move |_, _, _window, cx| {
@@ -4830,20 +4874,28 @@ impl Tty7App {
                     )
                     .when_some(update, |this, upd| {
                         let button_label = if upd.channel_switch && upd.installable {
-                            format!("Switch to {} and Relaunch", upd.channel.label())
+                            t_fmt(
+                                L10nKey::SettingsUpdateSwitchAndRelaunch,
+                                &[("channel", localized_update_channel(upd.channel))],
+                            )
                         } else if upd.installable {
-                            "Update and Relaunch".to_string()
+                            t(L10nKey::SettingsUpdateAndRelaunch).to_string()
                         } else {
-                            "View Release".to_string()
+                            t(L10nKey::SettingsUpdateViewRelease).to_string()
                         };
                         let availability = if upd.channel_switch {
-                            format!(
-                                "Version {} is the latest {} release.",
-                                upd.version,
-                                upd.channel.label()
+                            t_fmt(
+                                L10nKey::SettingsUpdateLatestChannelRelease,
+                                &[
+                                    ("version", &upd.version),
+                                    ("channel", localized_update_channel(upd.channel)),
+                                ],
                             )
                         } else {
-                            format!("Version {} is available.", upd.version)
+                            t_fmt(
+                                L10nKey::SettingsVersionAvailable,
+                                &[("version", &upd.version)],
+                            )
                         };
                         this.child(
                             v_flex()
@@ -4869,27 +4921,37 @@ impl Tty7App {
                                         ),
                                 )
                                 .when_some(upd.install_hint, |this, hint| {
-                                    this.child(div().text_xs().text_color(muted_fg).child(hint))
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted_fg)
+                                            .child(localized_update_install_hint(&hint)),
+                                    )
                                 }),
                         )
                     })
                     .when_some(phase_text, |this, text| {
                         this.child(div().text_sm().text_color(muted_fg).child(text))
                     })
-                    .child(div().text_sm().text_color(muted_fg).child(
-                        "tty7 follows the current build's update channel automatically. You can explicitly switch between Stable and Nightly; packaged macOS and Windows installations update without opening a browser, while Linux and unsupported layouts fall back to the target release page.",
-                    ))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted_fg)
+                            .child(t(L10nKey::SettingsCheckUpdatesDesc)),
+                    )
                     .child(
                         h_flex().child(
                             Button::new("check-update-now")
-                                .label(if matches!(
-                                    update_status.phase,
-                                    crate::core::update::UpdatePhase::Checking
-                                ) {
-                                    "Checking…"
-                                } else {
-                                    "Check Now"
-                                })
+                                .label(
+                                    if matches!(
+                                        update_status.phase,
+                                        crate::core::update::UpdatePhase::Checking
+                                    ) {
+                                        t(L10nKey::SettingsUpdateChecking)
+                                    } else {
+                                        t(L10nKey::SettingsUpdateCheckNow)
+                                    },
+                                )
                                 .small()
                                 .disabled(update_busy)
                                 .on_click(cx.listener(|_, _, _window, cx| {
@@ -4970,12 +5032,7 @@ impl Tty7App {
                                 ),
                         )
                         .when_some(explorer_feedback, |section, message| {
-                            section.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted_fg)
-                                    .child(message),
-                            )
+                            section.child(div().text_xs().text_color(muted_fg).child(message))
                         })
                         .child(
                             div()
