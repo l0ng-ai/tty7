@@ -36,6 +36,10 @@ use crate::ui::presets;
 use crate::ui::rounding;
 use crate::ui::rounding::RoundedCorners as _;
 
+fn settings_row_id(label: &str, _desc: &str) -> SharedString {
+    SharedString::from(format!("settings-row-{label}"))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsSection {
     Appearance,
@@ -161,7 +165,7 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         SearchEntry {
             section: Terminal,
             title: "Program",
-            keywords: "shell binary zsh bash fish pwsh powershell executable launch",
+            keywords: "shell binary zsh bash fish nu nushell pwsh powershell executable launch",
         },
         SearchEntry {
             section: Terminal,
@@ -374,6 +378,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             title: "Command line tool",
             keywords: "cli tty7 path shell command install symlink terminal iterm agent script",
         },
+        SearchEntry {
+            section: About,
+            title: "Windows Explorer context menu",
+            keywords: "windows explorer right click folder directory background shell menu register unregister open here",
+        },
     ]
 }
 
@@ -425,6 +434,9 @@ pub(crate) struct SettingsState {
     pub(crate) theme_search: Entity<InputState>,
     pub(crate) recording: Option<Recording>,
     pub(crate) rebinding_note: Option<String>,
+    pub(crate) explorer_context_menu_status:
+        Result<crate::core::explorer_context_menu::Status, String>,
+    pub(crate) explorer_context_menu_note: Option<String>,
     pub(crate) ssh_form: Option<SshProfileForm>,
     pub(crate) ssh_detail: SshDetail,
     pub(crate) ssh_filter: Entity<InputState>,
@@ -958,10 +970,15 @@ impl Tty7App {
         desc: impl Into<String>,
         control: AnyElement,
         cx: &Context<Self>,
-    ) -> Div {
+    ) -> Stateful<Div> {
         let theme = cx.theme();
+        let label = label.into();
         let desc = desc.into();
+        // Descriptions can contain live status (for example an agent hook target), so they
+        // must not participate in the identity that preserves GPUI's hover state.
+        let element_id = settings_row_id(&label, &desc);
         h_flex()
+            .id(element_id)
             .items_center()
             .justify_between()
             .gap_8()
@@ -970,6 +987,7 @@ impl Tty7App {
             .mx_neg_2p5()
             .rounded_lg()
             .hover(|h| h.bg(gpui::rgb(cx.global::<presets::Surfaces>().window.hover)))
+            .on_hover(cx.listener(|_this, _hovered, _window, cx| cx.notify()))
             .child(
                 v_flex()
                     .gap_0p5()
@@ -979,7 +997,7 @@ impl Tty7App {
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.foreground)
-                            .child(label.into()),
+                            .child(label),
                     )
                     .when(!desc.is_empty(), |col| {
                         col.child(
@@ -3247,7 +3265,7 @@ impl Tty7App {
             ))
             .child(self.settings_row(
                 "Program",
-                "Executable name on PATH or an absolute path. e.g. zsh, fish, pwsh.",
+                "Executable name on PATH or an absolute path. e.g. zsh, fish, nu, pwsh.",
                 program_control,
                 cx,
             ))
@@ -4487,13 +4505,74 @@ impl Tty7App {
 
     fn render_settings_about(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (foreground, muted_fg) = (theme.foreground, theme.muted_foreground);
+        let (foreground, muted_fg, success, warning) = (
+            theme.foreground,
+            theme.muted_foreground,
+            theme.success,
+            theme.warning,
+        );
 
-        let update = cx
+        let update_status = cx
             .try_global::<crate::core::update::UpdateStatus>()
-            .and_then(|s| s.available.clone());
+            .cloned()
+            .unwrap_or_default();
+        let update = update_status.available.clone();
+        let update_busy = matches!(
+            update_status.phase,
+            crate::core::update::UpdatePhase::Checking
+                | crate::core::update::UpdatePhase::Downloading
+                | crate::core::update::UpdatePhase::Installing
+        );
+        let phase_text = match &update_status.phase {
+            crate::core::update::UpdatePhase::Idle => None,
+            crate::core::update::UpdatePhase::Checking => Some("Checking for updates…".to_string()),
+            crate::core::update::UpdatePhase::UpToDate => {
+                Some("You're running the latest version.".to_string())
+            }
+            crate::core::update::UpdatePhase::Downloading => {
+                Some("Downloading and verifying the update…".to_string())
+            }
+            crate::core::update::UpdatePhase::Installing => {
+                Some("Relaunching with the update…".to_string())
+            }
+            crate::core::update::UpdatePhase::Failed(message) => Some(message.clone()),
+        };
         let check_for_updates = cx.global::<Config>().check_for_updates;
         let install_cli_on_path = cx.global::<Config>().install_cli_on_path;
+        let (explorer_status, explorer_note) = self
+            .active_settings()
+            .map(|settings| {
+                (
+                    settings.explorer_context_menu_status.clone(),
+                    settings.explorer_context_menu_note.clone(),
+                )
+            })
+            .unwrap_or((
+                Ok(crate::core::explorer_context_menu::Status::Unsupported),
+                None,
+            ));
+        let (
+            explorer_status_text,
+            explorer_status_color,
+            register_label,
+            register_disabled,
+            unregister_disabled,
+        ) = match explorer_status.as_ref() {
+            Ok(crate::core::explorer_context_menu::Status::NotRegistered) => {
+                ("Not registered", muted_fg, "Register", false, true)
+            }
+            Ok(crate::core::explorer_context_menu::Status::Registered) => {
+                ("Registered", success, "Register", true, false)
+            }
+            Ok(crate::core::explorer_context_menu::Status::NeedsUpdate) => {
+                ("Needs update", warning, "Update", false, false)
+            }
+            Ok(crate::core::explorer_context_menu::Status::Unsupported) => {
+                ("Unavailable", muted_fg, "Register", true, true)
+            }
+            Err(_) => ("Status unavailable", warning, "Register", false, false),
+        };
+        let explorer_feedback = explorer_note.or_else(|| explorer_status.err());
 
         let logo = Arc::new(Image::from_bytes(
             ImageFormat::Png,
@@ -4562,26 +4641,60 @@ impl Tty7App {
                             .child("Updates"),
                     )
                     .when_some(update, |this, upd| {
+                        let button_label = if upd.installable {
+                            "Update and Relaunch"
+                        } else {
+                            "View Release"
+                        };
                         this.child(
-                            h_flex()
-                                .gap_3()
-                                .items_center()
-                                .child(div().text_sm().text_color(foreground).child(
-                                    format!("Version {} is available.", upd.version),
-                                ))
+                            v_flex()
+                                .gap_1()
                                 .child(
-                                    Button::new("download-update")
-                                        .label("Download")
-                                        .small()
-                                        .on_click(cx.listener(|this, _, _w, _cx| {
-                                            this.open_releases_page()
-                                        })),
-                                ),
+                                    h_flex()
+                                        .gap_3()
+                                        .items_center()
+                                        .child(div().text_sm().text_color(foreground).child(
+                                            format!("Version {} is available.", upd.version),
+                                        ))
+                                        .child(
+                                            Button::new("install-update")
+                                                .label(button_label)
+                                                .small()
+                                                .disabled(update_busy)
+                                                .on_click(cx.listener(|_, _, _window, cx| {
+                                                    crate::core::update::install_available(cx)
+                                                })),
+                                        ),
+                                )
+                                .when_some(upd.install_hint, |this, hint| {
+                                    this.child(div().text_xs().text_color(muted_fg).child(hint))
+                                }),
                         )
                     })
+                    .when_some(phase_text, |this, text| {
+                        this.child(div().text_sm().text_color(muted_fg).child(text))
+                    })
                     .child(div().text_sm().text_color(muted_fg).child(
-                        "Check GitHub for a newer release on launch and show it here. tty7 never updates itself — downloading happens on the Releases page.",
+                        "tty7 checks stable releases and can update packaged macOS app bundles without opening a browser. A dedicated helper verifies checksums, version, and code signing before replacement, then relaunches the GUI. Compatible servers and shells stay running; if the wire protocol changed, tty7 asks whether to restart the server after relaunch. Other platforms and unsupported layouts fall back to the release page.",
                     ))
+                    .child(
+                        h_flex().child(
+                            Button::new("check-update-now")
+                                .label(if matches!(
+                                    update_status.phase,
+                                    crate::core::update::UpdatePhase::Checking
+                                ) {
+                                    "Checking…"
+                                } else {
+                                    "Check Now"
+                                })
+                                .small()
+                                .disabled(update_busy)
+                                .on_click(cx.listener(|_, _, _window, cx| {
+                                    crate::core::update::spawn_check_forced(cx)
+                                })),
+                        ),
+                    )
                     .child(
                         h_flex()
                             .gap_2()
@@ -4601,6 +4714,69 @@ impl Tty7App {
                             ),
                     ),
             )
+            .when(cfg!(windows), |page| {
+                page.child(
+                    v_flex()
+                        .mt_6()
+                        .gap_2()
+                        .child(self.section_rule(cx))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(foreground)
+                                .child("Windows Explorer"),
+                        )
+                        .child(div().text_sm().text_color(muted_fg).child(
+                            "Add “Open in tty7” when you right-click a folder and “Open tty7 here” when you right-click a folder background. This is off by default and is registered only for your Windows account.",
+                        ))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(div().size_2().rounded_full().bg(explorer_status_color))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(foreground)
+                                        .child(explorer_status_text),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("explorer-menu-register")
+                                        .label(register_label)
+                                        .small()
+                                        .disabled(register_disabled)
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.register_explorer_context_menu(cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("explorer-menu-unregister")
+                                        .label("Unregister")
+                                        .small()
+                                        .disabled(unregister_disabled)
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.unregister_explorer_context_menu(cx)
+                                        })),
+                                ),
+                        )
+                        .when_some(explorer_feedback, |section, message| {
+                            section.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted_fg)
+                                    .child(message),
+                            )
+                        })
+                        .child(div().text_xs().text_color(muted_fg).child(
+                            "On Windows 11, classic shell entries may appear under “Show more options”.",
+                        )),
+                )
+            })
             .child(
                 v_flex()
                     .mt_6()
@@ -4670,6 +4846,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn settings_row_identity_depends_only_on_its_stable_label() {
+        assert_eq!(
+            settings_row_id("Claude Code", "Installingâ€¦"),
+            settings_row_id("Claude Code", "Installed in C:\\tools")
+        );
+        assert_ne!(
+            settings_row_id("Claude Code", "Installed"),
+            settings_row_id("Codex", "Installed")
+        );
+    }
+
+    #[test]
     fn every_section_has_search_entries() {
         for section in SettingsSection::ALL {
             let n = settings_search_entries()
@@ -4712,10 +4900,12 @@ mod tests {
             ("grouping", WindowTabs),
             ("threshold", WindowTabs),
             ("report mouse", Terminal),
+            ("nushell", Terminal),
             ("open files with", Terminal),
             ("bell", Terminal),
             ("known_hosts", Ssh),
             ("claude", Agents),
+            ("right click", About),
         ];
         for (query, expected) in cases {
             assert_eq!(

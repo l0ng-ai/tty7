@@ -439,6 +439,15 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::for_workspace_at(id, None, window, cx)
+    }
+
+    pub fn for_workspace_at(
+        id: Option<WorkspaceId>,
+        initial_cwd: Option<std::path::PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let restore = cx.global::<Config>().restore_session;
         let known = id.is_some_and(|id| WorkspaceStore::all(cx).get(id).is_some());
         let workspace = WorkspaceStore::claim(cx, id);
@@ -447,7 +456,7 @@ impl Tty7App {
             .is_some_and(|w| w.is_remote());
         let hydrate = known && (restore || is_remote);
         let session = hydrate.then(Session::default);
-        let app = Self::with_session(Some(workspace), session, window, cx);
+        let app = Self::with_session_at(Some(workspace), session, initial_cwd, window, cx);
         if hydrate {
             crate::ui::tree_sync::hydrate_window_from_tree(cx, workspace);
         } else {
@@ -505,6 +514,16 @@ impl Tty7App {
     pub(crate) fn with_session(
         workspace: Option<WorkspaceId>,
         session: Option<Session>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_session_at(workspace, session, None, window, cx)
+    }
+
+    fn with_session_at(
+        workspace: Option<WorkspaceId>,
+        session: Option<Session>,
+        initial_cwd: Option<std::path::PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -594,7 +613,7 @@ impl Tty7App {
                 pane_ws.clone(),
                 Some(workspace),
                 font_size,
-                None,
+                initial_cwd,
                 None,
                 None,
                 window,
@@ -1919,6 +1938,41 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.install_cli_on_path = on);
     }
 
+    pub(crate) fn register_explorer_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.run_explorer_context_menu_action(true, cx);
+    }
+
+    pub(crate) fn unregister_explorer_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.run_explorer_context_menu_action(false, cx);
+    }
+
+    fn run_explorer_context_menu_action(&mut self, register: bool, cx: &mut Context<Self>) {
+        // Registry operations are tiny and synchronous. Keeping the action on
+        // the UI thread also makes the displayed status correspond to the
+        // completed write, without a task racing a closed Settings window.
+        let result = if register {
+            crate::core::explorer_context_menu::register()
+        } else {
+            crate::core::explorer_context_menu::unregister()
+        };
+        let note = match result {
+            Ok(()) if register => {
+                "Registered. Right-click a folder or folder background in Explorer to open it in tty7."
+                    .to_string()
+            }
+            Ok(()) => "Unregistered from Windows Explorer.".to_string(),
+            Err(error) if register => format!("Could not register: {error}"),
+            Err(error) => format!("Could not unregister: {error}"),
+        };
+        let status =
+            crate::core::explorer_context_menu::status().map_err(|error| error.to_string());
+        if let Some(settings) = self.settings.as_mut() {
+            settings.explorer_context_menu_status = status;
+            settings.explorer_context_menu_note = Some(note);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn set_dim_inactive_panes(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.dim_inactive_panes = on);
     }
@@ -2209,8 +2263,32 @@ impl Tty7App {
         self.new_tab_with_shell(None, window, cx);
     }
 
+    pub(crate) fn new_tab_at(
+        &mut self,
+        cwd: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.new_tab_with_cwd(Some(cwd), None, window, cx);
+    }
+
     pub(crate) fn new_tab_with_shell(
         &mut self,
+        shell: Option<ShellSpec>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cwd = self.tabs.get(self.active).and_then(|t| {
+            t.pane
+                .focused_or_first(window, cx)
+                .and_then(|leaf| leaf.read(cx).spawnable_cwd())
+        });
+        self.new_tab_with_cwd(cwd, shell, window, cx);
+    }
+
+    fn new_tab_with_cwd(
+        &mut self,
+        cwd: Option<std::path::PathBuf>,
         shell: Option<ShellSpec>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2218,11 +2296,6 @@ impl Tty7App {
         if !self.guard_local_spawn(window, cx) {
             return;
         }
-        let cwd = self.tabs.get(self.active).and_then(|t| {
-            t.pane
-                .focused_or_first(window, cx)
-                .and_then(|leaf| leaf.read(cx).spawnable_cwd())
-        });
         let pane_ws = self.window_workspace(cx);
         let tab = match new_terminal(
             pane_ws,
@@ -3509,6 +3582,9 @@ impl Tty7App {
             theme_search,
             recording: None,
             rebinding_note: None,
+            explorer_context_menu_status: crate::core::explorer_context_menu::status()
+                .map_err(|error| error.to_string()),
+            explorer_context_menu_note: None,
             ssh_form: None,
             ssh_detail: crate::ui::settings::SshDetail::None,
             ssh_filter,
@@ -4003,13 +4079,17 @@ impl Tty7App {
         } else {
             Some(ShellConfig { program, args })
         };
-        let cfg = cx.global_mut::<Config>();
-        if cfg.shell == shell {
-            return;
+        {
+            let cfg = cx.global_mut::<Config>();
+            if cfg.shell == shell {
+                return;
+            }
+            cfg.shell = shell;
+            cfg.save();
         }
-        cfg.shell = shell;
-        cfg.save();
-        cx.notify();
+        // Shell discovery runs off the UI thread and now includes the saved
+        // configured shell, so refresh the menu without blocking Settings.
+        self.refresh_shells(cx);
     }
 
     pub(crate) fn set_working_directory_strategy(
@@ -4597,10 +4677,6 @@ impl Tty7App {
         if let Err(e) = std::process::Command::new(opener).arg(&path).spawn() {
             log::warn!("failed to open {}: {e}", path.display());
         }
-    }
-
-    pub(crate) fn open_releases_page(&self) {
-        crate::core::update::open_releases_page();
     }
 }
 

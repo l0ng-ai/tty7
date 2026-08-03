@@ -16,6 +16,7 @@ use crate::core::actions::{
     TogglePalette,
 };
 use crate::core::config::RightPanelTab;
+use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
 use crate::ui::app::{TILE_GLYPH, TILE_GLYPH_LINE, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
 use crate::ui::hints::tab_badge_label;
@@ -27,6 +28,17 @@ const CHIP_GAP: f32 = 6.;
 pub(crate) const GRAB_HANDLE_W: f32 = 80.;
 
 const KEEP_SEGMENTS: usize = 3;
+
+/// Builds a launch specification without recomputing argument ownership locally.
+/// The inventory may originate from a remote host, so only its transported
+/// metadata can distinguish tty7 launch defaults from user-authored arguments.
+fn shell_spec(shell: &DetectedShell) -> ShellSpec {
+    ShellSpec {
+        program: shell.program.clone(),
+        args: shell.args.clone(),
+        args_are_tty7_defaults: shell.args_are_tty7_defaults,
+    }
+}
 
 pub(crate) fn abbreviate_home(path: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
@@ -539,11 +551,7 @@ impl Tty7App {
         button.dropdown_menu(move |menu, _window, _cx| {
             let mut menu = menu.min_w(px(220.));
             for shell in &shells {
-                let spec = ShellSpec {
-                    program: shell.program.clone(),
-                    args: shell.args.clone(),
-                    args_are_tty7_defaults: true,
-                };
+                let spec = shell_spec(shell);
                 let open = app.clone();
                 let item = if shell.label == default_name {
                     let label: SharedString = shell.label.clone().into();
@@ -1114,5 +1122,20 @@ mod tests {
         let out = short_title(&long);
         assert_eq!(out.chars().count(), 41);
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn configured_shell_arguments_remain_user_authored_in_the_menu() {
+        let shell = DetectedShell {
+            label: "custom".into(),
+            program: "custom-shell".into(),
+            args: vec!["--login".into()],
+            args_are_tty7_defaults: false,
+        };
+        let spec = shell_spec(&shell);
+
+        assert_eq!(spec.program, "custom-shell");
+        assert_eq!(spec.args, ["--login"]);
+        assert!(!spec.args_are_tty7_defaults);
     }
 }

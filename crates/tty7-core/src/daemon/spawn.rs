@@ -347,7 +347,15 @@ fn is_supported_shell(path: &Path) -> bool {
     };
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "zsh" | "bash" | "fish" | "pwsh" | "powershell" | "powershell.exe" | "pwsh.exe"
+        "zsh"
+            | "bash"
+            | "fish"
+            | "nu"
+            | "nu.exe"
+            | "pwsh"
+            | "powershell"
+            | "powershell.exe"
+            | "pwsh.exe"
     )
 }
 
@@ -635,6 +643,19 @@ mod exe_name_tests {
         assert_eq!(strip_exe_suffix(".exe"), "");
         assert_eq!(strip_exe_suffix("exe"), "exe");
     }
+
+    #[test]
+    fn supported_shell_detection_matches_shell_basenames_only() {
+        assert!(is_supported_shell(Path::new("/opt/homebrew/bin/fish")));
+        assert!(is_supported_shell(Path::new("/bin/zsh")));
+        assert!(is_supported_shell(Path::new("/usr/bin/bash")));
+        assert!(is_supported_shell(Path::new("/opt/homebrew/bin/nu")));
+        assert!(is_supported_shell(Path::new("/portable/Nu.EXE")));
+        assert!(!is_supported_shell(Path::new(
+            "/Applications/kitty.app/kitty"
+        )));
+        assert!(!is_supported_shell(Path::new("/usr/bin/omp")));
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -642,18 +663,6 @@ mod tests {
     use super::*;
     use std::io::ErrorKind;
     use std::os::unix::net::UnixStream;
-    use std::path::Path;
-
-    #[test]
-    fn supported_shell_detection_matches_shell_basenames_only() {
-        assert!(is_supported_shell(Path::new("/opt/homebrew/bin/fish")));
-        assert!(is_supported_shell(Path::new("/bin/zsh")));
-        assert!(is_supported_shell(Path::new("/usr/bin/bash")));
-        assert!(!is_supported_shell(Path::new(
-            "/Applications/kitty.app/kitty"
-        )));
-        assert!(!is_supported_shell(Path::new("/usr/bin/omp")));
-    }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]

@@ -94,20 +94,115 @@ fn is_theme_file(p: &std::path::Path) -> bool {
         })
 }
 
-fn apply_config_dir_arg() {
-    let mut args = std::env::args().skip(1);
+fn strip_os_arg_prefix(arg: &std::ffi::OsStr, prefix: &str) -> Option<std::ffi::OsString> {
+    let suffix = arg.as_encoded_bytes().strip_prefix(prefix.as_bytes())?;
+    // SAFETY: `prefix` is ASCII and is removed only from the beginning of an
+    // existing platform-encoded OsStr. ASCII bytes are self-synchronizing in
+    // Windows WTF-8 and Unix byte strings, so the suffix keeps valid encoding.
+    Some(unsafe { std::ffi::OsString::from_encoded_bytes_unchecked(suffix.to_vec()) })
+}
+
+fn config_dir_from(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
     while let Some(arg) = args.next() {
-        if let Some(path) = arg.strip_prefix("--config-dir=") {
-            crate::core::config::set_config_dir(path.into());
-            return;
+        if let Some(path) = strip_os_arg_prefix(&arg, "--config-dir=") {
+            return Some(path.into());
         }
-        if arg == "--config-dir" {
-            if let Some(path) = args.next() {
-                crate::core::config::set_config_dir(path.into());
-            }
-            return;
+        if arg == std::ffi::OsStr::new("--config-dir") {
+            return args.next().map(Into::into);
         }
     }
+    None
+}
+
+fn apply_config_dir_arg(args: &[std::ffi::OsString]) {
+    if let Some(path) = config_dir_from(args.iter().cloned()) {
+        crate::core::config::set_config_dir(path);
+    }
+}
+
+fn open_path_from(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    while let Some(arg) = args.next() {
+        if let Some(path) = strip_os_arg_prefix(&arg, "--open-path=") {
+            return Some(path.into());
+        }
+        if arg == std::ffi::OsStr::new("--open-path") {
+            return args.next().map(Into::into);
+        }
+    }
+    None
+}
+
+/// Offers an explicit launch path to an already running local GUI.
+///
+/// The dispatcher is injected so the startup decision can be tested without
+/// opening a real daemon connection. Only an explicit `Bool(true)` means the
+/// path reached a GUI; every other response keeps the current app alive so it
+/// can perform the normal first-window startup.
+fn forward_open_path_with(
+    open_path: Option<&std::path::Path>,
+    dispatch: impl FnOnce(String) -> std::io::Result<tty7_core::daemon::control::ReplyOk>,
+) -> bool {
+    use tty7_core::daemon::control::ReplyOk;
+
+    let Some(path) = open_path else {
+        return false;
+    };
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(current_dir) => current_dir.join(path),
+            Err(error) => {
+                log::debug!("could not resolve the relative GUI open path: {error}");
+                return false;
+            }
+        }
+    };
+
+    let Some(wire_path) = path.to_str().map(str::to_owned) else {
+        // Keep the native PathBuf in this process. Returning false continues
+        // normal startup, which opens the path without crossing the protocol.
+        log::debug!("the explicit GUI open path is not valid UTF-8; opening it locally");
+        return false;
+    };
+
+    match dispatch(wire_path) {
+        Ok(ReplyOk::Bool(true)) => true,
+        Ok(ReplyOk::Bool(false)) => false,
+        Ok(other) => {
+            log::debug!("the daemon answered the early GuiOpen request with {other:?}");
+            false
+        }
+        Err(error) => {
+            log::debug!("the early GuiOpen request was not delivered: {error}");
+            false
+        }
+    }
+}
+
+/// Uses a transient host-RPC connection instead of a GUI connection.
+///
+/// A GUI connection is long-lived and registers itself as the daemon's event
+/// target. This short probe must never replace the actual running GUI while it
+/// asks that GUI to open the requested folder.
+fn forward_open_path(open_path: Option<&std::path::Path>) -> bool {
+    use tty7_core::client::ControlClient;
+    use tty7_core::daemon::control::{ControlHello, ControlRequest};
+
+    forward_open_path_with(open_path, |path| {
+        let hello = ControlHello::host_rpc(
+            format!("tty7-app-open-{}", std::process::id()),
+            "this computer",
+        );
+        let client = ControlClient::connect(&hello)?;
+        let reply = client.request(ControlRequest::GuiOpen { path: Some(path) });
+        client.close();
+        reply
+    })
 }
 
 #[cfg(unix)]
@@ -177,34 +272,41 @@ fn set_dock_icon_for_bare_binary() {
 }
 
 fn main() {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     {
-        let args: Vec<String> = std::env::args().skip(1).take(3).collect();
-        if args.first().map(String::as_str) == Some("agent-hook") {
-            if let [_, agent, event] = args.as_slice() {
+        if args.first().map(std::ffi::OsString::as_os_str)
+            == Some(std::ffi::OsStr::new("agent-hook"))
+        {
+            if let (Some(agent), Some(event)) = (
+                args.get(1).and_then(|arg| arg.to_str()),
+                args.get(2).and_then(|arg| arg.to_str()),
+            ) {
                 crate::core::agent_hooks::run_agent_hook(agent, event);
             }
             return;
         }
     }
 
-    apply_config_dir_arg();
+    apply_config_dir_arg(&args);
 
-    let role = if std::env::args().any(|a| a == "--daemon") {
-        "daemon"
-    } else {
-        "gui"
-    };
+    let daemon = args
+        .iter()
+        .any(|arg| arg == std::ffi::OsStr::new("--daemon"));
+    let role = if daemon { "daemon" } else { "gui" };
     crate::core::crash::install(role);
     crate::core::logfile::install(role);
 
-    if std::env::args().any(|a| a == "--daemon") {
+    if daemon {
         if let Err(e) = crate::daemon::server::run_daemon() {
             log::error!("daemon exited with error: {e}");
         }
         return;
     }
 
-    if std::env::args().any(|a| a == "--stop-daemon") {
+    if args
+        .iter()
+        .any(|arg| arg == std::ffi::OsStr::new("--stop-daemon"))
+    {
         crate::daemon::spawn::stop();
         return;
     }
@@ -212,6 +314,10 @@ fn main() {
     #[cfg(unix)]
     enrich_path_from_login_shell();
 
+    let open_path = open_path_from(args.into_iter());
+    if forward_open_path(open_path.as_deref()) {
+        return;
+    }
     let config = crate::core::config::Config::load();
 
     // After the PATH enrichment above, which is what makes the candidate scan
@@ -254,8 +360,11 @@ fn main() {
             keymap::init(cx);
             crate::ui::local_link::LocalLink::install(cx);
 
-            let reopen = crate::core::session::WorkspaceStore::restore_one(cx);
-            crate::ui::windows::open(cx, reopen);
+            let reopen = open_path
+                .is_none()
+                .then(|| crate::core::session::WorkspaceStore::restore_one(cx))
+                .flatten();
+            crate::ui::windows::open_at(cx, reopen, open_path);
         });
 }
 
@@ -277,5 +386,117 @@ mod tests {
             "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
         );
         assert_eq!(merge_paths("", "/usr/bin"), "/usr/bin");
+    }
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::{config_dir_from, forward_open_path_with, open_path_from};
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+    use tty7_core::daemon::control::ReplyOk;
+
+    #[test]
+    fn open_path_accepts_separate_and_equals_forms() {
+        let separate = open_path_from(
+            ["--config-dir", "/cfg", "--open-path", "/work"]
+                .into_iter()
+                .map(OsString::from),
+        );
+        assert_eq!(separate, Some(PathBuf::from("/work")));
+
+        let equals = open_path_from([OsString::from("--open-path=C:\\work")].into_iter());
+        assert_eq!(equals, Some(PathBuf::from("C:\\work")));
+    }
+
+    #[test]
+    fn config_dir_accepts_native_separate_and_equals_forms() {
+        let separate = config_dir_from(
+            [OsString::from("--config-dir"), OsString::from("C:\\cfg")].into_iter(),
+        );
+        assert_eq!(separate, Some(PathBuf::from("C:\\cfg")));
+
+        let equals = config_dir_from([OsString::from("--config-dir=C:\\cfg")].into_iter());
+        assert_eq!(equals, Some(PathBuf::from("C:\\cfg")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn open_path_preserves_unpaired_utf16_from_windows_arguments() {
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let native_path =
+            OsString::from_wide(&[b'C' as u16, b':' as u16, b'\\' as u16, 0xD800, b'x' as u16]);
+        let parsed =
+            open_path_from([OsString::from("--open-path"), native_path.clone()].into_iter());
+        assert_eq!(parsed, Some(PathBuf::from(native_path.clone())));
+
+        let mut equals_arg = OsString::from("--open-path=");
+        equals_arg.push(&native_path);
+        assert_eq!(
+            open_path_from([equals_arg].into_iter()),
+            Some(PathBuf::from(native_path))
+        );
+    }
+
+    #[test]
+    fn no_open_path_never_attempts_early_dispatch() {
+        let delivered = forward_open_path_with(None, |_| {
+            panic!("the dispatcher must not run without an explicit path")
+        });
+
+        assert!(!delivered);
+    }
+
+    #[test]
+    fn early_dispatch_exits_only_after_a_gui_accepts_the_path() {
+        let path = std::env::current_dir().unwrap().join("folder with spaces");
+        let expected = path.to_str().unwrap().to_owned();
+        let delivered = forward_open_path_with(Some(&path), |actual| {
+            assert_eq!(actual, expected);
+            Ok(ReplyOk::Bool(true))
+        });
+
+        assert!(delivered);
+        assert!(!forward_open_path_with(Some(&path), |_| Ok(ReplyOk::Bool(
+            false
+        ))));
+        assert!(!forward_open_path_with(Some(&path), |_| Ok(ReplyOk::Unit)));
+        assert!(!forward_open_path_with(Some(&path), |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "daemon is not running",
+            ))
+        }));
+    }
+
+    #[test]
+    fn early_dispatch_resolves_relative_paths_before_cross_process_delivery() {
+        let relative = std::path::Path::new("workspace");
+        let expected = std::env::current_dir()
+            .unwrap()
+            .join(relative)
+            .to_str()
+            .unwrap()
+            .to_owned();
+
+        assert!(forward_open_path_with(Some(relative), |actual| {
+            assert_eq!(actual, expected);
+            Ok(ReplyOk::Bool(true))
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn early_dispatch_keeps_non_utf8_paths_in_the_current_process() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let path = std::env::temp_dir().join(OsString::from_vec(b"tty7-\xff".to_vec()));
+        let delivered = forward_open_path_with(Some(&path), |_| {
+            panic!("a non-UTF-8 path must never be changed and sent over the string protocol")
+        });
+
+        assert!(!delivered);
     }
 }

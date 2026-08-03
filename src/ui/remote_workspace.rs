@@ -216,17 +216,10 @@ impl Tty7App {
         }
     }
 
-    pub(crate) fn default_shell_label(&self, cx: &gpui::App) -> String {
-        if self.shells_host.is_local() {
-            crate::core::shells::default_shell_name(
-                cx.global::<crate::core::config::Config>()
-                    .shell
-                    .as_ref()
-                    .map(|s| s.program.as_str()),
-            )
-        } else {
-            self.shells.default_name.clone()
-        }
+    pub(crate) fn default_shell_label(&self, _cx: &gpui::App) -> String {
+        // ShellInventory maps configured programs to their displayed labels,
+        // including friendly Windows names that differ from the executable.
+        self.shells.default_name.clone()
     }
 
     pub(crate) fn refresh_shells(&mut self, cx: &mut Context<Self>) {
@@ -1026,6 +1019,9 @@ pub(crate) fn drain_events(cx: &mut gpui::App) {
                     }
                     crate::ui::tree_sync::resync_window_from_tree(cx, workspace);
                 }
+            }
+            ControlEvent::GuiOpen { path } if host.is_local() => {
+                crate::ui::windows::open_from_cli(cx, path.map(std::path::PathBuf::from));
             }
             other => log::debug!("unhandled control event from {host:?}: {other:?}"),
         }
