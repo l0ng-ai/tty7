@@ -4041,13 +4041,17 @@ impl Tty7App {
         } else {
             Some(ShellConfig { program, args })
         };
-        let cfg = cx.global_mut::<Config>();
-        if cfg.shell == shell {
-            return;
+        {
+            let cfg = cx.global_mut::<Config>();
+            if cfg.shell == shell {
+                return;
+            }
+            cfg.shell = shell;
+            cfg.save();
         }
-        cfg.shell = shell;
-        cfg.save();
-        cx.notify();
+        // Shell discovery runs off the UI thread and now includes the saved
+        // configured shell, so refresh the menu without blocking Settings.
+        self.refresh_shells(cx);
     }
 
     pub(crate) fn set_working_directory_strategy(

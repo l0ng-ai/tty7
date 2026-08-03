@@ -1016,7 +1016,8 @@ mod tests {
                     shells: vec![crate::core::shells::DetectedShell {
                         label: "zsh".into(),
                         program: "/usr/bin/zsh".into(),
-                        args: vec![],
+                        args: vec!["--no-rcs".into()],
+                        args_are_tty7_defaults: false,
                     }],
                     default_name: "zsh".into(),
                 })),
@@ -1029,6 +1030,8 @@ mod tests {
         assert_eq!(seen.recv().unwrap(), ControlRequest::Shells);
         assert_eq!(inv.default_name, "zsh");
         assert_eq!(inv.shells[0].program, "/usr/bin/zsh");
+        assert_eq!(inv.shells[0].args, ["--no-rcs"]);
+        assert!(!inv.shells[0].args_are_tty7_defaults);
     }
 
     #[test]

@@ -165,7 +165,7 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         SearchEntry {
             section: Terminal,
             title: "Program",
-            keywords: "shell binary zsh bash fish pwsh powershell executable launch",
+            keywords: "shell binary zsh bash fish nu nushell pwsh powershell executable launch",
         },
         SearchEntry {
             section: Terminal,
@@ -3257,7 +3257,7 @@ impl Tty7App {
             ))
             .child(self.settings_row(
                 "Program",
-                "Executable name on PATH or an absolute path. e.g. zsh, fish, pwsh.",
+                "Executable name on PATH or an absolute path. e.g. zsh, fish, nu, pwsh.",
                 program_control,
                 cx,
             ))
@@ -4790,6 +4790,7 @@ mod tests {
             ("grouping", WindowTabs),
             ("threshold", WindowTabs),
             ("report mouse", Terminal),
+            ("nushell", Terminal),
             ("open files with", Terminal),
             ("bell", Terminal),
             ("known_hosts", Ssh),
