@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 use tty7_core::core::machine::{Axis, Machine, PaneSeed, Workspace};
 use tty7_core::core::session::WorkspaceId;
@@ -46,14 +46,13 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
         None => match cli.path {
             // clap has no subcommand for this word, so it landed in [PATH].
             // Treat a word that is not a path as the typo it almost certainly
-            // is: answering "launching the GUI is not wired up yet" to
-            // `tty7 statu` helps nobody.
+            // is: launching the GUI for `tty7 statu` would hide the typo.
             Some(word) if !looks_like_a_path(&word) => bail!(
                 "unknown subcommand '{word}' — run `tty7 --help` for the list. \
                  (A path in this position would open the GUI there, but \
                  '{word}' does not name one.)"
             ),
-            path => launch_gui(path),
+            path => launch_gui(path, machine.as_deref(), backend),
         },
         Some(Command::Ls) | Some(Command::Ws(WsCmd::Ls)) => ws_ls(backend),
         Some(Command::Ws(WsCmd::Tree { ws })) => ws_tree(ws.as_deref(), ctx, backend),
@@ -140,11 +139,84 @@ fn looks_like_a_path(s: &str) -> bool {
         || std::path::Path::new(s).exists()
 }
 
-fn launch_gui(path: Option<String>) -> Result<Outcome> {
-    match path {
-        Some(p) => bail!("launching the GUI is not wired up yet (would open {p})"),
-        None => bail!("launching the GUI is not wired up yet"),
+fn launch_gui(
+    path: Option<String>,
+    machine: Option<&str>,
+    backend: &mut dyn Backend,
+) -> Result<Outcome> {
+    if let Some(machine) = machine {
+        bail!(
+            "`tty7 [PATH]` controls the GUI on this machine and cannot be combined with -m {machine}"
+        );
     }
+
+    let path = path.map(resolve_gui_path).transpose()?;
+    let wire_path = path.as_deref().map(gui_wire_path).transpose()?;
+    // A live GUI receives the request through the daemon. If the daemon itself
+    // is absent, the same fallback as "no GUI registered" starts the app, which
+    // will start its daemon during normal initialization.
+    let delivered = match backend.control(ControlRequest::GuiOpen {
+        path: wire_path.clone(),
+    }) {
+        Ok(ReplyOk::Bool(delivered)) => delivered,
+        Ok(other) => bail!("the server answered GuiOpen with {other:?}"),
+        Err(_) => false,
+    };
+
+    if !delivered {
+        crate::gui::launch(path.as_deref())?;
+    }
+    report(
+        "",
+        json!({
+            "path": wire_path,
+            "delivered": delivered,
+            "launched": !delivered,
+        }),
+    )
+}
+
+fn gui_wire_path(path: &std::path::Path) -> Result<String> {
+    let Some(path_text) = path.to_str() else {
+        bail!(
+            "cannot open {} through the GUI protocol because the path is not valid UTF-8",
+            path.display()
+        );
+    };
+    Ok(path_text.to_owned())
+}
+
+fn resolve_gui_path(raw: String) -> Result<std::path::PathBuf> {
+    let expanded = expand_home(&raw).unwrap_or_else(|| std::path::PathBuf::from(&raw));
+    // Do not canonicalize here: preserving the caller's junction or symlink
+    // spelling keeps shell cwd reporting and tab labels consistent.
+    let path = if expanded.is_absolute() {
+        expanded
+    } else {
+        std::env::current_dir()
+            .context("reading the current directory")?
+            .join(expanded)
+    };
+    let metadata =
+        std::fs::metadata(&path).with_context(|| format!("opening {}", path.display()))?;
+    if !metadata.is_dir() {
+        bail!("{} is not a directory", path.display());
+    }
+    Ok(path)
+}
+
+fn expand_home(raw: &str) -> Option<std::path::PathBuf> {
+    let rest = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\"));
+    if raw != "~" && rest.is_none() {
+        return None;
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)?;
+    Some(match rest {
+        Some(rest) => home.join(rest),
+        None => home,
+    })
 }
 
 fn fetch_machine(backend: &mut dyn Backend) -> Result<Machine> {
@@ -1651,14 +1723,68 @@ mod tests {
             assert!(msg.contains("unknown subcommand"), "{typo}: {msg}");
             assert!(msg.contains(typo), "{typo}: {msg}");
         }
+    }
 
-        // Things that do look like paths still reach the GUI launcher, and fail
-        // there for the honest reason.
-        for path in ["/tmp", "./src", "~/proj", "a/b"] {
-            let err = execute(cli(&["tty7", path]), &Context::default(), &mut mock())
-                .expect_err("the GUI launcher is not implemented yet");
-            assert!(err.to_string().contains("not wired up"), "{path}: {err}");
-        }
+    #[test]
+    fn a_path_asks_the_running_gui_to_open_an_absolute_directory() {
+        let mut backend = mock();
+        backend.replies.push_back(ReplyOk::Bool(true));
+        let out = run_cli(&["tty7", "."], &Context::default(), &mut backend);
+        let expected = std::env::current_dir()
+            .unwrap()
+            .join(".")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            backend.control_calls,
+            vec![ControlRequest::GuiOpen {
+                path: Some(expected.clone())
+            }]
+        );
+        let Outcome::Report(report) = out else {
+            panic!("GUI open is a regular report");
+        };
+        assert_eq!(report.json["path"], expected);
+        assert_eq!(report.json["delivered"], true);
+        assert_eq!(report.json["launched"], false);
+    }
+
+    #[test]
+    fn an_invalid_gui_path_fails_before_touching_the_wire() {
+        let mut backend = mock();
+        let missing =
+            std::env::temp_dir().join(format!("tty7-cli-missing-path-{}", std::process::id()));
+        let arg = missing.to_str().unwrap().to_owned();
+        let err = execute(cli(&["tty7", &arg]), &Context::default(), &mut backend)
+            .expect_err("a missing directory must be rejected");
+        assert!(err.to_string().contains("opening"), "{err:#}");
+        assert!(backend.control_calls.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_gui_path_is_rejected_instead_of_changed() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let path = std::env::temp_dir().join(OsString::from_vec(b"tty7-\xff".to_vec()));
+        let error = gui_wire_path(&path).expect_err("the string protocol cannot preserve bytes");
+
+        assert!(error.to_string().contains("not valid UTF-8"), "{error:#}");
+    }
+
+    #[test]
+    fn the_gui_launcher_is_local_only() {
+        let mut backend = mock();
+        let err = execute(
+            cli(&["tty7", "-m", "devbox", "."]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect_err("a local GUI request cannot be routed to another machine");
+        assert!(err.to_string().contains("cannot be combined"), "{err:#}");
+        assert!(backend.control_calls.is_empty());
     }
 
     #[test]

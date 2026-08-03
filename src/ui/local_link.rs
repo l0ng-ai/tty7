@@ -118,7 +118,7 @@ fn connect_blocking() -> std::io::Result<Arc<ControlClient>> {
     use tty7_core::daemon::control::ControlHello;
 
     crate::daemon::spawn::ensure_running().map_err(std::io::Error::other)?;
-    let hello = ControlHello::host_rpc(uuid::Uuid::new_v4().to_string(), "this computer");
+    let hello = ControlHello::gui(uuid::Uuid::new_v4().to_string(), "this computer");
     let sink: tty7_core::daemon::control::EventSink = Box::new(local_event_sink);
     #[cfg(unix)]
     let client = ControlClient::over_unix(
