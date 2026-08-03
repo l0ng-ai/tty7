@@ -151,9 +151,7 @@ fn launch_gui(
     }
 
     let path = path.map(resolve_gui_path).transpose()?;
-    let wire_path = path
-        .as_ref()
-        .map(|path| path.to_string_lossy().into_owned());
+    let wire_path = path.as_deref().map(gui_wire_path).transpose()?;
     // A live GUI receives the request through the daemon. If the daemon itself
     // is absent, the same fallback as "no GUI registered" starts the app, which
     // will start its daemon during normal initialization.
@@ -176,6 +174,16 @@ fn launch_gui(
             "launched": !delivered,
         }),
     )
+}
+
+fn gui_wire_path(path: &std::path::Path) -> Result<String> {
+    let Some(path_text) = path.to_str() else {
+        bail!(
+            "cannot open {} through the GUI protocol because the path is not valid UTF-8",
+            path.display()
+        );
+    };
+    Ok(path_text.to_owned())
 }
 
 fn resolve_gui_path(raw: String) -> Result<std::path::PathBuf> {
@@ -1725,8 +1733,9 @@ mod tests {
         let expected = std::env::current_dir()
             .unwrap()
             .join(".")
-            .to_string_lossy()
-            .into_owned();
+            .to_str()
+            .unwrap()
+            .to_owned();
         assert_eq!(
             backend.control_calls,
             vec![ControlRequest::GuiOpen {
@@ -1746,11 +1755,23 @@ mod tests {
         let mut backend = mock();
         let missing =
             std::env::temp_dir().join(format!("tty7-cli-missing-path-{}", std::process::id()));
-        let arg = missing.to_string_lossy().into_owned();
+        let arg = missing.to_str().unwrap().to_owned();
         let err = execute(cli(&["tty7", &arg]), &Context::default(), &mut backend)
             .expect_err("a missing directory must be rejected");
         assert!(err.to_string().contains("opening"), "{err:#}");
         assert!(backend.control_calls.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_gui_path_is_rejected_instead_of_changed() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let path = std::env::temp_dir().join(OsString::from_vec(b"tty7-\xff".to_vec()));
+        let error = gui_wire_path(&path).expect_err("the string protocol cannot preserve bytes");
+
+        assert!(error.to_string().contains("not valid UTF-8"), "{error:#}");
     }
 
     #[test]

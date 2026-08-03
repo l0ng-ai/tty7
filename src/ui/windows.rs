@@ -206,9 +206,7 @@ pub fn open_from_cli(cx: &mut App, path: Option<std::path::PathBuf>) {
         WindowRegistry::most_recent(cx)
     };
     let Some(workspace) = workspace else {
-        if path.is_some() {
-            open_at(cx, None, path);
-        }
+        open_missing_cli_window_with(cx, path, open_at);
         return;
     };
     let Some(handle) = WindowRegistry::window_for(cx, workspace) else {
@@ -225,6 +223,23 @@ pub fn open_from_cli(cx: &mut App, path: Option<std::path::PathBuf>) {
         }
         window.activate_window();
     });
+}
+
+/// Opens a window after CLI routing reaches a GUI process with no live windows.
+///
+/// A pathless request follows the same restoration policy as normal startup.
+/// An explicit path always starts a fresh local workspace so the requested tab
+/// cannot accidentally be attached to a detached remote workspace.
+fn open_missing_cli_window_with(
+    cx: &mut App,
+    path: Option<std::path::PathBuf>,
+    open: impl FnOnce(&mut App, Option<WorkspaceId>, Option<std::path::PathBuf>),
+) {
+    let restore = path
+        .is_none()
+        .then(|| WorkspaceStore::restore_one(cx))
+        .flatten();
+    open(cx, restore, path);
 }
 
 pub fn refresh_menu(cx: &mut App) {
@@ -521,6 +536,7 @@ fn cascade(bounds: Bounds<gpui::Pixels>, existing: usize) -> Bounds<gpui::Pixels
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::session::{WindowView, WindowViews};
 
     fn bounds_at(x: f32, y: f32) -> Bounds<gpui::Pixels> {
         Bounds {
@@ -554,6 +570,46 @@ mod tests {
         let b = bounds_at(100., 100.);
         assert_eq!(cascade(b, 5).origin, b.origin);
         assert_eq!(cascade(b, 6).origin, cascade(b, 1).origin);
+    }
+
+    #[gpui::test]
+    fn a_pathless_cli_request_restores_a_workspace_when_no_window_is_open(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let view = WindowView::default();
+        let restored = view.id;
+        let mut opened = None;
+
+        cx.update(|cx| {
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![view],
+                    active: Some(restored),
+                },
+            );
+            open_missing_cli_window_with(cx, None, |_, workspace, path| {
+                opened = Some((workspace, path));
+            });
+        });
+
+        assert_eq!(opened, Some((Some(restored), None)));
+    }
+
+    #[gpui::test]
+    fn a_pathless_cli_request_creates_a_default_window_without_history(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut opened = None;
+
+        cx.update(|cx| {
+            WorkspaceStore::install_for_test(cx, WindowViews::default());
+            open_missing_cli_window_with(cx, None, |_, workspace, path| {
+                opened = Some((workspace, path));
+            });
+        });
+
+        assert_eq!(opened, Some((None, None)));
     }
 
     #[test]
@@ -600,7 +656,6 @@ mod tests {
     fn a_delete_reads_its_kill_list_before_the_removal_blanks_the_mirror(
         cx: &mut gpui::TestAppContext,
     ) {
-        use crate::core::session::{WindowView, WindowViews};
         use tty7_core::core::machine::{Machine, PaneRecord, Tab, Workspace as TreeWorkspace};
 
         cx.update(|cx| {
