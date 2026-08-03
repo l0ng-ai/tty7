@@ -47,6 +47,9 @@ smol.workspace = true
 smallvec.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
+# Native GUI launches do not reliably inherit POSIX locale environment variables,
+# especially on Windows and macOS. Use the platform locale APIs for `gui_language = auto`.
+sys-locale = "0.3"
 
 # SSH profile ids in the connection manager UI (`ui::ssh_connect`,
 # `ui::settings`, the command palette). The profiles themselves — and the

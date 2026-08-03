@@ -83,6 +83,23 @@ impl WindowRegistry {
             .map(|w| w.app.clone())
     }
 
+    pub fn refresh_locale(cx: &mut App, except: Option<WorkspaceId>) {
+        Self::sweep(cx);
+        let windows: Vec<_> = cx
+            .global::<Self>()
+            .windows
+            .iter()
+            .filter(|entry| Some(entry.workspace) != except)
+            .map(|entry| (entry.handle, entry.app.clone()))
+            .collect();
+        for (handle, app) in windows {
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = app.update(cx, |app, cx| app.refresh_locale_state(window, cx));
+                window.refresh();
+            });
+        }
+    }
+
     fn register(
         cx: &mut App,
         workspace: WorkspaceId,

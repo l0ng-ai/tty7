@@ -3708,7 +3708,6 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        const CODES: &[&str] = &["auto", "en", "zh-CN"];
         let code = Self::normalize_gui_language(code);
         {
             let cfg = cx.global_mut::<Config>();
@@ -3717,16 +3716,52 @@ impl Tty7App {
         set_locale(code);
         cx.global::<Config>().save();
         set_menus(cx);
+        self.refresh_locale_state(window, cx);
+        crate::ui::windows::WindowRegistry::refresh_locale(cx, Some(self.workspace));
+    }
+
+    pub(crate) fn refresh_locale_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        const CODES: &[&str] = &["auto", "en", "zh-CN"];
+        self.sidebar_search.update(cx, |state, cx| {
+            state.set_placeholder(t(L10nKey::SearchTabs), window, cx)
+        });
+        self.file_search.update(cx, |state, cx| {
+            state.set_placeholder(t(L10nKey::SearchFiles), window, cx)
+        });
         if let Some(s) = self.active_settings() {
             let rows = vec![
                 t(L10nKey::SettingsLanguageAuto).to_string(),
                 t(L10nKey::SettingsLanguageEnglish).to_string(),
                 t(L10nKey::SettingsLanguageChinese).to_string(),
             ];
-            let selected = CODES.iter().position(|c| *c == code).unwrap_or(0);
             s.language_select.update(cx, |state, cx| {
                 state.set_items(SearchableVec::new(rows), window, cx);
+                let code = Self::normalize_gui_language(&cx.global::<Config>().gui_language);
+                let selected = CODES.iter().position(|c| *c == code).unwrap_or(0);
                 state.set_selected_index(Some(IndexPath::default().row(selected)), window, cx);
+            });
+            s.search.update(cx, |state, cx| {
+                state.set_placeholder(t(L10nKey::SearchSettings), window, cx)
+            });
+            s.theme_search.update(cx, |state, cx| {
+                state.set_placeholder(t(L10nKey::SearchThemes), window, cx)
+            });
+            s.ssh_filter.update(cx, |state, cx| {
+                state.set_placeholder(t(L10nKey::FilterHosts), window, cx)
+            });
+            s.ssh_quick_connect.update(cx, |state, cx| {
+                state.set_placeholder(t(L10nKey::AppPlaceholderSshQuickConnect), window, cx)
+            });
+            s.shell_args_input.update(cx, |state, cx| {
+                state.set_placeholder(t(L10nKey::AppPlaceholderNone), window, cx)
+            });
+            if !cfg!(windows) {
+                s.shell_program_input.update(cx, |state, cx| {
+                    state.set_placeholder(t(L10nKey::AppPlaceholderLoginShell), window, cx)
+                });
+            }
+            s.link_file_command_input.update(cx, |state, cx| {
+                state.set_placeholder(t(L10nKey::AppPlaceholderOpenInDefaultApp), window, cx)
             });
         }
         cx.notify();

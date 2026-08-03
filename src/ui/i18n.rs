@@ -971,15 +971,43 @@ fn current_locale() -> Locale {
 }
 
 fn detect_system_language() -> u8 {
-    for var in ["LC_ALL", "LC_MESSAGES", "LANG"] {
-        if let Ok(value) = std::env::var(var) {
-            let value = value.to_ascii_lowercase();
-            if value.starts_with("zh_") || value.starts_with("zh-") {
-                return ZH_HANS;
-            }
-        }
+    sys_locale::get_locale()
+        .as_deref()
+        .map(locale_identifier_language)
+        .unwrap_or(EN)
+}
+
+fn locale_identifier_language(identifier: &str) -> u8 {
+    let normalized = identifier
+        .split(['.', '@'])
+        .next()
+        .unwrap_or(identifier)
+        .replace('_', "-")
+        .to_ascii_lowercase();
+    let mut subtags = normalized.split('-');
+    if subtags.next() != Some("zh") {
+        return EN;
     }
-    EN
+
+    // Chinese defaults to Simplified when no script or region is specified.
+    // Traditional-script locales must be rejected before checking mainland and
+    // Singapore region aliases so malformed/conflicting identifiers fail safe.
+    let subtags: Vec<_> = subtags.collect();
+    if subtags
+        .iter()
+        .any(|part| matches!(*part, "hant" | "tw" | "hk" | "mo"))
+    {
+        return EN;
+    }
+    if subtags.is_empty()
+        || subtags
+            .iter()
+            .any(|part| matches!(*part, "hans" | "cn" | "sg"))
+    {
+        ZH_HANS
+    } else {
+        EN
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3763,6 +3791,24 @@ mod tests {
         assert_eq!(current_locale(), Locale::En);
         set_locale("ko");
         assert_eq!(current_locale(), Locale::En);
+    }
+
+    #[test]
+    fn system_locale_only_selects_simplified_chinese() {
+        for locale in ["zh", "zh-CN", "zh_CN.UTF-8", "zh-Hans", "zh-Hans-SG"] {
+            assert_eq!(locale_identifier_language(locale), ZH_HANS, "{locale}");
+        }
+        for locale in [
+            "en-CN",
+            "zh-TW",
+            "zh_HK.UTF-8",
+            "zh-MO",
+            "zh-Hant",
+            "zh-Hant-CN",
+            "zh-US",
+        ] {
+            assert_eq!(locale_identifier_language(locale), EN, "{locale}");
+        }
     }
 
     #[test]

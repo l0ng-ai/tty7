@@ -80,6 +80,7 @@ fn spawn_config_watcher(cx: &mut App) {
                 crate::ui::presets::load_registry(cx);
                 crate::ui::theme::apply_cursor_hide_mode(cx);
                 crate::ui::theme::apply_theme(None, cx);
+                crate::ui::windows::WindowRegistry::refresh_locale(cx, None);
                 cx.refresh_windows();
             });
         }
