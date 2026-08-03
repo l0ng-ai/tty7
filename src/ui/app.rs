@@ -439,6 +439,15 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::for_workspace_at(id, None, window, cx)
+    }
+
+    pub fn for_workspace_at(
+        id: Option<WorkspaceId>,
+        initial_cwd: Option<std::path::PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let restore = cx.global::<Config>().restore_session;
         let known = id.is_some_and(|id| WorkspaceStore::all(cx).get(id).is_some());
         let workspace = WorkspaceStore::claim(cx, id);
@@ -447,7 +456,7 @@ impl Tty7App {
             .is_some_and(|w| w.is_remote());
         let hydrate = known && (restore || is_remote);
         let session = hydrate.then(Session::default);
-        let app = Self::with_session(Some(workspace), session, window, cx);
+        let app = Self::with_session_at(Some(workspace), session, initial_cwd, window, cx);
         if hydrate {
             crate::ui::tree_sync::hydrate_window_from_tree(cx, workspace);
         } else {
@@ -505,6 +514,16 @@ impl Tty7App {
     pub(crate) fn with_session(
         workspace: Option<WorkspaceId>,
         session: Option<Session>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_session_at(workspace, session, None, window, cx)
+    }
+
+    fn with_session_at(
+        workspace: Option<WorkspaceId>,
+        session: Option<Session>,
+        initial_cwd: Option<std::path::PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -594,7 +613,7 @@ impl Tty7App {
                 pane_ws.clone(),
                 Some(workspace),
                 font_size,
-                None,
+                initial_cwd,
                 None,
                 None,
                 window,
@@ -2209,8 +2228,32 @@ impl Tty7App {
         self.new_tab_with_shell(None, window, cx);
     }
 
+    pub(crate) fn new_tab_at(
+        &mut self,
+        cwd: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.new_tab_with_cwd(Some(cwd), None, window, cx);
+    }
+
     pub(crate) fn new_tab_with_shell(
         &mut self,
+        shell: Option<ShellSpec>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cwd = self.tabs.get(self.active).and_then(|t| {
+            t.pane
+                .focused_or_first(window, cx)
+                .and_then(|leaf| leaf.read(cx).spawnable_cwd())
+        });
+        self.new_tab_with_cwd(cwd, shell, window, cx);
+    }
+
+    fn new_tab_with_cwd(
+        &mut self,
+        cwd: Option<std::path::PathBuf>,
         shell: Option<ShellSpec>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2218,11 +2261,6 @@ impl Tty7App {
         if !self.guard_local_spawn(window, cx) {
             return;
         }
-        let cwd = self.tabs.get(self.active).and_then(|t| {
-            t.pane
-                .focused_or_first(window, cx)
-                .and_then(|leaf| leaf.read(cx).spawnable_cwd())
-        });
         let pane_ws = self.window_workspace(cx);
         let tab = match new_terminal(
             pane_ws,

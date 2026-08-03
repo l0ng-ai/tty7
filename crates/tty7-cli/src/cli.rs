@@ -38,7 +38,7 @@ pub struct Cli {
 
     #[arg(
         value_name = "PATH",
-        help = "Launch or activate the GUI, at PATH if given (not wired up yet)"
+        help = "Launch or activate the GUI, opening a new tab at PATH if given"
     )]
     pub path: Option<String>,
 

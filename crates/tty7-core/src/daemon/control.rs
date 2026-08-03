@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::protocol::{MAX_FRAME, read_frame, write_frame};
 
-pub const CONTROL_VERSION: u32 = 4;
+pub const CONTROL_VERSION: u32 = 5;
 
 const DIALECT_MARKER: &str = "speaks control v";
 
@@ -152,6 +152,10 @@ pub enum ControlRequest {
         id: String,
     },
 
+    GuiOpen {
+        path: Option<String>,
+    },
+
     MachineGet,
     WorkspaceTree {
         workspace: WorkspaceId,
@@ -285,6 +289,7 @@ impl ControlRequest {
             Git { .. } | GitStream { .. } | Search { .. } => Duration::from_secs(20),
             Shells => Duration::from_secs(20),
             WorkspaceAttach { .. } | WorkspaceDetach { .. } => Duration::from_secs(10),
+            GuiOpen { .. } => Duration::from_secs(5),
             MachineGet
             | WorkspaceTree { .. }
             | WorkspaceCreate { .. }
@@ -467,6 +472,9 @@ pub enum ControlEvent {
         workspace: String,
         by: String,
     },
+    GuiOpen {
+        path: Option<String>,
+    },
     Layout {
         workspace: String,
         delta: LayoutDelta,
@@ -501,6 +509,8 @@ pub struct ControlHello {
     pub workspace: Option<String>,
     pub client_token: String,
     pub client_hostname: String,
+    #[serde(default)]
+    pub gui: bool,
 }
 
 impl ControlHello {
@@ -510,6 +520,14 @@ impl ControlHello {
             workspace: None,
             client_token: client_token.into(),
             client_hostname: client_hostname.into(),
+            gui: false,
+        }
+    }
+
+    pub fn gui(client_token: impl Into<String>, client_hostname: impl Into<String>) -> Self {
+        ControlHello {
+            gui: true,
+            ..Self::host_rpc(client_token, client_hostname)
         }
     }
 }
@@ -1399,6 +1417,9 @@ mod tests {
                 dirs: vec!["/home/me/proj".into(), "/home/me/proj/src".into()],
             },
             ControlRequest::WatchClose { id: 7 },
+            ControlRequest::GuiOpen {
+                path: Some("/home/me/proj".into()),
+            },
             ControlRequest::AgentStates,
             ControlRequest::Routes,
             ControlRequest::Status,
@@ -1523,6 +1544,9 @@ mod tests {
                 workspace: "w1".into(),
                 by: "other-laptop".into(),
             },
+            ControlEvent::GuiOpen {
+                path: Some("/home/me/proj".into()),
+            },
         ]
     }
 
@@ -1532,6 +1556,7 @@ mod tests {
             workspace: Some("w1".into()),
             client_token: "tok".into(),
             client_hostname: "laptop".into(),
+            gui: false,
         }
     }
 
@@ -1556,6 +1581,14 @@ mod tests {
         let ok: ControlHelloOk = serde_json::from_str(json).expect("decodes without instance");
         assert_eq!(ok.instance, "");
         assert!(ok.features.is_empty());
+    }
+
+    #[test]
+    fn an_old_client_hello_defaults_to_a_non_gui_connection() {
+        let json = r#"{"control_version":5,"workspace":null,"client_token":"tok",
+                       "client_hostname":"laptop"}"#;
+        let hello: ControlHello = serde_json::from_str(json).expect("decodes without gui role");
+        assert!(!hello.gui);
     }
 
     fn hello_ok() -> ControlHelloOk {
@@ -2109,6 +2142,7 @@ mod tests {
                 },
                 s(20),
             ),
+            (R::GuiOpen { path: None }, s(5)),
             (R::AgentStates, s(5)),
             (R::Routes, s(5)),
             (R::Status, s(5)),
