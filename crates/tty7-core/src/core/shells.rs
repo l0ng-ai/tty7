@@ -11,6 +11,11 @@ pub struct DetectedShell {
     pub label: String,
     pub program: String,
     pub args: Vec<String>,
+    /// Marks arguments supplied by tty7's shell detection rather than by the user.
+    /// Older peers omit this field, and their inventory arguments were all treated
+    /// as tty7 defaults, so `true` preserves the previous protocol behavior.
+    #[serde(default = "default_true")]
+    pub args_are_tty7_defaults: bool,
 }
 
 impl DetectedShell {
@@ -19,8 +24,13 @@ impl DetectedShell {
             label: label.into(),
             program: program.into(),
             args: Vec::new(),
+            args_are_tty7_defaults: true,
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,11 +80,18 @@ fn inventory_from(
         .as_ref()
         .map_or(fallback_program, |(program, _)| program.as_str());
 
-    if let Some(default_name) = shells
+    if let Some(default_index) = shells
         .iter()
-        .find(|shell| same_shell_program(&shell.program, default_program))
-        .map(|shell| shell.label.clone())
+        .position(|shell| same_shell_program(&shell.program, default_program))
     {
+        // A configured command may resolve to an already detected executable.
+        // Keep the detected path and friendly label, but retain the user's launch
+        // arguments and their origin so local and remote menus behave identically.
+        if let Some((_, args)) = configured.as_ref() {
+            shells[default_index].args.clone_from(args);
+            shells[default_index].args_are_tty7_defaults = false;
+        }
+        let default_name = shells[default_index].label.clone();
         return ShellInventory {
             shells,
             default_name,
@@ -91,6 +108,7 @@ fn inventory_from(
                 label: default_name.clone(),
                 program,
                 args,
+                args_are_tty7_defaults: false,
             },
         );
     }
@@ -399,6 +417,7 @@ fn detect_windows() -> Vec<DetectedShell> {
             label: "Git Bash".into(),
             program: bash.to_string_lossy().into_owned(),
             args: vec!["-i".into(), "-l".into()],
+            args_are_tty7_defaults: true,
         });
     }
 
@@ -407,6 +426,7 @@ fn detect_windows() -> Vec<DetectedShell> {
             label: format!("WSL · {distro}"),
             program: "wsl.exe".into(),
             args: vec!["--distribution".into(), distro, "--cd".into(), "~".into()],
+            args_are_tty7_defaults: true,
         });
     }
 
@@ -717,6 +737,7 @@ mod tests {
         assert_eq!(inventory.shells[0].label, "custom-shell");
         assert_eq!(inventory.shells[0].program, "custom-shell");
         assert_eq!(inventory.shells[0].args, ["--login", "--verbose"]);
+        assert!(!inventory.shells[0].args_are_tty7_defaults);
     }
 
     #[test]
@@ -734,6 +755,8 @@ mod tests {
 
         assert_eq!(inventory.shells.len(), 1, "the same shell was duplicated");
         assert_eq!(inventory.default_name, "Nushell");
+        assert_eq!(inventory.shells[0].args, ["--login"]);
+        assert!(!inventory.shells[0].args_are_tty7_defaults);
     }
 
     #[test]
@@ -793,6 +816,17 @@ mod tests {
 
         assert_eq!(inventory.default_name, label);
         assert_eq!(inventory.shells.len(), 1);
+        assert!(inventory.shells[0].args_are_tty7_defaults);
+    }
+
+    #[test]
+    fn inventories_from_older_peers_treat_arguments_as_tty7_defaults() {
+        let inventory: ShellInventory = serde_json::from_str(
+            r#"{"shells":[{"label":"Git Bash","program":"bash","args":["-l"]}],"default_name":"Git Bash"}"#,
+        )
+        .expect("an inventory without argument-origin metadata should remain compatible");
+
+        assert!(inventory.shells[0].args_are_tty7_defaults);
     }
 
     #[test]

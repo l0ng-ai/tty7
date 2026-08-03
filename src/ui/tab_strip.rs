@@ -15,7 +15,7 @@ use crate::core::actions::{
     SelectWorkspace5, SelectWorkspace6, SelectWorkspace7, SelectWorkspace8, SelectWorkspace9,
     TogglePalette,
 };
-use crate::core::config::{RightPanelTab, ShellConfig};
+use crate::core::config::RightPanelTab;
 use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
 use crate::ui::app::{TILE_GLYPH, TILE_GLYPH_LINE, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
@@ -29,14 +29,15 @@ pub(crate) const GRAB_HANDLE_W: f32 = 80.;
 
 const KEEP_SEGMENTS: usize = 3;
 
-/// Distinguishes built-in launch flags from arguments authored in Settings.
-/// User arguments must retain their existing shell-integration semantics when
-/// the configured shell is launched through the dropdown instead of the main
-/// new-tab action.
-fn shell_args_are_tty7_defaults(shell: &DetectedShell, configured: Option<&ShellConfig>) -> bool {
-    !configured.is_some_and(|configured| {
-        configured.program == shell.program && configured.args == shell.args
-    })
+/// Builds a launch specification without recomputing argument ownership locally.
+/// The inventory may originate from a remote host, so only its transported
+/// metadata can distinguish tty7 launch defaults from user-authored arguments.
+fn shell_spec(shell: &DetectedShell) -> ShellSpec {
+    ShellSpec {
+        program: shell.program.clone(),
+        args: shell.args.clone(),
+        args_are_tty7_defaults: shell.args_are_tty7_defaults,
+    }
 }
 
 pub(crate) fn abbreviate_home(path: &str) -> std::borrow::Cow<'_, str> {
@@ -546,23 +547,11 @@ impl Tty7App {
     ) -> impl IntoElement + use<> {
         let shells = self.shells.shells.clone();
         let default_name = self.default_shell_label(cx);
-        let configured = self
-            .shells_host
-            .is_local()
-            .then(|| cx.global::<crate::core::config::Config>().shell.clone())
-            .flatten();
         let app = cx.entity().downgrade();
         button.dropdown_menu(move |menu, _window, _cx| {
             let mut menu = menu.min_w(px(220.));
             for shell in &shells {
-                let spec = ShellSpec {
-                    program: shell.program.clone(),
-                    args: shell.args.clone(),
-                    args_are_tty7_defaults: shell_args_are_tty7_defaults(
-                        shell,
-                        configured.as_ref(),
-                    ),
-                };
+                let spec = shell_spec(shell);
                 let open = app.clone();
                 let item = if shell.label == default_name {
                     let label: SharedString = shell.label.clone().into();
@@ -1141,13 +1130,12 @@ mod tests {
             label: "custom".into(),
             program: "custom-shell".into(),
             args: vec!["--login".into()],
+            args_are_tty7_defaults: false,
         };
-        let configured = ShellConfig {
-            program: shell.program.clone(),
-            args: shell.args.clone(),
-        };
+        let spec = shell_spec(&shell);
 
-        assert!(!shell_args_are_tty7_defaults(&shell, Some(&configured)));
-        assert!(shell_args_are_tty7_defaults(&shell, None));
+        assert_eq!(spec.program, "custom-shell");
+        assert_eq!(spec.args, ["--login"]);
+        assert!(!spec.args_are_tty7_defaults);
     }
 }
