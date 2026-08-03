@@ -958,10 +958,13 @@ impl Tty7App {
         desc: impl Into<String>,
         control: AnyElement,
         cx: &Context<Self>,
-    ) -> Div {
+    ) -> Stateful<Div> {
         let theme = cx.theme();
+        let label = label.into();
         let desc = desc.into();
+        let element_id = SharedString::from(format!("settings-row-{label}:{desc}"));
         h_flex()
+            .id(element_id)
             .items_center()
             .justify_between()
             .gap_8()
@@ -970,6 +973,7 @@ impl Tty7App {
             .mx_neg_2p5()
             .rounded_lg()
             .hover(|h| h.bg(gpui::rgb(cx.global::<presets::Surfaces>().window.hover)))
+            .on_hover(cx.listener(|_this, _hovered, _window, cx| cx.notify()))
             .child(
                 v_flex()
                     .gap_0p5()
@@ -979,7 +983,7 @@ impl Tty7App {
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.foreground)
-                            .child(label.into()),
+                            .child(label),
                     )
                     .when(!desc.is_empty(), |col| {
                         col.child(
