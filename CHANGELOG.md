@@ -52,6 +52,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   touch one it didn't, so a hand-written skill that happens to share the
   directory name survives. (#248)
 
+### Fixed
+
+- **Scoop shims work again when tty7 is launched from a hardened Windows
+  shell broker** — some brokers enforce `ProcessRedirectionTrustPolicy` on
+  what they start. The daemon inherited it, every ConPTY shell under the
+  daemon inherited it in turn, and PowerShell could then no longer traverse
+  a user-created junction — which is exactly what Scoop's `current` links
+  are. `oh-my-posh` and `fzf` died with `Shim: Could not determine if target
+  is a GUI app`. Windows Terminal was unaffected because its process tree
+  never picked the policy up in the first place.
+
+  The policy cannot be relaxed once it is on, so the fix is to not inherit
+  it: when tty7 detects the enforcing bit, it creates the daemon with
+  `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` naming the interactive desktop
+  shell, which supplies the ordinary desktop token, device map, and
+  mitigation policy. Everything else about the spawn is unchanged, and the
+  ordinary path still runs whenever the policy is absent — or whenever the
+  desktop shell cannot be borrowed, in which case tty7 logs a warning and
+  starts degraded rather than not starting at all. (#292)
+
+- **A pane's last line of output no longer loses the race with its exit on
+  Windows** — the process-exit monitor could observe a short-lived shell
+  exiting before the ConPTY reader had delivered its final frame, so
+  `Exited` reached clients ahead of the output that preceded it. The
+  monitor now releases the pseudoconsole and lets the reader, which reports
+  only after it has forwarded everything up to EOF, announce the death. A
+  bounded window behind it still covers the case where EOF never arrives —
+  a grandchild holding the ConPTY output pipe open keeps the shell's own
+  exit from ever closing it. (#292)
+
 ## [26.8.1] - 2026-08-01
 
 ### Added

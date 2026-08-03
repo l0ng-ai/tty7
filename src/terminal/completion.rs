@@ -84,16 +84,12 @@ fn current_command(chars: &[char], word_start: usize) -> Option<String> {
 pub fn complete(line: &str, cursor: usize, cwd: Option<&Path>) -> Option<Completion> {
     let chars: Vec<char> = line.chars().collect();
     let cursor = cursor.min(chars.len());
-
-    let mut word_start = cursor;
-    while word_start > 0 && !chars[word_start - 1].is_whitespace() {
-        word_start -= 1;
-    }
+    let word_start = shell_word_start(&chars, cursor);
     let word: String = chars[word_start..cursor].iter().collect();
 
     let is_command = chars[..word_start].iter().all(|c| c.is_whitespace());
     let (word_cands, pending) = if is_command && !word.contains('/') {
-        (complete_command(&word), Vec::new())
+        (complete_command(&word, cwd.is_some()), Vec::new())
     } else {
         match complete_signature(&chars, word_start, &word, cwd) {
             Some(sig) => (sig.cands, sig.pending),
@@ -129,7 +125,30 @@ pub fn complete(line: &str, cursor: usize, cwd: Option<&Path>) -> Option<Complet
     }
 }
 
-fn complete_command(word: &str) -> Vec<WordCand> {
+/// Finds the start of the shell word at `cursor`. A whitespace character
+/// preceded by an odd-length run of backslashes belongs to the word, as in
+/// `My\ Documents/` after a path candidate has been inserted.
+fn shell_word_start(chars: &[char], cursor: usize) -> usize {
+    let mut start = cursor.min(chars.len());
+    while start > 0 {
+        if !chars[start - 1].is_whitespace() {
+            start -= 1;
+            continue;
+        }
+        let escapes = chars[..start - 1]
+            .iter()
+            .rev()
+            .take_while(|&&c| c == '\\')
+            .count();
+        if escapes % 2 == 0 {
+            break;
+        }
+        start -= 1;
+    }
+    start
+}
+
+fn complete_command(word: &str, local: bool) -> Vec<WordCand> {
     if word.is_empty() {
         return Vec::new();
     }
@@ -139,7 +158,7 @@ fn complete_command(word: &str) -> Vec<WordCand> {
             set.insert((*b).to_string());
         }
     }
-    if let Some(path) = std::env::var_os("PATH") {
+    if let Some(path) = std::env::var_os("PATH").filter(|_| local) {
         for dir in std::env::split_paths(&path) {
             let Ok(rd) = std::fs::read_dir(&dir) else {
                 continue;
@@ -207,10 +226,7 @@ pub fn remote_path_request(
     }
     let chars: Vec<char> = line.chars().collect();
     let cursor = cursor.min(chars.len());
-    let mut word_start = cursor;
-    while word_start > 0 && !chars[word_start - 1].is_whitespace() {
-        word_start -= 1;
-    }
+    let word_start = shell_word_start(&chars, cursor);
     let word: String = chars[word_start..cursor].iter().collect();
 
     let is_command = chars[..word_start].iter().all(|c| c.is_whitespace());
@@ -221,6 +237,7 @@ pub fn remote_path_request(
         return None;
     }
 
+    let word = unescape_path_word(&word);
     let (dir_part, prefix) = match word.rfind('/') {
         Some(i) => (&word[..=i], &word[i + 1..]),
         None => ("", word.as_str()),
@@ -281,9 +298,13 @@ pub fn remote_path_candidates(req: &RemotePathRequest, entries: &[RemoteEntry]) 
 }
 
 fn complete_path(word: &str, cwd: &Path, dirs_only: bool) -> Vec<WordCand> {
+    // Candidates are emitted unescaped and escaped at insertion time. Undo the
+    // corresponding backslash quoting for lookup, so a second Tab after
+    // inserting `My\ Documents/` still enters the real directory.
+    let word = unescape_path_word(word);
     let (dir_part, prefix) = match word.rfind(std::path::is_separator) {
         Some(i) => (&word[..=i], &word[i + 1..]),
-        None => ("", word),
+        None => ("", word.as_str()),
     };
     let base = resolve_dir(dir_part, cwd);
 
@@ -322,6 +343,25 @@ fn complete_path(word: &str, cwd: &Path, dirs_only: bool) -> Vec<WordCand> {
             .cmp(&b.text.chars().count())
             .then_with(|| a.text.cmp(&b.text))
     });
+    out
+}
+
+fn unescape_path_word(word: &str) -> String {
+    let mut out = String::with_capacity(word.len());
+    let mut escaped = false;
+    for ch in word.chars() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else {
+            out.push(ch);
+        }
+    }
+    if escaped {
+        out.push('\\');
+    }
     out
 }
 
@@ -527,6 +567,7 @@ pub(super) struct CompletionSession {
     pub(super) all: Vec<Candidate>,
     pub(super) filtered: Vec<usize>,
     pub(super) index: Option<usize>,
+    pub(super) pending_generators: usize,
 }
 
 pub(super) struct Replacement {
@@ -549,7 +590,12 @@ impl Replacement {
 }
 
 impl CompletionSession {
-    pub(super) fn new(word_start: usize, open_word: String, all: Vec<Candidate>) -> Self {
+    pub(super) fn new(
+        word_start: usize,
+        open_word: String,
+        all: Vec<Candidate>,
+        pending_generators: usize,
+    ) -> Self {
         let filtered = (0..all.len()).collect();
         Self {
             word_start,
@@ -557,7 +603,16 @@ impl CompletionSession {
             all,
             filtered,
             index: Some(0),
+            pending_generators,
         }
+    }
+
+    pub(super) fn generator_answered(&mut self) {
+        self.pending_generators = self.pending_generators.saturating_sub(1);
+    }
+
+    pub(super) fn is_spent(&self) -> bool {
+        self.pending_generators == 0 && self.filtered.is_empty()
     }
 
     pub(super) fn selected(&self) -> Option<&Candidate> {
@@ -744,6 +799,7 @@ mod tests {
             0,
             "f".into(),
             vec![cand("feature", CandidateKind::Value, 0, 1)],
+            0,
         );
         let new = vec![
             cand("feature", CandidateKind::Value, 0, 1),
@@ -765,6 +821,7 @@ mod tests {
                 cand("branch-a", CandidateKind::Value, 0, 1),
                 cand("branch-b", CandidateKind::Value, 0, 1),
             ],
+            0,
         );
         s.select(true);
         assert_eq!(s.selected().unwrap().text, "branch-b");
@@ -833,7 +890,7 @@ mod tests {
             .iter()
             .map(|w| cand(w, CandidateKind::Command, 0, 1))
             .collect();
-        CompletionSession::new(0, "a".into(), cands)
+        CompletionSession::new(0, "a".into(), cands, 0)
     }
 
     #[test]
@@ -886,7 +943,9 @@ mod tests {
             if *is_dir {
                 std::fs::create_dir_all(dir.join(name)).unwrap();
             } else {
-                std::fs::write(dir.join(name), b"").unwrap();
+                let path = dir.join(name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"").unwrap();
             }
         }
         dir
@@ -913,6 +972,18 @@ mod tests {
         let assets = c.candidates.iter().find(|c| c.text == "assets").unwrap();
         assert!(assets.is_dir());
         assert_eq!((assets.start, assets.end), (4, 5));
+    }
+
+    #[test]
+    fn completion_reenters_a_directory_inserted_with_an_escaped_space() {
+        let dir = temp_tree("escaped-path", &[("My Documents/notes.txt", false)]);
+        let line = r"cat My\ Documents/no";
+        let c = complete(line, line.chars().count(), Some(dir.as_path())).unwrap();
+        assert_eq!(c.candidates[0].text, "My Documents/notes.txt");
+        assert_eq!(
+            (c.candidates[0].start, c.candidates[0].end),
+            (4, line.chars().count())
+        );
     }
 
     #[test]
@@ -963,6 +1034,30 @@ mod tests {
 
         let c = complete("ech", 3, None).expect("command completion needs no cwd");
         assert!(c.candidates.iter().any(|c| c.text == "echo"));
+    }
+
+    #[test]
+    fn a_remote_pane_offers_builtins_but_never_this_machines_binaries() {
+        let remote: Vec<String> = complete("l", 1, None)
+            .map(|c| c.candidates.into_iter().map(|c| c.text).collect())
+            .unwrap_or_default();
+        assert!(
+            remote.iter().all(|n| BUILTINS.contains(&n.as_str())),
+            "a builtin is true on any POSIX shell, but a PATH scan reads *this* machine \
+             and its names do not exist on the remote: {remote:?}"
+        );
+
+        #[cfg(unix)]
+        {
+            let local: Vec<String> = complete("l", 1, Some(Path::new("/")))
+                .map(|c| c.candidates.into_iter().map(|c| c.text).collect())
+                .unwrap_or_default();
+            assert!(
+                local.iter().any(|n| n == "ls"),
+                "a local pane still scans PATH: {local:?}"
+            );
+            assert!(!remote.iter().any(|n| n == "ls"));
+        }
     }
 
     #[test]
@@ -1024,7 +1119,7 @@ mod tests {
         );
 
         let r = remote_path_request(r"cat a\b", 7, "/home/me").unwrap();
-        assert_eq!((r.dir.as_str(), r.prefix.as_str()), ("/home/me", r"a\b"));
+        assert_eq!((r.dir.as_str(), r.prefix.as_str()), ("/home/me", "ab"));
     }
 
     #[test]

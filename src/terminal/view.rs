@@ -160,6 +160,7 @@ pub struct TerminalView {
     remote_completion_inflight: bool,
     completion_generation: u64,
     editor_handoff: Option<u64>,
+    editor_handoff_interrupt_seq: Option<u64>,
     reverse_search: Option<ReverseSearch>,
     integration_notice: Option<String>,
     integration_notice_shown: bool,
@@ -381,6 +382,13 @@ fn shell_escape_path(path: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+fn escape_candidate(text: &str) -> String {
+    match text.strip_prefix("~/") {
+        Some(rest) => format!("~/{}", shell_escape_path(rest)),
+        None => shell_escape_path(text),
+    }
 }
 
 fn clipboard_paste_text(item: &ClipboardItem) -> Option<String> {
@@ -762,6 +770,7 @@ impl TerminalView {
             completion: None,
             completion_generation: 0,
             editor_handoff: None,
+            editor_handoff_interrupt_seq: None,
             remote_completion_inflight: false,
             reverse_search: None,
             integration_notice: None,
@@ -1130,6 +1139,15 @@ impl TerminalView {
             && cx.global::<Config>().history_search
         {
             self.note_integration_gap(cx);
+        }
+
+        if m.control && !m.platform && !m.alt && ks.key == "c" && self.handoff_active() {
+            // A Tab/unknown-chord handoff leaves the daemon at_prompt: the shell
+            // never saw Enter, so there is no C mark. Ctrl-C makes readline draw
+            // a fresh prompt whose A/B report is consequently true -> true and
+            // does not advance prompt_cycle. Remember this report boundary so
+            // that fresh prompt can still return ownership to the local editor.
+            self.editor_handoff_interrupt_seq = Some(self.terminal.prompt_seq());
         }
 
         let kitty = self.kitty_flags();
@@ -2482,7 +2500,7 @@ impl TerminalView {
         if self.shell_vi_prompt() {
             return Some("the shell prompt is in vi mode");
         }
-        if self.editor_handoff == Some(self.terminal.prompt_cycle()) {
+        if self.handoff_active() {
             return Some("this prompt's line was already handed to the shell");
         }
         if !self.at_shell_prompt() {
@@ -2501,6 +2519,9 @@ impl TerminalView {
 
     fn handoff_active(&self) -> bool {
         self.editor_handoff == Some(self.terminal.prompt_cycle())
+            && self
+                .editor_handoff_interrupt_seq
+                .is_none_or(|seq| self.terminal.prompt_seq() <= seq)
             && self.terminal.at_prompt()
             && !self.on_alt_screen()
     }
@@ -2913,6 +2934,7 @@ impl TerminalView {
         }
         self.cmd.clear();
         self.editor_handoff = Some(self.terminal.prompt_cycle());
+        self.editor_handoff_interrupt_seq = None;
         self.send_to_pty(chord, cx);
     }
 
@@ -2973,7 +2995,7 @@ impl TerminalView {
             return;
         };
 
-        let has_pending = !comp.pending.is_empty();
+        let pending_generators = comp.pending.len();
 
         let (word_start, word_end) = match comp.candidates.first() {
             Some(c) => (c.start, c.end),
@@ -2984,7 +3006,7 @@ impl TerminalView {
             word_start,
             word_end,
             comp.candidates,
-            has_pending,
+            pending_generators,
             cx,
         ) else {
             return;
@@ -2999,9 +3021,6 @@ impl TerminalView {
                     .background_executor()
                     .spawn(async move { super::generator::run(&script, &cwd) })
                     .await;
-                if results.is_empty() {
-                    return;
-                }
                 let _ = this.update(cx, |view, cx| {
                     view.completion_merge(generation, results, cx);
                 });
@@ -3016,9 +3035,10 @@ impl TerminalView {
         word_start: usize,
         word_end: usize,
         cands: Vec<completion::Candidate>,
-        has_pending: bool,
+        pending_generators: usize,
         cx: &mut Context<Self>,
     ) -> Option<u64> {
+        let has_pending = pending_generators > 0;
         if !has_pending && cands.len() == 1 {
             let c = cands[0].clone();
             self.completion_insert(&c, c.start);
@@ -3031,10 +3051,11 @@ impl TerminalView {
             .skip(word_start)
             .take(word_end - word_start)
             .collect();
-        let s = CompletionSession::new(word_start, word.clone(), cands);
+        let s = CompletionSession::new(word_start, word.clone(), cands, pending_generators);
         if !has_pending
             && let Some(lcp) = s.common_prefix()
             && lcp.chars().count() > word.chars().count()
+            && escape_candidate(&lcp) == lcp
         {
             self.apply_candidate(line, word_start, word_end, &lcp);
         }
@@ -3144,7 +3165,7 @@ impl TerminalView {
             self.handoff_tab_to_shell(!forward, cx);
             return;
         }
-        self.offer_candidates(line, req.word_start, req.cursor, cands, false, cx);
+        self.offer_candidates(line, req.word_start, req.cursor, cands, 0, cx);
     }
 
     fn open_completion(&mut self, session: CompletionSession) -> u64 {
@@ -3194,10 +3215,18 @@ impl TerminalView {
                 icon: None,
             })
             .collect();
-        if let Some(s) = self.completion.as_mut() {
-            s.merge(new, &live_word);
-            cx.notify();
+        let spent = match self.completion.as_mut() {
+            Some(s) => {
+                s.generator_answered();
+                s.merge(new, &live_word);
+                s.is_spent()
+            }
+            None => false,
+        };
+        if spent {
+            self.close_completion();
         }
+        cx.notify();
     }
 
     fn completion_tab_step(&mut self, forward: bool, cx: &mut Context<Self>) {
@@ -3213,12 +3242,14 @@ impl TerminalView {
             {
                 if lone {
                     self.completion_accept(cx);
-                } else {
+                    return;
+                }
+                if escape_candidate(&lcp) == lcp {
                     self.apply_candidate(&line, word_start, cursor, &lcp);
                     self.cursor_visible = true;
                     cx.notify();
+                    return;
                 }
-                return;
             }
         }
         self.completion_select(forward, cx);
@@ -3247,7 +3278,7 @@ impl TerminalView {
         let line = self.cmd.text();
         let len = line.chars().count();
         let cursor = self.cmd.cursor().min(len);
-        let mut text = cand.text.clone();
+        let mut text = escape_candidate(&cand.text);
         if cand.is_dir() {
             if !text.ends_with('/') {
                 text.push('/');
@@ -4839,8 +4870,8 @@ mod tests {
         display_width, loopback_plan,
     };
     use super::{
-        drag_scroll_step, encode_mouse, expand_file_command_template, fallback_chain,
-        fig_icon_emoji, fig_icon_glyph, focus_report_bytes, input_overflow_shift,
+        drag_scroll_step, encode_mouse, escape_candidate, expand_file_command_template,
+        fallback_chain, fig_icon_emoji, fig_icon_glyph, focus_report_bytes, input_overflow_shift,
         input_overlay_rows, menu_layout, paste_bytes, select_end_copy, shell_escape_path,
         smooth_scroll_step, submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
@@ -5368,6 +5399,24 @@ mod tests {
         );
         assert_eq!(shell_escape_path(""), "''");
         assert_eq!(shell_escape_path("a\nb"), "'a\nb'");
+    }
+
+    #[test]
+    fn escape_candidate_quotes_what_the_shell_would_resplit() {
+        assert_eq!(escape_candidate("notes.txt"), "notes.txt");
+        assert_eq!(escape_candidate("--message"), "--message");
+        assert_eq!(escape_candidate("My Documents"), "My\\ Documents");
+        assert_eq!(escape_candidate("a(1)&b"), "a\\(1\\)\\&b");
+        assert_eq!(
+            escape_candidate("~/My Documents"),
+            "~/My\\ Documents",
+            "a leading ~/ is the user's own text and must stay expandable"
+        );
+        assert_eq!(
+            escape_candidate("~weird name"),
+            "\\~weird\\ name",
+            "a bare ~ that is not a home prefix is just a filename character"
+        );
     }
 
     #[test]
@@ -5992,6 +6041,72 @@ mod gpui_tests {
     }
 
     #[gpui::test]
+    fn ctrl_c_after_tab_handoff_returns_the_fresh_prompt_to_the_editor(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for_input_active(&window, cx);
+
+        window
+            .update(cx, |view, window, cx| {
+                for ch in ["z", "z", "q", "q", "x"] {
+                    type_char(view, ch, window, cx);
+                }
+                view.complete_tab(true, cx);
+                assert!(!view.input_active(), "Tab handed this line to the shell");
+                view.on_key_down(
+                    &KeyDownEvent {
+                        keystroke: key("ctrl-c"),
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"zzqqx".to_vec())
+        );
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(b"\t".to_vec()));
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x03]));
+
+        // Tab handoff never emitted C, so the shell integration reports the
+        // interrupted prompt as another A/B while the daemon is still at_prompt.
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: Some(130),
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for_input_active(&window, cx);
+
+        window
+            .update(cx, |view, window, cx| {
+                type_char(view, "n", window, cx);
+                assert_eq!(
+                    view.cmd.text(),
+                    "n",
+                    "the first character on the fresh line belongs to tty7's editor"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "the fresh line must not keep going raw to the shell"
+        );
+    }
+
+    #[gpui::test]
     fn a_late_remote_listing_leaves_a_line_the_editor_no_longer_owns_alone(
         cx: &mut TestAppContext,
     ) {
@@ -6059,6 +6174,159 @@ mod gpui_tests {
             .unwrap();
         assert_eq!(next_input_until_timeout(&mut daemon), Some(b"cd ".to_vec()));
         assert_eq!(next_input_until_timeout(&mut daemon), Some(b"\t".to_vec()));
+    }
+
+    fn dir_candidate(text: &str, start: usize, end: usize) -> completion::Candidate {
+        completion::Candidate {
+            text: text.into(),
+            kind: CandidateKind::Dir,
+            start,
+            end,
+            description: None,
+            icon: None,
+        }
+    }
+
+    #[gpui::test]
+    fn accepting_a_candidate_escapes_it_for_the_shell(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                view.cmd.set("cd My");
+                view.completion_insert(&dir_candidate("My Documents", 3, 5), 3);
+                assert_eq!(
+                    view.cmd.text(),
+                    "cd My\\ Documents/",
+                    "an unescaped candidate resplits into two arguments and the command breaks"
+                );
+
+                view.cmd.set("cd ~/My");
+                view.completion_insert(&dir_candidate("~/My Documents", 3, 6), 3);
+                assert_eq!(view.cmd.text(), "cd ~/My\\ Documents/");
+
+                view.cmd.set("git commit --mess");
+                view.completion_insert(
+                    &completion::Candidate {
+                        text: "--message".into(),
+                        kind: CandidateKind::Flag,
+                        start: 11,
+                        end: 17,
+                        description: None,
+                        icon: None,
+                    },
+                    11,
+                );
+                assert_eq!(view.cmd.text(), "git commit --message ");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_candidate_needing_escapes_is_never_half_applied(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.cmd.set("cd My");
+                let offered = view.offer_candidates(
+                    "cd My",
+                    3,
+                    5,
+                    vec![
+                        dir_candidate("My Documents", 3, 5),
+                        dir_candidate("My Music", 3, 5),
+                    ],
+                    0,
+                    cx,
+                );
+                assert!(offered.is_some(), "two candidates open a menu");
+                assert_eq!(
+                    view.cmd.text(),
+                    "cd My",
+                    "the common prefix here is `My ` — writing it raw would break the line \
+                     and the trailing space would close the menu on the next keystroke"
+                );
+            })
+            .unwrap();
+    }
+
+    fn parsed(text: &str) -> super::super::generator::Parsed {
+        super::super::generator::Parsed {
+            text: text.into(),
+            description: None,
+        }
+    }
+
+    #[gpui::test]
+    fn a_generator_that_supplies_no_match_closes_the_menu(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                // `git ckout<Tab>`: no subcommand matches, but git's alias generator
+                // is in flight, so the session opens empty and waits for it.
+                view.cmd.set("ckout");
+                let generation =
+                    view.open_completion(CompletionSession::new(0, "ckout".into(), Vec::new(), 1));
+                assert!(
+                    view.completion.is_some(),
+                    "the menu waits for its generator"
+                );
+
+                view.completion_merge(generation, Vec::new(), cx);
+                assert!(
+                    view.completion.is_none(),
+                    "a menu that never got a candidate must not stay armed — it swallows \
+                     every later Tab instead of handing the line to the shell"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn generator_results_that_match_nothing_close_the_menu(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.cmd.set("ckout");
+                let generation =
+                    view.open_completion(CompletionSession::new(0, "ckout".into(), Vec::new(), 1));
+
+                view.completion_merge(generation, vec![parsed("main"), parsed("release")], cx);
+                assert!(
+                    view.completion.is_none(),
+                    "branches that match nothing typed are as good as no candidates at all"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_menu_waits_while_another_generator_is_still_in_flight(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.cmd.set("ck");
+                let generation =
+                    view.open_completion(CompletionSession::new(0, "ck".into(), Vec::new(), 2));
+
+                view.completion_merge(generation, Vec::new(), cx);
+                assert!(
+                    view.completion.is_some(),
+                    "one generator came back empty, the other has not answered yet"
+                );
+
+                view.completion_merge(generation, vec![parsed("ckout-fix")], cx);
+                let s = view
+                    .completion
+                    .as_ref()
+                    .expect("the second one supplied a match");
+                assert_eq!(s.filtered.len(), 1);
+            })
+            .unwrap();
     }
 
     #[gpui::test]
@@ -6328,6 +6596,7 @@ mod gpui_tests {
                     4,
                     String::new(),
                     vec![candidate("status")],
+                    0,
                 ));
 
                 view.insert_newline_action(cx);
@@ -6342,6 +6611,7 @@ mod gpui_tests {
                     4,
                     String::new(),
                     vec![candidate("status")],
+                    0,
                 ));
                 view.handle_editor_key(&key("enter"), cx);
                 assert_eq!(view.cmd.text(), "git status ");
@@ -7813,7 +8083,7 @@ mod gpui_tests {
         window
             .update(cx, |view, _, cx| {
                 view.cmd.set_with_cursor("git checkout ma", 15);
-                let session = CompletionSession::new(13, String::new(), Vec::new());
+                let session = CompletionSession::new(13, String::new(), Vec::new(), 1);
                 let generation = view.open_completion(session);
 
                 let results = vec![
@@ -7848,7 +8118,7 @@ mod gpui_tests {
         window
             .update(cx, |view, _, cx| {
                 view.cmd.set_with_cursor("git checkout ", 13);
-                let session = CompletionSession::new(13, String::new(), Vec::new());
+                let session = CompletionSession::new(13, String::new(), Vec::new(), 1);
                 let stale = view.open_completion(session);
                 view.close_completion();
 
@@ -7866,7 +8136,7 @@ mod gpui_tests {
                 );
 
                 let fresh =
-                    view.open_completion(CompletionSession::new(13, String::new(), Vec::new()));
+                    view.open_completion(CompletionSession::new(13, String::new(), Vec::new(), 1));
                 assert_ne!(stale, fresh);
                 view.completion_merge(
                     stale,

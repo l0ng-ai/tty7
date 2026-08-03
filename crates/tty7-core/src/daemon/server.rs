@@ -147,6 +147,23 @@ fn ssh_connection_for(
     })
 }
 
+/// `eprintln!` for a process that may have no standard error.
+///
+/// A daemon started through the Windows clean-parent path (see
+/// `daemon::spawn::windows`) has NULL standard handles: naming a logical parent
+/// makes handle inheritance follow *that* process, so tty7 cannot hand the
+/// child a `NUL` handle the way the ordinary `Stdio::null()` path does. On
+/// Windows a failed write to stderr makes `eprintln!` panic, which would kill
+/// the daemon before it serves anything. These notes are diagnostics for
+/// someone running the daemon in a terminal; dropping them is the right
+/// outcome when nobody is there to read them.
+macro_rules! startup_note {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 pub fn run_daemon() -> anyhow::Result<()> {
     let registry = Arc::new(Registry::new());
 
@@ -158,8 +175,8 @@ pub fn run_daemon() -> anyhow::Result<()> {
             crate::host::local::LocalHost::shared(),
             services,
         ) {
-            Ok(path) => eprintln!("tty7-server: control socket at {}", path.display()),
-            Err(e) => eprintln!("tty7-server: control listener unavailable: {e}"),
+            Ok(path) => startup_note!("tty7-server: control socket at {}", path.display()),
+            Err(e) => startup_note!("tty7-server: control listener unavailable: {e}"),
         }
     }
     #[cfg(not(any(unix, windows)))]
@@ -172,12 +189,12 @@ pub fn control_services() -> crate::host::server::Services {
     use crate::core::machine::MachineStore;
     match MachineStore::shared() {
         Ok(machine) => {
-            eprintln!("machine tree at {}", machine.path().display());
+            startup_note!("machine tree at {}", machine.path().display());
             crate::core::machine::publish_observations(&machine);
             crate::host::server::Services::with_machine(machine)
         }
         Err(e) => {
-            eprintln!("no machine tree ({e}); serving files and panes only");
+            startup_note!("no machine tree ({e}); serving files and panes only");
             crate::host::server::Services::none()
         }
     }
