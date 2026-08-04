@@ -84,9 +84,14 @@ Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 ; still has to produce an installer. See bundle-windows.ps1.
 Source: "{#StageDir}\server\*"; DestDir: "{app}\server"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
 
+; AppUserModelID is what lets toast notifications carry the tty7 name and icon
+; instead of the notify-rust PowerShell fallback: Windows only honors an
+; unpackaged app's toast identity when a shortcut stamps it. Must match
+; `core::aumid::AUMID` (src/core/aumid.rs, which also rewrites the per-user
+; shortcut at startup so portable-zip installs and pre-AUMID upgrades heal).
 [Icons]
-Name: "{autoprograms}\tty7"; Filename: "{app}\tty7-app.exe"
-Name: "{autodesktop}\tty7"; Filename: "{app}\tty7-app.exe"; Tasks: desktopicon
+Name: "{autoprograms}\tty7"; Filename: "{app}\tty7-app.exe"; AppUserModelID: "com.github.tty7"
+Name: "{autodesktop}\tty7"; Filename: "{app}\tty7-app.exe"; Tasks: desktopicon; AppUserModelID: "com.github.tty7"
 
 [Run]
 Filename: "{app}\tty7-app.exe"; Description: "{cm:LaunchProgram,tty7}"; Flags: nowait postinstall skipifsilent

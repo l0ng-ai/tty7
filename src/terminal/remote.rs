@@ -1526,10 +1526,16 @@ pub(crate) fn notify_desktop(title: Option<&str>, body: &str) {
     std::thread::spawn(move || {
         #[cfg(target_os = "macos")]
         ensure_notification_app();
-        let _ = notify_rust::Notification::new()
-            .summary(&summary)
-            .body(&body)
-            .show();
+        let mut notif = notify_rust::Notification::new();
+        notif.summary(&summary).body(&body);
+        // Without our own AUMID, the Windows backend falls back to
+        // PowerShell's — icon and name included. Only set ours when its
+        // Start Menu shortcut is actually in place, else the toast fails.
+        #[cfg(target_os = "windows")]
+        if let Some(app_id) = crate::core::aumid::toast_app_id() {
+            notif.app_id(app_id);
+        }
+        let _ = notif.show();
     });
 }
 
