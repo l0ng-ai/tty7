@@ -311,7 +311,8 @@ fn names_capability_env(key: &str) -> bool {
 
 fn pane_environment(
     extra_env: &std::collections::HashMap<String, String>,
-    theme: &str,
+    // Only Windows has a use for it — see the `COLORFGBG` block below.
+    #[cfg_attr(not(windows), allow(unused_variables))] dark: bool,
     pane: u64,
     workspace: Option<&str>,
 ) -> Vec<(String, String)> {
@@ -335,11 +336,7 @@ fn pane_environment(
         // ConPTY consumes OSC 11 queries before tty7's emulator can answer
         // them. Give TUI applications the conventional fallback hint while
         // preserving an explicit user override below.
-        let colorfgbg = if theme.eq_ignore_ascii_case("dark") {
-            "15;0"
-        } else {
-            "0;15"
-        };
+        let colorfgbg = if dark { "15;0" } else { "0;15" };
         env.push(("COLORFGBG".to_string(), colorfgbg.to_string()));
     }
     if let Some(ws) = workspace {
@@ -366,9 +363,9 @@ fn apply_common_command_setup(
     if let Some(dir) = initial_cwd {
         cmd.cwd(dir);
     }
-    let config = crate::core::config::Config::load();
-    let extra_env = &config.env;
-    for (k, v) in pane_environment(extra_env, &config.theme, pane, workspace) {
+    let extra_env = crate::core::config::extra_env();
+    let dark = crate::core::machine::appearance().dark;
+    for (k, v) in pane_environment(&extra_env, dark, pane, workspace) {
         cmd.env(k, v);
     }
 
@@ -4100,14 +4097,10 @@ mod tests {
 
     #[test]
     fn pane_environment_advertises_the_terminal_under_the_standard_names() {
-        let env: std::collections::HashMap<_, _> = pane_environment(
-            &std::collections::HashMap::new(),
-            "light",
-            7,
-            Some("ws-main"),
-        )
-        .into_iter()
-        .collect();
+        let env: std::collections::HashMap<_, _> =
+            pane_environment(&std::collections::HashMap::new(), false, 7, Some("ws-main"))
+                .into_iter()
+                .collect();
         let version = env!("CARGO_PKG_VERSION");
 
         assert_eq!(env.get("TERM_PROGRAM").map(String::as_str), Some("tty7"));
@@ -4131,7 +4124,7 @@ mod tests {
     fn pane_environment_hands_the_shell_its_own_address() {
         let env: std::collections::HashMap<_, _> = pane_environment(
             &std::collections::HashMap::new(),
-            "light",
+            false,
             42,
             Some("ws-main"),
         )
@@ -4162,7 +4155,7 @@ mod tests {
         }
 
         let unfiled: std::collections::HashMap<_, _> =
-            pane_environment(&std::collections::HashMap::new(), "light", 42, None)
+            pane_environment(&std::collections::HashMap::new(), false, 42, None)
                 .into_iter()
                 .collect();
         assert!(
@@ -4185,7 +4178,7 @@ mod tests {
         .collect();
 
         let applied: std::collections::HashMap<_, _> =
-            pane_environment(&configured, "light", 1, None)
+            pane_environment(&configured, false, 1, None)
                 .into_iter()
                 .collect();
 
@@ -4212,10 +4205,10 @@ mod tests {
     #[test]
     fn pane_environment_advertises_light_and_dark_backgrounds() {
         let empty = std::collections::HashMap::new();
-        let light: std::collections::HashMap<_, _> = pane_environment(&empty, "light", 1, None)
+        let light: std::collections::HashMap<_, _> = pane_environment(&empty, false, 1, None)
             .into_iter()
             .collect();
-        let dark: std::collections::HashMap<_, _> = pane_environment(&empty, "dark", 1, None)
+        let dark: std::collections::HashMap<_, _> = pane_environment(&empty, true, 1, None)
             .into_iter()
             .collect();
 
@@ -4229,7 +4222,7 @@ mod tests {
         let configured = [("ColorFgBg".to_string(), "3;4".to_string())]
             .into_iter()
             .collect();
-        let applied = pane_environment(&configured, "light", 1, None);
+        let applied = pane_environment(&configured, false, 1, None);
 
         assert!(!applied.iter().any(|(key, _)| key == "COLORFGBG"));
         assert!(
@@ -4247,7 +4240,7 @@ mod tests {
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect();
 
-        let applied = pane_environment(&configured, "light", 1, None);
+        let applied = pane_environment(&configured, false, 1, None);
 
         assert!(
             !applied.iter().any(|(k, _)| k == "Term" || k == "ColorTerm"),
