@@ -100,6 +100,7 @@ pub struct TerminalView {
     owner_workspace: Option<crate::core::session::WorkspaceId>,
     restored: bool,
     ssh_spec: Option<Box<crate::daemon::protocol::NativeSshSpec>>,
+    remote_clipboard_ready: bool,
     pub focus_handle: FocusHandle,
     pub font: Font,
     pub font_bold: Option<Font>,
@@ -427,6 +428,32 @@ fn write_clipboard_image(img: &gpui::Image) -> Option<std::path::PathBuf> {
     Some(path)
 }
 
+/// The SSH user a paste should be uploaded for, when this pane runs on a
+/// remote host reachable over the daemon's russh stack: either a native SSH
+/// workspace pane or a standalone native SSH pane. WSL shares localhost and
+/// needs path translation instead, and a workspace without connection details
+/// has no channel to piggyback on — both keep the local-path behavior.
+#[cfg(not(target_os = "macos"))]
+fn remote_paste_user<'a>(
+    workspace: Option<&'a crate::terminal::PaneWorkspace>,
+    ssh_spec: Option<&'a crate::daemon::protocol::NativeSshSpec>,
+) -> Option<&'a str> {
+    if let Some(ws) = workspace {
+        if ws.shares_localhost() {
+            return None;
+        }
+        return ws.spec.as_ref().map(|s| s.user.as_str());
+    }
+    ssh_spec.map(|s| s.user.as_str())
+}
+
+/// Per-user remote staging dir for pasted images, so concurrent users on one
+/// host don't clash over /tmp permissions.
+#[cfg(not(target_os = "macos"))]
+fn remote_clipboard_dir(user: &str) -> String {
+    format!("/tmp/tty7-clipboard-{user}")
+}
+
 #[cfg(not(target_os = "macos"))]
 fn transcode_to_png(bytes: &[u8], format: gpui::ImageFormat) -> Option<Vec<u8>> {
     use gpui::ImageFormat as G;
@@ -711,6 +738,7 @@ impl TerminalView {
             owner_workspace: None,
             restored: false,
             ssh_spec: None,
+            remote_clipboard_ready: false,
             focus_handle,
             font,
             font_bold,
@@ -2008,6 +2036,15 @@ impl TerminalView {
     fn paste_clipboard_image(&mut self, img: &gpui::Image, cx: &mut Context<Self>) {
         #[cfg(not(target_os = "macos"))]
         if let Some(path) = write_clipboard_image(img) {
+            // SSH panes can't see the local temp file: upload it over the
+            // pane's SFTP channel and paste the remote path instead. The
+            // hash-keyed name makes the remote path deterministic, and the
+            // transfer finishes long before the user submits the line.
+            if let Some(remote) = self.stage_image_for_remote(&path) {
+                let text = shell_escape_path(&remote);
+                self.paste(format!("{text} "), cx);
+                return;
+            }
             let text = shell_escape_path(&path.to_string_lossy());
             self.paste(format!("{text} "), cx);
             return;
@@ -2016,6 +2053,37 @@ impl TerminalView {
         self.terminal.write(vec![0x16]);
         self.terminal.term.lock().selection = None;
         cx.notify();
+    }
+
+    /// Upload a locally staged clipboard image to the remote host and return
+    /// the remote path to paste, or `None` for local/WSL panes and when the
+    /// upload cannot be started (the caller then falls back to the local
+    /// path). The transfer runs as a normal SFTP job, so failures surface in
+    /// the SFTP panel's transfer history.
+    #[cfg(not(target_os = "macos"))]
+    fn stage_image_for_remote(&mut self, local: &std::path::Path) -> Option<String> {
+        use crate::daemon::protocol::{SftpOp, SftpTransferKind, SftpTransferSpec};
+        let user = remote_paste_user(self.workspace.as_ref(), self.ssh_spec.as_deref())?;
+        let dir = remote_clipboard_dir(user);
+        let route = crate::ui::sftp::SftpRoute::new(self.pane_id, self.workspace.clone());
+        if !self.remote_clipboard_ready {
+            // Best-effort: the dir exists after the first paste, and a real
+            // failure here also fails the transfer below.
+            let _ = route.op(SftpOp::Mkdir { path: dir.clone() });
+            self.remote_clipboard_ready = true;
+        }
+        let name = local.file_name()?.to_string_lossy();
+        let remote = crate::daemon::ssh::sftp::remote_join(&dir, &name);
+        route
+            .transfer_start(SftpTransferSpec {
+                pane_id: self.pane_id,
+                kind: SftpTransferKind::Upload,
+                local: local.to_path_buf(),
+                remote: remote.clone(),
+                recursive: false,
+            })
+            .ok()?;
+        Some(remote)
     }
 
     pub fn clear_scrollback(&mut self, cx: &mut Context<Self>) {
@@ -4965,6 +5033,8 @@ mod tests {
         input_overlay_rows, menu_layout, paste_bytes, select_end_copy, shell_escape_path,
         smooth_scroll_step, submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
+    #[cfg(not(target_os = "macos"))]
+    use super::{remote_clipboard_dir, remote_paste_user};
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
     use gpui_component::IconName;
@@ -5159,6 +5229,52 @@ mod tests {
     fn workspace_without_a_spec_does_not_forward() {
         let w = ws(RemoteTarget::direct("me", "dev.box", 22), false);
         assert_eq!(loopback_plan(true, Some(&w), None, 7), LoopbackPlan::Direct);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn native_spec() -> crate::daemon::protocol::NativeSshSpec {
+        serde_json::from_str(r#"{"host":"dev.box","port":22,"user":"me","auth_mode":"auto"}"#)
+            .unwrap()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn local_pane_pastes_the_local_image_path() {
+        assert_eq!(remote_paste_user(None, None), None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn ssh_workspace_panes_upload_images_for_the_ssh_user() {
+        let w = ws(RemoteTarget::direct("me", "dev.box", 22), true);
+        assert_eq!(remote_paste_user(Some(&w), None), Some("me"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn standalone_ssh_panes_upload_images_for_the_ssh_user() {
+        let spec = native_spec();
+        assert_eq!(remote_paste_user(None, Some(&spec)), Some("me"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn wsl_and_specless_workspaces_keep_the_local_image_path() {
+        let wsl = ws(
+            RemoteTarget::Wsl {
+                distro: "Ubuntu".into(),
+            },
+            false,
+        );
+        assert_eq!(remote_paste_user(Some(&wsl), None), None);
+        let bare = ws(RemoteTarget::direct("me", "dev.box", 22), false);
+        assert_eq!(remote_paste_user(Some(&bare), None), None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn remote_clipboard_dirs_are_per_user() {
+        assert_eq!(remote_clipboard_dir("me"), "/tmp/tty7-clipboard-me");
     }
 
     #[test]
