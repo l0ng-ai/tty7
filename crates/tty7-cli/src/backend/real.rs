@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::json;
 use tty7_core::client::{ControlClient, PaneClient, PaneSession};
+use tty7_core::core::agent_hooks::{HookAgent, HookTarget, HooksState, hooks_state};
 use tty7_core::core::session::WorkspaceId;
 use tty7_core::daemon::control::{
     ControlEvent, ControlHello, ControlHelloOk, ControlRequest, ReplyOk, RouteInfo,
@@ -192,6 +193,16 @@ impl Backend for RealBackend {
     fn procs(&mut self, pane: u64) -> Result<PaneProcs> {
         let procs = self.pane_client()?.procs(pane)?;
         Ok(procs)
+    }
+
+    fn agent_hooks_state(&mut self, agent: HookAgent) -> Option<HooksState> {
+        if self.machine.is_some() {
+            return None;
+        }
+        let app = crate::gui::find_executable().ok()?;
+        let host = tty7_core::host::local::LocalHost::new();
+        let target = HookTarget::local_for_exe(&*host, app)?;
+        Some(hooks_state(&target, agent))
     }
 
     fn list_panes(&mut self) -> Result<Vec<PaneInfo>> {

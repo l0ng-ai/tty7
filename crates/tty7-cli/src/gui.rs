@@ -21,7 +21,10 @@ pub fn launch(path: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn find_executable() -> Result<PathBuf> {
+/// The bundled `tty7-app` this CLI belongs to: `TTY7_APP`, then the file next
+/// to this executable, then `PATH`. `gui` launches it; hook diagnosis needs the
+/// same path because that is the executable a hook command names.
+pub fn find_executable() -> Result<PathBuf> {
     if let Some(explicit) = std::env::var_os("TTY7_APP") {
         let path = PathBuf::from(explicit);
         if path.is_file() {

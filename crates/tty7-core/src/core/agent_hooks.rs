@@ -2,7 +2,7 @@ use std::io;
 use std::io::{IsTerminal as _, Read as _};
 use std::path::{Path, PathBuf};
 
-use crate::core::cli_agent::AGENT_EVENT_SENTINEL;
+use crate::core::cli_agent::{AGENT_EVENT_SENTINEL, CLIAgent};
 use crate::host::Host;
 
 pub const TTY7_ENV_MARKER: &str = "TTY7";
@@ -225,6 +225,33 @@ impl HookAgent {
         HookAgent::Grok,
     ];
 
+    /// The hooks behind a detected agent process, if it has any.
+    ///
+    /// Process detection knows far more agents than hooks do — the ones with no
+    /// arm here report status some other way, or not at all. The match is
+    /// exhaustive on purpose: a newly detected agent has to say which it is.
+    pub fn of_detected(agent: CLIAgent) -> Option<HookAgent> {
+        match agent {
+            CLIAgent::Claude => Some(HookAgent::Claude),
+            CLIAgent::Codex => Some(HookAgent::Codex),
+            CLIAgent::Copilot => Some(HookAgent::Copilot),
+            CLIAgent::OpenCode => Some(HookAgent::OpenCode),
+            CLIAgent::Pi => Some(HookAgent::Pi),
+            CLIAgent::Grok => Some(HookAgent::Grok),
+            CLIAgent::Gemini
+            | CLIAgent::Aider
+            | CLIAgent::Amp
+            | CLIAgent::Cursor
+            | CLIAgent::Goose
+            | CLIAgent::Droid
+            | CLIAgent::Auggie
+            | CLIAgent::Hermes
+            | CLIAgent::Vibe
+            | CLIAgent::Antigravity
+            | CLIAgent::Qwen => None,
+        }
+    }
+
     pub fn slug(self) -> &'static str {
         match self {
             HookAgent::Claude => "claude",
@@ -280,10 +307,19 @@ pub struct HookTarget<'a> {
 
 impl<'a> HookTarget<'a> {
     pub fn local(host: &'a dyn Host) -> Option<HookTarget<'a>> {
+        Self::local_for_exe(host, std::env::current_exe().ok()?)
+    }
+
+    /// Build a local target for a known tty7 hook runner.
+    ///
+    /// Most callers use [`Self::local`]. The standalone CLI is the exception:
+    /// it diagnoses hooks but never executes them, so it supplies the
+    /// `tty7-app` it would launch instead of comparing configs to `tty7`.
+    pub fn local_for_exe(host: &'a dyn Host, exe: PathBuf) -> Option<HookTarget<'a>> {
         Some(HookTarget {
             host,
             home: home_dir()?,
-            exe: std::env::current_exe().ok()?,
+            exe,
         })
     }
 
@@ -928,6 +964,21 @@ export default function (pi: ExtensionAPI) {{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exhaustive match keeps every detected agent mapped; this keeps the
+    /// other direction honest, so a hooked agent cannot become unreachable
+    /// from detection and silently stop being diagnosed.
+    #[test]
+    fn every_hooked_agent_is_reachable_from_detection() {
+        for hooked in HookAgent::ALL {
+            assert!(
+                CLIAgent::ALL
+                    .into_iter()
+                    .any(|detected| HookAgent::of_detected(detected) == Some(hooked)),
+                "{hooked:?} has hooks but no detected agent maps to it"
+            );
+        }
+    }
 
     #[test]
     fn every_tty7_daemon_host_takes_the_console_fast_path() {
