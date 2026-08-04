@@ -100,6 +100,11 @@ pub struct TerminalView {
     owner_workspace: Option<crate::core::session::WorkspaceId>,
     restored: bool,
     ssh_spec: Option<Box<crate::daemon::protocol::NativeSshSpec>>,
+    /// The verified remote staging directory for pasted images, once one has
+    /// been prepared for this pane. `None` means "not prepared yet", never
+    /// "preparation failed" — see [`staging_cache`].
+    #[cfg(not(target_os = "macos"))]
+    remote_clipboard_dir: Option<String>,
     pub focus_handle: FocusHandle,
     pub font: Font,
     pub font_bold: Option<Font>,
@@ -427,6 +432,116 @@ fn write_clipboard_image(img: &gpui::Image) -> Option<std::path::PathBuf> {
     Some(path)
 }
 
+/// The connection a paste should be uploaded over, when this pane runs on a
+/// remote host reachable over the daemon's russh stack: either a native SSH
+/// workspace pane or a standalone native SSH pane. WSL shares localhost and
+/// needs path translation instead, and a workspace without connection details
+/// has no channel to piggyback on — both keep the local-path behavior.
+#[cfg(not(target_os = "macos"))]
+fn remote_paste_spec<'a>(
+    workspace: Option<&'a crate::terminal::PaneWorkspace>,
+    ssh_spec: Option<&'a crate::daemon::protocol::NativeSshSpec>,
+) -> Option<&'a crate::daemon::protocol::NativeSshSpec> {
+    if let Some(ws) = workspace {
+        if ws.shares_localhost() {
+            return None;
+        }
+        return ws.spec.as_deref();
+    }
+    ssh_spec
+}
+
+/// Staging images under the SSH user's own home keeps them out of the
+/// world-writable `/tmp`, where any local account could pre-create the
+/// directory, read what lands in it, or swap a pasted screenshot for one of
+/// its own before the pane's agent opens it.
+#[cfg(not(target_os = "macos"))]
+const REMOTE_CLIPBOARD_PATH: [&str; 3] = [".cache", "tty7", "clipboard"];
+
+/// Owner-only, and *only* owner: a staging directory anyone else can enter is
+/// one anyone else can read the pasted screenshots out of.
+#[cfg(not(target_os = "macos"))]
+const REMOTE_CLIPBOARD_MODE: u32 = 0o700;
+
+/// Whether a prepared staging directory may be uploaded into.
+///
+/// The mode is what a `stat` reported *after* a `chmod 0700` the daemon
+/// watched succeed, which is the ownership proof: POSIX only lets a file's
+/// owner change its mode, so a directory tty7 can chmod and then observe at
+/// exactly `0700` is one the SSH user owns and nobody else can enter. A
+/// symlink is refused outright because `stat` follows links, so a link planted
+/// at the staging path would otherwise be judged by its target.
+#[cfg(not(target_os = "macos"))]
+fn staging_dir_is_safe(
+    is_symlink: bool,
+    kind: Option<crate::daemon::protocol::SftpEntryKind>,
+    mode: u32,
+) -> bool {
+    use crate::daemon::protocol::SftpEntryKind;
+    !is_symlink
+        && matches!(kind, Some(SftpEntryKind::Dir))
+        && mode & 0o7777 == REMOTE_CLIPBOARD_MODE
+}
+
+/// The staging directory to reuse on the next paste. Only a verified directory
+/// is cached: a preparation that failed — a dropped link, a squatted path, a
+/// remote with no POSIX `/home` — must be retried rather than latched, or
+/// every later paste emits a remote path for a directory that was never
+/// created.
+#[cfg(not(target_os = "macos"))]
+fn staging_cache(prepared: &Result<String, String>) -> Option<String> {
+    prepared.as_ref().ok().cloned()
+}
+
+/// Create and verify the per-user staging directory, answering the absolute
+/// remote path to upload into. Blocking: every step is a daemon round trip
+/// over the pane's SSH connection, so this only ever runs off the UI thread.
+#[cfg(not(target_os = "macos"))]
+fn prepare_remote_clipboard_dir(route: &crate::ui::sftp::SftpRoute) -> Result<String, String> {
+    use crate::daemon::protocol::{SftpOp, SftpOpResult};
+    let home = match route.op(SftpOp::Realpath {
+        path: ".".to_string(),
+    }) {
+        SftpOpResult::Link(home) if home.starts_with('/') => home,
+        SftpOpResult::Error(e) => return Err(e),
+        other => {
+            return Err(format!(
+                "the remote home directory is not a path: {other:?}"
+            ));
+        }
+    };
+    let mut dir = home;
+    for component in REMOTE_CLIPBOARD_PATH {
+        dir = crate::daemon::ssh::sftp::remote_join(&dir, component);
+        // An existing directory fails here with EEXIST; the checks below are
+        // what decide whether this one is ours, so the result carries no
+        // information worth branching on.
+        let _ = route.op(SftpOp::Mkdir { path: dir.clone() });
+    }
+    if let SftpOpResult::Link(target) = route.op(SftpOp::Readlink { path: dir.clone() }) {
+        return Err(format!("{dir} is a symlink to {target}"));
+    }
+    if let SftpOpResult::Error(e) = route.op(SftpOp::Chmod {
+        path: dir.clone(),
+        mode: REMOTE_CLIPBOARD_MODE,
+    }) {
+        return Err(format!("{dir} is not owned by this session: {e}"));
+    }
+    match route.op(SftpOp::Stat { path: dir.clone() }) {
+        SftpOpResult::Stat(entry)
+            if staging_dir_is_safe(false, Some(entry.kind), entry.permissions) =>
+        {
+            Ok(dir)
+        }
+        SftpOpResult::Stat(entry) => Err(format!(
+            "{dir} is not a private directory (mode {:o})",
+            entry.permissions & 0o7777
+        )),
+        SftpOpResult::Error(e) => Err(e),
+        other => Err(format!("unexpected reply for {dir}: {other:?}")),
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 fn transcode_to_png(bytes: &[u8], format: gpui::ImageFormat) -> Option<Vec<u8>> {
     use gpui::ImageFormat as G;
@@ -711,6 +826,8 @@ impl TerminalView {
             owner_workspace: None,
             restored: false,
             ssh_spec: None,
+            #[cfg(not(target_os = "macos"))]
+            remote_clipboard_dir: None,
             focus_handle,
             font,
             font_bold,
@@ -2008,6 +2125,14 @@ impl TerminalView {
     fn paste_clipboard_image(&mut self, img: &gpui::Image, cx: &mut Context<Self>) {
         #[cfg(not(target_os = "macos"))]
         if let Some(path) = write_clipboard_image(img) {
+            // SSH panes can't see the local temp file, so the image is
+            // uploaded and the *remote* path pasted instead. Every step of
+            // that needs a blocking daemon round trip, which a keystroke
+            // handler must not do, so the remote pane pastes from a background
+            // task and this returns without touching the line.
+            if self.upload_image_for_remote(&path, cx) {
+                return;
+            }
             let text = shell_escape_path(&path.to_string_lossy());
             self.paste(format!("{text} "), cx);
             return;
@@ -2016,6 +2141,182 @@ impl TerminalView {
         self.terminal.write(vec![0x16]);
         self.terminal.term.lock().selection = None;
         cx.notify();
+    }
+
+    /// Upload a locally staged clipboard image to the pane's remote host and
+    /// paste the remote path, all off the UI thread. Answers whether this pane
+    /// took the paste over; `false` means a local, WSL, or spec-less pane the
+    /// caller should paste the local path for.
+    ///
+    /// The upload itself still outlives the paste — it has to, or Ctrl+V would
+    /// stall on the wire — so the job is watched to completion and a failure
+    /// at any point warns the user that the path they were handed is dangling.
+    #[cfg(not(target_os = "macos"))]
+    fn upload_image_for_remote(&mut self, local: &std::path::Path, cx: &mut Context<Self>) -> bool {
+        use crate::daemon::protocol::{SftpTransferKind, SftpTransferSpec};
+        let Some(spec) = remote_paste_spec(self.workspace.as_ref(), self.ssh_spec.as_deref())
+        else {
+            return false;
+        };
+        let host = format!("{}@{}", spec.user, spec.host);
+        // The only caller stages through `write_clipboard_image`, so this
+        // holds; a name that could not stand alone as a remote path component
+        // would be a bug worth failing on rather than joining blindly.
+        let name = local
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|n| crate::daemon::ssh::sftp::safe_local_name(n));
+        let Some(name) = name else {
+            log::warn!("refusing to upload a clipboard image named {local:?}");
+            return false;
+        };
+        let route = crate::ui::sftp::SftpRoute::new(self.pane_id, self.workspace.clone());
+        let cached = self.remote_clipboard_dir.clone();
+        let local = local.to_path_buf();
+        let pane_id = self.pane_id;
+        cx.spawn(async move |this, cx| {
+            let prepared = match cached {
+                Some(dir) => Ok(dir),
+                None => {
+                    let route = route.clone();
+                    cx.background_spawn(async move { prepare_remote_clipboard_dir(&route) })
+                        .await
+                }
+            };
+            let dir = match this.update(cx, |view, _| {
+                view.remote_clipboard_dir = staging_cache(&prepared);
+                view.remote_clipboard_dir.clone()
+            }) {
+                Ok(Some(dir)) => dir,
+                Ok(None) => {
+                    let reason = prepared.unwrap_or_else(|e| e);
+                    Self::paste_local_image_path(&this, cx, &local, &host, &reason);
+                    return;
+                }
+                Err(_) => return,
+            };
+            let remote = crate::daemon::ssh::sftp::remote_join(&dir, &name);
+            let started = {
+                let (route, remote, local) = (route.clone(), remote.clone(), local.clone());
+                cx.background_spawn(async move {
+                    route.transfer_start(SftpTransferSpec {
+                        pane_id,
+                        kind: SftpTransferKind::Upload,
+                        local,
+                        remote,
+                        recursive: false,
+                    })
+                })
+                .await
+            };
+            let job = match started {
+                Ok(job) => job,
+                Err(reason) => {
+                    Self::paste_local_image_path(&this, cx, &local, &host, &reason);
+                    return;
+                }
+            };
+            let text = shell_escape_path(&remote);
+            if this
+                .update(cx, |view, cx| view.paste(format!("{text} "), cx))
+                .is_err()
+            {
+                return;
+            }
+            if let Err(reason) = Self::watch_upload(route, job, &remote, cx).await {
+                let _ = this.update_in(cx, |view, window, cx| {
+                    view.warn_image_upload_failed(&host, &reason, window, cx);
+                });
+            }
+        })
+        .detach();
+        true
+    }
+
+    /// Fall back to the local path when the remote staging directory cannot be
+    /// prepared — the paste is never dropped — and say why it is local.
+    #[cfg(not(target_os = "macos"))]
+    fn paste_local_image_path(
+        this: &gpui::WeakEntity<Self>,
+        cx: &mut gpui::AsyncApp,
+        local: &std::path::Path,
+        host: &str,
+        reason: &str,
+    ) {
+        let text = shell_escape_path(&local.to_string_lossy());
+        let _ = this.update_in(cx, |view, window, cx| {
+            view.paste(format!("{text} "), cx);
+            view.warn_image_upload_failed(host, reason, window, cx);
+        });
+    }
+
+    /// Poll a started upload to a terminal state. The transfer history the
+    /// SFTP panel reads is only polled while that panel is open, and the
+    /// daemon drops finished jobs after 30s, so a paste that no one is
+    /// watching would otherwise fail in silence.
+    #[cfg(not(target_os = "macos"))]
+    async fn watch_upload(
+        route: crate::ui::sftp::SftpRoute,
+        job: u64,
+        remote: &str,
+        cx: &mut gpui::AsyncApp,
+    ) -> Result<(), String> {
+        use crate::daemon::protocol::{SftpJobState, SftpOp};
+        // Long enough for a screenshot over a slow link, bounded so a wedged
+        // job cannot poll forever.
+        const POLL: std::time::Duration = std::time::Duration::from_millis(500);
+        const POLLS: usize = 600;
+        for _ in 0..POLLS {
+            cx.background_executor().timer(POLL).await;
+            let listed = {
+                let route = route.clone();
+                cx.background_spawn(async move { route.transfer_list() })
+                    .await
+            };
+            let Some(progress) = listed.into_iter().find(|j| j.job_id == job) else {
+                // Pruned after the retention window, or the daemon restarted:
+                // there is nothing left to report either way.
+                return Ok(());
+            };
+            match progress.state {
+                SftpJobState::Running => continue,
+                SftpJobState::Done => {
+                    // The staging directory is already owner-only, so this is
+                    // belt and braces against a wider umask on the remote.
+                    let (route, path) = (route.clone(), remote.to_string());
+                    cx.background_spawn(
+                        async move { route.op(SftpOp::Chmod { path, mode: 0o600 }) },
+                    )
+                    .await;
+                    return Ok(());
+                }
+                SftpJobState::Cancelled => return Ok(()),
+                SftpJobState::Error => {
+                    return Err(progress.error.unwrap_or_else(|| "upload failed".into()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One notification per failed paste — the pane's line already has a path
+    /// in it, and the user is the only one who can tell whether it matters.
+    #[cfg(not(target_os = "macos"))]
+    fn warn_image_upload_failed(
+        &self,
+        host: &str,
+        reason: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        log::warn!("clipboard image upload to {host} failed: {reason}");
+        window.push_notification(
+            crate::ui::i18n::t_fmt(
+                crate::ui::i18n::L10nKey::SftpImagePasteUploadFailed,
+                &[("host", host), ("error", reason)],
+            ),
+            cx,
+        );
     }
 
     pub fn clear_scrollback(&mut self, cx: &mut Context<Self>) {
@@ -4965,6 +5266,8 @@ mod tests {
         input_overlay_rows, menu_layout, paste_bytes, select_end_copy, shell_escape_path,
         smooth_scroll_step, submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
+    #[cfg(not(target_os = "macos"))]
+    use super::{remote_paste_spec, staging_cache, staging_dir_is_safe};
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
     use gpui_component::IconName;
@@ -5159,6 +5462,141 @@ mod tests {
     fn workspace_without_a_spec_does_not_forward() {
         let w = ws(RemoteTarget::direct("me", "dev.box", 22), false);
         assert_eq!(loopback_plan(true, Some(&w), None, 7), LoopbackPlan::Direct);
+    }
+
+    /// The SSH user a paste would be uploaded for, or `None` when the pane
+    /// keeps the local-path behavior.
+    #[cfg(not(target_os = "macos"))]
+    fn remote_paste_user<'a>(
+        workspace: Option<&'a crate::terminal::PaneWorkspace>,
+        ssh_spec: Option<&'a crate::daemon::protocol::NativeSshSpec>,
+    ) -> Option<&'a str> {
+        remote_paste_spec(workspace, ssh_spec).map(|s| s.user.as_str())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn native_spec() -> crate::daemon::protocol::NativeSshSpec {
+        serde_json::from_str(r#"{"host":"dev.box","port":22,"user":"me","auth_mode":"auto"}"#)
+            .unwrap()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn local_pane_pastes_the_local_image_path() {
+        assert_eq!(remote_paste_user(None, None), None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn ssh_workspace_panes_upload_images_for_the_ssh_user() {
+        let w = ws(RemoteTarget::direct("me", "dev.box", 22), true);
+        assert_eq!(remote_paste_user(Some(&w), None), Some("me"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn standalone_ssh_panes_upload_images_for_the_ssh_user() {
+        let spec = native_spec();
+        assert_eq!(remote_paste_user(None, Some(&spec)), Some("me"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn wsl_and_specless_workspaces_keep_the_local_image_path() {
+        let wsl = ws(
+            RemoteTarget::Wsl {
+                distro: "Ubuntu".into(),
+            },
+            false,
+        );
+        assert_eq!(remote_paste_user(Some(&wsl), None), None);
+        let bare = ws(RemoteTarget::direct("me", "dev.box", 22), false);
+        assert_eq!(remote_paste_user(Some(&bare), None), None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_staging_dir_is_only_safe_when_it_is_a_private_directory_we_own() {
+        use crate::daemon::protocol::SftpEntryKind;
+        // `chmod 0700` succeeded and the mode came back as asked: ours.
+        assert!(staging_dir_is_safe(
+            false,
+            Some(SftpEntryKind::Dir),
+            0o040700
+        ));
+        // A mode anyone else can enter is one anyone else can read pastes from.
+        assert!(!staging_dir_is_safe(
+            false,
+            Some(SftpEntryKind::Dir),
+            0o040755
+        ));
+        assert!(!staging_dir_is_safe(
+            false,
+            Some(SftpEntryKind::Dir),
+            0o040701
+        ));
+        // Sticky/setgid bits mean someone else set the terms.
+        assert!(!staging_dir_is_safe(
+            false,
+            Some(SftpEntryKind::Dir),
+            0o041700
+        ));
+        // A symlink is judged by its target by `stat`, so refuse it outright.
+        assert!(!staging_dir_is_safe(
+            true,
+            Some(SftpEntryKind::Dir),
+            0o040700
+        ));
+        // A file (or a path that vanished) is not a staging dir.
+        assert!(!staging_dir_is_safe(
+            false,
+            Some(SftpEntryKind::File),
+            0o100700
+        ));
+        assert!(!staging_dir_is_safe(false, None, 0o040700));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_failed_staging_preparation_is_retried_rather_than_latched() {
+        assert_eq!(
+            staging_cache(&Ok("/home/me/.cache/tty7/clipboard".to_string())),
+            Some("/home/me/.cache/tty7/clipboard".to_string())
+        );
+        // Nothing was created, so the next paste must try again instead of
+        // handing out a path under a directory that does not exist.
+        assert_eq!(staging_cache(&Err("link is down".to_string())), None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn staged_images_land_under_the_remote_users_own_home() {
+        let mut dir = "/home/me".to_string();
+        for component in super::REMOTE_CLIPBOARD_PATH {
+            dir = crate::daemon::ssh::sftp::remote_join(&dir, component);
+        }
+        assert_eq!(dir, "/home/me/.cache/tty7/clipboard");
+        assert!(
+            !dir.starts_with("/tmp"),
+            "a world-writable staging dir is exactly what this avoids"
+        );
+        assert_eq!(super::REMOTE_CLIPBOARD_MODE, 0o700);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_pasted_image_name_stands_alone_as_a_remote_path_component() {
+        use crate::daemon::ssh::sftp::safe_local_name;
+        use gpui::{Image, ImageFormat};
+
+        let pixel = image::RgbaImage::from_pixel(1, 1, image::Rgba([4, 5, 6, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(pixel)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let path = super::write_clipboard_image(&Image::from_bytes(ImageFormat::Png, png)).unwrap();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(safe_local_name(&name), "{name} must not traverse or nest");
     }
 
     #[test]

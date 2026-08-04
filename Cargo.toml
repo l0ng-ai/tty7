@@ -144,6 +144,24 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# COM for toast branding (`core::aumid`): IShellLinkW + IPropertyStore stamp
+# System.AppUserModel.ID onto the Start Menu shortcut, which Windows requires
+# before it honors an unpackaged app's toast identity (otherwise the toast
+# backend falls back to PowerShell's). 0.58 is already in the tree via gpui.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Storage_EnhancedStorage",
+    # IShellLinkW::GetPath takes a WIN32_FIND_DATAW, so reading an existing
+    # shortcut's target back — which is how `aumid` decides whether it has to
+    # write at all — needs the file-system bindings too.
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
+
 # Embeds `assets/favicon.ico` into the `.exe` so Windows shows the tty7 logo in
 # the taskbar / window / Explorer (macOS gets its icon from the `.app` bundle via
 # bundle.sh instead). Only needed at build time on Windows — see build.rs.
