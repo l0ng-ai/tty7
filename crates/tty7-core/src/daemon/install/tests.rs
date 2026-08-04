@@ -1055,7 +1055,9 @@ fn discover_falls_back_to_release_when_bundled_is_missing() {
         bundled: Some(wsl::BundledServerBinary::in_dirs(vec![dir.clone()])),
         fallback_on_missing: true,
     };
-    let loaded = source.load("26.7.5", ASSET_X86_64).expect("falls back to release");
+    let loaded = source
+        .load("26.7.5", ASSET_X86_64)
+        .expect("falls back to release");
     assert_eq!(loaded.bytes, SERVER_BYTES);
     assert_eq!(
         release.fetched().len(),
@@ -1067,7 +1069,10 @@ fn discover_falls_back_to_release_when_bundled_is_missing() {
 
 #[test]
 fn discover_uses_bundled_when_it_is_present() {
-    let dir = std::env::temp_dir().join(format!("tty7-bundle-discover-present-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "tty7-bundle-discover-present-{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(ASSET_X86_64), b"\x7fELF discovered build").unwrap();
