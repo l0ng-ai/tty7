@@ -1013,8 +1013,8 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             ("Search workspaces and machines", "搜索工作区与机器")
         }
         L10nKey::SearchFonts => ("Search fonts…", "搜索字体…"),
-        L10nKey::NewFolderName => ("New folder name", "新文件夹名称"),
-        L10nKey::NewFileName => ("New file name", "新文件名称"),
+        L10nKey::NewFolderName => ("New folder name", "新文件夹名"),
+        L10nKey::NewFileName => ("New file name", "新文件名"),
         L10nKey::HomeNewTab => ("New Tab", "新标签页"),
         L10nKey::HomeReopenClosedTab => ("Reopen Closed Tab", "重新打开已关闭的标签页"),
         L10nKey::HomeSwitchWorkspace => ("Switch Workspace", "切换工作区"),
@@ -1072,7 +1072,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::CloseSshConnectionTitle => ("Close this SSH connection?", "关闭这个 SSH 连接？"),
         L10nKey::CloseSshConnectionBody => (
             "The connection is live. Closing will end it.",
-            "连接仍处于活动状态。关闭将结束它。",
+            "连接仍处于活动状态，关闭会断开它。",
         ),
         L10nKey::Keep => ("Keep", "保留"),
         L10nKey::SettingsNavAppearance => ("Appearance", "外观"),
@@ -1190,7 +1190,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsDuplicateToEdit => ("Duplicate to edit", "复制以编辑"),
         L10nKey::SettingsHosts => ("Hosts", "主机"),
         L10nKey::SettingsDefaults => ("Defaults", "默认值"),
-        L10nKey::SettingsInheritedByEveryHost => ("Inherited by every host", "所有主机都继承"),
+        L10nKey::SettingsInheritedByEveryHost => ("Inherited by every host", "对所有主机生效"),
         L10nKey::SettingsNoSavedHosts => ("No saved hosts yet.", "还没有保存的主机。"),
         L10nKey::SettingsNothingMatches => {
             ("Nothing matches {query}.", "没有匹配 {query} 的内容。")
@@ -1223,14 +1223,14 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsCopyAddress => ("Copy address", "复制地址"),
         L10nKey::SettingsDuplicate => ("Duplicate", "复制"),
-        L10nKey::SettingsForgetPassword => ("Forget password", "忘记密码"),
+        L10nKey::SettingsForgetPassword => ("Forget password", "清除已保存的密码"),
         L10nKey::SettingsForgotPasswordFor => (
             "Forgot saved password for {endpoint}",
-            "已忘记 {endpoint} 的已保存密码",
+            "已清除 {endpoint} 的已保存密码",
         ),
         L10nKey::SettingsCouldntForgetPassword => (
             "Couldn't forget password for {endpoint}: {error}",
-            "无法忘记 {endpoint} 的密码：{error}",
+            "无法清除 {endpoint} 的已保存密码：{error}",
         ),
         L10nKey::SettingsSecurity => ("Security", "安全"),
         L10nKey::SettingsSecurityIntro => (
@@ -1240,7 +1240,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsVerifyHostKeys => ("Verify host keys", "校验主机密钥"),
         L10nKey::SettingsVerifyHostKeysDesc => (
             "Check each server's key against known_hosts and confirm unknown or changed keys before connecting. Off connects without checking, so a spoofed server would go unnoticed.",
-            "在连接前对照 known_hosts 检查每台服务器的密钥，并确认未知或已更改的密钥。关闭时连接不做检查，仿冒服务将无法被发现。",
+            "在连接前对照 known_hosts 检查每台服务器的密钥，并确认未知或已更改的密钥。关闭后连接不做检查，被仿冒的服务器也不会被察觉。",
         ),
         L10nKey::WarnBeforeClosing => ("Warn before closing", "关闭前警告"),
         L10nKey::SettingsWarnBeforeClosingDesc => (
@@ -1265,12 +1265,12 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsAuthModeAuto => ("Auto", "自动"),
         L10nKey::SettingsAuthModePassword => ("Password", "密码"),
         L10nKey::SettingsAuthModeKey => ("Key", "密钥"),
-        L10nKey::SettingsAuthModeAgent => ("Agent", "代理"),
+        L10nKey::SettingsAuthModeAgent => ("Agent", "ssh-agent"),
         L10nKey::SettingsAuthMode2Fa => ("2FA", "2FA"),
         L10nKey::SettingsJumpHost => ("Jump host", "跳板主机"),
         L10nKey::SettingsJumpHostDesc => (
             "Name of another profile to tunnel through (blank = direct).",
-            "用于隧道中转的另一配置文件名称（留空 = 直连）。",
+            "用于中转的另一个主机配置的名称（留空 = 直连）。",
         ),
         L10nKey::SettingsNoneSummary => ("(none)", "（无）"),
         L10nKey::SettingsNoneLower => ("none", "无"),
@@ -1306,7 +1306,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "Private-key paths, one per line (%h/%r expand).",
             "私钥路径，每行一个（支持 %h/%r 展开）。",
         ),
-        L10nKey::SettingsAgentForwarding => ("Agent forwarding", "代理转发"),
+        L10nKey::SettingsAgentForwarding => ("Agent forwarding", "ssh-agent 转发"),
         L10nKey::SettingsAgentForwardingDesc => (
             "Forward the local ssh-agent to the connection.",
             "将本机 ssh-agent 转发到该连接。",
@@ -1390,7 +1390,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsShell => ("Shell", "Shell"),
         L10nKey::SettingsShellIntro => (
             "The program each new terminal launches. Leave Program empty to use the platform default ({default}).",
-            "每个新终端启动的程序。将 Program 留空可使用平台默认值（{default}）。",
+            "每个新终端启动的程序。将「程序」留空可使用平台默认值（{default}）。",
         ),
         L10nKey::SettingsProgram => ("Program", "程序"),
         L10nKey::SettingsProgramDesc => (
@@ -1431,7 +1431,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "应用于鼠标滚轮滚动的倍率。",
         ),
         L10nKey::SettingsMouse => ("Mouse", "鼠标"),
-        L10nKey::SettingsFocusFollowsMouse => ("Focus follows mouse", "鼠标聚焦跟随"),
+        L10nKey::SettingsFocusFollowsMouse => ("Focus follows mouse", "焦点跟随鼠标"),
         L10nKey::SettingsFocusFollowsMouseDesc => (
             "Hovering a pane focuses it without a click.",
             "悬停窗格即聚焦，无需点击。",
@@ -1528,7 +1528,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsUninstall => ("Uninstall", "卸载"),
         L10nKey::SettingsOfflineMachines => (
             "{count} more saved machines are not connected — open a workspace on one to install its hooks there.",
-            "还有 {count} 个已保存的机器未连接——在其中一个上打开工作区以在那里安装钩子。",
+            "还有 {count} 台已保存的机器未连接——在其中一台上打开工作区，即可在那台机器上安装钩子。",
         ),
         L10nKey::SettingsSyncWithSystem => ("Sync with system", "跟随系统"),
         L10nKey::SettingsSyncWithSystemDesc => (
@@ -1550,7 +1550,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsLight => ("Light", "浅色"),
         L10nKey::SettingsLightMode => ("Light mode", "浅色模式"),
         L10nKey::SettingsDarkMode => ("Dark mode", "深色模式"),
-        L10nKey::SettingsActive => ("Active", "已激活"),
+        L10nKey::SettingsActive => ("Active", "使用中"),
         L10nKey::SettingsStartupWindow => ("Startup window", "启动窗口"),
         L10nKey::SettingsStartupWindowDesc => (
             "Window state when tty7 launches.",
@@ -1574,7 +1574,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsConfirmLastWindowCloseDesc => (
             "Ask first, since that close also quits tty7. Off closes straight away — either way your shells keep running in the background.",
-            "因为关闭它会同时退出 tty7，所以先询问。关闭后直接退出——任何情况下你的 shell 都会在后台继续运行。",
+            "关闭最后一个窗口会同时退出 tty7，所以先问一句。关掉此项则直接关窗——两种情况下你的 shell 都会在后台继续运行。",
         ),
         L10nKey::SettingsShowTrayIcon => ("Show tray icon", "显示托盘图标"),
         L10nKey::SettingsShowTrayIconDesc => (
@@ -1595,7 +1595,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsSidebarGrouping => ("Sidebar grouping", "侧栏分组"),
         L10nKey::SettingsSidebarGroupingDesc => (
             "Group sidebar tabs under a header per git repository, with non-repo tabs in a Scratch section. Only applies to the left sidebar.",
-            "按 git 仓库在标题下对侧栏标签页分组，非仓库标签页放在 Scratch 区。仅适用于左侧栏。",
+            "按 git 仓库在标题下对侧栏标签页分组，非仓库标签页放在「草稿」分组。仅适用于左侧栏。",
         ),
         L10nKey::SettingsDiffPreviewFromCounts => (
             "Open diff preview from sidebar counts",
@@ -1680,7 +1680,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsExplorerContextMenu => ("Windows Explorer", "Windows 文件资源管理器"),
         L10nKey::SettingsExplorerContextMenuDesc => (
             "Add “Open in tty7” when you right-click a folder and “Open tty7 here” when you right-click a folder background. This is off by default and is registered only for your Windows account.",
-            "右键单击文件夹时添加“Open in tty7”，右键单击文件夹背景时添加“Open tty7 here”。此功能默认关闭，且只为当前 Windows 帐户注册。",
+            "右键单击文件夹时添加“Open in tty7”，右键单击文件夹背景时添加“Open tty7 here”。此功能默认关闭，且只为当前 Windows 账户注册。",
         ),
         L10nKey::SettingsExplorerNotRegistered => ("Not registered", "未注册"),
         L10nKey::SettingsExplorerRegistered => ("Registered", "已注册"),
@@ -1795,7 +1795,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => (
             "pane hover activate",
-            "鼠标聚焦跟随 悬停 激活 窗格 focus follows mouse hover activate pane",
+            "焦点跟随鼠标 悬停 激活 窗格 focus follows mouse hover activate pane",
         ),
         L10nKey::SettingsSearchFontFamilyKeywords => (
             "typeface monospace typography",
@@ -2019,7 +2019,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::FileTreeDeleteFileBody => ("The file will be deleted.", "该文件将被删除。"),
         L10nKey::FileTreeDeleteFailed => ("Delete failed", "删除失败"),
         L10nKey::FileTreeContextOpen => ("Open", "打开"),
-        L10nKey::FileTreeContextCdHere => ("cd Here", "在此处 cd"),
+        L10nKey::FileTreeContextCdHere => ("cd Here", "cd 到此处"),
         L10nKey::FileTreeContextInsertPath => ("Insert Path in Terminal", "在终端中插入路径"),
         L10nKey::FileTreeContextAttachAgent => ("Attach to Agent", "附加到智能体"),
         L10nKey::FileTreeContextNewFile => ("New File", "新建文件"),
@@ -2044,7 +2044,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::EditorDiscard => ("Discard", "放弃"),
         L10nKey::EditorNoFileOpen => ("No file open", "没有打开的文件"),
         L10nKey::EditorBackToTerminal => ("Back to Terminal (Esc)", "返回终端 (Esc)"),
-        L10nKey::EditorLnCol => ("Ln {line}, Col {column}", "行 {line}, 列 {column}"),
+        L10nKey::EditorLnCol => ("Ln {line}, Col {column}", "行 {line}，列 {column}"),
         L10nKey::EditorEdit => ("Edit", "编辑"),
         L10nKey::EditorPreview => ("Preview", "预览"),
         L10nKey::EditorWrapOn => ("Wrap: on", "自动换行：开"),
@@ -2167,15 +2167,15 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::DiffUntrackedSummary => ("{count} untracked", "{count} 个未跟踪"),
         L10nKey::PendingConnecting => ("Connecting to {machine}…", "正在连接 {machine}…"),
         L10nKey::PendingUnreachable => ("Couldn't reach {machine}", "无法连接到 {machine}"),
-        L10nKey::WorktreePromptNeedsName => ("The worktree needs a name", "工作区需要一个名称"),
-        L10nKey::WorktreePromptTitle => ("New Worktree Tab", "新建工作区标签页"),
-        L10nKey::WorktreePromptName => ("Worktree Name", "工作区名称"),
+        L10nKey::WorktreePromptNeedsName => ("The worktree needs a name", "工作树需要一个名称"),
+        L10nKey::WorktreePromptTitle => ("New Worktree Tab", "新建工作树标签页"),
+        L10nKey::WorktreePromptName => ("Worktree Name", "工作树名称"),
         L10nKey::WorktreePromptBranch => ("New Branch", "新分支"),
         L10nKey::WorktreePromptBase => ("Start From", "起始分支"),
         L10nKey::WorktreePromptCreating => ("Creating…", "正在创建…"),
         L10nKey::WorktreePromptCreate => ("Create", "创建"),
         L10nKey::AppNewWorktreeFailed => {
-            ("New worktree failed: {error}", "新建工作区失败：{error}")
+            ("New worktree failed: {error}", "新建工作树失败：{error}")
         }
         L10nKey::HomeTimeJustNow => ("just now", "刚刚"),
         L10nKey::HomeTimeMinutesAgo => ("{count} min ago", "{count} 分钟前"),
@@ -2183,7 +2183,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::HomeTimeHoursAgo => ("{count} hours ago", "{count} 小时前"),
         L10nKey::HomeTimeYesterday => ("yesterday", "昨天"),
         L10nKey::HomeTimeDaysAgo => ("{count} days ago", "{count} 天前"),
-        L10nKey::HomeTimeOverWeekAgo => ("over a week ago", "超过一周"),
+        L10nKey::HomeTimeOverWeekAgo => ("over a week ago", "一周多以前"),
         L10nKey::HomeReopenNamed => ("Reopen \"{name}\"", "重新打开\"{name}\""),
         L10nKey::RemoteStripDisconnected => ("Not connected to {machine}", "未连接到 {machine}"),
         L10nKey::RemoteStripConnecting => ("Connecting to {machine}…", "正在连接 {machine}…"),
@@ -2200,25 +2200,25 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::RemoteStripFailed => (
             "Not connected to {machine} — {error}",
-            "未连接到 {machine} — {error}",
+            "未连接到 {machine}——{error}",
         ),
         L10nKey::RemoteNoticePreempted => (
             "Opened elsewhere — typing has no effect",
-            "已在别处打开 — 输入无效",
+            "已在别处打开——输入无效",
         ),
         L10nKey::RemoteNoticeDisconnected => {
-            ("Not connected — typing has no effect", "未连接 — 输入无效")
+            ("Not connected — typing has no effect", "未连接——输入无效")
         }
         L10nKey::RemoteActionRetryNow => ("Retry Now", "立即重试"),
-        L10nKey::RemoteActionTakeBack => ("Take Back", "夺回"),
+        L10nKey::RemoteActionTakeBack => ("Take Back", "收回"),
         L10nKey::RemoteActionConnect => ("Connect", "连接"),
         L10nKey::RemoteActionRetry => ("Retry", "重试"),
         L10nKey::RemoteNoConnectionDetails => (
             "This window is a workspace on {machine}, but tty7 has no connection \
              details for it any more — check that its SSH profile or ~/.ssh/config \
              entry still exists.",
-            "此窗口是 {machine} 上的工作区，但 tty7 已没有它的连接详情 — \
-             请检查其 SSH 配置文件或 ~/.ssh/config 条目是否仍然存在。",
+            "此窗口是 {machine} 上的工作区，但 tty7 已没有它的连接详情——\
+             请检查其 SSH 主机配置或 ~/.ssh/config 条目是否仍然存在。",
         ),
         L10nKey::RemoteThisComputer => ("this computer", "本机"),
         L10nKey::RemoteRestartTitle => (
@@ -2229,7 +2229,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "This stops every shell on {machine} — anything still running in them \
              will be terminated, including shells this window is not showing. \
              Workspaces and layouts are kept and come back with fresh shells.",
-            "这将停止 {machine} 上的所有 shell — 其中仍在运行的任何内容都会被终止，\
+            "这将停止 {machine} 上的所有 shell——其中仍在运行的任何内容都会被终止，\
              包括此窗口未显示的 shell。工作区和布局会被保留，并以全新的 shell 恢复。",
         ),
         L10nKey::RemoteReplaceBody => (
@@ -2255,7 +2255,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
              gone, reconnecting starts this build's server.",
             "{error}\n\
              \n\
-             仍在运行的会话仍位于旧版本上。如果它们已消失，重新连接将启动此版本的服务器。",
+             那里仍在运行的会话用的还是旧版本。如果它们已经结束，重新连接就会启动此版本的服务器。",
         ),
         L10nKey::RemoteHostUnreachable => (
             "could not reach {machine}: {error}",
@@ -2335,7 +2335,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::RemoteProfileMissing => (
             "that saved SSH profile no longer exists",
-            "该已保存的 SSH 配置文件已不存在",
+            "该已保存的 SSH 主机配置已不存在",
         ),
         L10nKey::RemoteAliasMissing => (
             "`{alias}` is no longer in ~/.ssh/config",
@@ -2419,7 +2419,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::CmdGroupAgents => ("Agents", "智能体"),
         L10nKey::CmdGroupApplication => ("Application", "应用"),
         L10nKey::CmdNewTab => ("New Tab", "新标签页"),
-        L10nKey::CmdNewWorktreeTab => ("New Worktree Tab", "新工作树标签页"),
+        L10nKey::CmdNewWorktreeTab => ("New Worktree Tab", "新建工作树标签页"),
         L10nKey::CmdNewWorktreeTabSubtitle => (
             "isolated checkout on a fresh branch",
             "在全新分支上独立检出",
@@ -2453,7 +2453,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "branch this agent session into a new tab",
             "将此智能体会话派生到新标签页",
         ),
-        L10nKey::CmdMarkTabAsUnread => ("Mark Tab as Unread", "标记为未读"),
+        L10nKey::CmdMarkTabAsUnread => ("Mark Tab as Unread", "标记标签页为未读"),
         L10nKey::CmdClosePaneTab => ("Close Pane / Tab", "关闭窗格/标签页"),
         L10nKey::CmdCloseOtherTabs => ("Close Other Tabs", "关闭其他标签页"),
         L10nKey::CmdCloseTabsToTheRight => ("Close Tabs to the Right", "关闭右侧标签页"),
@@ -2496,7 +2496,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::CmdPaste => ("Paste", "粘贴"),
         L10nKey::CmdSelectAll => ("Select All", "全选"),
         L10nKey::CmdSshAddConnection => ("SSH: Add Connection…", "SSH：添加连接…"),
-        L10nKey::CmdSshManageProfiles => ("SSH: Manage Profiles…", "SSH：管理配置文件…"),
+        L10nKey::CmdSshManageProfiles => ("SSH: Manage Profiles…", "SSH：管理主机配置…"),
         L10nKey::CmdSshReconnect => ("SSH: Reconnect", "SSH：重新连接"),
         L10nKey::CmdSshRemoteFiles => ("SSH: Remote Files", "SSH：远程文件"),
         L10nKey::CmdSshPortForwarding => ("SSH: Port Forwarding", "SSH：端口转发"),
@@ -2531,41 +2531,41 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::CmdQuickConnect => ("Connect to \"{target}\"", "连接到 \"{target}\""),
         L10nKey::CmdQuickConnectSaveProfile => (
             "Save \"{target}\" as profile…",
-            "将 \"{target}\" 保存为配置文件…",
+            "将 \"{target}\" 保存为主机配置…",
         ),
         L10nKey::CmdRecent => ("Recent", "最近使用"),
         L10nKey::AppRestartServerTitle => ("Restart Server?", "重启服务器？"),
         L10nKey::AppRestartServerMismatchDetail => (
             "The server holding your shells is from another build (v{build}, protocol {protocol} — this app speaks {ours}). You can keep using it and your shells stay, but features whose wire format changed may misbehave until it's restarted. Restarting starts a clean server: tabs reopen with fresh shells and anything running in them is terminated.",
-            "保存你 shell 的服务器来自另一个构建（v{build}，协议 {protocol} — 此应用使用 {ours}）。你可以继续使用，shell 也会保留，但协议格式已变更的功能可能会表现异常，直到重启服务器。重启会启动一个干净的服务器：标签页会以全新的 shell 重新打开，其中正在运行的所有内容都会被终止。",
+            "正在运行你 shell 的服务器来自另一个构建（v{build}，协议 {protocol}；此应用使用 {ours}）。你可以继续使用，shell 也会保留，但协议格式已变更的功能可能会表现异常，直到重启服务器。重启会启动一个干净的服务器：标签页会以全新的 shell 重新打开，其中正在运行的所有内容都会被终止。",
         ),
         L10nKey::AppRestartServerOldDetail => (
             "The server holding your shells is from an older version of the app. You can keep using it and your shells stay, but newer features may misbehave until it's restarted. Restarting starts a clean server: tabs reopen with fresh shells and anything running in them is terminated.",
-            "保存你 shell 的服务器来自应用的旧版本。你可以继续使用，shell 也会保留，但新功能可能会表现异常，直到重启服务器。重启会启动一个干净的服务器：标签页会以全新的 shell 重新打开，其中正在运行的所有内容都会被终止。",
+            "正在运行你 shell 的服务器来自应用的旧版本。你可以继续使用，shell 也会保留，但新功能可能会表现异常，直到重启服务器。重启会启动一个干净的服务器：标签页会以全新的 shell 重新打开，其中正在运行的所有内容都会被终止。",
         ),
         L10nKey::AppKeepShells => ("Keep Shells", "保留 Shell"),
         L10nKey::AppRestart => ("Restart", "重启"),
         L10nKey::AppRestartServerNotSsh => (
             "tty7 can only restart the server on machines it reaches over SSH. {label} is served from this computer — stop its workspace instead.",
-            "tty7 只能通过 SSH 重启它能连接到的机器上的服务器。{label} 由本机提供服务 — 请改为停止其工作区。",
+            "tty7 只能重启通过 SSH 连接的机器上的服务器。{label} 由本机提供服务——请改为停止其工作区。",
         ),
         L10nKey::AppRestartServerBody => (
             "This stops every running shell on this computer — anything still running in them will be terminated. Your tabs and layout are kept and reopened with fresh shells.",
-            "这会停止本机上所有正在运行的 shell — 其中仍在运行的任何内容都会被终止。你的标签页和布局会被保留，并以全新的 shell 重新打开。",
+            "这会停止本机上所有正在运行的 shell——其中仍在运行的任何内容都会被终止。你的标签页和布局会被保留，并以全新的 shell 重新打开。",
         ),
         L10nKey::AppWorktreeRemoveDetailDirty => (
             "The closed tab's worktree at {path} has uncommitted changes.",
-            "位于 {path} 的已关闭标签页的工作区有未提交的更改。",
+            "位于 {path} 的已关闭标签页的工作树有未提交的更改。",
         ),
         L10nKey::AppWorktreeRemoveDetailClean => (
             "The closed tab's worktree at {path} is clean.",
-            "位于 {path} 的已关闭标签页的工作区是干净的。",
+            "位于 {path} 的已关闭标签页的工作树是干净的。",
         ),
         L10nKey::AppWorktreeRemoveTitle => {
-            ("Remove worktree \"{branch}\"?", "删除工作区\"{branch}\"？")
+            ("Remove worktree \"{branch}\"?", "删除工作树\"{branch}\"？")
         }
         L10nKey::AppWorktreeDiscardAndRemove => ("Discard Changes & Remove", "放弃更改并删除"),
-        L10nKey::AppWorktreeRemove => ("Remove Worktree", "删除工作区"),
+        L10nKey::AppWorktreeRemove => ("Remove Worktree", "删除工作树"),
         L10nKey::AppWorktreeKeep => ("Keep", "保留"),
         L10nKey::AppReopenTabFailed => (
             "Could not reopen the tab: no terminal started",
@@ -2585,11 +2585,11 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             ("Could not split the pane: {error}", "无法拆分窗格：{error}")
         }
         L10nKey::AppWorktreeRemoved => {
-            ("Removed worktree \"{branch}\"", "已删除工作区\"{branch}\"")
+            ("Removed worktree \"{branch}\"", "已删除工作树\"{branch}\"")
         }
         L10nKey::AppWorktreeRemoveFailed => (
             "Worktree removal failed: {error}",
-            "删除工作区失败：{error}",
+            "删除工作树失败：{error}",
         ),
         L10nKey::AppForkStillConnecting => (
             "Could not fork: the pane is still connecting",
@@ -2609,7 +2609,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::AppForkNoSessionId => (
             "tty7 hasn't seen a {name} session id in this pane — install its hooks in Settings → Agents",
-            "tty7 尚未在此窗格中看到 {name} 的会话 ID — 请在设置 → 智能体中安装其钩子",
+            "tty7 尚未在此窗格中看到 {name} 的会话 ID——请在设置 → 智能体中安装其钩子",
         ),
         L10nKey::AppForkSessionIdNotToken => (
             "{name}'s session id isn't a plain token",
@@ -2617,7 +2617,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::AppForkMidTurn => (
             "{name} is mid-turn — the fork won't include the turn in flight",
-            "{name} 正在处理中 — 派生不会包含进行中的这一轮",
+            "{name} 正在处理中——派生不会包含进行中的这一轮",
         ),
         L10nKey::AppTabNoWorkingDirectory => (
             "This tab has no working directory yet",
@@ -2625,7 +2625,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::AppNothingSelected => (
             "Nothing selected — select some terminal output first.",
-            "未选择任何内容 — 请先选择一些终端输出。",
+            "未选择任何内容——请先选择一些终端输出。",
         ),
         L10nKey::AppPaneNoKnownDirectory => (
             "This pane has no known directory.",
@@ -2666,7 +2666,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::AppAgentHooksOpFailed => ("Failed: {error}", "失败：{error}"),
         L10nKey::AppKeybindingDisplacedNote => (
             "{action} took the shortcut from {previous}, which is now unset.",
-            "{action} 占用了 {previous} 的快捷键，{previous} 现在已被取消设置。",
+            "{action} 占用了原属于 {previous} 的快捷键，{previous} 现在没有快捷键了。",
         ),
         L10nKey::AppLocalServerName => ("the local server", "本地服务器"),
         L10nKey::AppSshParseUnbalancedQuotes => (
@@ -2721,7 +2721,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::AppMenuHelp => ("Help", "帮助"),
         L10nKey::AppMenuNewTab => ("New Tab", "新标签页"),
         L10nKey::AppMenuNewWorkspace => ("New Workspace", "新工作区"),
-        L10nKey::AppMenuNewWorktreeTab => ("New Worktree Tab", "新工作区标签页"),
+        L10nKey::AppMenuNewWorktreeTab => ("New Worktree Tab", "新工作树标签页"),
         L10nKey::AppMenuSplitRight => ("Split Right", "向右分屏"),
         L10nKey::AppMenuSplitDown => ("Split Down", "向下分屏"),
         L10nKey::AppMenuRenameTab => ("Rename Tab…", "重命名标签页…"),
@@ -2808,15 +2808,15 @@ fn translate_variant(locale: Locale, key: L10nKey, branch: &'static str) -> &'st
         // --- Offline machines ---
         (SettingsOfflineMachines, "zero") => (
             "0 more saved machines are not connected — open a workspace on one to install its hooks there.",
-            "还有 0 个已保存的机器未连接——在其中一个上打开工作区以在那里安装钩子。",
+            "还有 0 台已保存的机器未连接——在其中一台上打开工作区，即可在那台机器上安装钩子。",
         ),
         (SettingsOfflineMachines, "one") => (
             "1 more saved machine is not connected — open a workspace on it to install its hooks there.",
-            "还有 1 个已保存的机器未连接——在其上打开工作区以在那里安装钩子。",
+            "还有 1 台已保存的机器未连接——在那台机器上打开工作区，即可在那里安装钩子。",
         ),
         (SettingsOfflineMachines, "other") => (
             "{count} more saved machines are not connected — open a workspace on one to install its hooks there.",
-            "还有 {count} 个已保存的机器未连接——在其中一个上打开工作区以在那里安装钩子。",
+            "还有 {count} 台已保存的机器未连接——在其中一台上打开工作区，即可在那台机器上安装钩子。",
         ),
 
         // --- Panel untracked files ---
