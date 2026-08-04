@@ -1239,7 +1239,7 @@ pub fn appearance_path() -> io::Result<PathBuf> {
     Ok(data_dir()?.join(APPEARANCE_FILE))
 }
 
-/// The light/dark mode the GUI last applied, cached beside the machine tree.
+/// The appearance the GUI last applied, cached beside the machine tree.
 ///
 /// The daemon needs it when it spawns a pane on Windows, where ConPTY drops an
 /// OSC 11 background query before tty7's emulator can answer it (see
@@ -1256,6 +1256,17 @@ pub fn appearance_path() -> io::Result<PathBuf> {
 pub struct Appearance {
     #[serde(default)]
     pub dark: bool,
+    /// The active theme's ANSI table, encoded as `0xRRGGBB`.
+    ///
+    /// Older appearance files contain only `dark`; keeping this optional lets
+    /// them continue to parse while a freshly-painted GUI supplies the table
+    /// ConPTY needs for Win32 console color queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ansi16: Option<[u32; 16]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<u32>,
 }
 
 /// Read the cached appearance, or the default when there is none to read.
@@ -1275,13 +1286,12 @@ pub fn appearance() -> Appearance {
 
 /// Record the appearance the GUI just applied. A no-op when it has not changed,
 /// so repainting the same theme does not touch the disk.
-pub fn note_appearance(dark: bool) {
+pub fn note_appearance(appearance: Appearance) {
     let Ok(path) = appearance_path() else { return };
-    let next = Appearance { dark };
-    if read_appearance(&path) == next && path.exists() {
+    if read_appearance(&path) == appearance && path.exists() {
         return;
     }
-    if let Err(e) = write_appearance(&path, next) {
+    if let Err(e) = write_appearance(&path, appearance) {
         log::warn!("could not write {}: {e}", path.display());
     }
 }
@@ -1354,20 +1364,38 @@ mod tests {
 
         assert_eq!(
             read_appearance(&path),
-            Appearance { dark: false },
+            Appearance::default(),
             "a hint nobody has written yet reads as the default preset"
         );
 
-        write_appearance(&path, Appearance { dark: true }).unwrap();
-        assert_eq!(read_appearance(&path), Appearance { dark: true });
+        let dark = Appearance {
+            dark: true,
+            ansi16: Some(std::array::from_fn(|i| i as u32 * 0x010101)),
+            foreground: Some(0xfafafa),
+            background: Some(0x101010),
+        };
+        write_appearance(&path, dark).unwrap();
+        assert_eq!(read_appearance(&path), dark);
 
-        write_appearance(&path, Appearance { dark: false }).unwrap();
-        assert_eq!(read_appearance(&path), Appearance { dark: false });
+        write_appearance(&path, Appearance::default()).unwrap();
+        assert_eq!(read_appearance(&path), Appearance::default());
+
+        std::fs::write(&path, r#"{"dark":true}"#).unwrap();
+        assert_eq!(
+            read_appearance(&path),
+            Appearance {
+                dark: true,
+                ansi16: None,
+                foreground: None,
+                background: None,
+            },
+            "the pre-palette cache format remains readable"
+        );
 
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(
             read_appearance(&path),
-            Appearance { dark: false },
+            Appearance::default(),
             "a corrupt hint must not decide the background either"
         );
     }

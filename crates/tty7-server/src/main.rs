@@ -24,6 +24,10 @@ OPTIONS:
 ";
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    if let Some(code) = tty7_core::daemon::conpty_bootstrap::run_if_requested() {
+        std::process::exit(code);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.first().map(String::as_str) == Some("agent-hook") {

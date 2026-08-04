@@ -748,10 +748,28 @@ impl DaemonPane {
         let pty_size = pty_size(size);
 
         let pair = native_pty_system().openpty(pty_size)?;
-        let spawn = build_spawn_config(id, cwd, shell, workspace.as_deref())?;
+        let mut spawn = build_spawn_config(id, cwd, shell, workspace.as_deref())?;
+
+        #[cfg(windows)]
+        let bootstrap = match crate::daemon::conpty_bootstrap::wrap_command(
+            &mut spawn.cmd,
+            crate::core::machine::appearance(),
+        ) {
+            Ok(receiver) => receiver,
+            Err(e) => {
+                log::warn!("could not prepare the ConPTY palette bootstrap: {e}");
+                None
+            }
+        };
 
         let child = pair.slave.spawn_command(spawn.cmd)?;
-        let shell_pid = child.process_id();
+        let process_root_pid = child.process_id();
+        #[cfg(windows)]
+        let shell_pid = bootstrap
+            .and_then(|receiver| process_root_pid.and_then(|pid| receiver.receive(pid)))
+            .or(process_root_pid);
+        #[cfg(not(windows))]
+        let shell_pid = process_root_pid;
         let child = Arc::new(Mutex::new(child));
 
         drop(pair.slave);

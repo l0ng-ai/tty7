@@ -279,6 +279,10 @@ fn set_dock_icon_for_bare_binary() {
 }
 
 fn main() {
+    #[cfg(windows)]
+    if let Some(code) = crate::daemon::conpty_bootstrap::run_if_requested() {
+        std::process::exit(code);
+    }
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     {
         if args.first().map(std::ffi::OsString::as_os_str)

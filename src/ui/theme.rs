@@ -243,11 +243,21 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
         refresh_system_appearance(cx);
     }
     let theme = presets::by_id(cx, &effective_preset_id(cx));
+    let m = theme.neutrals();
     // Cache the mode beside the machine tree: the daemon is a separate process
     // and reads it back when it spawns a Windows pane, where ConPTY drops an
     // OSC 11 background query before tty7's emulator can answer it. Derived
     // state, so it deliberately stays out of the user's `config.json`.
-    crate::core::machine::note_appearance(theme.dark);
+    crate::core::machine::note_appearance(crate::core::machine::Appearance {
+        dark: theme.dark,
+        ansi16: Some(
+            theme
+                .ansi16
+                .map(|(r, g, b)| (r as u32) << 16 | (g as u32) << 8 | b as u32),
+        ),
+        foreground: Some(m.foreground),
+        background: Some(m.background),
+    });
     let config = cx.global::<Config>();
     let mode = if theme.dark {
         ThemeMode::Dark
@@ -259,7 +269,6 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     if !follow {
         sync_native_appearance(Some(theme.dark));
     }
-    let m = theme.neutrals();
     let surfaces = theme.surfaces();
     let sem = theme.semantics();
     let active = theme.active_palette();

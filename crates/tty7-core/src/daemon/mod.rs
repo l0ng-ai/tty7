@@ -1,3 +1,4 @@
+pub mod conpty_bootstrap;
 pub mod control;
 pub mod duplex;
 pub mod install;
