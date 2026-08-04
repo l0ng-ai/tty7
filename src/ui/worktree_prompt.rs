@@ -7,6 +7,7 @@ use gpui_component::{
 
 use crate::core::worktree::{WorktreeDefaults, WorktreeRequest};
 use crate::ui::app::Tty7App;
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 pub(crate) struct WorktreePrompt {
     host: crate::ui::host_ops::SharedHost,
@@ -78,7 +79,7 @@ impl Tty7App {
         let base = p.base.read(cx).value().trim().to_string();
         let (name, branch) = match (name.is_empty(), branch.is_empty()) {
             (true, true) => {
-                window.push_notification("The worktree needs a name", cx);
+                window.push_notification(t(L10nKey::WorktreePromptNeedsName), cx);
                 return;
             }
             (true, false) => (branch.clone(), branch),
@@ -113,7 +114,10 @@ impl Tty7App {
                     if let Some(p) = this.worktree_prompt.as_mut() {
                         p.busy = false;
                     }
-                    window.push_notification(format!("New worktree failed: {e}"), cx);
+                    window.push_notification(
+                        t_fmt(L10nKey::AppNewWorktreeFailed, &[("error", &e.to_string())]),
+                        cx,
+                    );
                     cx.notify();
                 }
             },
@@ -162,9 +166,9 @@ impl Tty7App {
                 div()
                     .text_sm()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("New Worktree Tab"),
+                    .child(t(L10nKey::WorktreePromptTitle)),
             )
-            .child(field("Worktree Name", &p.name))
+            .child(field(t(L10nKey::WorktreePromptName), &p.name))
             .child(
                 div()
                     .text_xs()
@@ -172,14 +176,18 @@ impl Tty7App {
                     .text_color(muted)
                     .child(preview),
             )
-            .child(field("New Branch", &p.branch))
-            .child(field("Start From", &p.base))
+            .child(field(t(L10nKey::WorktreePromptBranch), &p.branch))
+            .child(field(t(L10nKey::WorktreePromptBase), &p.base))
             .child(
                 h_flex()
                     .gap_2()
                     .child(
                         Button::new("worktree-create")
-                            .label(if p.busy { "Creating…" } else { "Create" })
+                            .label(if p.busy {
+                                t(L10nKey::WorktreePromptCreating)
+                            } else {
+                                t(L10nKey::WorktreePromptCreate)
+                            })
                             .small()
                             .primary()
                             .disabled(p.busy)
@@ -189,7 +197,7 @@ impl Tty7App {
                     )
                     .child(
                         Button::new("worktree-cancel")
-                            .label("Cancel")
+                            .label(t(L10nKey::Cancel))
                             .small()
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.cancel_worktree_prompt(window, cx)

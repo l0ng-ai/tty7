@@ -13,6 +13,7 @@ use crate::terminal::git_diff::{
     MAX_RENDERED_FILES, Truncation,
 };
 use crate::ui::app::Tty7App;
+use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::rounding;
 use crate::ui::rounding::RoundedCorners as _;
 
@@ -241,14 +242,13 @@ impl Tty7App {
         let overlay = self.tabs.get(self.active)?.diff_overlay.as_ref()?;
 
         let content = match &overlay.load {
-            DiffLoad::Loading => self.diff_message("Reading diff…", cx),
-            DiffLoad::NotARepo => self.diff_message("Not a git repository", cx),
-            DiffLoad::Ready(snap) if empty_snapshot(snap) && snap.read_failed => self.diff_message(
-                "Couldn't read the working-tree diff — retrying on the next refresh.",
-                cx,
-            ),
+            DiffLoad::Loading => self.diff_message(t(L10nKey::DiffReading), cx),
+            DiffLoad::NotARepo => self.diff_message(t(L10nKey::DiffNotARepo), cx),
+            DiffLoad::Ready(snap) if empty_snapshot(snap) && snap.read_failed => {
+                self.diff_message(t(L10nKey::DiffReadFailed), cx)
+            }
             DiffLoad::Ready(snap) if empty_snapshot(snap) => {
-                self.diff_message("Working tree clean", cx)
+                self.diff_message(t(L10nKey::DiffWorkingTreeClean), cx)
             }
             DiffLoad::Ready(snap) => {
                 self.diff_file_list(snap, &overlay.expanded, focused_file(snap, overlay), cx)
@@ -367,13 +367,9 @@ impl Tty7App {
             .when(
                 matches!(overlay.load, DiffLoad::Ready(_)) && overlay.focus.is_none(),
                 |bar| {
-                    let mut summary = format!(
-                        "{} changed file{}",
-                        files,
-                        if files == 1 { "" } else { "s" }
-                    );
+                    let mut summary = t_plural(L10nKey::DiffChangedFiles, files, &[]);
                     if untracked > 0 {
-                        summary.push_str(&format!(" · {untracked} untracked"));
+                        summary.push_str(&t_plural(L10nKey::DiffUntrackedCount, untracked, &[]));
                     }
                     bar.child(
                         div()
@@ -406,7 +402,7 @@ impl Tty7App {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("refreshing…"),
+                            .child(t(L10nKey::Refreshing)),
                     )
                 },
             )
@@ -421,7 +417,7 @@ impl Tty7App {
                         cx,
                     )
                     .rounded_lg()
-                    .tooltip("Close Diff (Esc)")
+                    .tooltip(t(L10nKey::DiffCloseTooltip))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.close_diff_overlay(window, cx);
                     })),
@@ -478,10 +474,7 @@ impl Tty7App {
                     .py_1p5()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!(
-                        "… and {rest} more changed file{} — run `git diff` in the terminal to see them.",
-                        if rest == 1 { "" } else { "s" }
-                    )),
+                    .child(t_plural(L10nKey::DiffMoreFiles, rest, &[])),
             );
         }
         if focused.is_none() && !snap.untracked.is_empty() {
@@ -502,10 +495,9 @@ impl Tty7App {
         stats: &DiffStats,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let text = format!(
-            "This working tree is too large to render efficiently ({}). Every file is \
-             collapsed — expand individual files, or run `git diff` in the terminal.",
-            oversized_summary(snap, stats),
+        let text = t_fmt(
+            L10nKey::DiffOversizedNotice,
+            &[("summary", &oversized_summary(snap, stats))],
         );
         div()
             .w_full()
@@ -607,7 +599,7 @@ impl Tty7App {
                     .flex_shrink_0()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("binary"),
+                    .child(t(L10nKey::Binary)),
             );
         }
         if file.added > 0 {
@@ -671,15 +663,11 @@ impl Tty7App {
             }
             if let Some(reason) = file.truncated {
                 let note = match reason {
-                    Truncation::PerFile => format!(
-                        "Diff truncated at {} lines — run `git diff` in the terminal for the rest.",
-                        git_diff::MAX_LINES_PER_FILE
+                    Truncation::PerFile => t_fmt(
+                        L10nKey::DiffTruncatedPerFile,
+                        &[("limit", &git_diff::MAX_LINES_PER_FILE.to_string())],
                     ),
-                    Truncation::Budget => {
-                        "Body not loaded — this working tree is past tty7's diff budget. \
-                         Run `git diff` in the terminal for this file."
-                            .to_string()
-                    }
+                    Truncation::Budget => t(L10nKey::DiffTruncatedBudget).to_string(),
                 };
                 body = body.child(
                     div()
@@ -778,7 +766,7 @@ impl Tty7App {
                     .bg(cx.theme().secondary)
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!("Untracked files ({total})")),
+                    .child(t_plural(L10nKey::DiffUntrackedHeader, total, &[])),
             );
         for path in untracked {
             section = section.child(
@@ -809,9 +797,7 @@ impl Tty7App {
                     .py_1()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!(
-                        "… and {rest} more — run `git status` in the terminal to see them.",
-                    )),
+                    .child(t_plural(L10nKey::DiffMoreUntracked, rest, &[])),
             );
         }
         section.into_any_element()
@@ -843,31 +829,36 @@ fn file_expanded(file: &FileDiff, expanded: &HashMap<String, bool>, collapse_all
 }
 
 fn oversized_summary(snap: &DiffSnapshot, stats: &DiffStats) -> String {
-    let mut parts = vec![format!(
-        "{} changed file{}",
-        snap.files.len(),
-        if snap.files.len() == 1 { "" } else { "s" }
-    )];
+    let mut parts = vec![t_plural(L10nKey::DiffChangedFiles, snap.files.len(), &[])];
     let (added, removed) = stats.totals;
     let total_lines = (added + removed) as usize;
     let loaded = stats.retained_lines;
     let budget = stats.budget_exhausted;
     let per_file = stats.per_file_truncated;
     parts.push(match (budget, per_file) {
-        (false, false) => format!("{total_lines} diff lines"),
+        (false, false) => t_plural(L10nKey::DiffLines, total_lines, &[]),
         _ => {
-            let cap = match (budget, per_file) {
-                (true, true) => "tty7's budget and the per-file cap",
-                (true, false) => "tty7's budget",
-                _ => "the per-file cap",
+            let cap_key = match (budget, per_file) {
+                (true, true) => L10nKey::DiffBudgetAndCap,
+                (true, false) => L10nKey::DiffBudget,
+                _ => L10nKey::DiffPerFileCap,
             };
-            format!(
-                "{total_lines} changed lines, {loaded} diff rows loaded before {cap} cut the rest"
+            t_fmt(
+                L10nKey::DiffChangedLines,
+                &[
+                    ("total", &total_lines.to_string()),
+                    ("loaded", &loaded.to_string()),
+                    ("cap", t(cap_key)),
+                ],
             )
         }
     });
     if stats.untracked_count > 0 {
-        parts.push(format!("{} untracked", stats.untracked_count));
+        parts.push(t_plural(
+            L10nKey::DiffUntrackedSummary,
+            stats.untracked_count,
+            &[],
+        ));
     }
     parts.join(", ")
 }
@@ -948,6 +939,7 @@ fn split_hunk(lines: &[git_diff::DiffLine]) -> Vec<SplitRow> {
 mod tests {
     use super::*;
     use crate::terminal::git_diff::{DiffLine, LineKind};
+    use crate::ui::i18n::set_locale;
 
     fn line(kind: LineKind, old: Option<u32>, new: Option<u32>, text: &str) -> DiffLine {
         DiffLine {
@@ -1037,6 +1029,7 @@ mod tests {
     }
 
     fn banner(snap: &DiffSnapshot) -> String {
+        set_locale("en");
         oversized_summary(snap, &snap.stats())
     }
 
