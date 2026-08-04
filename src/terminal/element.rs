@@ -672,6 +672,30 @@ fn powerline_path(bounds: Bounds<Pixels>, shape: PowerlineShape) -> gpui::Path<P
         p.line_to(c);
         p
     };
+    let half_circle = |anchor_x: Pixels, dir: f32| {
+        const SEGS: usize = 6;
+
+        let (rx, ry) = (bounds.size.width.as_f32(), bounds.size.height.as_f32() / 2.);
+
+        let at = |scale: f32, theta: f32| {
+            let x = anchor_x.as_f32() + dir * rx * scale * theta.cos();
+            let y = ymid.as_f32() + ry * scale * theta.sin();
+            point(
+                px(x.clamp(x0.as_f32(), x1.as_f32())),
+                px(y.clamp(y0.as_f32(), y1.as_f32())),
+            )
+        };
+
+        let step = std::f32::consts::PI / SEGS as f32;
+        let mut p = gpui::Path::new(at(1., -std::f32::consts::FRAC_PI_2));
+        for i in 0..SEGS {
+            let t0 = -std::f32::consts::FRAC_PI_2 + step * i as f32;
+            let t1 = t0 + step;
+            let ctrl = at(1. / (step / 2.).cos(), (t0 + t1) / 2.);
+            p.curve_to(at(1., t1), ctrl);
+        }
+        p
+    };
     match shape {
         PowerlineShape::TriangleRight => tri(point(x0, y0), point(x1, ymid), point(x0, y1)),
         PowerlineShape::TriangleLeft => tri(point(x1, y0), point(x0, ymid), point(x1, y1)),
@@ -679,18 +703,8 @@ fn powerline_path(bounds: Bounds<Pixels>, shape: PowerlineShape) -> gpui::Path<P
         PowerlineShape::SlantLowerRight => tri(point(x1, y0), point(x1, y1), point(x0, y1)),
         PowerlineShape::SlantUpperLeft => tri(point(x0, y0), point(x1, y0), point(x0, y1)),
         PowerlineShape::SlantUpperRight => tri(point(x0, y0), point(x1, y0), point(x1, y1)),
-        PowerlineShape::HalfCircleRight => {
-            let mut p = gpui::Path::new(point(x0, y0));
-            p.curve_to(point(x1, ymid), point(x1, y0));
-            p.curve_to(point(x0, y1), point(x1, y1));
-            p
-        }
-        PowerlineShape::HalfCircleLeft => {
-            let mut p = gpui::Path::new(point(x1, y0));
-            p.curve_to(point(x0, ymid), point(x0, y0));
-            p.curve_to(point(x1, y1), point(x0, y1));
-            p
-        }
+        PowerlineShape::HalfCircleRight => half_circle(x0, 1.),
+        PowerlineShape::HalfCircleLeft => half_circle(x1, -1.),
     }
 }
 
@@ -1949,6 +1963,19 @@ mod tests {
                 x0 + w,
                 "{shape:?} does not reach the right cell edge"
             );
+            match shape {
+                PowerlineShape::HalfCircleRight => assert!(
+                    path.vertices[1].xy_position.x <= x0 + w * 0.4
+                        && path.vertices[path.vertices.len() - 2].xy_position.x <= x0 + w * 0.4,
+                    "right caps should not collapse into a diagonal wedge"
+                ),
+                PowerlineShape::HalfCircleLeft => assert!(
+                    path.vertices[1].xy_position.x >= x0 + w * 0.6
+                        && path.vertices[path.vertices.len() - 2].xy_position.x >= x0 + w * 0.6,
+                    "left caps should not collapse into a diagonal wedge"
+                ),
+                _ => {}
+            }
         }
     }
 
