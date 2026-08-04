@@ -151,6 +151,10 @@ windows-sys = { version = "0.61", features = [
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Storage_EnhancedStorage",
+    # IShellLinkW::GetPath takes a WIN32_FIND_DATAW, so reading an existing
+    # shortcut's target back — which is how `aumid` decides whether it has to
+    # write at all — needs the file-system bindings too.
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
