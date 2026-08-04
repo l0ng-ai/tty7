@@ -334,6 +334,11 @@ fn main() {
     // carry the CLI's directory in its environment.
     crate::core::cli_install::install(config.install_cli_on_path);
 
+    // Give desktop toasts the tty7 icon and name instead of notify-rust's
+    // PowerShell fallback. Best-effort; no-op off Windows.
+    #[cfg(target_os = "windows")]
+    crate::core::aumid::init();
+
     let restore_session = config.restore_session;
     let daemon_result = if restore_session {
         crate::daemon::spawn::ensure_running()
