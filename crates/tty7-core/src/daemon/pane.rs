@@ -311,6 +311,8 @@ fn names_capability_env(key: &str) -> bool {
 
 fn pane_environment(
     extra_env: &std::collections::HashMap<String, String>,
+    // Only Windows has a use for it — see the `COLORFGBG` block below.
+    #[cfg_attr(not(windows), allow(unused_variables))] dark: bool,
     pane: u64,
     workspace: Option<&str>,
 ) -> Vec<(String, String)> {
@@ -326,6 +328,17 @@ fn pane_environment(
         ("TERM_PROGRAM_VERSION".to_string(), version.to_string()),
         (TTY7_PANE_ENV.to_string(), pane.to_string()),
     ];
+    #[cfg(windows)]
+    if !extra_env
+        .keys()
+        .any(|key| key.eq_ignore_ascii_case("COLORFGBG"))
+    {
+        // ConPTY consumes OSC 11 queries before tty7's emulator can answer
+        // them. Give TUI applications the conventional fallback hint while
+        // preserving an explicit user override below.
+        let colorfgbg = if dark { "15;0" } else { "0;15" };
+        env.push(("COLORFGBG".to_string(), colorfgbg.to_string()));
+    }
     if let Some(ws) = workspace {
         env.push((TTY7_WS_ENV.to_string(), ws.to_string()));
     }
@@ -351,7 +364,8 @@ fn apply_common_command_setup(
         cmd.cwd(dir);
     }
     let extra_env = crate::core::config::extra_env();
-    for (k, v) in pane_environment(&extra_env, pane, workspace) {
+    let dark = crate::core::machine::appearance().dark;
+    for (k, v) in pane_environment(&extra_env, dark, pane, workspace) {
         cmd.env(k, v);
     }
 
@@ -4084,7 +4098,7 @@ mod tests {
     #[test]
     fn pane_environment_advertises_the_terminal_under_the_standard_names() {
         let env: std::collections::HashMap<_, _> =
-            pane_environment(&std::collections::HashMap::new(), 7, Some("ws-main"))
+            pane_environment(&std::collections::HashMap::new(), false, 7, Some("ws-main"))
                 .into_iter()
                 .collect();
         let version = env!("CARGO_PKG_VERSION");
@@ -4108,10 +4122,14 @@ mod tests {
 
     #[test]
     fn pane_environment_hands_the_shell_its_own_address() {
-        let env: std::collections::HashMap<_, _> =
-            pane_environment(&std::collections::HashMap::new(), 42, Some("ws-main"))
-                .into_iter()
-                .collect();
+        let env: std::collections::HashMap<_, _> = pane_environment(
+            &std::collections::HashMap::new(),
+            false,
+            42,
+            Some("ws-main"),
+        )
+        .into_iter()
+        .collect();
 
         assert_eq!(
             env.get(TTY7_PANE_ENV).map(String::as_str),
@@ -4137,7 +4155,7 @@ mod tests {
         }
 
         let unfiled: std::collections::HashMap<_, _> =
-            pane_environment(&std::collections::HashMap::new(), 42, None)
+            pane_environment(&std::collections::HashMap::new(), false, 42, None)
                 .into_iter()
                 .collect();
         assert!(
@@ -4160,7 +4178,9 @@ mod tests {
         .collect();
 
         let applied: std::collections::HashMap<_, _> =
-            pane_environment(&configured, 1, None).into_iter().collect();
+            pane_environment(&configured, false, 1, None)
+                .into_iter()
+                .collect();
 
         assert_eq!(
             applied.get("TERM_PROGRAM").map(String::as_str),
@@ -4183,13 +4203,44 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn pane_environment_advertises_light_and_dark_backgrounds() {
+        let empty = std::collections::HashMap::new();
+        let light: std::collections::HashMap<_, _> = pane_environment(&empty, false, 1, None)
+            .into_iter()
+            .collect();
+        let dark: std::collections::HashMap<_, _> = pane_environment(&empty, true, 1, None)
+            .into_iter()
+            .collect();
+
+        assert_eq!(light.get("COLORFGBG").map(String::as_str), Some("0;15"));
+        assert_eq!(dark.get("COLORFGBG").map(String::as_str), Some("15;0"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn configured_colorfgbg_wins_case_insensitively() {
+        let configured = [("ColorFgBg".to_string(), "3;4".to_string())]
+            .into_iter()
+            .collect();
+        let applied = pane_environment(&configured, false, 1, None);
+
+        assert!(!applied.iter().any(|(key, _)| key == "COLORFGBG"));
+        assert!(
+            applied
+                .iter()
+                .any(|(key, value)| key == "ColorFgBg" && value == "3;4")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn pane_environment_capability_keys_cannot_be_overridden_by_recasing() {
         let configured = [("Term", "dumb"), ("ColorTerm", ""), ("term_program", "x")]
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect();
 
-        let applied = pane_environment(&configured, 1, None);
+        let applied = pane_environment(&configured, false, 1, None);
 
         assert!(
             !applied.iter().any(|(k, _)| k == "Term" || k == "ColorTerm"),

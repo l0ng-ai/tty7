@@ -12,6 +12,8 @@ use crate::daemon::protocol::NativeSshSpec;
 
 pub const MACHINE_FILE: &str = "machine.json";
 
+pub const APPEARANCE_FILE: &str = "appearance.json";
+
 pub const DATA_DIR_ENV: &str = "TTY7_DATA_DIR";
 
 pub const MAX_WORKSPACES: usize = 1024;
@@ -1233,6 +1235,78 @@ pub fn default_machine_path() -> io::Result<PathBuf> {
     Ok(data_dir()?.join(MACHINE_FILE))
 }
 
+pub fn appearance_path() -> io::Result<PathBuf> {
+    Ok(data_dir()?.join(APPEARANCE_FILE))
+}
+
+/// The light/dark mode the GUI last applied, cached beside the machine tree.
+///
+/// The daemon needs it when it spawns a pane on Windows, where ConPTY drops an
+/// OSC 11 background query before tty7's emulator can answer it (see
+/// `daemon::pane::pane_environment`), and the daemon is a separate process from
+/// the GUI that owns the theme. This is derived state, not a setting: it is
+/// written by whichever process paints the window and read by whoever needs to
+/// describe that window, so it lives here rather than in `config.json` — the
+/// user's file, which nothing should rewrite behind their back.
+///
+/// A file of its own rather than a field on [`Machine`]: the machine tree is
+/// owned by the daemon, held in memory and flushed on a timer, so a second
+/// writer would clobber the workspaces and panes it had not seen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Appearance {
+    #[serde(default)]
+    pub dark: bool,
+}
+
+/// Read the cached appearance, or the default when there is none to read.
+///
+/// Absent, unreadable, and unparsable all answer `dark: false`, which is what
+/// tty7's default preset is: a daemon that spawns a pane before the GUI has
+/// ever applied a theme describes the default window rather than guessing.
+pub fn appearance() -> Appearance {
+    match appearance_path() {
+        Ok(path) => read_appearance(&path),
+        Err(e) => {
+            log::debug!("no appearance hint ({e}); assuming the default preset");
+            Appearance::default()
+        }
+    }
+}
+
+/// Record the appearance the GUI just applied. A no-op when it has not changed,
+/// so repainting the same theme does not touch the disk.
+pub fn note_appearance(dark: bool) {
+    let Ok(path) = appearance_path() else { return };
+    let next = Appearance { dark };
+    if read_appearance(&path) == next && path.exists() {
+        return;
+    }
+    if let Err(e) = write_appearance(&path, next) {
+        log::warn!("could not write {}: {e}", path.display());
+    }
+}
+
+fn read_appearance(path: &Path) -> Appearance {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Appearance::default();
+    };
+    serde_json::from_str::<Appearance>(crate::core::config::strip_bom(&text)).unwrap_or_else(|e| {
+        log::warn!(
+            "{} does not parse ({e}); assuming the default preset",
+            path.display()
+        );
+        Appearance::default()
+    })
+}
+
+fn write_appearance(path: &Path, appearance: Appearance) -> io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(&appearance).map_err(io::Error::other)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::core::config::write_atomic_private(path, &bytes)
+}
+
 fn data_dir() -> io::Result<PathBuf> {
     if let Some(explicit) = std::env::var_os(DATA_DIR_ENV).filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(explicit));
@@ -1271,6 +1345,31 @@ mod tests {
     fn store() -> (Arc<MachineStore>, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();
         (MachineStore::open(dir.path().join(MACHINE_FILE)), dir)
+    }
+
+    #[test]
+    fn the_appearance_hint_round_trips_and_defaults_to_light() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("nested").join(APPEARANCE_FILE);
+
+        assert_eq!(
+            read_appearance(&path),
+            Appearance { dark: false },
+            "a hint nobody has written yet reads as the default preset"
+        );
+
+        write_appearance(&path, Appearance { dark: true }).unwrap();
+        assert_eq!(read_appearance(&path), Appearance { dark: true });
+
+        write_appearance(&path, Appearance { dark: false }).unwrap();
+        assert_eq!(read_appearance(&path), Appearance { dark: false });
+
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(
+            read_appearance(&path),
+            Appearance { dark: false },
+            "a corrupt hint must not decide the background either"
+        );
     }
 
     fn seed(pane: u64, cwd: &str) -> PaneSeed {
