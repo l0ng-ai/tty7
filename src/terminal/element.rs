@@ -713,10 +713,18 @@ fn powerline_solid_edge(
     bounds: Bounds<Pixels>,
     shape: PowerlineShape,
     scale_factor: f32,
+    fg_alpha: f32,
 ) -> Option<Bounds<Pixels>> {
     // A filled path anti-aliases a closing edge that falls between device
     // pixels. Cover exactly that partially occupied pixel with opaque
     // foreground color; an already aligned edge needs no extra primitive.
+    //
+    // Only opaque separators qualify. A translucent one (DIM) would composite
+    // the cover quad and the path on top of each other, pushing that single
+    // column past the glyph's own alpha and tinting the neighboring cell.
+    if !fg_alpha.is_finite() || fg_alpha < 1. {
+        return None;
+    }
     let scale_factor = if scale_factor.is_finite() && scale_factor > 0. {
         scale_factor
     } else {
@@ -807,7 +815,7 @@ fn paint_glyphs(
                     let native = if let Some(shape) = PowerlineShape::of(cell.c) {
                         let fg = GlyphStyle::of(cell).fg;
                         if let Some(edge) =
-                            powerline_solid_edge(cell_bounds, shape, window.scale_factor())
+                            powerline_solid_edge(cell_bounds, shape, window.scale_factor(), fg.a)
                         {
                             window.paint_quad(fill(edge, fg));
                         }
@@ -2011,7 +2019,7 @@ mod tests {
             PowerlineShape::SlantUpperLeft,
         ] {
             assert_eq!(
-                powerline_solid_edge(bounds, shape, scale),
+                powerline_solid_edge(bounds, shape, scale, 1.),
                 Some(Bounds::from_corners(
                     point(px(12. / scale), bounds.top()),
                     point(px(13. / scale), bounds.bottom()),
@@ -2027,7 +2035,7 @@ mod tests {
             PowerlineShape::SlantUpperRight,
         ] {
             assert_eq!(
-                powerline_solid_edge(bounds, shape, scale),
+                powerline_solid_edge(bounds, shape, scale, 1.),
                 Some(Bounds::from_corners(
                     point(px(24. / scale), bounds.top()),
                     point(px(25. / scale), bounds.bottom()),
@@ -2051,7 +2059,11 @@ mod tests {
             PowerlineShape::SlantUpperLeft,
             PowerlineShape::SlantUpperRight,
         ] {
-            assert_eq!(powerline_solid_edge(bounds, shape, 2.), None, "{shape:?}");
+            assert_eq!(
+                powerline_solid_edge(bounds, shape, 2., 1.),
+                None,
+                "{shape:?}"
+            );
         }
     }
 
@@ -2065,9 +2077,37 @@ mod tests {
 
         for scale in [0., -1., f32::NAN] {
             assert_eq!(
-                powerline_solid_edge(bounds, PowerlineShape::TriangleRight, scale),
+                powerline_solid_edge(bounds, PowerlineShape::TriangleRight, scale, 1.),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn powerline_solid_edge_skips_translucent_separators() {
+        let bounds = Bounds::new(point(px(10.2), px(20.)), size(px(9.2), px(21.)));
+
+        for shape in [
+            PowerlineShape::TriangleRight,
+            PowerlineShape::TriangleLeft,
+            PowerlineShape::HalfCircleRight,
+            PowerlineShape::HalfCircleLeft,
+            PowerlineShape::SlantLowerLeft,
+            PowerlineShape::SlantLowerRight,
+            PowerlineShape::SlantUpperLeft,
+            PowerlineShape::SlantUpperRight,
+        ] {
+            assert!(
+                powerline_solid_edge(bounds, shape, 1.25, 1.).is_some(),
+                "{shape:?} still needs the cover quad when opaque"
+            );
+            for alpha in [DIM_OPACITY, 0., 0.99, f32::NAN] {
+                assert_eq!(
+                    powerline_solid_edge(bounds, shape, 1.25, alpha),
+                    None,
+                    "{shape:?} must not stack a cover quad under a translucent path"
+                );
+            }
         }
     }
 
