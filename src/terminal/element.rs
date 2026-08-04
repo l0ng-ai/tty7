@@ -659,6 +659,21 @@ impl PowerlineShape {
             _ => return None,
         })
     }
+
+    fn closing_edge_x(self, bounds: Bounds<Pixels>) -> Pixels {
+        // Keep this match exhaustive so adding a shape cannot silently assign
+        // its solid closing edge to the wrong side of the cell.
+        match self {
+            Self::TriangleRight
+            | Self::HalfCircleRight
+            | Self::SlantLowerLeft
+            | Self::SlantUpperLeft => bounds.left(),
+            Self::TriangleLeft
+            | Self::HalfCircleLeft
+            | Self::SlantLowerRight
+            | Self::SlantUpperRight => bounds.right(),
+        }
+    }
 }
 
 fn powerline_path(bounds: Bounds<Pixels>, shape: PowerlineShape) -> gpui::Path<Pixels> {
@@ -692,6 +707,32 @@ fn powerline_path(bounds: Bounds<Pixels>, shape: PowerlineShape) -> gpui::Path<P
             p
         }
     }
+}
+
+fn powerline_solid_edge(
+    bounds: Bounds<Pixels>,
+    shape: PowerlineShape,
+    scale_factor: f32,
+) -> Option<Bounds<Pixels>> {
+    // A filled path anti-aliases a closing edge that falls between device
+    // pixels. Cover exactly that partially occupied pixel with opaque
+    // foreground color; an already aligned edge needs no extra primitive.
+    let scale_factor = if scale_factor.is_finite() && scale_factor > 0. {
+        scale_factor
+    } else {
+        1.
+    };
+    let physical_edge = shape.closing_edge_x(bounds).as_f32() * scale_factor;
+    let physical_left = physical_edge.floor();
+    let physical_right = physical_edge.ceil();
+    if physical_left == physical_right {
+        return None;
+    }
+
+    Some(Bounds::from_corners(
+        point(px(physical_left / scale_factor), bounds.top()),
+        point(px(physical_right / scale_factor), bounds.bottom()),
+    ))
 }
 
 fn native_cell_residue(style: &GlyphStyle) -> Option<char> {
@@ -764,8 +805,14 @@ fn paint_glyphs(
                         size(geom.cell_width, geom.line_height),
                     );
                     let native = if let Some(shape) = PowerlineShape::of(cell.c) {
+                        let fg = GlyphStyle::of(cell).fg;
+                        if let Some(edge) =
+                            powerline_solid_edge(cell_bounds, shape, window.scale_factor())
+                        {
+                            window.paint_quad(fill(edge, fg));
+                        }
                         let path = powerline_path(cell_bounds, shape);
-                        window.paint_path(path, GlyphStyle::of(cell).fg);
+                        window.paint_path(path, fg);
                         true
                     } else if let Some(ink) =
                         super::boxdraw::glyph(cell.c, cell_bounds, window.scale_factor())
@@ -1948,6 +1995,78 @@ mod tests {
                 max_x,
                 x0 + w,
                 "{shape:?} does not reach the right cell edge"
+            );
+        }
+    }
+
+    #[test]
+    fn powerline_solid_edge_covers_only_the_fractional_device_pixel() {
+        let bounds = Bounds::new(point(px(10.2), px(20.)), size(px(9.2), px(21.)));
+        let scale = 1.25;
+
+        for shape in [
+            PowerlineShape::TriangleRight,
+            PowerlineShape::HalfCircleRight,
+            PowerlineShape::SlantLowerLeft,
+            PowerlineShape::SlantUpperLeft,
+        ] {
+            assert_eq!(
+                powerline_solid_edge(bounds, shape, scale),
+                Some(Bounds::from_corners(
+                    point(px(12. / scale), bounds.top()),
+                    point(px(13. / scale), bounds.bottom()),
+                )),
+                "{shape:?} must cover only the device pixel containing its left edge"
+            );
+        }
+
+        for shape in [
+            PowerlineShape::TriangleLeft,
+            PowerlineShape::HalfCircleLeft,
+            PowerlineShape::SlantLowerRight,
+            PowerlineShape::SlantUpperRight,
+        ] {
+            assert_eq!(
+                powerline_solid_edge(bounds, shape, scale),
+                Some(Bounds::from_corners(
+                    point(px(24. / scale), bounds.top()),
+                    point(px(25. / scale), bounds.bottom()),
+                )),
+                "{shape:?} must cover only the device pixel containing its right edge"
+            );
+        }
+    }
+
+    #[test]
+    fn powerline_solid_edge_skips_device_aligned_edges() {
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(9.), px(21.)));
+
+        for shape in [
+            PowerlineShape::TriangleRight,
+            PowerlineShape::TriangleLeft,
+            PowerlineShape::HalfCircleRight,
+            PowerlineShape::HalfCircleLeft,
+            PowerlineShape::SlantLowerLeft,
+            PowerlineShape::SlantLowerRight,
+            PowerlineShape::SlantUpperLeft,
+            PowerlineShape::SlantUpperRight,
+        ] {
+            assert_eq!(powerline_solid_edge(bounds, shape, 2.), None, "{shape:?}");
+        }
+    }
+
+    #[test]
+    fn powerline_solid_edge_sanitizes_invalid_scale() {
+        let bounds = Bounds::new(point(px(10.25), px(20.)), size(px(9.), px(21.)));
+        let expected = Some(Bounds::from_corners(
+            point(px(10.), bounds.top()),
+            point(px(11.), bounds.bottom()),
+        ));
+
+        for scale in [0., -1., f32::NAN] {
+            assert_eq!(
+                powerline_solid_edge(bounds, PowerlineShape::TriangleRight, scale),
+                expected
             );
         }
     }
