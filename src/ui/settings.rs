@@ -109,13 +109,6 @@ impl ExplorerContextMenuNote {
     }
 }
 
-fn localized_update_channel(channel: crate::core::update::UpdateChannel) -> &'static str {
-    match channel {
-        crate::core::update::UpdateChannel::Stable => t(L10nKey::SettingsUpdateChannelStable),
-        crate::core::update::UpdateChannel::Nightly => t(L10nKey::SettingsUpdateChannelNightly),
-    }
-}
-
 fn localized_update_phase(phase: &crate::core::update::UpdatePhase) -> Option<String> {
     use crate::core::update::{UpdateFailure, UpdatePhase};
 
@@ -151,6 +144,10 @@ fn localized_update_install_hint(hint: &crate::core::update::UpdateInstallHint) 
         #[cfg(target_os = "windows")]
         UpdateInstallHint::UnsupportedWindows => {
             t(L10nKey::SettingsUpdateUnsupportedWindows).to_string()
+        }
+        #[cfg(target_os = "windows")]
+        UpdateInstallHint::WindowsAllUsersInstall => {
+            t(L10nKey::SettingsUpdateWindowsAllUsers).to_string()
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         UpdateInstallHint::UnsupportedPlatform => {
@@ -4716,11 +4713,6 @@ impl Tty7App {
             .cloned()
             .unwrap_or_default();
         let update = update_status.available.clone();
-        let current_update_channel = crate::core::update::UpdateChannel::current();
-        let switch_target = current_update_channel.other();
-        let channel_switch_pending = update
-            .as_ref()
-            .is_some_and(|available| available.channel_switch);
         let update_busy = matches!(
             update_status.phase,
             crate::core::update::UpdatePhase::Checking
@@ -4860,52 +4852,16 @@ impl Tty7App {
                             .text_color(foreground)
                             .child(t(L10nKey::SettingsUpdates)),
                     )
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .items_center()
-                            .child(div().text_sm().text_color(foreground).child(t_fmt(
-                                L10nKey::SettingsUpdateCurrentChannel,
-                                &[("channel", localized_update_channel(current_update_channel))],
-                            )))
-                            .child(
-                                Button::new("switch-update-channel")
-                                    .label(t_fmt(
-                                        L10nKey::SettingsUpdateSwitchTo,
-                                        &[("channel", localized_update_channel(switch_target))],
-                                    ))
-                                    .small()
-                                    .disabled(update_busy || channel_switch_pending)
-                                    .on_click(cx.listener(move |_, _, _window, cx| {
-                                        crate::core::update::switch_channel(switch_target, cx)
-                                    })),
-                            ),
-                    )
                     .when_some(update, |this, upd| {
-                        let button_label = if upd.channel_switch && upd.installable {
-                            t_fmt(
-                                L10nKey::SettingsUpdateSwitchAndRelaunch,
-                                &[("channel", localized_update_channel(upd.channel))],
-                            )
-                        } else if upd.installable {
+                        let button_label = if upd.installable {
                             t(L10nKey::SettingsUpdateAndRelaunch).to_string()
                         } else {
                             t(L10nKey::SettingsUpdateViewRelease).to_string()
                         };
-                        let availability = if upd.channel_switch {
-                            t_fmt(
-                                L10nKey::SettingsUpdateLatestChannelRelease,
-                                &[
-                                    ("version", &upd.version),
-                                    ("channel", localized_update_channel(upd.channel)),
-                                ],
-                            )
-                        } else {
-                            t_fmt(
-                                L10nKey::SettingsVersionAvailable,
-                                &[("version", &upd.version)],
-                            )
-                        };
+                        let availability = t_fmt(
+                            L10nKey::SettingsVersionAvailable,
+                            &[("version", &upd.version)],
+                        );
                         this.child(
                             v_flex()
                                 .gap_1()

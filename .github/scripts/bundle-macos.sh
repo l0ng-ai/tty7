@@ -39,8 +39,10 @@ chmod +x "$APP/Contents/MacOS/tty7"
 if [[ "$PACKAGE_UPDATE_ZIP" != "0" ]]; then
     # A focused out-of-process updater can replace the bundle after the GUI
     # exits, then relaunch or roll back without teaching the GUI to mutate
-    # itself. Stable and Nightly macOS builds carry it beside the app/CLI so its
-    # signature is covered by the outer bundle.
+    # itself. Every macOS build carries it beside the app/CLI so its signature
+    # is covered by the outer bundle — including Nightly, whose users are
+    # offered the stable release that supersedes their prerelease and need a
+    # working helper to get there.
     cp "target/${TARGET}/release/tty7-updater" "$APP/Contents/MacOS/tty7-updater"
     chmod +x "$APP/Contents/MacOS/tty7-updater"
 fi
@@ -152,8 +154,9 @@ else
 fi
 
 # The in-app updater needs the signed, notarized .app itself rather than a disk
-# image that requires Finder interaction. The full embedded build version tells
-# Stable and Nightly clients which release channel owns this archive.
+# image that requires Finder interaction. The helper re-reads the full embedded
+# version out of the staged bundle and refuses anything that is not the release
+# it was told to install.
 ZIP=""
 if [[ "$PACKAGE_UPDATE_ZIP" != "0" ]]; then
     ZIP="dist/tty7-${VERSION}-macos-${ARCH}.zip"

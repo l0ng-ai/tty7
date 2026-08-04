@@ -136,6 +136,15 @@ jobs:
         shell: pwsh
         run: '& ./.github/scripts/bundle-windows.ps1 "${{ matrix.target }}" "${{ matrix.arch }}"'
 
+      # The in-app updater refuses a package whose marker, helper or stamped
+      # version is wrong — on the user's machine, after the download. Check the
+      # same facts here so a packaging mistake fails the release instead.
+      - name: Verify Windows update package
+        if: matrix.os == 'windows'
+        working-directory: tty7
+        shell: pwsh
+        run: '& ./.github/scripts/verify-windows-package.ps1 "${{ matrix.arch }}"'
+
       # Hand the artifacts to the assemble job rather than uploading them to the
       # release here. Four parallel jobs each publishing their own slice would
       # make the release "latest" the moment the *first* platform finished — the

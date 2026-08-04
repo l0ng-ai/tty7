@@ -64,9 +64,10 @@ if (Test-Path $ServerSrc) {
     Write-Warning "no $ServerAsset to bundle - this build cannot serve WSL distros"
 }
 
-# Portable archives carry their own update authority. The embedded build
-# version selects Stable or Nightly discovery, so the layout marker never
-# changes update channels.
+# The marker tells the in-app updater which of the two Windows layouts it is
+# running from, and therefore which release asset can replace it. It says
+# nothing about where updates come from: that is always the latest stable
+# release. The Inno payload gets the mutually exclusive marker below.
 if ($PackageUpdater) {
     Set-Content -Path "$Stage/.tty7-portable" -Value 'portable-v1' -NoNewline -Encoding ascii
 }

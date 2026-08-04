@@ -14,8 +14,6 @@ use crate::core::config::Config;
 const REPO: &str = "l0ng-ai/tty7";
 
 pub const RELEASES_URL: &str = "https://github.com/l0ng-ai/tty7/releases/latest";
-const NIGHTLY_RELEASES_URL: &str = "https://github.com/l0ng-ai/tty7/releases/tag/nightly";
-const NIGHTLY_UPDATE_MANIFEST: &str = "update-manifest.json";
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -26,94 +24,9 @@ const WINDOWS_PORTABLE_MARKER: &str = ".tty7-portable";
 #[cfg(target_os = "windows")]
 const WINDOWS_PORTABLE_MARKER_CONTENT: &[u8] = b"portable-v1";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UpdateChannel {
-    Stable,
-    Nightly,
-}
-
-impl UpdateChannel {
-    pub fn current() -> Self {
-        Self::for_version(env!("CARGO_PKG_VERSION"))
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Stable => "Stable",
-            Self::Nightly => "Nightly",
-        }
-    }
-
-    pub fn other(self) -> Self {
-        match self {
-            Self::Stable => Self::Nightly,
-            Self::Nightly => Self::Stable,
-        }
-    }
-
-    fn for_version(version: &str) -> Self {
-        if version.trim_start_matches('v').contains("-nightly.") {
-            Self::Nightly
-        } else {
-            Self::Stable
-        }
-    }
-
-    fn api_url(self) -> String {
-        let endpoint = match self {
-            Self::Stable => "latest",
-            Self::Nightly => "tags/nightly",
-        };
-        format!("https://api.github.com/repos/{REPO}/releases/{endpoint}")
-    }
-
-    fn releases_url(self) -> &'static str {
-        match self {
-            Self::Stable => RELEASES_URL,
-            Self::Nightly => NIGHTLY_RELEASES_URL,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UpdateCheckIntent {
-    CurrentChannel,
-    SwitchTo(UpdateChannel),
-}
-
-impl UpdateCheckIntent {
-    fn target_channel(self, current_version: &str) -> UpdateChannel {
-        match self {
-            Self::CurrentChannel => UpdateChannel::for_version(current_version),
-            Self::SwitchTo(channel) => channel,
-        }
-    }
-
-    fn is_channel_switch(self, current_version: &str) -> bool {
-        matches!(
-            self,
-            Self::SwitchTo(channel) if channel != UpdateChannel::for_version(current_version)
-        )
-    }
-
-    fn accepts_release(self, latest: &str, current: &str) -> bool {
-        // An explicit channel switch is allowed to cross the normal version
-        // ordering boundary, but the target must still carry a valid identity
-        // for the requested channel. Integrity and binary checks continue in
-        // the unchanged preparation and updater paths after this selection.
-        if self.is_channel_switch(current) {
-            return parse_version(latest).is_some()
-                && self.target_channel(current) == UpdateChannel::for_version(latest);
-        }
-        is_update_available(latest, current)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AvailableUpdate {
     pub version: String,
-    pub channel: UpdateChannel,
-    pub channel_switch: bool,
     pub installable: bool,
     pub install_hint: Option<UpdateInstallHint>,
     asset: Option<ReleaseAsset>,
@@ -127,6 +40,8 @@ pub enum UpdateInstallHint {
     UnsupportedLinux,
     #[cfg(target_os = "windows")]
     UnsupportedWindows,
+    #[cfg(target_os = "windows")]
+    WindowsAllUsersInstall,
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     UnsupportedPlatform,
     MissingPackage(String),
@@ -142,6 +57,8 @@ impl UpdateInstallHint {
             Self::UnsupportedLinux => "The first in-app updater supports packaged macOS app bundles. Use the release page or your package manager to update this Linux installation.".to_string(),
             #[cfg(target_os = "windows")]
             Self::UnsupportedWindows => "Automatic Windows updates are available for recognized Inno Setup and portable ZIP installations. This copy is missing a valid installation marker, updater, or writable portable directory, so open the release page to update it manually.".to_string(),
+            #[cfg(target_os = "windows")]
+            Self::WindowsAllUsersInstall => "tty7 is installed for all users, which needs administrator rights to replace. tty7 will not raise an elevation prompt on its own behalf, so open the release page and run the installer yourself to update it.".to_string(),
             #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
             Self::UnsupportedPlatform => "Automatic installation is not available on this platform. Open the release page.".to_string(),
             Self::MissingPackage(name) => format!(
@@ -182,18 +99,14 @@ pub fn spawn_check(cx: &mut App) {
     if !cx.global::<Config>().check_for_updates {
         return;
     }
-    spawn_check_inner(false, UpdateCheckIntent::CurrentChannel, cx);
+    spawn_check_inner(false, cx);
 }
 
 pub fn spawn_check_forced(cx: &mut App) {
-    spawn_check_inner(true, UpdateCheckIntent::CurrentChannel, cx);
+    spawn_check_inner(true, cx);
 }
 
-pub fn switch_channel(channel: UpdateChannel, cx: &mut App) {
-    spawn_check_inner(true, UpdateCheckIntent::SwitchTo(channel), cx);
-}
-
-fn spawn_check_inner(report_failure: bool, intent: UpdateCheckIntent, cx: &mut App) {
+fn spawn_check_inner(report_failure: bool, cx: &mut App) {
     if cx.try_global::<UpdateStatus>().is_some_and(|status| {
         matches!(
             status.phase,
@@ -202,15 +115,9 @@ fn spawn_check_inner(report_failure: bool, intent: UpdateCheckIntent, cx: &mut A
     }) {
         return;
     }
-    // A channel switch replaces any offer from the current channel. Keeping an
-    // unrelated Stable offer visible while resolving Nightly (or vice versa)
-    // would let the user launch the wrong update from the settings page.
-    let previous_available = match intent {
-        UpdateCheckIntent::CurrentChannel => cx
-            .try_global::<UpdateStatus>()
-            .and_then(|status| status.available.clone()),
-        UpdateCheckIntent::SwitchTo(_) => None,
-    };
+    let previous_available = cx
+        .try_global::<UpdateStatus>()
+        .and_then(|status| status.available.clone());
     set_status(
         UpdateStatus {
             available: previous_available.clone(),
@@ -221,8 +128,7 @@ fn spawn_check_inner(report_failure: bool, intent: UpdateCheckIntent, cx: &mut A
 
     cx.spawn(async move |cx| {
         let current = env!("CARGO_PKG_VERSION");
-        let channel = intent.target_channel(current);
-        let release = match fetch_latest_release(channel)
+        let release = match fetch_latest_release()
             .or(async {
                 cx.background_executor().timer(CHECK_TIMEOUT).await;
                 Err(anyhow::anyhow!("timed out after {CHECK_TIMEOUT:?}"))
@@ -250,10 +156,10 @@ fn spawn_check_inner(report_failure: bool, intent: UpdateCheckIntent, cx: &mut A
             }
         };
 
-        if !intent.accepts_release(&release.version, current) {
+        if !is_update_available(&release.tag_name, current) {
             log::debug!(
                 "update check: up to date (latest {}, running {current})",
-                release.version
+                release.tag_name
             );
             cx.update(|cx| {
                 set_status(
@@ -267,25 +173,15 @@ fn spawn_check_inner(report_failure: bool, intent: UpdateCheckIntent, cx: &mut A
             return;
         }
 
-        let version = release.version;
-        let channel_switch = intent.is_channel_switch(current);
+        let version = release.tag_name.trim_start_matches('v').to_string();
         let selection = select_release_asset(&version, &release.assets);
         let available = AvailableUpdate {
             version: version.clone(),
-            channel,
-            channel_switch,
             installable: selection.asset.is_some(),
             install_hint: selection.reason,
             asset: selection.asset,
         };
-        if channel_switch {
-            log::info!(
-                "{} channel switch available: {version} (running {current})",
-                channel.label()
-            );
-        } else {
-            log::info!("update available: {version} (running {current})");
-        }
+        log::info!("update available: {version} (running {current})");
 
         cx.update(|cx| {
             set_status(
@@ -297,8 +193,7 @@ fn spawn_check_inner(report_failure: bool, intent: UpdateCheckIntent, cx: &mut A
             )
         });
 
-        if !channel_switch && UpdateState::load().last_prompted.as_deref() == Some(version.as_str())
-        {
+        if UpdateState::load().last_prompted.as_deref() == Some(version.as_str()) {
             return;
         }
 
@@ -313,7 +208,7 @@ fn spawn_check_inner(report_failure: bool, intent: UpdateCheckIntent, cx: &mut A
                 .is_ok()
         });
 
-        if shown && !channel_switch {
+        if shown {
             UpdateState {
                 last_prompted: Some(version),
             }
@@ -342,22 +237,7 @@ async fn wait_for_window(cx: &mut AsyncApp) -> Option<AnyWindowHandle> {
 
 fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
     let install_hint = update.install_hint.as_ref().map(UpdateInstallHint::english);
-    let detail = if update.channel_switch {
-        let install = if update.installable {
-            "tty7 can download the verified release, install it, and restart the app."
-        } else {
-            install_hint
-                .as_deref()
-                .unwrap_or("This installation cannot update itself.")
-        };
-        format!(
-            "Switch from {} to {} by installing tty7 {}. This may install an older version. {}",
-            UpdateChannel::current().label(),
-            update.channel.label(),
-            update.version,
-            install
-        )
-    } else if update.installable {
+    let detail = if update.installable {
         let note = install_hint
             .as_deref()
             .map(|note| format!(" {note}"))
@@ -378,21 +258,14 @@ fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
                 .unwrap_or("This installation cannot update itself.")
         )
     };
-    let action = if update.channel_switch && update.installable {
-        "Switch and Relaunch"
-    } else if update.installable {
+    let action = if update.installable {
         "Update and Relaunch"
     } else {
         "View Release"
     };
-    let title = if update.channel_switch {
-        "Switch update channel"
-    } else {
-        "Update available"
-    };
     let answer = window.prompt(
         PromptLevel::Info,
-        title,
+        "Update available",
         Some(&detail),
         &["Later", action],
         cx,
@@ -403,7 +276,7 @@ fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
             if update.installable {
                 let _ = cx.update(|cx| install(update, cx));
             } else {
-                open_releases_page_for(update.channel);
+                open_releases_page();
             }
         }
     })
@@ -420,7 +293,7 @@ pub fn install_available(cx: &mut App) {
     if update.installable {
         install(update, cx);
     } else {
-        open_releases_page_for(update.channel);
+        open_releases_page();
     }
 }
 
@@ -434,7 +307,7 @@ fn install(update: AvailableUpdate, cx: &mut App) {
         return;
     }
     let Some(asset) = update.asset.clone() else {
-        open_releases_page_for(update.channel);
+        open_releases_page();
         return;
     };
     set_status(
@@ -499,7 +372,7 @@ fn install(update: AvailableUpdate, cx: &mut App) {
     .detach();
 }
 
-fn open_releases_page_for(channel: UpdateChannel) {
+pub fn open_releases_page() {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(windows) {
@@ -507,8 +380,7 @@ fn open_releases_page_for(channel: UpdateChannel) {
     } else {
         "xdg-open"
     };
-    let url = channel.releases_url();
-    if let Err(e) = std::process::Command::new(opener).arg(url).spawn() {
+    if let Err(e) = std::process::Command::new(opener).arg(RELEASES_URL).spawn() {
         log::warn!("failed to open releases page: {e}");
     }
 }
@@ -555,13 +427,8 @@ impl UpdateState {
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
-struct GitHubRelease {
-    tag_name: String,
-    assets: Vec<GitHubAsset>,
-}
-
 struct LatestRelease {
-    version: String,
+    tag_name: String,
     assets: Vec<GitHubAsset>,
 }
 
@@ -571,19 +438,14 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct NightlyUpdateManifest {
-    schema: u32,
-    channel: String,
-    version: String,
-    commit: String,
-}
-
-async fn fetch_latest_release(channel: UpdateChannel) -> Result<LatestRelease> {
+async fn fetch_latest_release() -> Result<LatestRelease> {
     let client = ReqwestClient::user_agent(concat!("tty7/", env!("CARGO_PKG_VERSION")))
         .context("building HTTP client")?;
 
-    let url = channel.api_url();
+    // `/releases/latest` intentionally excludes prereleases, so Nightly builds
+    // are offered the Stable release that supersedes them and no rolling
+    // prerelease can ever become an update source.
+    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let request = http_client::Request::get(&url)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
@@ -607,86 +469,8 @@ async fn fetch_latest_release(channel: UpdateChannel) -> Result<LatestRelease> {
         .await
         .context("reading response body")?;
 
-    let release: GitHubRelease = serde_json::from_slice(&body).context("parsing release JSON")?;
-    let version = match channel {
-        UpdateChannel::Stable => release
-            .tag_name
-            .strip_prefix('v')
-            .unwrap_or(&release.tag_name)
-            .to_string(),
-        UpdateChannel::Nightly => {
-            if release.tag_name != "nightly" {
-                anyhow::bail!(
-                    "rolling Nightly release returned unexpected tag {:?}",
-                    release.tag_name
-                );
-            }
-            let manifest = release
-                .assets
-                .iter()
-                .find(|asset| asset.name == NIGHTLY_UPDATE_MANIFEST)
-                .context("rolling Nightly release has no update-manifest.json")?;
-            fetch_nightly_version(&client, &manifest.browser_download_url).await?
-        }
-    };
-    Ok(LatestRelease {
-        version,
-        assets: release.assets,
-    })
-}
-
-async fn fetch_nightly_version(client: &ReqwestClient, url: &str) -> Result<String> {
-    let request = http_client::Request::get(url)
-        .follow_redirects(RedirectPolicy::FollowAll)
-        .body(AsyncBody::default())
-        .context("building Nightly manifest request")?;
-    let mut response = client
-        .send(request)
-        .await
-        .context("requesting Nightly update manifest")?;
-    if !response.status().is_success() {
-        anyhow::bail!(
-            "Nightly update manifest returned HTTP {}",
-            response.status().as_u16()
-        );
-    }
-    let mut body = Vec::new();
-    response
-        .body_mut()
-        .read_to_end(&mut body)
-        .await
-        .context("reading Nightly update manifest")?;
-    parse_nightly_manifest(&body)
-}
-
-fn parse_nightly_manifest(body: &[u8]) -> Result<String> {
-    let manifest: NightlyUpdateManifest =
-        serde_json::from_slice(body).context("parsing Nightly update manifest")?;
-    if manifest.schema != 1 {
-        anyhow::bail!(
-            "unsupported Nightly update manifest schema {}",
-            manifest.schema
-        );
-    }
-    if manifest.channel != "nightly" {
-        anyhow::bail!(
-            "Nightly update manifest declares unexpected channel {:?}",
-            manifest.channel
-        );
-    }
-    if manifest.commit.trim().is_empty() {
-        anyhow::bail!("Nightly update manifest has no commit identity");
-    }
-    if !matches!(
-        parse_version(&manifest.version),
-        Some((_, _, _, VersionStage::Nightly(_)))
-    ) {
-        anyhow::bail!(
-            "Nightly update manifest declares invalid version {:?}",
-            manifest.version
-        );
-    }
-    Ok(manifest.version)
+    let release: LatestRelease = serde_json::from_slice(&body).context("parsing release JSON")?;
+    Ok(release)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -705,12 +489,18 @@ fn select_release_asset(version: &str, assets: &[GitHubAsset]) -> AssetSelection
     select_release_asset_for(package_for_current_install(version), assets)
 }
 
-fn select_release_asset_for(package: Option<String>, assets: &[GitHubAsset]) -> AssetSelection {
-    let Some(name) = package else {
-        return AssetSelection {
-            asset: None,
-            reason: Some(unsupported_install_reason()),
-        };
+fn select_release_asset_for(
+    package: Result<String, UpdateInstallHint>,
+    assets: &[GitHubAsset],
+) -> AssetSelection {
+    let name = match package {
+        Ok(name) => name,
+        Err(reason) => {
+            return AssetSelection {
+                asset: None,
+                reason: Some(reason),
+            };
+        }
     };
     let Some(asset) = assets.iter().find(|asset| asset.name == name) else {
         return AssetSelection {
@@ -734,55 +524,47 @@ fn select_release_asset_for(package: Option<String>, assets: &[GitHubAsset]) -> 
     }
 }
 
-fn package_for_current_install(version: &str) -> Option<String> {
+/// The release package this installation can replace itself with, or the
+/// reason it cannot.
+fn package_for_current_install(version: &str) -> Result<String, UpdateInstallHint> {
     #[cfg(target_os = "macos")]
     {
-        let app = current_macos_app_bundle()?;
+        let Some(app) = current_macos_app_bundle() else {
+            return Err(UpdateInstallHint::UnsupportedMacos);
+        };
         if !is_macos_update_writable(&app) || bundled_updater().is_none() {
-            return None;
+            return Err(UpdateInstallHint::UnsupportedMacos);
         }
         let arch = if cfg!(target_arch = "aarch64") {
             "arm64"
         } else if cfg!(target_arch = "x86_64") {
             "x86_64"
         } else {
-            return None;
+            return Err(UpdateInstallHint::UnsupportedMacos);
         };
-        return Some(format!("tty7-{version}-macos-{arch}.zip"));
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let layout = current_windows_update_layout()?;
-        if matches!(&layout, WindowsUpdateLayout::Portable(directory) if !can_update_windows_portable(directory))
-        {
-            return None;
-        }
-        let updater = layout.directory().join("tty7-updater.exe");
-        if !updater.is_file() {
-            return None;
-        }
-        return windows_package_for_layout(version, &layout);
-    }
-    #[allow(unreachable_code)]
-    None
-}
-
-fn unsupported_install_reason() -> UpdateInstallHint {
-    #[cfg(target_os = "macos")]
-    {
-        return UpdateInstallHint::UnsupportedMacos;
+        return Ok(format!("tty7-{version}-macos-{arch}.zip"));
     }
     #[cfg(target_os = "linux")]
     {
-        return UpdateInstallHint::UnsupportedLinux;
+        let _ = version;
+        return Err(UpdateInstallHint::UnsupportedLinux);
     }
     #[cfg(target_os = "windows")]
     {
-        return UpdateInstallHint::UnsupportedWindows;
+        let Some(layout) = current_windows_update_layout() else {
+            return Err(UpdateInstallHint::UnsupportedWindows);
+        };
+        windows_layout_is_updatable(&layout)?;
+        if !layout.directory().join("tty7-updater.exe").is_file() {
+            return Err(UpdateInstallHint::UnsupportedWindows);
+        }
+        return windows_package_for_layout(version, &layout)
+            .ok_or(UpdateInstallHint::UnsupportedWindows);
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        UpdateInstallHint::UnsupportedPlatform
+        let _ = version;
+        Err(UpdateInstallHint::UnsupportedPlatform)
     }
 }
 
@@ -921,9 +703,11 @@ fn prepare_windows_update(
 ) -> Result<PreparedUpdate> {
     let layout = current_windows_update_layout()
         .context("tty7 is not running from a recognized Windows installation")?;
-    if matches!(&layout, WindowsUpdateLayout::Portable(directory) if !can_update_windows_portable(directory))
-    {
-        anyhow::bail!("the Windows portable directory is not writable");
+    // Re-checked here rather than trusting the check that produced the offer:
+    // an installation can be relocated, or its privileges changed, between the
+    // update check and the user pressing the button.
+    if let Err(hint) = windows_layout_is_updatable(&layout) {
+        anyhow::bail!("{}", hint.english());
     }
     let install_dir = layout.directory().to_path_buf();
     let bundled = bundled_updater().context("tty7-updater.exe is not bundled with this app")?;
@@ -1072,11 +856,182 @@ fn windows_update_layout_for(executable: &Path) -> Option<WindowsUpdateLayout> {
 }
 
 #[cfg(target_os = "windows")]
-fn can_update_windows_portable(directory: &Path) -> bool {
+fn windows_directory_is_writable(directory: &Path) -> bool {
     tempfile::Builder::new()
         .prefix(".tty7-update-write-test-")
         .tempfile_in(directory)
         .is_ok()
+}
+
+/// Rejects the Windows installation layouts that cannot be replaced by this
+/// process, before anything is downloaded.
+#[cfg(target_os = "windows")]
+fn windows_layout_is_updatable(layout: &WindowsUpdateLayout) -> Result<(), UpdateInstallHint> {
+    match layout {
+        WindowsUpdateLayout::Inno(directory) => {
+            if windows_inno_needs_elevation(directory) {
+                return Err(UpdateInstallHint::WindowsAllUsersInstall);
+            }
+            Ok(())
+        }
+        WindowsUpdateLayout::Portable(directory) => {
+            if !windows_directory_is_writable(directory) {
+                return Err(UpdateInstallHint::UnsupportedWindows);
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_inno_needs_elevation(install_dir: &Path) -> bool {
+    windows_inno_needs_elevation_for(
+        windows_all_users_install_path().as_deref(),
+        install_dir,
+        windows_directory_is_writable(install_dir),
+    )
+}
+
+/// Whether replacing this Inno installation would need administrator rights.
+///
+/// The updater runs the release Setup silently, as the signed-in user, from a
+/// private staging directory. That is only correct for a per-user install.
+/// Two independent signals, because either alone misreads a real machine:
+///
+///   * An all-users install records its state under `HKLM`. A silent Setup
+///     launched without elevation resolves `{autopf}` to
+///     `%LocalAppData%\Programs`, never sees that state, and installs a
+///     *second* copy while the real installation goes untouched — or Inno
+///     re-launches itself elevated and the user gets a bare UAC prompt for an
+///     unsigned executable in `%TEMP%`, seconds after the GUI vanished.
+///     Neither outcome is one tty7 should produce on its own initiative.
+///   * A directory this process cannot write is one Setup cannot write
+///     either, whatever the registry says. This also catches an installation
+///     whose uninstall entry was pruned, relocated, or written by a different
+///     user account.
+///
+/// Pure so the decision is unit-tested without touching the registry or
+/// `C:\Program Files`.
+#[cfg(target_os = "windows")]
+fn windows_inno_needs_elevation_for(
+    all_users_app_path: Option<&Path>,
+    install_dir: &Path,
+    writable: bool,
+) -> bool {
+    if all_users_app_path.is_some_and(|path| same_windows_directory(path, install_dir)) {
+        return true;
+    }
+    !writable
+}
+
+/// Compares two Windows directory paths the way the filesystem does: without
+/// regard to case, and without letting a trailing separator make
+/// `C:\Program Files\tty7\` a different place from `C:\Program Files\tty7`.
+/// Deliberately textual — `canonicalize` would hit the disk and answers
+/// `\\?\`-prefixed, which is not what the registry stores.
+#[cfg(target_os = "windows")]
+fn same_windows_directory(left: &Path, right: &Path) -> bool {
+    fn normalize(path: &Path) -> Option<String> {
+        let text = path.to_str()?.trim_end_matches(['\\', '/']);
+        (!text.is_empty()).then(|| text.to_lowercase())
+    }
+    match (normalize(left), normalize(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// The `{app}` directory of an all-users tty7 installation, read from the
+/// machine hive. `AppId` is frozen in `windows-installer.iss` for exactly this
+/// kind of lookup, and Inno stamps the resolved install directory into
+/// `Inno Setup: App Path`. Absent for a per-user install, whose uninstall
+/// entry lives under `HKCU` instead.
+#[cfg(target_os = "windows")]
+fn windows_all_users_install_path() -> Option<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
+    };
+
+    const UNINSTALL_KEY: &str = concat!(
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\",
+        r"{9A3F6C1E-4B7D-4E2A-8C5F-D01B92E64A37}_is1"
+    );
+    const APP_PATH_VALUE: &str = "Inno Setup: App Path";
+
+    struct RegistryKey(HKEY);
+
+    impl Drop for RegistryKey {
+        fn drop(&mut self) {
+            // SAFETY: only constructed from a successful `RegOpenKeyExW`, and
+            // owns exactly one handle.
+            unsafe {
+                RegCloseKey(self.0);
+            }
+        }
+    }
+
+    fn wide(value: &str) -> Vec<u16> {
+        std::ffi::OsStr::new(value)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    let path = wide(UNINSTALL_KEY);
+    let mut key: HKEY = std::ptr::null_mut();
+    // SAFETY: `path` is NUL-terminated and live for the call; `key` is a valid
+    // out-parameter, wrapped only when the call reports success. The tty7
+    // installer is x64-only, so the native 64-bit view is the only one its
+    // uninstall entry can appear in.
+    let code = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.as_ptr(), 0, KEY_READ, &mut key) };
+    if code != ERROR_SUCCESS {
+        return None;
+    }
+    let key = RegistryKey(key);
+
+    let name = wide(APP_PATH_VALUE);
+    let mut kind = 0u32;
+    let mut bytes = 0u32;
+    // SAFETY: the key is live, the value name is NUL-terminated, and the
+    // type/size out-parameters are valid; a null data pointer asks for the
+    // size only.
+    let code = unsafe {
+        RegQueryValueExW(
+            key.0,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut kind,
+            std::ptr::null_mut(),
+            &mut bytes,
+        )
+    };
+    if code != ERROR_SUCCESS || kind != REG_SZ || bytes == 0 || !bytes.is_multiple_of(2) {
+        return None;
+    }
+
+    let mut value = vec![0u16; bytes as usize / 2];
+    // SAFETY: `value` is sized from the query above and stays live; Win32 is
+    // told its capacity in bytes through `bytes`.
+    let code = unsafe {
+        RegQueryValueExW(
+            key.0,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut kind,
+            value.as_mut_ptr().cast(),
+            &mut bytes,
+        )
+    };
+    if code != ERROR_SUCCESS {
+        return None;
+    }
+    value.truncate(bytes as usize / 2);
+    while value.last() == Some(&0) {
+        value.pop();
+    }
+    (!value.is_empty()).then(|| PathBuf::from(std::ffi::OsString::from_wide(&value)))
 }
 
 #[cfg(target_os = "macos")]
@@ -1102,35 +1057,18 @@ fn run_updater(updater: &Path, args: impl IntoIterator<Item = PathBuf>) -> Resul
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VersionStage {
-    OtherPrerelease,
-    Nightly(u64),
-    Release,
-}
-
-fn parse_version(s: &str) -> Option<(u64, u64, u64, VersionStage)> {
+/// `(major, minor, patch, is_release)`. Ordering the release flag last, with
+/// `false < true`, is what lets a prerelease be superseded by the stable
+/// release that carries the same core version: a Nightly stamped
+/// `26.7.1-nightly.20260716` is offered `v26.7.1` and graduates out of the
+/// prerelease. Two prereleases sharing a core compare equal, so nothing here
+/// can walk a user from one prerelease to another — only `/releases/latest`
+/// feeds this comparison, and that endpoint never returns one.
+fn parse_version(s: &str) -> Option<(u64, u64, u64, bool)> {
     let trimmed = s.trim();
-    let version = trimmed.strip_prefix('v').unwrap_or(trimmed);
-    let version = version.split_once('+').map_or(version, |(base, _)| base);
-    let (core, stage) = match version.split_once('-') {
-        None => (version, VersionStage::Release),
-        Some((core, prerelease)) => {
-            if prerelease.is_empty() {
-                return None;
-            }
-            let stage = prerelease
-                .strip_prefix("nightly.")
-                .and_then(|date| {
-                    (date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()))
-                        .then(|| date.parse().ok())
-                        .flatten()
-                })
-                .map(VersionStage::Nightly)
-                .unwrap_or(VersionStage::OtherPrerelease);
-            (core, stage)
-        }
-    };
+    let core = trimmed.strip_prefix('v').unwrap_or(trimmed);
+    let is_release = !core.split('+').next().unwrap_or(core).contains('-');
+    let core = core.split(['-', '+']).next().unwrap_or(core);
     let mut parts = core.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next().unwrap_or("0").parse().ok()?;
@@ -1138,24 +1076,12 @@ fn parse_version(s: &str) -> Option<(u64, u64, u64, VersionStage)> {
     if parts.next().is_some() {
         return None;
     }
-    Some((major, minor, patch, stage))
+    Some((major, minor, patch, is_release))
 }
 
 fn is_update_available(latest: &str, current: &str) -> bool {
     match (parse_version(latest), parse_version(current)) {
-        (Some(latest), Some(current)) => {
-            let latest_core = (latest.0, latest.1, latest.2);
-            let current_core = (current.0, current.1, current.2);
-            if latest_core != current_core {
-                return latest_core > current_core;
-            }
-            match (latest.3, current.3) {
-                (VersionStage::Release, VersionStage::Release) => false,
-                (VersionStage::Release, _) => true,
-                (VersionStage::Nightly(latest), VersionStage::Nightly(current)) => latest > current,
-                _ => false,
-            }
-        }
+        (Some(latest), Some(current)) => latest > current,
         _ => false,
     }
 }
@@ -1175,7 +1101,7 @@ mod tests {
     fn release_asset_requires_the_platform_package_and_checksums() {
         let name = "tty7-27.1.0-macos-arm64.zip";
         let assets = [github_asset(name), github_asset("checksums.txt")];
-        let selected = select_release_asset_for(Some(name.to_string()), &assets);
+        let selected = select_release_asset_for(Ok(name.to_string()), &assets);
         assert_eq!(
             selected.asset,
             Some(ReleaseAsset {
@@ -1190,7 +1116,7 @@ mod tests {
     #[test]
     fn release_without_checksums_is_never_installable() {
         let name = "tty7-27.1.0-macos-arm64.zip";
-        let selected = select_release_asset_for(Some(name.to_string()), &[github_asset(name)]);
+        let selected = select_release_asset_for(Ok(name.to_string()), &[github_asset(name)]);
         assert!(selected.asset.is_none());
         assert_eq!(selected.reason, Some(UpdateInstallHint::MissingChecksums));
     }
@@ -1198,7 +1124,7 @@ mod tests {
     #[test]
     fn release_without_the_exact_platform_package_is_never_guessed() {
         let selected = select_release_asset_for(
-            Some("tty7-27.1.0-macos-arm64.zip".to_string()),
+            Ok("tty7-27.1.0-macos-arm64.zip".to_string()),
             &[
                 github_asset("tty7-27.1.0-macos-x86_64.zip"),
                 github_asset("checksums.txt"),
@@ -1215,35 +1141,17 @@ mod tests {
 
     #[test]
     fn parses_versions_with_and_without_prefix() {
-        assert_eq!(
-            parse_version("v0.3.1"),
-            Some((0, 3, 1, VersionStage::Release))
-        );
-        assert_eq!(
-            parse_version("0.3.1"),
-            Some((0, 3, 1, VersionStage::Release))
-        );
-        assert_eq!(
-            parse_version(" 1.2.0 "),
-            Some((1, 2, 0, VersionStage::Release))
-        );
-        assert_eq!(parse_version("v2"), Some((2, 0, 0, VersionStage::Release)));
-        assert_eq!(
-            parse_version("v2.5"),
-            Some((2, 5, 0, VersionStage::Release))
-        );
-        assert_eq!(
-            parse_version("v0.4.0-rc.1"),
-            Some((0, 4, 0, VersionStage::OtherPrerelease))
-        );
+        assert_eq!(parse_version("v0.3.1"), Some((0, 3, 1, true)));
+        assert_eq!(parse_version("0.3.1"), Some((0, 3, 1, true)));
+        assert_eq!(parse_version(" 1.2.0 "), Some((1, 2, 0, true)));
+        assert_eq!(parse_version("v2"), Some((2, 0, 0, true)));
+        assert_eq!(parse_version("v2.5"), Some((2, 5, 0, true)));
+        assert_eq!(parse_version("v0.4.0-rc.1"), Some((0, 4, 0, false)));
         assert_eq!(
             parse_version("26.7.1-nightly.20260716"),
-            Some((26, 7, 1, VersionStage::Nightly(20260716)))
+            Some((26, 7, 1, false))
         );
-        assert_eq!(
-            parse_version("0.4.0+ci.7"),
-            Some((0, 4, 0, VersionStage::Release))
-        );
+        assert_eq!(parse_version("0.4.0+ci.7"), Some((0, 4, 0, true)));
         assert_eq!(parse_version("nightly"), None);
         assert_eq!(parse_version(""), None);
         assert_eq!(parse_version("v0.3.1.1"), None);
@@ -1267,104 +1175,18 @@ mod tests {
     }
 
     #[test]
-    fn compares_stable_and_nightly_versions() {
+    fn nightly_binaries_prompt_when_their_stable_ships() {
         assert!(is_update_available("v26.7.1", "26.7.1-nightly.20260716"));
         assert!(!is_update_available("v26.7.0", "26.7.1-nightly.20260716"));
         assert!(!is_update_available("v26.7.1-rc.1", "26.7.1"));
-        assert!(is_update_available(
+        // Nightly is a build channel, not an update channel: one Nightly never
+        // supersedes another. `/releases/latest` cannot return a prerelease, so
+        // this pair is unreachable in practice — asserted so a future change to
+        // the endpoint cannot quietly turn Nightly into an update source.
+        assert!(!is_update_available(
             "26.7.1-nightly.20260717",
             "26.7.1-nightly.20260716"
         ));
-        assert!(!is_update_available(
-            "26.7.1-nightly.20260715",
-            "26.7.1-nightly.20260716"
-        ));
-        assert!(!is_update_available(
-            "26.7.1-nightly.20260716",
-            "26.7.1-nightly.20260716"
-        ));
-    }
-
-    #[test]
-    fn build_version_selects_its_own_update_channel() {
-        assert_eq!(UpdateChannel::for_version("26.8.1"), UpdateChannel::Stable);
-        assert_eq!(
-            UpdateChannel::for_version("26.8.2-nightly.20260803"),
-            UpdateChannel::Nightly
-        );
-        assert!(
-            UpdateChannel::Stable
-                .api_url()
-                .ends_with("/releases/latest")
-        );
-        assert!(
-            UpdateChannel::Nightly
-                .api_url()
-                .ends_with("/releases/tags/nightly")
-        );
-        assert_eq!(UpdateChannel::Stable.other(), UpdateChannel::Nightly);
-        assert_eq!(UpdateChannel::Nightly.other(), UpdateChannel::Stable);
-    }
-
-    #[test]
-    fn explicit_cross_channel_switch_ignores_version_ordering() {
-        let to_stable = UpdateCheckIntent::SwitchTo(UpdateChannel::Stable);
-        let nightly = "27.1.0-nightly.20260803";
-        assert!(to_stable.is_channel_switch(nightly));
-        assert_eq!(to_stable.target_channel(nightly), UpdateChannel::Stable);
-        assert!(
-            to_stable.accepts_release("26.8.1", nightly),
-            "an explicit Nightly-to-Stable switch may install an older Stable release"
-        );
-
-        let to_nightly = UpdateCheckIntent::SwitchTo(UpdateChannel::Nightly);
-        let stable = "27.1.0";
-        assert!(to_nightly.is_channel_switch(stable));
-        assert_eq!(to_nightly.target_channel(stable), UpdateChannel::Nightly);
-        assert!(
-            to_nightly.accepts_release("26.8.1-nightly.20260803", stable),
-            "an explicit Stable-to-Nightly switch may install an older Nightly release"
-        );
-        assert!(!to_nightly.accepts_release("garbage", stable));
-        assert!(!to_nightly.accepts_release("26.8.1", stable));
-        assert!(!to_stable.accepts_release("26.8.1-nightly.20260803", nightly));
-    }
-
-    #[test]
-    fn normal_and_same_channel_checks_keep_version_ordering() {
-        let stable = "27.1.0";
-        assert!(!UpdateCheckIntent::CurrentChannel.accepts_release("26.8.1", stable));
-        assert!(UpdateCheckIntent::CurrentChannel.accepts_release("27.1.1", stable));
-
-        let same_channel = UpdateCheckIntent::SwitchTo(UpdateChannel::Stable);
-        assert!(!same_channel.is_channel_switch(stable));
-        assert!(!same_channel.accepts_release("26.8.1", stable));
-    }
-
-    #[test]
-    fn nightly_manifest_requires_channel_version_and_commit_identity() {
-        let version = parse_nightly_manifest(
-            br#"{"schema":1,"channel":"nightly","version":"26.8.2-nightly.20260803","commit":"0123456789abcdef"}"#,
-        )
-        .unwrap();
-        assert_eq!(version, "26.8.2-nightly.20260803");
-
-        assert!(parse_nightly_manifest(
-            br#"{"schema":1,"channel":"stable","version":"26.8.2-nightly.20260803","commit":"0123456789abcdef"}"#,
-        )
-        .is_err());
-        assert!(parse_nightly_manifest(
-            br#"{"schema":1,"channel":"nightly","version":"26.8.2","commit":"0123456789abcdef"}"#,
-        )
-        .is_err());
-        assert!(parse_nightly_manifest(
-            br#"{"schema":1,"channel":"nightly","version":"26.8.2-nightly.invalid","commit":"0123456789abcdef"}"#,
-        )
-        .is_err());
-        assert!(parse_nightly_manifest(
-            br#"{"schema":1,"channel":"nightly","version":"26.8.2-nightly.20260803","commit":""}"#,
-        )
-        .is_err());
     }
 
     #[test]
@@ -1430,6 +1252,105 @@ mod tests {
             windows_package_for_layout("26.8.2", &WindowsUpdateLayout::Portable(directory))
                 .as_deref(),
             Some("tty7-26.8.2-windows-x86_64.zip")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_all_users_inno_install_is_never_updated_in_place() {
+        let all_users = PathBuf::from(r"C:\Program Files\tty7");
+        let per_user = PathBuf::from(r"C:\Users\someone\AppData\Local\Programs\tty7");
+
+        // The machine-hive entry names this directory: elevation would be
+        // required, so tty7 declines however writable the directory looks.
+        assert!(windows_inno_needs_elevation_for(
+            Some(&all_users),
+            &all_users,
+            true
+        ));
+        // Inno stores the path with a trailing separator in `InstallLocation`
+        // and without one in `Inno Setup: App Path`; both name one place.
+        assert!(windows_inno_needs_elevation_for(
+            Some(Path::new(r"C:\Program Files\tty7\")),
+            &all_users,
+            true
+        ));
+        assert!(windows_inno_needs_elevation_for(
+            Some(Path::new(r"c:\program files\TTY7")),
+            &all_users,
+            true
+        ));
+
+        // A per-user install on a machine that also carries an all-users one
+        // updates itself: the machine entry names a different directory.
+        assert!(!windows_inno_needs_elevation_for(
+            Some(&all_users),
+            &per_user,
+            true
+        ));
+        assert!(!windows_inno_needs_elevation_for(None, &per_user, true));
+
+        // No machine entry, but the directory refuses writes — a relocated or
+        // pruned installation Setup could not replace either.
+        assert!(windows_inno_needs_elevation_for(None, &per_user, false));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_all_users_inno_install_reports_the_elevation_hint() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("tty7-app.exe");
+        std::fs::write(&executable, b"test app").unwrap();
+        std::fs::write(root.path().join(WINDOWS_INNO_INSTALL_MARKER), b"inno-v1").unwrap();
+        let layout = windows_update_layout_for(&executable).unwrap();
+
+        // A writable temp directory is never the all-users installation, so
+        // this layout is offered the normal in-place update.
+        assert_eq!(windows_layout_is_updatable(&layout), Ok(()));
+
+        assert_eq!(
+            select_release_asset_for(Err(UpdateInstallHint::WindowsAllUsersInstall), &[]).reason,
+            Some(UpdateInstallHint::WindowsAllUsersInstall)
+        );
+        let hint = UpdateInstallHint::WindowsAllUsersInstall.english();
+        assert!(hint.contains("all users"), "{hint}");
+        assert!(hint.contains("release page"), "{hint}");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_unwritable_portable_directory_is_not_offered_an_update() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().to_path_buf();
+        assert!(windows_directory_is_writable(&directory));
+        assert_eq!(
+            windows_layout_is_updatable(&WindowsUpdateLayout::Portable(directory)),
+            Ok(())
+        );
+
+        let missing = root.path().join("gone");
+        assert!(!windows_directory_is_writable(&missing));
+        assert_eq!(
+            windows_layout_is_updatable(&WindowsUpdateLayout::Portable(missing)),
+            Err(UpdateInstallHint::UnsupportedWindows)
+        );
+    }
+
+    /// Reads the real machine hive. Vacuous on a machine with no all-users
+    /// installation; on one that has it, the value Inno actually wrote must be
+    /// an absolute path and must make the decision function refuse an in-place
+    /// update of that directory.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_all_users_install_path_lookup_survives_this_machine() {
+        let Some(path) = windows_all_users_install_path() else {
+            return;
+        };
+        assert!(path.is_absolute(), "{}", path.display());
+        assert!(
+            windows_inno_needs_elevation_for(Some(&path), &path, true),
+            "the installed all-users path {} was not recognised",
+            path.display()
         );
     }
 }

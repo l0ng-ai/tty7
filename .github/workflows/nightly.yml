@@ -177,6 +177,18 @@ jobs:
         shell: pwsh
         run: '& ./.github/scripts/bundle-windows.ps1 "${{ matrix.target }}" "${{ matrix.arch }}"'
 
+      # Nightly builds the same packages as release.yml, so it gets the same
+      # check. Nightly is not an update channel — nobody updates *into* these
+      # artifacts — but a marker or version regression shows up here a night
+      # before it would reach a stable release.
+      - name: Verify Windows update package
+        if: matrix.os == 'windows'
+        working-directory: tty7
+        shell: pwsh
+        run: >-
+          & ./.github/scripts/verify-windows-package.ps1
+          "${{ matrix.arch }}" "${{ needs.plan.outputs.version }}"
+
       # Same glob list as release.yml's Release step: the bundle scripts leave
       # intermediates in dist/ (tty7.app, entitlements.plist, the Windows
       # staging dir) that must not reach the release assets.
@@ -301,23 +313,6 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-
-      # The rolling tag is deliberately not a semantic version. Publish the
-      # stamped build identity separately so clients never need to parse the
-      # human-facing release title.
-      - name: Generate update-manifest.json
-        run: |
-          set -euo pipefail
-          jq -n \
-            --arg version "$VERSION" \
-            --arg commit "$GITHUB_SHA" \
-            '{schema: 1, channel: "nightly", version: $version, commit: $commit}' \
-            > dist/update-manifest.json
-          jq -e \
-            --arg version "$VERSION" \
-            --arg commit "$GITHUB_SHA" \
-            '.schema == 1 and .channel == "nightly" and .version == $version and .commit == $commit' \
-            dist/update-manifest.json >/dev/null
 
       # Same contract as release.yml — see `install::asset`. Written
       # into dist/ before the upload below so it ships as an asset like any
