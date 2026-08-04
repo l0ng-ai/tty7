@@ -1390,7 +1390,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsShell => ("Shell", "Shell"),
         L10nKey::SettingsShellIntro => (
             "The program each new terminal launches. Leave Program empty to use the platform default ({default}).",
-            "每个新终端启动的程序。将「程序」留空可使用平台默认值（{default}）。",
+            "每个新终端启动的程序。将“程序”留空可使用平台默认值（{default}）。",
         ),
         L10nKey::SettingsProgram => ("Program", "程序"),
         L10nKey::SettingsProgramDesc => (
@@ -1595,7 +1595,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsSidebarGrouping => ("Sidebar grouping", "侧栏分组"),
         L10nKey::SettingsSidebarGroupingDesc => (
             "Group sidebar tabs under a header per git repository, with non-repo tabs in a Scratch section. Only applies to the left sidebar.",
-            "按 git 仓库在标题下对侧栏标签页分组，非仓库标签页放在「草稿」分组。仅适用于左侧栏。",
+            "按 git 仓库在标题下对侧栏标签页分组，非仓库标签页放在“草稿”分组。仅适用于左侧栏。",
         ),
         L10nKey::SettingsDiffPreviewFromCounts => (
             "Open diff preview from sidebar counts",
@@ -1652,7 +1652,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsAboutDesc2 => (
             "Editor-grade input in every shell, shells that outlive quits and reboots without tmux, a native SSH stack with profiles and port forwarding, and live status for panes running coding agents.",
-            "每个 shell 都具备编辑器级输入；无需 tmux 也能让 shell 在退出和重启后继续运行；原生的 SSH 栈支持配置文件和端口转发；为运行编码智能体的窗格提供实时状态。",
+            "每个 shell 都具备编辑器级输入；无需 tmux 也能让 shell 在退出和重启后继续运行；原生的 SSH 栈支持主机配置和端口转发；为运行编码智能体的窗格提供实时状态。",
         ),
         L10nKey::SettingsAboutTech => (
             "Pure Rust · GPU rendering on Zed's gpui · VT core from Alacritty",
@@ -1827,7 +1827,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsSearchHostsKeywords => (
             "ssh host connection saved profile import ssh_config manage add edit quick connect",
-            "主机 SSH 连接 保存 配置文件 导入 ssh_config 管理 添加 编辑 快速连接 hosts ssh profile import connect",
+            "主机 SSH 连接 保存 主机配置 配置文件 导入 ssh_config 管理 添加 编辑 快速连接 hosts ssh profile import connect",
         ),
         L10nKey::SettingsSearchHowShellsWorkKeywords => (
             "shell session daemon server detach persist background close quit stop delete workspace layout survive reboot tmux",
@@ -2183,7 +2183,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::HomeTimeHoursAgo => ("{count} hours ago", "{count} 小时前"),
         L10nKey::HomeTimeYesterday => ("yesterday", "昨天"),
         L10nKey::HomeTimeDaysAgo => ("{count} days ago", "{count} 天前"),
-        L10nKey::HomeTimeOverWeekAgo => ("over a week ago", "一周多以前"),
+        L10nKey::HomeTimeOverWeekAgo => ("over a week ago", "一周多前"),
         L10nKey::HomeReopenNamed => ("Reopen \"{name}\"", "重新打开\"{name}\""),
         L10nKey::RemoteStripDisconnected => ("Not connected to {machine}", "未连接到 {machine}"),
         L10nKey::RemoteStripConnecting => ("Connecting to {machine}…", "正在连接 {machine}…"),
@@ -2453,7 +2453,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "branch this agent session into a new tab",
             "将此智能体会话派生到新标签页",
         ),
-        L10nKey::CmdMarkTabAsUnread => ("Mark Tab as Unread", "标记标签页为未读"),
+        L10nKey::CmdMarkTabAsUnread => ("Mark Tab as Unread", "将标签页标记为未读"),
         L10nKey::CmdClosePaneTab => ("Close Pane / Tab", "关闭窗格/标签页"),
         L10nKey::CmdCloseOtherTabs => ("Close Other Tabs", "关闭其他标签页"),
         L10nKey::CmdCloseTabsToTheRight => ("Close Tabs to the Right", "关闭右侧标签页"),
@@ -2555,7 +2555,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::AppWorktreeRemoveDetailDirty => (
             "The closed tab's worktree at {path} has uncommitted changes.",
-            "位于 {path} 的已关闭标签页的工作树有未提交的更改。",
+            "位于 {path} 的已关闭标签页的工作树有未提交的变更。",
         ),
         L10nKey::AppWorktreeRemoveDetailClean => (
             "The closed tab's worktree at {path} is clean.",
@@ -2564,7 +2564,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::AppWorktreeRemoveTitle => {
             ("Remove worktree \"{branch}\"?", "删除工作树\"{branch}\"？")
         }
-        L10nKey::AppWorktreeDiscardAndRemove => ("Discard Changes & Remove", "放弃更改并删除"),
+        L10nKey::AppWorktreeDiscardAndRemove => ("Discard Changes & Remove", "放弃变更并删除"),
         L10nKey::AppWorktreeRemove => ("Remove Worktree", "删除工作树"),
         L10nKey::AppWorktreeKeep => ("Keep", "保留"),
         L10nKey::AppReopenTabFailed => (
