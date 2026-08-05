@@ -409,6 +409,9 @@ pub struct Tty7App {
         crate::ui::host_registry::HostId,
         crate::ui::switcher::HostSnapshot,
     >,
+    /// Errors reported for a remote host that should be shown inside that host's
+    /// switcher group instead of as a global modal or toast.
+    pub(crate) remote_host_errors: std::collections::HashMap<String, String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -711,6 +714,7 @@ impl Tty7App {
             connect: None,
             switcher: None,
             host_snapshots: std::collections::HashMap::new(),
+            remote_host_errors: std::collections::HashMap::new(),
         };
         if !cfg!(test) && crate::ui::windows::WindowRegistry::count(cx) == 0 {
             crate::ui::tray::init(cx);

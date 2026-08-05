@@ -489,11 +489,12 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         let label = mismatch.host.clone();
-        match remote_connect::mismatch_target(&mismatch)
-            .ok_or_else(|| t_fmt(L10nKey::RemoteNoRouteToHost, &[("machine", &label)]))
-        {
-            Ok(target) => self.restart_remote_server(target, label, window, cx),
-            Err(e) => Tty7App::report_restart_failure(&label, &e, window, cx),
+        match remote_connect::mismatch_target(&mismatch) {
+            Some(target) => self.restart_remote_server(target, label, window, cx),
+            None => {
+                let e = t_fmt(L10nKey::RemoteNoRouteToHost, &[("machine", &label)]);
+                self.report_remote_host_error(None, &label, &e, window, cx);
+            }
         }
     }
 
@@ -529,15 +530,17 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.remote_host_errors.remove(&target.to_string());
         let header = match remote_connect::control_route(&target, cx) {
             Ok(header) => header.restart_server(),
             Err(e) => {
-                Tty7App::report_restart_failure(&label, &e, window, cx);
+                self.report_remote_host_error(Some(&target), &label, &e, window, cx);
                 return;
             }
         };
         let host = header.target.origin_key();
         let host_id = target.host_id();
+        let target_for_error = target.clone();
         log::info!("restarting tty7's server on {label} at the user's request");
         let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
         self.watch_for_restart_consent(host_id, running.clone(), cx);
@@ -549,14 +552,14 @@ impl Tty7App {
                 .await;
             running.store(false, std::sync::atomic::Ordering::Relaxed);
             remote_connect::clear_install_progress(host_id);
-            let _ = this.update_in(cx, |_, window, cx| match outcome {
+            let _ = this.update_in(cx, |this, window, cx| match outcome {
                 Ok(()) => {
                     log::info!("{label} is now serving this client's build");
                     reconnect_after_restart(&host, cx);
                 }
                 Err(e) => {
                     log::warn!("could not restart tty7's server on {label}: {e}");
-                    Tty7App::report_restart_failure(&label, &e, window, cx);
+                    this.report_remote_host_error(Some(&target_for_error), &label, &e, window, cx);
                 }
             });
         })
@@ -595,16 +598,18 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.remote_host_errors.remove(&target.to_string());
         let route = match remote_connect::control_route(&target, cx) {
             Ok(header) => header.replace_server(),
             Err(e) => {
                 log::warn!("could not address {label} to replace its server: {e}");
-                Tty7App::report_restart_failure(&label, &e, window, cx);
+                self.report_remote_host_error(Some(&target), &label, &e, window, cx);
                 return;
             }
         };
         let host = route.target.origin_key();
         let host_id = target.host_id();
+        let target_for_error = target.clone();
         log::info!("replacing tty7's server on {label} at the user's request");
         let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
         self.watch_for_restart_consent(host_id, running.clone(), cx);
@@ -616,26 +621,39 @@ impl Tty7App {
                 .await;
             running.store(false, std::sync::atomic::Ordering::Relaxed);
             remote_connect::clear_install_progress(host_id);
-            let _ = this.update_in(cx, |_, window, cx| match outcome {
+            let _ = this.update_in(cx, |this, window, cx| match outcome {
                 Ok(()) => {
                     log::info!("{label} is now serving this client's build");
                     reconnect_after_restart(&host, cx);
                 }
                 Err(e) => {
                     log::warn!("could not replace tty7's server on {label}: {e}");
-                    Tty7App::report_restart_failure(&label, &e, window, cx);
+                    this.report_remote_host_error(Some(&target_for_error), &label, &e, window, cx);
                 }
             });
         })
         .detach();
     }
 
-    fn report_restart_failure(
+    fn report_remote_host_error(
+        &mut self,
+        target: Option<&RemoteTarget>,
         label: &str,
         error: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(target) = target {
+            let key = target.to_string();
+            self.remote_host_errors
+                .insert(key.clone(), error.to_string());
+            if let Some(switcher) = self.switcher.as_mut() {
+                switcher.expand(&key);
+            }
+            cx.notify();
+            return;
+        }
+
         let answer = window.prompt(
             PromptLevel::Warning,
             &t_fmt(L10nKey::RemoteRestartFailedTitle, &[("machine", label)]),
