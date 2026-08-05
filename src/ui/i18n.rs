@@ -265,6 +265,7 @@ pub enum L10nKey {
     SettingsBellModeOff,
     SettingsBellModeVisual,
     SettingsBellModeAudible,
+    SettingsBellModeBoth,
     SettingsPrompt,
     SettingsPromptIntro,
     SettingsTabCompletion,
@@ -1474,6 +1475,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsBellModeOff => ("Off", "关"),
         L10nKey::SettingsBellModeVisual => ("Visual", "闪烁"),
         L10nKey::SettingsBellModeAudible => ("Audible", "声音"),
+        L10nKey::SettingsBellModeBoth => ("Both", "闪烁 + 声音"),
         L10nKey::SettingsPrompt => ("Prompt", "提示符"),
         L10nKey::SettingsPromptIntro => (
             "tty7's own menus at the shell prompt. Turn one off to hand the key back to the shell.",
@@ -3189,6 +3191,7 @@ mod tests {
             L10nKey::SettingsBellModeOff,
             L10nKey::SettingsBellModeVisual,
             L10nKey::SettingsBellModeAudible,
+            L10nKey::SettingsBellModeBoth,
             L10nKey::SettingsPrompt,
             L10nKey::SettingsPromptIntro,
             L10nKey::SettingsTabCompletionDesc,
