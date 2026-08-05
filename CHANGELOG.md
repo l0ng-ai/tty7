@@ -63,6 +63,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   touch one it didn't, so a hand-written skill that happens to share the
   directory name survives. (#248)
 
+- **Windows taskbar buttons show a live status dot per window** —
+  Settings → Window & Tabs gains **Taskbar status dot** (on by default),
+  which stamps a small colored disc on each window's taskbar button using
+  the same palette as the in-window agent dots: blue while a shell command
+  or coding agent is running, amber when an agent needs your input, and
+  green when work finishes while the window is in the background (cleared
+  the moment the window is activated). The poll runs once a second, so the
+  toggle and a `config.json` hot-reload both apply within a second, and
+  turning it off clears any badge already stamped. This is a Windows-only
+  feature by nature (`ITaskbarList3::SetOverlayIcon`); macOS's Dock badge
+  and Linux's tray badge are the natural equivalents there. (#199)
+
 ### Fixed
 
 - **Scoop shims work again when tty7 is launched from a hardened Windows
