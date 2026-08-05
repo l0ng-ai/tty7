@@ -688,7 +688,7 @@ fn powerline_path(bounds: Bounds<Pixels>, shape: PowerlineShape) -> gpui::Path<P
         p
     };
     let half_circle = |anchor_x: Pixels, dir: f32| {
-        const SEGS: usize = 6;
+        const SEGS: usize = 12;
 
         let (rx, ry) = (bounds.size.width.as_f32(), bounds.size.height.as_f32() / 2.);
 

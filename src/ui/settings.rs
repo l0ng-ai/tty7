@@ -85,6 +85,59 @@ struct SearchEntry {
     keywords: L10nKey,
 }
 
+fn localized_update_phase(phase: &crate::core::update::UpdatePhase) -> Option<String> {
+    use crate::core::update::{UpdateFailure, UpdatePhase};
+
+    match phase {
+        UpdatePhase::Idle => None,
+        UpdatePhase::Checking => Some(t(L10nKey::SettingsUpdateChecking).to_string()),
+        UpdatePhase::UpToDate => Some(t(L10nKey::SettingsUpdateUpToDate).to_string()),
+        UpdatePhase::Downloading => Some(t(L10nKey::SettingsUpdateDownloading).to_string()),
+        UpdatePhase::Installing => Some(t(L10nKey::SettingsUpdateInstalling).to_string()),
+        UpdatePhase::Failed(failure) => {
+            let (key, error) = match failure {
+                UpdateFailure::Check(error) => (L10nKey::SettingsUpdateCheckFailed, error),
+                UpdateFailure::Prepare(error) => (L10nKey::SettingsUpdatePrepareFailed, error),
+                UpdateFailure::Launch(error) => (L10nKey::SettingsUpdateLaunchFailed, error),
+            };
+            Some(t_fmt(key, &[("error", error)]))
+        }
+    }
+}
+
+fn localized_update_install_hint(hint: &crate::core::update::UpdateInstallHint) -> String {
+    use crate::core::update::UpdateInstallHint;
+
+    match hint {
+        #[cfg(target_os = "macos")]
+        UpdateInstallHint::UnsupportedMacos => {
+            t(L10nKey::SettingsUpdateUnsupportedMacos).to_string()
+        }
+        #[cfg(target_os = "linux")]
+        UpdateInstallHint::UnsupportedLinux => {
+            t(L10nKey::SettingsUpdateUnsupportedLinux).to_string()
+        }
+        #[cfg(target_os = "windows")]
+        UpdateInstallHint::UnsupportedWindows => {
+            t(L10nKey::SettingsUpdateUnsupportedWindows).to_string()
+        }
+        #[cfg(target_os = "windows")]
+        UpdateInstallHint::WindowsAllUsersInstall => {
+            t(L10nKey::SettingsUpdateWindowsAllUsers).to_string()
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        UpdateInstallHint::UnsupportedPlatform => {
+            t(L10nKey::SettingsUpdateUnsupportedPlatform).to_string()
+        }
+        UpdateInstallHint::MissingPackage(name) => {
+            t_fmt(L10nKey::SettingsUpdateMissingPackage, &[("name", name)])
+        }
+        UpdateInstallHint::MissingChecksums => {
+            t(L10nKey::SettingsUpdateMissingChecksums).to_string()
+        }
+    }
+}
+
 fn settings_search_entries() -> &'static [SearchEntry] {
     use L10nKey::*;
     use SettingsSection::*;
@@ -1332,7 +1385,10 @@ impl Tty7App {
             .child(div().flex_1().child(Slider::new(&slider)))
             .child(
                 div()
-                    .w(px(36.))
+                    .w(px(38.))
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .text_right()
                     .text_sm()
                     .text_color(cx.theme().foreground)
                     .child(format!("{:.0}%", opacity * 100.)),
@@ -1456,7 +1512,10 @@ impl Tty7App {
                     .child(div().flex_1().child(Slider::new(&slider)))
                     .child(
                         div()
-                            .w(px(36.))
+                            .w(px(38.))
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .text_right()
                             .text_sm()
                             .text_color(cx.theme().foreground)
                             .child(format!("{:.0}%", readout * 100.)),
@@ -3466,7 +3525,10 @@ impl Tty7App {
             .child(div().flex_1().child(Slider::new(&scroll_slider)))
             .child(
                 div()
-                    .w(px(36.))
+                    .w(px(38.))
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .text_right()
                     .text_sm()
                     .text_color(foreground)
                     .child(format!("{scroll_mult:.2}×")),
@@ -4658,22 +4720,7 @@ impl Tty7App {
                 | crate::core::update::UpdatePhase::Downloading
                 | crate::core::update::UpdatePhase::Installing
         );
-        let phase_text = match &update_status.phase {
-            crate::core::update::UpdatePhase::Idle => None,
-            crate::core::update::UpdatePhase::Checking => {
-                Some(t(L10nKey::SettingsUpdateChecking).to_string())
-            }
-            crate::core::update::UpdatePhase::UpToDate => {
-                Some(t(L10nKey::SettingsUpdateUpToDate).to_string())
-            }
-            crate::core::update::UpdatePhase::Downloading => {
-                Some(t(L10nKey::SettingsUpdateDownloading).to_string())
-            }
-            crate::core::update::UpdatePhase::Installing => {
-                Some(t(L10nKey::SettingsUpdateInstalling).to_string())
-            }
-            crate::core::update::UpdatePhase::Failed(message) => Some(message.clone()),
-        };
+        let phase_text = localized_update_phase(&update_status.phase);
         let check_for_updates = cx.global::<Config>().check_for_updates;
 
         let logo = Arc::new(Image::from_bytes(
@@ -4748,10 +4795,14 @@ impl Tty7App {
                     )
                     .when_some(update, |this, upd| {
                         let button_label = if upd.installable {
-                            t(L10nKey::SettingsUpdateInstall)
+                            t(L10nKey::SettingsUpdateAndRelaunch).to_string()
                         } else {
-                            t(L10nKey::SettingsUpdateViewRelease)
+                            t(L10nKey::SettingsUpdateViewRelease).to_string()
                         };
+                        let availability = t_fmt(
+                            L10nKey::SettingsVersionAvailable,
+                            &[("version", &upd.version)],
+                        );
                         this.child(
                             v_flex()
                                 .gap_1()
@@ -4759,10 +4810,12 @@ impl Tty7App {
                                     h_flex()
                                         .gap_3()
                                         .items_center()
-                                        .child(div().text_sm().text_color(foreground).child(t_fmt(
-                                            L10nKey::SettingsVersionAvailable,
-                                            &[("version", &upd.version)],
-                                        )))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(foreground)
+                                                .child(availability),
+                                        )
                                         .child(
                                             Button::new("install-update")
                                                 .label(button_label)
@@ -4774,7 +4827,12 @@ impl Tty7App {
                                         ),
                                 )
                                 .when_some(upd.install_hint, |this, hint| {
-                                    this.child(div().text_xs().text_color(muted_fg).child(hint))
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted_fg)
+                                            .child(localized_update_install_hint(&hint)),
+                                    )
                                 }),
                         )
                     })

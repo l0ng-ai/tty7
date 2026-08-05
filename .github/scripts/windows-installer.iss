@@ -2,8 +2,9 @@
 ; windows-latest runners). Compiled by bundle-windows.ps1, which stages the
 ; payload and passes every path in via /D defines:
 ;
-;   /DAppVersion=<semver>   version parsed from Cargo.toml
-;   /DStageDir=<abs path>   staged payload (tty7-app.exe, completions\, LICENSE.txt, README.md)
+;   /DAppVersion=<semver>   display version parsed from Cargo.toml
+;   /DVersionInfoVersion=<numeric version> PE-compatible file version
+;   /DStageDir=<abs path>   staged payload (app, CLI, updater, marker, resources)
 ;   /DOutputDir=<abs path>  where the setup exe is written
 ;   /DOutputName=<basename> setup exe filename, without ".exe"
 ;
@@ -15,6 +16,9 @@
 #ifndef AppVersion
   #error Missing /DAppVersion — this script is meant to be compiled via bundle-windows.ps1
 #endif
+#ifndef VersionInfoVersion
+  #error Missing /DVersionInfoVersion — this script is meant to be compiled via bundle-windows.ps1
+#endif
 
 [Setup]
 ; Never change AppId: it is how Windows ties upgrades + the uninstall entry
@@ -22,6 +26,7 @@
 AppId={{9A3F6C1E-4B7D-4E2A-8C5F-D01B92E64A37}
 AppName=tty7
 AppVersion={#AppVersion}
+VersionInfoVersion={#VersionInfoVersion}
 AppPublisher=tty7 contributors
 AppPublisherURL=https://github.com/l0ng-ai/tty7
 AppSupportURL=https://github.com/l0ng-ai/tty7/issues
@@ -82,6 +87,10 @@ Source: "{#StageDir}\tty7-app.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; installer to do it, and one code path serving both is one behaviour to debug.
 ; The uninstaller takes that entry back out; see RemoveAppDirFromUserPath below.
 Source: "{#StageDir}\tty7.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\tty7-updater.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; This installer-only marker is the authority for enabling automatic Windows
+; updates. The portable archive is created before the marker enters the stage.
+Source: "{#StageDir}\.tty7-inno-install"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#StageDir}\completions\*"; DestDir: "{app}\completions"; Flags: ignoreversion recursesubdirs
 Source: "{#StageDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
@@ -90,9 +99,18 @@ Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 ; still has to produce an installer. See bundle-windows.ps1.
 Source: "{#StageDir}\server\*"; DestDir: "{app}\server"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
 
+; AppUserModelID is what lets toast notifications carry the tty7 name and icon
+; instead of the notify-rust PowerShell fallback: Windows only honors an
+; unpackaged app's toast identity when a shortcut stamps it. Must match
+; `core::aumid::AUMID` (src/core/aumid.rs), which at startup stamps the
+; per-user shortcut below if some older installer left it unstamped, and
+; writes one from scratch for the portable zip. It deliberately leaves an
+; all-users install alone — it cannot write {commonprograms} unelevated, and a
+; per-user twin would both duplicate the Start Menu entry and outlive this
+; uninstaller — so an elevated install depends on the stamp right here.
 [Icons]
-Name: "{autoprograms}\tty7"; Filename: "{app}\tty7-app.exe"
-Name: "{autodesktop}\tty7"; Filename: "{app}\tty7-app.exe"; Tasks: desktopicon
+Name: "{autoprograms}\tty7"; Filename: "{app}\tty7-app.exe"; AppUserModelID: "com.github.tty7"
+Name: "{autodesktop}\tty7"; Filename: "{app}\tty7-app.exe"; Tasks: desktopicon; AppUserModelID: "com.github.tty7"
 
 [Run]
 ; The registry shape lives in core::explorer_context_menu, not here: the app

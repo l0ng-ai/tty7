@@ -356,16 +356,26 @@ pub enum L10nKey {
     SettingsAboutTech,
     SettingsVersion,
     SettingsUpdates,
-    SettingsVersionAvailable,
-    SettingsCheckUpdatesDesc,
-    SettingsCheckUpdatesOnLaunch,
-    SettingsUpdateInstall,
+    SettingsUpdateAndRelaunch,
     SettingsUpdateViewRelease,
-    SettingsUpdateCheckNow,
     SettingsUpdateChecking,
     SettingsUpdateUpToDate,
     SettingsUpdateDownloading,
     SettingsUpdateInstalling,
+    SettingsUpdateCheckNow,
+    SettingsUpdateCheckFailed,
+    SettingsUpdatePrepareFailed,
+    SettingsUpdateLaunchFailed,
+    SettingsUpdateUnsupportedMacos,
+    SettingsUpdateUnsupportedLinux,
+    SettingsUpdateUnsupportedWindows,
+    SettingsUpdateWindowsAllUsers,
+    SettingsUpdateUnsupportedPlatform,
+    SettingsUpdateMissingPackage,
+    SettingsUpdateMissingChecksums,
+    SettingsVersionAvailable,
+    SettingsCheckUpdatesDesc,
+    SettingsCheckUpdatesOnLaunch,
     SettingsCommandLine,
     SettingsCommandLineDesc,
     SettingsInstallCliOnPath,
@@ -472,6 +482,7 @@ pub enum L10nKey {
     SftpTransferDone,
     SftpTransferCancelled,
     SftpTransferError,
+    SftpImagePasteUploadFailed,
     ForwardPanelTitle,
     ForwardDisconnected,
     ForwardDisconnectedFrom,
@@ -699,6 +710,7 @@ pub enum L10nKey {
     RemoteMismatchDetail,
     RemoteMismatchUnknownBuild,
     RemoteMismatchUnknownBuildFromExe,
+    RemoteMismatchReplaceServer,
     RemoteDaemonStartFailed,
     RemoteDaemonUnreachable,
     RemoteDaemonTooOld,
@@ -1651,28 +1663,65 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsVersion => ("Version", "版本"),
         L10nKey::SettingsUpdates => ("Updates", "更新"),
-        L10nKey::SettingsVersionAvailable => {
-            ("Version {version} is available.", "新版本 {version} 可用。")
-        }
-        L10nKey::SettingsCheckUpdatesDesc => (
-            "Check GitHub for new stable releases. Packaged macOS builds can install the update and relaunch; every other platform opens the release page.",
-            "检查 GitHub 上是否有新的稳定版。打包的 macOS 版本可以直接安装更新并重启；其他平台会打开发布页面。",
-        ),
-        L10nKey::SettingsCheckUpdatesOnLaunch => ("Check for updates on launch", "启动时检查更新"),
-        L10nKey::SettingsUpdateInstall => ("Update and Relaunch", "更新并重启"),
-        L10nKey::SettingsUpdateViewRelease => ("View Release", "查看发布页"),
-        L10nKey::SettingsUpdateCheckNow => ("Check Now", "立即检查"),
-        L10nKey::SettingsUpdateChecking => ("Checking…", "检查中…"),
+        L10nKey::SettingsUpdateAndRelaunch => ("Update and Relaunch", "更新并重新启动"),
+        L10nKey::SettingsUpdateViewRelease => ("View Release", "查看发布页面"),
+        L10nKey::SettingsUpdateChecking => ("Checking for updates…", "正在检查更新…"),
         L10nKey::SettingsUpdateUpToDate => {
             ("You're running the latest version.", "当前已是最新版本。")
         }
         L10nKey::SettingsUpdateDownloading => (
             "Downloading and verifying the update…",
-            "正在下载并校验更新…",
+            "正在下载并验证更新…",
         ),
         L10nKey::SettingsUpdateInstalling => {
-            ("Relaunching with the update…", "正在重启以应用更新…")
+            ("Relaunching with the update…", "正在通过更新重新启动…")
         }
+        L10nKey::SettingsUpdateCheckNow => ("Check Now", "立即检查"),
+        L10nKey::SettingsUpdateCheckFailed => (
+            "Could not check for updates: {error}",
+            "无法检查更新：{error}",
+        ),
+        L10nKey::SettingsUpdatePrepareFailed => ("Update failed: {error}", "更新失败：{error}"),
+        L10nKey::SettingsUpdateLaunchFailed => (
+            "Could not start the installer: {error}",
+            "无法启动安装程序：{error}",
+        ),
+        L10nKey::SettingsUpdateUnsupportedMacos => (
+            "This copy is not running from a writable tty7.app bundle, so replacing it would be unsafe. Move tty7 to Applications or another writable folder, or open the release page to install the update.",
+            "当前副本并非从可写的 tty7.app 包运行，直接替换并不安全。请将 tty7 移到“应用程序”或其他可写文件夹，或者打开发布页面安装更新。",
+        ),
+        L10nKey::SettingsUpdateUnsupportedLinux => (
+            "The first in-app updater supports packaged macOS app bundles. Use the release page or your package manager to update this Linux installation.",
+            "当前应用内更新器支持打包的 macOS 应用。请通过发布页面或包管理器更新此 Linux 安装。",
+        ),
+        L10nKey::SettingsUpdateUnsupportedWindows => (
+            "Automatic Windows updates are available for recognized Inno Setup and portable ZIP installations. This copy is missing a valid installation marker, updater, or writable portable directory, so open the release page to update it manually.",
+            "Windows 自动更新适用于可识别的 Inno Setup 安装版和便携 ZIP 版。当前副本缺少有效的安装标记、更新程序或可写的便携目录，请打开发布页面手动更新。",
+        ),
+        L10nKey::SettingsUpdateWindowsAllUsers => (
+            "tty7 is installed for all users, which needs administrator rights to replace. tty7 will not raise an elevation prompt on its own behalf, so open the release page and run the installer yourself to update it.",
+            "tty7 是为所有用户安装的，替换它需要管理员权限。tty7 不会自行弹出提权请求，请打开发布页面并自行运行安装程序进行更新。",
+        ),
+        L10nKey::SettingsUpdateUnsupportedPlatform => (
+            "Automatic installation is not available on this platform. Open the release page.",
+            "此平台不支持自动安装，请打开发布页面。",
+        ),
+        L10nKey::SettingsUpdateMissingPackage => (
+            "The release has no {name} package for this installation. Open the release page to choose another package.",
+            "该版本没有适用于当前安装的 {name} 包。请打开发布页面选择其他包。",
+        ),
+        L10nKey::SettingsUpdateMissingChecksums => (
+            "The release has no checksums.txt, so tty7 refuses to install it automatically.",
+            "该版本缺少 checksums.txt，因此 tty7 拒绝自动安装。",
+        ),
+        L10nKey::SettingsVersionAvailable => {
+            ("Version {version} is available.", "新版本 {version} 可用。")
+        }
+        L10nKey::SettingsCheckUpdatesDesc => (
+            "tty7 checks stable releases on launch. Packaged macOS bundles and per-user Windows installations update without opening a browser: a dedicated helper verifies the checksum and version before replacing anything, then relaunches the GUI. Linux, all-users Windows installations and other unsupported layouts fall back to the release page.",
+            "tty7 会在启动时检查稳定版发布。打包的 macOS 应用和为当前用户安装的 Windows 版本无需打开浏览器即可更新：专用助手会在替换前验证校验和与版本，然后重新启动界面。Linux、为所有用户安装的 Windows 版本以及其他不受支持的安装布局则会打开发布页面。",
+        ),
+        L10nKey::SettingsCheckUpdatesOnLaunch => ("Check for updates on launch", "启动时检查更新"),
         L10nKey::SettingsCommandLine => ("Command line", "命令行"),
         L10nKey::SettingsCommandLineDesc => (
             "Put the bundled `tty7` command on your PATH at launch, so scripts and coding agents can drive tty7 from any terminal. Inside a tty7 pane it works either way. Turn this off if you keep your own `tty7` — one you built or installed yourself — and do not want it shadowed. Takes effect at next launch.",
@@ -1966,6 +2015,10 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SftpTransferDone => ("done", "完成"),
         L10nKey::SftpTransferCancelled => ("cancelled", "已取消"),
         L10nKey::SftpTransferError => ("error", "错误"),
+        L10nKey::SftpImagePasteUploadFailed => (
+            "Could not upload the pasted image to {host}: {error}",
+            "无法将粘贴的图片上传到 {host}：{error}",
+        ),
         L10nKey::ForwardPanelTitle => ("Forwards", "端口转发"),
         L10nKey::ForwardDisconnected => ("Disconnected", "已断开"),
         L10nKey::ForwardDisconnectedFrom => ("Disconnected from {host}", "与 {host} 的连接已断开"),
@@ -2269,23 +2322,24 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::RemoteInstallBytes => ("bytes", "字节"),
         L10nKey::RemoteMismatchTitle => (
-            "Restart tty7's server on \"{machine}\"?",
-            "重启 \"{machine}\" 上的 tty7 服务器？",
+            "Update tty7's server on \"{machine}\"?",
+            "更新 \"{machine}\" 上的 tty7 服务器端？",
         ),
         L10nKey::RemoteMismatchDetail => (
             "{machine} is serving tty7 sessions from {running}, which speaks a protocol \
              this client ({wanted}) cannot. tty7 has installed a matching server there, \
              but the one already running is the one your sessions are on.\n\
              \n\
-             {restart_server}\u{2003}starts {wanted} there and ends every session it is hosting.\n\
+             {replace_server}\u{2003}replaces it with {wanted} and ends every session it is hosting.\n\
              {cancel}\u{2003}leaves {machine} exactly as it is. This window will not connect.",
             "{machine} 正在使用 {running} 提供 tty7 会话，该版本使用的协议无法被\
-             此客户端（{wanted}）识别。tty7 已在那里安装了匹配的服务器，\
+             此客户端（{wanted}）识别。tty7 已在那里安装了匹配的服务器端，\
              但正在运行的是你当前会话所在的版本。\n\
              \n\
-             {restart_server}\u{2003}会在该机器上启动 {wanted} 并结束其托管的所有会话。\n\
+             {replace_server}\u{2003}会将其替换为 {wanted} 并结束其托管的所有会话。\n\
              {cancel}\u{2003}会保持 {machine} 现状不变。此窗口将不会连接。",
         ),
+        L10nKey::RemoteMismatchReplaceServer => ("Update Server", "更新服务器端"),
         L10nKey::RemoteMismatchUnknownBuild => ("an unknown build", "未知构建"),
         L10nKey::RemoteMismatchUnknownBuildFromExe => {
             ("an unknown build (from {exe})", "未知构建（来自 {exe}）")
@@ -3216,16 +3270,26 @@ mod tests {
             L10nKey::SettingsAboutDesc2,
             L10nKey::SettingsAboutTech,
             L10nKey::SettingsUpdates,
-            L10nKey::SettingsVersionAvailable,
-            L10nKey::SettingsCheckUpdatesDesc,
-            L10nKey::SettingsCheckUpdatesOnLaunch,
-            L10nKey::SettingsUpdateInstall,
+            L10nKey::SettingsUpdateAndRelaunch,
             L10nKey::SettingsUpdateViewRelease,
-            L10nKey::SettingsUpdateCheckNow,
             L10nKey::SettingsUpdateChecking,
             L10nKey::SettingsUpdateUpToDate,
             L10nKey::SettingsUpdateDownloading,
             L10nKey::SettingsUpdateInstalling,
+            L10nKey::SettingsUpdateCheckNow,
+            L10nKey::SettingsUpdateCheckFailed,
+            L10nKey::SettingsUpdatePrepareFailed,
+            L10nKey::SettingsUpdateLaunchFailed,
+            L10nKey::SettingsUpdateUnsupportedMacos,
+            L10nKey::SettingsUpdateUnsupportedLinux,
+            L10nKey::SettingsUpdateUnsupportedWindows,
+            L10nKey::SettingsUpdateWindowsAllUsers,
+            L10nKey::SettingsUpdateUnsupportedPlatform,
+            L10nKey::SettingsUpdateMissingPackage,
+            L10nKey::SettingsUpdateMissingChecksums,
+            L10nKey::SettingsVersionAvailable,
+            L10nKey::SettingsCheckUpdatesDesc,
+            L10nKey::SettingsCheckUpdatesOnLaunch,
             L10nKey::SettingsCommandLine,
             L10nKey::SettingsCommandLineDesc,
             L10nKey::SettingsInstallCliOnPath,
@@ -3332,6 +3396,7 @@ mod tests {
             L10nKey::SftpTransferDone,
             L10nKey::SftpTransferCancelled,
             L10nKey::SftpTransferError,
+            L10nKey::SftpImagePasteUploadFailed,
             L10nKey::ForwardPanelTitle,
             L10nKey::ForwardDisconnected,
             L10nKey::ForwardDisconnectedFrom,
@@ -3559,6 +3624,7 @@ mod tests {
             L10nKey::RemoteMismatchDetail,
             L10nKey::RemoteMismatchUnknownBuild,
             L10nKey::RemoteMismatchUnknownBuildFromExe,
+            L10nKey::RemoteMismatchReplaceServer,
             L10nKey::RemoteDaemonStartFailed,
             L10nKey::RemoteDaemonUnreachable,
             L10nKey::RemoteDaemonTooOld,

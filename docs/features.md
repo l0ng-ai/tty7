@@ -23,6 +23,7 @@
 - **Sync with system** — Settings → Appearance; pick separate light and dark themes and tty7 follows the OS appearance live (`theme_follow_system`, `theme_preset_light` / `theme_preset_dark` in `config.json`)
 - **Window opacity & blur** — Settings → Appearance → Window; applies to every theme, *Follow theme* returns to the theme's own `opacity` / `blur`
 - **CJK / IME input**
+- **Windows Explorer menu** — the installer offers *Add “Open in tty7” to the folder context menu* as a setup task, off by default, and the uninstaller always takes it back out. Writing shell verbs is an install-time decision, so there is no runtime setting; a portable-zip install can do it itself with `tty7-app.exe --register-explorer-menu` (or `--unregister-explorer-menu`). Either way the keys land under `HKCU`, so only your own Windows account is affected
 
 ## Fonts
 

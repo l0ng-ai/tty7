@@ -303,25 +303,6 @@ fn main() {
         }
     }
 
-    // The Windows installer owns the Explorer context menu: a task checkbox
-    // runs these, and the uninstaller always runs the unregister half. Keeping
-    // the registry shape in `explorer_context_menu` rather than in the .iss
-    // means the installer and the running app can never disagree about it.
-    if let Some(register) = explorer_menu_action_from(&args) {
-        let result = if register {
-            crate::core::explorer_context_menu::register()
-        } else {
-            crate::core::explorer_context_menu::unregister()
-        };
-        if let Err(error) = result {
-            // No console on the GUI subsystem; the exit code is what the
-            // installer reads.
-            log::error!("the Explorer context-menu update failed: {error}");
-            std::process::exit(1);
-        }
-        return;
-    }
-
     apply_config_dir_arg(&args);
 
     let daemon = args
@@ -330,6 +311,26 @@ fn main() {
     let role = if daemon { "daemon" } else { "gui" };
     crate::core::crash::install(role);
     crate::core::logfile::install(role);
+
+    // The Windows installer owns the Explorer context menu: a task checkbox
+    // runs these, and the uninstaller always runs the unregister half. Keeping
+    // the registry shape in `explorer_context_menu` rather than in the .iss
+    // means the installer and the running app can never disagree about it.
+    // Handled after the log file is open, because a GUI-subsystem process has
+    // no console to report a failure on and Inno does not surface exit codes:
+    // the log is the only place the reason can survive.
+    if let Some(register) = explorer_menu_action_from(&args) {
+        let result = if register {
+            crate::core::explorer_context_menu::register()
+        } else {
+            crate::core::explorer_context_menu::unregister()
+        };
+        if let Err(error) = result {
+            log::error!("the Explorer context-menu update failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     if daemon {
         if let Err(e) = crate::daemon::server::run_daemon() {
@@ -361,6 +362,11 @@ fn main() {
     // and before the daemon below, which forks every pane and so must already
     // carry the CLI's directory in its environment.
     crate::core::cli_install::install(config.install_cli_on_path);
+
+    // Give desktop toasts the tty7 icon and name instead of notify-rust's
+    // PowerShell fallback. Best-effort; no-op off Windows.
+    #[cfg(target_os = "windows")]
+    crate::core::aumid::init();
 
     let restore_session = config.restore_session;
     let daemon_result = if restore_session {

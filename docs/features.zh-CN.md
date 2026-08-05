@@ -23,6 +23,7 @@
 - **跟随系统外观** — 设置 → Appearance；分别选好浅色和深色主题，tty7 随系统深浅模式实时切换（`config.json` 中的 `theme_follow_system`、`theme_preset_light` / `theme_preset_dark`）
 - **窗口透明与模糊** — 设置 → Appearance → Window；对所有主题生效，*Follow theme* 恢复主题自带的 `opacity` / `blur`
 - **CJK / 输入法输入**
+- **Windows 资源管理器右键菜单** —— 安装程序提供 *Add “Open in tty7” to the folder context menu* 这个安装任务，默认不勾选，卸载时一律移除。写 shell verb 是安装期的决定，所以没有运行时开关；用 portable zip 的话可以自己执行 `tty7-app.exe --register-explorer-menu`（或 `--unregister-explorer-menu`）。两种方式写入的键都在 `HKCU` 下，只影响你自己的 Windows 账户
 
 ## 字体
 
