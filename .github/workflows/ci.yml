@@ -127,8 +127,8 @@ jobs:
         timeout-minutes: 20
         run: cargo test --locked --target ${{ matrix.target }}
 
-      - name: Test macOS updater
-        if: runner.os == 'macOS'
+      - name: Test desktop updater
+        if: runner.os == 'macOS' || runner.os == 'Windows'
         timeout-minutes: 10
         run: cargo test --locked --features updater --bin tty7-updater --target ${{ matrix.target }}
 
