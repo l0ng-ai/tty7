@@ -492,7 +492,7 @@ impl Tty7App {
         match remote_connect::mismatch_target(&mismatch)
             .ok_or_else(|| t_fmt(L10nKey::RemoteNoRouteToHost, &[("machine", &label)]))
         {
-            Ok(target) => self.restart_remote_server(target, label, window, cx),
+            Ok(target) => self.replace_remote_server(target, label, window, cx),
             Err(e) => Tty7App::report_restart_failure(&label, &e, window, cx),
         }
     }
