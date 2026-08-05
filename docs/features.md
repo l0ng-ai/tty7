@@ -120,3 +120,29 @@ a brief pause; `prefix` + an unbound key passes straight through.
 - The PTY is read at device speed and parsed in large batches, off the render path
 - Hot paths are lock-free — a big `cat` never waits on drawing
 - The daemon buffers up to 16 MiB ahead of the window before backpressure applies
+
+## macOS privacy
+
+macOS gates access to a few protected resources behind the Transparency,
+Consent, and Control (TCC) framework, and tty7's panes are forked from the
+bundled executable, so TCC attributes a pane child's request to `tty7.app` as
+the responsible process. tty7 declares the usage strings for the resources a
+program you run in a pane can legitimately ask for (camera, microphone,
+contacts, calendar, reminders, photos, location, motion, local network,
+Bluetooth, speech recognition, Apple Events, and system administration), so
+those requests surface as a normal one-time grant instead of being denied
+outright with no System Settings entry — the same key set kitty and Kaku ship.
+
+Two things are *not* covered by usage strings:
+
+- **Full Disk Access** — Apple defines no `NS*UsageDescription` key for this
+  class. Access to `~/Library/Mail`, `~/Library/Messages`, `~/Library/Safari`,
+  and `~/Library/Containers` (e.g. by a `clean` / maintenance tool) can only be
+  granted by hand in System Settings → Privacy & Security → Full Disk Access;
+  no plist change can turn that prompt into a remembered one-time grant.
+- **Entitlement-gated access** — the camera / microphone / address book /
+  location entitlements are deliberately *not* granted to `tty7.app` itself.
+  Entitlements are per-executable and never inherited by children; the child's
+  access is decided by the responsible bundle's usage string, and granting the
+  GUI bundle those entitlements would only widen what injected code can reach
+  under tty7's identity.

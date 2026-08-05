@@ -70,27 +70,40 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
-    <!-- tty7 is a terminal workbench: users run shells and CLI tools inside it.
-         Declaring these TCC intent keys mirrors what kitty and Kaku ship, so the
-         forked child processes (shells, agents, mole, etc.) that touch protected
-         folders prompt once with a clear message instead of repeatedly asking
-         for access to other apps' data. -->
-    <key>NSDocumentsFolderUsageDescription</key>
-    <string>tty7 needs access to your Documents folder so shells and CLI tools run inside it can read and write files there.</string>
-    <key>NSDownloadsFolderUsageDescription</key>
-    <string>tty7 needs access to your Downloads folder so shells and CLI tools run inside it can read and write files there.</string>
-    <key>NSDesktopFolderUsageDescription</key>
-    <string>tty7 needs access to your Desktop folder so shells and CLI tools run inside it can read and write files there.</string>
-    <key>NSRemovableVolumesUsageDescription</key>
-    <string>tty7 needs access to removable volumes so shells and CLI tools run inside it can read and write files there.</string>
-    <key>NSNetworkVolumesUsageDescription</key>
-    <string>tty7 needs access to network volumes so shells and CLI tools run inside it can read and write files there.</string>
-    <key>NSCalendarsUsageDescription</key>
-    <string>tty7 needs access to your calendar data so shells and CLI tools run inside it can use it when you ask.</string>
+    <!-- tty7 is a terminal workbench: panes are forked from the bundled
+         executable, so macOS attributes a child process's protected-resource
+         requests to tty7.app. Without these usage strings a program you run in
+         a pane that asks for camera / microphone / contacts / calendar /
+         photos / location / reminders / Apple Events is denied outright with
+         no prompt, and cannot even be granted in System Settings. Declaring
+         them mirrors what kitty and Kaku ship for exactly this reason: Mac
+         TCC reads the responsible bundle's usage string, not the child's. -->
+    <key>NSCameraUsageDescription</key>
+    <string>A program running inside tty7 would like to access the camera.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>A program running inside tty7 would like to access the microphone.</string>
     <key>NSContactsUsageDescription</key>
-    <string>tty7 needs access to your contacts so shells and CLI tools run inside it can use them when you ask.</string>
+    <string>A program running inside tty7 would like to access your contacts.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>A program running inside tty7 would like to access your calendar data.</string>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>A program running inside tty7 would like to access your reminders.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>A program running inside tty7 would like to access your photo library.</string>
+    <key>NSLocationUsageDescription</key>
+    <string>A program running inside tty7 would like to access your location information.</string>
+    <key>NSMotionUsageDescription</key>
+    <string>A program running inside tty7 would like to access motion data.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>A program running inside tty7 would like to access the local network.</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>A program running inside tty7 would like to use Bluetooth.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>A program running inside tty7 would like to use speech recognition.</string>
+    <key>NSSystemAdministrationUsageDescription</key>
+    <string>A program running inside tty7 requires elevated privileges.</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>tty7 needs permission to control other applications so scripts and CLI tools run inside it can send Apple Events.</string>
+    <string>A program running inside tty7 would like to control other applications via Apple Events.</string>
 </dict>
 </plist>
 PLIST
@@ -132,15 +145,19 @@ if [[ -n "$SIGN_ID" && -n "${APPLE_CERTIFICATE:-}" ]]; then
     <key>com.apple.security.cs.allow-jit</key><true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
     <key>com.apple.security.cs.disable-library-validation</key><true/>
-    <!-- Declare the privacy-sensitive categories the app's child processes can
-         touch, mirroring kitty/Kaku. These keys make the TCC prompt a one-time,
-         clear grant instead of a repeating "access other apps' data" dialog. -->
+    <!-- Apple Events is declared here because it pairs with the
+         NSAppleEventsUsageDescription above and is the one resource where the
+         entitlement is genuinely exercised. The other TCC categories (camera,
+         microphone, address book, calendars, location) are deliberately NOT
+         granted to this bundle: the request comes from a child process, whose
+         access is gated by the responsible bundle's *usage string* in
+         Info.plist, not by an entitlement on tty7.app (entitlements are
+         per-executable and never inherited). Granting camera / microphone /
+         location etc. to tty7.app itself would only widen what injected code
+         can reach under its identity, against Apple's least-privilege
+         guidance — the same rationale the comments below already use to keep
+         these GUI entitlements off the CLI. -->
     <key>com.apple.security.automation.apple-events</key><true/>
-    <key>com.apple.security.personal-information.addressbook</key><true/>
-    <key>com.apple.security.personal-information.calendars</key><true/>
-    <key>com.apple.security.personal-information.location</key><true/>
-    <key>com.apple.security.device.audio-input</key><true/>
-    <key>com.apple.security.device.camera</key><true/>
 </dict>
 </plist>
 ENT
