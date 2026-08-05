@@ -364,6 +364,18 @@ fn apply_common_command_setup(
         cmd.cwd(dir);
     }
     let extra_env = crate::core::config::extra_env();
+
+    // Windows hands every process a private copy of the environment at spawn
+    // time and never updates it, so a daemon that has been running since before
+    // an installer touched `HKCU\Environment` would give a brand-new pane its
+    // startup `PATH` (#333). Re-read both hives here and pin the merge onto the
+    // command; the pane-specific variables below (and the configured overrides
+    // they carry) are applied afterwards and still win.
+    #[cfg(windows)]
+    for (k, v) in crate::daemon::windows_env::refreshed_pane_environment(&extra_env) {
+        cmd.env(k, v);
+    }
+
     let dark = crate::core::machine::appearance().dark;
     for (k, v) in pane_environment(&extra_env, dark, pane, workspace) {
         cmd.env(k, v);
