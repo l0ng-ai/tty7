@@ -112,7 +112,13 @@ jobs:
 
       - name: Build
         working-directory: tty7
-        run: cargo build --release --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          cargo build --release --target "${{ matrix.target }}"
+          if [[ "${{ matrix.os }}" == "macos" || "${{ matrix.os }}" == "windows" ]]; then
+            cargo build --release --features updater \
+              --bin tty7-updater --target "${{ matrix.target }}"
+          fi
 
       - name: Bundle macOS DMG
         if: matrix.os == 'macos'
@@ -126,6 +132,25 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: bash .github/scripts/bundle-macos.sh "${{ matrix.target }}" "${{ matrix.arch }}"
+
+      - name: Verify macOS Nightly update archive
+        if: matrix.os == 'macos'
+        working-directory: tty7
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.plan.outputs.version }}"
+          ZIP="dist/tty7-${VERSION}-macos-${{ matrix.arch }}.zip"
+          VERIFY_ROOT="$RUNNER_TEMP/tty7-nightly-update-verify"
+          rm -rf "$VERIFY_ROOT"
+          mkdir -p "$VERIFY_ROOT"
+          /usr/bin/ditto -x -k "$ZIP" "$VERIFY_ROOT"
+          APP="$VERIFY_ROOT/tty7.app"
+          test -x "$APP/Contents/MacOS/tty7-updater"
+          ACTUAL_VERSION="$(/usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+          test "$ACTUAL_VERSION" = "$VERSION"
+          /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP"
 
       - name: Package Linux tarball
         if: matrix.os == 'linux'
@@ -151,6 +176,18 @@ jobs:
         working-directory: tty7
         shell: pwsh
         run: '& ./.github/scripts/bundle-windows.ps1 "${{ matrix.target }}" "${{ matrix.arch }}"'
+
+      # Nightly builds the same packages as release.yml, so it gets the same
+      # check. Nightly is not an update channel — nobody updates *into* these
+      # artifacts — but a marker or version regression shows up here a night
+      # before it would reach a stable release.
+      - name: Verify Windows update package
+        if: matrix.os == 'windows'
+        working-directory: tty7
+        shell: pwsh
+        run: >-
+          & ./.github/scripts/verify-windows-package.ps1
+          "${{ matrix.arch }}" "${{ needs.plan.outputs.version }}"
 
       # Same glob list as release.yml's Release step: the bundle scripts leave
       # intermediates in dist/ (tty7.app, entitlements.plist, the Windows
