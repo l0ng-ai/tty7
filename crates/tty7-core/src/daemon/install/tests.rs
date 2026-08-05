@@ -980,6 +980,7 @@ fn without_a_bundle_the_source_is_the_plain_download() {
     let source = BundledOrRelease {
         fetch: &release,
         bundled: None,
+        fallback_on_missing: false,
     };
     let loaded = source.load("26.7.5", ASSET_X86_64).expect("downloads");
     assert_eq!(loaded.bytes, SERVER_BYTES);
@@ -1001,6 +1002,7 @@ fn a_bundle_is_used_instead_of_downloading() {
     let source = BundledOrRelease {
         fetch: &release,
         bundled: Some(wsl::BundledServerBinary::in_dirs(vec![dir.clone()])),
+        fallback_on_missing: false,
     };
     let loaded = source.load("26.7.5", ASSET_X86_64).expect("loads locally");
     assert_eq!(loaded.bytes, b"\x7fELF local build");
@@ -1026,6 +1028,7 @@ fn a_bundle_that_lacks_the_asset_does_not_fall_back_to_the_network() {
     let source = BundledOrRelease {
         fetch: &release,
         bundled: Some(wsl::BundledServerBinary::in_dirs(vec![dir.clone()])),
+        fallback_on_missing: false,
     };
     let err = source.load("26.7.5", ASSET_X86_64).expect_err("no binary");
     assert!(matches!(err, InstallError::MissingBundled { .. }), "{err}");
@@ -1036,6 +1039,55 @@ fn a_bundle_that_lacks_the_asset_does_not_fall_back_to_the_network() {
     assert!(
         release.fetched().is_empty(),
         "no silent fallback to the network"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn discover_falls_back_to_release_when_bundled_is_missing() {
+    let dir = std::env::temp_dir().join(format!("tty7-bundle-discover-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let release = FakeRelease::new();
+    let source = BundledOrRelease {
+        fetch: &release,
+        bundled: Some(wsl::BundledServerBinary::in_dirs(vec![dir.clone()])),
+        fallback_on_missing: true,
+    };
+    let loaded = source
+        .load("26.7.5", ASSET_X86_64)
+        .expect("falls back to release");
+    assert_eq!(loaded.bytes, SERVER_BYTES);
+    assert_eq!(
+        release.fetched().len(),
+        2,
+        "the manifest and the asset must be fetched when the bundled binary is absent"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn discover_uses_bundled_when_it_is_present() {
+    let dir = std::env::temp_dir().join(format!(
+        "tty7-bundle-discover-present-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(ASSET_X86_64), b"\x7fELF discovered build").unwrap();
+
+    let release = FakeRelease::new();
+    let source = BundledOrRelease {
+        fetch: &release,
+        bundled: Some(wsl::BundledServerBinary::in_dirs(vec![dir.clone()])),
+        fallback_on_missing: true,
+    };
+    let loaded = source.load("26.7.5", ASSET_X86_64).expect("loads locally");
+    assert_eq!(loaded.bytes, b"\x7fELF discovered build");
+    assert!(
+        release.fetched().is_empty(),
+        "a discovered bundled install must not touch the network"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -143,6 +143,15 @@ fn open_path_from(
     None
 }
 
+/// `Some(true)` to register the Explorer verbs, `Some(false)` to remove them.
+fn explorer_menu_action_from(args: &[std::ffi::OsString]) -> Option<bool> {
+    args.iter().find_map(|arg| match arg.as_os_str() {
+        a if a == std::ffi::OsStr::new("--register-explorer-menu") => Some(true),
+        a if a == std::ffi::OsStr::new("--unregister-explorer-menu") => Some(false),
+        _ => None,
+    })
+}
+
 /// Offers an explicit launch path to an already running local GUI.
 ///
 /// The dispatcher is injected so the startup decision can be tested without
@@ -303,6 +312,26 @@ fn main() {
     crate::core::crash::install(role);
     crate::core::logfile::install(role);
 
+    // The Windows installer owns the Explorer context menu: a task checkbox
+    // runs these, and the uninstaller always runs the unregister half. Keeping
+    // the registry shape in `explorer_context_menu` rather than in the .iss
+    // means the installer and the running app can never disagree about it.
+    // Handled after the log file is open, because a GUI-subsystem process has
+    // no console to report a failure on and Inno does not surface exit codes:
+    // the log is the only place the reason can survive.
+    if let Some(register) = explorer_menu_action_from(&args) {
+        let result = if register {
+            crate::core::explorer_context_menu::register()
+        } else {
+            crate::core::explorer_context_menu::unregister()
+        };
+        if let Err(error) = result {
+            log::error!("the Explorer context-menu update failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if daemon {
         if let Err(e) = crate::daemon::server::run_daemon() {
             log::error!("daemon exited with error: {e}");
@@ -405,10 +434,32 @@ mod tests {
 
 #[cfg(test)]
 mod argument_tests {
-    use super::{config_dir_from, forward_open_path_with, open_path_from};
+    use super::{
+        config_dir_from, explorer_menu_action_from, forward_open_path_with, open_path_from,
+    };
     use std::ffi::OsString;
     use std::path::PathBuf;
     use tty7_core::daemon::control::ReplyOk;
+
+    /// The installer passes exactly one of these; every other launch — above
+    /// all a plain `--open-path` from the very menu they register — must fall
+    /// through to normal startup instead of rewriting the registry and exiting.
+    #[test]
+    fn explorer_menu_flags_are_distinguished_and_otherwise_absent() {
+        assert_eq!(
+            explorer_menu_action_from(&[OsString::from("--register-explorer-menu")]),
+            Some(true)
+        );
+        assert_eq!(
+            explorer_menu_action_from(&[OsString::from("--unregister-explorer-menu")]),
+            Some(false)
+        );
+        assert_eq!(
+            explorer_menu_action_from(&[OsString::from("--open-path"), OsString::from("/work")]),
+            None
+        );
+        assert_eq!(explorer_menu_action_from(&[]), None);
+    }
 
     #[test]
     fn open_path_accepts_separate_and_equals_forms() {
