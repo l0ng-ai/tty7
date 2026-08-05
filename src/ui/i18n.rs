@@ -379,21 +379,6 @@ pub enum L10nKey {
     SettingsCommandLine,
     SettingsCommandLineDesc,
     SettingsInstallCliOnPath,
-    SettingsExplorerContextMenu,
-    SettingsExplorerContextMenuDesc,
-    SettingsExplorerNotRegistered,
-    SettingsExplorerRegistered,
-    SettingsExplorerNeedsUpdate,
-    SettingsExplorerUnavailable,
-    SettingsExplorerStatusUnavailable,
-    SettingsExplorerRegister,
-    SettingsExplorerUpdate,
-    SettingsExplorerUnregister,
-    SettingsExplorerRegisteredNote,
-    SettingsExplorerUnregisteredNote,
-    SettingsExplorerRegisterFailed,
-    SettingsExplorerUnregisterFailed,
-    SettingsExplorerWindows11Note,
     SettingsServer,
     SettingsServerDesc,
     SettingsRestartServer,
@@ -421,7 +406,6 @@ pub enum L10nKey {
     SettingsSearchDetectUrlsKeywords,
     SettingsSearchDiffPreviewFromCountsKeywords,
     SettingsSearchDimInactivePanesKeywords,
-    SettingsSearchExplorerContextMenuKeywords,
     SettingsSearchFocusFollowsMouseKeywords,
     SettingsSearchFontFamilyKeywords,
     SettingsSearchFontLigaturesKeywords,
@@ -1098,7 +1082,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsNavTerminal => ("Terminal", "终端"),
         L10nKey::SettingsNavInput => ("Input", "输入"),
         L10nKey::SettingsNavSsh => ("SSH", "SSH"),
-        L10nKey::SettingsNavAgents => ("Agents", "智能体"),
+        L10nKey::SettingsNavAgents => ("Agents", "Agents"),
         L10nKey::SettingsNavWindowTabs => ("Window & Tabs", "窗口与标签页"),
         L10nKey::SettingsNavKeybindings => ("Keybindings", "按键绑定"),
         L10nKey::SettingsNavAbout => ("About", "关于"),
@@ -1439,7 +1423,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "仅适用于没有可继承目录的 shell，例如窗口的第一个标签页。新标签页和分屏仍会继承活动窗格的目录，已经打开的 shell 会继续运行。",
         ),
         L10nKey::SettingsScrolling => ("Scrolling", "滚动"),
-        L10nKey::SettingsScrollback => ("Scrollback", "回滚缓冲"),
+        L10nKey::SettingsScrollback => ("Scrollback", "Scrollback"),
         L10nKey::SettingsScrollbackDesc => (
             "Lines of history kept per pane. Applies to new panes.",
             "每个窗格保留的历史行数。仅适用于新窗格。",
@@ -1529,14 +1513,14 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "⌥+key sends the escape chord shells expect (⌥B = back one word) instead of typing a special character (∫).",
             "⌥+按键 发送 shell 期望的转义组合键（⌥B = 后退一个词），而不是输入特殊字符（∫）。",
         ),
-        L10nKey::SettingsAgentsIntro => ("Agents", "智能体"),
+        L10nKey::SettingsAgentsIntro => ("Agents", "Agents"),
         L10nKey::SettingsAgentsIntroDesc => (
             "Hook integrations give panes running these agents live session status (working / waiting / done) in the tab bar. Only active inside tty7.",
-            "钩子集成让标签栏中的窗格实时显示这些智能体的会话状态（进行中 / 等待中 / 已完成）。仅在 tty7 内生效。",
+            "hook 集成让标签栏中的窗格实时显示这些 agent 的会话状态（进行中 / 等待中 / 已完成）。仅在 tty7 内生效。",
         ),
         L10nKey::SettingsReadingAgentConfig => (
             "Reading this machine's agent config…",
-            "正在读取这台机器的智能体配置…",
+            "正在读取这台机器的 agent 配置…",
         ),
         L10nKey::SettingsStatusNotInstalled => ("Not installed", "未安装"),
         L10nKey::SettingsStatusInstalled => ("Installed", "已安装"),
@@ -1547,7 +1531,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsUninstall => ("Uninstall", "卸载"),
         L10nKey::SettingsOfflineMachines => (
             "{count} more saved machines are not connected — open a workspace on one to install its hooks there.",
-            "还有 {count} 台已保存的机器未连接——在其中一台上打开工作区，即可在那台机器上安装钩子。",
+            "还有 {count} 台已保存的机器未连接——在其中一台上打开工作区，即可在那台机器上安装 hook。",
         ),
         L10nKey::SettingsSyncWithSystem => ("Sync with system", "跟随系统"),
         L10nKey::SettingsSyncWithSystemDesc => (
@@ -1598,7 +1582,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsShowTrayIcon => ("Show tray icon", "显示托盘图标"),
         L10nKey::SettingsShowTrayIconDesc => (
             "Keep a status item in the system tray / menu bar: it signals when a coding agent needs your input, and its menu jumps to agent panes.",
-            "在系统托盘/菜单栏保留状态项：当编码智能体需要输入时发出提示，其菜单可跳转到智能体窗格。",
+            "在系统托盘/菜单栏保留状态项：当编码 agent 需要输入时发出提示，其菜单可跳转到该 agent 的窗格。",
         ),
         L10nKey::SettingsTabs => ("Tabs", "标签页"),
         L10nKey::SettingsNewTabPosition => ("New tab position", "新标签页位置"),
@@ -1618,11 +1602,11 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsDiffPreviewFromCounts => (
             "Open diff preview from sidebar counts",
-            "从侧栏计数打开差异预览",
+            "从侧栏计数打开 diff 预览",
         ),
         L10nKey::SettingsDiffPreviewFromCountsDesc => (
             "Click a row's +N −N to open the working-tree diff in an overlay. Off keeps the branch and the counts on the row and just stops them being clickable.",
-            "点击行上的 +N −N 可在浮层中打开工作树差异。关闭时行上仍显示分支和计数，但不再可点击。",
+            "点击行上的 +N −N 可在浮层中打开 worktree diff。关闭时行上仍显示分支和计数，但不再可点击。",
         ),
         L10nKey::SettingsNotifications => ("Notifications", "通知"),
         L10nKey::SettingsNotifyOnCommandFinish => ("Notify on command finish", "命令完成时通知"),
@@ -1667,11 +1651,11 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsRestoreAllDefaults => ("Restore all defaults", "恢复全部默认值"),
         L10nKey::SettingsAboutDesc1 => (
             "A terminal workbench: shells, workspaces, SSH, coding agents.",
-            "一个终端工作台：shell、工作区、SSH、编码智能体。",
+            "一个终端工作台：shell、工作区、SSH、编码 agent。",
         ),
         L10nKey::SettingsAboutDesc2 => (
             "Editor-grade input in every shell, shells that outlive quits and reboots without tmux, a native SSH stack with profiles and port forwarding, and live status for panes running coding agents.",
-            "每个 shell 都具备编辑器级输入；无需 tmux 也能让 shell 在退出和重启后继续运行；原生的 SSH 栈支持主机配置和端口转发；为运行编码智能体的窗格提供实时状态。",
+            "每个 shell 都具备编辑器级输入；无需 tmux 也能让 shell 在退出和重启后继续运行；原生的 SSH 栈支持主机配置和端口转发；为运行编码 agent 的窗格提供实时状态。",
         ),
         L10nKey::SettingsAboutTech => (
             "Pure Rust · GPU rendering on Zed's gpui · VT core from Alacritty",
@@ -1741,42 +1725,11 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsCommandLine => ("Command line", "命令行"),
         L10nKey::SettingsCommandLineDesc => (
             "Put the bundled `tty7` command on your PATH at launch, so scripts and coding agents can drive tty7 from any terminal. Inside a tty7 pane it works either way. Turn this off if you keep your own `tty7` — one you built or installed yourself — and do not want it shadowed. Takes effect at next launch.",
-            "启动时将自带的 `tty7` 命令加入 PATH，让脚本和编码智能体可在任意终端驱动 tty7。在 tty7 窗格内两种情况都可用。如果你自己构建或安装了 `tty7` 且不希望被遮蔽，请关闭此选项。下次启动时生效。",
+            "启动时将自带的 `tty7` 命令加入 PATH，让脚本和编码 agent 可在任意终端驱动 tty7。在 tty7 窗格内两种情况都可用。如果你自己构建或安装了 `tty7` 且不希望被遮蔽，请关闭此选项。下次启动时生效。",
         ),
         L10nKey::SettingsInstallCliOnPath => (
             "Install the `tty7` command on PATH",
             "将 `tty7` 命令安装到 PATH",
-        ),
-        L10nKey::SettingsExplorerContextMenu => ("Windows Explorer", "Windows 文件资源管理器"),
-        L10nKey::SettingsExplorerContextMenuDesc => (
-            "Add “Open in tty7” when you right-click a folder and “Open tty7 here” when you right-click a folder background. This is off by default and is registered only for your Windows account.",
-            "右键单击文件夹时添加“Open in tty7”，右键单击文件夹背景时添加“Open tty7 here”。此功能默认关闭，且只为当前 Windows 账户注册。",
-        ),
-        L10nKey::SettingsExplorerNotRegistered => ("Not registered", "未注册"),
-        L10nKey::SettingsExplorerRegistered => ("Registered", "已注册"),
-        L10nKey::SettingsExplorerNeedsUpdate => ("Needs update", "需要更新"),
-        L10nKey::SettingsExplorerUnavailable => ("Unavailable", "不可用"),
-        L10nKey::SettingsExplorerStatusUnavailable => ("Status unavailable", "无法获取状态"),
-        L10nKey::SettingsExplorerRegister => ("Register", "注册"),
-        L10nKey::SettingsExplorerUpdate => ("Update", "更新"),
-        L10nKey::SettingsExplorerUnregister => ("Unregister", "取消注册"),
-        L10nKey::SettingsExplorerRegisteredNote => (
-            "Registered. Right-click a folder or folder background in Explorer to open it in tty7.",
-            "已注册。现在可以在文件资源管理器中右键单击文件夹或文件夹背景，以在 tty7 中打开。",
-        ),
-        L10nKey::SettingsExplorerUnregisteredNote => (
-            "Unregistered from Windows Explorer.",
-            "已从 Windows 文件资源管理器中取消注册。",
-        ),
-        L10nKey::SettingsExplorerRegisterFailed => {
-            ("Could not register: {error}", "无法注册：{error}")
-        }
-        L10nKey::SettingsExplorerUnregisterFailed => {
-            ("Could not unregister: {error}", "无法取消注册：{error}")
-        }
-        L10nKey::SettingsExplorerWindows11Note => (
-            "On Windows 11, classic shell entries may appear under “Show more options”.",
-            "在 Windows 11 上，经典右键菜单项可能显示在“显示更多选项”中。",
         ),
         L10nKey::SettingsServer => ("Server", "服务器"),
         L10nKey::SettingsServerDesc => (
@@ -1812,11 +1765,11 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsSearchClaudeCodeKeywords => (
             "agent integration hooks install uninstall status rich session working waiting tab bar sidebar badge claude",
-            "Claude Code 智能体 集成 钩子 安装 卸载 状态 会话 claude agent integration hooks install",
+            "Claude Code agent 集成 hook 安装 卸载 状态 会话 claude agent integration hooks install",
         ),
         L10nKey::SettingsSearchCodexKeywords => (
             "agent integration hooks install openai codex",
-            "Codex 智能体 集成 钩子 安装 OpenAI codex agent integration hooks install",
+            "Codex agent 集成 hook 安装 OpenAI codex agent integration hooks install",
         ),
         L10nKey::SettingsSearchCommandLineToolKeywords => (
             "cli tty7 path shell command install symlink terminal iterm agent script",
@@ -1829,7 +1782,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsSearchCopilotCliKeywords => (
             "agent integration hooks install github copilot",
-            "Copilot CLI 智能体 集成 钩子 安装 GitHub copilot agent integration hooks install",
+            "Copilot CLI agent 集成 hook 安装 GitHub copilot agent integration hooks install",
         ),
         L10nKey::SettingsSearchCopyOnSelectKeywords => (
             "clipboard selection yank mouse",
@@ -1853,15 +1806,11 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsSearchDiffPreviewFromCountsKeywords => (
             "diff overlay preview sidebar counts git changes click branch lines",
-            "从侧栏计数打开差异预览 差异 预览 侧栏 git diff preview sidebar counts git changes",
+            "从侧栏计数打开 diff 预览 diff 预览 侧栏 git diff preview sidebar counts git changes",
         ),
         L10nKey::SettingsSearchDimInactivePanesKeywords => (
             "fade unfocused inactive split pane focus opacity highlight active dimming",
             "调暗 非活动窗格 淡化 未聚焦 分屏 高亮 active dimming pane focus",
-        ),
-        L10nKey::SettingsSearchExplorerContextMenuKeywords => (
-            "windows explorer context menu right click folder directory background shell menu register unregister open here",
-            "Windows 文件资源管理器 右键 菜单 文件夹 目录 背景 注册 取消注册 打开 explorer context menu right click folder directory background shell register unregister open here",
         ),
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => (
             "pane hover activate",
@@ -1885,7 +1834,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsSearchGrokBuildKeywords => (
             "agent integration hooks install xai grok build",
-            "Grok Build 智能体 集成 钩子 安装 xai grok build agent integration hooks install",
+            "Grok Build agent 集成 hook 安装 xai grok build agent integration hooks install",
         ),
         L10nKey::SettingsSearchHideMouseWhileTypingKeywords => (
             "cursor pointer autohide",
@@ -1938,7 +1887,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsSearchOpencodeKeywords => (
             "agent integration plugin install opencode",
-            "OpenCode 智能体 集成 插件 安装 opencode agent integration plugin install",
+            "OpenCode agent 集成 插件 安装 opencode agent integration plugin install",
         ),
         L10nKey::SettingsSearchOptionAsMetaKeywords => (
             "alt keyboard modifier escape macos option meta option acts as meta",
@@ -1946,7 +1895,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsSearchPiKeywords => (
             "agent integration extension install pi",
-            "Pi 智能体 集成 扩展 安装 pi agent integration extension install",
+            "Pi agent 集成 扩展 安装 pi agent integration extension install",
         ),
         L10nKey::SettingsSearchPortForwardingKeywords => (
             "ssh tunnel local remote dynamic socks forward rule",
@@ -1974,7 +1923,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsSearchScrollbackKeywords => (
             "history buffer lines scroll",
-            "回滚 历史 缓冲区 行数 scrollback history buffer lines",
+            "scrollback 回看 向上滚动 历史 缓冲区 行数 scrollback history buffer lines",
         ),
         L10nKey::SettingsSearchShowTrayIconKeywords => (
             "tray menu bar status item agent attention system icon",
@@ -2095,7 +2044,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::FileTreeContextOpen => ("Open", "打开"),
         L10nKey::FileTreeContextCdHere => ("cd Here", "cd 到此处"),
         L10nKey::FileTreeContextInsertPath => ("Insert Path in Terminal", "在终端中插入路径"),
-        L10nKey::FileTreeContextAttachAgent => ("Attach to Agent", "附加到智能体"),
+        L10nKey::FileTreeContextAttachAgent => ("Attach to Agent", "附加到 agent"),
         L10nKey::FileTreeContextNewFile => ("New File", "新建文件"),
         L10nKey::FileTreeContextNewFolder => ("New Folder", "新建文件夹"),
         L10nKey::FileTreeContextRename => ("Rename", "重命名"),
@@ -2160,7 +2109,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "进入 git 仓库后，此标签页会列出未提交的变更。",
         ),
         L10nKey::PanelNoChanges => ("No uncommitted changes.", "没有未提交的变更。"),
-        L10nKey::PanelNoChangesHint => ("The working tree is clean.", "工作树是干净的。"),
+        L10nKey::PanelNoChangesHint => ("The working tree is clean.", "worktree 是干净的。"),
         L10nKey::PanelSessionSubtitle => ("Session", "会话"),
         L10nKey::PanelProcessesSubtitle => ("Processes", "进程"),
         L10nKey::PanelPortsSubtitle => ("Ports", "端口"),
@@ -2169,7 +2118,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::PanelSsh => ("ssh", "ssh"),
         L10nKey::PanelBranch => ("branch", "分支"),
         L10nKey::PanelChangesRow => ("changes", "变更"),
-        L10nKey::PanelAgent => ("agent", "智能体"),
+        L10nKey::PanelAgent => ("agent", "agent"),
         L10nKey::PanelAgentIdle => ("idle", "空闲"),
         L10nKey::PanelAgentWorking => ("working", "进行中"),
         L10nKey::PanelAgentWaiting => ("waiting", "等待中"),
@@ -2196,14 +2145,14 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "{count} running shells will be ended and the layout forgotten.",
             "{count} 个正在运行的 shell 将会被终止，布局也将被清除。",
         ),
-        L10nKey::DiffReading => ("Reading diff…", "正在读取差异…"),
+        L10nKey::DiffReading => ("Reading diff…", "正在读取 diff…"),
         L10nKey::DiffNotARepo => ("Not a git repository", "不是 git 仓库"),
         L10nKey::DiffReadFailed => (
             "Couldn't read the working-tree diff — retrying on the next refresh.",
-            "无法读取工作树差异——下次刷新时重试。",
+            "无法读取 worktree diff——下次刷新时重试。",
         ),
-        L10nKey::DiffWorkingTreeClean => ("Working tree clean", "工作树干净"),
-        L10nKey::DiffCloseTooltip => ("Close Diff (Esc)", "关闭差异 (Esc)"),
+        L10nKey::DiffWorkingTreeClean => ("Working tree clean", "worktree 干净"),
+        L10nKey::DiffCloseTooltip => ("Close Diff (Esc)", "关闭 diff (Esc)"),
         L10nKey::DiffChangedFiles => ("{count} changed files", "{count} 个变更文件"),
         L10nKey::DiffUntrackedCount => (" · {count} untracked", " · {count} 个未跟踪文件"),
         L10nKey::DiffMoreFiles => (
@@ -2212,25 +2161,25 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::DiffOversizedNotice => (
             "This working tree is too large to render efficiently ({summary}). Every file is collapsed — expand individual files, or run `git diff` in the terminal.",
-            "此工作树太大，无法高效渲染（{summary}）。每个文件都已折叠——可展开单个文件，或在终端中运行 `git diff`。",
+            "此 worktree 太大，无法高效渲染（{summary}）。每个文件都已折叠——可展开单个文件，或在终端中运行 `git diff`。",
         ),
         L10nKey::DiffTruncatedPerFile => (
             "Diff truncated at {limit} lines — run `git diff` in the terminal for the rest.",
-            "差异在 {limit} 行处截断——在终端中运行 `git diff` 查看其余部分。",
+            "diff 在 {limit} 行处截断——在终端中运行 `git diff` 查看其余部分。",
         ),
         L10nKey::DiffTruncatedBudget => (
             "Body not loaded — this working tree is past tty7's diff budget. Run `git diff` in the terminal for this file.",
-            "内容未加载——此工作树已超出 tty7 的差异预算。在终端中运行 `git diff` 查看此文件。",
+            "内容未加载——此 worktree 已超出 tty7 的 diff 预算。在终端中运行 `git diff` 查看此文件。",
         ),
         L10nKey::DiffUntrackedHeader => ("Untracked files ({count})", "未跟踪文件 ({count})"),
         L10nKey::DiffMoreUntracked => (
             "… and {count} more — run `git status` in the terminal to see them.",
             "…还有 {count} 个——在终端中运行 `git status` 查看。",
         ),
-        L10nKey::DiffLines => ("{count} diff lines", "{count} 行差异"),
+        L10nKey::DiffLines => ("{count} diff lines", "{count} 行 diff"),
         L10nKey::DiffChangedLines => (
             "{total} changed lines, {loaded} diff rows loaded before {cap} cut the rest",
-            "{total} 行变更，在 {cap} 截断前已加载 {loaded} 行差异",
+            "{total} 行变更，在 {cap} 截断前已加载 {loaded} 行 diff",
         ),
         L10nKey::DiffBudgetAndCap => (
             "tty7's budget and the per-file cap",
@@ -2241,16 +2190,17 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::DiffUntrackedSummary => ("{count} untracked", "{count} 个未跟踪"),
         L10nKey::PendingConnecting => ("Connecting to {machine}…", "正在连接 {machine}…"),
         L10nKey::PendingUnreachable => ("Couldn't reach {machine}", "无法连接到 {machine}"),
-        L10nKey::WorktreePromptNeedsName => ("The worktree needs a name", "工作树需要一个名称"),
-        L10nKey::WorktreePromptTitle => ("New Worktree Tab", "新建工作树标签页"),
-        L10nKey::WorktreePromptName => ("Worktree Name", "工作树名称"),
+        L10nKey::WorktreePromptNeedsName => ("The worktree needs a name", "worktree 需要一个名称"),
+        L10nKey::WorktreePromptTitle => ("New Worktree Tab", "新建 worktree 标签页"),
+        L10nKey::WorktreePromptName => ("Worktree Name", "worktree 名称"),
         L10nKey::WorktreePromptBranch => ("New Branch", "新分支"),
         L10nKey::WorktreePromptBase => ("Start From", "起始分支"),
         L10nKey::WorktreePromptCreating => ("Creating…", "正在创建…"),
         L10nKey::WorktreePromptCreate => ("Create", "创建"),
-        L10nKey::AppNewWorktreeFailed => {
-            ("New worktree failed: {error}", "新建工作树失败：{error}")
-        }
+        L10nKey::AppNewWorktreeFailed => (
+            "New worktree failed: {error}",
+            "新建 worktree 失败：{error}",
+        ),
         L10nKey::HomeTimeJustNow => ("just now", "刚刚"),
         L10nKey::HomeTimeMinutesAgo => ("{count} min ago", "{count} 分钟前"),
         L10nKey::HomeTimeHourAgo => ("1 hour ago", "1 小时前"),
@@ -2449,7 +2399,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         }
         L10nKey::AppNoRunningCodingAgent => (
             "No running coding agent found — start one (claude, codex, …) in a pane first.",
-            "未找到运行中的编码智能体——请先在某个窗格中启动一个（claude、codex 等）。",
+            "未找到运行中的编码 agent——请先在某个窗格中启动一个（claude、codex 等）。",
         ),
         L10nKey::SwitcherThisComputer => ("This Computer", "本机"),
         L10nKey::SwitcherRestartingServer => ("Restarting tty7's server…", "正在重启 tty7 服务器…"),
@@ -2491,10 +2441,10 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::CmdGroupView => ("View", "视图"),
         L10nKey::CmdGroupTerminal => ("Terminal", "终端"),
         L10nKey::CmdGroupSsh => ("SSH", "SSH"),
-        L10nKey::CmdGroupAgents => ("Agents", "智能体"),
+        L10nKey::CmdGroupAgents => ("Agents", "Agents"),
         L10nKey::CmdGroupApplication => ("Application", "应用"),
         L10nKey::CmdNewTab => ("New Tab", "新标签页"),
-        L10nKey::CmdNewWorktreeTab => ("New Worktree Tab", "新建工作树标签页"),
+        L10nKey::CmdNewWorktreeTab => ("New Worktree Tab", "新建 worktree 标签页"),
         L10nKey::CmdNewWorktreeTabSubtitle => (
             "isolated checkout on a fresh branch",
             "在全新分支上独立检出",
@@ -2521,12 +2471,12 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::CmdCopySessionId => ("Copy Session ID", "复制会话 ID"),
         L10nKey::CmdCopySessionIdSubtitle => (
             "the coding agent's own session id",
-            "编码智能体自身的会话 ID",
+            "编码 agent 自身的会话 ID",
         ),
-        L10nKey::CmdForkSession => ("Fork Session", "派生会话"),
+        L10nKey::CmdForkSession => ("Fork Session", "Fork 会话"),
         L10nKey::CmdForkSessionSubtitle => (
             "branch this agent session into a new tab",
-            "将此智能体会话派生到新标签页",
+            "将此 agent 会话 fork 到新标签页",
         ),
         L10nKey::CmdMarkTabAsUnread => ("Mark Tab as Unread", "将标签页标记为未读"),
         L10nKey::CmdClosePaneTab => ("Close Pane / Tab", "关闭窗格/标签页"),
@@ -2562,7 +2512,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::CmdChangeTheme => ("Change Theme…", "更改主题…"),
         L10nKey::CmdResetFontSize => ("Reset Font Size", "重置字号"),
         L10nKey::CmdEnterFullScreen => ("Enter Full Screen", "进入全屏"),
-        L10nKey::CmdClearScrollback => ("Clear Scrollback", "清除回滚"),
+        L10nKey::CmdClearScrollback => ("Clear Scrollback", "清除 scrollback"),
         L10nKey::CmdFindInTerminal => ("Find in Terminal…", "在终端中查找…"),
         L10nKey::CmdFindNext => ("Find Next", "查找下一个"),
         L10nKey::CmdFindPrevious => ("Find Previous", "查找上一个"),
@@ -2576,18 +2526,18 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::CmdSshRemoteFiles => ("SSH: Remote Files", "SSH：远程文件"),
         L10nKey::CmdSshPortForwarding => ("SSH: Port Forwarding", "SSH：端口转发"),
         L10nKey::CmdSshConnectWithInput => ("SSH: Connect {input}", "SSH：连接 {input}"),
-        L10nKey::CmdAgentSendSelection => ("Agent: Send Selection", "智能体：发送选区"),
+        L10nKey::CmdAgentSendSelection => ("Agent: Send Selection", "Agent：发送选区"),
         L10nKey::CmdAgentSendSelectionSubtitle => (
             "selection → running coding agent",
-            "选区 → 运行中的编码智能体",
+            "选区 → 运行中的编码 agent",
         ),
         L10nKey::CmdAgentSendGitDiffForReview => (
             "Agent: Send Git Diff for Review",
-            "智能体：发送 Git diff 以供审查",
+            "Agent：发送 git diff 以供审查",
         ),
         L10nKey::CmdAgentSendGitDiffSubtitle => (
             "git diff → running coding agent",
-            "git diff → 运行中的编码智能体",
+            "git diff → 运行中的编码 agent",
         ),
         L10nKey::CmdSettings => ("Settings…", "设置…"),
         L10nKey::CmdKeyboardShortcuts => ("Keyboard Shortcuts", "键盘快捷键"),
@@ -2630,17 +2580,18 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::AppWorktreeRemoveDetailDirty => (
             "The closed tab's worktree at {path} has uncommitted changes.",
-            "位于 {path} 的已关闭标签页的工作树有未提交的变更。",
+            "位于 {path} 的已关闭标签页的 worktree 有未提交的变更。",
         ),
         L10nKey::AppWorktreeRemoveDetailClean => (
             "The closed tab's worktree at {path} is clean.",
-            "位于 {path} 的已关闭标签页的工作树是干净的。",
+            "位于 {path} 的已关闭标签页的 worktree 是干净的。",
         ),
-        L10nKey::AppWorktreeRemoveTitle => {
-            ("Remove worktree \"{branch}\"?", "删除工作树\"{branch}\"？")
-        }
+        L10nKey::AppWorktreeRemoveTitle => (
+            "Remove worktree \"{branch}\"?",
+            "删除 worktree\"{branch}\"？",
+        ),
         L10nKey::AppWorktreeDiscardAndRemove => ("Discard Changes & Remove", "放弃变更并删除"),
-        L10nKey::AppWorktreeRemove => ("Remove Worktree", "删除工作树"),
+        L10nKey::AppWorktreeRemove => ("Remove Worktree", "删除 worktree"),
         L10nKey::AppWorktreeKeep => ("Keep", "保留"),
         L10nKey::AppReopenTabFailed => (
             "Could not reopen the tab: no terminal started",
@@ -2659,32 +2610,33 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::AppSplitPaneFailed => {
             ("Could not split the pane: {error}", "无法拆分窗格：{error}")
         }
-        L10nKey::AppWorktreeRemoved => {
-            ("Removed worktree \"{branch}\"", "已删除工作树\"{branch}\"")
-        }
+        L10nKey::AppWorktreeRemoved => (
+            "Removed worktree \"{branch}\"",
+            "已删除 worktree\"{branch}\"",
+        ),
         L10nKey::AppWorktreeRemoveFailed => (
             "Worktree removal failed: {error}",
-            "删除工作树失败：{error}",
+            "删除 worktree 失败：{error}",
         ),
         L10nKey::AppForkStillConnecting => (
             "Could not fork: the pane is still connecting",
-            "无法派生：窗格仍在连接中",
+            "无法 fork：窗格仍在连接中",
         ),
         L10nKey::AppPaneNoCodingAgent => (
             "This pane isn't running a coding agent",
-            "此窗格未运行编码智能体",
+            "此窗格未运行编码 agent",
         ),
         L10nKey::AppForkNoCommand => (
             "tty7 has no fork command for {name}",
-            "tty7 没有用于 {name} 的派生命令",
+            "tty7 没有用于 {name} 的 fork 命令",
         ),
         L10nKey::AppForkLocalOnly => (
             "{name} sessions can only be forked from a local pane",
-            "{name} 会话只能从本地窗格派生",
+            "{name} 会话只能从本地窗格 fork",
         ),
         L10nKey::AppForkNoSessionId => (
             "tty7 hasn't seen a {name} session id in this pane — install its hooks in Settings → Agents",
-            "tty7 尚未在此窗格中看到 {name} 的会话 ID——请在设置 → 智能体中安装其钩子",
+            "tty7 尚未在此窗格中看到 {name} 的会话 ID——请在设置 → Agents 中安装其 hook",
         ),
         L10nKey::AppForkSessionIdNotToken => (
             "{name}'s session id isn't a plain token",
@@ -2692,7 +2644,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::AppForkMidTurn => (
             "{name} is mid-turn — the fork won't include the turn in flight",
-            "{name} 正在处理中——派生不会包含进行中的这一轮",
+            "{name} 正在处理中——fork 不会包含进行中的这一轮",
         ),
         L10nKey::AppTabNoWorkingDirectory => (
             "This tab has no working directory yet",
@@ -2733,7 +2685,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::AppAgentHooksOffline => (
             "Not connected to this machine, so its agent config can't be read or written. Open a workspace on it and come back.",
-            "未连接到这台机器，因此无法读取或写入其智能体配置。请在其上打开一个工作区后再回来。",
+            "未连接到这台机器，因此无法读取或写入其 agent 配置。请在其上打开一个工作区后再回来。",
         ),
         L10nKey::AppAgentHooksHomeDirUnresolved => {
             ("cannot resolve home directory", "无法解析主目录")
@@ -2796,13 +2748,13 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::AppMenuHelp => ("Help", "帮助"),
         L10nKey::AppMenuNewTab => ("New Tab", "新标签页"),
         L10nKey::AppMenuNewWorkspace => ("New Workspace", "新工作区"),
-        L10nKey::AppMenuNewWorktreeTab => ("New Worktree Tab", "新工作树标签页"),
+        L10nKey::AppMenuNewWorktreeTab => ("New Worktree Tab", "新 worktree 标签页"),
         L10nKey::AppMenuSplitRight => ("Split Right", "向右分屏"),
         L10nKey::AppMenuSplitDown => ("Split Down", "向下分屏"),
         L10nKey::AppMenuRenameTab => ("Rename Tab…", "重命名标签页…"),
         L10nKey::AppMenuCopyWorkingDirectory => ("Copy Working Directory", "复制工作目录"),
         L10nKey::AppMenuCopySessionId => ("Copy Session ID", "复制会话 ID"),
-        L10nKey::AppMenuForkSession => ("Fork Session", "派生会话"),
+        L10nKey::AppMenuForkSession => ("Fork Session", "Fork 会话"),
         L10nKey::AppMenuClosePaneTab => ("Close Pane / Tab", "关闭窗格 / 标签页"),
         L10nKey::AppMenuCloseOtherTabs => ("Close Other Tabs", "关闭其他标签页"),
         L10nKey::AppMenuCloseTabsRight => ("Close Tabs to the Right", "关闭右侧标签页"),
@@ -2830,7 +2782,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::AppMenuFocusNextPane => ("Focus Next Pane", "聚焦下一个窗格"),
         L10nKey::AppMenuFocusPreviousPane => ("Focus Previous Pane", "聚焦上一个窗格"),
         L10nKey::AppMenuZoomPane => ("Zoom Pane", "缩放窗格"),
-        L10nKey::AppMenuClearScrollback => ("Clear Scrollback", "清除回滚"),
+        L10nKey::AppMenuClearScrollback => ("Clear Scrollback", "清除 scrollback"),
         L10nKey::AppMenuEnterFullscreen => ("Enter Full Screen", "进入全屏"),
         L10nKey::AppMenuDocumentation => ("tty7 Documentation", "tty7 文档"),
         L10nKey::AppMenuKeyboardShortcuts => ("Keyboard Shortcuts", "键盘快捷键"),
@@ -2883,15 +2835,15 @@ fn translate_variant(locale: Locale, key: L10nKey, branch: &'static str) -> &'st
         // --- Offline machines ---
         (SettingsOfflineMachines, "zero") => (
             "0 more saved machines are not connected — open a workspace on one to install its hooks there.",
-            "还有 0 台已保存的机器未连接——在其中一台上打开工作区，即可在那台机器上安装钩子。",
+            "还有 0 台已保存的机器未连接——在其中一台上打开工作区，即可在那台机器上安装 hook。",
         ),
         (SettingsOfflineMachines, "one") => (
             "1 more saved machine is not connected — open a workspace on it to install its hooks there.",
-            "还有 1 台已保存的机器未连接——在那台机器上打开工作区，即可在那里安装钩子。",
+            "还有 1 台已保存的机器未连接——在那台机器上打开工作区，即可在那里安装 hook。",
         ),
         (SettingsOfflineMachines, "other") => (
             "{count} more saved machines are not connected — open a workspace on one to install its hooks there.",
-            "还有 {count} 台已保存的机器未连接——在其中一台上打开工作区，即可在那台机器上安装钩子。",
+            "还有 {count} 台已保存的机器未连接——在其中一台上打开工作区，即可在那台机器上安装 hook。",
         ),
 
         // --- Panel untracked files ---
@@ -3341,21 +3293,6 @@ mod tests {
             L10nKey::SettingsCommandLine,
             L10nKey::SettingsCommandLineDesc,
             L10nKey::SettingsInstallCliOnPath,
-            L10nKey::SettingsExplorerContextMenu,
-            L10nKey::SettingsExplorerContextMenuDesc,
-            L10nKey::SettingsExplorerNotRegistered,
-            L10nKey::SettingsExplorerRegistered,
-            L10nKey::SettingsExplorerNeedsUpdate,
-            L10nKey::SettingsExplorerUnavailable,
-            L10nKey::SettingsExplorerStatusUnavailable,
-            L10nKey::SettingsExplorerRegister,
-            L10nKey::SettingsExplorerUpdate,
-            L10nKey::SettingsExplorerUnregister,
-            L10nKey::SettingsExplorerRegisteredNote,
-            L10nKey::SettingsExplorerUnregisteredNote,
-            L10nKey::SettingsExplorerRegisterFailed,
-            L10nKey::SettingsExplorerUnregisterFailed,
-            L10nKey::SettingsExplorerWindows11Note,
             L10nKey::SettingsServer,
             L10nKey::SettingsServerDesc,
             L10nKey::SettingsRestartServer,
@@ -3383,7 +3320,6 @@ mod tests {
             L10nKey::SettingsSearchDetectUrlsKeywords,
             L10nKey::SettingsSearchDiffPreviewFromCountsKeywords,
             L10nKey::SettingsSearchDimInactivePanesKeywords,
-            L10nKey::SettingsSearchExplorerContextMenuKeywords,
             L10nKey::SettingsSearchFocusFollowsMouseKeywords,
             L10nKey::SettingsSearchFontFamilyKeywords,
             L10nKey::SettingsSearchFontLigaturesKeywords,
@@ -3910,44 +3846,6 @@ mod tests {
         assert_eq!(current_locale(), Locale::En);
         set_locale("ko");
         assert_eq!(current_locale(), Locale::En);
-    }
-
-    #[test]
-    fn explorer_settings_are_translated_with_error_details() {
-        let keys = [
-            L10nKey::SettingsExplorerContextMenu,
-            L10nKey::SettingsExplorerContextMenuDesc,
-            L10nKey::SettingsExplorerNotRegistered,
-            L10nKey::SettingsExplorerRegistered,
-            L10nKey::SettingsExplorerNeedsUpdate,
-            L10nKey::SettingsExplorerUnavailable,
-            L10nKey::SettingsExplorerStatusUnavailable,
-            L10nKey::SettingsExplorerRegister,
-            L10nKey::SettingsExplorerUpdate,
-            L10nKey::SettingsExplorerUnregister,
-            L10nKey::SettingsExplorerRegisteredNote,
-            L10nKey::SettingsExplorerUnregisteredNote,
-            L10nKey::SettingsExplorerRegisterFailed,
-            L10nKey::SettingsExplorerUnregisterFailed,
-            L10nKey::SettingsExplorerWindows11Note,
-            L10nKey::SettingsSearchExplorerContextMenuKeywords,
-        ];
-        for key in keys {
-            assert_ne!(
-                translate(Locale::En, key),
-                translate(Locale::ZhHans, key),
-                "Simplified Chinese should not fall back to English for {key:?}"
-            );
-        }
-
-        assert_eq!(
-            apply_template(
-                translate(Locale::ZhHans, L10nKey::SettingsExplorerRegisterFailed),
-                &[("error", "access denied")],
-                None,
-            ),
-            "无法注册：access denied"
-        );
     }
 
     #[test]
