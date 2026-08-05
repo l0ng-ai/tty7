@@ -9656,6 +9656,7 @@ version = "26.8.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "async_zip",
  "core-foundation 0.10.0",
  "gpui",
  "gpui-component",
