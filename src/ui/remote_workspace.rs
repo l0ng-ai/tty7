@@ -291,6 +291,8 @@ impl Tty7App {
 
     pub(crate) fn connect_to_host(&mut self, choice: HostChoice, cx: &mut Context<Self>) {
         remote_connect::register(cx);
+        // Whatever went wrong last time is about to be answered by this attempt.
+        self.remote_host_errors.remove(&choice.target.to_string());
         let header = match remote_connect::control_route(&choice.target, cx) {
             Ok(header) => header,
             Err(e) => {
@@ -643,13 +645,13 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(target) = target {
+        // The grouped report is only visible while the switcher is open. Anywhere
+        // else — the window menu's "restart server", or a mismatch raised mid-connect
+        // — the modal is the only thing the user would see, so keep it.
+        if let (Some(target), Some(switcher)) = (target, self.switcher.as_mut()) {
             let key = target.to_string();
-            self.remote_host_errors
-                .insert(key.clone(), error.to_string());
-            if let Some(switcher) = self.switcher.as_mut() {
-                switcher.expand(&key);
-            }
+            switcher.expand(&key);
+            self.remote_host_errors.insert(key, error.to_string());
             cx.notify();
             return;
         }

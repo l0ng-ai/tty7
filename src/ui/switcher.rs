@@ -620,10 +620,10 @@ impl Tty7App {
         if let Some(error) = group.error.as_ref().filter(|_| group.installing.is_none()) {
             let retry = GroupRef::of(group);
             let replace = retry.clone();
-            let group_key = group.key.clone();
-            let retry_key = group_key.clone();
-            let replace_key = group_key.clone();
-            let dismiss_key = group_key;
+            let retry_key = group.key.clone();
+            let replace_key = group.key.clone();
+            let dismiss_key = group.key.clone();
+            let dismiss_target = group.target.clone();
             let theme = cx.theme();
             block =
                 block.child(
@@ -704,7 +704,14 @@ impl Tty7App {
                                     .xsmall()
                                     .on_click(cx.listener(move |this, _, _window, cx| {
                                         this.remote_host_errors.remove(&dismiss_key);
-                                        if this.connect.is_some() {
+                                        // The other half of this block can come from a
+                                        // failed connect. Retire that too, but only when
+                                        // it is this host's failure — a connect to
+                                        // anywhere else is still in flight.
+                                        if let Some(ConnectFlow::Failed { choice, .. }) =
+                                            &this.connect
+                                            && Some(&choice.target) == dismiss_target.as_ref()
+                                        {
                                             this.connect = None;
                                         }
                                         cx.notify();
