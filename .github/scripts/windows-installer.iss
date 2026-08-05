@@ -2,8 +2,9 @@
 ; windows-latest runners). Compiled by bundle-windows.ps1, which stages the
 ; payload and passes every path in via /D defines:
 ;
-;   /DAppVersion=<semver>   version parsed from Cargo.toml
-;   /DStageDir=<abs path>   staged payload (tty7-app.exe, completions\, LICENSE.txt, README.md)
+;   /DAppVersion=<semver>   display version parsed from Cargo.toml
+;   /DVersionInfoVersion=<numeric version> PE-compatible file version
+;   /DStageDir=<abs path>   staged payload (app, CLI, updater, marker, resources)
 ;   /DOutputDir=<abs path>  where the setup exe is written
 ;   /DOutputName=<basename> setup exe filename, without ".exe"
 ;
@@ -15,6 +16,9 @@
 #ifndef AppVersion
   #error Missing /DAppVersion — this script is meant to be compiled via bundle-windows.ps1
 #endif
+#ifndef VersionInfoVersion
+  #error Missing /DVersionInfoVersion — this script is meant to be compiled via bundle-windows.ps1
+#endif
 
 [Setup]
 ; Never change AppId: it is how Windows ties upgrades + the uninstall entry
@@ -22,6 +26,7 @@
 AppId={{9A3F6C1E-4B7D-4E2A-8C5F-D01B92E64A37}
 AppName=tty7
 AppVersion={#AppVersion}
+VersionInfoVersion={#VersionInfoVersion}
 AppPublisher=tty7 contributors
 AppPublisherURL=https://github.com/l0ng-ai/tty7
 AppSupportURL=https://github.com/l0ng-ai/tty7/issues
@@ -76,6 +81,10 @@ Source: "{#StageDir}\tty7-app.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; installer to do it, and one code path serving both is one behaviour to debug.
 ; The uninstaller takes that entry back out; see RemoveAppDirFromUserPath below.
 Source: "{#StageDir}\tty7.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\tty7-updater.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; This installer-only marker is the authority for enabling automatic Windows
+; updates. The portable archive is created before the marker enters the stage.
+Source: "{#StageDir}\.tty7-inno-install"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#StageDir}\completions\*"; DestDir: "{app}\completions"; Flags: ignoreversion recursesubdirs
 Source: "{#StageDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion

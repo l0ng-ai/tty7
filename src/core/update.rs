@@ -17,12 +17,56 @@ pub const RELEASES_URL: &str = "https://github.com/l0ng-ai/tty7/releases/latest"
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[cfg(target_os = "windows")]
+const WINDOWS_INNO_INSTALL_MARKER: &str = ".tty7-inno-install";
+#[cfg(target_os = "windows")]
+const WINDOWS_PORTABLE_MARKER: &str = ".tty7-portable";
+#[cfg(target_os = "windows")]
+const WINDOWS_PORTABLE_MARKER_CONTENT: &[u8] = b"portable-v1";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AvailableUpdate {
     pub version: String,
     pub installable: bool,
-    pub install_hint: Option<String>,
+    pub install_hint: Option<UpdateInstallHint>,
     asset: Option<ReleaseAsset>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateInstallHint {
+    #[cfg(target_os = "macos")]
+    UnsupportedMacos,
+    #[cfg(target_os = "linux")]
+    UnsupportedLinux,
+    #[cfg(target_os = "windows")]
+    UnsupportedWindows,
+    #[cfg(target_os = "windows")]
+    WindowsAllUsersInstall,
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    UnsupportedPlatform,
+    MissingPackage(String),
+    MissingChecksums,
+}
+
+impl UpdateInstallHint {
+    fn english(&self) -> String {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::UnsupportedMacos => "This copy is not running from a writable tty7.app bundle, so replacing it would be unsafe. Move tty7 to Applications or another writable folder, or open the release page to install the update.".to_string(),
+            #[cfg(target_os = "linux")]
+            Self::UnsupportedLinux => "The first in-app updater supports packaged macOS app bundles. Use the release page or your package manager to update this Linux installation.".to_string(),
+            #[cfg(target_os = "windows")]
+            Self::UnsupportedWindows => "Automatic Windows updates are available for recognized Inno Setup and portable ZIP installations. This copy is missing a valid installation marker, updater, or writable portable directory, so open the release page to update it manually.".to_string(),
+            #[cfg(target_os = "windows")]
+            Self::WindowsAllUsersInstall => "tty7 is installed for all users, which needs administrator rights to replace. tty7 will not raise an elevation prompt on its own behalf, so open the release page and run the installer yourself to update it.".to_string(),
+            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+            Self::UnsupportedPlatform => "Automatic installation is not available on this platform. Open the release page.".to_string(),
+            Self::MissingPackage(name) => format!(
+                "The release has no {name} package for this installation. Open the release page to choose another package."
+            ),
+            Self::MissingChecksums => "The release has no checksums.txt, so tty7 refuses to install it automatically.".to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -33,7 +77,14 @@ pub enum UpdatePhase {
     UpToDate,
     Downloading,
     Installing,
-    Failed(String),
+    Failed(UpdateFailure),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateFailure {
+    Check(String),
+    Prepare(String),
+    Launch(String),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -88,12 +139,12 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
             Err(e) => {
                 log::debug!("update check skipped: {e:#}");
                 if report_failure {
-                    let message = format!("Could not check for updates: {e:#}");
+                    let detail = format!("{e:#}");
                     cx.update(|cx| {
                         set_status(
                             UpdateStatus {
                                 available: previous_available,
-                                phase: UpdatePhase::Failed(message),
+                                phase: UpdatePhase::Failed(UpdateFailure::Check(detail)),
                             },
                             cx,
                         )
@@ -185,9 +236,9 @@ async fn wait_for_window(cx: &mut AsyncApp) -> Option<AnyWindowHandle> {
 }
 
 fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
+    let install_hint = update.install_hint.as_ref().map(UpdateInstallHint::english);
     let detail = if update.installable {
-        let note = update
-            .install_hint
+        let note = install_hint
             .as_deref()
             .map(|note| format!(" {note}"))
             .unwrap_or_default();
@@ -202,8 +253,7 @@ fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
             "tty7 {} is available — you're on {}. {}",
             update.version,
             env!("CARGO_PKG_VERSION"),
-            update
-                .install_hint
+            install_hint
                 .as_deref()
                 .unwrap_or("This installation cannot update itself.")
         )
@@ -276,13 +326,13 @@ fn install(update: AvailableUpdate, cx: &mut App) {
         let prepared = match task.await {
             Ok(prepared) => prepared,
             Err(error) => {
-                let message = format!("Update failed: {error:#}");
-                log::error!("{message}");
+                let detail = format!("{error:#}");
+                log::error!("update failed: {detail}");
                 cx.update(|cx| {
                     set_status(
                         UpdateStatus {
                             available: Some(update),
-                            phase: UpdatePhase::Failed(message),
+                            phase: UpdatePhase::Failed(UpdateFailure::Prepare(detail)),
                         },
                         cx,
                     )
@@ -305,13 +355,13 @@ fn install(update: AvailableUpdate, cx: &mut App) {
                 let _ = cx.update(|cx| cx.quit());
             }
             Err(error) => {
-                let message = format!("Could not start the installer: {error:#}");
-                log::error!("{message}");
+                let detail = format!("{error:#}");
+                log::error!("could not start the installer: {detail}");
                 cx.update(|cx| {
                     set_status(
                         UpdateStatus {
                             available: Some(update),
-                            phase: UpdatePhase::Failed(message),
+                            phase: UpdatePhase::Failed(UpdateFailure::Launch(detail)),
                         },
                         cx,
                     )
@@ -392,6 +442,9 @@ async fn fetch_latest_release() -> Result<LatestRelease> {
     let client = ReqwestClient::user_agent(concat!("tty7/", env!("CARGO_PKG_VERSION")))
         .context("building HTTP client")?;
 
+    // `/releases/latest` intentionally excludes prereleases, so Nightly builds
+    // are offered the Stable release that supersedes them and no rolling
+    // prerelease can ever become an update source.
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let request = http_client::Request::get(&url)
         .header("Accept", "application/vnd.github+json")
@@ -429,36 +482,36 @@ struct ReleaseAsset {
 
 struct AssetSelection {
     asset: Option<ReleaseAsset>,
-    reason: Option<String>,
+    reason: Option<UpdateInstallHint>,
 }
 
 fn select_release_asset(version: &str, assets: &[GitHubAsset]) -> AssetSelection {
     select_release_asset_for(package_for_current_install(version), assets)
 }
 
-fn select_release_asset_for(package: Option<String>, assets: &[GitHubAsset]) -> AssetSelection {
-    let Some(name) = package else {
-        return AssetSelection {
-            asset: None,
-            reason: Some(unsupported_install_reason()),
-        };
+fn select_release_asset_for(
+    package: Result<String, UpdateInstallHint>,
+    assets: &[GitHubAsset],
+) -> AssetSelection {
+    let name = match package {
+        Ok(name) => name,
+        Err(reason) => {
+            return AssetSelection {
+                asset: None,
+                reason: Some(reason),
+            };
+        }
     };
     let Some(asset) = assets.iter().find(|asset| asset.name == name) else {
         return AssetSelection {
             asset: None,
-            reason: Some(format!(
-                "The release has no {name} package for this installation. Open the release page \
-                 to choose another package."
-            )),
+            reason: Some(UpdateInstallHint::MissingPackage(name)),
         };
     };
     let Some(checksums) = assets.iter().find(|asset| asset.name == "checksums.txt") else {
         return AssetSelection {
             asset: None,
-            reason: Some(
-                "The release has no checksums.txt, so tty7 refuses to install it automatically."
-                    .to_string(),
-            ),
+            reason: Some(UpdateInstallHint::MissingChecksums),
         };
     };
     AssetSelection {
@@ -471,48 +524,48 @@ fn select_release_asset_for(package: Option<String>, assets: &[GitHubAsset]) -> 
     }
 }
 
-fn package_for_current_install(version: &str) -> Option<String> {
+/// The release package this installation can replace itself with, or the
+/// reason it cannot.
+fn package_for_current_install(version: &str) -> Result<String, UpdateInstallHint> {
     #[cfg(target_os = "macos")]
     {
-        let app = current_macos_app_bundle()?;
+        let Some(app) = current_macos_app_bundle() else {
+            return Err(UpdateInstallHint::UnsupportedMacos);
+        };
         if !is_macos_update_writable(&app) || bundled_updater().is_none() {
-            return None;
+            return Err(UpdateInstallHint::UnsupportedMacos);
         }
         let arch = if cfg!(target_arch = "aarch64") {
             "arm64"
         } else if cfg!(target_arch = "x86_64") {
             "x86_64"
         } else {
-            return None;
+            return Err(UpdateInstallHint::UnsupportedMacos);
         };
-        return Some(format!("tty7-{version}-macos-{arch}.zip"));
-    }
-    #[allow(unreachable_code)]
-    None
-}
-
-fn unsupported_install_reason() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        return "This copy is not running from a writable tty7.app bundle, so replacing it would be \
-                unsafe. Move tty7 to Applications or another writable folder, or open the release \
-                page to install the update."
-            .to_string();
+        return Ok(format!("tty7-{version}-macos-{arch}.zip"));
     }
     #[cfg(target_os = "linux")]
     {
-        return "The first in-app updater supports packaged macOS app bundles. Use the release page \
-                or your package manager to update this Linux installation."
-            .to_string();
+        let _ = version;
+        return Err(UpdateInstallHint::UnsupportedLinux);
     }
     #[cfg(target_os = "windows")]
     {
-        return "The first in-app updater supports packaged macOS app bundles. Open the release page \
-                to update this Windows installation."
-            .to_string();
+        let Some(layout) = current_windows_update_layout() else {
+            return Err(UpdateInstallHint::UnsupportedWindows);
+        };
+        windows_layout_is_updatable(&layout)?;
+        if !layout.directory().join("tty7-updater.exe").is_file() {
+            return Err(UpdateInstallHint::UnsupportedWindows);
+        }
+        return windows_package_for_layout(version, &layout)
+            .ok_or(UpdateInstallHint::UnsupportedWindows);
     }
-    #[allow(unreachable_code)]
-    "Automatic installation is not available on this platform. Open the release page.".to_string()
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = version;
+        Err(UpdateInstallHint::UnsupportedPlatform)
+    }
 }
 
 fn prepare_update(version: &str, asset: &ReleaseAsset) -> Result<PreparedUpdate> {
@@ -525,7 +578,16 @@ fn prepare_update(version: &str, asset: &ReleaseAsset) -> Result<PreparedUpdate>
         .get(&asset.url)
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("downloading {}", asset.name))?;
-    prepare_macos_update(version, &asset.name, &archive, &checksums)
+    #[cfg(target_os = "macos")]
+    {
+        return prepare_macos_update(version, &asset.name, &archive, &checksums);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return prepare_windows_update(version, &asset.name, &archive, &checksums);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    anyhow::bail!("automatic installation is not supported on this platform")
 }
 
 #[derive(Debug)]
@@ -544,7 +606,7 @@ impl PreparedUpdate {
         if let Some(config_dir) = self.config_dir {
             command.env("TTY7_CONFIG_DIR", config_dir);
         }
-        command
+        tty7_core::core::proc::hide_console(&mut command)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -557,11 +619,20 @@ impl PreparedUpdate {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn update_staging_dir(parent: &Path) -> Result<tempfile::TempDir> {
     tempfile::Builder::new()
         .prefix(".tty7-update-")
         .tempdir_in(parent)
         .context("creating update staging directory")
+}
+
+#[cfg(target_os = "windows")]
+fn system_update_staging_dir() -> Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix("tty7-update-")
+        .tempdir()
+        .context("creating the Windows update staging directory")
 }
 
 fn write_staged_asset(dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf> {
@@ -592,8 +663,8 @@ fn prepare_macos_update(
         [
             PathBuf::from("verify"),
             current.clone(),
-            archive,
-            checksums,
+            archive.clone(),
+            checksums.clone(),
             PathBuf::from(asset_name),
             dir.clone(),
             PathBuf::from(version),
@@ -611,6 +682,9 @@ fn prepare_macos_update(
             PathBuf::from("install"),
             std::process::id().to_string().into(),
             current,
+            archive,
+            checksums,
+            PathBuf::from(asset_name),
             dir.clone(),
             PathBuf::from(version),
             log,
@@ -620,14 +694,88 @@ fn prepare_macos_update(
     })
 }
 
-#[cfg(not(target_os = "macos"))]
-fn prepare_macos_update(
-    _version: &str,
-    _asset_name: &str,
-    _archive: &[u8],
-    _checksums: &[u8],
+#[cfg(target_os = "windows")]
+fn prepare_windows_update(
+    version: &str,
+    asset_name: &str,
+    package: &[u8],
+    checksums: &[u8],
 ) -> Result<PreparedUpdate> {
-    anyhow::bail!("the first in-app updater only supports macOS")
+    let layout = current_windows_update_layout()
+        .context("tty7 is not running from a recognized Windows installation")?;
+    // Re-checked here rather than trusting the check that produced the offer:
+    // an installation can be relocated, or its privileges changed, between the
+    // update check and the user pressing the button.
+    if let Err(hint) = windows_layout_is_updatable(&layout) {
+        anyhow::bail!("{}", hint.english());
+    }
+    let install_dir = layout.directory().to_path_buf();
+    let bundled = bundled_updater().context("tty7-updater.exe is not bundled with this app")?;
+    let staging = system_update_staging_dir()?;
+    let dir = staging.path().to_path_buf();
+    let package = write_staged_asset(&dir, asset_name, package)?;
+    let checksums = write_staged_asset(&dir, "checksums.txt", checksums)?;
+
+    // Verification runs before the GUI commits to quitting. Both Windows
+    // update modes repeat their archive checks after the parent exits.
+    let install_command = match &layout {
+        WindowsUpdateLayout::Inno(_) => {
+            run_updater(
+                &bundled,
+                [
+                    PathBuf::from("verify"),
+                    package.clone(),
+                    checksums.clone(),
+                    PathBuf::from(asset_name),
+                    PathBuf::from(version),
+                ],
+            )?;
+            "install"
+        }
+        WindowsUpdateLayout::Portable(_) => {
+            run_updater(
+                &bundled,
+                [
+                    PathBuf::from("verify-portable"),
+                    package.clone(),
+                    checksums.clone(),
+                    PathBuf::from(asset_name),
+                    PathBuf::from(version),
+                    dir.clone(),
+                ],
+            )?;
+            "install-portable"
+        }
+    };
+
+    // Windows locks a running executable. Run a private copy from the staging
+    // directory so Inno can replace the bundled helper in the installation.
+    let updater = dir.join("tty7-updater.exe");
+    std::fs::copy(&bundled, &updater)
+        .with_context(|| format!("copying the Windows updater to {}", updater.display()))?;
+
+    let log =
+        crate::core::config::config_path("update.log").unwrap_or_else(|| dir.join("update.log"));
+    if let Some(parent) = log.parent() {
+        std::fs::create_dir_all(parent).context("creating the update log directory")?;
+    }
+    let dir = staging.keep();
+    Ok(PreparedUpdate {
+        updater,
+        args: vec![
+            PathBuf::from(install_command),
+            std::process::id().to_string().into(),
+            package,
+            checksums,
+            PathBuf::from(asset_name),
+            install_dir,
+            PathBuf::from(version),
+            log,
+            dir.clone(),
+        ],
+        config_dir: crate::core::config::config_dir_path(),
+        stage: dir,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -648,14 +796,242 @@ fn bundled_updater() -> Option<PathBuf> {
     updater.is_file().then_some(updater)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn bundled_updater() -> Option<PathBuf> {
+    let updater = current_windows_update_layout()?
+        .directory()
+        .join("tty7-updater.exe");
+    updater.is_file().then_some(updater)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn bundled_updater() -> Option<PathBuf> {
     None
 }
 
-#[cfg(not(target_os = "macos"))]
-fn current_macos_app_bundle() -> Option<PathBuf> {
-    None
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum WindowsUpdateLayout {
+    Inno(PathBuf),
+    Portable(PathBuf),
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsUpdateLayout {
+    fn directory(&self) -> &Path {
+        match self {
+            Self::Inno(directory) | Self::Portable(directory) => directory,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_package_for_layout(version: &str, layout: &WindowsUpdateLayout) -> Option<String> {
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else {
+        return None;
+    };
+    Some(match layout {
+        WindowsUpdateLayout::Inno(_) => format!("tty7-{version}-windows-{arch}-setup.exe"),
+        WindowsUpdateLayout::Portable(_) => format!("tty7-{version}-windows-{arch}.zip"),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn current_windows_update_layout() -> Option<WindowsUpdateLayout> {
+    let executable = std::env::current_exe().ok()?;
+    windows_update_layout_for(&executable)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_update_layout_for(executable: &Path) -> Option<WindowsUpdateLayout> {
+    let directory = executable.parent()?;
+    if directory.join(WINDOWS_INNO_INSTALL_MARKER).is_file() {
+        return Some(WindowsUpdateLayout::Inno(directory.to_path_buf()));
+    }
+    let marker = std::fs::read(directory.join(WINDOWS_PORTABLE_MARKER)).ok()?;
+    (marker == WINDOWS_PORTABLE_MARKER_CONTENT)
+        .then(|| WindowsUpdateLayout::Portable(directory.to_path_buf()))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_directory_is_writable(directory: &Path) -> bool {
+    tempfile::Builder::new()
+        .prefix(".tty7-update-write-test-")
+        .tempfile_in(directory)
+        .is_ok()
+}
+
+/// Rejects the Windows installation layouts that cannot be replaced by this
+/// process, before anything is downloaded.
+#[cfg(target_os = "windows")]
+fn windows_layout_is_updatable(layout: &WindowsUpdateLayout) -> Result<(), UpdateInstallHint> {
+    match layout {
+        WindowsUpdateLayout::Inno(directory) => {
+            if windows_inno_needs_elevation(directory) {
+                return Err(UpdateInstallHint::WindowsAllUsersInstall);
+            }
+            Ok(())
+        }
+        WindowsUpdateLayout::Portable(directory) => {
+            if !windows_directory_is_writable(directory) {
+                return Err(UpdateInstallHint::UnsupportedWindows);
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_inno_needs_elevation(install_dir: &Path) -> bool {
+    windows_inno_needs_elevation_for(
+        windows_all_users_install_path().as_deref(),
+        install_dir,
+        windows_directory_is_writable(install_dir),
+    )
+}
+
+/// Whether replacing this Inno installation would need administrator rights.
+///
+/// The updater runs the release Setup silently, as the signed-in user, from a
+/// private staging directory. That is only correct for a per-user install.
+/// Two independent signals, because either alone misreads a real machine:
+///
+///   * An all-users install records its state under `HKLM`. A silent Setup
+///     launched without elevation resolves `{autopf}` to
+///     `%LocalAppData%\Programs`, never sees that state, and installs a
+///     *second* copy while the real installation goes untouched — or Inno
+///     re-launches itself elevated and the user gets a bare UAC prompt for an
+///     unsigned executable in `%TEMP%`, seconds after the GUI vanished.
+///     Neither outcome is one tty7 should produce on its own initiative.
+///   * A directory this process cannot write is one Setup cannot write
+///     either, whatever the registry says. This also catches an installation
+///     whose uninstall entry was pruned, relocated, or written by a different
+///     user account.
+///
+/// Pure so the decision is unit-tested without touching the registry or
+/// `C:\Program Files`.
+#[cfg(target_os = "windows")]
+fn windows_inno_needs_elevation_for(
+    all_users_app_path: Option<&Path>,
+    install_dir: &Path,
+    writable: bool,
+) -> bool {
+    if all_users_app_path.is_some_and(|path| same_windows_directory(path, install_dir)) {
+        return true;
+    }
+    !writable
+}
+
+/// Compares two Windows directory paths the way the filesystem does: without
+/// regard to case, and without letting a trailing separator make
+/// `C:\Program Files\tty7\` a different place from `C:\Program Files\tty7`.
+/// Deliberately textual — `canonicalize` would hit the disk and answers
+/// `\\?\`-prefixed, which is not what the registry stores.
+#[cfg(target_os = "windows")]
+fn same_windows_directory(left: &Path, right: &Path) -> bool {
+    fn normalize(path: &Path) -> Option<String> {
+        let text = path.to_str()?.trim_end_matches(['\\', '/']);
+        (!text.is_empty()).then(|| text.to_lowercase())
+    }
+    match (normalize(left), normalize(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// The `{app}` directory of an all-users tty7 installation, read from the
+/// machine hive. `AppId` is frozen in `windows-installer.iss` for exactly this
+/// kind of lookup, and Inno stamps the resolved install directory into
+/// `Inno Setup: App Path`. Absent for a per-user install, whose uninstall
+/// entry lives under `HKCU` instead.
+#[cfg(target_os = "windows")]
+fn windows_all_users_install_path() -> Option<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
+    };
+
+    const UNINSTALL_KEY: &str = concat!(
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\",
+        r"{9A3F6C1E-4B7D-4E2A-8C5F-D01B92E64A37}_is1"
+    );
+    const APP_PATH_VALUE: &str = "Inno Setup: App Path";
+
+    struct RegistryKey(HKEY);
+
+    impl Drop for RegistryKey {
+        fn drop(&mut self) {
+            // SAFETY: only constructed from a successful `RegOpenKeyExW`, and
+            // owns exactly one handle.
+            unsafe {
+                RegCloseKey(self.0);
+            }
+        }
+    }
+
+    fn wide(value: &str) -> Vec<u16> {
+        std::ffi::OsStr::new(value)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    let path = wide(UNINSTALL_KEY);
+    let mut key: HKEY = std::ptr::null_mut();
+    // SAFETY: `path` is NUL-terminated and live for the call; `key` is a valid
+    // out-parameter, wrapped only when the call reports success. The tty7
+    // installer is x64-only, so the native 64-bit view is the only one its
+    // uninstall entry can appear in.
+    let code = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.as_ptr(), 0, KEY_READ, &mut key) };
+    if code != ERROR_SUCCESS {
+        return None;
+    }
+    let key = RegistryKey(key);
+
+    let name = wide(APP_PATH_VALUE);
+    let mut kind = 0u32;
+    let mut bytes = 0u32;
+    // SAFETY: the key is live, the value name is NUL-terminated, and the
+    // type/size out-parameters are valid; a null data pointer asks for the
+    // size only.
+    let code = unsafe {
+        RegQueryValueExW(
+            key.0,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut kind,
+            std::ptr::null_mut(),
+            &mut bytes,
+        )
+    };
+    if code != ERROR_SUCCESS || kind != REG_SZ || bytes == 0 || !bytes.is_multiple_of(2) {
+        return None;
+    }
+
+    let mut value = vec![0u16; bytes as usize / 2];
+    // SAFETY: `value` is sized from the query above and stays live; Win32 is
+    // told its capacity in bytes through `bytes`.
+    let code = unsafe {
+        RegQueryValueExW(
+            key.0,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut kind,
+            value.as_mut_ptr().cast(),
+            &mut bytes,
+        )
+    };
+    if code != ERROR_SUCCESS {
+        return None;
+    }
+    value.truncate(bytes as usize / 2);
+    while value.last() == Some(&0) {
+        value.pop();
+    }
+    (!value.is_empty()).then(|| PathBuf::from(std::ffi::OsString::from_wide(&value)))
 }
 
 #[cfg(target_os = "macos")]
@@ -667,8 +1043,9 @@ fn can_stage_replacement_in(dir: &Path) -> bool {
 }
 
 fn run_updater(updater: &Path, args: impl IntoIterator<Item = PathBuf>) -> Result<()> {
-    let output = Command::new(updater)
-        .args(args)
+    let mut command = Command::new(updater);
+    command.args(args);
+    let output = tty7_core::core::proc::hide_console(&mut command)
         .output()
         .context("running tty7-updater verification")?;
     if !output.status.success() {
@@ -680,6 +1057,13 @@ fn run_updater(updater: &Path, args: impl IntoIterator<Item = PathBuf>) -> Resul
     Ok(())
 }
 
+/// `(major, minor, patch, is_release)`. Ordering the release flag last, with
+/// `false < true`, is what lets a prerelease be superseded by the stable
+/// release that carries the same core version: a Nightly stamped
+/// `26.7.1-nightly.20260716` is offered `v26.7.1` and graduates out of the
+/// prerelease. Two prereleases sharing a core compare equal, so nothing here
+/// can walk a user from one prerelease to another — only `/releases/latest`
+/// feeds this comparison, and that endpoint never returns one.
 fn parse_version(s: &str) -> Option<(u64, u64, u64, bool)> {
     let trimmed = s.trim();
     let core = trimmed.strip_prefix('v').unwrap_or(trimmed);
@@ -717,7 +1101,7 @@ mod tests {
     fn release_asset_requires_the_platform_package_and_checksums() {
         let name = "tty7-27.1.0-macos-arm64.zip";
         let assets = [github_asset(name), github_asset("checksums.txt")];
-        let selected = select_release_asset_for(Some(name.to_string()), &assets);
+        let selected = select_release_asset_for(Ok(name.to_string()), &assets);
         assert_eq!(
             selected.asset,
             Some(ReleaseAsset {
@@ -732,31 +1116,26 @@ mod tests {
     #[test]
     fn release_without_checksums_is_never_installable() {
         let name = "tty7-27.1.0-macos-arm64.zip";
-        let selected = select_release_asset_for(Some(name.to_string()), &[github_asset(name)]);
+        let selected = select_release_asset_for(Ok(name.to_string()), &[github_asset(name)]);
         assert!(selected.asset.is_none());
-        assert!(
-            selected
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("checksums.txt"))
-        );
+        assert_eq!(selected.reason, Some(UpdateInstallHint::MissingChecksums));
     }
 
     #[test]
     fn release_without_the_exact_platform_package_is_never_guessed() {
         let selected = select_release_asset_for(
-            Some("tty7-27.1.0-macos-arm64.zip".to_string()),
+            Ok("tty7-27.1.0-macos-arm64.zip".to_string()),
             &[
                 github_asset("tty7-27.1.0-macos-x86_64.zip"),
                 github_asset("checksums.txt"),
             ],
         );
         assert!(selected.asset.is_none());
-        assert!(
-            selected
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("macos-arm64"))
+        assert_eq!(
+            selected.reason,
+            Some(UpdateInstallHint::MissingPackage(
+                "tty7-27.1.0-macos-arm64.zip".to_string()
+            ))
         );
     }
 
@@ -800,6 +1179,10 @@ mod tests {
         assert!(is_update_available("v26.7.1", "26.7.1-nightly.20260716"));
         assert!(!is_update_available("v26.7.0", "26.7.1-nightly.20260716"));
         assert!(!is_update_available("v26.7.1-rc.1", "26.7.1"));
+        // Nightly is a build channel, not an update channel: one Nightly never
+        // supersedes another. `/releases/latest` cannot return a prerelease, so
+        // this pair is unreachable in practice — asserted so a future change to
+        // the endpoint cannot quietly turn Nightly into an update source.
         assert!(!is_update_available(
             "26.7.1-nightly.20260717",
             "26.7.1-nightly.20260716"
@@ -829,5 +1212,145 @@ mod tests {
         assert_eq!(UpdateState::load().last_prompted.as_deref(), Some("0.4.0"));
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_markers_distinguish_inno_portable_and_unknown_layouts() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("tty7-app.exe");
+        std::fs::write(&executable, b"test app").unwrap();
+        assert_eq!(windows_update_layout_for(&executable), None);
+
+        std::fs::write(root.path().join(WINDOWS_PORTABLE_MARKER), b"portable-v1").unwrap();
+        assert_eq!(
+            windows_update_layout_for(&executable),
+            Some(WindowsUpdateLayout::Portable(root.path().to_path_buf()))
+        );
+
+        std::fs::write(root.path().join(WINDOWS_INNO_INSTALL_MARKER), b"inno-v1").unwrap();
+        assert_eq!(
+            windows_update_layout_for(&executable),
+            Some(WindowsUpdateLayout::Inno(root.path().to_path_buf()))
+        );
+
+        std::fs::remove_file(root.path().join(WINDOWS_INNO_INSTALL_MARKER)).unwrap();
+        std::fs::write(root.path().join(WINDOWS_PORTABLE_MARKER), b"invalid").unwrap();
+        assert_eq!(windows_update_layout_for(&executable), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_layout_selects_the_matching_release_package() {
+        let directory = PathBuf::from(r"C:\tty7");
+        assert_eq!(
+            windows_package_for_layout("26.8.2", &WindowsUpdateLayout::Inno(directory.clone()))
+                .as_deref(),
+            Some("tty7-26.8.2-windows-x86_64-setup.exe")
+        );
+        assert_eq!(
+            windows_package_for_layout("26.8.2", &WindowsUpdateLayout::Portable(directory))
+                .as_deref(),
+            Some("tty7-26.8.2-windows-x86_64.zip")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_all_users_inno_install_is_never_updated_in_place() {
+        let all_users = PathBuf::from(r"C:\Program Files\tty7");
+        let per_user = PathBuf::from(r"C:\Users\someone\AppData\Local\Programs\tty7");
+
+        // The machine-hive entry names this directory: elevation would be
+        // required, so tty7 declines however writable the directory looks.
+        assert!(windows_inno_needs_elevation_for(
+            Some(&all_users),
+            &all_users,
+            true
+        ));
+        // Inno stores the path with a trailing separator in `InstallLocation`
+        // and without one in `Inno Setup: App Path`; both name one place.
+        assert!(windows_inno_needs_elevation_for(
+            Some(Path::new(r"C:\Program Files\tty7\")),
+            &all_users,
+            true
+        ));
+        assert!(windows_inno_needs_elevation_for(
+            Some(Path::new(r"c:\program files\TTY7")),
+            &all_users,
+            true
+        ));
+
+        // A per-user install on a machine that also carries an all-users one
+        // updates itself: the machine entry names a different directory.
+        assert!(!windows_inno_needs_elevation_for(
+            Some(&all_users),
+            &per_user,
+            true
+        ));
+        assert!(!windows_inno_needs_elevation_for(None, &per_user, true));
+
+        // No machine entry, but the directory refuses writes — a relocated or
+        // pruned installation Setup could not replace either.
+        assert!(windows_inno_needs_elevation_for(None, &per_user, false));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_all_users_inno_install_reports_the_elevation_hint() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("tty7-app.exe");
+        std::fs::write(&executable, b"test app").unwrap();
+        std::fs::write(root.path().join(WINDOWS_INNO_INSTALL_MARKER), b"inno-v1").unwrap();
+        let layout = windows_update_layout_for(&executable).unwrap();
+
+        // A writable temp directory is never the all-users installation, so
+        // this layout is offered the normal in-place update.
+        assert_eq!(windows_layout_is_updatable(&layout), Ok(()));
+
+        assert_eq!(
+            select_release_asset_for(Err(UpdateInstallHint::WindowsAllUsersInstall), &[]).reason,
+            Some(UpdateInstallHint::WindowsAllUsersInstall)
+        );
+        let hint = UpdateInstallHint::WindowsAllUsersInstall.english();
+        assert!(hint.contains("all users"), "{hint}");
+        assert!(hint.contains("release page"), "{hint}");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_unwritable_portable_directory_is_not_offered_an_update() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().to_path_buf();
+        assert!(windows_directory_is_writable(&directory));
+        assert_eq!(
+            windows_layout_is_updatable(&WindowsUpdateLayout::Portable(directory)),
+            Ok(())
+        );
+
+        let missing = root.path().join("gone");
+        assert!(!windows_directory_is_writable(&missing));
+        assert_eq!(
+            windows_layout_is_updatable(&WindowsUpdateLayout::Portable(missing)),
+            Err(UpdateInstallHint::UnsupportedWindows)
+        );
+    }
+
+    /// Reads the real machine hive. Vacuous on a machine with no all-users
+    /// installation; on one that has it, the value Inno actually wrote must be
+    /// an absolute path and must make the decision function refuse an in-place
+    /// update of that directory.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_all_users_install_path_lookup_survives_this_machine() {
+        let Some(path) = windows_all_users_install_path() else {
+            return;
+        };
+        assert!(path.is_absolute(), "{}", path.display());
+        assert!(
+            windows_inno_needs_elevation_for(Some(&path), &path, true),
+            "the installed all-users path {} was not recognised",
+            path.display()
+        );
     }
 }
