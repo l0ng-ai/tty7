@@ -492,7 +492,7 @@ impl Tty7App {
     ) {
         let label = mismatch.host.clone();
         match remote_connect::mismatch_target(&mismatch) {
-            Some(target) => self.restart_remote_server(target, label, window, cx),
+            Some(target) => self.replace_remote_server(target, label, window, cx),
             None => {
                 let e = t_fmt(L10nKey::RemoteNoRouteToHost, &[("machine", &label)]);
                 self.report_remote_host_error(None, &label, &e, window, cx);

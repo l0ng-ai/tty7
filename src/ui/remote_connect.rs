@@ -641,7 +641,7 @@ pub(crate) fn claim_mailbox() -> std::sync::MutexGuard<'static, ()> {
 }
 
 pub fn mismatch_answers() -> [&'static str; 2] {
-    [t(L10nKey::Cancel), t(L10nKey::RestartServer)]
+    [t(L10nKey::Cancel), t(L10nKey::RemoteMismatchReplaceServer)]
 }
 
 pub fn mismatch_detail(m: &MismatchedRemoteDaemon) -> String {
@@ -660,7 +660,7 @@ pub fn mismatch_detail(m: &MismatchedRemoteDaemon) -> String {
             ("machine", &m.host),
             ("running", &running),
             ("wanted", &m.wanted_version),
-            ("restart_server", t(L10nKey::RestartServer)),
+            ("replace_server", t(L10nKey::RemoteMismatchReplaceServer)),
             ("cancel", t(L10nKey::Cancel)),
         ],
     )

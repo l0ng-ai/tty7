@@ -726,6 +726,7 @@ pub enum L10nKey {
     RemoteMismatchDetail,
     RemoteMismatchUnknownBuild,
     RemoteMismatchUnknownBuildFromExe,
+    RemoteMismatchReplaceServer,
     RemoteDaemonStartFailed,
     RemoteDaemonUnreachable,
     RemoteDaemonTooOld,
@@ -2371,23 +2372,24 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::RemoteInstallBytes => ("bytes", "字节"),
         L10nKey::RemoteMismatchTitle => (
-            "Restart tty7's server on \"{machine}\"?",
-            "重启 \"{machine}\" 上的 tty7 服务器？",
+            "Update tty7's server on \"{machine}\"?",
+            "更新 \"{machine}\" 上的 tty7 服务器端？",
         ),
         L10nKey::RemoteMismatchDetail => (
             "{machine} is serving tty7 sessions from {running}, which speaks a protocol \
              this client ({wanted}) cannot. tty7 has installed a matching server there, \
              but the one already running is the one your sessions are on.\n\
              \n\
-             {restart_server}\u{2003}starts {wanted} there and ends every session it is hosting.\n\
+             {replace_server}\u{2003}replaces it with {wanted} and ends every session it is hosting.\n\
              {cancel}\u{2003}leaves {machine} exactly as it is. This window will not connect.",
             "{machine} 正在使用 {running} 提供 tty7 会话，该版本使用的协议无法被\
-             此客户端（{wanted}）识别。tty7 已在那里安装了匹配的服务器，\
+             此客户端（{wanted}）识别。tty7 已在那里安装了匹配的服务器端，\
              但正在运行的是你当前会话所在的版本。\n\
              \n\
-             {restart_server}\u{2003}会在该机器上启动 {wanted} 并结束其托管的所有会话。\n\
+             {replace_server}\u{2003}会将其替换为 {wanted} 并结束其托管的所有会话。\n\
              {cancel}\u{2003}会保持 {machine} 现状不变。此窗口将不会连接。",
         ),
+        L10nKey::RemoteMismatchReplaceServer => ("Update Server", "更新服务器端"),
         L10nKey::RemoteMismatchUnknownBuild => ("an unknown build", "未知构建"),
         L10nKey::RemoteMismatchUnknownBuildFromExe => {
             ("an unknown build (from {exe})", "未知构建（来自 {exe}）")
@@ -3686,6 +3688,7 @@ mod tests {
             L10nKey::RemoteMismatchDetail,
             L10nKey::RemoteMismatchUnknownBuild,
             L10nKey::RemoteMismatchUnknownBuildFromExe,
+            L10nKey::RemoteMismatchReplaceServer,
             L10nKey::RemoteDaemonStartFailed,
             L10nKey::RemoteDaemonUnreachable,
             L10nKey::RemoteDaemonTooOld,
