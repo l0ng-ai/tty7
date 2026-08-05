@@ -123,29 +123,18 @@ a brief pause; `prefix` + an unbound key passes straight through.
 
 ## macOS privacy
 
-macOS gates access to a few protected resources behind the Transparency,
-Consent, and Control (TCC) framework, and tty7's panes are forked from the
-bundled executable, so TCC attributes a pane child's request to `tty7.app` as
-the responsible process. tty7 declares the usage strings for the resources a
-program you run in a pane can legitimately ask for (camera, microphone,
-contacts, calendar, reminders, photos, location, motion, local network,
-Bluetooth, speech recognition, Apple Events, and system administration), so
-those requests surface as a normal one-time grant instead of being denied
-outright with no System Settings entry — the same key set kitty and Kaku ship.
+tty7 declares the macOS TCC usage strings (camera, microphone, contacts,
+calendar, reminders, photos, location, motion, local network, Bluetooth,
+speech recognition, Apple Events, system administration) so programs run in a
+pane can request them with a normal one-time prompt instead of being denied
+outright.
 
-Two things are *not* covered by usage strings:
+Not covered by usage strings:
 
-- **Full Disk Access** — Apple defines no `NS*UsageDescription` key for this
-  class. Access to `~/Library/Mail`, `~/Library/Messages`, `~/Library/Safari`,
-  and `~/Library/Containers` (e.g. by a `clean` / maintenance tool) can only be
-  granted by hand in System Settings → Privacy & Security → Full Disk Access;
-  no plist change can turn that prompt into a remembered one-time grant.
-- **Entitlement-gated access** — the camera / microphone / address book /
-  location entitlements are deliberately *not* granted to `tty7.app` itself.
-  Entitlements are per-executable and never inherited by children; the child's
-  access is decided by the responsible bundle's usage string, and granting the
-  GUI bundle those entitlements would only widen what injected code can reach
-  under tty7's identity.
+- **Full Disk Access** — no usage-string key exists; access to
+  `~/Library/Mail/Messages/Safari/Containers` requires a manual grant in System Settings.
+- **Camera / microphone / location etc.** — not granted to tty7.app itself;
+  a child's access is decided by the usage string above.
 
 ## Localization
 

@@ -128,3 +128,12 @@ GUI 目前提供英文和简体中文两套文案。在「设置 → 外观 → 
 
 只接受 `en` 和 `zh-CN` 两个值，其它值一律回落到 `en`。语言必须显式指定，不会
 去猜系统语言。CLI 输出保持英文，保证 agent、脚本和开发者工作流的输出稳定可预测。
+
+## macOS 隐私
+
+tty7 声明了 macOS TCC usage strings（摄像头、麦克风、通讯录、日历、提醒、照片、定位、运动、本地网络、蓝牙、语音识别、Apple Events、系统管理），让窗格内运行的程序能够以一次性授权弹窗的方式访问这些资源，而不是被直接拒绝。
+
+以下两类不受 usage strings 覆盖：
+
+- **完全磁盘访问** —— 没有对应的 usage-string 键；访问 `~/Library/Mail/Messages/Safari/Containers` 需在「系统设置」中手动授权。
+- **摄像头 / 麦克风 / 定位等** —— 不授予 tty7.app 本身；子进程的访问由上述 usage string 决定。
