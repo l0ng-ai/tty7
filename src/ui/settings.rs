@@ -85,30 +85,6 @@ struct SearchEntry {
     keywords: L10nKey,
 }
 
-#[derive(Clone)]
-pub(crate) enum ExplorerContextMenuNote {
-    Registered,
-    Unregistered,
-    RegisterFailed(String),
-    UnregisterFailed(String),
-}
-
-impl ExplorerContextMenuNote {
-    fn localized(&self) -> String {
-        match self {
-            Self::Registered => t(L10nKey::SettingsExplorerRegisteredNote).to_string(),
-            Self::Unregistered => t(L10nKey::SettingsExplorerUnregisteredNote).to_string(),
-            Self::RegisterFailed(error) => {
-                t_fmt(L10nKey::SettingsExplorerRegisterFailed, &[("error", error)])
-            }
-            Self::UnregisterFailed(error) => t_fmt(
-                L10nKey::SettingsExplorerUnregisterFailed,
-                &[("error", error)],
-            ),
-        }
-    }
-}
-
 fn settings_search_entries() -> &'static [SearchEntry] {
     use L10nKey::*;
     use SettingsSection::*;
@@ -404,14 +380,9 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchHowShellsWorkKeywords,
         },
         SearchEntry {
-            section: About,
+            section: Agents,
             title: SettingsSearchCommandLineToolTitle,
             keywords: SettingsSearchCommandLineToolKeywords,
-        },
-        SearchEntry {
-            section: About,
-            title: SettingsExplorerContextMenu,
-            keywords: SettingsSearchExplorerContextMenuKeywords,
         },
     ]
 }
@@ -466,9 +437,6 @@ pub(crate) struct SettingsState {
     pub(crate) theme_search: Entity<InputState>,
     pub(crate) recording: Option<Recording>,
     pub(crate) rebinding_note: Option<String>,
-    pub(crate) explorer_context_menu_status:
-        Result<crate::core::explorer_context_menu::Status, String>,
-    pub(crate) explorer_context_menu_note: Option<ExplorerContextMenuNote>,
     pub(crate) ssh_form: Option<SshProfileForm>,
     pub(crate) ssh_detail: SshDetail,
     pub(crate) ssh_filter: Entity<InputState>,
@@ -3695,22 +3663,21 @@ impl Tty7App {
 
         page = page.children(self.agent_hooks_machine_picker(selected_host, cx));
 
+        // The hook rows describe whichever machine is selected above; the
+        // command-line section below is always about this GUI's own host, so it
+        // is appended after the match rather than inside the ready arm.
         match view {
             AgentHooksView::Loading => {
-                return page
-                    .child(
-                        div()
-                            .py_4()
-                            .text_sm()
-                            .text_color(muted_fg)
-                            .child(t(L10nKey::SettingsReadingAgentConfig)),
-                    )
-                    .into_any_element();
+                page = page.child(
+                    div()
+                        .py_4()
+                        .text_sm()
+                        .text_color(muted_fg)
+                        .child(t(L10nKey::SettingsReadingAgentConfig)),
+                );
             }
             AgentHooksView::Unavailable(reason) => {
-                return page
-                    .child(div().py_4().text_sm().text_color(warning).child(reason))
-                    .into_any_element();
+                page = page.child(div().py_4().text_sm().text_color(warning).child(reason));
             }
             AgentHooksView::Ready(rows) => {
                 for (i, row) in rows.into_iter().enumerate() {
@@ -3785,7 +3752,46 @@ impl Tty7App {
                 }
             }
         }
-        page.into_any_element()
+
+        let install_cli_on_path = cx.global::<Config>().install_cli_on_path;
+        page.child(
+            v_flex()
+                .mt_6()
+                .gap_2()
+                .child(self.section_rule(cx))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(foreground)
+                        .child(t(L10nKey::SettingsCommandLine)),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(muted_fg)
+                        .child(t(L10nKey::SettingsCommandLineDesc)),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            crate::ui::theme::switch("install-cli-on-path", cx)
+                                .checked(install_cli_on_path)
+                                .on_click(cx.listener(|this, on: &bool, _w, cx| {
+                                    this.set_install_cli_on_path(*on, cx)
+                                })),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(foreground)
+                                .child(t(L10nKey::SettingsInstallCliOnPath)),
+                        ),
+                ),
+        )
+        .into_any_element()
     }
 
     fn agent_hooks_machine_picker(&self, selected: HostId, cx: &mut Context<Self>) -> Option<Div> {
@@ -4639,12 +4645,7 @@ impl Tty7App {
 
     fn render_settings_about(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (foreground, muted_fg, success, warning) = (
-            theme.foreground,
-            theme.muted_foreground,
-            theme.success,
-            theme.warning,
-        );
+        let (foreground, muted_fg) = (theme.foreground, theme.muted_foreground);
 
         let update_status = cx
             .try_global::<crate::core::update::UpdateStatus>()
@@ -4659,79 +4660,21 @@ impl Tty7App {
         );
         let phase_text = match &update_status.phase {
             crate::core::update::UpdatePhase::Idle => None,
-            crate::core::update::UpdatePhase::Checking => Some("Checking for updates…".to_string()),
+            crate::core::update::UpdatePhase::Checking => {
+                Some(t(L10nKey::SettingsUpdateChecking).to_string())
+            }
             crate::core::update::UpdatePhase::UpToDate => {
-                Some("You're running the latest version.".to_string())
+                Some(t(L10nKey::SettingsUpdateUpToDate).to_string())
             }
             crate::core::update::UpdatePhase::Downloading => {
-                Some("Downloading and verifying the update…".to_string())
+                Some(t(L10nKey::SettingsUpdateDownloading).to_string())
             }
             crate::core::update::UpdatePhase::Installing => {
-                Some("Relaunching with the update…".to_string())
+                Some(t(L10nKey::SettingsUpdateInstalling).to_string())
             }
             crate::core::update::UpdatePhase::Failed(message) => Some(message.clone()),
         };
         let check_for_updates = cx.global::<Config>().check_for_updates;
-        let install_cli_on_path = cx.global::<Config>().install_cli_on_path;
-        let (explorer_status, explorer_note) = self
-            .active_settings()
-            .map(|settings| {
-                (
-                    settings.explorer_context_menu_status.clone(),
-                    settings.explorer_context_menu_note.clone(),
-                )
-            })
-            .unwrap_or((
-                Ok(crate::core::explorer_context_menu::Status::Unsupported),
-                None,
-            ));
-        let (
-            explorer_status_text,
-            explorer_status_color,
-            register_label,
-            register_disabled,
-            unregister_disabled,
-        ) = match explorer_status.as_ref() {
-            Ok(crate::core::explorer_context_menu::Status::NotRegistered) => (
-                t(L10nKey::SettingsExplorerNotRegistered),
-                muted_fg,
-                t(L10nKey::SettingsExplorerRegister),
-                false,
-                true,
-            ),
-            Ok(crate::core::explorer_context_menu::Status::Registered) => (
-                t(L10nKey::SettingsExplorerRegistered),
-                success,
-                t(L10nKey::SettingsExplorerRegister),
-                true,
-                false,
-            ),
-            Ok(crate::core::explorer_context_menu::Status::NeedsUpdate) => (
-                t(L10nKey::SettingsExplorerNeedsUpdate),
-                warning,
-                t(L10nKey::SettingsExplorerUpdate),
-                false,
-                false,
-            ),
-            Ok(crate::core::explorer_context_menu::Status::Unsupported) => (
-                t(L10nKey::SettingsExplorerUnavailable),
-                muted_fg,
-                t(L10nKey::SettingsExplorerRegister),
-                true,
-                true,
-            ),
-            Err(_) => (
-                t(L10nKey::SettingsExplorerStatusUnavailable),
-                warning,
-                t(L10nKey::SettingsExplorerRegister),
-                false,
-                false,
-            ),
-        };
-        let explorer_feedback = explorer_note
-            .as_ref()
-            .map(ExplorerContextMenuNote::localized)
-            .or_else(|| explorer_status.err());
 
         let logo = Arc::new(Image::from_bytes(
             ImageFormat::Png,
@@ -4805,9 +4748,9 @@ impl Tty7App {
                     )
                     .when_some(update, |this, upd| {
                         let button_label = if upd.installable {
-                            "Update and Relaunch"
+                            t(L10nKey::SettingsUpdateInstall)
                         } else {
-                            "View Release"
+                            t(L10nKey::SettingsUpdateViewRelease)
                         };
                         this.child(
                             v_flex()
@@ -4838,20 +4781,25 @@ impl Tty7App {
                     .when_some(phase_text, |this, text| {
                         this.child(div().text_sm().text_color(muted_fg).child(text))
                     })
-                    .child(div().text_sm().text_color(muted_fg).child(
-                        "tty7 checks stable releases and can update packaged macOS app bundles without opening a browser. A dedicated helper verifies checksums, version, and code signing before replacement, then relaunches the GUI. Compatible servers and shells stay running; if the wire protocol changed, tty7 asks whether to restart the server after relaunch. Other platforms and unsupported layouts fall back to the release page.",
-                    ))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted_fg)
+                            .child(t(L10nKey::SettingsCheckUpdatesDesc)),
+                    )
                     .child(
                         h_flex().child(
                             Button::new("check-update-now")
-                                .label(if matches!(
-                                    update_status.phase,
-                                    crate::core::update::UpdatePhase::Checking
-                                ) {
-                                    "Checking…"
-                                } else {
-                                    "Check Now"
-                                })
+                                .label(
+                                    if matches!(
+                                        update_status.phase,
+                                        crate::core::update::UpdatePhase::Checking
+                                    ) {
+                                        t(L10nKey::SettingsUpdateChecking)
+                                    } else {
+                                        t(L10nKey::SettingsUpdateCheckNow)
+                                    },
+                                )
                                 .small()
                                 .disabled(update_busy)
                                 .on_click(cx.listener(|_, _, _window, cx| {
@@ -4875,112 +4823,6 @@ impl Tty7App {
                                     .text_sm()
                                     .text_color(foreground)
                                     .child(t(L10nKey::SettingsCheckUpdatesOnLaunch)),
-                            ),
-                    ),
-            )
-            .when(cfg!(windows), |page| {
-                page.child(
-                    v_flex()
-                        .mt_6()
-                        .gap_2()
-                        .child(self.section_rule(cx))
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(foreground)
-                                .child(t(L10nKey::SettingsExplorerContextMenu)),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted_fg)
-                                .child(t(L10nKey::SettingsExplorerContextMenuDesc)),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(div().size_2().rounded_full().bg(explorer_status_color))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(foreground)
-                                        .child(explorer_status_text),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    Button::new("explorer-menu-register")
-                                        .label(register_label)
-                                        .small()
-                                        .disabled(register_disabled)
-                                        .on_click(cx.listener(|this, _, _window, cx| {
-                                            this.register_explorer_context_menu(cx)
-                                        })),
-                                )
-                                .child(
-                                    Button::new("explorer-menu-unregister")
-                                        .label(t(L10nKey::SettingsExplorerUnregister))
-                                        .small()
-                                        .disabled(unregister_disabled)
-                                        .on_click(cx.listener(|this, _, _window, cx| {
-                                            this.unregister_explorer_context_menu(cx)
-                                        })),
-                                ),
-                        )
-                        .when_some(explorer_feedback, |section, message| {
-                            section.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted_fg)
-                                    .child(message),
-                            )
-                        })
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted_fg)
-                                .child(t(L10nKey::SettingsExplorerWindows11Note)),
-                        ),
-                )
-            })
-            .child(
-                v_flex()
-                    .mt_6()
-                    .gap_2()
-                    .child(self.section_rule(cx))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(foreground)
-                            .child(t(L10nKey::SettingsCommandLine)),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(muted_fg)
-                            .child(t(L10nKey::SettingsCommandLineDesc)),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                crate::ui::theme::switch("install-cli-on-path", cx)
-                                    .checked(install_cli_on_path)
-                                    .on_click(cx.listener(|this, on: &bool, _w, cx| {
-                                        this.set_install_cli_on_path(*on, cx)
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(foreground)
-                                    .child(t(L10nKey::SettingsInstallCliOnPath)),
                             ),
                     ),
             )
@@ -5081,7 +4923,7 @@ mod tests {
             ("bell", Terminal),
             ("known_hosts", Ssh),
             ("claude", Agents),
-            ("right click", About),
+            ("symlink", Agents),
         ];
         for (query, expected) in cases {
             assert_eq!(
@@ -5093,18 +4935,16 @@ mod tests {
         }
     }
 
+    /// The `tty7` CLI exists so scripts and coding agents can drive tty7, so it
+    /// lives with the other agent integrations rather than under About.
     #[test]
-    fn explorer_context_menu_search_entry_uses_localized_keys() {
+    fn command_line_tool_is_searchable_under_agents() {
         let entry = settings_search_entries()
             .iter()
-            .find(|entry| entry.title == L10nKey::SettingsExplorerContextMenu)
-            .expect("Explorer settings should be searchable");
+            .find(|entry| entry.title == L10nKey::SettingsSearchCommandLineToolTitle)
+            .expect("the CLI setting should be searchable");
 
-        assert_eq!(entry.section.profile_label(), "settings:about");
-        assert_eq!(
-            entry.keywords,
-            L10nKey::SettingsSearchExplorerContextMenuKeywords
-        );
+        assert_eq!(entry.section.profile_label(), "settings:agents");
     }
 
     #[test]
