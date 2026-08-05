@@ -356,6 +356,23 @@ pub enum L10nKey {
     SettingsAboutTech,
     SettingsVersion,
     SettingsUpdates,
+    SettingsUpdateAndRelaunch,
+    SettingsUpdateViewRelease,
+    SettingsUpdateChecking,
+    SettingsUpdateUpToDate,
+    SettingsUpdateDownloading,
+    SettingsUpdateInstalling,
+    SettingsUpdateCheckNow,
+    SettingsUpdateCheckFailed,
+    SettingsUpdatePrepareFailed,
+    SettingsUpdateLaunchFailed,
+    SettingsUpdateUnsupportedMacos,
+    SettingsUpdateUnsupportedLinux,
+    SettingsUpdateUnsupportedWindows,
+    SettingsUpdateWindowsAllUsers,
+    SettingsUpdateUnsupportedPlatform,
+    SettingsUpdateMissingPackage,
+    SettingsUpdateMissingChecksums,
     SettingsVersionAvailable,
     SettingsCheckUpdatesDesc,
     SettingsCheckUpdatesOnLaunch,
@@ -1661,12 +1678,63 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsVersion => ("Version", "版本"),
         L10nKey::SettingsUpdates => ("Updates", "更新"),
+        L10nKey::SettingsUpdateAndRelaunch => ("Update and Relaunch", "更新并重新启动"),
+        L10nKey::SettingsUpdateViewRelease => ("View Release", "查看发布页面"),
+        L10nKey::SettingsUpdateChecking => ("Checking for updates…", "正在检查更新…"),
+        L10nKey::SettingsUpdateUpToDate => {
+            ("You're running the latest version.", "当前已是最新版本。")
+        }
+        L10nKey::SettingsUpdateDownloading => (
+            "Downloading and verifying the update…",
+            "正在下载并验证更新…",
+        ),
+        L10nKey::SettingsUpdateInstalling => {
+            ("Relaunching with the update…", "正在通过更新重新启动…")
+        }
+        L10nKey::SettingsUpdateCheckNow => ("Check Now", "立即检查"),
+        L10nKey::SettingsUpdateCheckFailed => (
+            "Could not check for updates: {error}",
+            "无法检查更新：{error}",
+        ),
+        L10nKey::SettingsUpdatePrepareFailed => ("Update failed: {error}", "更新失败：{error}"),
+        L10nKey::SettingsUpdateLaunchFailed => (
+            "Could not start the installer: {error}",
+            "无法启动安装程序：{error}",
+        ),
+        L10nKey::SettingsUpdateUnsupportedMacos => (
+            "This copy is not running from a writable tty7.app bundle, so replacing it would be unsafe. Move tty7 to Applications or another writable folder, or open the release page to install the update.",
+            "当前副本并非从可写的 tty7.app 包运行，直接替换并不安全。请将 tty7 移到“应用程序”或其他可写文件夹，或者打开发布页面安装更新。",
+        ),
+        L10nKey::SettingsUpdateUnsupportedLinux => (
+            "The first in-app updater supports packaged macOS app bundles. Use the release page or your package manager to update this Linux installation.",
+            "当前应用内更新器支持打包的 macOS 应用。请通过发布页面或包管理器更新此 Linux 安装。",
+        ),
+        L10nKey::SettingsUpdateUnsupportedWindows => (
+            "Automatic Windows updates are available for recognized Inno Setup and portable ZIP installations. This copy is missing a valid installation marker, updater, or writable portable directory, so open the release page to update it manually.",
+            "Windows 自动更新适用于可识别的 Inno Setup 安装版和便携 ZIP 版。当前副本缺少有效的安装标记、更新程序或可写的便携目录，请打开发布页面手动更新。",
+        ),
+        L10nKey::SettingsUpdateWindowsAllUsers => (
+            "tty7 is installed for all users, which needs administrator rights to replace. tty7 will not raise an elevation prompt on its own behalf, so open the release page and run the installer yourself to update it.",
+            "tty7 是为所有用户安装的，替换它需要管理员权限。tty7 不会自行弹出提权请求，请打开发布页面并自行运行安装程序进行更新。",
+        ),
+        L10nKey::SettingsUpdateUnsupportedPlatform => (
+            "Automatic installation is not available on this platform. Open the release page.",
+            "此平台不支持自动安装，请打开发布页面。",
+        ),
+        L10nKey::SettingsUpdateMissingPackage => (
+            "The release has no {name} package for this installation. Open the release page to choose another package.",
+            "该版本没有适用于当前安装的 {name} 包。请打开发布页面选择其他包。",
+        ),
+        L10nKey::SettingsUpdateMissingChecksums => (
+            "The release has no checksums.txt, so tty7 refuses to install it automatically.",
+            "该版本缺少 checksums.txt，因此 tty7 拒绝自动安装。",
+        ),
         L10nKey::SettingsVersionAvailable => {
             ("Version {version} is available.", "新版本 {version} 可用。")
         }
         L10nKey::SettingsCheckUpdatesDesc => (
-            "Check GitHub for a newer release on launch and show it here. tty7 never updates itself — downloading happens on the Releases page.",
-            "启动时检查 GitHub 是否有新版本并在此显示。tty7 不会自行更新——下载在 Releases 页面完成。",
+            "tty7 checks stable releases on launch. Packaged macOS bundles and per-user Windows installations update without opening a browser: a dedicated helper verifies the checksum and version before replacing anything, then relaunches the GUI. Linux, all-users Windows installations and other unsupported layouts fall back to the release page.",
+            "tty7 会在启动时检查稳定版发布。打包的 macOS 应用和为当前用户安装的 Windows 版本无需打开浏览器即可更新：专用助手会在替换前验证校验和与版本，然后重新启动界面。Linux、为所有用户安装的 Windows 版本以及其他不受支持的安装布局则会打开发布页面。",
         ),
         L10nKey::SettingsCheckUpdatesOnLaunch => ("Check for updates on launch", "启动时检查更新"),
         L10nKey::SettingsCommandLine => ("Command line", "命令行"),
@@ -3248,6 +3316,23 @@ mod tests {
             L10nKey::SettingsAboutDesc2,
             L10nKey::SettingsAboutTech,
             L10nKey::SettingsUpdates,
+            L10nKey::SettingsUpdateAndRelaunch,
+            L10nKey::SettingsUpdateViewRelease,
+            L10nKey::SettingsUpdateChecking,
+            L10nKey::SettingsUpdateUpToDate,
+            L10nKey::SettingsUpdateDownloading,
+            L10nKey::SettingsUpdateInstalling,
+            L10nKey::SettingsUpdateCheckNow,
+            L10nKey::SettingsUpdateCheckFailed,
+            L10nKey::SettingsUpdatePrepareFailed,
+            L10nKey::SettingsUpdateLaunchFailed,
+            L10nKey::SettingsUpdateUnsupportedMacos,
+            L10nKey::SettingsUpdateUnsupportedLinux,
+            L10nKey::SettingsUpdateUnsupportedWindows,
+            L10nKey::SettingsUpdateWindowsAllUsers,
+            L10nKey::SettingsUpdateUnsupportedPlatform,
+            L10nKey::SettingsUpdateMissingPackage,
+            L10nKey::SettingsUpdateMissingChecksums,
             L10nKey::SettingsVersionAvailable,
             L10nKey::SettingsCheckUpdatesDesc,
             L10nKey::SettingsCheckUpdatesOnLaunch,
