@@ -6,6 +6,7 @@ use tty7_core::daemon::control::{ControlRequest, ReplyOk};
 use tty7_core::host::HostId;
 
 use crate::core::session::WorkspaceId;
+use crate::ui::i18n::{L10nKey, t};
 
 #[derive(Default)]
 pub struct MachineMirrors {
@@ -264,7 +265,7 @@ pub fn display_name_of(ws: &Workspace, panes: &[PaneRecord]) -> String {
                 .map(|n| n.to_string_lossy().into_owned())
         })
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "Untitled".to_string())
+        .unwrap_or_else(|| t(L10nKey::WindowUntitled).to_string())
 }
 
 pub fn subject_path_of(ws: &Workspace, panes: &[PaneRecord]) -> Option<String> {

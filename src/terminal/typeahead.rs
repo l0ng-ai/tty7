@@ -9,6 +9,7 @@ pub struct Typeahead {
 pub enum RawInput<'a> {
     Text(&'a str),
     Key { key: &'a str, plain: bool },
+    Interrupt,
 }
 
 impl Typeahead {
@@ -16,12 +17,10 @@ impl Typeahead {
         Self::default()
     }
 
-    pub fn observe(&mut self, input: RawInput, alt_screen: bool) {
-        if alt_screen {
-            self.taint();
-            return;
-        }
+    pub fn observe(&mut self, input: RawInput, externally_owned: bool) {
         match input {
+            RawInput::Interrupt => self.discard(),
+            _ if externally_owned => {}
             RawInput::Text(s) => self.record_text(s),
             RawInput::Key {
                 key: "enter",
@@ -33,6 +32,12 @@ impl Typeahead {
             } => self.record_backspace(),
             RawInput::Key { .. } => self.taint(),
         }
+    }
+
+    /// Discard a record at an input-ownership boundary without producing a
+    /// shell-line wipe.
+    pub fn discard(&mut self) {
+        *self = Self::default();
     }
 
     pub fn drain(&mut self) -> Option<String> {
@@ -70,7 +75,10 @@ impl Typeahead {
     }
 
     fn flush(self) -> Option<String> {
-        if self.text.is_empty() && !self.tainted {
+        if self.text.is_empty() {
+            if self.tainted {
+                return Some(String::new());
+            }
             return None;
         }
         if self.tainted {
@@ -140,10 +148,52 @@ mod tests {
     }
 
     #[test]
-    fn alt_screen_input_taints_instead_of_seeding() {
+    fn alt_screen_input_is_discarded_without_a_shell_gap() {
         let mut t = Typeahead::new();
         t.observe(RawInput::Text("q"), true);
-        assert_eq!(t.drain(), Some(String::new()));
+        assert_eq!(t.drain(), None);
+    }
+
+    #[test]
+    fn alt_screen_input_does_not_taint_later_shell_input() {
+        let mut t = Typeahead::new();
+        t.observe(RawInput::Text("q"), true);
+        t.observe(RawInput::Text("ls"), false);
+        assert_eq!(t.drain(), Some("ls".to_string()));
+    }
+
+    #[test]
+    fn interrupt_discards_a_gap_even_without_alt_screen() {
+        let mut t = Typeahead::new();
+        t.observe(RawInput::Text("agent input"), false);
+        t.observe(
+            RawInput::Key {
+                key: "up",
+                plain: true,
+            },
+            false,
+        );
+
+        t.observe(RawInput::Interrupt, false);
+        assert_eq!(t.drain(), None);
+    }
+
+    #[test]
+    fn discarding_a_tainted_record_starts_a_fresh_gap_without_a_shell_wipe() {
+        let mut t = Typeahead::new();
+        t.observe(RawInput::Text("ls"), false);
+        t.observe(
+            RawInput::Key {
+                key: "up",
+                plain: true,
+            },
+            false,
+        );
+        t.discard();
+        assert_eq!(t.drain(), None);
+
+        t.observe(RawInput::Text("git status"), false);
+        assert_eq!(t.drain(), Some("git status".to_string()));
     }
 
     #[test]

@@ -167,6 +167,10 @@ pub struct Config {
     /// package manager's copy — and do not want it shadowed.
     #[serde(default = "default_true")]
     pub install_cli_on_path: bool,
+    /// GUI-only locale selection. Values: `en` or `zh-CN`.
+    /// CLI output stays English so agent/script integrations are stable.
+    #[serde(default = "default_gui_language")]
+    pub gui_language: String,
     #[serde(default = "default_notify_threshold_secs")]
     pub notify_threshold_secs: u64,
     #[serde(default = "default_true")]
@@ -409,6 +413,7 @@ impl Default for Config {
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,
             install_cli_on_path: true,
+            gui_language: default_gui_language(),
             notify_threshold_secs: default_notify_threshold_secs(),
             restore_session: true,
             show_tray_icon: true,
@@ -495,6 +500,10 @@ impl Config {
             && command.trim().is_empty()
         {
             self.link_file_command = None;
+        }
+        match self.gui_language.as_str() {
+            "en" | "zh-CN" => {}
+            _ => self.gui_language = default_gui_language(),
         }
     }
 
@@ -645,6 +654,10 @@ fn default_preset() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_gui_language() -> String {
+    "en".to_string()
 }
 
 fn default_word_separators() -> String {
@@ -1074,6 +1087,19 @@ mod tests {
         assert_eq!(clamp(0), 1);
         assert_eq!(clamp(10), 10);
         assert_eq!(clamp(100_000), 3600);
+    }
+
+    #[test]
+    fn gui_language_defaults_to_english_and_rejects_unsupported_values() {
+        let cfg = Config::default();
+        assert_eq!(cfg.gui_language, "en");
+
+        let cfg: Config = serde_json::from_str(r#"{"gui_language": "zh-CN"}"#).unwrap();
+        assert_eq!(cfg.gui_language, "zh-CN");
+
+        let mut cfg: Config = serde_json::from_str(r#"{"gui_language": "ko"}"#).unwrap();
+        cfg.sanitize();
+        assert_eq!(cfg.gui_language, "en");
     }
 
     #[test]

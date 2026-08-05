@@ -74,10 +74,17 @@ fn spawn_config_watcher(cx: &mut App) {
             while rx.try_recv().is_ok() {}
 
             cx.update(|cx| {
-                cx.set_global(Config::load());
+                let config = Config::load();
+                crate::ui::i18n::set_locale(&config.gui_language);
+                cx.set_global(config);
                 crate::ui::presets::load_registry(cx);
                 crate::ui::theme::apply_cursor_hide_mode(cx);
                 crate::ui::theme::apply_theme(None, cx);
+                // The menu bar is built once from the current locale, so editing
+                // gui_language by hand has to rebuild it the same way the
+                // in-app language picker does.
+                crate::ui::theme::set_menus(cx);
+                crate::ui::windows::WindowRegistry::refresh_locale(cx, None);
                 cx.refresh_windows();
             });
         }
@@ -319,12 +326,18 @@ fn main() {
         return;
     }
     let config = crate::core::config::Config::load();
+    let gui_language = config.gui_language.clone();
 
     // After the PATH enrichment above, which is what makes the candidate scan
     // see the user's real PATH rather than the stub a Finder launch inherits —
     // and before the daemon below, which forks every pane and so must already
     // carry the CLI's directory in its environment.
     crate::core::cli_install::install(config.install_cli_on_path);
+
+    // Give desktop toasts the tty7 icon and name instead of notify-rust's
+    // PowerShell fallback. Best-effort; no-op off Windows.
+    #[cfg(target_os = "windows")]
+    crate::core::aumid::init();
 
     let restore_session = config.restore_session;
     let daemon_result = if restore_session {
@@ -344,6 +357,7 @@ fn main() {
             cx.activate(true);
             #[cfg(target_os = "macos")]
             set_dock_icon_for_bare_binary();
+            crate::ui::i18n::set_locale(&gui_language);
             cx.set_global(Config::load());
             crate::ui::theme::refresh_system_appearance(cx);
             crate::core::session::WorkspaceStore::init(cx);

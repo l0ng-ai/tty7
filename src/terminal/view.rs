@@ -100,6 +100,11 @@ pub struct TerminalView {
     owner_workspace: Option<crate::core::session::WorkspaceId>,
     restored: bool,
     ssh_spec: Option<Box<crate::daemon::protocol::NativeSshSpec>>,
+    /// The verified remote staging directory for pasted images, once one has
+    /// been prepared for this pane. `None` means "not prepared yet", never
+    /// "preparation failed" — see [`staging_cache`].
+    #[cfg(not(target_os = "macos"))]
+    remote_clipboard_dir: Option<String>,
     pub focus_handle: FocusHandle,
     pub font: Font,
     pub font_bold: Option<Font>,
@@ -130,6 +135,7 @@ pub struct TerminalView {
     pub bell_flash: bool,
     pub report_mouse: bool,
     last_at_prompt: bool,
+    last_typeahead_blocked: bool,
     running_since: Option<std::time::Instant>,
     running_title: String,
     running_agent: Option<crate::core::cli_agent::CLIAgent>,
@@ -426,6 +432,116 @@ fn write_clipboard_image(img: &gpui::Image) -> Option<std::path::PathBuf> {
     Some(path)
 }
 
+/// The connection a paste should be uploaded over, when this pane runs on a
+/// remote host reachable over the daemon's russh stack: either a native SSH
+/// workspace pane or a standalone native SSH pane. WSL shares localhost and
+/// needs path translation instead, and a workspace without connection details
+/// has no channel to piggyback on — both keep the local-path behavior.
+#[cfg(not(target_os = "macos"))]
+fn remote_paste_spec<'a>(
+    workspace: Option<&'a crate::terminal::PaneWorkspace>,
+    ssh_spec: Option<&'a crate::daemon::protocol::NativeSshSpec>,
+) -> Option<&'a crate::daemon::protocol::NativeSshSpec> {
+    if let Some(ws) = workspace {
+        if ws.shares_localhost() {
+            return None;
+        }
+        return ws.spec.as_deref();
+    }
+    ssh_spec
+}
+
+/// Staging images under the SSH user's own home keeps them out of the
+/// world-writable `/tmp`, where any local account could pre-create the
+/// directory, read what lands in it, or swap a pasted screenshot for one of
+/// its own before the pane's agent opens it.
+#[cfg(not(target_os = "macos"))]
+const REMOTE_CLIPBOARD_PATH: [&str; 3] = [".cache", "tty7", "clipboard"];
+
+/// Owner-only, and *only* owner: a staging directory anyone else can enter is
+/// one anyone else can read the pasted screenshots out of.
+#[cfg(not(target_os = "macos"))]
+const REMOTE_CLIPBOARD_MODE: u32 = 0o700;
+
+/// Whether a prepared staging directory may be uploaded into.
+///
+/// The mode is what a `stat` reported *after* a `chmod 0700` the daemon
+/// watched succeed, which is the ownership proof: POSIX only lets a file's
+/// owner change its mode, so a directory tty7 can chmod and then observe at
+/// exactly `0700` is one the SSH user owns and nobody else can enter. A
+/// symlink is refused outright because `stat` follows links, so a link planted
+/// at the staging path would otherwise be judged by its target.
+#[cfg(not(target_os = "macos"))]
+fn staging_dir_is_safe(
+    is_symlink: bool,
+    kind: Option<crate::daemon::protocol::SftpEntryKind>,
+    mode: u32,
+) -> bool {
+    use crate::daemon::protocol::SftpEntryKind;
+    !is_symlink
+        && matches!(kind, Some(SftpEntryKind::Dir))
+        && mode & 0o7777 == REMOTE_CLIPBOARD_MODE
+}
+
+/// The staging directory to reuse on the next paste. Only a verified directory
+/// is cached: a preparation that failed — a dropped link, a squatted path, a
+/// remote with no POSIX `/home` — must be retried rather than latched, or
+/// every later paste emits a remote path for a directory that was never
+/// created.
+#[cfg(not(target_os = "macos"))]
+fn staging_cache(prepared: &Result<String, String>) -> Option<String> {
+    prepared.as_ref().ok().cloned()
+}
+
+/// Create and verify the per-user staging directory, answering the absolute
+/// remote path to upload into. Blocking: every step is a daemon round trip
+/// over the pane's SSH connection, so this only ever runs off the UI thread.
+#[cfg(not(target_os = "macos"))]
+fn prepare_remote_clipboard_dir(route: &crate::ui::sftp::SftpRoute) -> Result<String, String> {
+    use crate::daemon::protocol::{SftpOp, SftpOpResult};
+    let home = match route.op(SftpOp::Realpath {
+        path: ".".to_string(),
+    }) {
+        SftpOpResult::Link(home) if home.starts_with('/') => home,
+        SftpOpResult::Error(e) => return Err(e),
+        other => {
+            return Err(format!(
+                "the remote home directory is not a path: {other:?}"
+            ));
+        }
+    };
+    let mut dir = home;
+    for component in REMOTE_CLIPBOARD_PATH {
+        dir = crate::daemon::ssh::sftp::remote_join(&dir, component);
+        // An existing directory fails here with EEXIST; the checks below are
+        // what decide whether this one is ours, so the result carries no
+        // information worth branching on.
+        let _ = route.op(SftpOp::Mkdir { path: dir.clone() });
+    }
+    if let SftpOpResult::Link(target) = route.op(SftpOp::Readlink { path: dir.clone() }) {
+        return Err(format!("{dir} is a symlink to {target}"));
+    }
+    if let SftpOpResult::Error(e) = route.op(SftpOp::Chmod {
+        path: dir.clone(),
+        mode: REMOTE_CLIPBOARD_MODE,
+    }) {
+        return Err(format!("{dir} is not owned by this session: {e}"));
+    }
+    match route.op(SftpOp::Stat { path: dir.clone() }) {
+        SftpOpResult::Stat(entry)
+            if staging_dir_is_safe(false, Some(entry.kind), entry.permissions) =>
+        {
+            Ok(dir)
+        }
+        SftpOpResult::Stat(entry) => Err(format!(
+            "{dir} is not a private directory (mode {:o})",
+            entry.permissions & 0o7777
+        )),
+        SftpOpResult::Error(e) => Err(e),
+        other => Err(format!("unexpected reply for {dir}: {other:?}")),
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 fn transcode_to_png(bytes: &[u8], format: gpui::ImageFormat) -> Option<Vec<u8>> {
     use gpui::ImageFormat as G;
@@ -710,6 +826,8 @@ impl TerminalView {
             owner_workspace: None,
             restored: false,
             ssh_spec: None,
+            #[cfg(not(target_os = "macos"))]
+            remote_clipboard_dir: None,
             focus_handle,
             font,
             font_bold,
@@ -740,6 +858,7 @@ impl TerminalView {
             search_last_query: String::new(),
             bell_flash: false,
             last_at_prompt: false,
+            last_typeahead_blocked: false,
             running_since: None,
             running_title: String::new(),
             running_agent: None,
@@ -975,6 +1094,7 @@ impl TerminalView {
 
     fn handle_event(&mut self, ev: AlacEvent, cx: &mut Context<Self>) {
         self.terminal.poll_exited();
+        self.sync_typeahead_owner();
         if self.terminal.has_pending_auth() {
             cx.emit(AuthPromptReady);
         }
@@ -1151,6 +1271,7 @@ impl TerminalView {
         let kitty = self.kitty_flags();
         if let Some(bytes) = super::input::keystroke_to_bytes(ks, kitty) {
             let plain = !m.control && !m.alt && !m.platform;
+            let interrupt = is_typeahead_interrupt(ks.key.as_str(), m);
             let shell_owns_prompt = self.shell_owns_prompt();
             let held = plain
                 && ks.key == "backspace"
@@ -1167,15 +1288,18 @@ impl TerminalView {
                 };
             if !held {
                 self.release_hold();
+                if !shell_owns_prompt && interrupt {
+                    // Ctrl-C cancels the foreground input transaction. Clear
+                    // the gap before delivering it so a prompt transition
+                    // cannot flush this interrupt as a later Ctrl-U.
+                    self.observe_typeahead(RawInput::Interrupt);
+                }
                 self.terminal.write(bytes);
-                if !shell_owns_prompt {
-                    self.typeahead.observe(
-                        RawInput::Key {
-                            key: ks.key.as_str(),
-                            plain,
-                        },
-                        self.on_alt_screen(),
-                    );
+                if !shell_owns_prompt && !interrupt {
+                    self.observe_typeahead(RawInput::Key {
+                        key: ks.key.as_str(),
+                        plain,
+                    });
                 }
             }
             self.cursor_visible = true;
@@ -1440,13 +1564,10 @@ impl TerminalView {
             "backspace" => {
                 if self.cmd.is_empty() {
                     self.terminal.write(vec![0x7f]);
-                    self.typeahead.observe(
-                        RawInput::Key {
-                            key: "backspace",
-                            plain: true,
-                        },
-                        false,
-                    );
+                    self.observe_typeahead(RawInput::Key {
+                        key: "backspace",
+                        plain: true,
+                    });
                     return;
                 }
                 if m.alt && self.cmd.selection().is_none() {
@@ -1535,8 +1656,14 @@ impl TerminalView {
                 self.cmd.move_home();
             }
             "e" => {
-                self.cmd.clear_selection();
-                self.cmd.move_end();
+                if self.cmd.selection().is_none()
+                    && let Some(full) = self.ghost_suggestion()
+                {
+                    self.cmd.set(&full);
+                } else {
+                    self.cmd.clear_selection();
+                    self.cmd.move_end();
+                }
             }
             "b" => {
                 self.cmd.clear_selection();
@@ -1998,6 +2125,14 @@ impl TerminalView {
     fn paste_clipboard_image(&mut self, img: &gpui::Image, cx: &mut Context<Self>) {
         #[cfg(not(target_os = "macos"))]
         if let Some(path) = write_clipboard_image(img) {
+            // SSH panes can't see the local temp file, so the image is
+            // uploaded and the *remote* path pasted instead. Every step of
+            // that needs a blocking daemon round trip, which a keystroke
+            // handler must not do, so the remote pane pastes from a background
+            // task and this returns without touching the line.
+            if self.upload_image_for_remote(&path, cx) {
+                return;
+            }
             let text = shell_escape_path(&path.to_string_lossy());
             self.paste(format!("{text} "), cx);
             return;
@@ -2006,6 +2141,182 @@ impl TerminalView {
         self.terminal.write(vec![0x16]);
         self.terminal.term.lock().selection = None;
         cx.notify();
+    }
+
+    /// Upload a locally staged clipboard image to the pane's remote host and
+    /// paste the remote path, all off the UI thread. Answers whether this pane
+    /// took the paste over; `false` means a local, WSL, or spec-less pane the
+    /// caller should paste the local path for.
+    ///
+    /// The upload itself still outlives the paste — it has to, or Ctrl+V would
+    /// stall on the wire — so the job is watched to completion and a failure
+    /// at any point warns the user that the path they were handed is dangling.
+    #[cfg(not(target_os = "macos"))]
+    fn upload_image_for_remote(&mut self, local: &std::path::Path, cx: &mut Context<Self>) -> bool {
+        use crate::daemon::protocol::{SftpTransferKind, SftpTransferSpec};
+        let Some(spec) = remote_paste_spec(self.workspace.as_ref(), self.ssh_spec.as_deref())
+        else {
+            return false;
+        };
+        let host = format!("{}@{}", spec.user, spec.host);
+        // The only caller stages through `write_clipboard_image`, so this
+        // holds; a name that could not stand alone as a remote path component
+        // would be a bug worth failing on rather than joining blindly.
+        let name = local
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|n| crate::daemon::ssh::sftp::safe_local_name(n));
+        let Some(name) = name else {
+            log::warn!("refusing to upload a clipboard image named {local:?}");
+            return false;
+        };
+        let route = crate::ui::sftp::SftpRoute::new(self.pane_id, self.workspace.clone());
+        let cached = self.remote_clipboard_dir.clone();
+        let local = local.to_path_buf();
+        let pane_id = self.pane_id;
+        cx.spawn(async move |this, cx| {
+            let prepared = match cached {
+                Some(dir) => Ok(dir),
+                None => {
+                    let route = route.clone();
+                    cx.background_spawn(async move { prepare_remote_clipboard_dir(&route) })
+                        .await
+                }
+            };
+            let dir = match this.update(cx, |view, _| {
+                view.remote_clipboard_dir = staging_cache(&prepared);
+                view.remote_clipboard_dir.clone()
+            }) {
+                Ok(Some(dir)) => dir,
+                Ok(None) => {
+                    let reason = prepared.unwrap_or_else(|e| e);
+                    Self::paste_local_image_path(&this, cx, &local, &host, &reason);
+                    return;
+                }
+                Err(_) => return,
+            };
+            let remote = crate::daemon::ssh::sftp::remote_join(&dir, &name);
+            let started = {
+                let (route, remote, local) = (route.clone(), remote.clone(), local.clone());
+                cx.background_spawn(async move {
+                    route.transfer_start(SftpTransferSpec {
+                        pane_id,
+                        kind: SftpTransferKind::Upload,
+                        local,
+                        remote,
+                        recursive: false,
+                    })
+                })
+                .await
+            };
+            let job = match started {
+                Ok(job) => job,
+                Err(reason) => {
+                    Self::paste_local_image_path(&this, cx, &local, &host, &reason);
+                    return;
+                }
+            };
+            let text = shell_escape_path(&remote);
+            if this
+                .update(cx, |view, cx| view.paste(format!("{text} "), cx))
+                .is_err()
+            {
+                return;
+            }
+            if let Err(reason) = Self::watch_upload(route, job, &remote, cx).await {
+                let _ = this.update_in(cx, |view, window, cx| {
+                    view.warn_image_upload_failed(&host, &reason, window, cx);
+                });
+            }
+        })
+        .detach();
+        true
+    }
+
+    /// Fall back to the local path when the remote staging directory cannot be
+    /// prepared — the paste is never dropped — and say why it is local.
+    #[cfg(not(target_os = "macos"))]
+    fn paste_local_image_path(
+        this: &gpui::WeakEntity<Self>,
+        cx: &mut gpui::AsyncApp,
+        local: &std::path::Path,
+        host: &str,
+        reason: &str,
+    ) {
+        let text = shell_escape_path(&local.to_string_lossy());
+        let _ = this.update_in(cx, |view, window, cx| {
+            view.paste(format!("{text} "), cx);
+            view.warn_image_upload_failed(host, reason, window, cx);
+        });
+    }
+
+    /// Poll a started upload to a terminal state. The transfer history the
+    /// SFTP panel reads is only polled while that panel is open, and the
+    /// daemon drops finished jobs after 30s, so a paste that no one is
+    /// watching would otherwise fail in silence.
+    #[cfg(not(target_os = "macos"))]
+    async fn watch_upload(
+        route: crate::ui::sftp::SftpRoute,
+        job: u64,
+        remote: &str,
+        cx: &mut gpui::AsyncApp,
+    ) -> Result<(), String> {
+        use crate::daemon::protocol::{SftpJobState, SftpOp};
+        // Long enough for a screenshot over a slow link, bounded so a wedged
+        // job cannot poll forever.
+        const POLL: std::time::Duration = std::time::Duration::from_millis(500);
+        const POLLS: usize = 600;
+        for _ in 0..POLLS {
+            cx.background_executor().timer(POLL).await;
+            let listed = {
+                let route = route.clone();
+                cx.background_spawn(async move { route.transfer_list() })
+                    .await
+            };
+            let Some(progress) = listed.into_iter().find(|j| j.job_id == job) else {
+                // Pruned after the retention window, or the daemon restarted:
+                // there is nothing left to report either way.
+                return Ok(());
+            };
+            match progress.state {
+                SftpJobState::Running => continue,
+                SftpJobState::Done => {
+                    // The staging directory is already owner-only, so this is
+                    // belt and braces against a wider umask on the remote.
+                    let (route, path) = (route.clone(), remote.to_string());
+                    cx.background_spawn(
+                        async move { route.op(SftpOp::Chmod { path, mode: 0o600 }) },
+                    )
+                    .await;
+                    return Ok(());
+                }
+                SftpJobState::Cancelled => return Ok(()),
+                SftpJobState::Error => {
+                    return Err(progress.error.unwrap_or_else(|| "upload failed".into()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One notification per failed paste — the pane's line already has a path
+    /// in it, and the user is the only one who can tell whether it matters.
+    #[cfg(not(target_os = "macos"))]
+    fn warn_image_upload_failed(
+        &self,
+        host: &str,
+        reason: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        log::warn!("clipboard image upload to {host} failed: {reason}");
+        window.push_notification(
+            crate::ui::i18n::t_fmt(
+                crate::ui::i18n::L10nKey::SftpImagePasteUploadFailed,
+                &[("host", host), ("error", reason)],
+            ),
+            cx,
+        );
     }
 
     pub fn clear_scrollback(&mut self, cx: &mut Context<Self>) {
@@ -2561,6 +2872,32 @@ impl TerminalView {
             .contains(TermMode::ALT_SCREEN)
     }
 
+    fn typeahead_blocked(&self) -> bool {
+        self.on_alt_screen()
+            || self.terminal.foreground_agent().is_some()
+            || self.terminal.agent_session().is_some()
+    }
+
+    fn sync_typeahead_owner(&mut self) {
+        let blocked = self.typeahead_blocked();
+        sync_typeahead_owner_state(
+            &mut self.typeahead,
+            &mut self.last_typeahead_blocked,
+            blocked,
+        );
+    }
+
+    fn observe_typeahead(&mut self, input: RawInput<'_>) {
+        // The input that crosses an ownership boundary belongs to neither side.
+        let blocked = self.typeahead_blocked();
+        observe_typeahead_for_owner(
+            &mut self.typeahead,
+            &mut self.last_typeahead_blocked,
+            input,
+            blocked,
+        );
+    }
+
     fn flush_typeahead(&mut self) {
         let Some(seed) = self.typeahead.drain() else {
             return;
@@ -2601,15 +2938,13 @@ impl TerminalView {
             self.release_hold();
         }
         self.terminal.write(bytes);
-        let alt = self.on_alt_screen();
-        self.typeahead.observe(RawInput::Text(text), alt);
+        self.observe_typeahead(RawInput::Text(text));
     }
 
     fn release_hold(&mut self) {
         if let Some((net, bytes)) = self.hold.release() {
             self.terminal.write(bytes);
-            let alt = self.on_alt_screen();
-            self.typeahead.observe(RawInput::Text(&net), alt);
+            self.observe_typeahead(RawInput::Text(&net));
         }
     }
 
@@ -2628,8 +2963,7 @@ impl TerminalView {
         }
         if let Some((net, bytes)) = self.hold.timeout(epoch) {
             self.terminal.write(bytes);
-            let alt = self.on_alt_screen();
-            self.typeahead.observe(RawInput::Text(&net), alt);
+            self.observe_typeahead(RawInput::Text(&net));
             cx.notify();
         }
     }
@@ -4282,6 +4616,36 @@ impl TerminalView {
     }
 }
 
+fn is_typeahead_interrupt(key: &str, modifiers: &Modifiers) -> bool {
+    modifiers.control && !modifiers.alt && !modifiers.platform && key == "c"
+}
+
+fn sync_typeahead_owner_state(
+    typeahead: &mut Typeahead,
+    last_blocked: &mut bool,
+    blocked: bool,
+) -> bool {
+    // Alternate-screen TUIs and known agents own their input. Never replay a
+    // record across an ownership boundary as shell input.
+    let changed = blocked != *last_blocked;
+    if changed {
+        typeahead.discard();
+        *last_blocked = blocked;
+    }
+    changed
+}
+
+fn observe_typeahead_for_owner(
+    typeahead: &mut Typeahead,
+    last_blocked: &mut bool,
+    input: RawInput<'_>,
+    blocked: bool,
+) {
+    if !sync_typeahead_owner_state(typeahead, last_blocked, blocked) {
+        typeahead.observe(input, *last_blocked);
+    }
+}
+
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -4296,6 +4660,7 @@ impl Drop for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_typeahead_owner();
         if self.shell_owns_prompt() {
             if let Some((_net, bytes)) = self.hold.release() {
                 self.terminal.write(bytes);
@@ -4891,8 +5256,9 @@ fn drag_scroll_step(overshoot: f32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        LoopbackPlan, SelectEndCopy, WheelRoute, clipboard_paste_text, cwd_is_on_host,
-        display_width, loopback_plan,
+        LoopbackPlan, RawInput, SelectEndCopy, Typeahead, WheelRoute, clipboard_paste_text,
+        cwd_is_on_host, display_width, is_typeahead_interrupt, loopback_plan,
+        observe_typeahead_for_owner,
     };
     use super::{
         drag_scroll_step, encode_mouse, escape_candidate, expand_file_command_template,
@@ -4900,6 +5266,8 @@ mod tests {
         input_overlay_rows, menu_layout, paste_bytes, select_end_copy, shell_escape_path,
         smooth_scroll_step, submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
+    #[cfg(not(target_os = "macos"))]
+    use super::{remote_paste_spec, staging_cache, staging_dir_is_safe};
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
     use gpui_component::IconName;
@@ -4908,6 +5276,127 @@ mod tests {
     use crate::core::session::{RemoteTarget, WorkspaceId};
     use crate::daemon::protocol::RemoteKind;
     use crate::terminal::PaneWorkspace;
+
+    #[test]
+    fn alt_screen_exit_discards_the_boundary_input_before_recording_shell_text() {
+        let mut typeahead = Typeahead::new();
+        let mut last_blocked = true;
+        typeahead.observe(RawInput::Text("stale"), false);
+
+        observe_typeahead_for_owner(
+            &mut typeahead,
+            &mut last_blocked,
+            RawInput::Key {
+                key: "c",
+                plain: false,
+            },
+            false,
+        );
+        assert_eq!(
+            typeahead.drain(),
+            None,
+            "the Ctrl-C crossing TUI exit must not become a tainted shell record"
+        );
+
+        observe_typeahead_for_owner(
+            &mut typeahead,
+            &mut last_blocked,
+            RawInput::Text("ls"),
+            false,
+        );
+        assert_eq!(typeahead.drain(), Some("ls".to_string()));
+    }
+
+    #[test]
+    fn agent_interrupt_discards_typeahead_without_an_alt_screen_transition() {
+        let mut typeahead = Typeahead::new();
+        let mut last_blocked = false;
+        typeahead.observe(RawInput::Text("agent input"), false);
+        typeahead.observe(
+            RawInput::Key {
+                key: "up",
+                plain: true,
+            },
+            false,
+        );
+
+        observe_typeahead_for_owner(
+            &mut typeahead,
+            &mut last_blocked,
+            RawInput::Interrupt,
+            false,
+        );
+        assert_eq!(
+            typeahead.drain(),
+            None,
+            "Ctrl-C must cancel a stable non-ALT_SCREEN agent gap"
+        );
+
+        observe_typeahead_for_owner(
+            &mut typeahead,
+            &mut last_blocked,
+            RawInput::Text("ls"),
+            false,
+        );
+        assert_eq!(typeahead.drain(), Some("ls".to_string()));
+    }
+
+    #[test]
+    fn known_agent_input_is_discarded_at_both_ownership_boundaries() {
+        let mut typeahead = Typeahead::new();
+        let mut last_blocked = false;
+        typeahead.observe(RawInput::Text("stale shell gap"), false);
+
+        observe_typeahead_for_owner(
+            &mut typeahead,
+            &mut last_blocked,
+            RawInput::Text("agent input"),
+            true,
+        );
+        observe_typeahead_for_owner(
+            &mut typeahead,
+            &mut last_blocked,
+            RawInput::Key {
+                key: "up",
+                plain: true,
+            },
+            true,
+        );
+        assert_eq!(typeahead.drain(), None);
+
+        observe_typeahead_for_owner(
+            &mut typeahead,
+            &mut last_blocked,
+            RawInput::Text("boundary input"),
+            false,
+        );
+        assert_eq!(typeahead.drain(), None);
+
+        observe_typeahead_for_owner(
+            &mut typeahead,
+            &mut last_blocked,
+            RawInput::Text("ls"),
+            false,
+        );
+        assert_eq!(typeahead.drain(), Some("ls".to_string()));
+    }
+
+    #[test]
+    fn only_plain_ctrl_c_is_a_typeahead_interrupt() {
+        let ctrl = Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        assert!(is_typeahead_interrupt("c", &ctrl));
+        assert!(!is_typeahead_interrupt("d", &ctrl));
+
+        let ctrl_alt = Modifiers {
+            control: true,
+            alt: true,
+            ..Default::default()
+        };
+        assert!(!is_typeahead_interrupt("c", &ctrl_alt));
+    }
 
     fn ws(target: RemoteTarget, with_spec: bool) -> PaneWorkspace {
         PaneWorkspace {
@@ -4973,6 +5462,141 @@ mod tests {
     fn workspace_without_a_spec_does_not_forward() {
         let w = ws(RemoteTarget::direct("me", "dev.box", 22), false);
         assert_eq!(loopback_plan(true, Some(&w), None, 7), LoopbackPlan::Direct);
+    }
+
+    /// The SSH user a paste would be uploaded for, or `None` when the pane
+    /// keeps the local-path behavior.
+    #[cfg(not(target_os = "macos"))]
+    fn remote_paste_user<'a>(
+        workspace: Option<&'a crate::terminal::PaneWorkspace>,
+        ssh_spec: Option<&'a crate::daemon::protocol::NativeSshSpec>,
+    ) -> Option<&'a str> {
+        remote_paste_spec(workspace, ssh_spec).map(|s| s.user.as_str())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn native_spec() -> crate::daemon::protocol::NativeSshSpec {
+        serde_json::from_str(r#"{"host":"dev.box","port":22,"user":"me","auth_mode":"auto"}"#)
+            .unwrap()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn local_pane_pastes_the_local_image_path() {
+        assert_eq!(remote_paste_user(None, None), None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn ssh_workspace_panes_upload_images_for_the_ssh_user() {
+        let w = ws(RemoteTarget::direct("me", "dev.box", 22), true);
+        assert_eq!(remote_paste_user(Some(&w), None), Some("me"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn standalone_ssh_panes_upload_images_for_the_ssh_user() {
+        let spec = native_spec();
+        assert_eq!(remote_paste_user(None, Some(&spec)), Some("me"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn wsl_and_specless_workspaces_keep_the_local_image_path() {
+        let wsl = ws(
+            RemoteTarget::Wsl {
+                distro: "Ubuntu".into(),
+            },
+            false,
+        );
+        assert_eq!(remote_paste_user(Some(&wsl), None), None);
+        let bare = ws(RemoteTarget::direct("me", "dev.box", 22), false);
+        assert_eq!(remote_paste_user(Some(&bare), None), None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_staging_dir_is_only_safe_when_it_is_a_private_directory_we_own() {
+        use crate::daemon::protocol::SftpEntryKind;
+        // `chmod 0700` succeeded and the mode came back as asked: ours.
+        assert!(staging_dir_is_safe(
+            false,
+            Some(SftpEntryKind::Dir),
+            0o040700
+        ));
+        // A mode anyone else can enter is one anyone else can read pastes from.
+        assert!(!staging_dir_is_safe(
+            false,
+            Some(SftpEntryKind::Dir),
+            0o040755
+        ));
+        assert!(!staging_dir_is_safe(
+            false,
+            Some(SftpEntryKind::Dir),
+            0o040701
+        ));
+        // Sticky/setgid bits mean someone else set the terms.
+        assert!(!staging_dir_is_safe(
+            false,
+            Some(SftpEntryKind::Dir),
+            0o041700
+        ));
+        // A symlink is judged by its target by `stat`, so refuse it outright.
+        assert!(!staging_dir_is_safe(
+            true,
+            Some(SftpEntryKind::Dir),
+            0o040700
+        ));
+        // A file (or a path that vanished) is not a staging dir.
+        assert!(!staging_dir_is_safe(
+            false,
+            Some(SftpEntryKind::File),
+            0o100700
+        ));
+        assert!(!staging_dir_is_safe(false, None, 0o040700));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_failed_staging_preparation_is_retried_rather_than_latched() {
+        assert_eq!(
+            staging_cache(&Ok("/home/me/.cache/tty7/clipboard".to_string())),
+            Some("/home/me/.cache/tty7/clipboard".to_string())
+        );
+        // Nothing was created, so the next paste must try again instead of
+        // handing out a path under a directory that does not exist.
+        assert_eq!(staging_cache(&Err("link is down".to_string())), None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn staged_images_land_under_the_remote_users_own_home() {
+        let mut dir = "/home/me".to_string();
+        for component in super::REMOTE_CLIPBOARD_PATH {
+            dir = crate::daemon::ssh::sftp::remote_join(&dir, component);
+        }
+        assert_eq!(dir, "/home/me/.cache/tty7/clipboard");
+        assert!(
+            !dir.starts_with("/tmp"),
+            "a world-writable staging dir is exactly what this avoids"
+        );
+        assert_eq!(super::REMOTE_CLIPBOARD_MODE, 0o700);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_pasted_image_name_stands_alone_as_a_remote_path_component() {
+        use crate::daemon::ssh::sftp::safe_local_name;
+        use gpui::{Image, ImageFormat};
+
+        let pixel = image::RgbaImage::from_pixel(1, 1, image::Rgba([4, 5, 6, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(pixel)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let path = super::write_clipboard_image(&Image::from_bytes(ImageFormat::Png, png)).unwrap();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(safe_local_name(&name), "{name} must not traverse or nest");
     }
 
     #[test]
@@ -5903,6 +6527,43 @@ mod gpui_tests {
             .unwrap();
 
         assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x0c]));
+    }
+
+    #[gpui::test]
+    fn passthrough_ctrl_c_discards_typeahead_before_the_shell_can_resume(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, window, cx| {
+                assert!(!view.input_active(), "the foreground process owns input");
+                view.typeahead.observe(RawInput::Text("agent input"), false);
+                view.typeahead.observe(
+                    RawInput::Key {
+                        key: "up",
+                        plain: true,
+                    },
+                    false,
+                );
+
+                view.on_key_down(
+                    &KeyDownEvent {
+                        keystroke: key("ctrl-c"),
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+                assert_eq!(view.typeahead.drain(), None);
+                view.flush_typeahead();
+            })
+            .unwrap();
+
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x03]));
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "resuming the shell must not synthesize Ctrl-U after Ctrl-C"
+        );
     }
 
     #[gpui::test]
@@ -7101,6 +7762,50 @@ mod gpui_tests {
                 assert_eq!(view.cmd.text(), "echo hello");
                 view.handle_editor_key(&key("ctrl-n"), cx);
                 assert_eq!(view.cmd.text(), "");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn ctrl_e_accepts_a_ghost_suggestion_at_the_end(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        prompt_ready(&window, cx, &mut daemon);
+
+        window
+            .update(cx, |view, _, cx| {
+                assert!(view.input_active(), "the local editor owns a fresh prompt");
+                view.history_ranked = vec!["git log --oneline".to_string()];
+                view.cmd.set("git l");
+
+                view.handle_editor_key(&key("ctrl-e"), cx);
+
+                assert_eq!(view.cmd.text(), "git log --oneline");
+                assert!(
+                    view.editor_handoff.is_none(),
+                    "accepting a local suggestion must not hand input to the shell"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "the local editor must consume Ctrl+E instead of forwarding 0x05"
+        );
+    }
+
+    #[gpui::test]
+    fn ctrl_e_only_moves_to_the_end_when_no_ghost_is_visible(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.history_ranked = vec!["git log --oneline".to_string()];
+                view.cmd.set_with_cursor("git l", 2);
+
+                view.handle_editor_key(&key("ctrl-e"), cx);
+
+                assert_eq!(view.cmd.text(), "git l");
+                assert_eq!(view.cmd.cursor(), view.cmd.len());
             })
             .unwrap();
     }

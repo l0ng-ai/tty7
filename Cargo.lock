@@ -9656,6 +9656,7 @@ version = "26.8.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "async_zip",
  "core-foundation 0.10.0",
  "gpui",
  "gpui-component",
@@ -9686,6 +9687,7 @@ dependencies = [
  "tray-icon",
  "tty7-core",
  "uuid",
+ "windows 0.58.0",
  "windows-sys 0.61.2",
  "winresource",
 ]

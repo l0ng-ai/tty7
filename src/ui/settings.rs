@@ -32,6 +32,7 @@ use crate::ui::app::{
     Tty7App,
 };
 use crate::ui::host_ops::HostId;
+use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::presets;
 use crate::ui::rounding;
 use crate::ui::rounding::RoundedCorners as _;
@@ -80,314 +81,397 @@ impl SettingsSection {
 
 struct SearchEntry {
     section: SettingsSection,
-    title: &'static str,
-    keywords: &'static str,
+    title: L10nKey,
+    keywords: L10nKey,
+}
+
+#[derive(Clone)]
+pub(crate) enum ExplorerContextMenuNote {
+    Registered,
+    Unregistered,
+    RegisterFailed(String),
+    UnregisterFailed(String),
+}
+
+impl ExplorerContextMenuNote {
+    fn localized(&self) -> String {
+        match self {
+            Self::Registered => t(L10nKey::SettingsExplorerRegisteredNote).to_string(),
+            Self::Unregistered => t(L10nKey::SettingsExplorerUnregisteredNote).to_string(),
+            Self::RegisterFailed(error) => {
+                t_fmt(L10nKey::SettingsExplorerRegisterFailed, &[("error", error)])
+            }
+            Self::UnregisterFailed(error) => t_fmt(
+                L10nKey::SettingsExplorerUnregisterFailed,
+                &[("error", error)],
+            ),
+        }
+    }
+}
+
+fn localized_update_phase(phase: &crate::core::update::UpdatePhase) -> Option<String> {
+    use crate::core::update::{UpdateFailure, UpdatePhase};
+
+    match phase {
+        UpdatePhase::Idle => None,
+        UpdatePhase::Checking => Some(t(L10nKey::SettingsUpdateChecking).to_string()),
+        UpdatePhase::UpToDate => Some(t(L10nKey::SettingsUpdateUpToDate).to_string()),
+        UpdatePhase::Downloading => Some(t(L10nKey::SettingsUpdateDownloading).to_string()),
+        UpdatePhase::Installing => Some(t(L10nKey::SettingsUpdateInstalling).to_string()),
+        UpdatePhase::Failed(failure) => {
+            let (key, error) = match failure {
+                UpdateFailure::Check(error) => (L10nKey::SettingsUpdateCheckFailed, error),
+                UpdateFailure::Prepare(error) => (L10nKey::SettingsUpdatePrepareFailed, error),
+                UpdateFailure::Launch(error) => (L10nKey::SettingsUpdateLaunchFailed, error),
+            };
+            Some(t_fmt(key, &[("error", error)]))
+        }
+    }
+}
+
+fn localized_update_install_hint(hint: &crate::core::update::UpdateInstallHint) -> String {
+    use crate::core::update::UpdateInstallHint;
+
+    match hint {
+        #[cfg(target_os = "macos")]
+        UpdateInstallHint::UnsupportedMacos => {
+            t(L10nKey::SettingsUpdateUnsupportedMacos).to_string()
+        }
+        #[cfg(target_os = "linux")]
+        UpdateInstallHint::UnsupportedLinux => {
+            t(L10nKey::SettingsUpdateUnsupportedLinux).to_string()
+        }
+        #[cfg(target_os = "windows")]
+        UpdateInstallHint::UnsupportedWindows => {
+            t(L10nKey::SettingsUpdateUnsupportedWindows).to_string()
+        }
+        #[cfg(target_os = "windows")]
+        UpdateInstallHint::WindowsAllUsersInstall => {
+            t(L10nKey::SettingsUpdateWindowsAllUsers).to_string()
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        UpdateInstallHint::UnsupportedPlatform => {
+            t(L10nKey::SettingsUpdateUnsupportedPlatform).to_string()
+        }
+        UpdateInstallHint::MissingPackage(name) => {
+            t_fmt(L10nKey::SettingsUpdateMissingPackage, &[("name", name)])
+        }
+        UpdateInstallHint::MissingChecksums => {
+            t(L10nKey::SettingsUpdateMissingChecksums).to_string()
+        }
+    }
 }
 
 fn settings_search_entries() -> &'static [SearchEntry] {
+    use L10nKey::*;
     use SettingsSection::*;
     &[
         SearchEntry {
             section: Appearance,
-            title: "Theme",
-            keywords: "appearance color colours scheme dark light palette background foreground accent sync system os auto follow",
+            title: SettingsLanguage,
+            keywords: SettingsSearchLanguageKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Sync with system",
-            keywords: "theme dark light auto follow os appearance mode",
+            title: SettingsThemeIntroTitle,
+            keywords: SettingsSearchThemeKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Custom themes",
-            keywords: "theme duplicate edit colors folder yaml import",
+            title: SettingsSyncWithSystem,
+            keywords: SettingsSearchSyncWithSystemKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Opacity",
-            keywords: "transparency translucent see through window alpha",
+            title: SettingsCustomThemes,
+            keywords: SettingsSearchCustomThemesKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Blur",
-            keywords: "transparency translucent frosted vibrancy window background",
+            title: SettingsOpacity,
+            keywords: SettingsSearchOpacityKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Dim inactive panes",
-            keywords: "fade unfocused inactive split pane focus opacity highlight active dimming",
+            title: SettingsBlur,
+            keywords: SettingsSearchBlurKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Font size",
-            keywords: "typography text bigger smaller zoom",
+            title: SettingsDimInactivePanes,
+            keywords: SettingsSearchDimInactivePanesKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Line height",
-            keywords: "typography leading spacing",
+            title: SettingsFontSize,
+            keywords: SettingsSearchFontSizeKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Font family",
-            keywords: "typeface monospace typography",
+            title: SettingsLineHeight,
+            keywords: SettingsSearchLineHeightKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Bold font",
-            keywords: "typeface weight",
+            title: SettingsFontFamily,
+            keywords: SettingsSearchFontFamilyKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Italic font",
-            keywords: "typeface oblique",
+            title: SettingsBoldFont,
+            keywords: SettingsSearchBoldFontKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Font ligatures",
-            keywords: "typography glyph fira",
+            title: SettingsItalicFont,
+            keywords: SettingsSearchItalicFontKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Cursor shape",
-            keywords: "caret block bar underline beam",
+            title: SettingsFontLigatures,
+            keywords: SettingsSearchFontLigaturesKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "Cursor blink",
-            keywords: "caret blinking flash",
+            title: SettingsCursorShape,
+            keywords: SettingsSearchCursorShapeKeywords,
         },
         SearchEntry {
             section: Appearance,
-            title: "ANSI colors",
-            keywords: "palette 16 terminal colours theme",
+            title: SettingsCursorBlink,
+            keywords: SettingsSearchCursorBlinkKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
+            title: SettingsAnsiColors,
+            keywords: SettingsSearchAnsiColorsKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Program",
-            keywords: "shell binary zsh bash fish nu nushell pwsh powershell executable launch",
+            title: SettingsProgram,
+            keywords: SettingsSearchProgramKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Arguments",
-            keywords: "shell flags login args",
+            title: SettingsArguments,
+            keywords: SettingsSearchArgumentsKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Start in",
-            keywords: "cwd working directory start folder path home inherit custom",
+            title: SettingsStartIn,
+            keywords: SettingsSearchStartInKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Scrollback",
-            keywords: "history buffer lines scroll",
+            title: SettingsScrollback,
+            keywords: SettingsSearchScrollbackKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Scroll speed",
-            keywords: "mouse wheel multiplier scrolling",
+            title: SettingsScrollSpeed,
+            keywords: SettingsSearchScrollSpeedKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Focus follows mouse",
-            keywords: "pane hover activate",
+            title: SettingsFocusFollowsMouse,
+            keywords: SettingsSearchFocusFollowsMouseKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Hide mouse while typing",
-            keywords: "cursor pointer autohide",
+            title: SettingsHideMouseWhileTyping,
+            keywords: SettingsSearchHideMouseWhileTypingKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Report mouse to apps",
-            keywords: "mouse reporting vim tmux click scroll shift passthrough",
+            title: SettingsReportMouseToApps,
+            keywords: SettingsSearchReportMouseToAppsKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Terminal bell",
-            keywords: "bell audible visual flash sound silence beep ^g",
+            title: SettingsTerminalBell,
+            keywords: SettingsSearchTerminalBellKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Detect URLs",
-            keywords: "links hyperlink clickable open",
+            title: DetectUrls,
+            keywords: SettingsSearchDetectUrlsKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Forward SSH loopback links",
-            keywords: "ssh remote port tunnel localhost forward links",
+            title: ForwardSshLoopbackLinks,
+            keywords: SettingsSearchForwardSshLoopbackLinksKeywords,
         },
         SearchEntry {
             section: Terminal,
-            title: "Open files with",
-            keywords: "links file editor command external app path line column",
+            title: OpenFilesWith,
+            keywords: SettingsSearchOpenFilesWithKeywords,
         },
         SearchEntry {
             section: Input,
-            title: "Tab completion",
-            keywords: "complete completion menu suggestions tab prompt",
+            title: SettingsTabCompletion,
+            keywords: SettingsSearchTabCompletionKeywords,
         },
         SearchEntry {
             section: Input,
-            title: "History search",
-            keywords: "ctrl-r reverse search fuzzy history recall fzf prompt",
+            title: SettingsHistorySearch,
+            keywords: SettingsSearchHistorySearchKeywords,
         },
         SearchEntry {
             section: Input,
-            title: "Option (⌥) acts as Meta",
-            keywords: "alt keyboard modifier escape macos option meta option acts as meta",
+            title: SettingsOptionAsMeta,
+            keywords: SettingsSearchOptionAsMetaKeywords,
         },
         SearchEntry {
             section: Input,
-            title: "Smart selection",
-            keywords: "double click word url path select semantic bracket email",
+            title: SettingsSmartSelection,
+            keywords: SettingsSearchSmartSelectionKeywords,
         },
         SearchEntry {
             section: Input,
-            title: "Copy on select",
-            keywords: "clipboard selection yank mouse",
+            title: SettingsCopyOnSelect,
+            keywords: SettingsSearchCopyOnSelectKeywords,
         },
         SearchEntry {
             section: Input,
-            title: "Trim trailing spaces on copy",
-            keywords: "clipboard whitespace copy",
+            title: SettingsTrimTrailingSpaces,
+            keywords: SettingsSearchTrimTrailingSpacesKeywords,
         },
         SearchEntry {
             section: Ssh,
-            title: "Hosts",
-            keywords: "ssh host connection saved profile import ssh_config manage add edit \
-                       quick connect",
+            title: SettingsHosts,
+            keywords: SettingsSearchHostsKeywords,
         },
         SearchEntry {
             section: Ssh,
-            title: "Verify host keys",
-            keywords: "ssh security known_hosts fingerprint mitm host key verification",
+            title: SettingsVerifyHostKeys,
+            keywords: SettingsSearchVerifyHostKeysKeywords,
         },
         SearchEntry {
             section: Ssh,
-            title: "Warn before closing",
-            keywords: "ssh confirm close tab pane live session security",
+            title: WarnBeforeClosing,
+            keywords: SettingsSearchWarnBeforeClosingKeywords,
         },
         SearchEntry {
             section: Ssh,
-            title: "Port forwarding",
-            keywords: "ssh tunnel local remote dynamic socks forward rule",
+            title: SettingsPortForwarding,
+            keywords: SettingsSearchPortForwardingKeywords,
         },
         SearchEntry {
             section: Agents,
-            title: "Claude Code",
-            keywords: "agent integration hooks install uninstall status rich session working waiting tab bar sidebar badge claude",
+            title: SettingsAgentClaudeCode,
+            keywords: SettingsSearchClaudeCodeKeywords,
         },
         SearchEntry {
             section: Agents,
-            title: "Codex",
-            keywords: "agent integration hooks install openai codex",
+            title: SettingsAgentCodex,
+            keywords: SettingsSearchCodexKeywords,
         },
         SearchEntry {
             section: Agents,
-            title: "Copilot CLI",
-            keywords: "agent integration hooks install github copilot",
+            title: SettingsAgentCopilotCli,
+            keywords: SettingsSearchCopilotCliKeywords,
         },
         SearchEntry {
             section: Agents,
-            title: "OpenCode",
-            keywords: "agent integration plugin install opencode",
+            title: SettingsAgentOpencode,
+            keywords: SettingsSearchOpencodeKeywords,
         },
         SearchEntry {
             section: Agents,
-            title: "Pi",
-            keywords: "agent integration extension install pi",
+            title: SettingsAgentPi,
+            keywords: SettingsSearchPiKeywords,
         },
         SearchEntry {
             section: Agents,
-            title: "Grok Build",
-            keywords: "agent integration hooks install xai grok build",
+            title: SettingsAgentGrokBuild,
+            keywords: SettingsSearchGrokBuildKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Startup window",
-            keywords: "launch open maximized fullscreen normal",
+            title: SettingsStartupWindow,
+            keywords: SettingsSearchStartupWindowKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Remember window size & position",
-            keywords: "window size position bounds geometry launch startup remember",
+            title: SettingsRememberWindowSize,
+            keywords: SettingsSearchRememberWindowSizeKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Restore last layout",
-            keywords: "restore session previous tabs splits reopen launch startup layout",
+            title: SettingsRestoreLastLayout,
+            keywords: SettingsSearchRestoreLastLayoutKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Confirm before closing the last window",
-            keywords: "close quit confirm prompt dialog ask again warn last window cmd-w ctrl-w",
+            title: SettingsConfirmLastWindowClose,
+            keywords: SettingsSearchConfirmLastWindowCloseKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Show tray icon",
-            keywords: "tray menu bar status item agent attention system icon",
+            title: SettingsShowTrayIcon,
+            keywords: SettingsSearchShowTrayIconKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "New tab position",
-            keywords: "tabs order end after current",
+            title: SettingsNewTabPosition,
+            keywords: SettingsSearchNewTabPositionKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Tab bar position",
-            keywords: "tabs vertical sidebar left top layout rail",
+            title: SettingsTabBarPosition,
+            keywords: SettingsSearchTabBarPositionKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Sidebar grouping",
-            keywords: "tabs group repo repository git scratch header sidebar flat",
+            title: SettingsSidebarGrouping,
+            keywords: SettingsSearchSidebarGroupingKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Open diff preview from sidebar counts",
-            keywords: "diff overlay preview sidebar counts git changes click branch lines",
+            title: SettingsDiffPreviewFromCounts,
+            keywords: SettingsSearchDiffPreviewFromCountsKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Notify on command finish",
-            keywords: "notification alert done osc desktop banner long command",
+            title: SettingsNotifyOnCommandFinish,
+            keywords: SettingsSearchNotifyOnCommandFinishKeywords,
         },
         SearchEntry {
             section: WindowTabs,
-            title: "Notify threshold",
-            keywords: "notification alert seconds duration long command delay",
+            title: SettingsNotifyThreshold,
+            keywords: SettingsSearchNotifyThresholdKeywords,
         },
         SearchEntry {
             section: Keybindings,
-            title: "Keybindings",
-            keywords: "shortcut hotkey keyboard binding chord tmux preset rebind prefix",
+            title: SettingsSearchKeybindingsTitle,
+            keywords: SettingsSearchKeybindingsKeywords,
         },
         SearchEntry {
             section: About,
-            title: "About",
-            keywords: "version license credits build update check github",
+            title: SettingsNavAbout,
+            keywords: SettingsSearchAboutKeywords,
         },
         SearchEntry {
             section: About,
-            title: "How shells work",
-            keywords: "shell session daemon server detach persist background close quit stop delete workspace layout survive reboot tmux",
+            title: SettingsSearchHowShellsWorkTitle,
+            keywords: SettingsSearchHowShellsWorkKeywords,
         },
         SearchEntry {
             section: About,
-            title: "Command line tool",
-            keywords: "cli tty7 path shell command install symlink terminal iterm agent script",
+            title: SettingsSearchCommandLineToolTitle,
+            keywords: SettingsSearchCommandLineToolKeywords,
         },
         SearchEntry {
             section: About,
-            title: "Windows Explorer context menu",
-            keywords: "windows explorer right click folder directory background shell menu register unregister open here",
+            title: SettingsExplorerContextMenu,
+            keywords: SettingsSearchExplorerContextMenuKeywords,
         },
     ]
 }
 
 fn entry_matches(entry: &SearchEntry, query: &str) -> bool {
-    entry.title.to_lowercase().contains(query) || entry.keywords.contains(query)
+    t(entry.title).to_lowercase().contains(query)
+        || t(entry.keywords).to_lowercase().contains(query)
 }
 
 pub(crate) fn section_match_count(section: SettingsSection, query: &str) -> usize {
@@ -422,6 +506,7 @@ pub(crate) struct SettingsState {
     pub(crate) font_select: Entity<SelectState<SearchableVec<String>>>,
     pub(crate) font_bold_select: Entity<SelectState<SearchableVec<String>>>,
     pub(crate) font_italic_select: Entity<SelectState<SearchableVec<String>>>,
+    pub(crate) language_select: Entity<SelectState<SearchableVec<String>>>,
     pub(crate) shell_program_input: Entity<InputState>,
     pub(crate) shell_args_input: Entity<InputState>,
     pub(crate) wd_path_input: Entity<InputState>,
@@ -436,7 +521,7 @@ pub(crate) struct SettingsState {
     pub(crate) rebinding_note: Option<String>,
     pub(crate) explorer_context_menu_status:
         Result<crate::core::explorer_context_menu::Status, String>,
-    pub(crate) explorer_context_menu_note: Option<String>,
+    pub(crate) explorer_context_menu_note: Option<ExplorerContextMenuNote>,
     pub(crate) ssh_form: Option<SshProfileForm>,
     pub(crate) ssh_detail: SshDetail,
     pub(crate) ssh_filter: Entity<InputState>,
@@ -490,7 +575,7 @@ fn ssh_group_key(p: &SshProfile) -> &str {
 fn ssh_group_label(key: &str) -> &str {
     match key {
         crate::core::ssh_config::IMPORTED_GROUP => "~/.ssh/config",
-        "" => "In tty7",
+        "" => t(L10nKey::SettingsInTty7),
         other => other,
     }
 }
@@ -605,7 +690,9 @@ pub(crate) struct Recording {
     pub(crate) _intercept: Subscription,
 }
 
-pub(crate) const FONT_DEFAULT_LABEL: &str = "Default (match primary)";
+pub(crate) fn font_default_label() -> &'static str {
+    t(L10nKey::SettingsFontDefault)
+}
 
 #[cfg(target_os = "macos")]
 const LINK_MODIFIER_LABEL: &str = "⌘";
@@ -678,7 +765,12 @@ fn seed_forward_row(
         bind_port: seed_hinted(window, cx, &port(rule.bind.port), "8080"),
         target_host: seed_hinted(window, cx, &rule.target.host, "127.0.0.1"),
         target_port: seed_hinted(window, cx, &port(rule.target.port), "80"),
-        description: seed_hinted(window, cx, &rule.description, "what it's for"),
+        description: seed_hinted(
+            window,
+            cx,
+            &rule.description,
+            t(L10nKey::ForwardDescriptionPlaceholder),
+        ),
     }
 }
 
@@ -762,42 +854,42 @@ impl Tty7App {
 
         let nav_body = SidebarMenu::new()
             .child(nav_item(
-                "Appearance",
+                t(L10nKey::SettingsNavAppearance),
                 SettingsSection::Appearance,
                 Icon::new(IconName::Palette),
             ))
             .child(nav_item(
-                "Terminal",
+                t(L10nKey::SettingsNavTerminal),
                 SettingsSection::Terminal,
                 Icon::new(IconName::SquareTerminal),
             ))
             .child(nav_item(
-                "Input",
+                t(L10nKey::SettingsNavInput),
                 SettingsSection::Input,
                 Icon::new(IconName::Settings2),
             ))
             .child(nav_item(
-                "SSH",
+                t(L10nKey::SettingsNavSsh),
                 SettingsSection::Ssh,
                 Icon::new(IconName::Globe),
             ))
             .child(nav_item(
-                "Agents",
+                t(L10nKey::SettingsNavAgents),
                 SettingsSection::Agents,
                 Icon::new(IconName::Bot),
             ))
             .child(nav_item(
-                "Window & Tabs",
+                t(L10nKey::SettingsNavWindowTabs),
                 SettingsSection::WindowTabs,
                 Icon::new(IconName::WindowRestore),
             ))
             .child(nav_item(
-                "Keybindings",
+                t(L10nKey::SettingsNavKeybindings),
                 SettingsSection::Keybindings,
                 Icon::new(IconName::CaseSensitive),
             ))
             .child(nav_item(
-                "About",
+                t(L10nKey::SettingsNavAbout),
                 SettingsSection::About,
                 Icon::empty().path("icons/circle-info.svg"),
             ));
@@ -817,7 +909,7 @@ impl Tty7App {
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(header_muted)
-                            .child("SETTINGS"),
+                            .child(t(L10nKey::SettingsHeader)),
                     )
                     .child(
                         h_flex()
@@ -1014,7 +1106,7 @@ impl Tty7App {
     pub(crate) fn segmented(
         &self,
         id: impl Into<SharedString>,
-        options: &'static [&'static str],
+        options: &[&str],
         selected: usize,
         cx: &mut Context<Self>,
         on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
@@ -1027,7 +1119,7 @@ impl Tty7App {
         &self,
         sf: presets::Surface,
         id: impl Into<SharedString>,
-        options: &'static [&'static str],
+        options: &[&str],
         selected: usize,
         cx: &mut Context<Self>,
         on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
@@ -1069,7 +1161,7 @@ impl Tty7App {
                             .hover(|h| h.bg(gpui::rgb(sf.hover)))
                     })
                     .active(|s| s.bg(gpui::rgb(sf.pressed)))
-                    .child(*label)
+                    .child(label.to_string())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         on_pick(this, i, window, cx);
                     }))
@@ -1084,14 +1176,16 @@ impl Tty7App {
         let hover_bg = gpui::rgb(cx.global::<presets::Surfaces>().window.hover);
         let stepper_bg = theme.secondary.opacity(0.35);
         let font_size = self.font_size;
-        let (font_select, font_bold_select, font_italic_select) = match self.active_settings() {
-            Some(s) => (
-                s.font_select.clone(),
-                s.font_bold_select.clone(),
-                s.font_italic_select.clone(),
-            ),
-            None => return div().into_any_element(),
-        };
+        let (font_select, font_bold_select, font_italic_select, language_select) =
+            match self.active_settings() {
+                Some(s) => (
+                    s.font_select.clone(),
+                    s.font_bold_select.clone(),
+                    s.font_italic_select.clone(),
+                    s.language_select.clone(),
+                ),
+                None => return div().into_any_element(),
+            };
         let cfg = cx.global::<Config>();
         let cursor_style = cfg.cursor_style;
         let cursor_blink = cfg.cursor_blink;
@@ -1160,7 +1254,7 @@ impl Tty7App {
             step("font-inc", "+", 2)
                 .on_click(cx.listener(|this, _, _w, cx| this.change_font_size(FONT_SIZE_STEP, cx))),
             Button::new("font-reset")
-                .label("Reset")
+                .label(t(L10nKey::Reset))
                 .ghost()
                 .small()
                 .on_click(cx.listener(|this, _, _w, cx| this.reset_font_size(cx))),
@@ -1176,7 +1270,7 @@ impl Tty7App {
                 cx.listener(|this, _, _w, cx| this.change_line_height(LINE_HEIGHT_STEP, cx)),
             ),
             Button::new("lh-reset")
-                .label("Reset")
+                .label(t(L10nKey::Reset))
                 .ghost()
                 .small()
                 .on_click(cx.listener(|this, _, _w, cx| this.reset_line_height(cx))),
@@ -1187,7 +1281,7 @@ impl Tty7App {
                 .small()
                 .w(px(180.))
                 .h(control_h)
-                .search_placeholder("Search fonts…")
+                .search_placeholder(crate::ui::i18n::t(crate::ui::i18n::L10nKey::SearchFonts))
                 .menu_max_h(px(224.))
                 .into_any_element()
         };
@@ -1197,6 +1291,12 @@ impl Tty7App {
         let ligature_switch = crate::ui::theme::switch("font-ligatures", cx)
             .checked(font_ligatures)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_font_ligatures(*on, cx)))
+            .into_any_element();
+        let language_control = Select::new(&language_select)
+            .small()
+            .w(px(180.))
+            .h(control_h)
+            .menu_max_h(px(224.))
             .into_any_element();
 
         let cursor_idx = match cursor_style {
@@ -1225,8 +1325,8 @@ impl Tty7App {
 
         v_flex()
             .child(self.section_intro(
-                "Theme",
-                "Pick a color theme. Each one sets its own light or dark look.",
+                t(L10nKey::SettingsThemeIntroTitle),
+                t(L10nKey::SettingsThemeIntroDesc),
                 cx,
             ))
             .child(self.render_theme_selection(cx))
@@ -1234,54 +1334,62 @@ impl Tty7App {
             .child(self.section_rule(cx))
             .child(self.render_window_section(cx))
             .child(self.section_rule(cx))
-            .child(self.section_header("Typography", cx))
+            .child(self.section_header(t(L10nKey::SettingsLanguage), cx))
             .child(self.settings_row(
-                "Font size",
-                "Terminal text size in pixels.",
+                t(L10nKey::SettingsLanguage),
+                t(L10nKey::SettingsLanguageDesc),
+                language_control,
+                cx,
+            ))
+            .child(self.section_rule(cx))
+            .child(self.section_header(t(L10nKey::SettingsTypography), cx))
+            .child(self.settings_row(
+                t(L10nKey::SettingsFontSize),
+                t(L10nKey::SettingsFontSizeDesc),
                 font_size_control,
                 cx,
             ))
             .child(self.settings_row(
-                "Line height",
-                "Row spacing as a multiple of the font size.",
+                t(L10nKey::SettingsLineHeight),
+                t(L10nKey::SettingsLineHeightDesc),
                 line_height_control,
                 cx,
             ))
             .child(self.settings_row(
-                "Font family",
-                "Pick from fonts installed on your system.",
+                t(L10nKey::SettingsFontFamily),
+                t(L10nKey::SettingsFontFamilyDesc),
                 font_family_control,
                 cx,
             ))
             .child(self.settings_row(
-                "Bold font",
-                "Face for bold text; Default synthesizes it from the primary.",
+                t(L10nKey::SettingsBoldFont),
+                t(L10nKey::SettingsBoldFontDesc),
                 font_bold_control,
                 cx,
             ))
             .child(self.settings_row(
-                "Italic font",
-                "Face for italic text; Default synthesizes it from the primary.",
+                t(L10nKey::SettingsItalicFont),
+                t(L10nKey::SettingsItalicFontDesc),
                 font_italic_control,
                 cx,
             ))
             .child(self.settings_row(
-                "Font ligatures",
-                "Enable common programming ligature features for terminal text.",
+                t(L10nKey::SettingsFontLigatures),
+                t(L10nKey::SettingsFontLigaturesDesc),
                 ligature_switch,
                 cx,
             ))
             .child(self.section_rule(cx))
-            .child(self.section_header("Cursor", cx))
+            .child(self.section_header(t(L10nKey::SettingsCursor), cx))
             .child(self.settings_row(
-                "Cursor shape",
-                "How the terminal cursor is drawn.",
+                t(L10nKey::SettingsCursorShape),
+                t(L10nKey::SettingsCursorShapeDesc),
                 cursor_style_control,
                 cx,
             ))
             .child(self.settings_row(
-                "Cursor blink",
-                "Pulse the cursor while the terminal is focused.",
+                t(L10nKey::SettingsCursorBlink),
+                t(L10nKey::SettingsCursorBlinkDesc),
                 blink_switch,
                 cx,
             ))
@@ -1309,7 +1417,10 @@ impl Tty7App {
             .child(div().flex_1().child(Slider::new(&slider)))
             .child(
                 div()
-                    .w(px(36.))
+                    .w(px(38.))
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .text_right()
                     .text_sm()
                     .text_color(cx.theme().foreground)
                     .child(format!("{:.0}%", opacity * 100.)),
@@ -1327,17 +1438,16 @@ impl Tty7App {
             .into_any_element();
 
         v_flex()
-            .child(self.section_header("Transparency", cx))
+            .child(self.section_header(t(L10nKey::SettingsTransparency), cx))
             .child(self.settings_row(
-                "Opacity",
-                "How opaque the window background is, for every theme. Below \
-                 100% the desktop shows through.",
+                t(L10nKey::SettingsOpacity),
+                t(L10nKey::SettingsOpacityDesc),
                 opacity_control,
                 cx,
             ))
             .child(self.settings_row(
-                "Blur",
-                "Blur whatever is behind a translucent window (macOS).",
+                t(L10nKey::SettingsBlur),
+                t(L10nKey::SettingsBlurDesc),
                 blur_switch,
                 cx,
             ))
@@ -1345,7 +1455,7 @@ impl Tty7App {
                 this.child(
                     h_flex().mt_2().child(
                         Button::new("follow-theme-window")
-                            .label("Follow theme")
+                            .label(t(L10nKey::FollowTheme))
                             .small()
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.reset_window_overrides(window, cx)
@@ -1354,8 +1464,8 @@ impl Tty7App {
                 )
             })
             .child(self.settings_row(
-                "Dim inactive panes",
-                "Fade unfocused panes in a split so the active one stands out.",
+                t(L10nKey::SettingsDimInactivePanes),
+                t(L10nKey::SettingsDimInactivePanesDesc),
                 dim_switch,
                 cx,
             ))
@@ -1366,7 +1476,7 @@ impl Tty7App {
         let editor = self.active_settings().and_then(|s| s.theme_editor.as_ref());
 
         let folder_button = Button::new("open-themes-folder")
-            .label("Open themes folder")
+            .label(t(L10nKey::SettingsOpenThemesFolder))
             .small()
             .on_click(cx.listener(|this, _, _w, cx| this.open_themes_folder(cx)));
 
@@ -1398,9 +1508,9 @@ impl Tty7App {
                 .child(
                     Button::new("pick-theme-image")
                         .label(if image.is_some() {
-                            "Change…"
+                            t(L10nKey::SettingsChangeThemeImage)
                         } else {
-                            "Choose…"
+                            t(L10nKey::SettingsChooseThemeImage)
                         })
                         .small()
                         .on_click(cx.listener(|this, _, _w, cx| this.pick_theme_image(cx))),
@@ -1417,7 +1527,7 @@ impl Tty7App {
                     )
                     .child(
                         Button::new("remove-theme-image")
-                            .label("Remove")
+                            .label(t(L10nKey::SettingsRemoveThemeImage))
                             .small()
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.remove_theme_image(window, cx)
@@ -1434,15 +1544,18 @@ impl Tty7App {
                     .child(div().flex_1().child(Slider::new(&slider)))
                     .child(
                         div()
-                            .w(px(36.))
+                            .w(px(38.))
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .text_right()
                             .text_sm()
                             .text_color(cx.theme().foreground)
                             .child(format!("{:.0}%", readout * 100.)),
                     )
                     .into_any_element();
                 self.settings_row(
-                    "Image opacity",
-                    "How strongly the image shows over the background color.",
+                    t(L10nKey::SettingsImageOpacity),
+                    t(L10nKey::SettingsImageOpacityDesc),
                     control,
                     cx,
                 )
@@ -1451,9 +1564,8 @@ impl Tty7App {
             return v_flex()
                 .mt_5()
                 .child(self.section_intro(
-                    "Edit theme",
-                    "You're editing a copy. Changes save to its file in the themes \
-                     folder and apply live.",
+                    t(L10nKey::SettingsEditTheme),
+                    t(L10nKey::SettingsEditThemeIntro),
                     cx,
                 ))
                 .children(
@@ -1461,13 +1573,13 @@ impl Tty7App {
                         .map(|(label, state)| self.render_theme_color_row(label, state, cx)),
                 )
                 .child(self.settings_row(
-                    "Background image",
-                    "Composited over the background color, under the text.",
+                    t(L10nKey::SettingsBackgroundImage),
+                    t(L10nKey::SettingsBackgroundImageDesc),
                     image_control,
                     cx,
                 ))
                 .children(image_opacity_row)
-                .child(self.section_header("ANSI colors", cx))
+                .child(self.section_header(t(L10nKey::SettingsAnsiColors), cx))
                 .children(
                     ansi.into_iter()
                         .map(|(label, state)| self.render_theme_color_row(label, state, cx)),
@@ -1479,9 +1591,8 @@ impl Tty7App {
         v_flex()
             .mt_5()
             .child(self.section_intro(
-                "Custom themes",
-                "Duplicate a theme to edit its colors here, or drop your own in the \
-                 themes folder: a tty7 YAML theme or an iTerm2 .itermcolors scheme.",
+                t(L10nKey::SettingsCustomThemes),
+                t(L10nKey::SettingsCustomThemesIntro),
                 cx,
             ))
             .child(
@@ -1489,7 +1600,7 @@ impl Tty7App {
                     .gap_3()
                     .child(
                         Button::new("duplicate-theme")
-                            .label("Duplicate to edit")
+                            .label(t(L10nKey::SettingsDuplicateToEdit))
                             .small()
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.fork_active_theme(window, cx)
@@ -1564,49 +1675,52 @@ impl Tty7App {
         let live = self.live_ssh_profiles(cx);
         let menu_app = cx.entity().downgrade();
 
-        let header = v_flex().gap_2().child(self.header_text("Hosts", cx)).child(
-            h_flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    Icon::empty()
-                        .path("stock/icons/search.svg")
-                        .size(px(16.))
-                        .text_color(muted),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(Input::new(&filter).appearance(false).pl_0()),
-                )
-                .child(
-                    h_flex()
-                        .flex_shrink_0()
-                        .gap_0p5()
-                        .child(
-                            Button::new("ssh-profiles-add")
-                                .icon(Icon::new(IconName::Plus))
-                                .ghost()
-                                .small()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.add_new_profile(window, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new("ssh-profiles-more")
-                                .icon(Icon::empty().path("stock/icons/ellipsis.svg"))
-                                .ghost()
-                                .small()
-                                .dropdown_menu_with_anchor(
-                                    gpui::Anchor::TopRight,
-                                    move |menu, _window, _cx| {
-                                        Self::ssh_master_menu(menu, &menu_app)
-                                    },
-                                ),
-                        ),
-                ),
-        );
+        let header = v_flex()
+            .gap_2()
+            .child(self.header_text(t(L10nKey::SettingsHosts), cx))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Icon::empty()
+                            .path("stock/icons/search.svg")
+                            .size(px(16.))
+                            .text_color(muted),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&filter).appearance(false).pl_0()),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_shrink_0()
+                            .gap_0p5()
+                            .child(
+                                Button::new("ssh-profiles-add")
+                                    .icon(Icon::new(IconName::Plus))
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.add_new_profile(window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("ssh-profiles-more")
+                                    .icon(Icon::empty().path("stock/icons/ellipsis.svg"))
+                                    .ghost()
+                                    .small()
+                                    .dropdown_menu_with_anchor(
+                                        gpui::Anchor::TopRight,
+                                        move |menu, _window, _cx| {
+                                            Self::ssh_master_menu(menu, &menu_app)
+                                        },
+                                    ),
+                            ),
+                    ),
+            );
 
         let mut groups: Vec<(String, Vec<SshProfile>)> = Vec::new();
         for p in profiles.iter().filter(|p| ssh_row_matches(p, &query)) {
@@ -1624,8 +1738,8 @@ impl Tty7App {
 
         let mut list = v_flex().gap_0p5().w_full().child(self.render_ssh_row(
             "ssh-defaults-row",
-            "Defaults",
-            "Inherited by every host",
+            t(L10nKey::SettingsDefaults),
+            t(L10nKey::SettingsInheritedByEveryHost),
             detail == SshDetail::Defaults,
             None,
             sf,
@@ -1640,7 +1754,7 @@ impl Tty7App {
                     .py_4()
                     .text_sm()
                     .text_color(muted)
-                    .child("No saved hosts yet."),
+                    .child(t(L10nKey::SettingsNoSavedHosts)),
             );
         } else if groups.is_empty() {
             list = list.child(
@@ -1648,7 +1762,7 @@ impl Tty7App {
                     .py_4()
                     .text_sm()
                     .text_color(muted)
-                    .child(format!("Nothing matches {query}.")),
+                    .child(t_fmt(L10nKey::SettingsNothingMatches, &[("query", &query)])),
             );
         }
 
@@ -1687,23 +1801,27 @@ impl Tty7App {
 
     fn ssh_master_menu(menu: PopupMenu, app: &gpui::WeakEntity<Self>) -> PopupMenu {
         menu.min_w(px(200.))
-            .item(PopupMenuItem::new("Import from ~/.ssh/config").on_click({
-                let app = app.clone();
-                move |_, _window, cx| {
-                    let _ = app.update(cx, |this, cx| this.import_ssh_config_profiles(cx));
-                }
-            }))
-            .item(PopupMenuItem::new("Expand all groups").on_click({
-                let app = app.clone();
-                move |_, _window, cx| {
-                    let _ = app.update(cx, |this, cx| {
-                        if let Some(s) = this.active_settings_mut() {
-                            s.ssh_collapsed_groups.clear();
-                        }
-                        cx.notify();
-                    });
-                }
-            }))
+            .item(
+                PopupMenuItem::new(t(L10nKey::SettingsImportFromSshConfig)).on_click({
+                    let app = app.clone();
+                    move |_, _window, cx| {
+                        let _ = app.update(cx, |this, cx| this.import_ssh_config_profiles(cx));
+                    }
+                }),
+            )
+            .item(
+                PopupMenuItem::new(t(L10nKey::SettingsExpandAllGroups)).on_click({
+                    let app = app.clone();
+                    move |_, _window, cx| {
+                        let _ = app.update(cx, |this, cx| {
+                            if let Some(s) = this.active_settings_mut() {
+                                s.ssh_collapsed_groups.clear();
+                            }
+                            cx.notify();
+                        });
+                    }
+                }),
+            )
     }
 
     fn render_ssh_group_header(
@@ -1992,9 +2110,9 @@ impl Tty7App {
         };
 
         let heading = if saved == 0 {
-            "No hosts yet"
+            t(L10nKey::SettingsNoHostsYet)
         } else {
-            "Nothing selected"
+            t(L10nKey::SettingsNothingSelected)
         };
 
         let mut body = v_flex()
@@ -2004,7 +2122,7 @@ impl Tty7App {
                 div()
                     .text_sm()
                     .text_color(muted)
-                    .child("Type an address to connect now — tty7 offers to save it afterwards."),
+                    .child(t(L10nKey::SettingsTypeAddressToConnect)),
             )
             .child(
                 h_flex()
@@ -2013,7 +2131,7 @@ impl Tty7App {
                     .child(div().w(px(320.)).child(Input::new(&input).small()))
                     .child(
                         Button::new("ssh-quick-connect")
-                            .label("Connect")
+                            .label(t(L10nKey::Connect))
                             .primary()
                             .small()
                             .disabled(parsed.is_none())
@@ -2042,17 +2160,15 @@ impl Tty7App {
                             .flex_1()
                             .min_w_0()
                             .gap_0p5()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(format!("{n} more in ~/.ssh/config")),
-                            )
+                            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(t_fmt(
+                                L10nKey::SettingsMoreInSshConfig,
+                                &[("count", &n.to_string())],
+                            )))
                             .child(div().text_xs().text_color(muted).truncate().child(names)),
                     )
                     .child(
                         Button::new("ssh-empty-import")
-                            .label("Link")
+                            .label(t(L10nKey::Link))
                             .small()
                             .on_click(
                                 cx.listener(|this, _, _w, cx| this.import_ssh_config_profiles(cx)),
@@ -2090,20 +2206,15 @@ impl Tty7App {
         let config_block = v_flex()
             .child(self.section_intro(
                 "~/.ssh/config",
-                match imported {
-                    0 => "No aliases linked yet.".to_string(),
-                    1 => "1 alias linked.".to_string(),
-                    n => format!("{n} aliases linked."),
-                },
+                t_plural(L10nKey::SettingsAliasesLinked, imported, &[]),
                 cx,
             ))
             .child(
                 self.settings_row(
-                    "Import aliases",
-                    "Re-reads the file and adds anything new. Edits you make here are \
-                 stored by tty7 — the file itself is never written.",
+                    t(L10nKey::SettingsImportAliases),
+                    t(L10nKey::SettingsImportAliasesDesc),
                     Button::new("ssh-defaults-import")
-                        .label("Import now")
+                        .label(t(L10nKey::SettingsImportNow))
                         .small()
                         .on_click(
                             cx.listener(|this, _, _w, cx| this.import_ssh_config_profiles(cx)),
@@ -2118,11 +2229,13 @@ impl Tty7App {
                 v_flex()
                     .gap_1()
                     .mb_6()
-                    .child(self.header_text("Defaults", cx))
-                    .child(div().text_sm().text_color(muted).child(
-                        "Every host starts from these. Any host can override one under \
-                         its own Advanced.",
-                    )),
+                    .child(self.header_text(t(L10nKey::SettingsDefaults), cx))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(t(L10nKey::SettingsDefaultsIntro)),
+                    ),
             )
             .child(self.render_ssh_security_block(cx))
             .child(self.section_rule(cx))
@@ -2138,7 +2251,7 @@ impl Tty7App {
     ) -> PopupMenu {
         let menu = menu
             .min_w(px(180.))
-            .item(PopupMenuItem::new("Connect").on_click({
+            .item(PopupMenuItem::new(t(L10nKey::Connect)).on_click({
                 let app = app.clone();
                 move |_, window, cx| {
                     let _ = app.update(cx, |this, cx| {
@@ -2147,40 +2260,46 @@ impl Tty7App {
                     });
                 }
             }))
-            .item(PopupMenuItem::new("Copy address").on_click({
-                let app = app.clone();
-                move |_, _window, cx| {
-                    let _ = app.update(cx, |this, cx| this.copy_profile_connect_string(id, cx));
-                }
-            }))
-            .item(PopupMenuItem::new("Duplicate").on_click({
+            .item(
+                PopupMenuItem::new(t(L10nKey::SettingsCopyAddress)).on_click({
+                    let app = app.clone();
+                    move |_, _window, cx| {
+                        let _ = app.update(cx, |this, cx| this.copy_profile_connect_string(id, cx));
+                    }
+                }),
+            )
+            .item(PopupMenuItem::new(t(L10nKey::SettingsDuplicate)).on_click({
                 let app = app.clone();
                 move |_, window, cx| {
                     let _ = app.update(cx, |this, cx| this.duplicate_profile(id, window, cx));
                 }
             }))
-            .item(PopupMenuItem::new("Forget password").on_click({
-                let app = app.clone();
-                move |_, window, cx| {
-                    if let Some(msg) = app
-                        .update(cx, |this, cx| this.forget_profile_password(id, cx))
-                        .ok()
-                        .flatten()
-                    {
-                        window.push_notification(msg, cx);
+            .item(
+                PopupMenuItem::new(t(L10nKey::SettingsForgetPassword)).on_click({
+                    let app = app.clone();
+                    move |_, window, cx| {
+                        if let Some(msg) = app
+                            .update(cx, |this, cx| this.forget_profile_password(id, cx))
+                            .ok()
+                            .flatten()
+                        {
+                            window.push_notification(msg, cx);
+                        }
                     }
-                }
-            }))
+                }),
+            )
             .separator();
 
         menu.item(
-            PopupMenuItem::element(move |_window, _cx| div().text_color(danger).child("Delete"))
-                .on_click({
-                    let app = app.clone();
-                    move |_, _window, cx| {
-                        let _ = app.update(cx, |this, cx| this.delete_profile(id, cx));
-                    }
-                }),
+            PopupMenuItem::element(move |_window, _cx| {
+                div().text_color(danger).child(t(L10nKey::Delete))
+            })
+            .on_click({
+                let app = app.clone();
+                move |_, _window, cx| {
+                    let _ = app.update(cx, |this, cx| this.delete_profile(id, cx));
+                }
+            }),
         )
     }
 
@@ -2199,22 +2318,19 @@ impl Tty7App {
 
         v_flex()
             .child(self.section_intro(
-                "Security",
-                "A host can override either of these under its own Advanced.",
+                t(L10nKey::SettingsSecurity),
+                t(L10nKey::SettingsSecurityIntro),
                 cx,
             ))
             .child(self.settings_row(
-                "Verify host keys",
-                "Check each server's key against known_hosts and confirm unknown or \
-                 changed keys before connecting. Off connects without checking, so a \
-                 spoofed server would go unnoticed.",
+                t(L10nKey::SettingsVerifyHostKeys),
+                t(L10nKey::SettingsVerifyHostKeysDesc),
                 verify_switch,
                 cx,
             ))
             .child(self.settings_row(
-                "Warn before closing",
-                "Ask for confirmation before closing a tab or pane with a live SSH \
-                 session.",
+                t(L10nKey::WarnBeforeClosing),
+                t(L10nKey::SettingsWarnBeforeClosingDesc),
                 warn_switch,
                 cx,
             ))
@@ -2474,7 +2590,7 @@ impl Tty7App {
             return;
         };
         profile.id = Uuid::new_v4();
-        profile.name = format!("{} (copy)", profile.name);
+        profile.name = t_fmt(L10nKey::SettingsProfileCopied, &[("name", &profile.name)]);
         self.update_config(cx, |cfg| cfg.ssh_profiles.push(profile.clone()));
         self.ssh_form_load(&profile, window, cx);
     }
@@ -2531,8 +2647,14 @@ impl Tty7App {
         let endpoint = format!("{user}@{host}:{port}");
         Some(
             match OsCredentialStore.delete_password(&user, &host, port) {
-                Ok(()) => format!("Forgot saved password for {endpoint}"),
-                Err(e) => format!("Couldn't forget password for {endpoint}: {e}"),
+                Ok(()) => t_fmt(
+                    L10nKey::SettingsForgotPasswordFor,
+                    &[("endpoint", &endpoint)],
+                ),
+                Err(e) => t_fmt(
+                    L10nKey::SettingsCouldntForgetPassword,
+                    &[("endpoint", &endpoint), ("error", &e.to_string())],
+                ),
             },
         )
     }
@@ -2564,7 +2686,7 @@ impl Tty7App {
         let title = match (name.is_empty(), host.is_empty()) {
             (false, _) => name,
             (true, false) => host,
-            (true, true) => "New host".to_string(),
+            (true, true) => t(L10nKey::SettingsNewHost).to_string(),
         };
 
         let auth_idx = match form.auth {
@@ -2598,10 +2720,17 @@ impl Tty7App {
                             .text_color(muted)
                             .child(div().truncate().child(address))
                             .when(!jump_name.is_empty(), |r| {
-                                r.child(div().child(format!("· via {jump_name}")))
+                                r.child(div().child(t_fmt(
+                                    L10nKey::SettingsJumpHostVia,
+                                    &[("jump_name", &jump_name)],
+                                )))
                             })
                             .when(live, |r| {
-                                r.child(div().text_color(success).child("· connected"))
+                                r.child(
+                                    div()
+                                        .text_color(success)
+                                        .child(format!("· {}", t(L10nKey::SettingsConnected))),
+                                )
                             }),
                     ),
             )
@@ -2611,14 +2740,14 @@ impl Tty7App {
                     .gap_2()
                     .child(
                         Button::new("ssh-form-save")
-                            .label("Save")
+                            .label(t(L10nKey::Save))
                             .small()
                             .disabled(!dirty)
                             .on_click(cx.listener(|this, _, _w, cx| this.save_ssh_form(cx))),
                     )
                     .child(
                         Button::new("ssh-form-connect")
-                            .label("Connect")
+                            .label(t(L10nKey::Connect))
                             .primary()
                             .small()
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -2631,8 +2760,8 @@ impl Tty7App {
             .gap_3()
             .child(
                 self.settings_row(
-                    "Name",
-                    "A label for this connection.",
+                    t(L10nKey::SettingsName),
+                    t(L10nKey::SettingsNameDesc),
                     div()
                         .w(px(260.))
                         .child(Input::new(&form.name).small())
@@ -2642,8 +2771,8 @@ impl Tty7App {
             )
             .child(
                 self.settings_row(
-                    "Host",
-                    "Hostname or IP address.",
+                    t(L10nKey::SettingsHost),
+                    t(L10nKey::SettingsHostDesc),
                     h_flex()
                         .gap_2()
                         .child(div().w(px(172.)).child(Input::new(&form.host).small()))
@@ -2654,8 +2783,8 @@ impl Tty7App {
             )
             .child(
                 self.settings_row(
-                    "User",
-                    "Login user (blank = resolve at connect).",
+                    t(L10nKey::SettingsUser),
+                    t(L10nKey::SettingsUserDesc),
                     div()
                         .w(px(260.))
                         .child(Input::new(&form.user).small())
@@ -2664,11 +2793,18 @@ impl Tty7App {
                 ),
             )
             .child(self.settings_row(
-                "Auth",
-                "Authentication method. Auto tries every applicable method.",
+                t(L10nKey::SettingsAuth),
+                t(L10nKey::SettingsAuthDesc),
                 self.segmented(
                     "ssh-form-auth",
-                    &["Auto", "GSSAPI", "Password", "Key", "Agent", "2FA"],
+                    &[
+                        t(L10nKey::SettingsAuthModeAuto),
+                        "GSSAPI",
+                        t(L10nKey::SettingsAuthModePassword),
+                        t(L10nKey::SettingsAuthModeKey),
+                        t(L10nKey::SettingsAuthModeAgent),
+                        t(L10nKey::SettingsAuthMode2Fa),
+                    ],
                     auth_idx,
                     cx,
                     |this, ix, _w, cx| {
@@ -2737,14 +2873,14 @@ impl Tty7App {
         let summary = {
             let name = form.jump.read(cx).value().trim().to_string();
             if name.is_empty() {
-                "(none)".to_string()
+                t(L10nKey::SettingsNoneSummary).to_string()
             } else {
                 name
             }
         };
         let mut section = v_flex().child(self.disclosure_header(
             "ssh-sec-jump",
-            "Jump host",
+            t(L10nKey::SettingsJumpHost),
             &summary,
             form.show_jump,
             cx,
@@ -2758,8 +2894,8 @@ impl Tty7App {
         if form.show_jump {
             section = section.child(
                 self.settings_row(
-                    "Jump host",
-                    "Name of another profile to tunnel through (blank = direct).",
+                    t(L10nKey::SettingsJumpHost),
+                    t(L10nKey::SettingsJumpHostDesc),
                     div()
                         .w(px(260.))
                         .child(Input::new(&form.jump).small())
@@ -2783,13 +2919,12 @@ impl Tty7App {
             .filter(|r| r.collect(cx).is_some())
             .count();
         let summary = match count {
-            0 => "none".to_string(),
-            1 => "1 rule, opened with the connection".to_string(),
-            n => format!("{n} rules, opened with the connection"),
+            0 => t(L10nKey::SettingsNoneLower).to_string(),
+            _ => t_plural(L10nKey::SettingsRulesOpenedWithConnection, count, &[]),
         };
         let mut section = v_flex().child(self.disclosure_header(
             "ssh-sec-fwd",
-            "Port forwarding",
+            t(L10nKey::SettingsPortForwarding),
             &summary,
             form.show_forwards,
             cx,
@@ -2812,7 +2947,7 @@ impl Tty7App {
             .child(
                 h_flex().pt_1p5().child(
                     Button::new("ssh-fwd-add")
-                        .label("+ Add rule")
+                        .label(t(L10nKey::SettingsAddRule))
                         .ghost()
                         .small()
                         .on_click(
@@ -2826,9 +2961,9 @@ impl Tty7App {
                     .pt_1()
                     .text_xs()
                     .text_color(muted)
-                    .child("L — a local port reaches the remote side")
-                    .child("R — a remote port reaches this machine")
-                    .child("D — dynamic SOCKS proxy"),
+                    .child(t(L10nKey::SettingsFwdLegendLocal))
+                    .child(t(L10nKey::SettingsFwdLegendRemote))
+                    .child(t(L10nKey::SettingsFwdLegendDynamic)),
             )
             .into_any_element()
     }
@@ -2909,9 +3044,9 @@ impl Tty7App {
             )
             .when(incomplete, |col| {
                 col.child(div().text_xs().text_color(danger).child(if needs_target {
-                    "Needs a listen port and a target host:port — won't be saved."
+                    t(L10nKey::SettingsFwdNeedsBoth)
                 } else {
-                    "Needs a listen port — won't be saved."
+                    t(L10nKey::SettingsFwdNeedsListen)
                 }))
             })
             .into_any_element()
@@ -2953,8 +3088,8 @@ impl Tty7App {
     ) -> AnyElement {
         let mut section = v_flex().child(self.disclosure_header(
             "ssh-sec-adv",
-            "Advanced",
-            "algorithms / keepalive / proxies / X11 / login scripts",
+            t(L10nKey::SettingsAdvanced),
+            t(L10nKey::SettingsAdvancedSummary),
             form.show_advanced,
             cx,
             |this, cx| {
@@ -2984,7 +3119,13 @@ impl Tty7App {
             )
         };
 
-        let on_off = |b: bool| if b { "on" } else { "off" };
+        let on_off = |b: bool| {
+            if b {
+                t(L10nKey::SettingsValueOn)
+            } else {
+                t(L10nKey::SettingsValueOff)
+            }
+        };
         let vhk_default = on_off(cx.global::<Config>().verify_host_keys);
         let woc_default = on_off(cx.global::<Config>().ssh_warn_on_close);
         let vhk_idx = match form.verify_host_keys {
@@ -3001,15 +3142,15 @@ impl Tty7App {
         section = section
             .child(text_row(
                 self,
-                "Identity files",
-                "Private-key paths, one per line (%h/%r expand).",
+                t(L10nKey::SettingsIdentityFiles),
+                t(L10nKey::SettingsIdentityFilesDesc),
                 &form.identity_files,
                 cx,
             ))
             .child(
                 self.settings_row(
-                    "Agent forwarding",
-                    "Forward the local ssh-agent to the connection.",
+                    t(L10nKey::SettingsAgentForwarding),
+                    t(L10nKey::SettingsAgentForwardingDesc),
                     crate::ui::theme::switch("ssh-form-agent", cx)
                         .checked(form.agent_forward)
                         .on_click(cx.listener(|this, on: &bool, _w, cx| {
@@ -3024,85 +3165,85 @@ impl Tty7App {
             )
             .child(text_row(
                 self,
-                "ProxyCommand",
-                "Transport command (%h/%p/%r substituted).",
+                t(L10nKey::SettingsProxyCommand),
+                t(L10nKey::SettingsProxyCommandDesc),
                 &form.proxy_command,
                 cx,
             ))
             .child(text_row(
                 self,
-                "SOCKS5 proxy",
-                "host:port (blank = none).",
+                t(L10nKey::SettingsSocks5Proxy),
+                t(L10nKey::SettingsSocks5ProxyDesc),
                 &form.socks,
                 cx,
             ))
             .child(text_row(
                 self,
-                "HTTP proxy",
-                "host:port (blank = none).",
+                t(L10nKey::SettingsHttpProxy),
+                t(L10nKey::SettingsHttpProxyDesc),
                 &form.http,
                 cx,
             ))
             .child(text_row(
                 self,
-                "KEX algorithms",
-                "Comma-separated (blank = library default).",
+                t(L10nKey::SettingsKexAlgorithms),
+                t(L10nKey::SettingsKexAlgorithmsDesc),
                 &form.kex,
                 cx,
             ))
             .child(text_row(
                 self,
-                "Ciphers",
-                "Comma-separated (blank = default).",
+                t(L10nKey::SettingsCiphers),
+                t(L10nKey::SettingsCiphersDesc),
                 &form.cipher,
                 cx,
             ))
             .child(text_row(
                 self,
-                "MACs",
-                "Comma-separated (blank = default).",
+                t(L10nKey::SettingsMacs),
+                t(L10nKey::SettingsMacsDesc),
                 &form.mac,
                 cx,
             ))
             .child(text_row(
                 self,
-                "Host-key algorithms",
-                "Comma-separated (blank = default).",
+                t(L10nKey::SettingsHostKeyAlgorithms),
+                t(L10nKey::SettingsHostKeyAlgorithmsDesc),
                 &form.hostkey,
                 cx,
             ))
             .child(text_row(
                 self,
-                "Compression",
-                "Comma-separated (blank = default).",
+                t(L10nKey::SettingsCompression),
+                t(L10nKey::SettingsCompressionDesc),
                 &form.compression,
                 cx,
             ))
             .child(text_row(
                 self,
-                "Keepalive interval (s)",
-                "Blank = library default.",
+                t(L10nKey::SettingsKeepaliveInterval),
+                t(L10nKey::SettingsKeepaliveIntervalDesc),
                 &form.keepalive_interval,
                 cx,
             ))
             .child(text_row(
                 self,
-                "Keepalive count max",
-                "Missed keepalives before dead.",
+                t(L10nKey::SettingsKeepaliveCountMax),
+                t(L10nKey::SettingsKeepaliveCountMaxDesc),
                 &form.keepalive_count,
                 cx,
             ))
             .child(text_row(
                 self,
-                "Connect timeout (s)",
-                "Blank = library default.",
+                t(L10nKey::SettingsConnectTimeout),
+                t(L10nKey::SettingsConnectTimeoutDesc),
                 &form.connect_timeout,
                 cx,
             ))
             .child(
                 self.settings_row(
-                    "X11 forwarding",
-                    "Request X11 forwarding (needs XQuartz on macOS).",
+                    t(L10nKey::SettingsX11Forwarding),
+                    t(L10nKey::SettingsX11ForwardingDesc),
                     crate::ui::theme::switch("ssh-form-x11", cx)
                         .checked(form.x11)
                         .on_click(cx.listener(|this, on: &bool, _w, cx| {
@@ -3117,8 +3258,8 @@ impl Tty7App {
             )
             .child(
                 self.settings_row(
-                    "Shell integration",
-                    "Let the remote shell report prompts, exit codes and directory.",
+                    t(L10nKey::SettingsShellIntegration),
+                    t(L10nKey::SettingsShellIntegrationDesc),
                     crate::ui::theme::switch("ssh-form-shell-integration", cx)
                         .checked(form.shell_integration)
                         .on_click(cx.listener(|this, on: &bool, _w, cx| {
@@ -3133,15 +3274,15 @@ impl Tty7App {
             )
             .child(text_row(
                 self,
-                "Login scripts",
-                "Commands sent after the shell opens, one per line.",
+                t(L10nKey::SettingsLoginScripts),
+                t(L10nKey::SettingsLoginScriptsDesc),
                 &form.login_scripts,
                 cx,
             ))
             .child(
                 self.settings_row(
-                    "Skip banner",
-                    "Suppress the server login banner.",
+                    t(L10nKey::SettingsSkipBanner),
+                    t(L10nKey::SettingsSkipBannerDesc),
                     crate::ui::theme::switch("ssh-form-banner", cx)
                         .checked(form.skip_banner)
                         .on_click(cx.listener(|this, on: &bool, _w, cx| {
@@ -3155,11 +3296,18 @@ impl Tty7App {
                 ),
             )
             .child(self.settings_row(
-                "Verify host keys",
-                format!("Default follows Defaults, which is {vhk_default}."),
+                t(L10nKey::SettingsVerifyHostKeys),
+                t_fmt(
+                    L10nKey::SettingsDefaultFollowsDefaults,
+                    &[("value", vhk_default)],
+                ),
                 self.segmented(
                     "ssh-form-vhk",
-                    &["Default", "On", "Off"],
+                    &[
+                        t(L10nKey::SettingsDefault),
+                        t(L10nKey::SettingsOn),
+                        t(L10nKey::SettingsOff),
+                    ],
                     vhk_idx,
                     cx,
                     |this, ix, _w, cx| {
@@ -3176,11 +3324,18 @@ impl Tty7App {
                 cx,
             ))
             .child(self.settings_row(
-                "Warn before closing",
-                format!("Default follows Defaults, which is {woc_default}."),
+                t(L10nKey::WarnBeforeClosing),
+                t_fmt(
+                    L10nKey::SettingsDefaultFollowsDefaults,
+                    &[("value", woc_default)],
+                ),
                 self.segmented(
                     "ssh-form-woc",
-                    &["Default", "On", "Off"],
+                    &[
+                        t(L10nKey::SettingsDefault),
+                        t(L10nKey::SettingsOn),
+                        t(L10nKey::SettingsOff),
+                    ],
                     woc_idx,
                     cx,
                     |this, ix, _w, cx| {
@@ -3214,7 +3369,7 @@ impl Tty7App {
         let platform_default = if cfg!(windows) {
             "PowerShell"
         } else {
-            "your login shell"
+            t(L10nKey::SettingsShellDefaultLoginShell)
         };
 
         let program_control = div()
@@ -3234,7 +3389,11 @@ impl Tty7App {
         };
         let wd_radio = self.segmented(
             "wd-strategy",
-            &["Inherit", "Home", "Custom"],
+            &[
+                t(L10nKey::SettingsWdInherit),
+                t(L10nKey::SettingsWdHome),
+                t(L10nKey::SettingsWdCustom),
+            ],
             wd_idx,
             cx,
             |this, ix, _w, cx| {
@@ -3257,44 +3416,48 @@ impl Tty7App {
 
         v_flex()
             .child(self.section_intro(
-                "Shell",
-                format!(
-                    "The program each new terminal launches. Leave Program empty to use the platform default ({platform_default})."
+                t(L10nKey::SettingsShell),
+                t_fmt(
+                    L10nKey::SettingsShellIntro,
+                    &[("default", platform_default)],
                 ),
                 cx,
             ))
             .child(self.settings_row(
-                "Program",
-                "Executable name on PATH or an absolute path. e.g. zsh, fish, nu, pwsh.",
+                t(L10nKey::SettingsProgram),
+                t(L10nKey::SettingsProgramDesc),
                 program_control,
                 cx,
             ))
             .child(self.settings_row(
-                "Arguments",
-                "Space-separated launch flags. e.g. -l for a login shell.",
+                t(L10nKey::SettingsArguments),
+                t(L10nKey::SettingsArgumentsDesc),
                 args_control,
                 cx,
             ))
             .child(self.settings_row(
-                "Start in",
-                "What a fresh shell starts in: tty7's launch directory, your home folder, or a fixed path.",
+                t(L10nKey::SettingsStartIn),
+                t(L10nKey::SettingsStartInDesc),
                 wd_radio,
                 cx,
             ))
-            .when(wd_strategy == crate::core::config::WdStrategy::Custom, |v| {
-                v.child(self.settings_row(
-                    "Custom path",
-                    "The directory new shells start in.",
-                    wd_path_control,
-                    cx,
-                ))
-            })
+            .when(
+                wd_strategy == crate::core::config::WdStrategy::Custom,
+                |v| {
+                    v.child(self.settings_row(
+                        t(L10nKey::SettingsCustomPath),
+                        t(L10nKey::SettingsCustomPathDesc),
+                        wd_path_control,
+                        cx,
+                    ))
+                },
+            )
             .child(
                 div()
                     .mt_3()
                     .text_xs()
                     .text_color(muted_fg)
-                    .child("Applies to shells with nothing to inherit — like the first tab of a window. New tabs and splits keep inheriting the active pane's directory, and shells already open keep running."),
+                    .child(t(L10nKey::SettingsShellFooter)),
             )
             .into_any_element()
     }
@@ -3371,7 +3534,11 @@ impl Tty7App {
         };
         let bell_control = self.segmented(
             "term-bell",
-            &["Off", "Visual", "Audible"],
+            &[
+                t(L10nKey::SettingsBellModeOff),
+                t(L10nKey::SettingsBellModeVisual),
+                t(L10nKey::SettingsBellModeAudible),
+            ],
             bell_idx,
             cx,
             |this, ix, _w, cx| {
@@ -3390,7 +3557,10 @@ impl Tty7App {
             .child(div().flex_1().child(Slider::new(&scroll_slider)))
             .child(
                 div()
-                    .w(px(36.))
+                    .w(px(38.))
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .text_right()
                     .text_sm()
                     .text_color(foreground)
                     .child(format!("{scroll_mult:.2}×")),
@@ -3400,68 +3570,74 @@ impl Tty7App {
         v_flex()
             .child(self.render_shell_group(cx))
             .child(self.section_rule(cx))
-            .child(self.section_header("Scrolling", cx))
+            .child(self.section_header(t(L10nKey::SettingsScrolling), cx))
             .child(self.settings_row(
-                "Scrollback",
-                "Lines of history kept per pane. Applies to new panes.",
+                t(L10nKey::SettingsScrollback),
+                t(L10nKey::SettingsScrollbackDesc),
                 scrollback_radio,
                 cx,
             ))
             .child(self.settings_row(
-                "Scroll speed",
-                "Multiplier applied to mouse-wheel scrolling.",
+                t(L10nKey::SettingsScrollSpeed),
+                t(L10nKey::SettingsScrollSpeedDesc),
                 scroll_control,
                 cx,
             ))
             .child(self.section_rule(cx))
-            .child(self.section_header("Mouse", cx))
+            .child(self.section_header(t(L10nKey::SettingsMouse), cx))
             .child(self.settings_row(
-                "Focus follows mouse",
-                "Hovering a pane focuses it without a click.",
+                t(L10nKey::SettingsFocusFollowsMouse),
+                t(L10nKey::SettingsFocusFollowsMouseDesc),
                 focus_switch,
                 cx,
             ))
             .child(self.settings_row(
-                "Hide mouse while typing",
-                "Hide the pointer as you type; it returns on the next move.",
+                t(L10nKey::SettingsHideMouseWhileTyping),
+                t(L10nKey::SettingsHideMouseWhileTypingDesc),
                 mouse_hide_switch,
                 cx,
             ))
             .child(self.settings_row(
-                "Report mouse to apps",
-                "Let full-screen apps (vim, tmux) handle clicks and scrolling; hold Shift to keep a gesture local.",
+                t(L10nKey::SettingsReportMouseToApps),
+                t(L10nKey::SettingsReportMouseToAppsDesc),
                 mouse_report_switch,
                 cx,
             ))
             .child(self.section_rule(cx))
-            .child(self.section_header("Bell", cx))
+            .child(self.section_header(t(L10nKey::SettingsBell), cx))
             .child(self.settings_row(
-                "Terminal bell",
-                "How a bell (^G) is signalled: silenced, a brief flash, or the system sound.",
+                t(L10nKey::SettingsTerminalBell),
+                t(L10nKey::SettingsTerminalBellDesc),
                 bell_control,
                 cx,
             ))
             .child(self.section_rule(cx))
-            .child(self.section_header("Links", cx))
+            .child(self.section_header(t(L10nKey::SettingsLinks), cx))
             .child(self.settings_row(
-                "Detect URLs",
-                format!("Underline links on hover and open them on {LINK_MODIFIER_LABEL}-click."),
+                t(L10nKey::DetectUrls),
+                t_fmt(
+                    L10nKey::SettingsDetectUrlsDesc,
+                    &[("modifier", LINK_MODIFIER_LABEL)],
+                ),
                 link_switch,
                 cx,
             ))
             .child(self.settings_row(
-                "Forward SSH loopback links",
-                "When a pane is in SSH, open localhost links through a temporary port forward.",
+                t(L10nKey::ForwardSshLoopbackLinks),
+                t(L10nKey::SettingsForwardSshLoopbackLinksDesc),
                 ssh_loopback_switch,
                 cx,
             ))
             .child(self.settings_row(
-                "Open files with",
-                format!(
-                    "Command run when {LINK_MODIFIER_LABEL}-clicking a file link, instead of \
-                     the default app. Use {{path}}, {{line}}, {{column}}; a flag whose value \
-                     is absent is dropped (e.g. herdr edit {{path}} --line={{line}}). Empty \
-                     uses the default app."
+                t(L10nKey::OpenFilesWith),
+                t_fmt(
+                    L10nKey::SettingsOpenFilesWithDesc,
+                    &[
+                        ("modifier", LINK_MODIFIER_LABEL),
+                        ("path", "{path}"),
+                        ("line", "{line}"),
+                        ("column", "{column}"),
+                    ],
                 ),
                 link_file_command_control,
                 cx,
@@ -3506,9 +3682,8 @@ impl Tty7App {
                 )
                 .into_any_element();
             self.settings_row(
-                "Option (⌥) acts as Meta",
-                "⌥+key sends the escape chord shells expect (⌥B = back one word) \
-                 instead of typing a special character (∫).",
+                t(L10nKey::SettingsOptionAsMeta),
+                t(L10nKey::SettingsOptionAsMetaDesc),
                 switch,
                 cx,
             )
@@ -3516,48 +3691,45 @@ impl Tty7App {
 
         v_flex()
             .child(self.section_intro(
-                "Prompt",
-                "tty7's own menus at the shell prompt. Turn one off to hand the key back to the shell.",
+                t(L10nKey::SettingsPrompt),
+                t(L10nKey::SettingsPromptIntro),
                 cx,
             ))
             .child(self.settings_row(
-                "Tab completion",
-                "Tab at the prompt opens tty7's completion menu. When off, Tab goes to the \
-                 shell's own completion instead.",
+                t(L10nKey::SettingsTabCompletion),
+                t(L10nKey::SettingsTabCompletionDesc),
                 tab_completion_switch,
                 cx,
             ))
             .child(self.settings_row(
-                "History search",
-                "⌃R at the prompt opens tty7's fuzzy history menu. When off, ⌃R goes to the \
-                 shell instead — its own reverse-i-search, or whatever you've bound there \
-                 (fzf, percol).",
+                t(L10nKey::SettingsHistorySearch),
+                t(L10nKey::SettingsHistorySearchDesc),
                 history_search_switch,
                 cx,
             ))
             .child(self.section_rule(cx))
-            .child(self.section_header("Selection & clipboard", cx))
+            .child(self.section_header(t(L10nKey::SettingsSelectionClipboard), cx))
             .child(self.settings_row(
-                "Smart selection",
-                "Double-click selects the whole URL, file path, email, or bracket pair under the cursor.",
+                t(L10nKey::SettingsSmartSelection),
+                t(L10nKey::SettingsSmartSelectionDesc),
                 smart_select_switch,
                 cx,
             ))
             .child(self.settings_row(
-                "Copy on select",
-                "Selecting text with the mouse copies it to the clipboard right away, no ⌘C needed.",
+                t(L10nKey::SettingsCopyOnSelect),
+                t(L10nKey::SettingsCopyOnSelectDesc),
                 copy_on_select_switch,
                 cx,
             ))
             .child(self.settings_row(
-                "Trim trailing spaces on copy",
-                "Strip trailing whitespace from each copied line.",
+                t(L10nKey::SettingsTrimTrailingSpaces),
+                t(L10nKey::SettingsTrimTrailingSpacesDesc),
                 trim_switch,
                 cx,
             ))
             .when_some(option_alt_row, |v, row| {
                 v.child(self.section_rule(cx))
-                    .child(self.section_header("Keyboard", cx))
+                    .child(self.section_header(t(L10nKey::SettingsKeyboard), cx))
                     .child(row)
             })
             .into_any_element()
@@ -3578,9 +3750,8 @@ impl Tty7App {
             None => (AgentHooksView::Loading, None, HostId::LOCAL),
         };
         let mut page = v_flex().child(self.section_intro(
-            "Agents",
-            "Hook integrations give panes running these agents live session status \
-             (working / waiting / done) in the tab bar. Only active inside tty7.",
+            t(L10nKey::SettingsAgentsIntro),
+            t(L10nKey::SettingsAgentsIntroDesc),
             cx,
         ));
 
@@ -3594,7 +3765,7 @@ impl Tty7App {
                             .py_4()
                             .text_sm()
                             .text_color(muted_fg)
-                            .child("Reading this machine's agent config…"),
+                            .child(t(L10nKey::SettingsReadingAgentConfig)),
                     )
                     .into_any_element();
             }
@@ -3607,14 +3778,16 @@ impl Tty7App {
                 for (i, row) in rows.into_iter().enumerate() {
                     let agent = row.agent;
                     let (dot_color, status_text) = match row.state {
-                        HooksState::NotInstalled => (muted_fg, "Not installed"),
-                        HooksState::Installed => (success, "Installed"),
-                        HooksState::Outdated => (warning, "Outdated"),
+                        HooksState::NotInstalled => {
+                            (muted_fg, t(L10nKey::SettingsStatusNotInstalled))
+                        }
+                        HooksState::Installed => (success, t(L10nKey::SettingsStatusInstalled)),
+                        HooksState::Outdated => (warning, t(L10nKey::SettingsStatusOutdated)),
                     };
                     let primary_label = match row.state {
-                        HooksState::NotInstalled => "Install",
-                        HooksState::Installed => "Reinstall",
-                        HooksState::Outdated => "Update",
+                        HooksState::NotInstalled => t(L10nKey::SettingsInstall),
+                        HooksState::Installed => t(L10nKey::SettingsReinstall),
+                        HooksState::Outdated => t(L10nKey::SettingsUpdate),
                     };
                     let row_note = note
                         .as_ref()
@@ -3645,7 +3818,7 @@ impl Tty7App {
                                 .when(row.state != HooksState::NotInstalled, |r| {
                                     r.child(
                                         Button::new(("agent-hooks-uninstall", i))
-                                            .label("Uninstall")
+                                            .label(t(L10nKey::SettingsUninstall))
                                             .small()
                                             .on_click(cx.listener(move |this, _, _w, cx| {
                                                 this.settings_uninstall_agent_hooks(agent, cx)
@@ -3726,10 +3899,10 @@ impl Tty7App {
                         })),
                 )
                 .when(offline > 0, |col| {
-                    col.child(div().text_xs().text_color(muted_fg).child(format!(
-                        "{offline} more saved machine{} not connected — open a workspace on one to \
-                     install its hooks there.",
-                        if offline == 1 { " is" } else { "s are" }
+                    col.child(div().text_xs().text_color(muted_fg).child(t_plural(
+                        L10nKey::SettingsOfflineMachines,
+                        offline,
+                        &[],
                     )))
                 }),
         )
@@ -3772,7 +3945,11 @@ impl Tty7App {
         };
         let notify_radio = self.segmented(
             "wt-notify",
-            &["Never", "When Unfocused", "Always"],
+            &[
+                t(L10nKey::NotifyModeNever),
+                t(L10nKey::NotifyModeUnfocused),
+                t(L10nKey::NotifyModeAlways),
+            ],
             notify_idx,
             cx,
             |this, ix, _w, cx| {
@@ -3818,7 +3995,11 @@ impl Tty7App {
             .into_any_element();
         let startup_radio = self.segmented(
             "wt-startup",
-            &["Normal", "Maximized", "Fullscreen"],
+            &[
+                t(L10nKey::SettingsStartupNormal),
+                t(L10nKey::SettingsStartupMaximized),
+                t(L10nKey::SettingsStartupFullscreen),
+            ],
             startup_idx,
             cx,
             |this, ix, _w, cx| {
@@ -3832,7 +4013,7 @@ impl Tty7App {
         );
         let new_tab_radio = self.segmented(
             "wt-new-tab-pos",
-            &["After current", "At end"],
+            &[t(L10nKey::SettingsAfterCurrent), t(L10nKey::SettingsAtEnd)],
             new_tab_idx,
             cx,
             |this, ix, _w, cx| {
@@ -3846,7 +4027,7 @@ impl Tty7App {
         );
         let tab_bar_radio = self.segmented(
             "wt-tab-bar-pos",
-            &["Top", "Left"],
+            &[t(L10nKey::SettingsTop), t(L10nKey::SettingsLeft)],
             tab_bar_idx,
             cx,
             |this, ix, _w, cx| {
@@ -3864,7 +4045,7 @@ impl Tty7App {
             .into_any_element();
         let sidebar_grouping_radio = self.segmented(
             "wt-sidebar-grouping",
-            &["By repo", "Flat"],
+            &[t(L10nKey::SettingsByRepo), t(L10nKey::SettingsFlat)],
             sidebar_grouping_idx,
             cx,
             |this, ix, _w, cx| {
@@ -3878,78 +4059,74 @@ impl Tty7App {
         );
 
         v_flex()
-            .child(self.section_header("Window", cx))
+            .child(self.section_header(t(L10nKey::SettingsWindow), cx))
             .child(self.settings_row(
-                "Startup window",
-                "Window state when tty7 launches.",
+                t(L10nKey::SettingsStartupWindow),
+                t(L10nKey::SettingsStartupWindowDesc),
                 startup_radio,
                 cx,
             ))
             .child(self.settings_row(
-                "Remember window size & position",
-                "Reopen at the size and position the window had when tty7 last quit. Off opens centered at the default size.",
+                t(L10nKey::SettingsRememberWindowSize),
+                t(L10nKey::SettingsRememberWindowSizeDesc),
                 remember_window_switch,
                 cx,
             ))
             .child(self.settings_row(
-                "Restore last layout",
-                "Reopen the last window's tabs, splits, and directories on launch. Off starts with a single fresh terminal.",
+                t(L10nKey::SettingsRestoreLastLayout),
+                t(L10nKey::SettingsRestoreLastLayoutDesc),
                 restore_switch,
                 cx,
             ))
             .child(self.settings_row(
-                "Confirm before closing the last window",
-                "Ask first, since that close also quits tty7. Off closes straight away — \
-                 either way your shells keep running in the background.",
+                t(L10nKey::SettingsConfirmLastWindowClose),
+                t(L10nKey::SettingsConfirmLastWindowCloseDesc),
                 confirm_close_switch,
                 cx,
             ))
             .child(self.settings_row(
-                "Show tray icon",
-                "Keep a status item in the system tray / menu bar: it signals when a \
-                 coding agent needs your input, and its menu jumps to agent panes.",
+                t(L10nKey::SettingsShowTrayIcon),
+                t(L10nKey::SettingsShowTrayIconDesc),
                 tray_switch,
                 cx,
             ))
             .child(self.section_rule(cx))
-            .child(self.section_header("Tabs", cx))
+            .child(self.section_header(t(L10nKey::SettingsTabs), cx))
             .child(self.settings_row(
-                "New tab position",
-                "Where a freshly opened tab is inserted.",
+                t(L10nKey::SettingsNewTabPosition),
+                t(L10nKey::SettingsNewTabPositionDesc),
                 new_tab_radio,
                 cx,
             ))
             .child(self.settings_row(
-                "Tab bar position",
-                "Show tabs as a horizontal strip on top or a vertical sidebar on the left.",
+                t(L10nKey::SettingsTabBarPosition),
+                t(L10nKey::SettingsTabBarPositionDesc),
                 tab_bar_radio,
                 cx,
             ))
             .child(self.settings_row(
-                "Sidebar grouping",
-                "Group sidebar tabs under a header per git repository, with non-repo tabs \
-                 in a Scratch section. Only applies to the left sidebar.",
+                t(L10nKey::SettingsSidebarGrouping),
+                t(L10nKey::SettingsSidebarGroupingDesc),
                 sidebar_grouping_radio,
                 cx,
             ))
             .child(self.settings_row(
-                "Open diff preview from sidebar counts",
-                "Click a row's +N −N to open the working-tree diff in an overlay. Off keeps the \
-                 branch and the counts on the row and just stops them being clickable.",
+                t(L10nKey::SettingsDiffPreviewFromCounts),
+                t(L10nKey::SettingsDiffPreviewFromCountsDesc),
                 sidebar_diff_switch,
                 cx,
             ))
             .child(self.section_rule(cx))
-            .child(self.section_header("Notifications", cx))
+            .child(self.section_header(t(L10nKey::SettingsNotifications), cx))
             .child(self.settings_row(
-                "Notify on command finish",
-                "Desktop alert after a long foreground command completes.",
+                t(L10nKey::SettingsNotifyOnCommandFinish),
+                t(L10nKey::SettingsNotifyOnCommandFinishDesc),
                 notify_radio,
                 cx,
             ))
             .child(self.settings_row(
-                "Notify threshold",
-                "How long a command must run to qualify as \"long\".",
+                t(L10nKey::SettingsNotifyThreshold),
+                t(L10nKey::SettingsNotifyThresholdDesc),
                 threshold_radio,
                 cx,
             ))
@@ -4010,8 +4187,8 @@ impl Tty7App {
             }))
             .into_any_element();
         let root = v_flex().child(self.settings_row(
-            "Sync with system",
-            "Follow the OS appearance with separate light and dark themes.",
+            t(L10nKey::SettingsSyncWithSystem),
+            t(L10nKey::SettingsSyncWithSystemDesc),
             follow_switch,
             cx,
         ));
@@ -4042,23 +4219,30 @@ impl Tty7App {
         let active = presets::by_id(cx, &active_id);
         let name = active.name.clone();
         let kind = if active.path.is_some() {
-            "Custom"
+            t(L10nKey::SettingsCustom)
         } else {
-            "Built-in"
+            t(L10nKey::SettingsBuiltIn)
+        };
+        let mode = if active.dark {
+            t(L10nKey::SettingsDark)
+        } else {
+            t(L10nKey::SettingsLight)
+        };
+        let mode_label = if active.dark {
+            t(L10nKey::SettingsDarkMode)
+        } else {
+            t(L10nKey::SettingsLightMode)
         };
         let caption = match slot {
-            ThemeSlot::Manual => {
-                let mode = if active.dark { "Dark" } else { "Light" };
-                format!("{kind} · {mode}")
-            }
+            ThemeSlot::Manual => format!("{kind} · {mode}"),
             ThemeSlot::Light if !crate::ui::theme::system_dark(cx) => {
-                format!("Light mode · {kind} · Active")
+                format!("{mode_label} · {kind} · {}", t(L10nKey::SettingsActive))
             }
-            ThemeSlot::Light => format!("Light mode · {kind}"),
+            ThemeSlot::Light => format!("{mode_label} · {kind}"),
             ThemeSlot::Dark if crate::ui::theme::system_dark(cx) => {
-                format!("Dark mode · {kind} · Active")
+                format!("{mode_label} · {kind} · {}", t(L10nKey::SettingsActive))
             }
-            ThemeSlot::Dark => format!("Dark mode · {kind}"),
+            ThemeSlot::Dark => format!("{mode_label} · {kind}"),
         };
         let to_u32 = |(r, g, b): (u8, u8, u8)| (r as u32) << 16 | (g as u32) << 8 | b as u32;
         let swatches = h_flex().gap_1().mt_1p5().children((1..=6).map(|i| {
@@ -4115,7 +4299,7 @@ impl Tty7App {
                             .gap_1()
                             .text_sm()
                             .text_color(muted_fg)
-                            .child("Change theme")
+                            .child(t(L10nKey::SettingsChangeTheme))
                             .child(Icon::new(IconName::ChevronRight).small()),
                     ),
             )
@@ -4166,7 +4350,7 @@ impl Tty7App {
                     .text_base()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(foreground)
-                    .child("Themes"),
+                    .child(t(L10nKey::SettingsThemes)),
             )
             .child(
                 div().occlude().child(
@@ -4184,9 +4368,9 @@ impl Tty7App {
             .text_xs()
             .text_color(muted_fg)
             .child(match slot {
-                ThemeSlot::Manual => "Change your current theme.",
-                ThemeSlot::Light => "Choose the theme for light mode.",
-                ThemeSlot::Dark => "Choose the theme for dark mode.",
+                ThemeSlot::Manual => t(L10nKey::SettingsThemePanelManual),
+                ThemeSlot::Light => t(L10nKey::SettingsThemePanelLight),
+                ThemeSlot::Dark => t(L10nKey::SettingsThemePanelDark),
             });
 
         let search_box = div().px_4().pb_3().child(
@@ -4333,7 +4517,7 @@ impl Tty7App {
 
         let preset_control = self.segmented(
             "kb-preset",
-            &["Default", "tmux"],
+            &[t(L10nKey::SettingsDefault), "tmux"],
             usize::from(tmux),
             cx,
             |this, ix, _w, cx| {
@@ -4362,11 +4546,14 @@ impl Tty7App {
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(foreground)
-                            .child("Preset"),
+                            .child(t(L10nKey::SettingsPreset)),
                     )
-                    .child(div().text_xs().text_color(muted).child(
-                        "tmux remaps pane/tab actions onto prefix sequences (e.g. Ctrl-B then C).",
-                    )),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(t(L10nKey::SettingsPresetDesc)),
+                    ),
             )
             .child(h_flex().flex_shrink_0().child(preset_control));
 
@@ -4379,7 +4566,7 @@ impl Tty7App {
                     .text_sm()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(foreground)
-                    .child("Prefix"),
+                    .child(t(L10nKey::SettingsPrefix)),
             )
             .child(h_flex().flex_shrink_0().child(prefix_control));
 
@@ -4404,13 +4591,18 @@ impl Tty7App {
                     .unwrap_or_default();
                 let row = h_flex().gap_2().items_center();
                 let row = if chords.is_empty() {
-                    row.child(div().text_xs().text_color(accent).child("Press keys…"))
+                    row.child(
+                        div()
+                            .text_xs()
+                            .text_color(accent)
+                            .child(t(L10nKey::SettingsPressKeys)),
+                    )
                 } else {
                     row.child(keycaps(&chords.join(" "))).child(
                         div()
                             .text_xs()
                             .text_color(muted)
-                            .child("pause to save · Esc"),
+                            .child(t(L10nKey::SettingsPauseToSaveEsc)),
                     )
                 };
                 row.into_any_element()
@@ -4449,7 +4641,7 @@ impl Tty7App {
                 .when(is_overridden, |r| {
                     r.child(
                         Button::new(SharedString::from(format!("reset-{action}")))
-                            .label("Reset")
+                            .label(t(L10nKey::Reset))
                             .small()
                             .on_click(cx.listener(move |this, _, _w, cx| {
                                 this.reset_keybinding(action_for_reset.clone(), cx)
@@ -4475,16 +4667,20 @@ impl Tty7App {
 
         v_flex()
             .child(self.section_intro(
-                "Keybindings",
-                "Click a shortcut, then press the new keys — it saves after a brief pause. Chain keys for a sequence like Ctrl-B then X. Esc cancels; Backspace removes the last key, or resets the shortcut to default when pressed first.",
+                t(L10nKey::SettingsNavKeybindings),
+                t(L10nKey::SettingsKeybindingsIntroDesc),
                 cx,
             ))
             .child(preset_row)
             .when(tmux, |v| v.child(prefix_row))
             .when(tmux, |v| {
-                v.child(div().py_1().text_xs().text_color(muted).child(
-                    "With a prefix active, a bare prefix key reaches the shell after a ~1s pause, and prefix + an unbound key is sent through to the terminal.",
-                ))
+                v.child(
+                    div()
+                        .py_1()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(t(L10nKey::SettingsPrefixNote)),
+                )
             })
             .when_some(note, |v, note| {
                 v.child(div().py_1().text_xs().text_color(accent).child(note))
@@ -4492,11 +4688,11 @@ impl Tty7App {
             .child(
                 h_flex().justify_end().py_2().child(
                     Button::new("kb-restore-all")
-                        .label("Restore all defaults")
+                        .label(t(L10nKey::SettingsRestoreAllDefaults))
                         .small()
-                        .on_click(cx.listener(|this, _, _w, cx| {
-                            this.restore_default_keybindings(cx)
-                        })),
+                        .on_click(
+                            cx.listener(|this, _, _w, cx| this.restore_default_keybindings(cx)),
+                        ),
                 ),
             )
             .child(list)
@@ -4523,20 +4719,7 @@ impl Tty7App {
                 | crate::core::update::UpdatePhase::Downloading
                 | crate::core::update::UpdatePhase::Installing
         );
-        let phase_text = match &update_status.phase {
-            crate::core::update::UpdatePhase::Idle => None,
-            crate::core::update::UpdatePhase::Checking => Some("Checking for updates…".to_string()),
-            crate::core::update::UpdatePhase::UpToDate => {
-                Some("You're running the latest version.".to_string())
-            }
-            crate::core::update::UpdatePhase::Downloading => {
-                Some("Downloading and verifying the update…".to_string())
-            }
-            crate::core::update::UpdatePhase::Installing => {
-                Some("Relaunching with the update…".to_string())
-            }
-            crate::core::update::UpdatePhase::Failed(message) => Some(message.clone()),
-        };
+        let phase_text = localized_update_phase(&update_status.phase);
         let check_for_updates = cx.global::<Config>().check_for_updates;
         let install_cli_on_path = cx.global::<Config>().install_cli_on_path;
         let (explorer_status, explorer_note) = self
@@ -4558,21 +4741,46 @@ impl Tty7App {
             register_disabled,
             unregister_disabled,
         ) = match explorer_status.as_ref() {
-            Ok(crate::core::explorer_context_menu::Status::NotRegistered) => {
-                ("Not registered", muted_fg, "Register", false, true)
-            }
-            Ok(crate::core::explorer_context_menu::Status::Registered) => {
-                ("Registered", success, "Register", true, false)
-            }
-            Ok(crate::core::explorer_context_menu::Status::NeedsUpdate) => {
-                ("Needs update", warning, "Update", false, false)
-            }
-            Ok(crate::core::explorer_context_menu::Status::Unsupported) => {
-                ("Unavailable", muted_fg, "Register", true, true)
-            }
-            Err(_) => ("Status unavailable", warning, "Register", false, false),
+            Ok(crate::core::explorer_context_menu::Status::NotRegistered) => (
+                t(L10nKey::SettingsExplorerNotRegistered),
+                muted_fg,
+                t(L10nKey::SettingsExplorerRegister),
+                false,
+                true,
+            ),
+            Ok(crate::core::explorer_context_menu::Status::Registered) => (
+                t(L10nKey::SettingsExplorerRegistered),
+                success,
+                t(L10nKey::SettingsExplorerRegister),
+                true,
+                false,
+            ),
+            Ok(crate::core::explorer_context_menu::Status::NeedsUpdate) => (
+                t(L10nKey::SettingsExplorerNeedsUpdate),
+                warning,
+                t(L10nKey::SettingsExplorerUpdate),
+                false,
+                false,
+            ),
+            Ok(crate::core::explorer_context_menu::Status::Unsupported) => (
+                t(L10nKey::SettingsExplorerUnavailable),
+                muted_fg,
+                t(L10nKey::SettingsExplorerRegister),
+                true,
+                true,
+            ),
+            Err(_) => (
+                t(L10nKey::SettingsExplorerStatusUnavailable),
+                warning,
+                t(L10nKey::SettingsExplorerRegister),
+                false,
+                false,
+            ),
         };
-        let explorer_feedback = explorer_note.or_else(|| explorer_status.err());
+        let explorer_feedback = explorer_note
+            .as_ref()
+            .map(ExplorerContextMenuNote::localized)
+            .or_else(|| explorer_status.err());
 
         let logo = Arc::new(Image::from_bytes(
             ImageFormat::Png,
@@ -4580,7 +4788,7 @@ impl Tty7App {
         ));
 
         v_flex()
-            .child(self.section_header("About", cx))
+            .child(self.section_header(t(L10nKey::SettingsNavAbout), cx))
             .child(
                 h_flex()
                     .gap_4()
@@ -4597,7 +4805,8 @@ impl Tty7App {
                                     .child("tty7"),
                             )
                             .child(div().text_sm().text_color(muted_fg).child(format!(
-                                "Version {}",
+                                "{} {}",
+                                t(L10nKey::SettingsVersion),
                                 env!("CARGO_PKG_VERSION")
                             )))
                             .child(
@@ -4616,16 +4825,19 @@ impl Tty7App {
                         div()
                             .text_sm()
                             .text_color(foreground)
-                            .child("A terminal workbench: shells, workspaces, SSH, coding agents."),
+                            .child(t(L10nKey::SettingsAboutDesc1)),
                     )
-                    .child(div().text_sm().text_color(muted_fg).child(
-                        "Editor-grade input in every shell, shells that outlive quits and reboots without tmux, a native SSH stack with profiles and port forwarding, and live status for panes running coding agents.",
-                    ))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted_fg)
+                            .child(t(L10nKey::SettingsAboutDesc2)),
+                    )
                     .child(
                         div()
                             .text_xs()
                             .text_color(muted_fg)
-                            .child("Pure Rust · GPU rendering on Zed's gpui · VT core from Alacritty"),
+                            .child(t(L10nKey::SettingsAboutTech)),
                     ),
             )
             .child(
@@ -4638,14 +4850,18 @@ impl Tty7App {
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(foreground)
-                            .child("Updates"),
+                            .child(t(L10nKey::SettingsUpdates)),
                     )
                     .when_some(update, |this, upd| {
                         let button_label = if upd.installable {
-                            "Update and Relaunch"
+                            t(L10nKey::SettingsUpdateAndRelaunch).to_string()
                         } else {
-                            "View Release"
+                            t(L10nKey::SettingsUpdateViewRelease).to_string()
                         };
+                        let availability = t_fmt(
+                            L10nKey::SettingsVersionAvailable,
+                            &[("version", &upd.version)],
+                        );
                         this.child(
                             v_flex()
                                 .gap_1()
@@ -4653,9 +4869,12 @@ impl Tty7App {
                                     h_flex()
                                         .gap_3()
                                         .items_center()
-                                        .child(div().text_sm().text_color(foreground).child(
-                                            format!("Version {} is available.", upd.version),
-                                        ))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(foreground)
+                                                .child(availability),
+                                        )
                                         .child(
                                             Button::new("install-update")
                                                 .label(button_label)
@@ -4667,27 +4886,37 @@ impl Tty7App {
                                         ),
                                 )
                                 .when_some(upd.install_hint, |this, hint| {
-                                    this.child(div().text_xs().text_color(muted_fg).child(hint))
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted_fg)
+                                            .child(localized_update_install_hint(&hint)),
+                                    )
                                 }),
                         )
                     })
                     .when_some(phase_text, |this, text| {
                         this.child(div().text_sm().text_color(muted_fg).child(text))
                     })
-                    .child(div().text_sm().text_color(muted_fg).child(
-                        "tty7 checks stable releases and can update packaged macOS app bundles without opening a browser. A dedicated helper verifies checksums, version, and code signing before replacement, then relaunches the GUI. Compatible servers and shells stay running; if the wire protocol changed, tty7 asks whether to restart the server after relaunch. Other platforms and unsupported layouts fall back to the release page.",
-                    ))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted_fg)
+                            .child(t(L10nKey::SettingsCheckUpdatesDesc)),
+                    )
                     .child(
                         h_flex().child(
                             Button::new("check-update-now")
-                                .label(if matches!(
-                                    update_status.phase,
-                                    crate::core::update::UpdatePhase::Checking
-                                ) {
-                                    "Checking…"
-                                } else {
-                                    "Check Now"
-                                })
+                                .label(
+                                    if matches!(
+                                        update_status.phase,
+                                        crate::core::update::UpdatePhase::Checking
+                                    ) {
+                                        t(L10nKey::SettingsUpdateChecking)
+                                    } else {
+                                        t(L10nKey::SettingsUpdateCheckNow)
+                                    },
+                                )
                                 .small()
                                 .disabled(update_busy)
                                 .on_click(cx.listener(|_, _, _window, cx| {
@@ -4710,7 +4939,7 @@ impl Tty7App {
                                 div()
                                     .text_sm()
                                     .text_color(foreground)
-                                    .child("Check for updates on launch"),
+                                    .child(t(L10nKey::SettingsCheckUpdatesOnLaunch)),
                             ),
                     ),
             )
@@ -4725,11 +4954,14 @@ impl Tty7App {
                                 .text_sm()
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(foreground)
-                                .child("Windows Explorer"),
+                                .child(t(L10nKey::SettingsExplorerContextMenu)),
                         )
-                        .child(div().text_sm().text_color(muted_fg).child(
-                            "Add “Open in tty7” when you right-click a folder and “Open tty7 here” when you right-click a folder background. This is off by default and is registered only for your Windows account.",
-                        ))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted_fg)
+                                .child(t(L10nKey::SettingsExplorerContextMenuDesc)),
+                        )
                         .child(
                             h_flex()
                                 .gap_2()
@@ -4756,7 +4988,7 @@ impl Tty7App {
                                 )
                                 .child(
                                     Button::new("explorer-menu-unregister")
-                                        .label("Unregister")
+                                        .label(t(L10nKey::SettingsExplorerUnregister))
                                         .small()
                                         .disabled(unregister_disabled)
                                         .on_click(cx.listener(|this, _, _window, cx| {
@@ -4765,16 +4997,14 @@ impl Tty7App {
                                 ),
                         )
                         .when_some(explorer_feedback, |section, message| {
-                            section.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted_fg)
-                                    .child(message),
-                            )
+                            section.child(div().text_xs().text_color(muted_fg).child(message))
                         })
-                        .child(div().text_xs().text_color(muted_fg).child(
-                            "On Windows 11, classic shell entries may appear under “Show more options”.",
-                        )),
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted_fg)
+                                .child(t(L10nKey::SettingsExplorerWindows11Note)),
+                        ),
                 )
             })
             .child(
@@ -4787,11 +5017,14 @@ impl Tty7App {
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(foreground)
-                            .child("Command line"),
+                            .child(t(L10nKey::SettingsCommandLine)),
                     )
-                    .child(div().text_sm().text_color(muted_fg).child(
-                        "Put the bundled `tty7` command on your PATH at launch, so scripts and coding agents can drive tty7 from any terminal. Inside a tty7 pane it works either way. Turn this off if you keep your own `tty7` — one you built or installed yourself — and do not want it shadowed. Takes effect at next launch.",
-                    ))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted_fg)
+                            .child(t(L10nKey::SettingsCommandLineDesc)),
+                    )
                     .child(
                         h_flex()
                             .gap_2()
@@ -4807,7 +5040,7 @@ impl Tty7App {
                                 div()
                                     .text_sm()
                                     .text_color(foreground)
-                                    .child("Install the `tty7` command on PATH"),
+                                    .child(t(L10nKey::SettingsInstallCliOnPath)),
                             ),
                     ),
             )
@@ -4821,15 +5054,18 @@ impl Tty7App {
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(foreground)
-                            .child("Server"),
+                            .child(t(L10nKey::SettingsServer)),
                     )
-                    .child(div().text_sm().text_color(muted_fg).child(
-                        "Restart the server on this computer to pick up a newly granted macOS permission, recover if it stops responding, or start from a clean slate. This ends all running shells here; your tabs and layout reopen with fresh shells. A remote machine's server is restarted from its own menu in the workspace switcher.",
-                    ))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted_fg)
+                            .child(t(L10nKey::SettingsServerDesc)),
+                    )
                     .child(
                         h_flex().child(
                             Button::new("restart-daemon")
-                                .label("Restart server…")
+                                .label(t(L10nKey::SettingsRestartServer))
                                 .small()
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.restart_daemon(window, cx)
@@ -4879,7 +5115,7 @@ mod tests {
                 .iter()
                 .find(|e| e.section == section)
                 .expect("checked by every_section_has_search_entries");
-            let query = entry.title.to_lowercase();
+            let query = t(entry.title).to_lowercase();
             let landed = best_matching_section(&query);
             assert!(
                 landed.is_some(),
@@ -4918,6 +5154,20 @@ mod tests {
     }
 
     #[test]
+    fn explorer_context_menu_search_entry_uses_localized_keys() {
+        let entry = settings_search_entries()
+            .iter()
+            .find(|entry| entry.title == L10nKey::SettingsExplorerContextMenu)
+            .expect("Explorer settings should be searchable");
+
+        assert_eq!(entry.section.profile_label(), "settings:about");
+        assert_eq!(
+            entry.keywords,
+            L10nKey::SettingsSearchExplorerContextMenuKeywords
+        );
+    }
+
+    #[test]
     fn close_confirmation_toggle_is_findable() {
         for query in [
             "ask again",
@@ -4950,7 +5200,9 @@ mod tests {
             "Option (⌥) acts as Meta",
         ] {
             assert!(
-                settings_search_entries().iter().any(|e| e.title == title),
+                settings_search_entries()
+                    .iter()
+                    .any(|e| t(e.title) == title),
                 "no index entry titled {title:?}"
             );
         }
@@ -4960,9 +5212,10 @@ mod tests {
     fn agent_rows_are_in_the_search_index() {
         for agent in crate::core::agent_hooks::HookAgent::ALL {
             assert!(
-                settings_search_entries().iter().any(
-                    |e| e.section == SettingsSection::Agents && e.title == agent.display_name()
-                ),
+                settings_search_entries()
+                    .iter()
+                    .any(|e| e.section == SettingsSection::Agents
+                        && t(e.title) == agent.display_name()),
                 "no Agents index entry titled {:?}",
                 agent.display_name()
             );

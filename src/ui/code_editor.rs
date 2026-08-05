@@ -15,6 +15,7 @@ use gpui_component::{
 
 use crate::ui::app::Tty7App;
 use crate::ui::host_ops::{HostOps, MTime, SharedHost, WatchSub};
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -362,24 +363,43 @@ impl Tty7App {
                 let path = h.canonicalize(&p).unwrap_or(p);
                 let meta = match h.stat(&path) {
                     Ok(m) => m,
-                    Err(e) => return Err(format!("Can't open {}: {e}", path.display())),
+                    Err(e) => {
+                        return Err(t_fmt(
+                            L10nKey::EditorCantOpen,
+                            &[("path", &path.display().to_string()), ("e", &e.to_string())],
+                        ));
+                    }
                 };
                 if meta.len > MAX_FILE_BYTES {
-                    return Err(format!(
-                        "\"{}\" is too large for the editor ({} MB)",
-                        path.display(),
-                        meta.len / (1024 * 1024)
+                    return Err(t_fmt(
+                        L10nKey::EditorFileTooLarge,
+                        &[
+                            ("path", &path.display().to_string()),
+                            ("size", &(meta.len / (1024 * 1024)).to_string()),
+                        ],
                     ));
                 }
                 let bytes = match h.read_file(&path, MAX_FILE_BYTES) {
                     Ok(b) => b,
-                    Err(e) => return Err(format!("Can't read {}: {e}", path.display())),
+                    Err(e) => {
+                        return Err(t_fmt(
+                            L10nKey::EditorCantRead,
+                            &[("path", &path.display().to_string()), ("e", &e.to_string())],
+                        ));
+                    }
                 };
                 if looks_binary(&bytes) {
-                    return Err(format!("\"{}\" looks like a binary file", path.display()));
+                    return Err(t_fmt(
+                        L10nKey::EditorBinaryFile,
+                        &[("path", &path.display().to_string())],
+                    ));
                 }
-                let text = String::from_utf8(bytes)
-                    .map_err(|_| format!("\"{}\" is not valid UTF-8", path.display()))?;
+                let text = String::from_utf8(bytes).map_err(|_| {
+                    t_fmt(
+                        L10nKey::EditorNotUtf8,
+                        &[("path", &path.display().to_string())],
+                    )
+                })?;
                 Ok((path, text, meta.mtime))
             },
             move |app, opened, window, cx| match opened {
@@ -603,7 +623,7 @@ impl Tty7App {
                     Ok(mtime) => {
                         f.disk_mtime = mtime;
                     }
-                    Err(e) => HostOps::notify_err(window, cx, "Save failed", &e),
+                    Err(e) => HostOps::notify_err(window, cx, t(L10nKey::EditorSaveFailed), &e),
                 }
                 if landing.clean {
                     f.dirty = false;
@@ -658,9 +678,13 @@ impl Tty7App {
         let name = f.label();
         let answer = window.prompt(
             PromptLevel::Warning,
-            &format!("\"{name}\" has unsaved changes"),
+            &t_fmt(L10nKey::EditorUnsavedChanges, &[("name", &name)]),
             None,
-            &["Save", "Discard", "Cancel"],
+            &[
+                t(L10nKey::Save),
+                t(L10nKey::EditorDiscard),
+                t(L10nKey::Cancel),
+            ],
             cx,
         );
         let id = f.input.entity_id();
@@ -937,7 +961,9 @@ impl Tty7App {
                     .when(name.is_none(), |d| {
                         d.text_color(cx.theme().muted_foreground)
                     })
-                    .child(name.unwrap_or_else(|| SharedString::from("No file open"))),
+                    .child(
+                        name.unwrap_or_else(|| SharedString::from(t(L10nKey::EditorNoFileOpen))),
+                    ),
             )
             .when(dirty, |d| {
                 d.child(
@@ -958,7 +984,7 @@ impl Tty7App {
                         cx,
                     )
                     .rounded_lg()
-                    .tooltip("Back to Terminal (Esc)")
+                    .tooltip(t(L10nKey::EditorBackToTerminal))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_code_panel(window, cx);
                     })),
@@ -992,7 +1018,14 @@ impl Tty7App {
         let active = code.and_then(|c| c.active_file());
         let cursor: Option<SharedString> = active.map(|f| {
             let pos = f.input.read(cx).cursor_position();
-            format!("Ln {}, Col {}", pos.line + 1, pos.character + 1).into()
+            t_fmt(
+                L10nKey::EditorLnCol,
+                &[
+                    ("line", &(pos.line + 1).to_string()),
+                    ("column", &(pos.character + 1).to_string()),
+                ],
+            )
+            .into()
         });
         let wrap: Option<bool> = active.map(|f| f.wrap);
         let is_markdown = active.is_some_and(|f| language_for_path(&f.path) == "markdown");
@@ -1016,7 +1049,11 @@ impl Tty7App {
             .when(is_markdown, |this| {
                 this.child(
                     Button::new("status-md-preview")
-                        .label(if preview { "Edit" } else { "Preview" })
+                        .label(if preview {
+                            t(L10nKey::EditorEdit)
+                        } else {
+                            t(L10nKey::EditorPreview)
+                        })
                         .custom(crate::ui::tab_strip::chrome_tile_variant(cx))
                         .xsmall()
                         .on_click(cx.listener(|this, _, _w, cx| {
@@ -1033,7 +1070,11 @@ impl Tty7App {
             .when_some(wrap, |this, wrap| {
                 this.child(
                     Button::new("status-wrap")
-                        .label(if wrap { "Wrap: on" } else { "Wrap: off" })
+                        .label(if wrap {
+                            t(L10nKey::EditorWrapOn)
+                        } else {
+                            t(L10nKey::EditorWrapOff)
+                        })
                         .custom(crate::ui::tab_strip::chrome_tile_variant(cx))
                         .xsmall()
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -1069,7 +1110,9 @@ impl Tty7App {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Open a file from the file tree"),
+                    .child(crate::ui::i18n::t(
+                        crate::ui::i18n::L10nKey::OpenFileFromTree,
+                    )),
             )
     }
 
@@ -1087,10 +1130,12 @@ impl Tty7App {
             .border_b_1()
             .border_color(cx.theme().border)
             .text_sm()
-            .child(div().flex_1().child("File changed on disk"))
+            .child(div().flex_1().child(crate::ui::i18n::t(
+                crate::ui::i18n::L10nKey::FileChangedOnDisk,
+            )))
             .child(
                 Button::new("editor-conflict-reload")
-                    .label("Reload")
+                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Reload))
                     .small()
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.editor_reload_from_disk(tab_ix, ix, window, cx);
@@ -1098,7 +1143,7 @@ impl Tty7App {
             )
             .child(
                 Button::new("editor-conflict-keep")
-                    .label("Keep mine")
+                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::KeepMine))
                     .ghost()
                     .small()
                     .on_click(cx.listener(move |this, _, _w, cx| {

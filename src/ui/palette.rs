@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::core::config::{Config, RightPanelTab, TabBarPosition};
 use crate::core::ssh_profile::parse_quick_connect;
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum CommandKind {
@@ -297,13 +298,13 @@ impl CommandGroup {
 
     fn title(self) -> &'static str {
         match self {
-            CommandGroup::TabsPanes => "Tabs & Panes",
-            CommandGroup::Workspaces => "Workspaces",
-            CommandGroup::View => "View",
-            CommandGroup::Terminal => "Terminal",
-            CommandGroup::Ssh => "SSH",
-            CommandGroup::Agents => "Agents",
-            CommandGroup::Application => "Application",
+            CommandGroup::TabsPanes => t(L10nKey::CmdGroupTabsPanes),
+            CommandGroup::Workspaces => t(L10nKey::CmdGroupWorkspaces),
+            CommandGroup::View => t(L10nKey::CmdGroupView),
+            CommandGroup::Terminal => t(L10nKey::CmdGroupTerminal),
+            CommandGroup::Ssh => t(L10nKey::CmdGroupSsh),
+            CommandGroup::Agents => t(L10nKey::CmdGroupAgents),
+            CommandGroup::Application => t(L10nKey::CmdGroupApplication),
         }
     }
 }
@@ -350,127 +351,134 @@ impl Command {
         let right_panel_open = chrome.right_panel_visible;
 
         let tabs = [
-            Command::new("New Tab", NewTab),
-            Command::new("New Worktree Tab", NewWorktreeTab)
-                .with_subtitle("isolated checkout on a fresh branch"),
-            Command::new("Rename Tab…", RenameTab),
-            Command::new("Split Right", SplitRight),
-            Command::new("Split Down", SplitDown),
-            Command::new("Zoom Pane", ToggleMaximizePane),
-            Command::new("Next Pane", NextPane),
-            Command::new("Previous Pane", PrevPane),
-            Command::new("Focus Pane Left", FocusPaneLeft),
-            Command::new("Focus Pane Right", FocusPaneRight),
-            Command::new("Focus Pane Up", FocusPaneUp),
-            Command::new("Focus Pane Down", FocusPaneDown),
-            Command::new("Resize Pane Left", ResizePaneLeft),
-            Command::new("Resize Pane Right", ResizePaneRight),
-            Command::new("Resize Pane Up", ResizePaneUp),
-            Command::new("Resize Pane Down", ResizePaneDown),
-            Command::new("Swap Pane Next", SwapPaneNext),
-            Command::new("Swap Pane Previous", SwapPanePrev),
-            Command::new("Next Tab", NextTab),
-            Command::new("Previous Tab", PrevTab),
-            Command::new("Copy Working Directory", CopyWorkingDirectory),
-            Command::new("Copy Session ID", CopyAgentSessionId)
-                .with_subtitle("the coding agent's own session id"),
-            Command::new("Fork Session", ForkAgentSession)
-                .with_subtitle("branch this agent session into a new tab"),
-            Command::new("Mark Tab as Unread", MarkTabUnread),
-            Command::new("Close Pane / Tab", ClosePane),
-            Command::new("Close Other Tabs", CloseOtherTabs),
-            Command::new("Close Tabs to the Right", CloseTabsToTheRight),
-            Command::new("Reopen Closed Tab", ReopenClosedTab),
+            Command::new(t(L10nKey::CmdNewTab), NewTab),
+            Command::new(t(L10nKey::CmdNewWorktreeTab), NewWorktreeTab)
+                .with_subtitle(t(L10nKey::CmdNewWorktreeTabSubtitle)),
+            Command::new(t(L10nKey::CmdRenameTab), RenameTab),
+            Command::new(t(L10nKey::CmdSplitRight), SplitRight),
+            Command::new(t(L10nKey::CmdSplitDown), SplitDown),
+            Command::new(t(L10nKey::CmdZoomPane), ToggleMaximizePane),
+            Command::new(t(L10nKey::CmdNextPane), NextPane),
+            Command::new(t(L10nKey::CmdPreviousPane), PrevPane),
+            Command::new(t(L10nKey::CmdFocusPaneLeft), FocusPaneLeft),
+            Command::new(t(L10nKey::CmdFocusPaneRight), FocusPaneRight),
+            Command::new(t(L10nKey::CmdFocusPaneUp), FocusPaneUp),
+            Command::new(t(L10nKey::CmdFocusPaneDown), FocusPaneDown),
+            Command::new(t(L10nKey::CmdResizePaneLeft), ResizePaneLeft),
+            Command::new(t(L10nKey::CmdResizePaneRight), ResizePaneRight),
+            Command::new(t(L10nKey::CmdResizePaneUp), ResizePaneUp),
+            Command::new(t(L10nKey::CmdResizePaneDown), ResizePaneDown),
+            Command::new(t(L10nKey::CmdSwapPaneNext), SwapPaneNext),
+            Command::new(t(L10nKey::CmdSwapPanePrevious), SwapPanePrev),
+            Command::new(t(L10nKey::CmdNextTab), NextTab),
+            Command::new(t(L10nKey::CmdPreviousTab), PrevTab),
+            Command::new(t(L10nKey::CmdCopyWorkingDirectory), CopyWorkingDirectory),
+            Command::new(t(L10nKey::CmdCopySessionId), CopyAgentSessionId)
+                .with_subtitle(t(L10nKey::CmdCopySessionIdSubtitle)),
+            Command::new(t(L10nKey::CmdForkSession), ForkAgentSession)
+                .with_subtitle(t(L10nKey::CmdForkSessionSubtitle)),
+            Command::new(t(L10nKey::CmdMarkTabAsUnread), MarkTabUnread),
+            Command::new(t(L10nKey::CmdClosePaneTab), ClosePane),
+            Command::new(t(L10nKey::CmdCloseOtherTabs), CloseOtherTabs),
+            Command::new(t(L10nKey::CmdCloseTabsToTheRight), CloseTabsToTheRight),
+            Command::new(t(L10nKey::CmdReopenClosedTab), ReopenClosedTab),
         ];
 
         let workspaces = [
-            Command::new("New Workspace", NewWorkspace),
-            Command::new("Switch Workspace…", OpenWorkspacePicker),
-            Command::new("Rename Workspace…", RenameWorkspace),
-            Command::new("Stop Workspace…", StopWorkspace)
-                .with_subtitle("ends its shells, keeps the layout"),
-            Command::new("Delete Workspace…", DeleteWorkspace)
-                .with_subtitle("ends its shells and forgets the layout"),
+            Command::new(t(L10nKey::CmdNewWorkspace), NewWorkspace),
+            Command::new(t(L10nKey::CmdSwitchWorkspace), OpenWorkspacePicker),
+            Command::new(t(L10nKey::CmdRenameWorkspace), RenameWorkspace),
+            Command::new(t(L10nKey::CmdStopWorkspace), StopWorkspace)
+                .with_subtitle(t(L10nKey::CmdStopWorkspaceSubtitle)),
+            Command::new(t(L10nKey::CmdDeleteWorkspace), DeleteWorkspace)
+                .with_subtitle(t(L10nKey::CmdDeleteWorkspaceSubtitle)),
         ];
 
         let view = [
             Command::new(
                 if sidebar_hidden {
-                    "Show Left Sidebar"
+                    t(L10nKey::CmdShowLeftSidebar)
                 } else {
-                    "Hide Left Sidebar"
+                    t(L10nKey::CmdHideLeftSidebar)
                 },
                 ToggleLeftPanel,
             ),
             Command::new(
                 if right_panel_open {
-                    "Hide Right Panel"
+                    t(L10nKey::CmdHideRightPanel)
                 } else {
-                    "Show Right Panel"
+                    t(L10nKey::CmdShowRightPanel)
                 },
                 ToggleRightPanel,
             ),
-            Command::new("Show Code Panel", ToggleCodePanel),
+            Command::new(t(L10nKey::CmdShowCodePanel), ToggleCodePanel),
             Command::new(
                 if tab_bar_left {
-                    "Tab Bar: Move to Top"
+                    t(L10nKey::CmdTabBarMoveToTop)
                 } else {
-                    "Tab Bar: Move to Left Sidebar"
+                    t(L10nKey::CmdTabBarMoveToLeftSidebar)
                 },
                 ToggleTabSidebar,
             ),
-            Command::new("Right Panel: Info", ShowRightPanel(RightPanelTab::Info)),
             Command::new(
-                "Right Panel: Outline",
+                t(L10nKey::CmdRightPanelInfo),
+                ShowRightPanel(RightPanelTab::Info),
+            ),
+            Command::new(
+                t(L10nKey::CmdRightPanelOutline),
                 ShowRightPanel(RightPanelTab::Outline),
             ),
             Command::new(
-                "Right Panel: Changes",
+                t(L10nKey::CmdRightPanelChanges),
                 ShowRightPanel(RightPanelTab::Changes),
             ),
-            Command::new("Right Panel: Files", ShowRightPanel(RightPanelTab::Files)),
-            Command::new("Change Theme…", OpenThemePicker),
-            Command::new("Reset Font Size", ResetFontSize),
-            Command::new("Enter Full Screen", ToggleFullscreen),
+            Command::new(
+                t(L10nKey::CmdRightPanelFiles),
+                ShowRightPanel(RightPanelTab::Files),
+            ),
+            Command::new(t(L10nKey::CmdChangeTheme), OpenThemePicker),
+            Command::new(t(L10nKey::CmdResetFontSize), ResetFontSize),
+            Command::new(t(L10nKey::CmdEnterFullScreen), ToggleFullscreen),
         ];
 
         let terminal = [
-            Command::new("Clear Scrollback", ClearTerminal),
-            Command::new("Find in Terminal…", FindInTerminal),
-            Command::new("Find Next", FindNext),
-            Command::new("Find Previous", FindPrevious),
-            Command::new("Copy", CopyText),
-            Command::new("Cut", CutText),
-            Command::new("Paste", PasteText),
-            Command::new("Select All", SelectAllText),
+            Command::new(t(L10nKey::CmdClearScrollback), ClearTerminal),
+            Command::new(t(L10nKey::CmdFindInTerminal), FindInTerminal),
+            Command::new(t(L10nKey::CmdFindNext), FindNext),
+            Command::new(t(L10nKey::CmdFindPrevious), FindPrevious),
+            Command::new(t(L10nKey::CmdCopy), CopyText),
+            Command::new(t(L10nKey::CmdCut), CutText),
+            Command::new(t(L10nKey::CmdPaste), PasteText),
+            Command::new(t(L10nKey::CmdSelectAll), SelectAllText),
         ];
 
         let ssh = [
-            Command::new("SSH: Add Connection…", OpenSshConnectInput),
-            Command::new("SSH: Manage Profiles…", OpenSshProfiles),
-            Command::new("SSH: Reconnect", RestartSshSession),
-            Command::new("SSH: Remote Files", ToggleSftp),
-            Command::new("SSH: Port Forwarding", ShowSshForwards),
+            Command::new(t(L10nKey::CmdSshAddConnection), OpenSshConnectInput),
+            Command::new(t(L10nKey::CmdSshManageProfiles), OpenSshProfiles),
+            Command::new(t(L10nKey::CmdSshReconnect), RestartSshSession),
+            Command::new(t(L10nKey::CmdSshRemoteFiles), ToggleSftp),
+            Command::new(t(L10nKey::CmdSshPortForwarding), ShowSshForwards),
         ];
 
         let agents = [
-            Command::new("Agent: Send Selection", SendSelectionToAgent)
-                .with_subtitle("selection → running coding agent"),
-            Command::new("Agent: Send Git Diff for Review", SendGitDiffToAgent)
-                .with_subtitle("git diff → running coding agent"),
+            Command::new(t(L10nKey::CmdAgentSendSelection), SendSelectionToAgent)
+                .with_subtitle(t(L10nKey::CmdAgentSendSelectionSubtitle)),
+            Command::new(t(L10nKey::CmdAgentSendGitDiffForReview), SendGitDiffToAgent)
+                .with_subtitle(t(L10nKey::CmdAgentSendGitDiffSubtitle)),
         ];
 
         let application = [
-            Command::new("Settings…", OpenSettings),
-            Command::new("Keyboard Shortcuts", ShowKeyboardShortcuts),
-            Command::new("About tty7", About),
-            Command::new("Check for Updates…", CheckForUpdates),
-            Command::new("Documentation", OpenDocumentation),
-            Command::new("Join the Discord", OpenDiscord),
-            Command::new("Report an Issue…", ReportIssue),
-            Command::new("Restart Server…", RestartDaemon)
-                .with_subtitle("ends every running shell; layout is kept"),
-            Command::new("Quit tty7", Quit).with_subtitle("shells keep running"),
+            Command::new(t(L10nKey::CmdSettings), OpenSettings),
+            Command::new(t(L10nKey::CmdKeyboardShortcuts), ShowKeyboardShortcuts),
+            Command::new(t(L10nKey::CmdAboutTty7), About),
+            Command::new(t(L10nKey::CmdCheckForUpdates), CheckForUpdates),
+            Command::new(t(L10nKey::CmdDocumentation), OpenDocumentation),
+            Command::new(t(L10nKey::CmdJoinDiscord), OpenDiscord),
+            Command::new(t(L10nKey::CmdReportIssue), ReportIssue),
+            Command::new(t(L10nKey::CmdRestartServer), RestartDaemon)
+                .with_subtitle(t(L10nKey::CmdRestartServerSubtitle)),
+            Command::new(t(L10nKey::CmdQuitTty7), Quit)
+                .with_subtitle(t(L10nKey::CmdQuitTty7Subtitle)),
         ];
 
         let mut out = Vec::new();
@@ -504,10 +512,11 @@ impl Command {
     }
 
     fn ssh_connect_command(input: &str) -> Command {
-        let title = if input.trim().is_empty() {
-            "SSH: Add Connection…".to_string()
+        let trimmed = input.trim();
+        let title = if trimmed.is_empty() {
+            t(L10nKey::CmdSshAddConnection).to_string()
         } else {
-            format!("SSH: Connect {}", input.trim())
+            t_fmt(L10nKey::CmdSshConnectWithInput, &[("input", trimmed)])
         };
         Command::new(title, CommandKind::OpenSshConnect(input.to_string()))
     }
@@ -644,7 +653,7 @@ impl PaletteDelegate {
         recent.truncate(RECENT_ROWS);
         if !recent.is_empty() {
             sections.push(Section {
-                title: Some("Recent".into()),
+                title: Some(t(L10nKey::CmdRecent).into()),
                 commands: recent.into_iter().map(|(_, c)| c.clone()).collect(),
             });
         }
@@ -675,11 +684,11 @@ impl PaletteDelegate {
                 let target = query.trim().to_string();
                 vec![
                     Command::new(
-                        format!("Connect to \"{target}\""),
+                        t_fmt(L10nKey::CmdQuickConnect, &[("target", &target)]),
                         CommandKind::QuickConnect(target.clone()),
                     ),
                     Command::new(
-                        format!("Save \"{target}\" as profile…"),
+                        t_fmt(L10nKey::CmdQuickConnectSaveProfile, &[("target", &target)]),
                         CommandKind::SaveQuickConnect(target),
                     ),
                 ]
@@ -803,11 +812,13 @@ impl ListDelegate for PaletteDelegate {
             .items_center()
             .text_sm()
             .text_color(cx.theme().muted_foreground)
-            .child("No matching commands")
+            .child(crate::ui::i18n::t(
+                crate::ui::i18n::L10nKey::NoMatchingCommands,
+            ))
             .child(
                 div()
                     .text_xs()
-                    .child("Type user@host to connect over SSH instead."),
+                    .child(crate::ui::i18n::t(crate::ui::i18n::L10nKey::ConnectSshHint)),
             )
     }
 
@@ -840,7 +851,12 @@ impl ListDelegate for PaletteDelegate {
             .justify_between()
             .child(left);
         if cmd.kind.edit_variant().is_some() {
-            row = row.child(div().text_xs().text_color(muted).child("→ edit"));
+            row = row.child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(crate::ui::i18n::t(crate::ui::i18n::L10nKey::EditHint)),
+            );
         }
         if let Some(tokens) = keys {
             row = row.child(h_flex().gap_1().children(tokens.into_iter().map(move |t| {
@@ -958,8 +974,8 @@ impl PaletteView {
     fn search_placeholder(&self) -> &'static str {
         match self.menu {
             PaletteMenu::SshConnect => "user@host [-p 2222 -J jump]",
-            PaletteMenu::Root => "Search or type user@host to connect…",
-            PaletteMenu::Theme => "Search…",
+            PaletteMenu::Root => t(crate::ui::i18n::L10nKey::SearchCommandsOrHost),
+            PaletteMenu::Theme => t(crate::ui::i18n::L10nKey::SearchTheme),
         }
     }
 
@@ -1094,6 +1110,7 @@ mod tests {
 
     #[test]
     fn host_like_queries_get_connect_and_save_rows() {
+        crate::ui::i18n::set_locale("en");
         for q in [
             "deploy@10.0.0.5",
             "host.example.com",
@@ -1105,8 +1122,8 @@ mod tests {
             assert_eq!(
                 titles,
                 vec![
-                    format!("Connect to \"{q}\""),
-                    format!("Save \"{q}\" as profile…"),
+                    t_fmt(L10nKey::CmdQuickConnect, &[("target", q)]),
+                    t_fmt(L10nKey::CmdQuickConnectSaveProfile, &[("target", q)]),
                 ],
                 "query {q:?}"
             );

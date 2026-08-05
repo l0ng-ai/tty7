@@ -8,6 +8,7 @@ use crate::core::config::{Config, StartupMode};
 use crate::core::session::{WorkspaceId, WorkspaceStore};
 use crate::core::window_state::{WindowGeometry as _, WindowState};
 use crate::ui::app::Tty7App;
+use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 
 const CASCADE_STEP: f32 = 28.0;
 
@@ -103,6 +104,23 @@ impl WindowRegistry {
             .iter()
             .find(|w| w.workspace == workspace)
             .map(|w| w.app.clone())
+    }
+
+    pub fn refresh_locale(cx: &mut App, except: Option<WorkspaceId>) {
+        Self::sweep(cx);
+        let windows: Vec<_> = cx
+            .global::<Self>()
+            .windows
+            .iter()
+            .filter(|entry| Some(entry.workspace) != except)
+            .map(|entry| (entry.handle, entry.app.clone()))
+            .collect();
+        for (handle, app) in windows {
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = app.update(cx, |app, cx| app.refresh_locale_state(window, cx));
+                window.refresh();
+            });
+        }
     }
 
     fn register(
@@ -303,22 +321,11 @@ pub fn confirm_and_delete(cx: &mut App, window: &mut Window, workspace: Workspac
 
 fn destructive_detail(live: Option<usize>, verb: &str) -> String {
     match (live, verb) {
-        (None, "Delete") => "Its machine could not be reached. Any shells still running there \
-                             will be ended, and the layout forgotten."
-            .to_string(),
-        (None, _) => {
-            "Its machine could not be reached. Any shells still running there will be ended."
-                .to_string()
-        }
-        (Some(0), _) => "Its layout and working directories will be forgotten.".to_string(),
-        (Some(1), "Delete") => {
-            "1 running shell will be ended and its layout forgotten.".to_string()
-        }
-        (Some(n), "Delete") => {
-            format!("{n} running shells will be ended and the layout forgotten.")
-        }
-        (Some(1), _) => "1 running shell will be ended.".to_string(),
-        (Some(n), _) => format!("{n} running shells will be ended."),
+        (None, "Delete") => t(L10nKey::WindowDeleteUnreachable).to_string(),
+        (None, _) => t(L10nKey::WindowStopUnreachable).to_string(),
+        (Some(0), _) => t_plural(L10nKey::WindowStopShells, 0, &[]),
+        (Some(n), "Delete") => t_plural(L10nKey::WindowDeleteShells, n, &[]),
+        (Some(n), _) => t_plural(L10nKey::WindowStopShells, n, &[]),
     }
 }
 
@@ -330,7 +337,7 @@ fn confirm_destructive(
     act: fn(&mut App, WorkspaceId),
 ) {
     let name = crate::ui::machine_mirror::display_name_for(cx, workspace)
-        .unwrap_or_else(|| "this workspace".to_string());
+        .unwrap_or_else(|| t(L10nKey::WindowThisWorkspace).to_string());
     let query = pane_count_query(cx, workspace);
     let handle = window.window_handle();
 
@@ -349,12 +356,22 @@ fn confirm_destructive(
         }
 
         let detail = destructive_detail(live, verb);
+        let verb_key = if verb == "Delete" {
+            L10nKey::WindowDelete
+        } else {
+            L10nKey::WindowStop
+        };
+        let verb_label = t(verb_key);
+        let title = t_fmt(
+            L10nKey::WindowConfirmTitle,
+            &[("verb", verb_label), ("name", &name)],
+        );
         let Ok(answer) = handle.update(cx, |_, window, cx| {
             window.prompt(
                 gpui::PromptLevel::Warning,
-                &format!("{verb} Workspace \u{201c}{name}\u{201d}?"),
+                &title,
                 Some(&detail),
-                &["Cancel", verb],
+                &[t(L10nKey::Cancel), verb_label],
                 cx,
             )
         }) else {
@@ -537,6 +554,7 @@ fn cascade(bounds: Bounds<gpui::Pixels>, existing: usize) -> Bounds<gpui::Pixels
 mod tests {
     use super::*;
     use crate::core::session::{WindowView, WindowViews};
+    use crate::ui::i18n::{L10nKey, set_locale, t_plural};
 
     fn bounds_at(x: f32, y: f32) -> Bounds<gpui::Pixels> {
         Bounds {
@@ -614,25 +632,26 @@ mod tests {
 
     #[test]
     fn the_confirmation_says_which_of_the_three_answers_it_got() {
+        set_locale("en");
         assert_eq!(
             destructive_detail(Some(1), "Stop"),
-            "1 running shell will be ended."
+            t_plural(L10nKey::WindowStopShells, 1, &[])
         );
         assert_eq!(
             destructive_detail(Some(3), "Stop"),
-            "3 running shells will be ended."
+            t_plural(L10nKey::WindowStopShells, 3, &[])
         );
         assert_eq!(
             destructive_detail(Some(1), "Delete"),
-            "1 running shell will be ended and its layout forgotten."
+            t_plural(L10nKey::WindowDeleteShells, 1, &[])
         );
         assert_eq!(
             destructive_detail(Some(3), "Delete"),
-            "3 running shells will be ended and the layout forgotten."
+            t_plural(L10nKey::WindowDeleteShells, 3, &[])
         );
         assert_eq!(
             destructive_detail(Some(0), "Delete"),
-            "Its layout and working directories will be forgotten."
+            t_plural(L10nKey::WindowStopShells, 0, &[])
         );
 
         for verb in ["Stop", "Delete"] {

@@ -146,3 +146,16 @@ Two things are *not* covered by usage strings:
   access is decided by the responsible bundle's usage string, and granting the
   GUI bundle those entitlements would only widen what injected code can reach
   under tty7's identity.
+
+## Localization
+
+The GUI ships English and Simplified Chinese strings. Pick one in Settings →
+Appearance → Language, or in `config.json`:
+
+```json
+{ "gui_language": "zh-CN" }
+```
+
+`en` and `zh-CN` are the only accepted values; anything else falls back to `en`.
+The choice is explicit — the system language is never inferred. CLI output stays
+English so agent and script integrations keep a stable, predictable surface.
