@@ -95,6 +95,10 @@ impl Switcher {
     fn text(&self, cx: &App) -> String {
         self.query.read(cx).value().trim().to_lowercase()
     }
+
+    pub(crate) fn expand(&mut self, key: &str) {
+        self.collapsed.remove(key);
+    }
 }
 
 impl Tty7App {
@@ -260,6 +264,11 @@ impl Tty7App {
                 && choice.target == target
             {
                 group.error = Some(error.clone());
+            }
+            if group.error.is_none() {
+                if let Some(error) = self.remote_host_errors.get(&target.to_string()) {
+                    group.error = Some(error.clone());
+                }
             }
             let id = target.host_id();
             let reported = remote_connect::install_progress_for(id);
@@ -611,6 +620,10 @@ impl Tty7App {
         if let Some(error) = group.error.as_ref().filter(|_| group.installing.is_none()) {
             let retry = GroupRef::of(group);
             let replace = retry.clone();
+            let retry_key = group.key.clone();
+            let replace_key = group.key.clone();
+            let dismiss_key = group.key.clone();
+            let dismiss_target = group.target.clone();
             let theme = cx.theme();
             block =
                 block.child(
@@ -642,6 +655,7 @@ impl Tty7App {
                                     .ghost()
                                     .xsmall()
                                     .on_click(cx.listener(move |this, _, _window, cx| {
+                                        this.remote_host_errors.remove(&retry_key);
                                         if let Some(target) = retry.target.clone() {
                                             this.connect_to_host(
                                                 HostChoice {
@@ -667,6 +681,7 @@ impl Tty7App {
                                             .ghost()
                                             .xsmall()
                                             .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.remote_host_errors.remove(&replace_key);
                                                 if let Some(target) = replace.target.clone() {
                                                     this.confirm_replace_remote_server(
                                                         target,
@@ -678,6 +693,29 @@ impl Tty7App {
                                             })),
                                         )
                                     },
+                                )
+                                .child(
+                                    Button::new(gpui::SharedString::from(format!(
+                                        "switcher-dismiss:{}",
+                                        group.key
+                                    )))
+                                    .label(t(L10nKey::Dismiss))
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        this.remote_host_errors.remove(&dismiss_key);
+                                        // The other half of this block can come from a
+                                        // failed connect. Retire that too, but only when
+                                        // it is this host's failure — a connect to
+                                        // anywhere else is still in flight.
+                                        if let Some(ConnectFlow::Failed { choice, .. }) =
+                                            &this.connect
+                                            && Some(&choice.target) == dismiss_target.as_ref()
+                                        {
+                                            this.connect = None;
+                                        }
+                                        cx.notify();
+                                    })),
                                 ),
                         ),
                 );

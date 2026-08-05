@@ -2,8 +2,9 @@
 ; windows-latest runners). Compiled by bundle-windows.ps1, which stages the
 ; payload and passes every path in via /D defines:
 ;
-;   /DAppVersion=<semver>   version parsed from Cargo.toml
-;   /DStageDir=<abs path>   staged payload (tty7-app.exe, completions\, LICENSE.txt, README.md)
+;   /DAppVersion=<semver>   display version parsed from Cargo.toml
+;   /DVersionInfoVersion=<numeric version> PE-compatible file version
+;   /DStageDir=<abs path>   staged payload (app, CLI, updater, marker, resources)
 ;   /DOutputDir=<abs path>  where the setup exe is written
 ;   /DOutputName=<basename> setup exe filename, without ".exe"
 ;
@@ -15,6 +16,9 @@
 #ifndef AppVersion
   #error Missing /DAppVersion — this script is meant to be compiled via bundle-windows.ps1
 #endif
+#ifndef VersionInfoVersion
+  #error Missing /DVersionInfoVersion — this script is meant to be compiled via bundle-windows.ps1
+#endif
 
 [Setup]
 ; Never change AppId: it is how Windows ties upgrades + the uninstall entry
@@ -22,6 +26,7 @@
 AppId={{9A3F6C1E-4B7D-4E2A-8C5F-D01B92E64A37}
 AppName=tty7
 AppVersion={#AppVersion}
+VersionInfoVersion={#VersionInfoVersion}
 AppPublisher=tty7 contributors
 AppPublisherURL=https://github.com/l0ng-ai/tty7
 AppSupportURL=https://github.com/l0ng-ai/tty7/issues
@@ -51,6 +56,12 @@ RestartApplications=no
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+; Writing shell verbs is an install-time decision, the way VS Code and Git for
+; Windows treat theirs — not a runtime preference, so tty7 has no setting for
+; it. Off by default: the registry is user-visible system state. The keys land
+; under HKCU even for an all-users install, so this only ever affects whoever
+; ran the installer. Inno restores the previous choice when upgrading.
+Name: "explorermenu"; Description: "Add ""Open in tty7"" to the folder context menu"; GroupDescription: "Shell integration:"; Flags: unchecked
 
 ; Builds before the tty7/tty7-app split installed the GUI as tty7.exe. Upgrading
 ; only *adds* tty7-app.exe, so the old binary would stay on disk — and a taskbar
@@ -76,6 +87,10 @@ Source: "{#StageDir}\tty7-app.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; installer to do it, and one code path serving both is one behaviour to debug.
 ; The uninstaller takes that entry back out; see RemoveAppDirFromUserPath below.
 Source: "{#StageDir}\tty7.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\tty7-updater.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; This installer-only marker is the authority for enabling automatic Windows
+; updates. The portable archive is created before the marker enters the stage.
+Source: "{#StageDir}\.tty7-inno-install"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#StageDir}\completions\*"; DestDir: "{app}\completions"; Flags: ignoreversion recursesubdirs
 Source: "{#StageDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
@@ -98,6 +113,11 @@ Name: "{autoprograms}\tty7"; Filename: "{app}\tty7-app.exe"; AppUserModelID: "co
 Name: "{autodesktop}\tty7"; Filename: "{app}\tty7-app.exe"; Tasks: desktopicon; AppUserModelID: "com.github.tty7"
 
 [Run]
+; The registry shape lives in core::explorer_context_menu, not here: the app
+; reads those same keys to decide whether an existing registration still points
+; at this install, and two hand-kept copies of the layout would drift. Runs
+; before the launch entry below so a first start already sees the final state.
+Filename: "{app}\tty7-app.exe"; Parameters: "--register-explorer-menu"; Tasks: explorermenu; Flags: runhidden waituntilterminated
 Filename: "{app}\tty7-app.exe"; Description: "{cm:LaunchProgram,tty7}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
@@ -108,6 +128,11 @@ Filename: "{app}\tty7-app.exe"; Description: "{cm:LaunchProgram,tty7}"; Flags: n
 ; the call returns without opening a window. RunOnceId keys the entry so a repeated
 ; uninstall doesn't run it twice.
 Filename: "{app}\tty7-app.exe"; Parameters: "--stop-daemon"; Flags: runhidden waituntilterminated; RunOnceId: "StopDaemon"
+; Unconditional, and deliberately not gated on the task: an install that had the
+; menu registered and was later upgraded without the box ticked still holds the
+; keys, and verbs pointing at a deleted exe are worse than a no-op. Removing keys
+; that were never written succeeds silently.
+Filename: "{app}\tty7-app.exe"; Parameters: "--unregister-explorer-menu"; Flags: runhidden waituntilterminated; RunOnceId: "UnregisterExplorerMenu"
 
 [Code]
 (* Gracefully stop the persistent daemon before we overwrite tty7-app.exe. We can't

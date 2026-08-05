@@ -122,6 +122,11 @@ pub struct TerminalView {
     last_mouse_cell: Option<(usize, usize)>,
     last_hover_cell: Option<(usize, usize)>,
     link_modifier_down: bool,
+    /// The verdict of `should_show_context_menu` for the most recent right
+    /// mouse-down, latched so the menu builder — which gpui-component runs on a
+    /// deferred callback, one turn after the click — can still see the
+    /// modifiers the user actually held.
+    context_menu_allowed: bool,
     scroll_debt: f32,
     pub(super) scroll_frac: f32,
     pub search: Option<SearchState>,
@@ -846,6 +851,7 @@ impl TerminalView {
             report_mouse,
             last_hover_cell: None,
             link_modifier_down: false,
+            context_menu_allowed: true,
             scroll_debt: 0.,
             scroll_frac: 0.,
             search: None,
@@ -4716,6 +4722,20 @@ impl Render for TerminalView {
                     window.focus(&this.focus_handle, cx);
                 }),
             )
+            // Latch the context-menu verdict for this click. gpui-component's
+            // `ContextMenu` element owns the right mouse-down that opens the
+            // popup and hands the builder no event to inspect, so the modifiers
+            // have to be recorded here. That element wraps this one, so its
+            // listener actually fires *before* this one — harmless, because it
+            // only builds the menu from a `window.defer` callback that runs
+            // once the whole mouse dispatch has unwound.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, ev: &MouseDownEvent, _window, _cx| {
+                    this.context_menu_allowed =
+                        should_show_context_menu(this.mouse_mode(), ev.modifiers.shift);
+                }),
+            )
             .drag_over::<ExternalPaths>(|s, _, _, cx| s.bg(cx.theme().drag_border.opacity(0.12)))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 window.focus(&this.focus_handle, cx);
@@ -4760,6 +4780,15 @@ impl Render for TerminalView {
             .children(reverse_search_menu)
             .children(integration_notice)
             .context_menu(move |menu, window, cx| {
+                // Suppressing the popup means handing back an item-less menu:
+                // gpui-component's `ContextMenu` element skips rendering the
+                // anchored overlay entirely when the built menu `is_empty()`,
+                // and its right mouse-down listener is registered after ours
+                // (it wraps this element), so we cannot out-order it or veto it
+                // any earlier. See `should_show_context_menu` for the rule.
+                if !menu_view.read(cx).context_menu_allowed {
+                    return menu;
+                }
                 let menu = menu
                     .min_w(px(220.))
                     .action_context(menu_focus.clone())
@@ -4912,6 +4941,24 @@ enum SelectEndCopy {
     None,
     Grid,
     Editor,
+}
+
+/// Whether a right-click belongs to tty7's own context menu rather than to the
+/// terminal application.
+///
+/// A TUI that has turned mouse reporting on (vim with `set mouse=a`, lazygit,
+/// tmux, …) draws its own right-button menus, so popping the host menu on top
+/// of the application's is a double delivery of one click — #251. While
+/// reporting is active the unmodified click is the application's alone; Shift
+/// is the escape hatch that reaches tty7, matching how Shift already overrides
+/// mouse reporting for selection (`register_mouse_handlers`) and for the wheel
+/// (`wheel_route`).
+///
+/// This is the exact complement of the "forward the press to the app" branch in
+/// `TerminalElement::register_mouse_handlers`, which is why both call it: one
+/// click must never feed both consumers.
+pub(super) fn should_show_context_menu(mouse_mode: bool, shift: bool) -> bool {
+    !mouse_mode || shift
 }
 
 fn select_end_copy(enabled: bool, grid: bool, editor: bool) -> SelectEndCopy {
@@ -5264,7 +5311,8 @@ mod tests {
         drag_scroll_step, encode_mouse, escape_candidate, expand_file_command_template,
         fallback_chain, fig_icon_emoji, fig_icon_glyph, focus_report_bytes, input_overflow_shift,
         input_overlay_rows, menu_layout, paste_bytes, select_end_copy, shell_escape_path,
-        smooth_scroll_step, submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
+        should_show_context_menu, smooth_scroll_step, submit_bytes, trim_trailing_spaces,
+        wheel_route, wrapped_click_index,
     };
     #[cfg(not(target_os = "macos"))]
     use super::{remote_paste_spec, staging_cache, staging_dir_is_safe};
@@ -5789,6 +5837,47 @@ mod tests {
             | TermMode::APP_CURSOR;
         assert_eq!(wheel_route(everything, true, true), WheelRoute::Scrollback);
         assert_eq!(wheel_route(everything, true, false), WheelRoute::Scrollback);
+    }
+
+    #[test]
+    fn right_click_opens_the_host_menu_when_the_app_is_not_reporting_mouse() {
+        assert!(should_show_context_menu(false, false));
+        assert!(should_show_context_menu(false, true));
+    }
+
+    #[test]
+    fn right_click_belongs_to_the_app_while_mouse_reporting_is_active() {
+        assert!(
+            !should_show_context_menu(true, false),
+            "an unmodified right-click in mouse mode is the application's event, \
+             so tty7 must not also pop its own menu over it"
+        );
+    }
+
+    #[test]
+    fn shift_right_click_stays_the_escape_hatch_in_mouse_mode() {
+        assert!(
+            should_show_context_menu(true, true),
+            "Shift is the documented way to reach tty7's own menu inside a \
+             mouse-reporting TUI"
+        );
+    }
+
+    #[test]
+    fn context_menu_and_mouse_report_never_fire_for_the_same_click() {
+        // The render-time menu gate and the mouse-down forwarder in
+        // `TerminalElement` read the same predicate from opposite sides, so
+        // every (mouse_mode, shift) pair must land in exactly one of them.
+        for mouse_mode in [false, true] {
+            for shift in [false, true] {
+                let menu = should_show_context_menu(mouse_mode, shift);
+                let reported = mouse_mode && !shift;
+                assert_ne!(
+                    menu, reported,
+                    "mouse_mode={mouse_mode} shift={shift} must route to exactly one consumer"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1,32 +1,24 @@
 //! Optional Windows Explorer context-menu integration.
 //!
-//! tty7 deliberately does not register shell verbs during installation or
-//! startup. The registry is user-visible system state, so only the explicit
-//! buttons in Settings call [`register`] or [`unregister`]. Both verbs invoke
-//! the GUI-subsystem `tty7-app.exe` directly so Explorer never allocates a
-//! transient console. The app first offers the path to an already running GUI
-//! through `GuiOpen`, then continues normal startup when no GUI receives it.
+//! The registry is user-visible system state, so tty7 never writes these verbs
+//! on its own: the Windows installer offers a task checkbox and invokes
+//! [`register`], and its uninstaller always invokes [`unregister`]. There is no
+//! runtime setting — the same install-time-only treatment VS Code and Git for
+//! Windows give their shell entries. Keeping the key layout here rather than in
+//! the .iss keeps one description of it in the tree.
+//!
+//! Both verbs invoke the GUI-subsystem `tty7-app.exe` directly so Explorer never
+//! allocates a transient console. The app first offers the path to an already
+//! running GUI through `GuiOpen`, then continues normal startup when no GUI
+//! receives it.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 
 const DIRECTORY_KEY: &str = r"Software\Classes\Directory\shell\tty7";
 const BACKGROUND_KEY: &str = r"Software\Classes\Directory\Background\shell\tty7";
-
-/// The state shown in Settings.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Status {
-    /// Neither tty7 verb exists for this user.
-    NotRegistered,
-    /// Both verbs exactly describe the currently running tty7 installation.
-    Registered,
-    /// At least one verb exists, but the pair is incomplete or points elsewhere.
-    NeedsUpdate,
-    /// Explorer shell verbs are unavailable on this operating system.
-    Unsupported,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Location {
@@ -66,23 +58,6 @@ struct Registration {
     command: OsString,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RegistryShape {
-    values: u32,
-    subkeys: u32,
-}
-
-fn registration_tree_is_exact(root: RegistryShape, command: RegistryShape) -> bool {
-    root == (RegistryShape {
-        values: 2,
-        subkeys: 1,
-    }) && command
-        == (RegistryShape {
-            values: 1,
-            subkeys: 0,
-        })
-}
-
 fn replace_entry_with(
     registration: &Registration,
     delete: impl FnOnce(&str) -> Result<()>,
@@ -103,11 +78,6 @@ impl Registration {
             command: quoted_open_command(app, location.placeholder()),
         }
     }
-}
-
-/// Return the live per-user registration state.
-pub fn status() -> Result<Status> {
-    platform_status()
 }
 
 /// Register both Explorer verbs for the current user.
@@ -151,6 +121,7 @@ fn registrations(app: &Path) -> [Registration; 2] {
 #[cfg(windows)]
 mod windows {
     use super::*;
+    use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt as _;
 
     use windows_sys::Win32::Foundation::{
@@ -175,19 +146,8 @@ mod windows {
         }
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum EntryState {
-        Missing,
-        Matching,
-        Different,
-    }
-
     fn wide(value: &OsStr) -> Vec<u16> {
         value.encode_wide().chain(std::iter::once(0)).collect()
-    }
-
-    fn units(value: &OsStr) -> Vec<u16> {
-        value.encode_wide().collect()
     }
 
     fn io_error(action: &str, code: u32) -> anyhow::Error {
@@ -195,20 +155,6 @@ mod windows {
             "{action}: {}",
             std::io::Error::from_raw_os_error(code as i32)
         )
-    }
-
-    fn open_key(path: &str) -> Result<Option<RegistryKey>> {
-        let path = wide(OsStr::new(path));
-        let mut key: HKEY = std::ptr::null_mut();
-        // SAFETY: `path` is NUL-terminated and alive for the call; `key` is a
-        // valid out-parameter and is wrapped only when the call succeeds.
-        let code =
-            unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut key) };
-        match code {
-            ERROR_SUCCESS => Ok(Some(RegistryKey(key))),
-            ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => Ok(None),
-            other => Err(io_error("opening the tty7 Explorer registry key", other)),
-        }
     }
 
     fn create_key(path: &str) -> Result<RegistryKey> {
@@ -235,56 +181,6 @@ mod windows {
         Ok(RegistryKey(key))
     }
 
-    fn query_string(key: &RegistryKey, name: Option<&OsStr>) -> Result<Option<Vec<u16>>> {
-        let name = name.map(wide);
-        let name_ptr = name.as_ref().map_or(std::ptr::null(), |name| name.as_ptr());
-        let mut kind = 0u32;
-        let mut bytes = 0u32;
-        // SAFETY: the key is live, the optional value-name pointer is either
-        // null or NUL-terminated, and the size/type out-parameters are valid.
-        let code = unsafe {
-            RegQueryValueExW(
-                key.0,
-                name_ptr,
-                std::ptr::null(),
-                &mut kind,
-                std::ptr::null_mut(),
-                &mut bytes,
-            )
-        };
-        if matches!(code, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) {
-            return Ok(None);
-        }
-        if code != ERROR_SUCCESS {
-            return Err(io_error("reading a tty7 Explorer registry value", code));
-        }
-        if kind != REG_SZ || !bytes.is_multiple_of(2) {
-            return Ok(None);
-        }
-
-        let mut value = vec![0u16; (bytes as usize).div_ceil(2)];
-        // SAFETY: `value` is sized from the preceding query and remains live;
-        // Win32 receives its capacity in bytes through `bytes`.
-        let code = unsafe {
-            RegQueryValueExW(
-                key.0,
-                name_ptr,
-                std::ptr::null(),
-                &mut kind,
-                value.as_mut_ptr().cast(),
-                &mut bytes,
-            )
-        };
-        if code != ERROR_SUCCESS {
-            return Err(io_error("reading a tty7 Explorer registry value", code));
-        }
-        value.truncate(bytes as usize / 2);
-        while value.last() == Some(&0) {
-            value.pop();
-        }
-        Ok(Some(value))
-    }
-
     fn set_string(key: &RegistryKey, name: Option<&OsStr>, value: &OsStr) -> Result<()> {
         let name = name.map(wide);
         let name_ptr = name.as_ref().map_or(std::ptr::null(), |name| name.as_ptr());
@@ -300,59 +196,6 @@ mod windows {
         } else {
             Err(io_error("writing a tty7 Explorer registry value", code))
         }
-    }
-
-    fn key_shape(key: &RegistryKey) -> Result<RegistryShape> {
-        let mut subkeys = 0u32;
-        let mut values = 0u32;
-        // SAFETY: `key` is live and the two count pointers reference writable
-        // locals. Every optional output that is not needed is passed as null,
-        // which `RegQueryInfoKeyW` explicitly permits.
-        let code = unsafe {
-            RegQueryInfoKeyW(
-                key.0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                &mut subkeys,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut values,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        if code == ERROR_SUCCESS {
-            Ok(RegistryShape { values, subkeys })
-        } else {
-            Err(io_error("inspecting the tty7 Explorer registry key", code))
-        }
-    }
-
-    fn entry_state(registration: &Registration) -> Result<EntryState> {
-        let Some(root) = open_key(registration.location.key())? else {
-            return Ok(EntryState::Missing);
-        };
-        let label = query_string(&root, None)?;
-        let icon = query_string(&root, Some(OsStr::new("Icon")))?;
-
-        let command_path = format!(r"{}\command", registration.location.key());
-        let command_key = match open_key(&command_path)? {
-            Some(key) => key,
-            None => return Ok(EntryState::Different),
-        };
-        let command = query_string(&command_key, None)?;
-        let matches = label.as_deref() == Some(&units(OsStr::new(registration.location.label())))
-            && icon.as_deref() == Some(&units(&registration.icon))
-            && command.as_deref() == Some(&units(&registration.command))
-            && registration_tree_is_exact(key_shape(&root)?, key_shape(&command_key)?);
-        Ok(if matches {
-            EntryState::Matching
-        } else {
-            EntryState::Different
-        })
     }
 
     fn write_entry_contents(registration: &Registration) -> Result<()> {
@@ -389,18 +232,6 @@ mod windows {
         }
     }
 
-    pub(super) fn status() -> Result<Status> {
-        let app = application_path()?;
-        let states = registrations(&app).map(|entry| entry_state(&entry));
-        let [directory, background] = states;
-        let (directory, background) = (directory?, background?);
-        Ok(match (directory, background) {
-            (EntryState::Missing, EntryState::Missing) => Status::NotRegistered,
-            (EntryState::Matching, EntryState::Matching) => Status::Registered,
-            _ => Status::NeedsUpdate,
-        })
-    }
-
     pub(super) fn register() -> Result<()> {
         let app = application_path()?;
         for registration in registrations(&app) {
@@ -423,11 +254,6 @@ mod windows {
 }
 
 #[cfg(windows)]
-fn platform_status() -> Result<Status> {
-    windows::status()
-}
-
-#[cfg(windows)]
 fn platform_register() -> Result<()> {
     windows::register()
 }
@@ -435,11 +261,6 @@ fn platform_register() -> Result<()> {
 #[cfg(windows)]
 fn platform_unregister() -> Result<()> {
     windows::unregister()
-}
-
-#[cfg(not(windows))]
-fn platform_status() -> Result<Status> {
-    Ok(Status::Unsupported)
 }
 
 #[cfg(not(windows))]
@@ -484,50 +305,6 @@ mod tests {
             quoted_open_command(Path::new(r"C:\tty7\tty7-app.exe"), "%1"),
             r#""C:\tty7\tty7-app.exe" --open-path "%1""#
         );
-    }
-
-    #[test]
-    fn registration_shape_rejects_every_extra_value_or_subkey() {
-        assert!(registration_tree_is_exact(
-            RegistryShape {
-                values: 2,
-                subkeys: 1,
-            },
-            RegistryShape {
-                values: 1,
-                subkeys: 0,
-            },
-        ));
-        assert!(!registration_tree_is_exact(
-            RegistryShape {
-                values: 3,
-                subkeys: 1,
-            },
-            RegistryShape {
-                values: 1,
-                subkeys: 0,
-            },
-        ));
-        assert!(!registration_tree_is_exact(
-            RegistryShape {
-                values: 2,
-                subkeys: 1,
-            },
-            RegistryShape {
-                values: 2,
-                subkeys: 0,
-            },
-        ));
-        assert!(!registration_tree_is_exact(
-            RegistryShape {
-                values: 2,
-                subkeys: 2,
-            },
-            RegistryShape {
-                values: 1,
-                subkeys: 0,
-            },
-        ));
     }
 
     #[test]
