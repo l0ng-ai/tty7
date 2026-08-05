@@ -178,8 +178,26 @@ fn build_shell_command(
         apply_shell_integration(&mut cmd, &resolved_program, integration);
     }
     let integration_dir = integration.as_ref().and_then(|i| i.dir.clone());
-    apply_common_command_setup(&mut cmd, initial_cwd, pane, workspace);
+    let launched = launched_shell_program(&cmd, &resolved_program);
+    apply_common_command_setup(&mut cmd, initial_cwd, pane, workspace, &launched);
     Ok((cmd, integration_dir))
+}
+
+/// The program the pane is really about to exec.
+///
+/// `resolved_program` is what tty7 *decided* to run before shell integration
+/// had its say, and for a default-prog builder that decision is
+/// `CommandBuilder::get_shell()` — the passwd entry — even when
+/// `default_prog()` swapped the builder for the shell that launched the daemon.
+/// argv survives every rewrite on the way here, including the one an
+/// argv-replacing injection performs, so it is the honest answer. An empty argv
+/// means the builder is still the untouched default prog, which is precisely
+/// the case `resolved_program` already describes.
+fn launched_shell_program(cmd: &CommandBuilder, resolved_program: &str) -> String {
+    cmd.get_argv()
+        .first()
+        .map(|argv0| argv0.to_string_lossy().into_owned())
+        .unwrap_or_else(|| resolved_program.to_string())
 }
 
 fn initial_working_directory(cwd: Option<PathBuf>) -> Option<PathBuf> {
@@ -297,6 +315,60 @@ fn config_dir_env() -> Option<String> {
     crate::core::config::config_dir_path().map(|p| p.display().to_string())
 }
 
+/// The shell the pane is running, not the one the passwd entry names.
+///
+/// Everything that spawns "the user's shell" — tmux's `default-shell`, `sudo
+/// -s`, an editor's `!` escape, a coding agent picking a quoting dialect —
+/// reads `$SHELL`. A GUI launch inherits the login session's snapshot of it,
+/// so a pane told to run fish still advertised `/bin/zsh` and every one of
+/// those consumers walked off into the wrong shell (#342). Inside a pane, the
+/// shell tty7 was told to run *is* the user's shell, so that is what we name.
+///
+/// Note this is the opposite direction from `shells::login_shell()`, which
+/// deliberately ignores `$SHELL` in favour of passwd: that answers "which
+/// shell did the user log in with", which is still the login shell. This
+/// answers "which shell is this pane", which is not the same question.
+const SHELL_ENV: &str = "SHELL";
+
+/// The absolute path to name in `$SHELL`, or `None` when there is none to
+/// promise.
+///
+/// `$SHELL` is a POSIX contract, so the path rules here are POSIX ones rather
+/// than the host's — this only ever describes a pane on a unix daemon (see the
+/// caller), and hard-coding them keeps the resolution testable on any host.
+///
+/// A configured command may be bare (`fish`), because a bare command is what
+/// the shell inventory keeps when it wants PATH to decide which install wins.
+/// Consumers of `$SHELL` exec it directly, and many of them do so with a PATH
+/// of their own, so a bare name there is not the same binary the pane runs.
+/// Resolve it the way exec would, against the PATH the pane will inherit, and
+/// leave `$SHELL` untouched when that finds nothing — a stale but honest login
+/// shell beats a name that resolves somewhere else.
+fn shell_env_path(
+    program: &str,
+    path_var: impl FnOnce() -> Option<String>,
+    is_file: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let program = program.trim();
+    if program.is_empty() {
+        return None;
+    }
+    if program.starts_with('/') {
+        return Some(program.to_string());
+    }
+    // Anything else with a separator is relative to a working directory, and
+    // the reader's is not necessarily the pane's. Only a bare name is worth
+    // resolving.
+    if program.contains('/') {
+        return None;
+    }
+    path_var()?
+        .split(':')
+        .filter(|dir| dir.starts_with('/'))
+        .map(|dir| format!("{}/{program}", dir.trim_end_matches('/')))
+        .find(|candidate| is_file(candidate))
+}
+
 const CAPABILITY_ENV: [&str; 2] = ["TERM", "COLORTERM"];
 
 fn names_capability_env(key: &str) -> bool {
@@ -315,6 +387,7 @@ fn pane_environment(
     #[cfg_attr(not(windows), allow(unused_variables))] dark: bool,
     pane: u64,
     workspace: Option<&str>,
+    shell: &str,
 ) -> Vec<(String, String)> {
     let version = env!("CARGO_PKG_VERSION");
     let mut env = vec![
@@ -345,6 +418,33 @@ fn pane_environment(
     if let Some(dir) = config_dir_env() {
         env.push((TTY7_CONFIG_DIR_ENV.to_string(), dir));
     }
+    // Windows is deliberately left out. `SHELL` is not a native concept there —
+    // neither cmd nor PowerShell reads it — and the tools that do read it are
+    // the POSIX emulations: MSYS/Git Bash, Cygwin, and WSL, which take `WSLENV`
+    // exports as Linux paths. All of them want a POSIX path, and every shell
+    // this branch could name is a Windows one, so setting it would point them
+    // at something they cannot exec. That also covers the WSL pane, whose
+    // program is `wsl.exe` rather than a shell at all: the distro's own login
+    // shell is the right answer inside it, and leaving `SHELL` alone is how
+    // that answer survives.
+    //
+    // Resolution runs against the PATH the pane will actually inherit, so a
+    // user who redirects PATH in their `env` block gets the binary that PATH
+    // resolves rather than the daemon's.
+    if !cfg!(windows)
+        && let Some(path) = shell_env_path(
+            shell,
+            || {
+                extra_env
+                    .get("PATH")
+                    .cloned()
+                    .or_else(|| std::env::var("PATH").ok())
+            },
+            |candidate| std::path::Path::new(candidate).is_file(),
+        )
+    {
+        env.push((SHELL_ENV.to_string(), path));
+    }
     env.extend(
         extra_env
             .iter()
@@ -359,13 +459,14 @@ fn apply_common_command_setup(
     initial_cwd: &Option<PathBuf>,
     pane: u64,
     workspace: Option<&str>,
+    shell: &str,
 ) {
     if let Some(dir) = initial_cwd {
         cmd.cwd(dir);
     }
     let extra_env = crate::core::config::extra_env();
     let dark = crate::core::machine::appearance().dark;
-    for (k, v) in pane_environment(&extra_env, dark, pane, workspace) {
+    for (k, v) in pane_environment(&extra_env, dark, pane, workspace, shell) {
         cmd.env(k, v);
     }
 
@@ -4097,10 +4198,15 @@ mod tests {
 
     #[test]
     fn pane_environment_advertises_the_terminal_under_the_standard_names() {
-        let env: std::collections::HashMap<_, _> =
-            pane_environment(&std::collections::HashMap::new(), false, 7, Some("ws-main"))
-                .into_iter()
-                .collect();
+        let env: std::collections::HashMap<_, _> = pane_environment(
+            &std::collections::HashMap::new(),
+            false,
+            7,
+            Some("ws-main"),
+            "/bin/zsh",
+        )
+        .into_iter()
+        .collect();
         let version = env!("CARGO_PKG_VERSION");
 
         assert_eq!(env.get("TERM_PROGRAM").map(String::as_str), Some("tty7"));
@@ -4127,6 +4233,7 @@ mod tests {
             false,
             42,
             Some("ws-main"),
+            "/bin/zsh",
         )
         .into_iter()
         .collect();
@@ -4154,13 +4261,164 @@ mod tests {
             ),
         }
 
-        let unfiled: std::collections::HashMap<_, _> =
-            pane_environment(&std::collections::HashMap::new(), false, 42, None)
-                .into_iter()
-                .collect();
+        let unfiled: std::collections::HashMap<_, _> = pane_environment(
+            &std::collections::HashMap::new(),
+            false,
+            42,
+            None,
+            "/bin/zsh",
+        )
+        .into_iter()
+        .collect();
         assert!(
             !unfiled.contains_key(TTY7_WS_ENV),
             "a pane outside any workspace must not claim one"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pane_environment_names_the_shell_the_pane_actually_runs() {
+        // The reported bug: a pane running fish still advertised the passwd
+        // login shell, so tmux, `sudo -s` and agents inside it all picked zsh.
+        let env: std::collections::HashMap<_, _> = pane_environment(
+            &std::collections::HashMap::new(),
+            false,
+            1,
+            None,
+            "/opt/homebrew/bin/fish",
+        )
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            env.get(SHELL_ENV).map(String::as_str),
+            Some("/opt/homebrew/bin/fish"),
+            "$SHELL must name the shell the pane is actually running"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unconfigured_pane_still_announces_the_shell_it_runs() {
+        // No configured shell means the pane runs the login shell, and naming
+        // it is both harmless and correct: it is what the pane is running.
+        let cmd = build_shell_command(None, &Some(PathBuf::from("/tmp")), 1, None)
+            .expect("build default shell command")
+            .0;
+        let shell = cmd
+            .get_env(SHELL_ENV)
+            .and_then(|v| v.to_str())
+            .map(str::to_string)
+            .expect("the default shell resolves to an absolute path");
+
+        assert!(
+            shell.starts_with('/'),
+            "$SHELL must be an absolute path, got {shell}"
+        );
+        assert_eq!(
+            shell,
+            default_shell_name(&CommandBuilder::new_default_prog()),
+            "an unconfigured pane announces the very shell it was about to run"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_configured_shell_variable_outranks_the_shell_tty7_launched() {
+        // Same precedence contract as TERM_PROGRAM: tty7 describes the pane,
+        // the user's own `env` block gets the last word.
+        let configured = [("SHELL".to_string(), "/bin/ksh".to_string())]
+            .into_iter()
+            .collect();
+
+        let applied: std::collections::HashMap<_, _> =
+            pane_environment(&configured, false, 1, None, "/opt/homebrew/bin/fish")
+                .into_iter()
+                .collect();
+
+        assert_eq!(applied.get(SHELL_ENV).map(String::as_str), Some("/bin/ksh"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_panes_are_left_without_a_shell_variable() {
+        let applied = pane_environment(
+            &std::collections::HashMap::new(),
+            false,
+            1,
+            None,
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+        );
+
+        assert!(
+            !applied
+                .iter()
+                .any(|(key, _)| key.eq_ignore_ascii_case(SHELL_ENV)),
+            "$SHELL is a POSIX contract: the MSYS, Cygwin and WSL tools that \
+             read it on Windows want a POSIX path, and a Windows one would \
+             point them at a shell they cannot exec"
+        );
+    }
+
+    #[test]
+    fn shell_env_path_only_ever_answers_an_absolute_path() {
+        let never = |_: &str| false;
+        let path = || Some("/usr/local/bin:/usr/bin:relative/bin".to_string());
+
+        assert_eq!(
+            shell_env_path("/opt/homebrew/bin/fish", path, never).as_deref(),
+            Some("/opt/homebrew/bin/fish"),
+            "an absolute program is already the answer, PATH untouched"
+        );
+        assert_eq!(
+            shell_env_path("fish", path, |c| c == "/usr/local/bin/fish").as_deref(),
+            Some("/usr/local/bin/fish"),
+            "a bare command must be resolved the way exec would resolve it"
+        );
+        assert_eq!(
+            shell_env_path("fish", path, never),
+            None,
+            "an unresolvable bare command must leave $SHELL alone rather than \
+             hand a consumer a name it may resolve differently"
+        );
+        assert_eq!(
+            shell_env_path("./fish", path, |_| true),
+            None,
+            "a cwd-relative program is meaningless to a process with another cwd"
+        );
+        assert_eq!(shell_env_path("  ", path, |_| true), None);
+        assert_eq!(
+            shell_env_path("fish", || None, |_| true),
+            None,
+            "no PATH to search means nothing to promise"
+        );
+    }
+
+    #[test]
+    fn the_shell_we_announce_is_the_argv_we_are_about_to_exec() {
+        let mut configured = CommandBuilder::new("/opt/homebrew/bin/fish");
+        configured.args(["-l"]);
+        assert_eq!(
+            launched_shell_program(&configured, "/bin/zsh"),
+            "/opt/homebrew/bin/fish",
+            "a builder with an argv has already overruled whatever tty7 resolved"
+        );
+
+        assert_eq!(
+            launched_shell_program(&CommandBuilder::new_default_prog(), "/bin/zsh"),
+            "/bin/zsh",
+            "an untouched default prog is exactly what resolved_program describes"
+        );
+    }
+
+    #[test]
+    fn shell_env_path_ignores_relative_path_entries() {
+        // A relative PATH entry resolves against the *pane's* cwd, which is not
+        // ours, so it can never yield the absolute path $SHELL must hold.
+        assert_eq!(
+            shell_env_path("fish", || Some("bin:.".to_string()), |_| true),
+            None
         );
     }
 
@@ -4178,7 +4436,7 @@ mod tests {
         .collect();
 
         let applied: std::collections::HashMap<_, _> =
-            pane_environment(&configured, false, 1, None)
+            pane_environment(&configured, false, 1, None, "/bin/zsh")
                 .into_iter()
                 .collect();
 
@@ -4205,12 +4463,14 @@ mod tests {
     #[test]
     fn pane_environment_advertises_light_and_dark_backgrounds() {
         let empty = std::collections::HashMap::new();
-        let light: std::collections::HashMap<_, _> = pane_environment(&empty, false, 1, None)
-            .into_iter()
-            .collect();
-        let dark: std::collections::HashMap<_, _> = pane_environment(&empty, true, 1, None)
-            .into_iter()
-            .collect();
+        let light: std::collections::HashMap<_, _> =
+            pane_environment(&empty, false, 1, None, "pwsh.exe")
+                .into_iter()
+                .collect();
+        let dark: std::collections::HashMap<_, _> =
+            pane_environment(&empty, true, 1, None, "pwsh.exe")
+                .into_iter()
+                .collect();
 
         assert_eq!(light.get("COLORFGBG").map(String::as_str), Some("0;15"));
         assert_eq!(dark.get("COLORFGBG").map(String::as_str), Some("15;0"));
@@ -4222,7 +4482,7 @@ mod tests {
         let configured = [("ColorFgBg".to_string(), "3;4".to_string())]
             .into_iter()
             .collect();
-        let applied = pane_environment(&configured, false, 1, None);
+        let applied = pane_environment(&configured, false, 1, None, "pwsh.exe");
 
         assert!(!applied.iter().any(|(key, _)| key == "COLORFGBG"));
         assert!(
@@ -4240,7 +4500,7 @@ mod tests {
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect();
 
-        let applied = pane_environment(&configured, false, 1, None);
+        let applied = pane_environment(&configured, false, 1, None, "pwsh.exe");
 
         assert!(
             !applied.iter().any(|(k, _)| k == "Term" || k == "ColorTerm"),
