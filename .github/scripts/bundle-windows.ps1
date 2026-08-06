@@ -107,6 +107,10 @@ if (-not $Iscc) { $Iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
     .github/scripts/windows-installer.iss
 if ($LASTEXITCODE -ne 0) { throw "ISCC exited with $LASTEXITCODE" }
 
-Remove-Item -Recurse -Force $Stage
+# The staging directory stays. It is what ISCC compiled the installer from, and
+# reading the compiled setup.exe back would need innoextract, which the runners
+# do not carry — so `verify-windows-package.ps1` reads the payload here instead.
+# It never reaches the release: both workflows upload named file globs
+# (*.zip, *-setup.exe, …), and a directory matches none of them.
 Write-Host "OK dist/$Name.zip"
 Write-Host "OK dist/$Name-setup.exe"
