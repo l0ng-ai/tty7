@@ -310,13 +310,31 @@ fn notify_agent_finished(agent: crate::core::cli_agent::CLIAgent, elapsed: std::
     super::remote::notify_desktop(Some(agent.display_name()), &body);
 }
 
+/// Ring the platform's alert sound, reporting whether one was actually made —
+/// `Audible` falls back to a flash when it wasn't, so a silent `false` is the
+/// difference between "you heard the bell" and "you saw it instead".
+///
+/// Linux has no equivalent worth the dependency: the desktop sound APIs
+/// (libcanberra, PipeWire) are a runtime link away and X11's `XBell` does
+/// nothing under Wayland, so the flash fallback stays the answer there.
 fn ring_system_bell() -> bool {
     #[cfg(target_os = "macos")]
     {
         objc2_app_kit::NSBeep();
         true
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        // MB_OK is the "Default Beep" scheme entry, so this follows whatever
+        // the user picked in Sound Settings — including "None", which is a
+        // deliberate silence and still reports success. Deliberately not
+        // `Beep()`, which synthesizes a fixed tone straight at the speaker and
+        // ignores the scheme. Returns immediately; the sound plays async.
+        use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
+        use windows_sys::Win32::UI::WindowsAndMessaging::MB_OK;
+        unsafe { MessageBeep(MB_OK) != 0 }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         false
     }
