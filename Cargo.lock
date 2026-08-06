@@ -9668,6 +9668,7 @@ dependencies = [
  "ksni",
  "libc",
  "log",
+ "mac-notification-sys",
  "memchr",
  "notify 8.2.0",
  "notify-rust",

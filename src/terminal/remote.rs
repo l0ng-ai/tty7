@@ -1570,6 +1570,12 @@ pub(crate) fn notify_desktop_at(title: Option<&str>, body: &str, leaf_id: Option
     let summary = title.unwrap_or("tty7").to_string();
     let body = body.to_string();
 
+    #[cfg(all(target_os = "macos", not(test)))]
+    if let Some(leaf_id) = leaf_id {
+        std::thread::spawn(move || show_macos_toast(&summary, &body, leaf_id));
+        return;
+    }
+
     #[cfg(all(target_os = "windows", not(test)))]
     if let Some(leaf_id) = leaf_id {
         std::thread::spawn(move || show_windows_toast(&summary, &body, leaf_id));
@@ -1592,6 +1598,27 @@ pub(crate) fn notify_desktop_at(title: Option<&str>, body: &str, leaf_id: Option
         }
         let _ = notif.show();
     });
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn show_macos_toast(title: &str, body: &str, leaf_id: u64) {
+    use mac_notification_sys::{Notification, NotificationResponse};
+
+    let response = Notification::new()
+        .title(title)
+        .message(body)
+        .wait_for_click(true)
+        .send();
+
+    match response {
+        Ok(NotificationResponse::Click) => {
+            if let Some(tx) = crate::ui::tray::sender() {
+                let _ = tx.try_send(crate::ui::tray::TrayAction::RevealPane { leaf_id });
+            }
+        }
+        Ok(_) => {}
+        Err(e) => log::warn!("failed to show macOS notification: {e}"),
+    }
 }
 
 #[cfg(all(target_os = "windows", not(test)))]

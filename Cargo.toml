@@ -199,6 +199,10 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "
 # NSData feeds the runtime Dock icon for bare (non-bundled) binaries — see
 # `set_dock_icon_for_bare_binary` in main.rs.
 objc2-foundation = { version = "0.3", features = ["NSData"] }
+# Clickable desktop notifications on macOS. `notify-rust` already pulls this
+# crate transitively for basic display; we depend on it directly to use
+# wait_for_click / NotificationResponse::Click.
+mac-notification-sys = "0.6"
 
 # Dictionary-based Chinese word segmentation for double-click selection
 # (`terminal::smart_select`), as a *fallback* where the OS has no tokenizer of
