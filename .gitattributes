@@ -1,0 +1,5 @@
+# Git detects binary content on its own, but the bundled ConPTY is redistributed
+# byte-for-byte from Microsoft and checked against its own file version at
+# release time. Say so explicitly so no future line-ending rule can rewrite it.
+assets/windows/conpty/**/*.dll binary
+assets/windows/conpty/**/*.exe binary

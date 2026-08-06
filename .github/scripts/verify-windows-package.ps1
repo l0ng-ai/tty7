@@ -50,6 +50,30 @@ function Assert-BinaryVersion([string]$path, [string]$label) {
     }
 }
 
+# Microsoft ships conpty.dll and OpenConsole.exe as one supported unit, and the
+# app degrades quietly without them: `portable-pty` falls back to the in-box
+# conhost, which swallows the OSC 11 background query all over again (#345).
+# Neither the missing case nor the mismatched case is visible at runtime, so
+# both fail the release here instead.
+function Assert-ConptyPair([string]$directory, [string]$label) {
+    $versions = @{}
+    foreach ($file in 'conpty.dll', 'OpenConsole.exe') {
+        $path = Join-Path $directory $file
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            Fail "$label is missing the bundled $file"
+            return
+        }
+        $versions[$file] = (Get-Item -LiteralPath $path).VersionInfo.FileVersion
+    }
+    if ($versions['conpty.dll'] -ne $versions['OpenConsole.exe']) {
+        Fail ("$label carries a mismatched ConPTY pair: conpty.dll is " +
+              "$($versions['conpty.dll']), OpenConsole.exe is $($versions['OpenConsole.exe'])")
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $directory 'LICENSE-ConPTY.txt') -PathType Leaf)) {
+        Fail "$label ships the bundled ConPTY without its MIT notice"
+    }
+}
+
 # ---- Portable ZIP --------------------------------------------------------
 # Update rules live in the updater's extractor; the ones that can be broken by
 # packaging alone are re-stated here.
@@ -76,7 +100,8 @@ if (-not (Test-Path -LiteralPath $Zip)) {
     # `validate_portable_relative_path` allows only these top-level names.
     $managed = @(
         'tty7-app.exe', 'tty7.exe', 'tty7-updater.exe', '.tty7-portable',
-        'completions', 'server', 'LICENSE.txt', 'README.md'
+        'completions', 'server', 'LICENSE.txt', 'README.md',
+        'conpty.dll', 'OpenConsole.exe', 'LICENSE-ConPTY.txt'
     )
     $roots = @($entries |
         ForEach-Object { ($_ -split '[\\/]', 2)[0] } |
@@ -122,6 +147,7 @@ if (-not (Test-Path -LiteralPath $Zip)) {
 
         Assert-BinaryVersion (Join-Path $unzipped 'tty7-app.exe') 'the portable tty7-app.exe'
         Assert-BinaryVersion (Join-Path $unzipped 'tty7-updater.exe') 'the portable tty7-updater.exe'
+        Assert-ConptyPair $unzipped 'the portable archive'
     } finally {
         Remove-Item -Recurse -Force $unzipped -ErrorAction SilentlyContinue
     }
@@ -145,6 +171,7 @@ if (-not (Test-Path -LiteralPath $Stage -PathType Container)) {
     }
     Assert-BinaryVersion (Join-Path $Stage 'tty7-app.exe') 'the installed tty7-app.exe'
     Assert-BinaryVersion (Join-Path $Stage 'tty7-updater.exe') 'the installed tty7-updater.exe'
+    Assert-ConptyPair $Stage 'the Inno payload'
 }
 
 # ---- Setup executable ----------------------------------------------------

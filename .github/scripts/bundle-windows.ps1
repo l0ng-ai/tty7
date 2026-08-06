@@ -6,7 +6,8 @@
 #
 # Fonts are embedded via include_bytes! and the app icon is compiled into the
 # executable as a resource (see build.rs). So the payload is tty7-app.exe plus a
-# sibling completions\ dir (loaded at runtime — see terminal::signature) and the
+# sibling completions\ dir (loaded at runtime — see terminal::signature), the
+# bundled ConPTY pair (loaded by the DLL search path — see below) and the
 # license/readme. Windows release artifacts are intentionally unsigned. The
 # in-app updater verifies the published SHA-256 checksum and PE file version
 # before and after waiting for the GUI to exit.
@@ -42,6 +43,21 @@ New-Item -ItemType Directory -Force -Path "$Stage/completions" | Out-Null
 Copy-Item "assets/completions/*.json" "$Stage/completions/"
 Copy-Item LICENSE "$Stage/LICENSE.txt"
 Copy-Item README.md "$Stage/README.md"
+
+# Microsoft's redistributable ConPTY, which `portable-pty` prefers over the
+# in-box conhost when it sits beside the running executable — and the daemon is
+# `tty7-app.exe --daemon`, so beside it is exactly here. The in-box host
+# swallows a pane's OSC 11 background query (#345); this pair forwards it. The
+# two files are one unit, so a missing half is an error rather than a warning.
+# See assets/windows/conpty/README.md.
+$ConptyArch = @{ 'x86_64-pc-windows-msvc' = 'x64' }[$Target]
+if (-not $ConptyArch) { throw "no vendored ConPTY for $Target - see assets/windows/conpty/README.md" }
+foreach ($File in 'conpty.dll', 'OpenConsole.exe') {
+    $Source = "assets/windows/conpty/$ConptyArch/$File"
+    if (-not (Test-Path $Source)) { throw "missing bundled ConPTY file: $Source" }
+    Copy-Item $Source "$Stage/$File"
+}
+Copy-Item "assets/windows/conpty/LICENSE.txt" "$Stage/LICENSE-ConPTY.txt"
 
 # The Linux musl `tty7-server`, staged at server/ so a WSL distro can be handed
 # the binary this client shipped with (WSL downloads nothing). The
