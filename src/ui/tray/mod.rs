@@ -9,12 +9,21 @@ use native::Backend;
 #[cfg(target_os = "linux")]
 use sni::Backend;
 
+use std::sync::OnceLock;
+
 use crate::core::cli_agent::AgentStatus;
 use crate::core::config::{Config, NotifyMode};
 use crate::ui::i18n::{L10nKey, t};
 use gpui::App;
 
 const POLL: std::time::Duration = std::time::Duration::from_millis(1000);
+
+static SENDER: OnceLock<smol::channel::Sender<TrayAction>> = OnceLock::new();
+
+/// Returns the global tray action sender, if the tray has been initialized.
+pub(crate) fn sender() -> Option<&'static smol::channel::Sender<TrayAction>> {
+    SENDER.get()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TrayAction {
@@ -329,6 +338,7 @@ fn dispatch(action: TrayAction, cx: &mut App) {
 
 pub(crate) fn init(cx: &mut App) {
     let (tx, rx) = smol::channel::unbounded::<TrayAction>();
+    let _ = SENDER.set(tx.clone());
 
     cx.spawn(async move |cx| {
         while let Ok(action) = rx.recv().await {

@@ -28,6 +28,7 @@ use crate::core::actions::{
 };
 use crate::core::config::{BellMode, Config, NotifyMode};
 use crate::daemon::protocol::{RemoteContext, ShellSpec};
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 const GRID_PAD_X: f32 = 8.;
 const GRID_PAD_Y: f32 = 4.;
@@ -293,21 +294,49 @@ fn integration_notice_message(wrapper: Option<&str>) -> String {
     }
 }
 
-fn notify_command_finished(label: &str, elapsed: std::time::Duration) {
-    let secs = elapsed.as_secs();
-    let label = label.trim();
-    let body = if label.is_empty() {
-        format!("Command finished after {secs}s")
-    } else {
-        format!("{label} — finished after {secs}s")
-    };
-    super::remote::notify_desktop(Some("tty7"), &body);
-}
+impl TerminalView {
+    fn notify_command_finished(
+        &self,
+        label: &str,
+        elapsed: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
+        let secs = elapsed.as_secs().to_string();
+        let command = label.trim();
+        let body = if command.is_empty() {
+            t_fmt(L10nKey::NotifyCommandFinished, &[("secs", &secs)])
+        } else {
+            t_fmt(
+                L10nKey::NotifyCommandFinishedWithCommand,
+                &[("command", command), ("secs", &secs)],
+            )
+        };
+        let title = self.notification_title(cx);
+        super::remote::notify_desktop_at(Some(&title), &body, Some(self.pane_id));
+    }
 
-fn notify_agent_finished(agent: crate::core::cli_agent::CLIAgent, elapsed: std::time::Duration) {
-    let secs = elapsed.as_secs();
-    let body = format!("Finished after {secs}s");
-    super::remote::notify_desktop(Some(agent.display_name()), &body);
+    fn notify_agent_finished(
+        &self,
+        agent: crate::core::cli_agent::CLIAgent,
+        elapsed: std::time::Duration,
+    ) {
+        let secs = elapsed.as_secs().to_string();
+        let body = t_fmt(L10nKey::NotifyAgentFinished, &[("secs", &secs)]);
+        super::remote::notify_desktop_at(Some(agent.display_name()), &body, Some(self.pane_id));
+    }
+
+    fn notification_title(&self, cx: &App) -> String {
+        let host = self
+            .workspace
+            .as_ref()
+            .map(|w| crate::ui::remote_connect::label_for(&w.target, cx))
+            .unwrap_or_else(|| t(L10nKey::RemoteThisComputer).to_string());
+        let workspace = self
+            .owner_workspace
+            .and_then(|id| crate::ui::machine_mirror::display_name_for(cx, id))
+            .unwrap_or_else(|| t(L10nKey::WindowUntitled).to_string());
+        format!("{host} · {workspace}")
+    }
 }
 
 /// Ring the platform's alert sound, reporting whether one was actually made —
@@ -2470,13 +2499,13 @@ impl TerminalView {
                 if notify_allowed {
                     match agent {
                         Some(_) if self.agent_was_rich => {}
-                        Some(agent) => notify_agent_finished(agent, elapsed),
+                        Some(agent) => self.notify_agent_finished(agent, elapsed),
                         None => {
                             let threshold = std::time::Duration::from_secs(
                                 cx.global::<Config>().notify_threshold_secs,
                             );
                             if elapsed >= threshold {
-                                notify_command_finished(&title, elapsed);
+                                self.notify_command_finished(&title, elapsed, cx);
                             }
                         }
                     }
@@ -2713,8 +2742,9 @@ impl TerminalView {
                 let body = session
                     .as_ref()
                     .and_then(|s| s.message.clone())
-                    .unwrap_or_else(|| "Waiting for your input".to_string());
-                super::remote::notify_desktop(Some(agent_name), &body);
+                    .unwrap_or_else(|| t(L10nKey::NotifyAgentWaiting).to_string());
+                let title = format!("{} · {}", self.notification_title(cx), agent_name);
+                super::remote::notify_desktop_at(Some(&title), &body, Some(self.pane_id));
             }
             Some(AgentStatus::Done)
                 if rich
@@ -2725,10 +2755,14 @@ impl TerminalView {
                     ) =>
             {
                 let body = match self.agent_turn_started.take() {
-                    Some(start) => format!("Finished after {}s", start.elapsed().as_secs()),
-                    None => "Turn finished".to_string(),
+                    Some(start) => {
+                        let secs = start.elapsed().as_secs().to_string();
+                        t_fmt(L10nKey::NotifyAgentFinished, &[("secs", &secs)])
+                    }
+                    None => t(L10nKey::NotifyTurnFinished).to_string(),
                 };
-                super::remote::notify_desktop(Some(agent_name), &body);
+                let title = format!("{} · {}", self.notification_title(cx), agent_name);
+                super::remote::notify_desktop_at(Some(&title), &body, Some(self.pane_id));
             }
             _ => {}
         }
