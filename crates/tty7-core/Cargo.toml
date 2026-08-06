@@ -70,6 +70,7 @@ portable-pty = "0.8"
 # downloaded. The GUI package turns the feature on (see the root `Cargo.toml`).
 ureq = { version = "3", default-features = false, features = [
     "rustls",
+    "win-system-proxy",
 ], optional = true }
 
 russh = "0.62"
