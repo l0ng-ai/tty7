@@ -318,11 +318,21 @@ mod macos {
             core_foundation::base::CFType,
         >,
     ) -> Vec<String> {
+        use core_foundation::base::TCFType as _;
+
         let key = unsafe { CFString::wrap_under_get_rule(kSCPropNetProxiesExceptionsList) };
         proxies
             .find(&key)
             .and_then(|v| v.downcast::<core_foundation::array::CFArray>())
-            .map(|arr| arr.iter::<CFString>().map(|s| s.to_string()).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|raw| {
+                        let cf =
+                            unsafe { core_foundation::base::CFType::wrap_under_get_rule(*raw) };
+                        cf.downcast::<CFString>().map(|s| s.to_string())
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
 }
