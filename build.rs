@@ -52,6 +52,12 @@ fn stage_bundled_conpty() {
                 continue;
             }
             let to = directory.join(name);
+            // Watching the destination as well as the source is what makes the
+            // staging self-healing: cargo treats a path that no longer exists
+            // as changed, so a copy that gets cleaned out of the target
+            // directory comes back on the next build instead of staying gone
+            // behind a cached build script.
+            println!("cargo:rerun-if-changed={}", to.display());
             // Re-copying would fail while a previously built tty7 is running,
             // and the pair only changes when it is deliberately updated.
             let same = std::fs::metadata(&to)
