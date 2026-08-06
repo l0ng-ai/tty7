@@ -3516,7 +3516,8 @@ impl Tty7App {
                     0 => BellMode::None,
                     1 => BellMode::Visual,
                     2 => BellMode::Audible,
-                    _ => BellMode::Both,
+                    3 => BellMode::Both,
+                    _ => BellMode::default(),
                 };
                 this.set_bell_mode(mode, cx);
             },

@@ -1453,8 +1453,8 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsBell => ("Bell", "铃声"),
         L10nKey::SettingsTerminalBell => ("Terminal bell", "终端铃声"),
         L10nKey::SettingsTerminalBellDesc => (
-            "How a bell (^G) is signalled: silenced, a brief flash, or the system sound.",
-            "铃声（^G）的通知方式：静音、短暂闪烁或系统声音。",
+            "How a bell (^G) is signalled: silenced, a brief flash, the system sound, or both.",
+            "铃声（^G）的通知方式：静音、短暂闪烁、系统声音，或两者同时。",
         ),
         L10nKey::SettingsLinks => ("Links", "链接"),
         L10nKey::DetectUrls => ("Detect URLs", "检测 URL"),
@@ -1956,8 +1956,8 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "Tab补全 补全 菜单 建议 tab completion suggestions prompt",
         ),
         L10nKey::SettingsSearchTerminalBellKeywords => (
-            "bell audible visual flash sound silence beep ^g",
-            "终端铃声 铃声 提示音 闪烁 静音 beep bell terminal audible visual",
+            "bell audible visual flash sound silence beep both ^g",
+            "终端铃声 铃声 提示音 闪烁 静音 两者 同时 beep bell terminal audible visual both",
         ),
         L10nKey::SettingsSearchThemeKeywords => (
             "appearance color colours scheme dark light palette background foreground accent sync system os auto follow",
