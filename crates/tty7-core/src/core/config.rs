@@ -205,6 +205,11 @@ pub struct Config {
     pub mouse_reporting: bool,
     pub clipboard_trim_trailing_spaces: bool,
     pub copy_on_select: bool,
+    /// Optional HTTP/SOCKS proxy used for update checks and release downloads.
+    /// When set, it overrides the system proxy and environment variables.
+    /// Examples: `http://127.0.0.1:7890`, `socks5://127.0.0.1:1080`.
+    #[serde(default)]
+    pub http_proxy: Option<String>,
     #[serde(default = "default_true")]
     pub smart_select: bool,
     #[serde(default = "default_word_separators")]
@@ -439,6 +444,7 @@ impl Default for Config {
             mouse_reporting: true,
             clipboard_trim_trailing_spaces: false,
             copy_on_select: false,
+            http_proxy: None,
             smart_select: true,
             word_separators: default_word_separators(),
             startup_mode: StartupMode::Normal,

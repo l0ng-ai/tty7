@@ -434,6 +434,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: About,
+            title: SettingsAppHttpProxy,
+            keywords: SettingsSearchAppHttpProxyKeywords,
+        },
+        SearchEntry {
+            section: About,
             title: SettingsSearchHowShellsWorkTitle,
             keywords: SettingsSearchHowShellsWorkKeywords,
         },
@@ -487,6 +492,7 @@ pub(crate) struct SettingsState {
     pub(crate) shell_args_input: Entity<InputState>,
     pub(crate) wd_path_input: Entity<InputState>,
     pub(crate) link_file_command_input: Entity<InputState>,
+    pub(crate) http_proxy_input: Entity<InputState>,
     pub(crate) scroll_slider: Entity<SliderState>,
     pub(crate) window_opacity_slider: Entity<SliderState>,
     pub(crate) theme_editor: Option<ThemeEditor>,
@@ -4747,6 +4753,14 @@ impl Tty7App {
         );
         let phase_text = localized_update_phase(&update_status.phase);
         let check_for_updates = cx.global::<Config>().check_for_updates;
+        let http_proxy_input = match self.active_settings() {
+            Some(s) => s.http_proxy_input.clone(),
+            None => return div().into_any_element(),
+        };
+        let http_proxy_control = div()
+            .w(px(260.))
+            .child(Input::new(&http_proxy_input).small())
+            .into_any_element();
 
         let logo = Arc::new(Image::from_bytes(
             ImageFormat::Png,
@@ -4882,6 +4896,12 @@ impl Tty7App {
                         ),
                     ),
             )
+            .child(self.settings_row(
+                t(L10nKey::SettingsAppHttpProxy),
+                t(L10nKey::SettingsAppHttpProxyDesc),
+                http_proxy_control,
+                cx,
+            ))
             .child(
                 v_flex()
                     .mt_6()
