@@ -321,8 +321,8 @@ mod macos {
         let key = unsafe { CFString::wrap_under_get_rule(kSCPropNetProxiesExceptionsList) };
         proxies
             .find(&key)
-            .and_then(|v| v.downcast::<core_foundation::array::CFArray<CFString>>())
-            .map(|arr| arr.iter().map(|s| s.to_string()).collect())
+            .and_then(|v| v.downcast::<core_foundation::array::CFArray>())
+            .map(|arr| arr.iter::<CFString>().map(|s| s.to_string()).collect())
             .unwrap_or_default()
     }
 }
