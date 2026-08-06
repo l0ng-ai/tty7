@@ -1561,8 +1561,21 @@ fn stale_mode_resets(mode: TermMode) -> Vec<u8> {
 }
 
 pub(crate) fn notify_desktop(title: Option<&str>, body: &str) {
+    notify_desktop_at(title, body, None);
+}
+
+/// Show a desktop notification. On Windows, `leaf_id` makes the toast clickable
+/// and routes the activation to the originating pane.
+pub(crate) fn notify_desktop_at(title: Option<&str>, body: &str, leaf_id: Option<u64>) {
     let summary = title.unwrap_or("tty7").to_string();
     let body = body.to_string();
+
+    #[cfg(all(target_os = "windows", not(test)))]
+    if let Some(leaf_id) = leaf_id {
+        std::thread::spawn(move || show_windows_toast(&summary, &body, leaf_id));
+        return;
+    }
+
     std::thread::spawn(move || {
         #[cfg(target_os = "macos")]
         ensure_notification_app();
@@ -1579,6 +1592,95 @@ pub(crate) fn notify_desktop(title: Option<&str>, body: &str) {
         }
         let _ = notif.show();
     });
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
+fn show_windows_toast(title: &str, body: &str, leaf_id: u64) {
+    use std::time::Duration;
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::Foundation::TypedEventHandler;
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+    use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
+    use windows::core::IInspectable;
+
+    // Initialize COM on this background thread. MTA lets the Activated callback
+    // run on a thread-pool thread without a message loop.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+
+    let app_id = crate::core::aumid::toast_app_id().unwrap_or("tty7");
+
+    let xml = format!(
+        r#"<toast>
+  <visual>
+    <binding template="ToastText02">
+      <text id="1">{}</text>
+      <text id="2">{}</text>
+    </binding>
+  </visual>
+</toast>"#,
+        xml_escape(title),
+        xml_escape(body)
+    );
+
+    let doc = match XmlDocument::new() {
+        Ok(d) => {
+            if let Err(e) = d.LoadXml(&xml.into()) {
+                log::warn!("failed to load toast xml: {e}");
+                return;
+            }
+            d
+        }
+        Err(e) => {
+            log::warn!("failed to create toast xml document: {e}");
+            return;
+        }
+    };
+
+    let toast = match ToastNotification::CreateToastNotification(&doc) {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("failed to create toast notification: {e}");
+            return;
+        }
+    };
+
+    if let Err(e) = toast.Activated(&TypedEventHandler::new(
+        move |_sender: &Option<ToastNotification>, _args: &Option<IInspectable>| {
+            if let Some(tx) = crate::ui::tray::sender() {
+                let _ = tx.try_send(crate::ui::tray::TrayAction::RevealPane { leaf_id });
+            }
+            Ok(())
+        },
+    )) {
+        log::warn!("failed to register toast activated handler: {e}");
+    }
+
+    let notifier = match ToastNotificationManager::CreateToastNotifierWithId(&app_id.into()) {
+        Ok(n) => n,
+        Err(e) => {
+            log::warn!("failed to create toast notifier: {e}");
+            return;
+        }
+    };
+
+    if let Err(e) = notifier.Show(&toast) {
+        log::warn!("failed to show toast: {e}");
+        return;
+    }
+
+    // Keep the toast object alive for a while so the Activated event can fire.
+    std::thread::sleep(Duration::from_secs(60));
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 #[cfg(target_os = "macos")]

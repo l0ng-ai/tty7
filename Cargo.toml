@@ -159,6 +159,9 @@ async_zip = { version = "0.0.18", default-features = false, features = ["deflate
 # before it honors an unpackaged app's toast identity (otherwise the toast
 # backend falls back to PowerShell's). 0.58 is already in the tree via gpui.
 windows = { version = "0.58", features = [
+    "Data_Xml_Dom",
+    "Foundation",
+    "UI_Notifications",
     "Win32_Foundation",
     "Win32_Storage_EnhancedStorage",
     # IShellLinkW::GetPath takes a WIN32_FIND_DATAW, so reading an existing
