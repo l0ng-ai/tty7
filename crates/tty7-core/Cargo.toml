@@ -116,7 +116,7 @@ base64 = "0.22"
 # payloads (`core::kitty_graphics`). Pure-Rust, no new native code, and already
 # in the tree transitively — the same crate `terminal-browser` uses for the
 # deflate side, so the two ends agree on the wire format.
-miniz_oxide = "0.8"
+miniz_oxide = "0.9"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
