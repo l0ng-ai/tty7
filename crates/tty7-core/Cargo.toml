@@ -70,6 +70,7 @@ portable-pty = "0.8"
 # downloaded. The GUI package turns the feature on (see the root `Cargo.toml`).
 ureq = { version = "3", default-features = false, features = [
     "rustls",
+    "socks-proxy",
 ], optional = true }
 
 russh = "0.62"
@@ -128,6 +129,8 @@ libgssapi = { version = "0.11", optional = true }
 # foreground process name through it on macOS.
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
+# Read system proxy settings from SCDynamicStore for release downloads.
+system-configuration = "0.6"
 
 # The Windows GUI⇄daemon transport is loopback TCP, which (unlike a Unix socket)
 # any local process can connect to — so the daemon authenticates each connection
@@ -150,6 +153,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# Read system proxy settings from the registry for release downloads.
+winreg = "0.52"
 
 [dev-dependencies]
 # Sandboxes for the `host::conformance` suite: a fresh empty directory per case,

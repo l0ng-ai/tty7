@@ -3519,6 +3519,7 @@ impl Tty7App {
         let (shell_program_input, shell_args_input, wd_path_input) =
             self.build_shell_inputs(&mut subs, window, cx);
         let link_file_command_input = self.build_link_file_command_input(&mut subs, window, cx);
+        let http_proxy_input = self.build_http_proxy_input(&mut subs, window, cx);
         let scroll_slider = self.build_scroll_slider(&mut subs, window, cx);
         let window_opacity_slider = self.build_window_opacity_slider(&mut subs, window, cx);
         let theme_search = cx.new(|cx| {
@@ -3577,6 +3578,7 @@ impl Tty7App {
             shell_args_input,
             wd_path_input,
             link_file_command_input,
+            http_proxy_input,
             scroll_slider,
             window_opacity_slider,
             theme_editor: None,
@@ -3889,6 +3891,52 @@ impl Tty7App {
             }),
         );
         input
+    }
+
+    fn build_http_proxy_input(
+        &mut self,
+        subs: &mut Vec<Subscription>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        let value = cx
+            .global::<Config>()
+            .http_proxy
+            .clone()
+            .unwrap_or_default();
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("http://127.0.0.1:7890")
+                .default_value(value)
+        });
+        subs.push(
+            cx.subscribe_in(&input, window, move |this, _i, ev, _w, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.commit_http_proxy(cx);
+                }
+            }),
+        );
+        input
+    }
+
+    fn commit_http_proxy(&mut self, cx: &mut Context<Self>) {
+        let Some(value) = self.active_settings().map(|s| {
+            s.http_proxy_input
+                .read(cx)
+                .value()
+                .trim()
+                .to_string()
+        }) else {
+            return;
+        };
+        let value = if value.is_empty() { None } else { Some(value) };
+        let cfg = cx.global_mut::<Config>();
+        if cfg.http_proxy == value {
+            return;
+        }
+        cfg.http_proxy = value;
+        cfg.save();
+        cx.notify();
     }
 
     fn commit_link_file_command(&mut self, cx: &mut Context<Self>) {

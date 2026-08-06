@@ -126,9 +126,11 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
         cx,
     );
 
+    let manual_proxy = cx.global::<Config>().http_proxy.clone();
+
     cx.spawn(async move |cx| {
         let current = env!("CARGO_PKG_VERSION");
-        let release = match fetch_latest_release()
+        let release = match fetch_latest_release(manual_proxy)
             .or(async {
                 cx.background_executor().timer(CHECK_TIMEOUT).await;
                 Err(anyhow::anyhow!("timed out after {CHECK_TIMEOUT:?}"))
@@ -438,9 +440,14 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
-async fn fetch_latest_release() -> Result<LatestRelease> {
-    let client = ReqwestClient::user_agent(concat!("tty7/", env!("CARGO_PKG_VERSION")))
-        .context("building HTTP client")?;
+async fn fetch_latest_release(manual_proxy: Option<String>) -> Result<LatestRelease> {
+    let user_agent = concat!("tty7/", env!("CARGO_PKG_VERSION"));
+    let client = if let Some(proxy) = manual_proxy.as_deref().and_then(|url| http_client::Url::parse(url).ok()) {
+        ReqwestClient::proxy_and_user_agent(Some(proxy), user_agent)
+            .context("building HTTP client")?
+    } else {
+        ReqwestClient::user_agent(user_agent).context("building HTTP client")?
+    };
 
     // `/releases/latest` intentionally excludes prereleases, so Nightly builds
     // are offered the Stable release that supersedes them and no rolling
@@ -569,7 +576,12 @@ fn package_for_current_install(version: &str) -> Result<String, UpdateInstallHin
 }
 
 fn prepare_update(version: &str, asset: &ReleaseAsset) -> Result<PreparedUpdate> {
-    let fetcher = tty7_core::daemon::install::download::HttpsFetcher::default();
+    let cfg = Config::load();
+    let manual_proxy = cfg
+        .http_proxy
+        .as_ref()
+        .filter(|s| !s.trim().is_empty());
+    let fetcher = tty7_core::daemon::install::download::HttpsFetcher::new(manual_proxy.map(|x| x.as_str()));
     let checksums = fetcher
         .get(&asset.checksums_url)
         .map_err(anyhow::Error::msg)
