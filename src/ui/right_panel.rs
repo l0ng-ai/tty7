@@ -84,7 +84,6 @@ impl Tty7App {
 
         let body = match tab {
             RightPanelTab::Info => self.render_panel_info(window, cx),
-            RightPanelTab::Outline => self.render_panel_outline(window, cx),
             RightPanelTab::Changes => self.render_panel_changes(window, cx),
             RightPanelTab::Files => self.render_panel_files(window, cx),
         };
@@ -705,107 +704,6 @@ impl Tty7App {
         .detach();
     }
 
-    fn render_panel_outline(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
-        let Some(leaf) = self
-            .tabs
-            .get(self.active)
-            .and_then(|t| t.detail_pane(window, cx))
-        else {
-            let title = self.panel_title(t(L10nKey::PanelOutlineTitle), None, None, window, cx);
-            return self.panel_scroll(
-                self.panel_empty(
-                    t(L10nKey::PanelNoSession),
-                    Some(t(L10nKey::PanelNoSessionHint)),
-                    cx,
-                ),
-                title,
-            );
-        };
-        let count = leaf.read(cx).command_marks().len();
-        if count == 0 {
-            let title = self.panel_title(t(L10nKey::PanelOutlineTitle), None, None, window, cx);
-            return self.panel_scroll(
-                self.panel_empty(
-                    t(L10nKey::PanelNoCommands),
-                    Some(t(L10nKey::PanelNoCommandsHint)),
-                    cx,
-                ),
-                title,
-            );
-        }
-        let title = self.panel_title(
-            t(L10nKey::PanelOutlineTitle),
-            Some(count.to_string()),
-            None,
-            window,
-            cx,
-        );
-
-        let mono = cx.theme().mono_font_family.clone();
-        let mut list = v_flex().px(px(CONTENT_INSET - 4.)).py(px(2.)).gap(px(1.));
-        let marks = leaf.read(cx).command_marks();
-        for mark in marks.iter().rev() {
-            let row = mark.row;
-            let leaf = leaf.clone();
-            let failed = mark.exit.is_some_and(|c| c != 0);
-            let running = !mark.done;
-            let dot = {
-                let d = div().flex_none().size(px(7.)).rounded_full();
-                if failed {
-                    d.bg(cx.theme().danger)
-                } else if running {
-                    d.bg(cx.theme().muted_foreground)
-                } else {
-                    d.border_1()
-                        .border_color(cx.theme().muted_foreground.opacity(0.55))
-                }
-            };
-            list = list.child(
-                h_flex()
-                    .id(gpui::SharedString::from(format!("panel-mark-{row}")))
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(4.))
-                    .py(px(3.))
-                    .rounded(px(5.))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(gpui::rgb(sf.hover)))
-                    .on_click(cx.listener(move |_this, _, _window, cx| {
-                        leaf.update(cx, |view, cx| {
-                            view.scroll_to_mark(row, cx);
-                        });
-                    }))
-                    .child(dot)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(12.))
-                            .font_family(mono.clone())
-                            .text_color(if failed {
-                                cx.theme().danger
-                            } else {
-                                cx.theme().foreground
-                            })
-                            .child(one_line(&mark.text)),
-                    )
-                    .when_some(mark.exit.filter(|c| *c != 0), |this, code| {
-                        this.child(
-                            div()
-                                .flex_none()
-                                .text_size(px(10.5))
-                                .font_family(mono.clone())
-                                .text_color(cx.theme().danger)
-                                .child(code.to_string()),
-                        )
-                    }),
-            );
-        }
-        self.panel_scroll(list.into_any_element(), title)
-    }
-
     fn render_panel_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let target = self
@@ -1092,10 +990,6 @@ fn agent_status_label(status: crate::core::cli_agent::AgentStatus) -> &'static s
         Waiting => t(L10nKey::PanelAgentWaiting),
         Done => t(L10nKey::PanelAgentDone),
     }
-}
-
-fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn compact_path(path: &std::path::Path) -> String {

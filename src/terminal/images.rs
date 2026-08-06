@@ -16,8 +16,7 @@
 //! (`history_size - display_offset + cursor_line`, the exact formula
 //! [`record_mark`](crate::terminal::remote) uses) and convert back to a screen
 //! row at paint time (`anchor_row - history_size + display_offset`, the inverse
-//! [`scroll_to_mark`](crate::terminal::view::TerminalView::scroll_to_mark)
-//! applies). Below the scrollback limit — where a pane spends most of its life —
+//! conversion). Below the scrollback limit — where a pane spends most of its life —
 //! this is exact; past it the anchor drifts by the (unobservable) discard count,
 //! the same caveat marks carry, and a browser that redraws every frame corrects
 //! it on the next transmit anyway.
