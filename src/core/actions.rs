@@ -67,7 +67,6 @@ actions!(
         ToggleLeftPanel,
         ToggleRightPanel,
         ShowRightPanelInfo,
-        ShowRightPanelOutline,
         ShowRightPanelChanges,
         ShowRightPanelFiles,
         OpenSettings,
