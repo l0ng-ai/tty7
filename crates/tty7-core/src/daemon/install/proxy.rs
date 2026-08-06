@@ -47,7 +47,7 @@ fn system_proxy(_target_url: &str) -> Option<Proxy> {
 }
 
 /// Build a `ureq::Proxy` from a URL string and an optional no-proxy list.
-fn proxy_from_url(url: &str, no_proxy: &[&str]) -> Result<Proxy, ureq::Error> {
+fn proxy_from_url(url: &str, no_proxy: &[String]) -> Result<Proxy, ureq::Error> {
     let uri: ureq::http::Uri = url.parse().map_err(|_| ureq::Error::InvalidProxyUrl)?;
     let authority = uri.authority().ok_or(ureq::Error::InvalidProxyUrl)?.clone();
 
@@ -70,7 +70,7 @@ fn proxy_from_url(url: &str, no_proxy: &[&str]) -> Result<Proxy, ureq::Error> {
     }
 
     for entry in no_proxy {
-        builder = builder.no_proxy(entry);
+        builder = builder.no_proxy(entry.as_str());
     }
 
     builder.build()
@@ -133,10 +133,11 @@ mod windows {
         }
         let server: String = key.get_value("ProxyServer").ok()?;
         let overrides: String = key.get_value("ProxyOverride").unwrap_or_default();
-        let no_proxy: Vec<&str> = overrides
+        let no_proxy: Vec<String> = overrides
             .split(';')
             .map(str::trim)
             .filter(|s| !s.is_empty() && *s != "<local>")
+            .map(String::from)
             .collect();
 
         let target = target_scheme(target_url).unwrap_or("http");
@@ -228,7 +229,7 @@ mod macos {
     use core_foundation::number::CFNumber;
     use core_foundation::string::CFString;
     use system_configuration::dynamic_store::SCDynamicStoreBuilder;
-    use system_configuration_sys::schema_definitions::{
+    use system_configuration::schema_definitions::{
         kSCPropNetProxiesExceptionsList, kSCPropNetProxiesHTTPEnable, kSCPropNetProxiesHTTPPort,
         kSCPropNetProxiesHTTPProxy, kSCPropNetProxiesHTTPSEnable, kSCPropNetProxiesHTTPSPort,
         kSCPropNetProxiesHTTPSProxy, kSCPropNetProxiesSOCKSEnable, kSCPropNetProxiesSOCKSPort,
@@ -272,7 +273,7 @@ mod macos {
         };
         let enabled = proxies
             .find(&enabled_key)
-            .and_then(|v| v.downcast_ref::<CFNumber>())
+            .and_then(|v| v.downcast::<CFNumber>())
             .and_then(|n| n.to_i64())
             == Some(1);
         if !enabled {
@@ -300,11 +301,11 @@ mod macos {
 
         let host = proxies
             .find(&host_key)
-            .and_then(|v| v.downcast_ref::<CFString>())?
+            .and_then(|v| v.downcast::<CFString>())?
             .to_string();
         let port = proxies
             .find(&port_key)
-            .and_then(|v| v.downcast_ref::<CFNumber>())?
+            .and_then(|v| v.downcast::<CFNumber>())?
             .to_i64()?;
 
         let scheme = if kind == "socks" { "socks5" } else { kind };
