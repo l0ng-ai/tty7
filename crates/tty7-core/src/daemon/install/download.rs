@@ -1,8 +1,8 @@
 use std::io::Read as _;
 use std::time::Duration;
 
-use super::proxy;
 use super::AssetFetcher;
+use super::proxy;
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 

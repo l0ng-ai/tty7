@@ -4898,14 +4898,12 @@ impl Tty7App {
                             ),
                     ),
             )
-            .child(
-                self.settings_row(
-                    t(L10nKey::SettingsAppHttpProxy),
-                    t(L10nKey::SettingsAppHttpProxyDesc),
-                    http_proxy_control,
-                    cx,
-                ),
-            )
+            .child(self.settings_row(
+                t(L10nKey::SettingsAppHttpProxy),
+                t(L10nKey::SettingsAppHttpProxyDesc),
+                http_proxy_control,
+                cx,
+            ))
             .child(
                 v_flex()
                     .mt_6()

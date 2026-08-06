@@ -49,16 +49,15 @@ fn system_proxy(_target_url: &str) -> Option<Proxy> {
 /// Build a `ureq::Proxy` from a URL string and an optional no-proxy list.
 fn proxy_from_url(url: &str, no_proxy: &[&str]) -> Result<Proxy, ureq::Error> {
     let uri: ureq::http::Uri = url.parse().map_err(|_| ureq::Error::InvalidProxyUrl)?;
-    let authority = uri
-        .authority()
-        .ok_or(ureq::Error::InvalidProxyUrl)?
-        .clone();
+    let authority = uri.authority().ok_or(ureq::Error::InvalidProxyUrl)?.clone();
 
     let scheme = uri.scheme_str().unwrap_or("http");
     let protocol = proxy_protocol(scheme)?;
 
     let host = authority.host();
-    let port = authority.port_u16().unwrap_or_else(|| default_port(protocol));
+    let port = authority
+        .port_u16()
+        .unwrap_or_else(|| default_port(protocol));
 
     let mut builder = Proxy::builder(protocol).host(host).port(port);
 
@@ -119,11 +118,10 @@ fn target_scheme(target_url: &str) -> Option<&str> {
 mod windows {
     use super::{proxy_from_url, target_scheme};
     use ureq::Proxy;
-    use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
 
-    const INTERNET_SETTINGS: &str =
-        r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+    const INTERNET_SETTINGS: &str = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 
     pub fn system_proxy(target_url: &str) -> Option<Proxy> {
         let key = RegKey::predef(HKEY_CURRENT_USER)
@@ -166,7 +164,10 @@ mod windows {
                 return Some(addr.clone());
             }
             if let Some(addr) = map.get("socks") {
-                return Some(format!("socks5://{}", addr.strip_prefix("http://").unwrap_or(addr)));
+                return Some(format!(
+                    "socks5://{}",
+                    addr.strip_prefix("http://").unwrap_or(addr)
+                ));
             }
             None
         } else {
@@ -228,10 +229,10 @@ mod macos {
     use core_foundation::string::CFString;
     use system_configuration::dynamic_store::SCDynamicStoreBuilder;
     use system_configuration_sys::schema_definitions::{
-        kSCPropNetProxiesExceptionsList, kSCPropNetProxiesHTTPEnable,
-        kSCPropNetProxiesHTTPPort, kSCPropNetProxiesHTTPProxy, kSCPropNetProxiesHTTPSEnable,
-        kSCPropNetProxiesHTTPSPort, kSCPropNetProxiesHTTPSProxy, kSCPropNetProxiesSOCKSEnable,
-        kSCPropNetProxiesSOCKSPort, kSCPropNetProxiesSOCKSProxy,
+        kSCPropNetProxiesExceptionsList, kSCPropNetProxiesHTTPEnable, kSCPropNetProxiesHTTPPort,
+        kSCPropNetProxiesHTTPProxy, kSCPropNetProxiesHTTPSEnable, kSCPropNetProxiesHTTPSPort,
+        kSCPropNetProxiesHTTPSProxy, kSCPropNetProxiesSOCKSEnable, kSCPropNetProxiesSOCKSPort,
+        kSCPropNetProxiesSOCKSProxy,
     };
     use ureq::Proxy;
 
@@ -255,7 +256,10 @@ mod macos {
     }
 
     fn read_proxy(
-        proxies: &core_foundation::dictionary::CFDictionary<CFString, core_foundation::base::CFType>,
+        proxies: &core_foundation::dictionary::CFDictionary<
+            CFString,
+            core_foundation::base::CFType,
+        >,
         kind: &str,
     ) -> Option<String> {
         let enabled_key = unsafe {
@@ -308,7 +312,10 @@ mod macos {
     }
 
     fn read_exceptions(
-        proxies: &core_foundation::dictionary::CFDictionary<CFString, core_foundation::base::CFType>,
+        proxies: &core_foundation::dictionary::CFDictionary<
+            CFString,
+            core_foundation::base::CFType,
+        >,
     ) -> Vec<String> {
         let key = unsafe { CFString::wrap_under_get_rule(kSCPropNetProxiesExceptionsList) };
         proxies

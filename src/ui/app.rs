@@ -3899,11 +3899,7 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<InputState> {
-        let value = cx
-            .global::<Config>()
-            .http_proxy
-            .clone()
-            .unwrap_or_default();
+        let value = cx.global::<Config>().http_proxy.clone().unwrap_or_default();
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("http://127.0.0.1:7890")
@@ -3920,13 +3916,10 @@ impl Tty7App {
     }
 
     fn commit_http_proxy(&mut self, cx: &mut Context<Self>) {
-        let Some(value) = self.active_settings().map(|s| {
-            s.http_proxy_input
-                .read(cx)
-                .value()
-                .trim()
-                .to_string()
-        }) else {
+        let Some(value) = self
+            .active_settings()
+            .map(|s| s.http_proxy_input.read(cx).value().trim().to_string())
+        else {
             return;
         };
         let value = if value.is_empty() { None } else { Some(value) };

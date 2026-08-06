@@ -442,7 +442,10 @@ struct GitHubAsset {
 
 async fn fetch_latest_release(manual_proxy: Option<String>) -> Result<LatestRelease> {
     let user_agent = concat!("tty7/", env!("CARGO_PKG_VERSION"));
-    let client = if let Some(proxy) = manual_proxy.as_deref().and_then(|url| http_client::Url::parse(url).ok()) {
+    let client = if let Some(proxy) = manual_proxy
+        .as_deref()
+        .and_then(|url| http_client::Url::parse(url).ok())
+    {
         ReqwestClient::proxy_and_user_agent(Some(proxy), user_agent)
             .context("building HTTP client")?
     } else {
@@ -577,11 +580,9 @@ fn package_for_current_install(version: &str) -> Result<String, UpdateInstallHin
 
 fn prepare_update(version: &str, asset: &ReleaseAsset) -> Result<PreparedUpdate> {
     let cfg = Config::load();
-    let manual_proxy = cfg
-        .http_proxy
-        .as_ref()
-        .filter(|s| !s.trim().is_empty());
-    let fetcher = tty7_core::daemon::install::download::HttpsFetcher::new(manual_proxy.map(|x| x.as_str()));
+    let manual_proxy = cfg.http_proxy.as_ref().filter(|s| !s.trim().is_empty());
+    let fetcher =
+        tty7_core::daemon::install::download::HttpsFetcher::new(manual_proxy.map(|x| x.as_str()));
     let checksums = fetcher
         .get(&asset.checksums_url)
         .map_err(anyhow::Error::msg)
