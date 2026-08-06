@@ -110,7 +110,7 @@ memchr = "2"
 # (`host::Output`'s stdout/stderr). JSON has no byte type — `serde_json` renders
 # a `Vec<u8>` as an array of decimal numbers, inflating a 1 MB `git diff` to
 # roughly 4 MB. Base64 costs 1.33× instead. Already in the tree via russh.
-base64 = "0.22"
+base64 = "0.23"
 
 # zlib inflate for the kitty graphics protocol's `o=z` (compressed) pixel
 # payloads (`core::kitty_graphics`). Pure-Rust, no new native code, and already
