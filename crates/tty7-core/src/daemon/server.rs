@@ -204,6 +204,28 @@ pub fn run() -> anyhow::Result<()> {
     run_with(Arc::new(Registry::new()))
 }
 
+/// Say which pseudoconsole this daemon's panes will run on.
+///
+/// `portable-pty` loads a sideloaded `conpty.dll` if one sits beside the
+/// running executable and silently uses `kernel32`'s otherwise. The difference
+/// is invisible until someone asks why a pane swallowed an OSC 11 query (#345),
+/// so the choice belongs in the log rather than in a bug report.
+#[cfg(windows)]
+fn report_conpty_host() {
+    let bundled = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("conpty.dll")));
+    match bundled {
+        Some(path) if path.is_file() => {
+            log::info!("panes use the bundled ConPTY at {}", path.display())
+        }
+        _ => log::warn!(
+            "no conpty.dll beside this executable; panes fall back to the in-box conhost, \
+             which does not answer terminal color queries"
+        ),
+    }
+}
+
 fn run_with(registry: Arc<Registry>) -> anyhow::Result<()> {
     crate::daemon::control::server_started();
 
@@ -223,6 +245,9 @@ fn run_with(registry: Arc<Registry>) -> anyhow::Result<()> {
 
     let listener = transport::bind()?;
     log::info!("daemon listening on {}", transport::endpoint_display());
+
+    #[cfg(windows)]
+    report_conpty_host();
 
     crate::daemon::pidfile::write_current();
 
