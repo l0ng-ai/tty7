@@ -717,6 +717,11 @@ impl Tty7App {
         };
         if !cfg!(test) && crate::ui::windows::WindowRegistry::count(cx) == 0 {
             crate::ui::tray::init(cx);
+            // The taskbar overlay poll is app-wide for the same reason the
+            // tray's is: one task snapshots every window (each window gets
+            // its own badge, but nobody wants N poll loops).
+            #[cfg(windows)]
+            crate::ui::taskbar::init(cx);
         }
         app.refresh_shells(cx);
         cx.on_app_quit(|app, cx| {
@@ -1043,6 +1048,31 @@ impl Tty7App {
             }
         }
         agents
+    }
+
+    /// This window's aggregated signals for the taskbar overlay
+    /// (`ui::taskbar`): whether any agent pane is blocked on the user, and
+    /// whether any pane is still working (an agent mid-turn or a shell off
+    /// its prompt). Same walk as [`agent_rows`](Self::agent_rows), minus the
+    /// per-row detail the tray menu needs.
+    #[cfg(windows)]
+    pub(crate) fn taskbar_signals(&self, cx: &App) -> (bool, bool) {
+        use crate::core::cli_agent::AgentStatus;
+        let (mut attention, mut busy) = (false, false);
+        for tab in &self.tabs {
+            for leaf in tab.pane.terminals() {
+                let view = leaf.read(cx);
+                match view.agent_session().map(|s| s.status) {
+                    Some(AgentStatus::Waiting) => attention = true,
+                    Some(AgentStatus::Working) => busy = true,
+                    _ => {}
+                }
+                if view.shell_busy() {
+                    busy = true;
+                }
+            }
+        }
+        (attention, busy)
     }
 
     pub(crate) fn handle_tray_action(
@@ -2045,6 +2075,13 @@ impl Tty7App {
 
     pub(crate) fn set_show_tray_icon(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.show_tray_icon = on);
+    }
+
+    /// Toggle the Windows taskbar status dot. Same live-apply story as the
+    /// tray: the overlay poll re-reads the flag every second, and turning it
+    /// off clears any badge already stamped.
+    pub(crate) fn set_taskbar_status_icon(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.taskbar_status_icon = on);
     }
 
     pub(crate) fn set_confirm_window_close(&mut self, on: bool, cx: &mut Context<Self>) {

@@ -389,6 +389,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: WindowTabs,
+            title: SettingsTaskbarStatusIcon,
+            keywords: SettingsSearchTaskbarStatusIconKeywords,
+        },
+        SearchEntry {
+            section: WindowTabs,
             title: SettingsNewTabPosition,
             keywords: SettingsSearchNewTabPositionKeywords,
         },
@@ -3499,6 +3504,7 @@ impl Tty7App {
             BellMode::None => 0,
             BellMode::Visual => 1,
             BellMode::Audible => 2,
+            BellMode::Both => 3,
         };
         let bell_control = self.segmented(
             "term-bell",
@@ -3506,6 +3512,7 @@ impl Tty7App {
                 t(L10nKey::SettingsBellModeOff),
                 t(L10nKey::SettingsBellModeVisual),
                 t(L10nKey::SettingsBellModeAudible),
+                t(L10nKey::SettingsBellModeBoth),
             ],
             bell_idx,
             cx,
@@ -3513,7 +3520,9 @@ impl Tty7App {
                 let mode = match ix {
                     0 => BellMode::None,
                     1 => BellMode::Visual,
-                    _ => BellMode::Audible,
+                    2 => BellMode::Audible,
+                    3 => BellMode::Both,
+                    _ => BellMode::default(),
                 };
                 this.set_bell_mode(mode, cx);
             },
@@ -3928,6 +3937,7 @@ impl Tty7App {
         let restore_session = cfg.restore_session;
         let remember_window_size = cfg.remember_window_size;
         let show_tray_icon = cfg.show_tray_icon;
+        let taskbar_status_icon = cfg.taskbar_status_icon;
         let confirm_window_close = cfg.confirm_window_close;
         let tab_bar_idx = match cfg.tab_bar_position {
             TabBarPosition::Top => 0,
@@ -3998,6 +4008,10 @@ impl Tty7App {
         let tray_switch = crate::ui::theme::switch("wt-tray-icon", cx)
             .checked(show_tray_icon)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_show_tray_icon(*on, cx)))
+            .into_any_element();
+        let taskbar_switch = crate::ui::theme::switch("wt-taskbar-status", cx)
+            .checked(taskbar_status_icon)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_taskbar_status_icon(*on, cx)))
             .into_any_element();
         let startup_radio = self.segmented(
             "wt-startup",
@@ -4096,6 +4110,17 @@ impl Tty7App {
                 tray_switch,
                 cx,
             ))
+            // Windows only: `SetOverlayIcon` is a taskbar concept. The row is
+            // simply absent elsewhere rather than shown disabled — a switch
+            // that can never do anything is noise, not a setting.
+            .children(cfg!(windows).then(|| {
+                self.settings_row(
+                    t(L10nKey::SettingsTaskbarStatusIcon),
+                    t(L10nKey::SettingsTaskbarStatusIconDesc),
+                    taskbar_switch,
+                    cx,
+                )
+            }))
             .child(self.section_rule(cx))
             .child(self.section_header(t(L10nKey::SettingsTabs), cx))
             .child(self.settings_row(
