@@ -156,7 +156,6 @@ async_zip = { version = "0.0.18", default-features = false, features = ["deflate
 # backend falls back to PowerShell's). 0.58 is already in the tree via gpui.
 windows = { version = "0.58", features = [
     "Win32_Foundation",
-    "Win32_Graphics_Gdi",
     "Win32_Storage_EnhancedStorage",
     # IShellLinkW::GetPath takes a WIN32_FIND_DATAW, so reading an existing
     # shortcut's target back — which is how `aumid` decides whether it has to

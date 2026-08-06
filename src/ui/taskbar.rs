@@ -26,6 +26,7 @@ use gpui::App;
 
 use crate::core::cli_agent::AgentStatus;
 use crate::core::config::Config;
+use crate::ui::i18n::{L10nKey, t};
 
 /// Same cadence as the tray poll: agent status reaches the views on a 300 ms
 /// timer, so 1 s here keeps the taskbar a hair behind the in-window dots at
@@ -60,13 +61,15 @@ impl Overlay {
     }
 
     /// Screen-reader text for the overlay (`SetOverlayIcon`'s accessibility
-    /// description).
+    /// description). Localized like every other user-visible string, and
+    /// borrowed from the panel and tray so the badge reads the same as the
+    /// status it mirrors.
     fn description(self) -> &'static str {
         match self {
             Overlay::None => "",
-            Overlay::Done => "command finished",
-            Overlay::Busy => "working",
-            Overlay::Attention => "needs your input",
+            Overlay::Done => t(L10nKey::PanelAgentDone),
+            Overlay::Busy => t(L10nKey::PanelAgentWorking),
+            Overlay::Attention => t(L10nKey::TrayAgentNeedsInput),
         }
     }
 }
@@ -123,8 +126,13 @@ pub(crate) fn init(cx: &mut App) {
             cx.background_executor().timer(POLL).await;
             let wanted = cx.update(|cx| snapshot(&mut tracks, cx));
             for (hwnd, overlay) in &wanted {
-                if shown.get(hwnd).copied().unwrap_or_default() != *overlay {
-                    taskbar.stamp(*hwnd, *overlay);
+                // Only remember a badge the taskbar actually took. A failed
+                // stamp (Explorer restarting takes every overlay with it)
+                // leaves the cache alone, so the next tick sees the same diff
+                // and tries again instead of believing a badge it never drew.
+                if shown.get(hwnd).copied().unwrap_or_default() != *overlay
+                    && taskbar.stamp(*hwnd, *overlay)
+                {
                     shown.insert(*hwnd, *overlay);
                 }
             }
@@ -187,47 +195,82 @@ fn win32_hwnd(window: &gpui::Window) -> Option<isize> {
 #[derive(Default)]
 struct Taskbar {
     list: Option<windows::Win32::UI::Shell::ITaskbarList3>,
-    /// One warning per process on create failure, not one per second.
-    create_failed: bool,
+    /// Create-failure backoff, same shape as `tray::init`'s: Explorer may not
+    /// be up yet when the first window opens, and it can restart later, so a
+    /// failure is a cooldown rather than a life sentence.
+    attempts: u32,
+    cooldown: u32,
 }
 
+/// Give up on the overlay after this many failed creations, and wait this
+/// many stamps between tries. Both copied from `ui::tray`.
+const MAX_ATTEMPTS: u32 = 10;
+const RETRY_EVERY: u32 = 30;
+
 impl Taskbar {
-    fn stamp(&mut self, hwnd: isize, overlay: Overlay) {
+    /// Stamp one window's badge. Returns whether the taskbar took it, so the
+    /// caller knows not to cache a badge that was never drawn.
+    fn stamp(&mut self, hwnd: isize, overlay: Overlay) -> bool {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, HICON};
         use windows::core::PCWSTR;
 
-        let Some(list) = self.list() else { return };
+        // Cloned (COM refcount) rather than borrowed: a failed call has to
+        // drop `self.list` below, which the borrow would forbid.
+        let Some(list) = self.list().cloned() else {
+            return false;
+        };
         let hwnd = HWND(hwnd as *mut core::ffi::c_void);
         // Null icon + null description == clear the overlay slot.
         let icon = overlay.rgb().and_then(dot_icon);
         // Keep the wide string alive across the call.
-        let desc: Vec<u16> = overlay.description().encode_utf16().chain([0]).collect();
+        let desc_buf: Vec<u16> = overlay.description().encode_utf16().chain([0]).collect();
         let desc = if icon.is_some() {
-            PCWSTR(desc.as_ptr())
+            PCWSTR(desc_buf.as_ptr())
         } else {
             PCWSTR::null()
         };
-        // A dead HWND (window closed between snapshot and stamp) just errors;
-        // nothing to do about it and the button is gone anyway.
-        unsafe {
-            let _ = list.SetOverlayIcon(hwnd, icon.unwrap_or_default(), desc);
+        let stamped = unsafe {
+            let stamped = list.SetOverlayIcon(hwnd, icon.unwrap_or_default(), desc);
             // The taskbar copies the icon during the call, so ours is free to
             // go immediately (per the SetOverlayIcon contract) — holding it
-            // longer would leak one GDI handle per status change.
+            // longer would leak one GDI handle per status change. Unconditional
+            // on the result: a rejected icon is still ours to destroy.
             if let Some(icon) = icon
                 && icon != HICON::default()
             {
                 let _ = DestroyIcon(icon);
             }
+            stamped
+        };
+        if let Err(e) = stamped {
+            // Either a dead HWND (window closed between snapshot and stamp —
+            // its button is gone anyway) or an interface outlived by an
+            // Explorer restart. Both are cheapest to treat the same way: drop
+            // the interface and let the next tick re-create and re-stamp.
+            log::debug!("taskbar overlay stamp failed: {e}");
+            self.list = None;
+            return false;
         }
+        // A dot the taskbar accepted means the interface is live; forgive the
+        // creation failures that came before it.
+        self.attempts = 0;
+        true
     }
 
     fn list(&mut self) -> Option<&windows::Win32::UI::Shell::ITaskbarList3> {
         use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
         use windows::Win32::UI::Shell::{ITaskbarList3, TaskbarList};
 
-        if self.list.is_none() && !self.create_failed {
+        if self.list.is_none() {
+            if self.attempts >= MAX_ATTEMPTS {
+                return None;
+            }
+            if self.cooldown > 0 {
+                self.cooldown -= 1;
+                return None;
+            }
+            self.attempts += 1;
             // gpui's Windows platform already ran `OleInitialize` on this
             // thread, so plain creation is all that's needed.
             let created: Result<ITaskbarList3, _> =
@@ -237,8 +280,12 @@ impl Taskbar {
                 Err(e) => {
                     // Explorer not running (custom shells) is the realistic
                     // cause; the app is fine without a badge.
-                    log::warn!("taskbar overlay unavailable: {e}");
-                    self.create_failed = true;
+                    self.cooldown = RETRY_EVERY;
+                    if self.attempts == MAX_ATTEMPTS {
+                        log::warn!(
+                            "taskbar overlay unavailable after {MAX_ATTEMPTS} attempts: {e}"
+                        );
+                    }
                 }
             }
         }
@@ -246,24 +293,32 @@ impl Taskbar {
     }
 }
 
-/// Render the status dot as a 16×16 `HICON`: a solid antialiased disc on a
-/// transparent field. Drawn by hand — at 16px a circle needs no SVG pipeline,
-/// and the alpha channel of a 32-bit icon carries the antialiasing.
+/// Render the status dot as a 32×32 `HICON`: a solid antialiased disc on a
+/// transparent field. Drawn by hand — a circle needs no SVG pipeline, and the
+/// alpha channel of a 32-bit icon carries the antialiasing.
+///
+/// `SetOverlayIcon` asks for 16×16 *at 96 dpi*, so at 150%/200% scaling the
+/// shell wants 24/32 — rendering at 32 and letting it downscale beats handing
+/// it 16 to blow up, the same reason `tray::icon` renders at 32 off macOS.
 fn dot_icon(rgb: u32) -> Option<windows::Win32::UI::WindowsAndMessaging::HICON> {
     use windows::Win32::UI::WindowsAndMessaging::CreateIcon;
 
-    const S: usize = 16;
+    const S: usize = 32;
+    const CENTER: f32 = S as f32 / 2.0 - 0.5;
+    // Leaves a pixel of breathing room at 96 dpi so the dot never touches the
+    // icon's edge once the shell has scaled it.
+    const RADIUS: f32 = S as f32 * 7.0 / 16.0;
     let (r, g, b) = ((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
     // BGRA, straight (non-premultiplied) alpha — the layout `CreateIcon`
     // expects for 32-bit XOR bits.
     let mut xor = vec![0u8; S * S * 4];
     for y in 0..S {
         for x in 0..S {
-            let dx = x as f32 - 7.5;
-            let dy = y as f32 - 7.5;
-            // Disc of radius 6.5 with a 1px antialiased rim: alpha ramps
-            // linearly over the last pixel of distance.
-            let a = (7.0 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+            let dx = x as f32 - CENTER;
+            let dy = y as f32 - CENTER;
+            // Solid to `RADIUS`, with alpha ramping linearly over the last
+            // pixel of distance to antialias the rim.
+            let a = (RADIUS - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
             if a > 0.0 {
                 let i = (y * S + x) * 4;
                 xor[i] = b;
