@@ -138,12 +138,15 @@ getrandom = "0.3"
 
 # Toolhelp process enumeration + `TerminateProcess`, used by `daemon::winproc` to
 # title a pane by its foreground command and to tear down a shell's descendant
-# tree on hangup (ConPTY's `kill` only reaches the shell itself).
+# tree on hangup (ConPTY's `kill` only reaches the shell itself). `Registry`
+# additionally lets `daemon::windows_env` re-read the two environment hives at
+# pane-spawn time so a long-lived daemon stops handing out its startup `PATH`.
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_Console",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }

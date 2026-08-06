@@ -34,8 +34,7 @@ use crate::ui::palette::{
 use crate::ui::pane::{CloseOutcome, Dir, Pane, PaneSlot};
 use crate::ui::presets::Fill;
 use crate::ui::settings::{
-    ExplorerContextMenuNote, Recording, SettingsSection, SettingsState, ThemeEditor,
-    humanize_action,
+    Recording, SettingsSection, SettingsState, ThemeEditor, humanize_action,
 };
 use crate::ui::theme::{apply_theme, set_menus, window_background};
 
@@ -409,6 +408,9 @@ pub struct Tty7App {
         crate::ui::host_registry::HostId,
         crate::ui::switcher::HostSnapshot,
     >,
+    /// Errors reported for a remote host that should be shown inside that host's
+    /// switcher group instead of as a global modal or toast.
+    pub(crate) remote_host_errors: std::collections::HashMap<String, String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -711,6 +713,7 @@ impl Tty7App {
             connect: None,
             switcher: None,
             host_snapshots: std::collections::HashMap::new(),
+            remote_host_errors: std::collections::HashMap::new(),
         };
         if !cfg!(test) && crate::ui::windows::WindowRegistry::count(cx) == 0 {
             crate::ui::tray::init(cx);
@@ -1939,38 +1942,6 @@ impl Tty7App {
     /// a symlink already placed — the install is idempotent, not reversible.
     pub(crate) fn set_install_cli_on_path(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.install_cli_on_path = on);
-    }
-
-    pub(crate) fn register_explorer_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.run_explorer_context_menu_action(true, cx);
-    }
-
-    pub(crate) fn unregister_explorer_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.run_explorer_context_menu_action(false, cx);
-    }
-
-    fn run_explorer_context_menu_action(&mut self, register: bool, cx: &mut Context<Self>) {
-        // Registry operations are tiny and synchronous. Keeping the action on
-        // the UI thread also makes the displayed status correspond to the
-        // completed write, without a task racing a closed Settings window.
-        let result = if register {
-            crate::core::explorer_context_menu::register()
-        } else {
-            crate::core::explorer_context_menu::unregister()
-        };
-        let note = match result {
-            Ok(()) if register => ExplorerContextMenuNote::Registered,
-            Ok(()) => ExplorerContextMenuNote::Unregistered,
-            Err(error) if register => ExplorerContextMenuNote::RegisterFailed(error.to_string()),
-            Err(error) => ExplorerContextMenuNote::UnregisterFailed(error.to_string()),
-        };
-        let status =
-            crate::core::explorer_context_menu::status().map_err(|error| error.to_string());
-        if let Some(settings) = self.settings.as_mut() {
-            settings.explorer_context_menu_status = status;
-            settings.explorer_context_menu_note = Some(note);
-        }
-        cx.notify();
     }
 
     pub(crate) fn set_dim_inactive_panes(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -3614,9 +3585,6 @@ impl Tty7App {
             theme_search,
             recording: None,
             rebinding_note: None,
-            explorer_context_menu_status: crate::core::explorer_context_menu::status()
-                .map_err(|error| error.to_string()),
-            explorer_context_menu_note: None,
             ssh_form: None,
             ssh_detail: crate::ui::settings::SshDetail::None,
             ssh_filter,

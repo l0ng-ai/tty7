@@ -56,6 +56,12 @@ RestartApplications=no
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+; Writing shell verbs is an install-time decision, the way VS Code and Git for
+; Windows treat theirs — not a runtime preference, so tty7 has no setting for
+; it. Off by default: the registry is user-visible system state. The keys land
+; under HKCU even for an all-users install, so this only ever affects whoever
+; ran the installer. Inno restores the previous choice when upgrading.
+Name: "explorermenu"; Description: "Add ""Open in tty7"" to the folder context menu"; GroupDescription: "Shell integration:"; Flags: unchecked
 
 ; Builds before the tty7/tty7-app split installed the GUI as tty7.exe. Upgrading
 ; only *adds* tty7-app.exe, so the old binary would stay on disk — and a taskbar
@@ -107,6 +113,11 @@ Name: "{autoprograms}\tty7"; Filename: "{app}\tty7-app.exe"; AppUserModelID: "co
 Name: "{autodesktop}\tty7"; Filename: "{app}\tty7-app.exe"; Tasks: desktopicon; AppUserModelID: "com.github.tty7"
 
 [Run]
+; The registry shape lives in core::explorer_context_menu, not here: the app
+; reads those same keys to decide whether an existing registration still points
+; at this install, and two hand-kept copies of the layout would drift. Runs
+; before the launch entry below so a first start already sees the final state.
+Filename: "{app}\tty7-app.exe"; Parameters: "--register-explorer-menu"; Tasks: explorermenu; Flags: runhidden waituntilterminated
 Filename: "{app}\tty7-app.exe"; Description: "{cm:LaunchProgram,tty7}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
@@ -117,6 +128,11 @@ Filename: "{app}\tty7-app.exe"; Description: "{cm:LaunchProgram,tty7}"; Flags: n
 ; the call returns without opening a window. RunOnceId keys the entry so a repeated
 ; uninstall doesn't run it twice.
 Filename: "{app}\tty7-app.exe"; Parameters: "--stop-daemon"; Flags: runhidden waituntilterminated; RunOnceId: "StopDaemon"
+; Unconditional, and deliberately not gated on the task: an install that had the
+; menu registered and was later upgraded without the box ticked still holds the
+; keys, and verbs pointing at a deleted exe are worse than a no-op. Removing keys
+; that were never written succeeds silently.
+Filename: "{app}\tty7-app.exe"; Parameters: "--unregister-explorer-menu"; Flags: runhidden waituntilterminated; RunOnceId: "UnregisterExplorerMenu"
 
 [Code]
 (* Gracefully stop the persistent daemon before we overwrite tty7-app.exe. We can't

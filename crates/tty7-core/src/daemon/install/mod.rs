@@ -128,6 +128,9 @@ pub trait ServerBinarySource: Send + Sync {
 pub struct BundledOrRelease<'a> {
     pub fetch: &'a dyn AssetFetcher,
     pub bundled: Option<wsl::BundledServerBinary>,
+    /// When a bundled directory is configured but the requested asset is absent,
+    /// fall back to the release download instead of failing with `MissingBundled`.
+    pub fallback_on_missing: bool,
 }
 
 impl<'a> BundledOrRelease<'a> {
@@ -135,6 +138,18 @@ impl<'a> BundledOrRelease<'a> {
         Self {
             fetch,
             bundled: wsl::BundledServerBinary::from_env_only(),
+            fallback_on_missing: false,
+        }
+    }
+
+    /// Prefer a server binary shipped next to the client executable (see
+    /// `wsl::BundledServerBinary::discover`), falling back to the GitHub release
+    /// download when no matching bundled asset is present.
+    pub fn discover(fetch: &'a dyn AssetFetcher) -> Self {
+        Self {
+            fetch,
+            bundled: Some(wsl::BundledServerBinary::discover()),
+            fallback_on_missing: true,
         }
     }
 }
@@ -151,7 +166,17 @@ impl ServerBinarySource for BundledOrRelease<'_> {
         on_progress: &dyn Fn(u64, Option<u64>),
     ) -> Result<LoadedBinary, InstallError> {
         match &self.bundled {
-            Some(bundled) => bundled.load(version, asset),
+            Some(bundled) => match bundled.load(version, asset) {
+                Ok(binary) => Ok(binary),
+                Err(InstallError::MissingBundled { .. }) if self.fallback_on_missing => {
+                    ReleaseDownload { fetch: self.fetch }.load_with_progress(
+                        version,
+                        asset,
+                        on_progress,
+                    )
+                }
+                Err(e) => Err(e),
+            },
             None => ReleaseDownload { fetch: self.fetch }.load_with_progress(
                 version,
                 asset,
@@ -1017,7 +1042,7 @@ pub fn ensure_remote_server_labeled(conn: &Arc<SshConnection>, host: &str) -> io
     let ops = ssh_ops::SshRemoteOps::new(conn.clone());
     let fetch = default_fetcher();
     let confirm = install_confirm();
-    let source = BundledOrRelease::from_env(fetch.as_ref());
+    let source = BundledOrRelease::discover(fetch.as_ref());
     let report = Installer::with_source(&ops, &source, confirm.as_ref(), host).run()?;
     log::info!(
         "remote {host}: {} at {} ({}{})",
@@ -1055,7 +1080,7 @@ pub fn replace_remote_server(conn: &Arc<SshConnection>) -> io::Result<()> {
     let ops = ssh_ops::SshRemoteOps::new(conn.clone());
     let fetch = default_fetcher();
     let confirm = install_confirm();
-    let source = BundledOrRelease::from_env(fetch.as_ref());
+    let source = BundledOrRelease::discover(fetch.as_ref());
     Installer::with_source(&ops, &source, confirm.as_ref(), host).replace()?;
     Ok(())
 }
