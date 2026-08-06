@@ -317,8 +317,6 @@ pub enum L10nKey {
     SettingsConfirmLastWindowCloseDesc,
     SettingsShowTrayIcon,
     SettingsShowTrayIconDesc,
-    SettingsTaskbarStatusIcon,
-    SettingsTaskbarStatusIconDesc,
     SettingsTabs,
     SettingsNewTabPosition,
     SettingsNewTabPositionDesc,
@@ -439,7 +437,6 @@ pub enum L10nKey {
     SettingsSearchScrollSpeedKeywords,
     SettingsSearchScrollbackKeywords,
     SettingsSearchShowTrayIconKeywords,
-    SettingsSearchTaskbarStatusIconKeywords,
     SettingsSearchSidebarGroupingKeywords,
     SettingsSearchSmartSelectionKeywords,
     SettingsSearchStartInKeywords,
@@ -1588,13 +1585,6 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "Keep a status item in the system tray / menu bar: it signals when a coding agent needs your input, and its menu jumps to agent panes.",
             "在系统托盘/菜单栏保留状态项：当编码 agent 需要输入时发出提示，其菜单可跳转到该 agent 的窗格。",
         ),
-        L10nKey::SettingsTaskbarStatusIcon => ("Taskbar status dot", "任务栏状态点"),
-        L10nKey::SettingsTaskbarStatusIconDesc => (
-            "Badge the taskbar icon with each window's status: blue while a \
-             command or agent is working, green when one finishes in the \
-             background, amber when an agent needs your input.",
-            "给每个窗口的任务栏图标加状态角标：蓝色表示命令或 agent 正在运行，绿色表示有任务在后台完成，琥珀色表示 agent 等你输入。",
-        ),
         L10nKey::SettingsTabs => ("Tabs", "标签页"),
         L10nKey::SettingsNewTabPosition => ("New tab position", "新标签页位置"),
         L10nKey::SettingsNewTabPositionDesc => (
@@ -1935,10 +1925,6 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchShowTrayIconKeywords => (
             "tray menu bar status item agent attention system icon",
             "显示托盘图标 托盘 菜单栏 状态 图标 show tray icon menu bar status",
-        ),
-        L10nKey::SettingsSearchTaskbarStatusIconKeywords => (
-            "taskbar badge overlay status dot busy done agent attention windows",
-            "任务栏 状态点 角标 覆盖图标 taskbar badge status dot overlay",
         ),
         L10nKey::SettingsSearchSidebarGroupingKeywords => (
             "tabs group repo repository git scratch header sidebar flat",
@@ -3244,8 +3230,6 @@ mod tests {
             L10nKey::SettingsConfirmLastWindowCloseDesc,
             L10nKey::SettingsShowTrayIcon,
             L10nKey::SettingsShowTrayIconDesc,
-            L10nKey::SettingsTaskbarStatusIcon,
-            L10nKey::SettingsTaskbarStatusIconDesc,
             L10nKey::SettingsTabs,
             L10nKey::SettingsNewTabPosition,
             L10nKey::SettingsNewTabPositionDesc,
@@ -3364,7 +3348,6 @@ mod tests {
             L10nKey::SettingsSearchScrollSpeedKeywords,
             L10nKey::SettingsSearchScrollbackKeywords,
             L10nKey::SettingsSearchShowTrayIconKeywords,
-            L10nKey::SettingsSearchTaskbarStatusIconKeywords,
             L10nKey::SettingsSearchSidebarGroupingKeywords,
             L10nKey::SettingsSearchSmartSelectionKeywords,
             L10nKey::SettingsSearchStartInKeywords,
