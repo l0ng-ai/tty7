@@ -9741,6 +9741,7 @@ dependencies = [
  "sha2 0.11.0",
  "smol",
  "system-configuration",
+ "system-configuration-sys",
  "tempfile",
  "tokio",
  "ureq",

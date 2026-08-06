@@ -229,7 +229,7 @@ mod macos {
     use core_foundation::number::CFNumber;
     use core_foundation::string::CFString;
     use system_configuration::dynamic_store::SCDynamicStoreBuilder;
-    use system_configuration::schema_definitions::{
+    use system_configuration_sys::schema_definitions::{
         kSCPropNetProxiesExceptionsList, kSCPropNetProxiesHTTPEnable, kSCPropNetProxiesHTTPPort,
         kSCPropNetProxiesHTTPProxy, kSCPropNetProxiesHTTPSEnable, kSCPropNetProxiesHTTPSPort,
         kSCPropNetProxiesHTTPSProxy, kSCPropNetProxiesSOCKSEnable, kSCPropNetProxiesSOCKSPort,
@@ -321,7 +321,7 @@ mod macos {
         let key = unsafe { CFString::wrap_under_get_rule(kSCPropNetProxiesExceptionsList) };
         proxies
             .find(&key)
-            .and_then(|v| v.downcast_ref::<core_foundation::array::CFArray<CFString>>())
+            .and_then(|v| v.downcast::<core_foundation::array::CFArray<CFString>>())
             .map(|arr| arr.iter().map(|s| s.to_string()).collect())
             .unwrap_or_default()
     }

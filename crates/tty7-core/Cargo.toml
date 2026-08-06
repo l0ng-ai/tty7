@@ -131,6 +131,7 @@ libgssapi = { version = "0.11", optional = true }
 core-foundation = "0.9"
 # Read system proxy settings from SCDynamicStore for release downloads.
 system-configuration = "0.6"
+system-configuration-sys = "0.6"
 
 # The Windows GUI⇄daemon transport is loopback TCP, which (unlike a Unix socket)
 # any local process can connect to — so the daemon authenticates each connection
