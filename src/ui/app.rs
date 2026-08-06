@@ -34,8 +34,7 @@ use crate::ui::palette::{
 use crate::ui::pane::{CloseOutcome, Dir, Pane, PaneSlot};
 use crate::ui::presets::Fill;
 use crate::ui::settings::{
-    ExplorerContextMenuNote, Recording, SettingsSection, SettingsState, ThemeEditor,
-    humanize_action,
+    Recording, SettingsSection, SettingsState, ThemeEditor, humanize_action,
 };
 use crate::ui::theme::{apply_theme, set_menus, window_background};
 
@@ -718,6 +717,11 @@ impl Tty7App {
         };
         if !cfg!(test) && crate::ui::windows::WindowRegistry::count(cx) == 0 {
             crate::ui::tray::init(cx);
+            // The taskbar overlay poll is app-wide for the same reason the
+            // tray's is: one task snapshots every window (each window gets
+            // its own badge, but nobody wants N poll loops).
+            #[cfg(windows)]
+            crate::ui::taskbar::init(cx);
         }
         app.refresh_shells(cx);
         cx.on_app_quit(|app, cx| {
@@ -1044,6 +1048,31 @@ impl Tty7App {
             }
         }
         agents
+    }
+
+    /// This window's aggregated signals for the taskbar overlay
+    /// (`ui::taskbar`): whether any agent pane is blocked on the user, and
+    /// whether any pane is still working (an agent mid-turn or a shell off
+    /// its prompt). Same walk as [`agent_rows`](Self::agent_rows), minus the
+    /// per-row detail the tray menu needs.
+    #[cfg(windows)]
+    pub(crate) fn taskbar_signals(&self, cx: &App) -> (bool, bool) {
+        use crate::core::cli_agent::AgentStatus;
+        let (mut attention, mut busy) = (false, false);
+        for tab in &self.tabs {
+            for leaf in tab.pane.terminals() {
+                let view = leaf.read(cx);
+                match view.agent_session().map(|s| s.status) {
+                    Some(AgentStatus::Waiting) => attention = true,
+                    Some(AgentStatus::Working) => busy = true,
+                    _ => {}
+                }
+                if view.shell_busy() {
+                    busy = true;
+                }
+            }
+        }
+        (attention, busy)
     }
 
     pub(crate) fn handle_tray_action(
@@ -1945,38 +1974,6 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.install_cli_on_path = on);
     }
 
-    pub(crate) fn register_explorer_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.run_explorer_context_menu_action(true, cx);
-    }
-
-    pub(crate) fn unregister_explorer_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.run_explorer_context_menu_action(false, cx);
-    }
-
-    fn run_explorer_context_menu_action(&mut self, register: bool, cx: &mut Context<Self>) {
-        // Registry operations are tiny and synchronous. Keeping the action on
-        // the UI thread also makes the displayed status correspond to the
-        // completed write, without a task racing a closed Settings window.
-        let result = if register {
-            crate::core::explorer_context_menu::register()
-        } else {
-            crate::core::explorer_context_menu::unregister()
-        };
-        let note = match result {
-            Ok(()) if register => ExplorerContextMenuNote::Registered,
-            Ok(()) => ExplorerContextMenuNote::Unregistered,
-            Err(error) if register => ExplorerContextMenuNote::RegisterFailed(error.to_string()),
-            Err(error) => ExplorerContextMenuNote::UnregisterFailed(error.to_string()),
-        };
-        let status =
-            crate::core::explorer_context_menu::status().map_err(|error| error.to_string());
-        if let Some(settings) = self.settings.as_mut() {
-            settings.explorer_context_menu_status = status;
-            settings.explorer_context_menu_note = Some(note);
-        }
-        cx.notify();
-    }
-
     pub(crate) fn set_dim_inactive_panes(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.dim_inactive_panes = on);
     }
@@ -2078,6 +2075,13 @@ impl Tty7App {
 
     pub(crate) fn set_show_tray_icon(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.show_tray_icon = on);
+    }
+
+    /// Toggle the Windows taskbar status dot. Same live-apply story as the
+    /// tray: the overlay poll re-reads the flag every second, and turning it
+    /// off clears any badge already stamped.
+    pub(crate) fn set_taskbar_status_icon(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.taskbar_status_icon = on);
     }
 
     pub(crate) fn set_confirm_window_close(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -3618,9 +3622,6 @@ impl Tty7App {
             theme_search,
             recording: None,
             rebinding_note: None,
-            explorer_context_menu_status: crate::core::explorer_context_menu::status()
-                .map_err(|error| error.to_string()),
-            explorer_context_menu_note: None,
             ssh_form: None,
             ssh_detail: crate::ui::settings::SshDetail::None,
             ssh_filter,

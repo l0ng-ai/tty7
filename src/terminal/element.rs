@@ -15,7 +15,7 @@ use gpui::{
 };
 use gpui_component::ActiveTheme as _;
 
-use super::view::TerminalView;
+use super::view::{TerminalView, should_show_context_menu};
 use crate::core::config::Config;
 
 const DIM_OPACITY: f32 = 0.66;
@@ -1268,7 +1268,10 @@ impl TerminalElement {
                 {
                     return;
                 }
-                if v.mouse_mode() && !mods.shift {
+                // The mirror image of the context-menu gate in
+                // `TerminalView::render`: a click the application gets is never
+                // also a click tty7 acts on, and vice versa.
+                if !should_show_context_menu(v.mouse_mode(), mods.shift) {
                     v.mouse_press(button, col, row, &mods);
                     return;
                 }
