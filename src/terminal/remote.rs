@@ -13,6 +13,7 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{self, CursorShape, CursorStyle};
 
 use crate::terminal::marks::{MarkEvent, MarkScanner};
+use crate::terminal::parked_cursor::{CursorCut, ParkedCursorRepair, ParkedCursorScanner};
 
 use std::collections::VecDeque;
 
@@ -534,6 +535,8 @@ impl RemoteTerminal {
                 let mut mode_tok = OscTokenizer::new(&[b"133"]);
                 let mut zle_tok = OscTokenizer::new(&[b"133"]);
                 let mut mark_scan = MarkScanner::new();
+                let mut cursor_scan = ParkedCursorScanner::new();
+                let mut parked_cursor = ParkedCursorRepair::default();
                 let mut pending: Vec<u8> = buffered;
                 let mut pending_size: Option<WinSize> = None;
                 // Kitty-graphics decode runs on its own thread with newest-frame
@@ -573,8 +576,18 @@ impl RemoteTerminal {
                     macro_rules! flush_batch {
                         () => {
                             if !out_batch.is_empty() {
-                                let mut cuts: Vec<(usize, MarkEvent)> = Vec::new();
-                                mark_scan.feed(&out_batch, |off, ev| cuts.push((off, ev)));
+                                // Both scanners report an offset one past the
+                                // sequence they matched, so the batch splits at
+                                // each of them: advance the emulator to the cut,
+                                // act on the state that sequence left behind,
+                                // carry on. In offset order, since a frame can
+                                // carry marks and cursor shows both.
+                                let mut cuts: Vec<(usize, Cut)> = Vec::new();
+                                mark_scan
+                                    .feed(&out_batch, |off, ev| cuts.push((off, Cut::Mark(ev))));
+                                cursor_scan
+                                    .feed(&out_batch, |off, c| cuts.push((off, Cut::Cursor(c))));
+                                cuts.sort_by_key(|(off, _)| *off);
                                 {
                                     let t0 = trace.then(std::time::Instant::now);
                                     let mut term = term.lock();
@@ -583,10 +596,15 @@ impl RemoteTerminal {
                                         processor.advance(&mut *term, &out_batch);
                                     } else {
                                         let mut at = 0usize;
-                                        for (off, ev) in cuts {
+                                        for (off, cut) in cuts {
                                             processor.advance(&mut *term, &out_batch[at..off]);
                                             at = off;
-                                            record_mark(&term, &marks, ev);
+                                            match cut {
+                                                Cut::Mark(ev) => record_mark(&term, &marks, ev),
+                                                Cut::Cursor(vis) => {
+                                                    parked_cursor.apply(&mut term, vis);
+                                                }
+                                            }
                                         }
                                         processor.advance(&mut *term, &out_batch[at..]);
                                     }
@@ -654,6 +672,8 @@ impl RemoteTerminal {
                             }
                             DaemonMsg::Snapshot(bytes) => {
                                 flush_batch!();
+                                cursor_scan.reset();
+                                parked_cursor.reset();
                                 proxy.replaying.store(true, Ordering::Relaxed);
                                 {
                                     let mut term = term.lock();
@@ -1375,6 +1395,13 @@ impl RemoteTerminal {
         }
         query(pane_id).unwrap_or_default()
     }
+}
+
+/// Something in the pty stream the reader has to act on at the byte where it
+/// appeared, rather than after the whole batch has been parsed.
+enum Cut {
+    Mark(MarkEvent),
+    Cursor(CursorCut),
 }
 
 fn record_mark(term: &Term<EventProxy>, marks: &crate::terminal::marks::Marks, event: MarkEvent) {
@@ -2483,6 +2510,60 @@ mod tests {
         assert!(
             !events.iter().any(|e| matches!(e, AlacEvent::PtyWrite(_))),
             "a query inside the replayed sync tail must stay suppressed"
+        );
+    }
+
+    /// Feeds one conhost-shaped repaint and reports the cell the cursor ends on,
+    /// waiting for the `X` the frame paints so the reader is known to be done.
+    fn cursor_after_conpty_frame(frame: &[u8]) -> (i32, usize) {
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        // Where the TUI put the cursor before conhost repainted over it.
+        DaemonMsg::Output(b"\x1b[6;4H".to_vec())
+            .encode(&mut daemon_side)
+            .unwrap();
+        DaemonMsg::Output(frame.to_vec())
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+
+        for _ in 0..600 {
+            {
+                let t = term.term.lock();
+                let painted = t.grid()[alacritty_terminal::index::Line(19)]
+                    [alacritty_terminal::index::Column(1)]
+                .c;
+                if painted == 'X' {
+                    let point = t.grid().cursor.point;
+                    return (point.line.0, point.column.0);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the reader never applied the frame");
+    }
+
+    #[test]
+    fn a_conpty_frame_that_shows_the_cursor_over_an_erase_keeps_the_cell_it_hid_on() {
+        assert_eq!(
+            cursor_after_conpty_frame(
+                b"\x1b[?25l\x1b[20;2HX\x1b[K\x1b[m\x1b[22;42H\x1b[K\x1b[?25h"
+            ),
+            (5, 3),
+            "conhost parked the cursor on the cell it erased last; the cursor \
+             belongs where it was when the repaint hid it"
+        );
+    }
+
+    #[test]
+    fn a_conpty_frame_that_moves_the_cursor_before_showing_it_is_obeyed() {
+        assert_eq!(
+            cursor_after_conpty_frame(
+                b"\x1b[?25l\x1b[20;2HX\x1b[K\x1b[m\x1b[22;42H\x1b[K\x1b[9;9H\x1b[?25h"
+            ),
+            (8, 8),
+            "the frame painted the cursor somewhere on purpose"
         );
     }
 

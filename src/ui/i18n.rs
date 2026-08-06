@@ -355,7 +355,6 @@ pub enum L10nKey {
     SettingsPrefixNote,
     SettingsRestoreAllDefaults,
     SettingsAboutDesc1,
-    SettingsAboutDesc2,
     SettingsAboutTech,
     SettingsVersion,
     SettingsUpdates,
@@ -1662,16 +1661,12 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsRestoreAllDefaults => ("Restore all defaults", "恢复全部默认值"),
         L10nKey::SettingsAboutDesc1 => (
-            "A terminal workbench: shells, workspaces, SSH, coding agents.",
-            "一个终端工作台：shell、工作区、SSH、编码 agent。",
-        ),
-        L10nKey::SettingsAboutDesc2 => (
-            "Editor-grade input in every shell, shells that outlive quits and reboots without tmux, a native SSH stack with profiles and port forwarding, and live status for panes running coding agents.",
-            "每个 shell 都具备编辑器级输入；无需 tmux 也能让 shell 在退出和重启后继续运行；原生的 SSH 栈支持主机配置和端口转发；为运行编码 agent 的窗格提供实时状态。",
+            "A terminal workbench: persistent sessions, remote work, agents.",
+            "终端工作台：常驻会话、远程工作、agent。",
         ),
         L10nKey::SettingsAboutTech => (
             "Pure Rust · GPU rendering on Zed's gpui · VT core from Alacritty",
-            "纯 Rust · 基于 Zed 的 gpui 进行 GPU 渲染 · 来自 Alacritty 的 VT 核心",
+            "纯 Rust · GPU 渲染基于 Zed 的 gpui · VT 内核来自 Alacritty",
         ),
         L10nKey::SettingsVersion => ("Version", "版本"),
         L10nKey::SettingsUpdates => ("Updates", "更新"),
@@ -1730,8 +1725,8 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             ("Version {version} is available.", "新版本 {version} 可用。")
         }
         L10nKey::SettingsCheckUpdatesDesc => (
-            "tty7 checks stable releases on launch. Packaged macOS bundles and per-user Windows installations update without opening a browser: a dedicated helper verifies the checksum and version before replacing anything, then relaunches the GUI. Linux, all-users Windows installations and other unsupported layouts fall back to the release page.",
-            "tty7 会在启动时检查稳定版发布。打包的 macOS 应用和为当前用户安装的 Windows 版本无需打开浏览器即可更新：专用助手会在替换前验证校验和与版本，然后重新启动界面。Linux、为所有用户安装的 Windows 版本以及其他不受支持的安装布局则会打开发布页面。",
+            "Installations that cannot update in place open the release page instead.",
+            "无法就地更新的安装方式会改为打开发布页面。",
         ),
         L10nKey::SettingsCheckUpdatesOnLaunch => ("Check for updates on launch", "启动时检查更新"),
         L10nKey::SettingsCommandLine => ("Command line", "命令行"),
@@ -1745,8 +1740,8 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SettingsServer => ("Server", "服务器"),
         L10nKey::SettingsServerDesc => (
-            "Restart the server on this computer to pick up a newly granted macOS permission, recover if it stops responding, or start from a clean slate. This ends all running shells here; your tabs and layout reopen with fresh shells. A remote machine's server is restarted from its own menu in the workspace switcher.",
-            "重启这台计算机上的服务器以应用新授予的 macOS 权限，在无响应时恢复，或重新开始。这会结束此处所有正在运行的 shell；你的标签页和布局会以全新的 shell 重新打开。远程机器的服务器可从工作区切换器的对应菜单中重启。",
+            "Restarts the background server that keeps your shells running. This ends every shell on this computer; your tabs and layout reopen with fresh ones.",
+            "重启在后台维持 shell 运行的服务器。这会结束这台计算机上所有正在运行的 shell；你的标签页和布局会以全新的 shell 重新打开。",
         ),
         L10nKey::SettingsRestartServer => ("Restart server…", "重启服务器…"),
         L10nKey::SettingsAgentClaudeCode => ("Claude Code", "Claude Code"),
@@ -3286,7 +3281,6 @@ mod tests {
             L10nKey::SettingsPrefixNote,
             L10nKey::SettingsRestoreAllDefaults,
             L10nKey::SettingsAboutDesc1,
-            L10nKey::SettingsAboutDesc2,
             L10nKey::SettingsAboutTech,
             L10nKey::SettingsUpdates,
             L10nKey::SettingsUpdateAndRelaunch,
