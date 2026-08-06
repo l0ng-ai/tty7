@@ -177,6 +177,14 @@ pub struct Config {
     pub restore_session: bool,
     #[serde(default = "default_true")]
     pub show_tray_icon: bool,
+    /// Windows: stamp a status dot on each window's taskbar button — amber
+    /// when an agent needs input, blue while a command or agent works, green
+    /// when work finished unfocused (cleared on activation). Colors match the
+    /// in-window status dots. On by default; the overlay poll re-reads this
+    /// every second, so the toggle and a `config.json` hot-reload apply live.
+    /// Ignored off Windows (a macOS Dock badge would be its own setting).
+    #[serde(default = "default_true")]
+    pub taskbar_status_icon: bool,
     #[serde(default = "default_true")]
     pub confirm_window_close: bool,
     #[serde(default, deserialize_with = "de_lenient")]
@@ -328,6 +336,7 @@ pub enum BellMode {
     #[default]
     Visual,
     Audible,
+    Both,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -417,6 +426,7 @@ impl Default for Config {
             notify_threshold_secs: default_notify_threshold_secs(),
             restore_session: true,
             show_tray_icon: true,
+            taskbar_status_icon: true,
             confirm_window_close: true,
             bell: BellMode::Visual,
             tab_completion: true,
@@ -1070,8 +1080,13 @@ mod tests {
         assert!(!cfg.mouse_reporting);
         assert_eq!(cfg.bell, BellMode::Audible);
 
+        let cfg: Config = serde_json::from_str(r#"{"bell": "both"}"#).unwrap();
+        assert_eq!(cfg.bell, BellMode::Both);
+
         let cfg: Config = serde_json::from_str(r#"{"bell": "loud"}"#).unwrap();
         assert_eq!(cfg.bell, BellMode::Visual);
+
+        assert_eq!(serde_json::to_string(&BellMode::Both).unwrap(), "\"both\"");
     }
 
     #[test]

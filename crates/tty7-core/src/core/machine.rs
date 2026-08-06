@@ -1241,10 +1241,10 @@ pub fn appearance_path() -> io::Result<PathBuf> {
 
 /// The light/dark mode the GUI last applied, cached beside the machine tree.
 ///
-/// The daemon needs it when it spawns a pane on Windows, where ConPTY drops an
-/// OSC 11 background query before tty7's emulator can answer it (see
-/// `daemon::pane::pane_environment`), and the daemon is a separate process from
-/// the GUI that owns the theme. This is derived state, not a setting: it is
+/// The daemon needs it when it spawns a pane on Windows, to fill in the
+/// `COLORFGBG` hint (see `daemon::pane::pane_environment`), and the daemon is a
+/// separate process from the GUI that owns the theme. This is derived state,
+/// not a setting: it is
 /// written by whichever process paints the window and read by whoever needs to
 /// describe that window, so it lives here rather than in `config.json` — the
 /// user's file, which nothing should rewrite behind their back.
