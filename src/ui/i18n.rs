@@ -265,6 +265,7 @@ pub enum L10nKey {
     SettingsBellModeOff,
     SettingsBellModeVisual,
     SettingsBellModeAudible,
+    SettingsBellModeBoth,
     SettingsPrompt,
     SettingsPromptIntro,
     SettingsTabCompletion,
@@ -1452,8 +1453,8 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsBell => ("Bell", "铃声"),
         L10nKey::SettingsTerminalBell => ("Terminal bell", "终端铃声"),
         L10nKey::SettingsTerminalBellDesc => (
-            "How a bell (^G) is signalled: silenced, a brief flash, or the system sound.",
-            "铃声（^G）的通知方式：静音、短暂闪烁或系统声音。",
+            "How a bell (^G) is signalled: silenced, a brief flash, the system sound, or both.",
+            "铃声（^G）的通知方式：静音、短暂闪烁、系统声音，或两者同时。",
         ),
         L10nKey::SettingsLinks => ("Links", "链接"),
         L10nKey::DetectUrls => ("Detect URLs", "检测 URL"),
@@ -1474,6 +1475,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SettingsBellModeOff => ("Off", "关"),
         L10nKey::SettingsBellModeVisual => ("Visual", "闪烁"),
         L10nKey::SettingsBellModeAudible => ("Audible", "声音"),
+        L10nKey::SettingsBellModeBoth => ("Both", "闪烁 + 声音"),
         L10nKey::SettingsPrompt => ("Prompt", "提示符"),
         L10nKey::SettingsPromptIntro => (
             "tty7's own menus at the shell prompt. Turn one off to hand the key back to the shell.",
@@ -1954,8 +1956,8 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "Tab补全 补全 菜单 建议 tab completion suggestions prompt",
         ),
         L10nKey::SettingsSearchTerminalBellKeywords => (
-            "bell audible visual flash sound silence beep ^g",
-            "终端铃声 铃声 提示音 闪烁 静音 beep bell terminal audible visual",
+            "bell audible visual flash sound silence beep both ^g",
+            "终端铃声 铃声 提示音 闪烁 静音 两者 同时 beep bell terminal audible visual both",
         ),
         L10nKey::SettingsSearchThemeKeywords => (
             "appearance color colours scheme dark light palette background foreground accent sync system os auto follow",
@@ -3189,6 +3191,7 @@ mod tests {
             L10nKey::SettingsBellModeOff,
             L10nKey::SettingsBellModeVisual,
             L10nKey::SettingsBellModeAudible,
+            L10nKey::SettingsBellModeBoth,
             L10nKey::SettingsPrompt,
             L10nKey::SettingsPromptIntro,
             L10nKey::SettingsTabCompletionDesc,

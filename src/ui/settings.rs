@@ -3499,6 +3499,7 @@ impl Tty7App {
             BellMode::None => 0,
             BellMode::Visual => 1,
             BellMode::Audible => 2,
+            BellMode::Both => 3,
         };
         let bell_control = self.segmented(
             "term-bell",
@@ -3506,6 +3507,7 @@ impl Tty7App {
                 t(L10nKey::SettingsBellModeOff),
                 t(L10nKey::SettingsBellModeVisual),
                 t(L10nKey::SettingsBellModeAudible),
+                t(L10nKey::SettingsBellModeBoth),
             ],
             bell_idx,
             cx,
@@ -3513,7 +3515,9 @@ impl Tty7App {
                 let mode = match ix {
                     0 => BellMode::None,
                     1 => BellMode::Visual,
-                    _ => BellMode::Audible,
+                    2 => BellMode::Audible,
+                    3 => BellMode::Both,
+                    _ => BellMode::default(),
                 };
                 this.set_bell_mode(mode, cx);
             },

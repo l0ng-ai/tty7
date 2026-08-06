@@ -1153,6 +1153,10 @@ impl TerminalView {
                         self.flash_bell(cx);
                     }
                 }
+                BellMode::Both => {
+                    ring_system_bell();
+                    self.flash_bell(cx);
+                }
             },
             AlacEvent::TextAreaSizeRequest(fmt) => {
                 let size = self.terminal.size();

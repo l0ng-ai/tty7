@@ -328,6 +328,7 @@ pub enum BellMode {
     #[default]
     Visual,
     Audible,
+    Both,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -1070,8 +1071,13 @@ mod tests {
         assert!(!cfg.mouse_reporting);
         assert_eq!(cfg.bell, BellMode::Audible);
 
+        let cfg: Config = serde_json::from_str(r#"{"bell": "both"}"#).unwrap();
+        assert_eq!(cfg.bell, BellMode::Both);
+
         let cfg: Config = serde_json::from_str(r#"{"bell": "loud"}"#).unwrap();
         assert_eq!(cfg.bell, BellMode::Visual);
+
+        assert_eq!(serde_json::to_string(&BellMode::Both).unwrap(), "\"both\"");
     }
 
     #[test]
