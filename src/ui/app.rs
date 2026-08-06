@@ -3732,17 +3732,19 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<SelectState<SearchableVec<String>>> {
-        const CODES: &[&str] = &["en", "zh-CN"];
         let labels = || {
-            vec![
-                t(L10nKey::SettingsLanguageEnglish).to_string(),
-                t(L10nKey::SettingsLanguageChinese).to_string(),
-            ]
+            crate::ui::i18n::SUPPORTED_LANGUAGES
+                .iter()
+                .map(|lang| t(lang.label_key).to_string())
+                .collect::<Vec<_>>()
         };
         let cfg = cx.global::<Config>();
         let current = Self::normalize_gui_language(&cfg.gui_language);
         let rows = labels();
-        let selected = CODES.iter().position(|c| *c == current).unwrap_or(0);
+        let selected = crate::ui::i18n::SUPPORTED_LANGUAGES
+            .iter()
+            .position(|lang| lang.code == current)
+            .unwrap_or(0);
         let language_select = cx.new(|cx| {
             SelectState::new(
                 SearchableVec::new(rows),
@@ -3758,7 +3760,9 @@ impl Tty7App {
                 if let SelectEvent::Confirm(Some(label)) = ev {
                     let rows = labels();
                     if let Some(idx) = rows.iter().position(|r| r == label) {
-                        this.set_gui_language(CODES[idx], window, cx);
+                        if let Some(lang) = crate::ui::i18n::SUPPORTED_LANGUAGES.get(idx) {
+                            this.set_gui_language(lang.code, window, cx);
+                        }
                     }
                 }
             },
@@ -3767,10 +3771,9 @@ impl Tty7App {
     }
 
     fn normalize_gui_language(code: &str) -> &'static str {
-        match code {
-            "zh-CN" => "zh-CN",
-            _ => "en",
-        }
+        crate::ui::i18n::find_language(code)
+            .map(|lang| lang.code)
+            .unwrap_or_else(crate::ui::i18n::default_language_code)
     }
 
     pub(crate) fn set_gui_language(
@@ -3792,7 +3795,7 @@ impl Tty7App {
     }
 
     pub(crate) fn refresh_locale_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        const CODES: &[&str] = &["en", "zh-CN"];
+        const CODES: &[&str] = &["en", "zh-CN", "ja-JP"];
         self.sidebar_search.update(cx, |state, cx| {
             state.set_placeholder(t(L10nKey::SearchTabs), window, cx)
         });
@@ -3803,6 +3806,7 @@ impl Tty7App {
             let rows = vec![
                 t(L10nKey::SettingsLanguageEnglish).to_string(),
                 t(L10nKey::SettingsLanguageChinese).to_string(),
+                t(L10nKey::SettingsLanguageJapanese).to_string(),
             ];
             s.language_select.update(cx, |state, cx| {
                 state.set_items(SearchableVec::new(rows), window, cx);
