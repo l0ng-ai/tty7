@@ -104,7 +104,6 @@ pub struct TerminalView {
     /// The verified remote staging directory for pasted images, once one has
     /// been prepared for this pane. `None` means "not prepared yet", never
     /// "preparation failed" — see [`staging_cache`].
-    #[cfg(not(target_os = "macos"))]
     remote_clipboard_dir: Option<String>,
     pub focus_handle: FocusHandle,
     pub font: Font,
@@ -489,7 +488,6 @@ fn clipboard_paste_text(item: &ClipboardItem) -> Option<String> {
     item.text()
 }
 
-#[cfg(not(target_os = "macos"))]
 fn write_clipboard_image(img: &gpui::Image) -> Option<std::path::PathBuf> {
     use gpui::ImageFormat;
     let dir = std::env::temp_dir().join("tty7-clipboard");
@@ -512,7 +510,6 @@ fn write_clipboard_image(img: &gpui::Image) -> Option<std::path::PathBuf> {
 /// workspace pane or a standalone native SSH pane. WSL shares localhost and
 /// needs path translation instead, and a workspace without connection details
 /// has no channel to piggyback on — both keep the local-path behavior.
-#[cfg(not(target_os = "macos"))]
 fn remote_paste_spec<'a>(
     workspace: Option<&'a crate::terminal::PaneWorkspace>,
     ssh_spec: Option<&'a crate::daemon::protocol::NativeSshSpec>,
@@ -526,16 +523,67 @@ fn remote_paste_spec<'a>(
     ssh_spec
 }
 
+/// Whether a pane stages the clipboard image to a file instead of forwarding
+/// SYN and letting the agent read the clipboard itself.
+///
+/// SYN only works because the agent shares a clipboard with the pane. That
+/// holds for a local macOS pane — where it is the better path, carrying the
+/// image at full fidelity — and nowhere else: off macOS Claude Code silently
+/// drops raw screenshots (anthropics/claude-code#26679), and an agent in a
+/// remote pane reads the clipboard of the host it runs on, which never holds
+/// this machine's screenshot no matter what the local OS is.
+fn stages_clipboard_image(is_remote: bool) -> bool {
+    cfg!(not(target_os = "macos")) || is_remote
+}
+
+/// The WSL view of a Windows path: `C:\x\y` becomes `/mnt/c/x/y`.
+///
+/// `None` for anything without a drive letter — a UNC temp directory has no
+/// automount mapping, and `C:x` is drive-relative rather than absolute.
+///
+/// The `/mnt` prefix is WSL's default automount root, not a guaranteed one:
+/// `[automount] root=` in `/etc/wsl.conf` can move it. Asking the distro
+/// (`wslpath -u`) would be exact, but it is a round trip through the daemon on
+/// a keystroke path, and a moved automount root is rare enough that a wrong
+/// path — which the user sees, in their own line, before they send it — beats
+/// making every paste wait on a subprocess.
+fn wsl_path(windows: &str) -> Option<String> {
+    let mut chars = windows.chars();
+    let drive = chars.next()?.to_ascii_lowercase();
+    if !drive.is_ascii_alphabetic() || chars.next()? != ':' {
+        return None;
+    }
+    if !matches!(chars.next()?, '\\' | '/') {
+        return None;
+    }
+    Some(format!(
+        "/mnt/{drive}/{}",
+        chars.as_str().replace('\\', "/")
+    ))
+}
+
+/// The staged image's path as the pane's own filesystem spells it.
+///
+/// A WSL pane shares this machine's disk but not its path syntax: an agent in
+/// there reads `/mnt/c/…` and cannot open `C:\…` at all, which is why the
+/// upload route skips WSL — there is nothing to copy, only a name to rewrite.
+/// A path with no mapping falls back to the Windows one, which at least tells
+/// the user where the file is.
+fn staged_path_for_pane(local: &str, shares_localhost: bool) -> String {
+    if shares_localhost {
+        return wsl_path(local).unwrap_or_else(|| local.to_string());
+    }
+    local.to_string()
+}
+
 /// Staging images under the SSH user's own home keeps them out of the
 /// world-writable `/tmp`, where any local account could pre-create the
 /// directory, read what lands in it, or swap a pasted screenshot for one of
 /// its own before the pane's agent opens it.
-#[cfg(not(target_os = "macos"))]
 const REMOTE_CLIPBOARD_PATH: [&str; 3] = [".cache", "tty7", "clipboard"];
 
 /// Owner-only, and *only* owner: a staging directory anyone else can enter is
 /// one anyone else can read the pasted screenshots out of.
-#[cfg(not(target_os = "macos"))]
 const REMOTE_CLIPBOARD_MODE: u32 = 0o700;
 
 /// Whether a prepared staging directory may be uploaded into.
@@ -546,7 +594,6 @@ const REMOTE_CLIPBOARD_MODE: u32 = 0o700;
 /// exactly `0700` is one the SSH user owns and nobody else can enter. A
 /// symlink is refused outright because `stat` follows links, so a link planted
 /// at the staging path would otherwise be judged by its target.
-#[cfg(not(target_os = "macos"))]
 fn staging_dir_is_safe(
     is_symlink: bool,
     kind: Option<crate::daemon::protocol::SftpEntryKind>,
@@ -563,7 +610,6 @@ fn staging_dir_is_safe(
 /// remote with no POSIX `/home` — must be retried rather than latched, or
 /// every later paste emits a remote path for a directory that was never
 /// created.
-#[cfg(not(target_os = "macos"))]
 fn staging_cache(prepared: &Result<String, String>) -> Option<String> {
     prepared.as_ref().ok().cloned()
 }
@@ -571,7 +617,6 @@ fn staging_cache(prepared: &Result<String, String>) -> Option<String> {
 /// Create and verify the per-user staging directory, answering the absolute
 /// remote path to upload into. Blocking: every step is a daemon round trip
 /// over the pane's SSH connection, so this only ever runs off the UI thread.
-#[cfg(not(target_os = "macos"))]
 fn prepare_remote_clipboard_dir(route: &crate::ui::sftp::SftpRoute) -> Result<String, String> {
     use crate::daemon::protocol::{SftpOp, SftpOpResult};
     let home = match route.op(SftpOp::Realpath {
@@ -617,7 +662,6 @@ fn prepare_remote_clipboard_dir(route: &crate::ui::sftp::SftpRoute) -> Result<St
     }
 }
 
-#[cfg(not(target_os = "macos"))]
 fn transcode_to_png(bytes: &[u8], format: gpui::ImageFormat) -> Option<Vec<u8>> {
     use gpui::ImageFormat as G;
     let src = match format {
@@ -901,7 +945,6 @@ impl TerminalView {
             owner_workspace: None,
             restored: false,
             ssh_spec: None,
-            #[cfg(not(target_os = "macos"))]
             remote_clipboard_dir: None,
             focus_handle,
             font,
@@ -2203,24 +2246,48 @@ impl TerminalView {
     }
 
     fn paste_clipboard_image(&mut self, img: &gpui::Image, cx: &mut Context<Self>) {
-        #[cfg(not(target_os = "macos"))]
-        if let Some(path) = write_clipboard_image(img) {
-            // SSH panes can't see the local temp file, so the image is
-            // uploaded and the *remote* path pasted instead. Every step of
-            // that needs a blocking daemon round trip, which a keystroke
-            // handler must not do, so the remote pane pastes from a background
-            // task and this returns without touching the line.
-            if self.upload_image_for_remote(&path, cx) {
-                return;
-            }
-            let text = shell_escape_path(&path.to_string_lossy());
-            self.paste(format!("{text} "), cx);
+        if self.paste_clipboard_image_as_path(img, cx) {
             return;
         }
-        let _ = img;
         self.terminal.write(vec![0x16]);
         self.terminal.term.lock().selection = None;
         cx.notify();
+    }
+
+    /// Stage the clipboard image and paste a path for it, answering whether
+    /// this took the paste over. `false` leaves the caller forwarding SYN —
+    /// see [`stages_clipboard_image`] for when that is the better path.
+    fn paste_clipboard_image_as_path(&mut self, img: &gpui::Image, cx: &mut Context<Self>) -> bool {
+        let is_remote =
+            remote_paste_spec(self.workspace.as_ref(), self.ssh_spec.as_deref()).is_some();
+        if !stages_clipboard_image(is_remote) {
+            return false;
+        }
+        let Some(path) = write_clipboard_image(img) else {
+            return false;
+        };
+        // SSH panes can't see the local temp file, so the image is uploaded and
+        // the *remote* path pasted instead. Every step of that needs a blocking
+        // daemon round trip, which a keystroke handler must not do, so the
+        // remote pane pastes from a background task and this returns without
+        // touching the line.
+        if self.upload_image_for_remote(&path, cx) {
+            return true;
+        }
+        // The upload declined or could not start. A local path is still worth
+        // pasting where the agent can open it, but on macOS that only ever
+        // happens for a remote pane, whose agent cannot — SYN is the better
+        // last resort there.
+        cfg!(not(target_os = "macos")) && {
+            let shares_localhost = self
+                .workspace
+                .as_ref()
+                .is_some_and(|w| w.shares_localhost());
+            let path = staged_path_for_pane(&path.to_string_lossy(), shares_localhost);
+            let text = shell_escape_path(&path);
+            self.paste(format!("{text} "), cx);
+            true
+        }
     }
 
     /// Upload a locally staged clipboard image to the pane's remote host and
@@ -2231,7 +2298,6 @@ impl TerminalView {
     /// The upload itself still outlives the paste — it has to, or Ctrl+V would
     /// stall on the wire — so the job is watched to completion and a failure
     /// at any point warns the user that the path they were handed is dangling.
-    #[cfg(not(target_os = "macos"))]
     fn upload_image_for_remote(&mut self, local: &std::path::Path, cx: &mut Context<Self>) -> bool {
         use crate::daemon::protocol::{SftpTransferKind, SftpTransferSpec};
         let Some(spec) = remote_paste_spec(self.workspace.as_ref(), self.ssh_spec.as_deref())
@@ -2315,7 +2381,6 @@ impl TerminalView {
 
     /// Fall back to the local path when the remote staging directory cannot be
     /// prepared — the paste is never dropped — and say why it is local.
-    #[cfg(not(target_os = "macos"))]
     fn paste_local_image_path(
         this: &gpui::WeakEntity<Self>,
         cx: &mut gpui::AsyncApp,
@@ -2334,7 +2399,6 @@ impl TerminalView {
     /// SFTP panel reads is only polled while that panel is open, and the
     /// daemon drops finished jobs after 30s, so a paste that no one is
     /// watching would otherwise fail in silence.
-    #[cfg(not(target_os = "macos"))]
     async fn watch_upload(
         route: crate::ui::sftp::SftpRoute,
         job: u64,
@@ -2381,7 +2445,6 @@ impl TerminalView {
 
     /// One notification per failed paste — the pane's line already has a path
     /// in it, and the user is the only one who can tell whether it matters.
-    #[cfg(not(target_os = "macos"))]
     fn warn_image_upload_failed(
         &self,
         host: &str,
@@ -5376,8 +5439,10 @@ mod tests {
         should_show_context_menu, smooth_scroll_step, submit_bytes, trim_trailing_spaces,
         wheel_route, wrapped_click_index,
     };
-    #[cfg(not(target_os = "macos"))]
-    use super::{remote_paste_spec, staging_cache, staging_dir_is_safe};
+    use super::{
+        remote_paste_spec, staged_path_for_pane, stages_clipboard_image, staging_cache,
+        staging_dir_is_safe, wsl_path,
+    };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
     use gpui_component::IconName;
@@ -5597,7 +5662,6 @@ mod tests {
 
     /// The SSH user a paste would be uploaded for, or `None` when the pane
     /// keeps the local-path behavior.
-    #[cfg(not(target_os = "macos"))]
     fn remote_paste_user<'a>(
         workspace: Option<&'a crate::terminal::PaneWorkspace>,
         ssh_spec: Option<&'a crate::daemon::protocol::NativeSshSpec>,
@@ -5605,33 +5669,28 @@ mod tests {
         remote_paste_spec(workspace, ssh_spec).map(|s| s.user.as_str())
     }
 
-    #[cfg(not(target_os = "macos"))]
     fn native_spec() -> crate::daemon::protocol::NativeSshSpec {
         serde_json::from_str(r#"{"host":"dev.box","port":22,"user":"me","auth_mode":"auto"}"#)
             .unwrap()
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn local_pane_pastes_the_local_image_path() {
         assert_eq!(remote_paste_user(None, None), None);
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn ssh_workspace_panes_upload_images_for_the_ssh_user() {
         let w = ws(RemoteTarget::direct("me", "dev.box", 22), true);
         assert_eq!(remote_paste_user(Some(&w), None), Some("me"));
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn standalone_ssh_panes_upload_images_for_the_ssh_user() {
         let spec = native_spec();
         assert_eq!(remote_paste_user(None, Some(&spec)), Some("me"));
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn wsl_and_specless_workspaces_keep_the_local_image_path() {
         let wsl = ws(
@@ -5645,7 +5704,6 @@ mod tests {
         assert_eq!(remote_paste_user(Some(&bare), None), None);
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_staging_dir_is_only_safe_when_it_is_a_private_directory_we_own() {
         use crate::daemon::protocol::SftpEntryKind;
@@ -5687,7 +5745,54 @@ mod tests {
         assert!(!staging_dir_is_safe(false, None, 0o040700));
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_remote_pane_stages_its_clipboard_image_on_every_platform() {
+        // The SYN path leans on the agent sharing a clipboard with the pane,
+        // which a remote agent never does — it reads the clipboard of the host
+        // it runs on, and this machine's screenshot is not in it.
+        assert!(
+            stages_clipboard_image(true),
+            "a remote agent cannot see this machine's clipboard"
+        );
+        // Locally the platform decides: macOS hands the agent the clipboard
+        // itself, which is higher fidelity than a staged file.
+        assert_eq!(
+            stages_clipboard_image(false),
+            cfg!(not(target_os = "macos"))
+        );
+    }
+
+    #[test]
+    fn a_wsl_pane_gets_the_automount_path_not_the_windows_one() {
+        // The staged file really is on the pane's own disk — only its name
+        // differs — so this is a rewrite, not an upload.
+        assert_eq!(
+            staged_path_for_pane(
+                r"C:\Users\me\AppData\Local\Temp\tty7-clipboard\paste-1.png",
+                true
+            ),
+            "/mnt/c/Users/me/AppData/Local/Temp/tty7-clipboard/paste-1.png"
+        );
+        assert_eq!(wsl_path(r"D:\x\y.png").as_deref(), Some("/mnt/d/x/y.png"));
+
+        // No automount mapping: the Windows path at least says where it went.
+        let unc = r"\\server\share\paste-1.png";
+        assert_eq!(wsl_path(unc), None);
+        assert_eq!(staged_path_for_pane(unc, true), unc);
+        // Drive-relative, not absolute — `C:x` means "x under C:'s cwd".
+        assert_eq!(wsl_path(r"C:paste-1.png"), None);
+
+        // Every other pane keeps the path exactly as staged.
+        assert_eq!(
+            staged_path_for_pane("/tmp/tty7-clipboard/paste-1.png", false),
+            "/tmp/tty7-clipboard/paste-1.png"
+        );
+        assert_eq!(
+            staged_path_for_pane(r"C:\Temp\paste-1.png", false),
+            r"C:\Temp\paste-1.png"
+        );
+    }
+
     #[test]
     fn a_failed_staging_preparation_is_retried_rather_than_latched() {
         assert_eq!(
@@ -5699,7 +5804,6 @@ mod tests {
         assert_eq!(staging_cache(&Err("link is down".to_string())), None);
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn staged_images_land_under_the_remote_users_own_home() {
         let mut dir = "/home/me".to_string();
@@ -5714,7 +5818,6 @@ mod tests {
         assert_eq!(super::REMOTE_CLIPBOARD_MODE, 0o700);
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn the_pasted_image_name_stands_alone_as_a_remote_path_component() {
         use crate::daemon::ssh::sftp::safe_local_name;
@@ -5787,7 +5890,6 @@ mod tests {
         assert_eq!(argv, vec!["code", "--goto", "{other}"]);
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn clipboard_image_transcodes_bmp_to_png_and_passes_png_through() {
         use gpui::{Image, ImageFormat};
@@ -5806,6 +5908,28 @@ mod tests {
             .unwrap();
         assert_eq!(out.extension().unwrap(), "png");
         assert_eq!(std::fs::read(&out).unwrap(), png);
+    }
+
+    /// A macOS screenshot reaches the pasteboard as TIFF, which agent vision
+    /// rejects the same way it rejects a Windows BMP. The transcode depends on
+    /// `image`'s TIFF decoder being compiled in — without it this fails at
+    /// runtime by quietly staging nothing, which reads as "paste did nothing".
+    #[test]
+    fn a_macos_tiff_screenshot_is_staged_as_png() {
+        use gpui::{Image, ImageFormat};
+
+        let pixel = image::RgbaImage::from_pixel(1, 1, image::Rgba([4, 5, 6, 255]));
+        let mut tiff = Vec::new();
+        image::DynamicImage::ImageRgba8(pixel)
+            .write_to(
+                &mut std::io::Cursor::new(&mut tiff),
+                image::ImageFormat::Tiff,
+            )
+            .unwrap();
+        let path =
+            super::write_clipboard_image(&Image::from_bytes(ImageFormat::Tiff, tiff)).unwrap();
+        assert_eq!(path.extension().unwrap(), "png");
+        assert_eq!(&std::fs::read(&path).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
     }
 
     #[test]

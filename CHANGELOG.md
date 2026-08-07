@@ -65,6 +65,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pasting a screenshot into a remote pane works on macOS too** — the
+  clipboard-image paste that stages a file and hands the agent its path was
+  built off macOS only, because a local macOS agent reads the system
+  clipboard itself when it sees Ctrl+V and that carries the image at full
+  fidelity. The reasoning stops at the pane boundary: an agent in an SSH
+  pane or a remote workspace reads the clipboard of the host *it* runs on,
+  which never holds this machine's screenshot, so SYN was a no-op and the
+  paste did nothing at all. Remote panes now stage and upload on every
+  platform, while a local macOS pane keeps SYN untouched. macOS screenshots
+  arrive as TIFF, which agent vision rejects the same way it rejects a
+  Windows BMP, so those transcode to PNG on the way out. (#338)
+
+- **A WSL pane is handed a path it can actually open** — the same paste
+  staged its file on the Windows side and pasted the Windows name for it, so
+  an agent in WSL got `C:\Users\…\paste-1.png` and found nothing there. A
+  WSL pane shares this machine's disk but not its path syntax, so there is
+  nothing to upload and only a name to rewrite: the paste now carries the
+  automount view, `/mnt/c/Users/…`. A path with no mapping — a UNC temp
+  directory — keeps the Windows name, which at least says where the file
+  went. (#338)
+
 - **Scoop shims work again when tty7 is launched from a hardened Windows
   shell broker** — some brokers enforce `ProcessRedirectionTrustPolicy` on
   what they start. The daemon inherited it, every ConPTY shell under the
