@@ -103,6 +103,14 @@ const SCROLL_ANIM_FRAME: std::time::Duration = std::time::Duration::from_millis(
 /// twentieth of a line is around a pixel — the tail of an exponential decay is
 /// invisible long before it ends, and every frame of it costs a full repaint.
 const SCROLL_ANIM_MIN: f32 = 0.05;
+/// A jump smaller than this reads as continuous already; spreading it would
+/// only put lag between the hand and the grid. Inching a wheel one detent at a
+/// time lands here, and so does every event a trackpad sends.
+const SCROLL_ANIM_MIN_JUMP: f32 = 1.0;
+/// How long a trackpad gesture stays "live" after its last event. Long enough
+/// to bridge the gaps in a momentum tail, short enough that reaching for the
+/// wheel right after a swipe is not mistaken for more of the swipe.
+const SCROLL_GESTURE_IDLE: std::time::Duration = std::time::Duration::from_millis(150);
 
 fn cwd_is_on_host(pane_runs_remotely: bool, host_is_local: bool) -> bool {
     match pane_runs_remotely {
@@ -139,6 +147,7 @@ pub struct TerminalView {
     drag_scroll_epoch: u64,
     scroll_anim: Option<ScrollAnim>,
     scroll_anim_epoch: u64,
+    gesture_until: Option<std::time::Instant>,
     pub title: String,
     pub marked_text: String,
     last_mouse_cell: Option<(usize, usize)>,
@@ -938,6 +947,7 @@ impl TerminalView {
             drag_scroll_epoch: 0,
             scroll_anim: None,
             scroll_anim_epoch: 0,
+            gesture_until: None,
             title: "tty7".to_string(),
             marked_text: String::new(),
             last_mouse_cell: None,
@@ -3990,14 +4000,12 @@ impl TerminalView {
 
     fn on_scroll(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let mult = cx.global::<Config>().mouse_scroll_multiplier;
-        // A wheel notch is one discrete pulse — applying it whole is what makes
-        // scrolling look like it jumps. A trackpad already sends a fine-grained
-        // pixel stream, so it stays on the direct path.
-        let (raw, discrete) = match ev.delta {
-            ScrollDelta::Lines(p) => (p.y, true),
-            ScrollDelta::Pixels(p) => (p.y.as_f32() / self.line_height.as_f32(), false),
+        let raw = match ev.delta {
+            ScrollDelta::Lines(p) => p.y,
+            ScrollDelta::Pixels(p) => p.y.as_f32() / self.line_height.as_f32(),
         };
         let delta = raw * mult;
+        let gesturing = self.track_scroll_gesture(ev.touch_phase);
 
         let quantized = !ev.modifiers.shift && {
             let mode = *self.terminal.term.lock().mode();
@@ -4017,12 +4025,42 @@ impl TerminalView {
             return;
         }
 
-        if discrete && cx.global::<Config>().smooth_scroll {
+        if self.should_animate_scroll(delta, gesturing, cx) {
             self.queue_scroll_anim(delta, cx);
         } else {
             self.cancel_scroll_anim();
             self.smooth_scroll(delta, cx);
         }
+    }
+
+    /// Track whether the pointing device is mid-gesture, which is what tells a
+    /// trackpad apart from a wheel.
+    ///
+    /// Not the delta *type*: macOS reports a wheel mouse as pixels too — one
+    /// notch arrives as a single ~100px event — so `Pixels` says nothing about
+    /// the device. Phase does: only devices that can gesture ever report
+    /// `Started`/`Ended`, and a wheel is `Moved` forever, on every platform.
+    ///
+    /// The gesture is held open on a timer rather than closed on `Ended`,
+    /// because lifting the fingers is not the end of the stream — the momentum
+    /// tail keeps delivering `Moved` events, larger than the gesture itself,
+    /// and animating those would put a second layer of smoothing on scrolling
+    /// the system is already smoothing.
+    fn track_scroll_gesture(&mut self, phase: gpui::TouchPhase) -> bool {
+        let now = std::time::Instant::now();
+        let live = matches!(phase, gpui::TouchPhase::Started)
+            || self.gesture_until.is_some_and(|until| now < until);
+        self.gesture_until = live.then(|| now + SCROLL_GESTURE_IDLE);
+        live
+    }
+
+    fn should_animate_scroll(&self, delta: f32, gesturing: bool, cx: &App) -> bool {
+        if gesturing || !cx.global::<Config>().smooth_scroll {
+            return false;
+        }
+        // Anything already in flight keeps accumulating, or a slow notch
+        // arriving mid-animation would fight the frames still to come.
+        self.scroll_anim.is_some() || delta.abs() >= SCROLL_ANIM_MIN_JUMP
     }
 
     /// Add `delta` to the in-flight animation, starting the frame loop if it is
@@ -8122,25 +8160,36 @@ mod gpui_tests {
         view.terminal.term.lock().grid().display_offset()
     }
 
-    fn wheel(delta: gpui::ScrollDelta) -> ScrollWheelEvent {
+    /// Shaped after what macOS actually delivers, measured on a wheel mouse and
+    /// a trackpad: both arrive as pixels, and only the trackpad ever reports a
+    /// phase. One wheel detent is ~103px, roughly five lines at a 21px line
+    /// height; a trackpad event is a fraction of that but can reach ~3 lines
+    /// when flicked, which is why phase and not size decides.
+    fn wheel(view: &TerminalView, lines: f32, phase: gpui::TouchPhase) -> ScrollWheelEvent {
         ScrollWheelEvent {
-            delta,
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(lines * view.line_height.as_f32()))),
+            touch_phase: phase,
             ..Default::default()
         }
     }
 
-    /// The whole point of the animation: a notch must not land in one go.
+    fn notch(view: &TerminalView, lines: f32) -> ScrollWheelEvent {
+        wheel(view, lines, gpui::TouchPhase::Moved)
+    }
+
+    /// The whole point of the animation: a detent must not land in one go.
     #[gpui::test]
     fn a_wheel_notch_is_spread_over_frames(cx: &mut TestAppContext) {
         let (window, _daemon) = harness(cx);
         window
             .update(cx, |view, w, cx| {
                 scroll_into_history(view, 10);
-                view.on_scroll(&wheel(gpui::ScrollDelta::Lines(point(0., -3.))), w, cx);
+                let ev = notch(view, -4.9);
+                view.on_scroll(&ev, w, cx);
                 assert_eq!(
                     display_offset(view),
                     10,
-                    "the notch was applied whole, before a single frame ran"
+                    "the detent was applied whole, before a single frame ran"
                 );
                 assert_eq!(view.scroll_frac, 0., "and not even a sliver of it");
                 assert!(view.scroll_anim.is_some(), "nothing was left to animate");
@@ -8149,24 +8198,66 @@ mod gpui_tests {
     }
 
     /// A trackpad is already a continuous stream — animating it would only put
-    /// lag between the fingers and the grid.
+    /// lag between the fingers and the grid. It is told apart by its phase, not
+    /// by its delta type or size: a flick moves further in one event than a
+    /// slowly inched wheel does.
     #[gpui::test]
-    fn a_trackpad_still_scrolls_the_instant_it_is_touched(cx: &mut TestAppContext) {
+    fn a_trackpad_gesture_scrolls_the_instant_it_is_touched(cx: &mut TestAppContext) {
         let (window, _daemon) = harness(cx);
         window
             .update(cx, |view, w, cx| {
                 scroll_into_history(view, 10);
-                let lines = view.line_height.as_f32() * -3.;
-                view.on_scroll(
-                    &wheel(gpui::ScrollDelta::Pixels(point(px(0.), px(lines)))),
-                    w,
-                    cx,
-                );
-                assert_eq!(display_offset(view), 7, "the pixels were held back");
+                let ev = wheel(view, -3., gpui::TouchPhase::Started);
+                view.on_scroll(&ev, w, cx);
+                assert_eq!(display_offset(view), 7, "the gesture was held back");
                 assert!(
                     view.scroll_anim.is_none(),
                     "a trackpad started an animation"
                 );
+            })
+            .unwrap();
+    }
+
+    /// Lifting the fingers does not end the stream: macOS keeps sending Moved
+    /// events for the momentum tail, and they are *larger* than the gesture
+    /// that spawned them. Treating those as a wheel would smooth what the
+    /// system is already smoothing.
+    #[gpui::test]
+    fn a_momentum_tail_is_not_mistaken_for_a_wheel(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, w, cx| {
+                scroll_into_history(view, 10);
+                for (lines, phase) in [
+                    (-0.5, gpui::TouchPhase::Started),
+                    (-1.2, gpui::TouchPhase::Moved),
+                    (0., gpui::TouchPhase::Ended),
+                    (-2.9, gpui::TouchPhase::Moved),
+                    (-2.4, gpui::TouchPhase::Moved),
+                ] {
+                    let ev = wheel(view, lines, phase);
+                    view.on_scroll(&ev, w, cx);
+                    assert!(
+                        view.scroll_anim.is_none(),
+                        "the momentum tail was animated at {lines} lines"
+                    );
+                }
+                assert_eq!(display_offset(view), 3, "the tail did not all land");
+            })
+            .unwrap();
+    }
+
+    /// Inching the wheel one detent at a time reads as continuous already.
+    #[gpui::test]
+    fn a_scroll_too_small_to_see_jump_stays_direct(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, w, cx| {
+                scroll_into_history(view, 10);
+                let ev = notch(view, -0.57);
+                view.on_scroll(&ev, w, cx);
+                assert!(view.scroll_anim.is_none(), "half a line was animated");
+                assert!(view.scroll_frac > 0., "and it did not move either");
             })
             .unwrap();
     }
@@ -8178,7 +8269,8 @@ mod gpui_tests {
         window
             .update(cx, |view, w, cx| {
                 scroll_into_history(view, 10);
-                view.on_scroll(&wheel(gpui::ScrollDelta::Lines(point(0., -3.))), w, cx);
+                let ev = notch(view, -3.);
+                view.on_scroll(&ev, w, cx);
                 assert_eq!(display_offset(view), 7);
                 assert!(view.scroll_anim.is_none());
             })
@@ -8193,7 +8285,8 @@ mod gpui_tests {
         window
             .update(cx, |view, w, cx| {
                 scroll_into_history(view, 10);
-                view.on_scroll(&wheel(gpui::ScrollDelta::Lines(point(0., -3.))), w, cx);
+                let ev = notch(view, -4.9);
+                view.on_scroll(&ev, w, cx);
                 assert!(view.scroll_anim.is_some());
 
                 view.jump_to_prompt();

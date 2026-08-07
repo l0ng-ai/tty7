@@ -78,20 +78,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time, and the view jumped three lines per notch — the sub-line machinery was
   present and never engaged. That is the "no smooth scroll on Windows" report.
 
-  A 120-step wheel notch is one discrete pulse; no amount of arithmetic on the
-  delta recovers a continuous gesture from it. So the fix is to make position a
-  function of time: a notch adds to a remaining distance, and each frame
+  macOS was no better, just differently broken: it reports a wheel mouse as
+  *pixels* too — `hasPreciseScrollingDeltas` is set — so the fraction was never
+  zero, but one detent arrives as a single ~103px event, which at a 21px line
+  height is a five-line jump applied in one go. Worse than Windows, and
+  invisible to any check based on the delta's type.
+
+  A wheel detent is one discrete pulse; no amount of arithmetic on the delta
+  recovers a continuous gesture from it. So the fix is to make position a
+  function of time: a detent adds to a remaining distance, and each frame
   consumes a share of what is left. Roughly 120ms to land, exponential, so most
   of the travel happens immediately and the tail is invisible — under a pixel
   of remainder is snapped rather than approached, since every frame of it costs
   a repaint.
 
-  Trackpads keep the direct path. They already deliver a continuous pixel
-  stream, and putting an animation between the fingers and the grid would only
-  add lag. The split falls out of the event itself — line deltas are discrete
-  and get animated, pixel deltas are continuous and do not. Mouse reporting and
-  alternate-scroll are untouched too: those forward whole lines to the
-  application, which cannot be spread over frames.
+  Trackpads keep the direct path; putting an animation between the fingers and
+  the grid would only add lag. What separates the two is **phase**, not delta
+  type and not delta size — measured on this machine, a trackpad flick moves up
+  to ~3 lines in one event while an inched wheel moves ~0.6, so size overlaps
+  badly, but only a device that can gesture ever reports `Started`/`Ended`, and
+  a wheel is `Moved` forever on every platform. The gesture is then held open
+  on a 150ms idle timer rather than closed on `Ended`, because lifting the
+  fingers is not the end of the stream: the momentum tail keeps delivering
+  `Moved` events *larger* than the gesture itself, and animating those would
+  smooth what the system is already smoothing.
+
+  Two more things stay direct. A jump under a line reads as continuous already
+  — inching a wheel one detent at a time lands there — and mouse reporting and
+  alternate-scroll forward whole lines to the application, which cannot be
+  spread over frames at all.
 
   The distance in flight is relative, not an absolute target, so output
   arriving mid-scroll shifts the grid without dragging the animation somewhere

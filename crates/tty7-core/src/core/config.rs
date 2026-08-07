@@ -195,9 +195,9 @@ pub struct Config {
     pub mouse_hide_while_typing: bool,
     pub focus_follows_mouse: bool,
     pub mouse_scroll_multiplier: f32,
-    /// Spread a wheel notch over several frames instead of jumping the whole
-    /// distance at once. Only affects discrete wheel input — trackpads already
-    /// deliver a continuous pixel stream, and animating that would just add lag.
+    /// Spread a wheel detent over several frames instead of jumping the whole
+    /// distance at once. Trackpad gestures are left alone — they are already a
+    /// continuous stream, and animating one would just add lag.
     #[serde(default = "default_true")]
     pub smooth_scroll: bool,
     #[serde(default = "default_true")]
