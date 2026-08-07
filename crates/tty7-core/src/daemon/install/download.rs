@@ -2,6 +2,7 @@ use std::io::Read as _;
 use std::time::Duration;
 
 use super::AssetFetcher;
+use super::proxy;
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -13,15 +14,25 @@ pub struct HttpsFetcher {
     agent: ureq::Agent,
 }
 
+impl HttpsFetcher {
+    pub fn new(manual_proxy: Option<&str>) -> Self {
+        let mut builder = ureq::Agent::config_builder()
+            .timeout_global(Some(DOWNLOAD_TIMEOUT))
+            .user_agent(concat!("tty7/", env!("CARGO_PKG_VERSION")));
+
+        if let Some(proxy) = proxy::resolve("https://github.com", manual_proxy) {
+            builder = builder.proxy(Some(proxy));
+        }
+
+        Self {
+            agent: builder.build().into(),
+        }
+    }
+}
+
 impl Default for HttpsFetcher {
     fn default() -> Self {
-        let config = ureq::Agent::config_builder()
-            .timeout_global(Some(DOWNLOAD_TIMEOUT))
-            .user_agent(concat!("tty7/", env!("CARGO_PKG_VERSION")))
-            .build();
-        Self {
-            agent: config.into(),
-        }
+        Self::new(None)
     }
 }
 

@@ -177,14 +177,6 @@ pub struct Config {
     pub restore_session: bool,
     #[serde(default = "default_true")]
     pub show_tray_icon: bool,
-    /// Windows: stamp a status dot on each window's taskbar button — amber
-    /// when an agent needs input, blue while a command or agent works, green
-    /// when work finished unfocused (cleared on activation). Colors match the
-    /// in-window status dots. On by default; the overlay poll re-reads this
-    /// every second, so the toggle and a `config.json` hot-reload apply live.
-    /// Ignored off Windows (a macOS Dock badge would be its own setting).
-    #[serde(default = "default_true")]
-    pub taskbar_status_icon: bool,
     #[serde(default = "default_true")]
     pub confirm_window_close: bool,
     #[serde(default, deserialize_with = "de_lenient")]
@@ -205,6 +197,15 @@ pub struct Config {
     pub mouse_reporting: bool,
     pub clipboard_trim_trailing_spaces: bool,
     pub copy_on_select: bool,
+    /// Optional HTTP/SOCKS proxy for tty7's *own* update checks and release
+    /// downloads; when set it overrides the system proxy and the environment.
+    /// Programs running in a pane are unaffected — they inherit their proxy
+    /// from their own environment, as in any other terminal.
+    ///
+    /// Normalised by [`Config::sanitize`], so `Some` always means a non-blank
+    /// value. Examples: `http://127.0.0.1:7890`, `socks5://127.0.0.1:1080`.
+    #[serde(default)]
+    pub http_proxy: Option<String>,
     #[serde(default = "default_true")]
     pub smart_select: bool,
     #[serde(default = "default_word_separators")]
@@ -426,7 +427,6 @@ impl Default for Config {
             notify_threshold_secs: default_notify_threshold_secs(),
             restore_session: true,
             show_tray_icon: true,
-            taskbar_status_icon: true,
             confirm_window_close: true,
             bell: BellMode::Visual,
             tab_completion: true,
@@ -439,6 +439,7 @@ impl Default for Config {
             mouse_reporting: true,
             clipboard_trim_trailing_spaces: false,
             copy_on_select: false,
+            http_proxy: None,
             smart_select: true,
             word_separators: default_word_separators(),
             startup_mode: StartupMode::Normal,
@@ -511,6 +512,13 @@ impl Config {
         {
             self.link_file_command = None;
         }
+        // Normalise here so every reader can take the field as-is instead of
+        // repeating a trim-and-drop-if-blank dance.
+        self.http_proxy = self
+            .http_proxy
+            .take()
+            .map(|proxy| proxy.trim().to_string())
+            .filter(|proxy| !proxy.is_empty());
         match self.gui_language.as_str() {
             "en" | "zh-CN" => {}
             _ => self.gui_language = default_gui_language(),
@@ -687,7 +695,6 @@ fn default_prefix() -> String {
 pub enum RightPanelTab {
     #[default]
     Info,
-    Outline,
     Changes,
     Files,
 }
@@ -1102,6 +1109,25 @@ mod tests {
         assert_eq!(clamp(0), 1);
         assert_eq!(clamp(10), 10);
         assert_eq!(clamp(100_000), 3600);
+    }
+
+    #[test]
+    fn sanitize_normalizes_blank_http_proxy_to_none() {
+        let normalize = |proxy: Option<&str>| {
+            let mut cfg = Config {
+                http_proxy: proxy.map(String::from),
+                ..Config::default()
+            };
+            cfg.sanitize();
+            cfg.http_proxy
+        };
+        assert_eq!(normalize(None), None);
+        assert_eq!(normalize(Some("")), None);
+        assert_eq!(normalize(Some("   ")), None);
+        assert_eq!(
+            normalize(Some("  http://127.0.0.1:7890 ")),
+            Some("http://127.0.0.1:7890".to_string())
+        );
     }
 
     #[test]

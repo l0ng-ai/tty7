@@ -32,10 +32,6 @@ pub mod ssh_prompt;
 pub mod switcher;
 pub mod tab_sidebar;
 pub mod tab_strip;
-// Taskbar overlay badges are a Windows concept (`ITaskbarList3`); macOS's
-// Dock badge would be this module's sibling, not its port.
-#[cfg(windows)]
-pub mod taskbar;
 pub mod theme;
 pub mod tray;
 pub mod tree_sync;

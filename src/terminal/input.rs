@@ -5,24 +5,34 @@ use super::view::TerminalView;
 #[cfg(target_os = "macos")]
 use crate::core::config::Config;
 
+/// Everything about the terminal's current state that changes how a keystroke
+/// is encoded: the kitty protocol flags, plus DECCKM (application cursor keys).
 #[derive(Clone, Copy, Default)]
-pub(super) struct KittyFlags {
+pub(super) struct KeyFlags {
     disambiguate: bool,
     report_all_keys: bool,
     report_text: bool,
+    /// DECCKM. ncurses apps turn this on via `smkx` and then only recognise the
+    /// SS3 form of the arrow keys, because that is what `kcuu1` & co. spell.
+    app_cursor: bool,
 }
 
-impl KittyFlags {
+impl KeyFlags {
     pub(super) fn from_mode(mode: &TermMode) -> Self {
         Self {
             disambiguate: mode.contains(TermMode::DISAMBIGUATE_ESC_CODES),
             report_all_keys: mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC),
             report_text: mode.contains(TermMode::REPORT_ASSOCIATED_TEXT),
+            app_cursor: mode.contains(TermMode::APP_CURSOR),
         }
     }
 
-    pub(super) fn active(self) -> bool {
+    pub(super) fn kitty_active(self) -> bool {
         self.disambiguate || self.report_all_keys
+    }
+
+    pub(super) fn app_cursor(self) -> bool {
+        self.app_cursor
     }
 }
 
@@ -63,8 +73,8 @@ pub(super) fn reshape_option_keystroke(
 }
 
 #[cfg(any(target_os = "macos", test))]
-pub(super) fn defer_to_ime(ks: &gpui::Keystroke, kitty: KittyFlags) -> bool {
-    if kitty.report_all_keys {
+pub(super) fn defer_to_ime(ks: &gpui::Keystroke, flags: KeyFlags) -> bool {
+    if flags.report_all_keys {
         return false;
     }
     let m = &ks.modifiers;
@@ -82,17 +92,17 @@ pub(super) fn meta_chord_bypasses_ime(ks: &gpui::Keystroke, option_as_alt: bool)
     option_as_alt && m.alt && !m.platform && !m.control
 }
 
-pub(super) fn keystroke_to_bytes(ks: &gpui::Keystroke, kitty: KittyFlags) -> Option<Vec<u8>> {
-    if kitty.active() && !ks.modifiers.platform {
-        if let Some(bytes) = encode_kitty(ks, kitty) {
+pub(super) fn keystroke_to_bytes(ks: &gpui::Keystroke, flags: KeyFlags) -> Option<Vec<u8>> {
+    if flags.kitty_active() && !ks.modifiers.platform {
+        if let Some(bytes) = encode_kitty(ks, flags) {
             return Some(bytes);
         }
     }
-    legacy_keystroke_to_bytes(ks)
+    legacy_keystroke_to_bytes(ks, flags)
 }
 
-pub(super) fn tab_bytes(shift: bool, kitty: KittyFlags) -> Vec<u8> {
-    if kitty.active() && (shift || kitty.report_all_keys) {
+pub(super) fn tab_bytes(shift: bool, flags: KeyFlags) -> Vec<u8> {
+    if flags.kitty_active() && (shift || flags.report_all_keys) {
         if shift {
             b"\x1b[9;2u".to_vec()
         } else {
@@ -105,18 +115,15 @@ pub(super) fn tab_bytes(shift: bool, kitty: KittyFlags) -> Vec<u8> {
     }
 }
 
-fn encode_kitty(ks: &gpui::Keystroke, kitty: KittyFlags) -> Option<Vec<u8>> {
+/// xterm's modifier parameter: 1 plus a bitmask of shift/alt/control. The
+/// platform (cmd) modifier has no xterm encoding and is deliberately left out.
+fn xterm_mods(m: &gpui::Modifiers) -> u32 {
+    1 + u32::from(m.shift) + 2 * u32::from(m.alt) + 4 * u32::from(m.control)
+}
+
+fn encode_kitty(ks: &gpui::Keystroke, kitty: KeyFlags) -> Option<Vec<u8>> {
     let m = &ks.modifiers;
-    let mut mods = 1u32;
-    if m.shift {
-        mods += 1;
-    }
-    if m.alt {
-        mods += 2;
-    }
-    if m.control {
-        mods += 4;
-    }
+    let mods = xterm_mods(m);
 
     if ks.key.as_str() == "escape" {
         return Some(csi_u(27, mods, None));
@@ -135,7 +142,7 @@ fn encode_kitty(ks: &gpui::Keystroke, kitty: KittyFlags) -> Option<Vec<u8>> {
         return Some(csi_u(code, mods, None));
     }
 
-    if let Some(seq) = kitty_functional(ks.key.as_str(), mods) {
+    if let Some(seq) = functional_key(ks.key.as_str(), mods, kitty.app_cursor()) {
         return Some(seq);
     }
 
@@ -164,7 +171,15 @@ fn csi_u(code: u32, mods: u32, text: Option<&[u32]>) -> Vec<u8> {
     s.into_bytes()
 }
 
-fn kitty_functional(key: &str, mods: u32) -> Option<Vec<u8>> {
+/// The cursor and editing keys, encoded the way `xterm-256color`'s terminfo
+/// says they are — which is what we advertise in `$TERM`, and what ncurses
+/// matches against byte for byte.
+///
+/// Unmodified, the letter keys follow DECCKM: `CSI A` normally, `SS3 A` once
+/// the app has turned on application cursor keys (`smkx`). Modified, they are
+/// always the `CSI 1;<mods>A` form — xterm ignores DECCKM there, and so does
+/// terminfo (`kUP3=\E[1;3A` and friends).
+fn functional_key(key: &str, mods: u32, app_cursor: bool) -> Option<Vec<u8>> {
     let letter = match key {
         "up" => Some('A'),
         "down" => Some('B'),
@@ -175,10 +190,10 @@ fn kitty_functional(key: &str, mods: u32) -> Option<Vec<u8>> {
         _ => None,
     };
     if let Some(l) = letter {
-        let s = if mods != 1 {
-            format!("\x1b[1;{mods}{l}")
-        } else {
-            format!("\x1b[{l}")
+        let s = match (mods, app_cursor) {
+            (1, false) => format!("\x1b[{l}"),
+            (1, true) => format!("\x1bO{l}"),
+            _ => format!("\x1b[1;{mods}{l}"),
         };
         return Some(s.into_bytes());
     }
@@ -224,7 +239,7 @@ fn associated_text(ks: &gpui::Keystroke) -> Option<Vec<u32>> {
     (!cps.is_empty()).then_some(cps)
 }
 
-fn legacy_keystroke_to_bytes(ks: &gpui::Keystroke) -> Option<Vec<u8>> {
+fn legacy_keystroke_to_bytes(ks: &gpui::Keystroke, flags: KeyFlags) -> Option<Vec<u8>> {
     let m = &ks.modifiers;
     let key = ks.key.as_str();
 
@@ -270,21 +285,15 @@ fn legacy_keystroke_to_bytes(ks: &gpui::Keystroke) -> Option<Vec<u8>> {
         }
     }
 
+    if let Some(seq) = functional_key(key, xterm_mods(m), flags.app_cursor()) {
+        return Some(seq);
+    }
+
     let seq: Option<&[u8]> = match key {
         "enter" => Some(b"\r"),
         "tab" => Some(b"\t"),
         "backspace" => Some(b"\x7f"),
         "escape" => Some(b"\x1b"),
-        "up" => Some(b"\x1b[A"),
-        "down" => Some(b"\x1b[B"),
-        "right" => Some(b"\x1b[C"),
-        "left" => Some(b"\x1b[D"),
-        "home" => Some(b"\x1b[H"),
-        "end" => Some(b"\x1b[F"),
-        "pageup" => Some(b"\x1b[5~"),
-        "pagedown" => Some(b"\x1b[6~"),
-        "delete" => Some(b"\x1b[3~"),
-        "insert" => Some(b"\x1b[2~"),
         _ => None,
     };
     if let Some(seq) = seq {
@@ -429,7 +438,7 @@ impl InputHandler for TerminalInputHandler {
         if meta_chord_bypasses_ime(keystroke, cx.global::<Config>().macos_option_as_alt) {
             return false;
         }
-        if self.view.read(cx).kitty_flags().report_all_keys {
+        if self.view.read(cx).key_flags().report_all_keys {
             return false;
         }
         if window.has_pending_keystrokes() {
@@ -442,29 +451,31 @@ impl InputHandler for TerminalInputHandler {
 #[cfg(test)]
 mod tests {
     use super::{
-        KittyFlags, defer_to_ime, keystroke_to_bytes, meta_chord_bypasses_ime,
+        KeyFlags, defer_to_ime, keystroke_to_bytes, meta_chord_bypasses_ime,
         reshape_option_keystroke, tab_bytes,
     };
     use gpui::{Keystroke, Modifiers};
 
-    fn full_mode() -> KittyFlags {
-        KittyFlags {
+    fn full_mode() -> KeyFlags {
+        KeyFlags {
             disambiguate: true,
             report_all_keys: true,
             report_text: true,
+            app_cursor: false,
         }
     }
 
-    fn disambiguate_only() -> KittyFlags {
-        KittyFlags {
+    fn disambiguate_only() -> KeyFlags {
+        KeyFlags {
             disambiguate: true,
             report_all_keys: false,
             report_text: false,
+            app_cursor: false,
         }
     }
 
     fn legacy(ks: &Keystroke) -> Option<Vec<u8>> {
-        keystroke_to_bytes(ks, KittyFlags::default())
+        keystroke_to_bytes(ks, KeyFlags::default())
     }
 
     fn ks(mods: Modifiers, key: &str, key_char: Option<&str>) -> Keystroke {
@@ -480,7 +491,7 @@ mod tests {
         let plain = Modifiers::default();
         let a = ks(plain, "a", Some("a"));
 
-        assert!(defer_to_ime(&a, KittyFlags::default()));
+        assert!(defer_to_ime(&a, KeyFlags::default()));
         assert!(defer_to_ime(&a, disambiguate_only()));
 
         assert!(!defer_to_ime(&a, full_mode()));
@@ -490,7 +501,7 @@ mod tests {
         );
 
         let space = ks(plain, "space", Some(" "));
-        assert!(defer_to_ime(&space, KittyFlags::default()));
+        assert!(defer_to_ime(&space, KeyFlags::default()));
         assert!(!defer_to_ime(&space, full_mode()));
     }
 
@@ -501,28 +512,25 @@ mod tests {
             ..Default::default()
         };
         let upper = ks(shift, "a", Some("A"));
-        assert!(defer_to_ime(&upper, KittyFlags::default()));
+        assert!(defer_to_ime(&upper, KeyFlags::default()));
         assert!(!defer_to_ime(&upper, full_mode()));
     }
 
     #[test]
     fn non_text_keys_never_defer_to_the_ime() {
         let plain = Modifiers::default();
-        assert!(!defer_to_ime(
-            &ks(plain, "left", None),
-            KittyFlags::default()
-        ));
+        assert!(!defer_to_ime(&ks(plain, "left", None), KeyFlags::default()));
         assert!(!defer_to_ime(
             &ks(plain, "backspace", None),
-            KittyFlags::default()
+            KeyFlags::default()
         ));
         assert!(!defer_to_ime(
             &ks(plain, "enter", Some("\n")),
-            KittyFlags::default()
+            KeyFlags::default()
         ));
         assert!(!defer_to_ime(
             &ks(plain, "tab", Some("\t")),
-            KittyFlags::default()
+            KeyFlags::default()
         ));
         let ctrl = Modifiers {
             control: true,
@@ -530,7 +538,7 @@ mod tests {
         };
         assert!(!defer_to_ime(
             &ks(ctrl, "c", Some("c")),
-            KittyFlags::default()
+            KeyFlags::default()
         ));
     }
 
@@ -571,7 +579,10 @@ mod tests {
             alt: true,
             ..Default::default()
         };
-        assert_eq!(legacy(&ks(alt, "up", None)), Some(b"\x1b\x1b[A".to_vec()));
+        // Named keys carry their modifiers in the sequence (kUP3), rather than
+        // taking the meta-ESC prefix the way enter/tab/backspace do.
+        assert_eq!(legacy(&ks(alt, "up", None)), Some(b"\x1b[1;3A".to_vec()));
+        assert_eq!(legacy(&ks(alt, "enter", None)), Some(b"\x1b\r".to_vec()));
     }
 
     #[test]
@@ -635,6 +646,118 @@ mod tests {
         }
     }
 
+    fn app_cursor() -> KeyFlags {
+        KeyFlags {
+            app_cursor: true,
+            ..Default::default()
+        }
+    }
+
+    /// The bug behind issue #361: htop turns on DECCKM, `xterm-256color` spells
+    /// `kcuu1` as `\EOA`, and ncurses matches nothing else. Sending `\E[A` there
+    /// left htop reading the bytes one at a time -- and `[` is bound to "lower
+    /// priority", so every Up/Down bumped the selected process's nice value.
+    #[test]
+    fn app_cursor_mode_switches_the_arrow_keys_to_ss3() {
+        let none = Modifiers::default();
+        let cases: &[(&str, &[u8])] = &[
+            ("up", b"\x1bOA"),
+            ("down", b"\x1bOB"),
+            ("right", b"\x1bOC"),
+            ("left", b"\x1bOD"),
+            ("home", b"\x1bOH"),
+            ("end", b"\x1bOF"),
+        ];
+        for (key, seq) in cases {
+            assert_eq!(
+                keystroke_to_bytes(&ks(none, key, None), app_cursor()).as_deref(),
+                Some(*seq),
+                "{key} under DECCKM"
+            );
+            // The kitty encoder shares the same table, so it has to agree.
+            let kitty_app = KeyFlags {
+                app_cursor: true,
+                ..kitty()
+            };
+            assert_eq!(
+                keystroke_to_bytes(&ks(none, key, None), kitty_app).as_deref(),
+                Some(*seq),
+                "{key} under DECCKM + kitty"
+            );
+        }
+    }
+
+    /// DECCKM only governs the unmodified form. xterm -- and terminfo's `kUP5`
+    /// & co. -- keep the CSI form once a modifier is in play.
+    #[test]
+    fn app_cursor_mode_leaves_modified_arrows_and_tilde_keys_alone() {
+        let ctrl = Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            keystroke_to_bytes(&ks(ctrl, "up", None), app_cursor()),
+            Some(b"\x1b[1;5A".to_vec())
+        );
+        let none = Modifiers::default();
+        for key in ["pageup", "pagedown", "delete", "insert"] {
+            assert_eq!(
+                keystroke_to_bytes(&ks(none, key, None), app_cursor()),
+                legacy(&ks(none, key, None)),
+                "{key} does not follow DECCKM"
+            );
+        }
+    }
+
+    #[test]
+    fn keystroke_to_bytes_encodes_modified_named_keys_like_xterm() {
+        let shift = Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let ctrl = Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        let ctrl_shift = Modifiers {
+            control: true,
+            shift: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            legacy(&ks(shift, "left", None)),
+            Some(b"\x1b[1;2D".to_vec())
+        );
+        assert_eq!(
+            legacy(&ks(ctrl, "right", None)),
+            Some(b"\x1b[1;5C".to_vec())
+        );
+        assert_eq!(legacy(&ks(ctrl, "home", None)), Some(b"\x1b[1;5H".to_vec()));
+        assert_eq!(
+            legacy(&ks(ctrl_shift, "up", None)),
+            Some(b"\x1b[1;6A".to_vec())
+        );
+        assert_eq!(
+            legacy(&ks(shift, "delete", None)),
+            Some(b"\x1b[3;2~".to_vec())
+        );
+        assert_eq!(
+            legacy(&ks(ctrl, "pageup", None)),
+            Some(b"\x1b[5;5~".to_vec())
+        );
+    }
+
+    /// Cmd has no xterm modifier encoding, so it must not leak into the
+    /// parameter and turn a bare arrow into a modified one.
+    #[test]
+    fn keystroke_to_bytes_ignores_cmd_when_encoding_named_keys() {
+        let cmd = Modifiers {
+            platform: true,
+            ..Default::default()
+        };
+        assert_eq!(legacy(&ks(cmd, "up", None)), Some(b"\x1b[A".to_vec()));
+    }
+
     #[test]
     fn keystroke_to_bytes_alt_prefixes_printable_and_ignores_empty_char() {
         let alt = Modifiers {
@@ -656,11 +779,12 @@ mod tests {
         );
     }
 
-    fn kitty() -> KittyFlags {
-        KittyFlags {
+    fn kitty() -> KeyFlags {
+        KeyFlags {
             disambiguate: true,
             report_all_keys: false,
             report_text: false,
+            app_cursor: false,
         }
     }
 
@@ -737,10 +861,11 @@ mod tests {
 
     #[test]
     fn kitty_report_all_keys_escapes_plain_enter_tab_backspace() {
-        let full = KittyFlags {
+        let full = KeyFlags {
             disambiguate: true,
             report_all_keys: true,
             report_text: false,
+            app_cursor: false,
         };
         let none = Modifiers::default();
         assert_eq!(
@@ -759,15 +884,16 @@ mod tests {
 
     #[test]
     fn tab_bytes_follows_the_disambiguate_rule() {
-        let off = KittyFlags::default();
+        let off = KeyFlags::default();
         assert_eq!(tab_bytes(false, off), b"\t".to_vec());
         assert_eq!(tab_bytes(true, off), b"\x1b[Z".to_vec());
         assert_eq!(tab_bytes(false, kitty()), b"\t".to_vec());
         assert_eq!(tab_bytes(true, kitty()), b"\x1b[9;2u".to_vec());
-        let full = KittyFlags {
+        let full = KeyFlags {
             disambiguate: true,
             report_all_keys: true,
             report_text: false,
+            app_cursor: false,
         };
         assert_eq!(tab_bytes(false, full), b"\x1b[9u".to_vec());
     }
@@ -824,10 +950,11 @@ mod tests {
 
     #[test]
     fn kitty_report_all_keys_escapes_plain_text_with_associated_text() {
-        let full = KittyFlags {
+        let full = KeyFlags {
             disambiguate: true,
             report_all_keys: true,
             report_text: true,
+            app_cursor: false,
         };
         let none = Modifiers::default();
         assert_eq!(
@@ -838,10 +965,11 @@ mod tests {
 
     #[test]
     fn kitty_associated_text_drops_del_and_c1_controls() {
-        let full = KittyFlags {
+        let full = KeyFlags {
             disambiguate: true,
             report_all_keys: true,
             report_text: true,
+            app_cursor: false,
         };
         let none = Modifiers::default();
         assert_eq!(
@@ -860,8 +988,8 @@ mod tests {
 
     #[test]
     fn kitty_off_is_byte_identical_to_legacy() {
-        let none = KittyFlags::default();
-        assert!(!none.active());
+        let none = KeyFlags::default();
+        assert!(!none.kitty_active());
         let mods = Modifiers::default();
         assert_eq!(
             keystroke_to_bytes(&ks(mods, "tab", None), none),
@@ -877,7 +1005,7 @@ mod tests {
         );
     }
 
-    fn reshaped_bytes(ks: &Keystroke, option_as_alt: bool, kitty: KittyFlags) -> Option<Vec<u8>> {
+    fn reshaped_bytes(ks: &Keystroke, option_as_alt: bool, kitty: KeyFlags) -> Option<Vec<u8>> {
         let reshaped = reshape_option_keystroke(ks, option_as_alt);
         keystroke_to_bytes(reshaped.as_ref().unwrap_or(ks), kitty)
     }
@@ -893,7 +1021,7 @@ mod tests {
     #[test]
     fn option_as_alt_on_sends_esc_plus_base_key() {
         assert_eq!(
-            reshaped_bytes(&option_b(), true, KittyFlags::default()),
+            reshaped_bytes(&option_b(), true, KeyFlags::default()),
             Some(b"\x1bb".to_vec())
         );
         let alt_shift = Modifiers {
@@ -902,7 +1030,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            reshaped_bytes(&ks(alt_shift, "b", Some("ı")), true, KittyFlags::default()),
+            reshaped_bytes(&ks(alt_shift, "b", Some("ı")), true, KeyFlags::default()),
             Some(b"\x1bB".to_vec())
         );
         let alt = Modifiers {
@@ -910,7 +1038,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            reshaped_bytes(&ks(alt, "2", Some("™")), true, KittyFlags::default()),
+            reshaped_bytes(&ks(alt, "2", Some("™")), true, KeyFlags::default()),
             Some(b"\x1b2".to_vec())
         );
     }
@@ -918,7 +1046,7 @@ mod tests {
     #[test]
     fn option_as_alt_off_sends_composed_text_bare() {
         assert_eq!(
-            reshaped_bytes(&option_b(), false, KittyFlags::default()),
+            reshaped_bytes(&option_b(), false, KeyFlags::default()),
             Some("∫".as_bytes().to_vec())
         );
     }
@@ -972,8 +1100,8 @@ mod tests {
         for on in [true, false] {
             assert!(reshape_option_keystroke(&ks(alt, "up", None), on).is_none());
             assert_eq!(
-                reshaped_bytes(&ks(alt, "up", None), on, KittyFlags::default()),
-                Some(b"\x1b\x1b[A".to_vec())
+                reshaped_bytes(&ks(alt, "up", None), on, KeyFlags::default()),
+                Some(b"\x1b[1;3A".to_vec())
             );
         }
         assert!(reshape_option_keystroke(&ks(alt, "enter", Some("\n")), false).is_none());
@@ -985,7 +1113,7 @@ mod tests {
         for on in [true, false] {
             assert!(reshape_option_keystroke(&ks(ctrl_alt, "c", None), on).is_none());
             assert_eq!(
-                reshaped_bytes(&ks(ctrl_alt, "c", None), on, KittyFlags::default()),
+                reshaped_bytes(&ks(ctrl_alt, "c", None), on, KeyFlags::default()),
                 Some(vec![0x1b, 0x03])
             );
         }

@@ -389,11 +389,6 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: WindowTabs,
-            title: SettingsTaskbarStatusIcon,
-            keywords: SettingsSearchTaskbarStatusIconKeywords,
-        },
-        SearchEntry {
-            section: WindowTabs,
             title: SettingsNewTabPosition,
             keywords: SettingsSearchNewTabPositionKeywords,
         },
@@ -431,6 +426,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             section: About,
             title: SettingsNavAbout,
             keywords: SettingsSearchAboutKeywords,
+        },
+        SearchEntry {
+            section: About,
+            title: SettingsAppHttpProxy,
+            keywords: SettingsSearchAppHttpProxyKeywords,
         },
         SearchEntry {
             section: About,
@@ -487,6 +487,7 @@ pub(crate) struct SettingsState {
     pub(crate) shell_args_input: Entity<InputState>,
     pub(crate) wd_path_input: Entity<InputState>,
     pub(crate) link_file_command_input: Entity<InputState>,
+    pub(crate) http_proxy_input: Entity<InputState>,
     pub(crate) scroll_slider: Entity<SliderState>,
     pub(crate) window_opacity_slider: Entity<SliderState>,
     pub(crate) theme_editor: Option<ThemeEditor>,
@@ -3937,7 +3938,6 @@ impl Tty7App {
         let restore_session = cfg.restore_session;
         let remember_window_size = cfg.remember_window_size;
         let show_tray_icon = cfg.show_tray_icon;
-        let taskbar_status_icon = cfg.taskbar_status_icon;
         let confirm_window_close = cfg.confirm_window_close;
         let tab_bar_idx = match cfg.tab_bar_position {
             TabBarPosition::Top => 0,
@@ -4008,10 +4008,6 @@ impl Tty7App {
         let tray_switch = crate::ui::theme::switch("wt-tray-icon", cx)
             .checked(show_tray_icon)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_show_tray_icon(*on, cx)))
-            .into_any_element();
-        let taskbar_switch = crate::ui::theme::switch("wt-taskbar-status", cx)
-            .checked(taskbar_status_icon)
-            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_taskbar_status_icon(*on, cx)))
             .into_any_element();
         let startup_radio = self.segmented(
             "wt-startup",
@@ -4110,17 +4106,6 @@ impl Tty7App {
                 tray_switch,
                 cx,
             ))
-            // Windows only: `SetOverlayIcon` is a taskbar concept. The row is
-            // simply absent elsewhere rather than shown disabled — a switch
-            // that can never do anything is noise, not a setting.
-            .children(cfg!(windows).then(|| {
-                self.settings_row(
-                    t(L10nKey::SettingsTaskbarStatusIcon),
-                    t(L10nKey::SettingsTaskbarStatusIconDesc),
-                    taskbar_switch,
-                    cx,
-                )
-            }))
             .child(self.section_rule(cx))
             .child(self.section_header(t(L10nKey::SettingsTabs), cx))
             .child(self.settings_row(
@@ -4747,6 +4732,28 @@ impl Tty7App {
         );
         let phase_text = localized_update_phase(&update_status.phase);
         let check_for_updates = cx.global::<Config>().check_for_updates;
+        let http_proxy_input = match self.active_settings() {
+            Some(s) => s.http_proxy_input.clone(),
+            None => return div().into_any_element(),
+        };
+        // Only flags a committed value: the input commits on Enter/blur, so a
+        // half-typed address is never marked wrong mid-keystroke.
+        let http_proxy_value = http_proxy_input.read(cx).value().trim().to_string();
+        let http_proxy_invalid = !http_proxy_value.is_empty()
+            && !tty7_core::daemon::install::proxy::is_valid_manual(&http_proxy_value);
+        let http_proxy_control = v_flex()
+            .gap_1()
+            .w(px(260.))
+            .child(Input::new(&http_proxy_input).small())
+            .when(http_proxy_invalid, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.danger)
+                        .child(t(L10nKey::SettingsAppHttpProxyInvalid)),
+                )
+            })
+            .into_any_element();
 
         let logo = Arc::new(Image::from_bytes(
             ImageFormat::Png,
@@ -4882,6 +4889,12 @@ impl Tty7App {
                         ),
                     ),
             )
+            .child(self.settings_row(
+                t(L10nKey::SettingsAppHttpProxy),
+                t(L10nKey::SettingsAppHttpProxyDesc),
+                http_proxy_control,
+                cx,
+            ))
             .child(
                 v_flex()
                     .mt_6()

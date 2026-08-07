@@ -28,6 +28,7 @@ use crate::core::actions::{
 };
 use crate::core::config::{BellMode, Config, NotifyMode};
 use crate::daemon::protocol::{RemoteContext, ShellSpec};
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 const GRID_PAD_X: f32 = 8.;
 const GRID_PAD_Y: f32 = 4.;
@@ -293,21 +294,72 @@ fn integration_notice_message(wrapper: Option<&str>) -> String {
     }
 }
 
-fn notify_command_finished(label: &str, elapsed: std::time::Duration) {
-    let secs = elapsed.as_secs();
-    let label = label.trim();
-    let body = if label.is_empty() {
-        format!("Command finished after {secs}s")
-    } else {
-        format!("{label} — finished after {secs}s")
-    };
-    super::remote::notify_desktop(Some("tty7"), &body);
+/// Join whatever context a pane has into a notification title, most specific
+/// part first: an agent name if one is running, otherwise the machine the pane
+/// lives on, then the workspace it belongs to. Kept to two segments — Windows
+/// toast titles are a single line and ellipsize anything longer.
+fn compose_notification_title(
+    lead: Option<String>,
+    host: Option<String>,
+    workspace: Option<String>,
+) -> String {
+    match (lead.or(host), workspace) {
+        (Some(lead), Some(workspace)) => format!("{lead} · {workspace}"),
+        (Some(only), None) | (None, Some(only)) => only,
+        (None, None) => "tty7".to_string(),
+    }
 }
 
-fn notify_agent_finished(agent: crate::core::cli_agent::CLIAgent, elapsed: std::time::Duration) {
-    let secs = elapsed.as_secs();
-    let body = format!("Finished after {secs}s");
-    super::remote::notify_desktop(Some(agent.display_name()), &body);
+impl TerminalView {
+    fn notify_command_finished(
+        &self,
+        label: &str,
+        elapsed: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
+        let secs = elapsed.as_secs().to_string();
+        let command = label.trim();
+        let body = if command.is_empty() {
+            t_fmt(L10nKey::NotifyCommandFinished, &[("secs", &secs)])
+        } else {
+            t_fmt(
+                L10nKey::NotifyCommandFinishedWithCommand,
+                &[("command", command), ("secs", &secs)],
+            )
+        };
+        self.notify_pane(None, &body, cx);
+    }
+
+    fn notify_agent_finished(
+        &self,
+        agent: crate::core::cli_agent::CLIAgent,
+        elapsed: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
+        let secs = elapsed.as_secs().to_string();
+        let body = t_fmt(L10nKey::NotifyAgentFinished, &[("secs", &secs)]);
+        self.notify_pane(Some(agent.display_name()), &body, cx);
+    }
+
+    /// Notify about this pane, with a title describing where it lives and a
+    /// click that reveals it. The id has to be the pane's *gpui entity id*:
+    /// that is what `TrayAction::RevealPane` matches leaves on, and it is a
+    /// different number from `pane_id`, which the daemon assigns.
+    fn notify_pane(&self, lead: Option<&str>, body: &str, cx: &mut Context<Self>) {
+        let title = self.notification_title(lead, cx);
+        super::remote::notify_desktop_for_pane(Some(&title), body, Some(cx.entity_id()));
+    }
+
+    fn notification_title(&self, lead: Option<&str>, cx: &App) -> String {
+        let host = self
+            .workspace
+            .as_ref()
+            .map(|w| crate::ui::remote_connect::label_for(&w.target, cx));
+        let workspace = self
+            .owner_workspace
+            .and_then(|id| crate::ui::machine_mirror::display_name_for(cx, id));
+        compose_notification_title(lead.map(str::to_string), host, workspace)
+    }
 }
 
 /// Ring the platform's alert sound, reporting whether one was actually made —
@@ -1057,14 +1109,6 @@ impl TerminalView {
         self.terminal.agent_session()
     }
 
-    /// Whether the shell is off its prompt running a command (see
-    /// [`RemoteTerminal::shell_busy`] for why integration-less panes answer
-    /// `false` rather than "busy forever"). Feeds the Windows taskbar overlay.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub fn shell_busy(&self) -> bool {
-        self.terminal.shell_busy()
-    }
-
     pub fn agent_result_unread(&self) -> bool {
         self.agent_result_unread
     }
@@ -1276,7 +1320,7 @@ impl TerminalView {
         }
 
         #[cfg(target_os = "macos")]
-        if !window.has_pending_keystrokes() && super::input::defer_to_ime(ks, self.kitty_flags()) {
+        if !window.has_pending_keystrokes() && super::input::defer_to_ime(ks, self.key_flags()) {
             return;
         }
 
@@ -1304,7 +1348,7 @@ impl TerminalView {
             self.editor_handoff_interrupt_seq = Some(self.terminal.prompt_seq());
         }
 
-        let kitty = self.kitty_flags();
+        let kitty = self.key_flags();
         if let Some(bytes) = super::input::keystroke_to_bytes(ks, kitty) {
             let plain = !m.control && !m.alt && !m.platform;
             let interrupt = is_typeahead_interrupt(ks.key.as_str(), m);
@@ -1556,7 +1600,7 @@ impl TerminalView {
             }
             if self.apply_readline_ctrl(key) {
                 cx.notify();
-            } else if let Some(bytes) = super::input::keystroke_to_bytes(ks, self.kitty_flags()) {
+            } else if let Some(bytes) = super::input::keystroke_to_bytes(ks, self.key_flags()) {
                 self.handoff_line_to_shell(&bytes, cx);
             } else {
                 cx.notify();
@@ -1650,7 +1694,7 @@ impl TerminalView {
                 return;
             }
             "escape" => {
-                let bytes = super::input::keystroke_to_bytes(ks, self.kitty_flags())
+                let bytes = super::input::keystroke_to_bytes(ks, self.key_flags())
                     .unwrap_or_else(|| vec![0x1b]);
                 self.terminal.write(bytes);
                 return;
@@ -1665,7 +1709,7 @@ impl TerminalView {
                     }
                 }
                 if m.alt && !m.control && !m.platform && key.chars().count() == 1 {
-                    let bytes = super::input::keystroke_to_bytes(ks, self.kitty_flags())
+                    let bytes = super::input::keystroke_to_bytes(ks, self.key_flags())
                         .unwrap_or_else(|| {
                             let name = if m.shift {
                                 key.to_uppercase()
@@ -1851,12 +1895,12 @@ impl TerminalView {
         self.has_selection() || (self.input_active() && self.cmd.selected_text().is_some())
     }
 
-    pub(super) fn kitty_flags(&self) -> super::input::KittyFlags {
-        super::input::KittyFlags::from_mode(self.terminal.term.lock().mode())
+    pub(super) fn key_flags(&self) -> super::input::KeyFlags {
+        super::input::KeyFlags::from_mode(self.terminal.term.lock().mode())
     }
 
     fn tab_bytes(&self, shift: bool) -> Vec<u8> {
-        super::input::tab_bytes(shift, self.kitty_flags())
+        super::input::tab_bytes(shift, self.key_flags())
     }
 
     fn jump_to_prompt(&mut self) {
@@ -2470,13 +2514,13 @@ impl TerminalView {
                 if notify_allowed {
                     match agent {
                         Some(_) if self.agent_was_rich => {}
-                        Some(agent) => notify_agent_finished(agent, elapsed),
+                        Some(agent) => self.notify_agent_finished(agent, elapsed, cx),
                         None => {
                             let threshold = std::time::Duration::from_secs(
                                 cx.global::<Config>().notify_threshold_secs,
                             );
                             if elapsed >= threshold {
-                                notify_command_finished(&title, elapsed);
+                                self.notify_command_finished(&title, elapsed, cx);
                             }
                         }
                     }
@@ -2713,8 +2757,8 @@ impl TerminalView {
                 let body = session
                     .as_ref()
                     .and_then(|s| s.message.clone())
-                    .unwrap_or_else(|| "Waiting for your input".to_string());
-                super::remote::notify_desktop(Some(agent_name), &body);
+                    .unwrap_or_else(|| t(L10nKey::NotifyAgentWaiting).to_string());
+                self.notify_pane(Some(agent_name), &body, cx);
             }
             Some(AgentStatus::Done)
                 if rich
@@ -2725,10 +2769,13 @@ impl TerminalView {
                     ) =>
             {
                 let body = match self.agent_turn_started.take() {
-                    Some(start) => format!("Finished after {}s", start.elapsed().as_secs()),
-                    None => "Turn finished".to_string(),
+                    Some(start) => {
+                        let secs = start.elapsed().as_secs().to_string();
+                        t_fmt(L10nKey::NotifyAgentFinished, &[("secs", &secs)])
+                    }
+                    None => t(L10nKey::NotifyTurnFinished).to_string(),
                 };
-                super::remote::notify_desktop(Some(agent_name), &body);
+                self.notify_pane(Some(agent_name), &body, cx);
             }
             _ => {}
         }
@@ -3023,7 +3070,7 @@ impl TerminalView {
         if self.input_active() {
             self.insert_newline_action(cx);
         } else if (self.search.is_some() && self.search_focused)
-            || self.kitty_flags().active()
+            || self.key_flags().kitty_active()
             || !self.accepts_input(cx)
         {
             cx.propagate();
@@ -3322,7 +3369,12 @@ impl TerminalView {
         if !line.is_empty() {
             self.terminal.write(line.into_bytes());
             if tail > 0 {
-                self.terminal.write(b"\x1b[D".repeat(tail));
+                let left: &[u8] = if self.key_flags().app_cursor() {
+                    b"\x1bOD"
+                } else {
+                    b"\x1b[D"
+                };
+                self.terminal.write(left.repeat(tail));
             }
         }
         self.cmd.clear();
@@ -3933,26 +3985,6 @@ impl TerminalView {
         }
 
         self.smooth_scroll(delta, cx);
-    }
-
-    pub fn command_marks(&self) -> Vec<crate::terminal::marks::CommandMark> {
-        self.terminal.marks().list()
-    }
-
-    pub fn scroll_to_mark(&mut self, row: i64, cx: &mut Context<Self>) -> bool {
-        use alacritty_terminal::grid::Dimensions as _;
-        let mut term = self.terminal.term.lock();
-        let history = term.grid().history_size() as i64;
-        if row < 0 || row > history + term.grid().screen_lines() as i64 {
-            return false;
-        }
-        let target = (history - row).max(0);
-        let current = term.grid().display_offset() as i64;
-        term.scroll_display(Scroll::Delta((target - current) as i32));
-        drop(term);
-        self.scroll_frac = 0.;
-        cx.notify();
-        true
     }
 
     fn smooth_scroll(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -5334,8 +5366,8 @@ fn drag_scroll_step(overshoot: f32) -> i32 {
 mod tests {
     use super::{
         LoopbackPlan, RawInput, SelectEndCopy, Typeahead, WheelRoute, clipboard_paste_text,
-        cwd_is_on_host, display_width, is_typeahead_interrupt, loopback_plan,
-        observe_typeahead_for_owner,
+        compose_notification_title, cwd_is_on_host, display_width, is_typeahead_interrupt,
+        loopback_plan, observe_typeahead_for_owner,
     };
     use super::{
         drag_scroll_step, encode_mouse, escape_candidate, expand_file_command_template,
@@ -5354,6 +5386,27 @@ mod tests {
     use crate::core::session::{RemoteTarget, WorkspaceId};
     use crate::daemon::protocol::RemoteKind;
     use crate::terminal::PaneWorkspace;
+
+    #[test]
+    fn a_notification_title_keeps_at_most_two_segments() {
+        let ws = || Some("tty7".to_string());
+        assert_eq!(
+            compose_notification_title(None, Some("build-box".into()), ws()),
+            "build-box · tty7"
+        );
+        // An agent takes the machine's place rather than adding a third part.
+        assert_eq!(
+            compose_notification_title(Some("Claude".into()), Some("build-box".into()), ws()),
+            "Claude · tty7"
+        );
+        // A local pane has no machine label; a nameless workspace has no name.
+        assert_eq!(compose_notification_title(None, None, ws()), "tty7");
+        assert_eq!(
+            compose_notification_title(Some("Claude".into()), None, None),
+            "Claude"
+        );
+        assert_eq!(compose_notification_title(None, None, None), "tty7");
+    }
 
     #[test]
     fn alt_screen_exit_discards_the_boundary_input_before_recording_shell_text() {
@@ -6765,6 +6818,51 @@ mod gpui_tests {
         panic!("the local editor never engaged at the prompt");
     }
 
+    /// Handing the line back to the shell walks the cursor left once per
+    /// character it sat before. Those are arrow keys like any other, so under
+    /// DECCKM they have to be SS3 — and zsh's zle does turn DECCKM on, so this
+    /// is the ordinary case rather than the exotic one.
+    #[gpui::test]
+    fn a_handoff_walks_the_cursor_back_in_ss3_under_app_cursor_mode(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Output(b"\x1b[?1h".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for_input_active(&window, cx);
+
+        window
+            .update(cx, |view, window, cx| {
+                assert!(
+                    view.key_flags().app_cursor(),
+                    "the shell asked for application cursor keys"
+                );
+                for ch in ["z", "z", "q", "q", "x"] {
+                    type_char(view, ch, window, cx);
+                }
+                view.handle_editor_key(&key("left"), cx);
+                view.handle_editor_key(&key("left"), cx);
+                view.complete_tab(true, cx);
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"zzqqx".to_vec())
+        );
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"\x1bOD\x1bOD".to_vec()),
+            "the cursor walks back in SS3, not CSI"
+        );
+    }
+
     #[gpui::test]
     fn tab_with_no_candidates_hands_the_line_to_the_shell(cx: &mut TestAppContext) {
         let (window, mut daemon) = harness(cx);
@@ -7435,7 +7533,7 @@ mod gpui_tests {
         for _ in 0..200 {
             cx.run_until_parked();
             if window
-                .update(cx, |view, _, _| view.kitty_flags().active())
+                .update(cx, |view, _, _| view.key_flags().kitty_active())
                 .unwrap()
             {
                 break;
