@@ -124,18 +124,22 @@ a brief pause; `prefix` + an unbound key passes straight through.
 
 ## macOS privacy
 
-tty7 declares the macOS TCC usage strings (camera, microphone, contacts,
-calendar, reminders, photos, location, motion, local network, Bluetooth,
-speech recognition, Apple Events, system administration) so programs run in a
-pane can request them with a normal one-time prompt instead of being denied
-outright.
+Panes are forked from the bundled executable, so macOS attributes a program's
+request for a protected resource to tty7.app. tty7 declares the matching TCC
+usage strings (camera, microphone, contacts, calendar, reminders, photos,
+location, local network, Bluetooth, speech recognition, Apple Events, system
+administration) so that program gets the normal one-time prompt instead of
+being denied outright with no prompt at all.
 
 Not covered by usage strings:
 
-- **Full Disk Access** — no usage-string key exists; access to
-  `~/Library/Mail/Messages/Safari/Containers` requires a manual grant in System Settings.
-- **Camera / microphone / location etc.** — not granted to tty7.app itself;
-  a child's access is decided by the usage string above.
+- **Full Disk Access** — Apple defines no usage-string key for it. Reaching
+  `~/Library/Mail`, `~/Library/Messages`, `~/Library/Safari` or
+  `~/Library/Containers` needs a manual grant in System Settings.
+
+Declaring a usage string is not the same as holding the permission: tty7.app
+itself is granted none of these resources. Every prompt you see belongs to
+whatever you ran in the pane, and you can revoke it under Privacy & Security.
 
 ## Localization
 

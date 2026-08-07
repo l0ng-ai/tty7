@@ -143,19 +143,18 @@ if [[ -n "$SIGN_ID" && -n "${APPLE_CERTIFICATE:-}" ]]; then
     <key>com.apple.security.cs.allow-jit</key><true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
     <key>com.apple.security.cs.disable-library-validation</key><true/>
-    <!-- Apple Events is declared here because it pairs with the
-         NSAppleEventsUsageDescription above and is the one resource where the
-         entitlement is genuinely exercised. The other TCC categories (camera,
-         microphone, address book, calendars, location) are deliberately NOT
-         granted to this bundle: the request comes from a child process, whose
-         access is gated by the responsible bundle's *usage string* in
-         Info.plist, not by an entitlement on tty7.app (entitlements are
-         per-executable and never inherited). Granting camera / microphone /
-         location etc. to tty7.app itself would only widen what injected code
-         can reach under its identity, against Apple's least-privilege
-         guidance — the same rationale the comments below already use to keep
-         these GUI entitlements off the CLI. -->
-    <key>com.apple.security.automation.apple-events</key><true/>
+    <!-- Deliberately nothing beyond those three, and in particular no TCC
+         entitlement to match the usage strings in Info.plist. Those strings
+         are about a *child* process's request: macOS attributes it to tty7.app
+         as the responsible process and reads the wording from its bundle. The
+         hardened-runtime entitlement, by contrast, is checked against the
+         process actually sending the request — the child, carrying its own
+         signature, since entitlements are per-executable and never inherited.
+         So camera / microphone / location / apple-events on tty7.app would do
+         nothing for a pane, while widening what injected code could reach
+         under tty7's identity; this bundle already carries
+         disable-library-validation. Same reasoning the comments below use to
+         keep the GUI's entitlements off the CLI. -->
 </dict>
 </plist>
 ENT
