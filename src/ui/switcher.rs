@@ -1945,15 +1945,10 @@ impl Tty7App {
                         .text_color(muted)
                         .child(row.name.clone()),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(dim)
-                        .child(match row.tabs.len() {
-                            1 => t(L10nKey::SwitcherTabCountOne).to_string(),
-                            n => t_fmt(L10nKey::SwitcherTabCount, &[("n", &n.to_string())]),
-                        }),
-                ),
+                .child(div().text_xs().text_color(dim).child(match row.tabs.len() {
+                    1 => t(L10nKey::SwitcherTabCountOne).to_string(),
+                    n => t_fmt(L10nKey::SwitcherTabCount, &[("n", &n.to_string())]),
+                })),
         );
 
         for (nth, i) in hits.iter().enumerate() {
