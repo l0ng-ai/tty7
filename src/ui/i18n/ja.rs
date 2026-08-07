@@ -46,10 +46,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::Override => "上書き",
         L10nKey::RememberKeychain => "キーチェーンに保存",
-        L10nKey::CloseWindowTitle => "ウィンドウを閉じますか？",
-        L10nKey::CloseWindowBody => {
-            "セッションはバックグラウンドで動き続けます。次回 tty7 を開いたときに、このワークスペースはホームページとタイトルバーのワークスペースメニューに表示されます"
-        }
         L10nKey::Cancel => "キャンセル",
         L10nKey::Close => "閉じる",
         L10nKey::QuitStopServerTitle => "tty7 を終了してサーバーを停止しますか？",
@@ -396,10 +392,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRestoreLastLayoutDesc => {
             "起動時に前回のウィンドウのタブ、分割、ディレクトリを復元します。オフなら新しいターミナルが 1 つだけ起動します"
         }
-        L10nKey::SettingsConfirmLastWindowClose => "最後のウィンドウを閉じる前に確認",
-        L10nKey::SettingsConfirmLastWindowCloseDesc => {
-            "その操作で tty7 も終了するため、先に確認を求めます。オフならそのまま閉じます。どちらの場合もシェルはバックグラウンドで動き続けます"
-        }
         L10nKey::SettingsShowTrayIcon => "システムトレイアイコンを表示",
         L10nKey::SettingsShowTrayIconDesc => {
             "システムトレイ / メニューバーに状態を表示します。コーディングエージェントが入力を必要とするときに通知し、そのメニューからエージェントペインへ移動できます"
@@ -456,9 +448,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAboutDesc1 => {
             "ターミナルワークベンチ: 常駐セッション、リモート作業、エージェント"
         }
-        L10nKey::SettingsAboutTech => {
-            "Pure Rust · Zed の gpui で GPU レンダリング · Alacritty ベースの VT コア"
-        }
         L10nKey::SettingsVersion => "バージョン",
         L10nKey::SettingsUpdates => "アップデート",
         L10nKey::SettingsUpdateAndRelaunch => "更新して再起動",
@@ -509,7 +498,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRestartServer => "サーバーを再起動…",
         L10nKey::SettingsAppHttpProxy => "アップデート用プロキシ",
         L10nKey::SettingsAppHttpProxyDesc => {
-            "tty7 自身の更新チェックとダウンロードに使う任意のプロキシです。ペインで実行中のプログラムには影響しません（それぞれの環境変数に従います）。空欄にするとシステムのプロキシ設定に従います。例: http://127.0.0.1:7890、socks5://127.0.0.1:1080"
+            "tty7 自身の更新チェックとダウンロードにのみ使用し、ペインで実行中のプログラムには影響しません。空欄ならシステムのプロキシに従います"
         }
         L10nKey::SettingsAppHttpProxyInvalid => {
             "プロキシアドレスとして正しくないため、この値は保存されませんでした"
@@ -548,9 +537,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "cli tty7 パス シェル コマンド インストール シンボリックリンク ターミナル iterm エージェント スクリプト command line tool"
         }
         L10nKey::SettingsSearchCommandLineToolTitle => "コマンドラインツール",
-        L10nKey::SettingsSearchConfirmLastWindowCloseKeywords => {
-            "閉じる 終了 確認 プロンプト ダイアログ 警告 最後のウィンドウ cmd-w ctrl-w confirm close last window quit ask"
-        }
         L10nKey::SettingsSearchCopilotCliKeywords => {
             "エージェント 統合 フック インストール github copilot agent integration hooks install"
         }

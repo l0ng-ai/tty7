@@ -44,12 +44,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::Override => "Override",
         L10nKey::RememberKeychain => "Remember (keychain)",
-        L10nKey::CloseWindowTitle => "Close Window?",
-        L10nKey::CloseWindowBody => {
-            "Your sessions keep running in the background. This workspace will be \
-             waiting on the home page, and in the workspace menu in the title bar, the \
-             next time you open tty7."
-        }
         L10nKey::Cancel => "Cancel",
         L10nKey::Close => "Close",
         L10nKey::QuitStopServerTitle => "Quit and Stop Server?",
@@ -398,10 +392,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsRestoreLastLayoutDesc => {
             "Reopen the last window's tabs, splits, and directories on launch. Off starts with a single fresh terminal."
         }
-        L10nKey::SettingsConfirmLastWindowClose => "Confirm before closing the last window",
-        L10nKey::SettingsConfirmLastWindowCloseDesc => {
-            "Ask first, since that close also quits tty7. Off closes straight away — either way your shells keep running in the background."
-        }
         L10nKey::SettingsShowTrayIcon => "Show tray icon",
         L10nKey::SettingsShowTrayIconDesc => {
             "Keep a status item in the system tray / menu bar: it signals when a coding agent needs your input, and its menu jumps to agent panes."
@@ -460,9 +450,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAboutDesc1 => {
             "A terminal workbench: persistent sessions, remote work, agents."
         }
-        L10nKey::SettingsAboutTech => {
-            "Pure Rust · GPU rendering on Zed's gpui · VT core from Alacritty"
-        }
         L10nKey::SettingsVersion => "Version",
         L10nKey::SettingsUpdates => "Updates",
         L10nKey::SettingsUpdateAndRelaunch => "Update and Relaunch",
@@ -513,7 +500,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsRestartServer => "Restart server…",
         L10nKey::SettingsAppHttpProxy => "Proxy for updates",
         L10nKey::SettingsAppHttpProxyDesc => {
-            "Optional proxy for tty7's own update checks and downloads. It does not affect programs running in your panes — those use their own environment. Leave empty to follow the system proxy. Examples: http://127.0.0.1:7890, socks5://127.0.0.1:1080."
+            "Used only for tty7's update checks and downloads, not for programs in your panes. Empty follows the system proxy."
         }
         L10nKey::SettingsAppHttpProxyInvalid => {
             "Not a valid proxy address — this value was not saved."
@@ -542,9 +529,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "cli tty7 path shell command install symlink terminal iterm agent script"
         }
         L10nKey::SettingsSearchCommandLineToolTitle => "Command line tool",
-        L10nKey::SettingsSearchConfirmLastWindowCloseKeywords => {
-            "close quit confirm prompt dialog ask again warn last window cmd-w ctrl-w"
-        }
         L10nKey::SettingsSearchCopilotCliKeywords => {
             "agent integration hooks install github copilot"
         }

@@ -42,10 +42,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::HostKeyOverrideMessage => "输入 yes 覆盖并信任新密钥，或按 Esc 中止。",
         L10nKey::Override => "覆盖",
         L10nKey::RememberKeychain => "记住（钥匙串）",
-        L10nKey::CloseWindowTitle => "是否关闭窗口？",
-        L10nKey::CloseWindowBody => {
-            "你的会话会继续在后台运行。此工作区将保留，下次启动时可在主页和标题栏工作区菜单中找到。"
-        }
         L10nKey::Cancel => "取消",
         L10nKey::Close => "关闭",
         L10nKey::QuitStopServerTitle => "退出并停止服务器？",
@@ -350,10 +346,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRestoreLastLayoutDesc => {
             "启动时恢复上次窗口的标签页、分屏和目录。关闭时从单个新终端开始。"
         }
-        L10nKey::SettingsConfirmLastWindowClose => "关闭最后一个窗口前确认",
-        L10nKey::SettingsConfirmLastWindowCloseDesc => {
-            "关闭最后一个窗口会同时退出 tty7，所以先问一句。关掉此项则直接关窗——两种情况下你的 shell 都会在后台继续运行。"
-        }
         L10nKey::SettingsShowTrayIcon => "显示托盘图标",
         L10nKey::SettingsShowTrayIconDesc => {
             "在系统托盘/菜单栏保留状态项：当编码 agent 需要输入时发出提示，其菜单可跳转到该 agent 的窗格。"
@@ -404,7 +396,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsRestoreAllDefaults => "恢复全部默认值",
         L10nKey::SettingsAboutDesc1 => "终端工作台：常驻会话、远程工作、agent。",
-        L10nKey::SettingsAboutTech => "纯 Rust · GPU 渲染基于 Zed 的 gpui · VT 内核来自 Alacritty",
         L10nKey::SettingsVersion => "版本",
         L10nKey::SettingsUpdates => "更新",
         L10nKey::SettingsUpdateAndRelaunch => "更新并重新启动",
@@ -451,7 +442,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRestartServer => "重启服务器…",
         L10nKey::SettingsAppHttpProxy => "更新代理",
         L10nKey::SettingsAppHttpProxyDesc => {
-            "供 tty7 自身的更新检查和下载使用的可选代理。不影响面板中运行的程序，它们仍按各自的环境变量走。留空则跟随系统代理。例如：http://127.0.0.1:7890、socks5://127.0.0.1:1080。"
+            "仅用于 tty7 自身的更新检查和下载，不影响面板中运行的程序。留空则跟随系统代理。"
         }
         L10nKey::SettingsAppHttpProxyInvalid => "不是有效的代理地址，该值未保存。",
         L10nKey::SettingsAgentClaudeCode => "Claude Code",
@@ -486,9 +477,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "命令行工具 cli tty7 路径 shell 命令 安装 符号链接 terminal command line tool"
         }
         L10nKey::SettingsSearchCommandLineToolTitle => "命令行工具",
-        L10nKey::SettingsSearchConfirmLastWindowCloseKeywords => {
-            "关闭最后一个窗口前确认 关闭 退出 确认 提示 最后一个窗口 confirm close last window quit"
-        }
         L10nKey::SettingsSearchCopilotCliKeywords => {
             "Copilot CLI agent 集成 hook 安装 GitHub copilot agent integration hooks install"
         }

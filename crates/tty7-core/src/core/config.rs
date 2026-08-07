@@ -179,8 +179,6 @@ pub struct Config {
     pub restore_session: bool,
     #[serde(default = "default_true")]
     pub show_tray_icon: bool,
-    #[serde(default = "default_true")]
-    pub confirm_window_close: bool,
     #[serde(default, deserialize_with = "de_lenient")]
     pub bell: BellMode,
     #[serde(default = "default_true")]
@@ -429,7 +427,6 @@ impl Default for Config {
             notify_threshold_secs: default_notify_threshold_secs(),
             restore_session: true,
             show_tray_icon: true,
-            confirm_window_close: true,
             bell: BellMode::Visual,
             tab_completion: true,
             history_search: true,
@@ -786,24 +783,6 @@ mod tests {
         assert!(json.contains("\"sidebar_diff_preview\":false"), "persisted");
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.sidebar_diff_preview);
-    }
-
-    #[test]
-    fn confirm_window_close_defaults_on_and_round_trips() {
-        assert!(Config::default().confirm_window_close);
-
-        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
-        assert!(old.confirm_window_close);
-
-        let off: Config = serde_json::from_str(r#"{"confirm_window_close": false}"#).unwrap();
-        assert!(!off.confirm_window_close);
-        let json = serde_json::to_string(&off).unwrap();
-        let back: Config = serde_json::from_str(&json).unwrap();
-        assert!(!back.confirm_window_close);
-
-        let newer: Config =
-            serde_json::from_str(r#"{"confirm_window_close": false, "not_a_setting": 7}"#).unwrap();
-        assert!(!newer.confirm_window_close);
     }
 
     #[test]

@@ -379,11 +379,6 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: WindowTabs,
-            title: SettingsConfirmLastWindowClose,
-            keywords: SettingsSearchConfirmLastWindowCloseKeywords,
-        },
-        SearchEntry {
-            section: WindowTabs,
             title: SettingsShowTrayIcon,
             keywords: SettingsSearchShowTrayIconKeywords,
         },
@@ -3938,7 +3933,6 @@ impl Tty7App {
         let restore_session = cfg.restore_session;
         let remember_window_size = cfg.remember_window_size;
         let show_tray_icon = cfg.show_tray_icon;
-        let confirm_window_close = cfg.confirm_window_close;
         let tab_bar_idx = match cfg.tab_bar_position {
             TabBarPosition::Top => 0,
             TabBarPosition::Left => 1,
@@ -4000,10 +3994,6 @@ impl Tty7App {
         let remember_window_switch = crate::ui::theme::switch("wt-remember-window", cx)
             .checked(remember_window_size)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_remember_window_size(*on, cx)))
-            .into_any_element();
-        let confirm_close_switch = crate::ui::theme::switch("wt-confirm-window-close", cx)
-            .checked(confirm_window_close)
-            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_confirm_window_close(*on, cx)))
             .into_any_element();
         let tray_switch = crate::ui::theme::switch("wt-tray-icon", cx)
             .checked(show_tray_icon)
@@ -4092,12 +4082,6 @@ impl Tty7App {
                 t(L10nKey::SettingsRestoreLastLayout),
                 t(L10nKey::SettingsRestoreLastLayoutDesc),
                 restore_switch,
-                cx,
-            ))
-            .child(self.settings_row(
-                t(L10nKey::SettingsConfirmLastWindowClose),
-                t(L10nKey::SettingsConfirmLastWindowCloseDesc),
-                confirm_close_switch,
                 cx,
             ))
             .child(self.settings_row(
@@ -4924,13 +4908,6 @@ impl Tty7App {
                         ),
                     ),
             )
-            .child(
-                div()
-                    .mt_8()
-                    .text_xs()
-                    .text_color(muted_fg)
-                    .child(t(L10nKey::SettingsAboutTech)),
-            )
             .into_any_element()
     }
 }
@@ -5024,28 +5001,10 @@ mod tests {
     }
 
     #[test]
-    fn close_confirmation_toggle_is_findable() {
-        for query in [
-            "ask again",
-            "closing the last window",
-            "dialog",
-            "cmd-w",
-            "ctrl-w",
-        ] {
-            assert_eq!(
-                best_matching_section(query).map(|s| s.profile_label()),
-                Some(SettingsSection::WindowTabs.profile_label()),
-                "query {query:?} should land on Window & Tabs"
-            );
-        }
-    }
-
-    #[test]
     fn index_titles_match_rendered_row_labels() {
         for title in [
             "Start in",
             "Restore last layout",
-            "Confirm before closing the last window",
             "Terminal bell",
             "Report mouse to apps",
             "Open files with",

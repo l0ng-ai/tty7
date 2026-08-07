@@ -746,56 +746,19 @@ impl Tty7App {
         })
         .detach();
 
-        let close_confirmed = std::rc::Rc::new(std::cell::Cell::new(false));
         let weak_app = cx.weak_entity();
-        window.on_window_should_close(cx, move |window, cx| {
-            if close_confirmed.get() {
-                return true;
-            }
+        window.on_window_should_close(cx, move |_window, cx| {
             let last_window = crate::ui::windows::WindowRegistry::count(cx) <= 1;
-            let empty = weak_app
-                .upgrade()
-                .is_some_and(|app| app.read(cx).tabs.is_empty());
-
-            let confirm = cx.global::<Config>().confirm_window_close;
-            if !last_window || empty || !confirm {
-                if let Some(app) = weak_app.upgrade() {
-                    app.update(cx, |app, cx| app.detach_workspace(cx));
-                }
-                if last_window {
-                    cx.spawn(async move |cx| {
-                        let _ = cx.update(|cx| cx.quit());
-                    })
-                    .detach();
-                }
-                return true;
+            if let Some(app) = weak_app.upgrade() {
+                app.update(cx, |app, cx| app.detach_workspace(cx));
             }
-
-            let answer = window.prompt(
-                PromptLevel::Info,
-                t(crate::ui::i18n::L10nKey::CloseWindowTitle),
-                Some(t(crate::ui::i18n::L10nKey::CloseWindowBody)),
-                &[
-                    t(crate::ui::i18n::L10nKey::Cancel),
-                    t(crate::ui::i18n::L10nKey::Close),
-                ],
-                cx,
-            );
-            let close_confirmed = close_confirmed.clone();
-            let weak_app = weak_app.clone();
-            cx.spawn(async move |cx| {
-                if let Ok(1) = answer.await {
-                    close_confirmed.set(true);
-                    let _ = cx.update(|cx| {
-                        if let Some(app) = weak_app.upgrade() {
-                            app.update(cx, |app, cx| app.detach_workspace(cx));
-                        }
-                        cx.quit();
-                    });
-                }
-            })
-            .detach();
-            false
+            if last_window {
+                cx.spawn(async move |cx| {
+                    let _ = cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+            true
         });
 
         app.focus_active(window, cx);
@@ -2063,10 +2026,6 @@ impl Tty7App {
 
     pub(crate) fn set_show_tray_icon(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.show_tray_icon = on);
-    }
-
-    pub(crate) fn set_confirm_window_close(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.update_config(cx, |cfg| cfg.confirm_window_close = on);
     }
 
     pub(crate) fn set_macos_option_as_alt(&mut self, on: bool, cx: &mut Context<Self>) {
