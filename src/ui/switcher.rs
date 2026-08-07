@@ -824,6 +824,16 @@ impl Tty7App {
         let (key, mods) = (ev.keystroke.key.as_str(), ev.keystroke.modifiers);
         if key == "escape" {
             cx.stop_propagation();
+            // A rename in progress is the smaller thing to back out of; the
+            // panel itself only closes on a second press.
+            if let Some(sw) = self.switcher.as_mut()
+                && sw.renaming.take().is_some()
+            {
+                let query = sw.query.clone();
+                query.update(cx, |state, cx| state.focus(window, cx));
+                cx.notify();
+                return;
+            }
             self.close_switcher(window, cx);
             return;
         }
@@ -1935,10 +1945,15 @@ impl Tty7App {
                         .text_color(muted)
                         .child(row.name.clone()),
                 )
-                .child(div().text_xs().text_color(dim).child(t_fmt(
-                    L10nKey::SwitcherTabCount,
-                    &[("n", &row.tabs.len().to_string())],
-                ))),
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(dim)
+                        .child(match row.tabs.len() {
+                            1 => t(L10nKey::SwitcherTabCountOne).to_string(),
+                            n => t_fmt(L10nKey::SwitcherTabCount, &[("n", &n.to_string())]),
+                        }),
+                ),
         );
 
         for (nth, i) in hits.iter().enumerate() {
@@ -2718,9 +2733,14 @@ mod key_tests {
     #[test]
     fn a_held_control_keeps_tab_working_but_parks_the_arrows() {
         // Mid Ctrl+Tab gesture: Tab still steps, but an arrow key is somebody
-        // else's chord.
+        // else's chord. Only macOS sees the raw key here — everywhere else
+        // Ctrl is the secondary modifier, the chord arrives as the NextTab
+        // action instead, and the raw key must fall through untouched.
         let ctrl = Modifiers::control();
-        assert_eq!(key_intent("tab", ctrl), Key::Tab(true));
+        match cfg!(target_os = "macos") {
+            true => assert_eq!(key_intent("tab", ctrl), Key::Tab(true)),
+            false => assert_eq!(key_intent("tab", ctrl), Key::Pass),
+        }
         assert_eq!(key_intent("up", ctrl), Key::Pass);
     }
 

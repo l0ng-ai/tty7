@@ -189,10 +189,9 @@ pub fn open_at_tab(cx: &mut App, workspace: WorkspaceId, tab: tty7_core::core::m
     let _ = handle.update(cx, |_, window, cx| {
         window.activate_window();
         let _ = app.update(cx, |this, cx| {
-            let Some(index) = this.tabs.iter().position(|t| t.tree_id.get() == tab) else {
-                return;
-            };
-            this.activate(index, window, cx);
+            // A window opened just now may still be hydrating its tabs, so the
+            // request parks until the tab arrives rather than probing once.
+            this.activate_tree_tab(tab, window, cx);
         });
     });
 }

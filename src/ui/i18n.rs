@@ -741,6 +741,7 @@ pub enum L10nKey {
     SwitcherNoTabs,
     SwitcherTabsAfterOpening,
     SwitcherTabCount,
+    SwitcherTabCountOne,
     SwitcherActiveTab,
     SwitcherHoldToSwitch,
     SshPromptPasswordFor,
@@ -2426,6 +2427,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
             "打开这个工作区后才能看到它的标签页",
         ),
         L10nKey::SwitcherTabCount => ("{n} tabs", "{n} 个标签页"),
+        L10nKey::SwitcherTabCountOne => ("1 tab", "1 个标签页"),
         L10nKey::SwitcherActiveTab => ("active", "当前"),
         L10nKey::SwitcherHoldToSwitch => {
             ("Tab to move · release to switch", "按 Tab 移动 · 松开切换")
@@ -3675,6 +3677,7 @@ mod tests {
             L10nKey::SwitcherNoTabs,
             L10nKey::SwitcherTabsAfterOpening,
             L10nKey::SwitcherTabCount,
+            L10nKey::SwitcherTabCountOne,
             L10nKey::SwitcherActiveTab,
             L10nKey::SwitcherHoldToSwitch,
             L10nKey::SshPromptPasswordFor,
