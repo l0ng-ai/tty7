@@ -1268,7 +1268,7 @@ impl TerminalView {
         }
 
         #[cfg(target_os = "macos")]
-        if !window.has_pending_keystrokes() && super::input::defer_to_ime(ks, self.kitty_flags()) {
+        if !window.has_pending_keystrokes() && super::input::defer_to_ime(ks, self.key_flags()) {
             return;
         }
 
@@ -1296,7 +1296,7 @@ impl TerminalView {
             self.editor_handoff_interrupt_seq = Some(self.terminal.prompt_seq());
         }
 
-        let kitty = self.kitty_flags();
+        let kitty = self.key_flags();
         if let Some(bytes) = super::input::keystroke_to_bytes(ks, kitty) {
             let plain = !m.control && !m.alt && !m.platform;
             let interrupt = is_typeahead_interrupt(ks.key.as_str(), m);
@@ -1548,7 +1548,7 @@ impl TerminalView {
             }
             if self.apply_readline_ctrl(key) {
                 cx.notify();
-            } else if let Some(bytes) = super::input::keystroke_to_bytes(ks, self.kitty_flags()) {
+            } else if let Some(bytes) = super::input::keystroke_to_bytes(ks, self.key_flags()) {
                 self.handoff_line_to_shell(&bytes, cx);
             } else {
                 cx.notify();
@@ -1642,7 +1642,7 @@ impl TerminalView {
                 return;
             }
             "escape" => {
-                let bytes = super::input::keystroke_to_bytes(ks, self.kitty_flags())
+                let bytes = super::input::keystroke_to_bytes(ks, self.key_flags())
                     .unwrap_or_else(|| vec![0x1b]);
                 self.terminal.write(bytes);
                 return;
@@ -1657,7 +1657,7 @@ impl TerminalView {
                     }
                 }
                 if m.alt && !m.control && !m.platform && key.chars().count() == 1 {
-                    let bytes = super::input::keystroke_to_bytes(ks, self.kitty_flags())
+                    let bytes = super::input::keystroke_to_bytes(ks, self.key_flags())
                         .unwrap_or_else(|| {
                             let name = if m.shift {
                                 key.to_uppercase()
@@ -1843,12 +1843,12 @@ impl TerminalView {
         self.has_selection() || (self.input_active() && self.cmd.selected_text().is_some())
     }
 
-    pub(super) fn kitty_flags(&self) -> super::input::KittyFlags {
-        super::input::KittyFlags::from_mode(self.terminal.term.lock().mode())
+    pub(super) fn key_flags(&self) -> super::input::KeyFlags {
+        super::input::KeyFlags::from_mode(self.terminal.term.lock().mode())
     }
 
     fn tab_bytes(&self, shift: bool) -> Vec<u8> {
-        super::input::tab_bytes(shift, self.kitty_flags())
+        super::input::tab_bytes(shift, self.key_flags())
     }
 
     fn jump_to_prompt(&mut self) {
@@ -3015,7 +3015,7 @@ impl TerminalView {
         if self.input_active() {
             self.insert_newline_action(cx);
         } else if (self.search.is_some() && self.search_focused)
-            || self.kitty_flags().active()
+            || self.key_flags().kitty_active()
             || !self.accepts_input(cx)
         {
             cx.propagate();
@@ -3314,7 +3314,12 @@ impl TerminalView {
         if !line.is_empty() {
             self.terminal.write(line.into_bytes());
             if tail > 0 {
-                self.terminal.write(b"\x1b[D".repeat(tail));
+                let left: &[u8] = if self.key_flags().app_cursor() {
+                    b"\x1bOD"
+                } else {
+                    b"\x1b[D"
+                };
+                self.terminal.write(left.repeat(tail));
             }
         }
         self.cmd.clear();
@@ -6737,6 +6742,51 @@ mod gpui_tests {
         panic!("the local editor never engaged at the prompt");
     }
 
+    /// Handing the line back to the shell walks the cursor left once per
+    /// character it sat before. Those are arrow keys like any other, so under
+    /// DECCKM they have to be SS3 — and zsh's zle does turn DECCKM on, so this
+    /// is the ordinary case rather than the exotic one.
+    #[gpui::test]
+    fn a_handoff_walks_the_cursor_back_in_ss3_under_app_cursor_mode(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Output(b"\x1b[?1h".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for_input_active(&window, cx);
+
+        window
+            .update(cx, |view, window, cx| {
+                assert!(
+                    view.key_flags().app_cursor(),
+                    "the shell asked for application cursor keys"
+                );
+                for ch in ["z", "z", "q", "q", "x"] {
+                    type_char(view, ch, window, cx);
+                }
+                view.handle_editor_key(&key("left"), cx);
+                view.handle_editor_key(&key("left"), cx);
+                view.complete_tab(true, cx);
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"zzqqx".to_vec())
+        );
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"\x1bOD\x1bOD".to_vec()),
+            "the cursor walks back in SS3, not CSI"
+        );
+    }
+
     #[gpui::test]
     fn tab_with_no_candidates_hands_the_line_to_the_shell(cx: &mut TestAppContext) {
         let (window, mut daemon) = harness(cx);
@@ -7407,7 +7457,7 @@ mod gpui_tests {
         for _ in 0..200 {
             cx.run_until_parked();
             if window
-                .update(cx, |view, _, _| view.kitty_flags().active())
+                .update(cx, |view, _, _| view.key_flags().kitty_active())
                 .unwrap()
             {
                 break;
