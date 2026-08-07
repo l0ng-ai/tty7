@@ -197,9 +197,13 @@ pub struct Config {
     pub mouse_reporting: bool,
     pub clipboard_trim_trailing_spaces: bool,
     pub copy_on_select: bool,
-    /// Optional HTTP/SOCKS proxy used for update checks and release downloads.
-    /// When set, it overrides the system proxy and environment variables.
-    /// Examples: `http://127.0.0.1:7890`, `socks5://127.0.0.1:1080`.
+    /// Optional HTTP/SOCKS proxy for tty7's *own* update checks and release
+    /// downloads; when set it overrides the system proxy and the environment.
+    /// Programs running in a pane are unaffected — they inherit their proxy
+    /// from their own environment, as in any other terminal.
+    ///
+    /// Normalised by [`Config::sanitize`], so `Some` always means a non-blank
+    /// value. Examples: `http://127.0.0.1:7890`, `socks5://127.0.0.1:1080`.
     #[serde(default)]
     pub http_proxy: Option<String>,
     #[serde(default = "default_true")]
@@ -507,6 +511,13 @@ impl Config {
         {
             self.link_file_command = None;
         }
+        // Normalise here so every reader can take the field as-is instead of
+        // repeating a trim-and-drop-if-blank dance.
+        self.http_proxy = self
+            .http_proxy
+            .take()
+            .map(|proxy| proxy.trim().to_string())
+            .filter(|proxy| !proxy.is_empty());
         match self.gui_language.as_str() {
             "en" | "zh-CN" => {}
             _ => self.gui_language = default_gui_language(),
@@ -1093,6 +1104,25 @@ mod tests {
         assert_eq!(clamp(0), 1);
         assert_eq!(clamp(10), 10);
         assert_eq!(clamp(100_000), 3600);
+    }
+
+    #[test]
+    fn sanitize_normalizes_blank_http_proxy_to_none() {
+        let normalize = |proxy: Option<&str>| {
+            let mut cfg = Config {
+                http_proxy: proxy.map(String::from),
+                ..Config::default()
+            };
+            cfg.sanitize();
+            cfg.http_proxy
+        };
+        assert_eq!(normalize(None), None);
+        assert_eq!(normalize(Some("")), None);
+        assert_eq!(normalize(Some("   ")), None);
+        assert_eq!(
+            normalize(Some("  http://127.0.0.1:7890 ")),
+            Some("http://127.0.0.1:7890".to_string())
+        );
     }
 
     #[test]

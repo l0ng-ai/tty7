@@ -442,9 +442,12 @@ struct GitHubAsset {
 
 async fn fetch_latest_release(manual_proxy: Option<String>) -> Result<LatestRelease> {
     let user_agent = concat!("tty7/", env!("CARGO_PKG_VERSION"));
+    // Normalise through the same helper the downloader uses, so a bare
+    // `127.0.0.1:7890` proxies the check as well as the download.
     let client = if let Some(proxy) = manual_proxy
         .as_deref()
-        .and_then(|url| http_client::Url::parse(url).ok())
+        .and_then(tty7_core::daemon::install::proxy::normalize_manual)
+        .and_then(|url| http_client::Url::parse(&url).ok())
     {
         ReqwestClient::proxy_and_user_agent(Some(proxy), user_agent)
             .context("building HTTP client")?
@@ -579,10 +582,10 @@ fn package_for_current_install(version: &str) -> Result<String, UpdateInstallHin
 }
 
 fn prepare_update(version: &str, asset: &ReleaseAsset) -> Result<PreparedUpdate> {
+    // Runs off the main thread, so the `Config` global is out of reach.
     let cfg = Config::load();
-    let manual_proxy = cfg.http_proxy.as_ref().filter(|s| !s.trim().is_empty());
     let fetcher =
-        tty7_core::daemon::install::download::HttpsFetcher::new(manual_proxy.map(|x| x.as_str()));
+        tty7_core::daemon::install::download::HttpsFetcher::new(cfg.http_proxy.as_deref());
     let checksums = fetcher
         .get(&asset.checksums_url)
         .map_err(anyhow::Error::msg)

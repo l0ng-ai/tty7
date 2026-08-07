@@ -9724,7 +9724,7 @@ version = "26.8.1"
 dependencies = [
  "anyhow",
  "base64",
- "core-foundation 0.9.4",
+ "core-foundation 0.10.0",
  "getrandom 0.3.4",
  "ignore",
  "libc",

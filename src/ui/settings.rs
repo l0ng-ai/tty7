@@ -4732,9 +4732,23 @@ impl Tty7App {
             Some(s) => s.http_proxy_input.clone(),
             None => return div().into_any_element(),
         };
-        let http_proxy_control = div()
+        // Only flags a committed value: the input commits on Enter/blur, so a
+        // half-typed address is never marked wrong mid-keystroke.
+        let http_proxy_value = http_proxy_input.read(cx).value().trim().to_string();
+        let http_proxy_invalid = !http_proxy_value.is_empty()
+            && !tty7_core::daemon::install::proxy::is_valid_manual(&http_proxy_value);
+        let http_proxy_control = v_flex()
+            .gap_1()
             .w(px(260.))
             .child(Input::new(&http_proxy_input).small())
+            .when(http_proxy_invalid, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.danger)
+                        .child(t(L10nKey::SettingsAppHttpProxyInvalid)),
+                )
+            })
             .into_any_element();
 
         let logo = Arc::new(Image::from_bytes(

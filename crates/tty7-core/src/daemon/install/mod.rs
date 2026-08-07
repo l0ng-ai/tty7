@@ -7,7 +7,7 @@ pub mod checksums;
 #[cfg(feature = "remote-install")]
 pub mod download;
 #[cfg(feature = "remote-install")]
-mod proxy;
+pub mod proxy;
 pub mod ssh_ops;
 pub mod wsl;
 
@@ -1089,9 +1089,9 @@ pub fn replace_remote_server(conn: &Arc<SshConnection>) -> io::Result<()> {
 
 #[cfg(feature = "remote-install")]
 fn default_fetcher() -> Arc<dyn AssetFetcher> {
-    let manual = crate::core::config::Config::load()
-        .http_proxy
-        .filter(|s| !s.trim().is_empty());
+    // Re-read rather than cache: the GUI writes `config.json` whenever the
+    // proxy setting changes, and installs are rare enough for a file read.
+    let manual = crate::core::config::Config::load().http_proxy;
     Arc::new(download::HttpsFetcher::new(manual.as_deref()))
 }
 

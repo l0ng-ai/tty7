@@ -3922,7 +3922,13 @@ impl Tty7App {
         else {
             return;
         };
-        let value = if value.is_empty() { None } else { Some(value) };
+        // Keep an unusable value out of `config.json`. The row renders a hint
+        // under the input, so the typo does not silently vanish either.
+        if !value.is_empty() && !tty7_core::daemon::install::proxy::is_valid_manual(&value) {
+            cx.notify();
+            return;
+        }
+        let value = (!value.is_empty()).then_some(value);
         let cfg = cx.global_mut::<Config>();
         if cfg.http_proxy == value {
             return;

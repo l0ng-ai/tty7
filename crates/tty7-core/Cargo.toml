@@ -128,10 +128,13 @@ libgssapi = { version = "0.11", optional = true }
 # CFStringTokenizer-adjacent CoreFoundation FFI: `daemon::pane` reads a pane's
 # foreground process name through it on macOS.
 [target.'cfg(target_os = "macos")'.dependencies]
-core-foundation = "0.9"
-# Read system proxy settings from SCDynamicStore for release downloads.
-system-configuration = "0.6"
-system-configuration-sys = "0.6"
+core-foundation = "0.10"
+# Read the system proxy out of SCDynamicStore for tty7's own downloads
+# (`daemon::install::proxy`). It pins core-foundation 0.9, so that module goes
+# through this crate's `core_foundation` re-export rather than the 0.10 above —
+# `get_proxies` hands back 0.9 types and the two versions do not interoperate.
+system-configuration = { version = "0.6", optional = true }
+system-configuration-sys = { version = "0.6", optional = true }
 
 # The Windows GUI⇄daemon transport is loopback TCP, which (unlike a Unix socket)
 # any local process can connect to — so the daemon authenticates each connection
@@ -154,8 +157,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
-# Read system proxy settings from the registry for release downloads.
-winreg = "0.52"
+# Read the system proxy out of the registry for tty7's own downloads
+# (`daemon::install::proxy`).
+winreg = { version = "0.52", optional = true }
 
 [dev-dependencies]
 # Sandboxes for the `host::conformance` suite: a fresh empty directory per case,
@@ -192,7 +196,14 @@ gssapi = ["dep:libgssapi"]
 # no HTTP client. Without it, `daemon::install` still installs from bytes it is
 # handed and still launches/probes a remote daemon; only the fetch fails, with a
 # message saying so.
-remote-install = ["dep:ureq"]
+# The platform proxy readers ride along: they exist only to configure the
+# downloader, and each is a no-op on the targets it is not written for.
+remote-install = [
+    "dep:ureq",
+    "dep:winreg",
+    "dep:system-configuration",
+    "dep:system-configuration-sys",
+]
 
 [lints]
 workspace = true
