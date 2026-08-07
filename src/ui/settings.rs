@@ -4885,19 +4885,49 @@ impl Tty7App {
                                 ),
                         )
                     })
-                    // Announcement only. Acting on an update is the update
-                    // dialog's job — duplicating its buttons here meant three
-                    // controls crowding the row for something the user has
-                    // already been asked about.
+                    // One action, not the three that used to crowd this row.
+                    // The update dialog covers the rest, but it is a moment
+                    // rather than a place: after "Later" it does not come back
+                    // for days, and where the package cannot be installed for
+                    // the user — Linux, an unsupported install — the release
+                    // page is the whole update path. That cannot live only in a
+                    // dialog that has already been dismissed.
                     .when_some(update.filter(|_| ready.is_none()), |this, upd| {
                         let availability = t_fmt(
                             L10nKey::SettingsVersionAvailable,
                             &[("version", &upd.version)],
                         );
+                        // `install_available` opens the release page by itself
+                        // when there is nothing to install, so both labels lead
+                        // to the one call.
+                        let action = if upd.installable {
+                            t(L10nKey::SettingsUpdateAndRelaunch)
+                        } else {
+                            t(L10nKey::SettingsUpdateViewRelease)
+                        };
                         this.child(
                             v_flex()
                                 .gap_2()
-                                .child(div().text_sm().text_color(foreground).child(availability))
+                                .child(
+                                    h_flex()
+                                        .gap_3()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(foreground)
+                                                .child(availability),
+                                        )
+                                        .child(
+                                            Button::new("install-update")
+                                                .label(action)
+                                                .small()
+                                                .disabled(update_busy)
+                                                .on_click(cx.listener(|_, _, _window, cx| {
+                                                    crate::core::update::install_available(cx)
+                                                })),
+                                        ),
+                                )
                                 .when_some(upd.install_hint, |this, hint| {
                                     this.child(
                                         div()

@@ -27,7 +27,9 @@ const NIGHTLY_MANIFEST: &str = "nightly.json";
 pub const RELEASES_URL: &str = "https://github.com/l0ng-ai/tty7/releases/latest";
 
 /// The nightly release's own page. Unlike Stable's, this URL is stable across
-/// nights — the tag stays put even as the commit under it moves.
+/// nights — the tag stays put even as the commit under it moves. Spelled out
+/// rather than built from `NIGHTLY_TAG`, which `concat!` cannot take; the tail
+/// is asserted against it in `each_channel_reads_its_own_feed` instead.
 pub const NIGHTLY_RELEASE_URL: &str = "https://github.com/l0ng-ai/tty7/releases/tag/nightly";
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
@@ -51,6 +53,14 @@ const STAGE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// download runs at a time (`spawn_download` refuses to start a second), so a
 /// single flag is the whole mechanism.
 static DOWNLOAD_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// Bumped by `switch_channel`. A download carries the value it started under,
+/// so a package prepared for the feed the user just left is thrown away instead
+/// of being staged. `DOWNLOAD_CANCELLED` handles the common case — a transfer
+/// still reading bytes — but stops being observed once the download is through
+/// and the work moves on to hashing and unpacking, and that tail is exactly
+/// long enough for a switch to land inside it.
+static CHANNEL_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Whether the user has asked to install as soon as the package is ready. Set
 /// by pressing the install button while a background download is still going,
@@ -477,12 +487,19 @@ fn remind_later() {
 /// armed for the next launch would otherwise install a Stable build onto
 /// someone who just moved to Nightly.
 ///
+/// "Everything" includes a download still in flight, which is the likely one:
+/// checking starts a background transfer on its own, so the seconds spent
+/// finding this setting are seconds that transfer is running. Cancelling stops
+/// it where it can be stopped, and the generation bump covers the rest.
+///
 /// Nightly to Stable deliberately does *not* downgrade. The nightly in hand
 /// keeps running until a stable release supersedes it, which is already how
 /// `parse_version` orders a release above the prerelease sharing its core
 /// version. Rolling back to an older build to honour the switch immediately
 /// would be a bigger surprise than arriving there one release later.
 pub fn switch_channel(cx: &mut App) {
+    CHANNEL_GENERATION.fetch_add(1, Ordering::Relaxed);
+    cancel_download(cx);
     discard_pending(cx);
     let mut state = UpdateState::load();
     state.last_prompted = None;
@@ -621,6 +638,7 @@ fn spawn_download(update: AvailableUpdate, cx: &mut App) {
     });
     spawn_progress_pump(cx);
 
+    let generation = CHANNEL_GENERATION.load(Ordering::Relaxed);
     let version = update.version.clone();
     let task = cx.background_executor().spawn(smol::unblock(move || {
         prepare_update(&version, &asset, &|received, total| {
@@ -644,8 +662,21 @@ fn spawn_download(update: AvailableUpdate, cx: &mut App) {
                 INSTALL_WHEN_READY.store(false, Ordering::Relaxed);
                 APPLY_ON_LAUNCH.store(false, Ordering::Relaxed);
                 if DOWNLOAD_CANCELLED.load(Ordering::Relaxed) {
-                    log::info!("update download cancelled by the user");
-                    cx.update(|cx| update_status(cx, |status| status.phase = UpdatePhase::Idle));
+                    log::info!("update download cancelled");
+                    // Only if nothing has claimed the phase since. A channel
+                    // switch cancels this download and starts a check in the
+                    // same breath, and the check is already the live work by
+                    // the time the transfer notices it was called off.
+                    cx.update(|cx| {
+                        update_status(cx, |status| {
+                            if matches!(
+                                status.phase,
+                                UpdatePhase::Downloading { .. } | UpdatePhase::Verifying
+                            ) {
+                                status.phase = UpdatePhase::Idle;
+                            }
+                        })
+                    });
                     return;
                 }
                 let detail = format!("{error:#}");
@@ -664,6 +695,20 @@ fn spawn_download(update: AvailableUpdate, cx: &mut App) {
             update.version.clone(),
             APPLY_ON_LAUNCH.load(Ordering::Relaxed),
         );
+        // The feed moved under this download. Staging it anyway would hand a
+        // Nightly user the Stable package they were mid-way through fetching
+        // when they left — and if they had pressed install, relaunch them into
+        // it. Both flags were consent to a version from the old channel.
+        if CHANNEL_GENERATION.load(Ordering::Relaxed) != generation {
+            log::info!(
+                "discarding {}: the update channel changed while it was being prepared",
+                update.version
+            );
+            INSTALL_WHEN_READY.store(false, Ordering::Relaxed);
+            APPLY_ON_LAUNCH.store(false, Ordering::Relaxed);
+            let _ = std::fs::remove_dir_all(&pending.stage);
+            return;
+        }
         let mut state = UpdateState::load();
         state.pending = Some(pending.clone());
         state.last_failure = None;
@@ -1136,22 +1181,32 @@ fn release_endpoint(channel: UpdateChannel) -> String {
 }
 
 /// Recovers the version from a package name such as
-/// `tty7-26.8.2-nightly.20260807-macos-arm64.zip`.
+/// `tty7-26.8.2-nightly.202608071800-macos-arm64.zip`.
 ///
 /// The platform segment is a closed set, which is what makes the split
 /// unambiguous — the version is everything between the `tty7-` prefix and the
 /// platform marker. `tty7-server-linux-x86_64-musl` matches that shape too but
 /// yields `server`, which `parse_version` rejects, so the remote-server assets
 /// sitting in the same release are skipped without special-casing them.
+///
+/// The highest version wins rather than the first one found. Two nights can be
+/// on the release at once: the workflow uploads tonight's packages before
+/// pruning yesterday's, and a prune that never ran leaves them there for good.
+/// GitHub lists assets oldest first, so taking the first match is taking the
+/// older build — which reads as "no update" and stalls the channel silently.
 fn version_from_assets(assets: &[GitHubAsset]) -> Option<String> {
-    assets.iter().find_map(|asset| {
-        let rest = asset.name.strip_prefix("tty7-")?;
-        let cut = ["-macos-", "-linux-", "-windows-"]
-            .iter()
-            .find_map(|marker| rest.find(marker))?;
-        let version = &rest[..cut];
-        parse_version(version).map(|_| version.to_string())
-    })
+    assets
+        .iter()
+        .filter_map(|asset| {
+            let rest = asset.name.strip_prefix("tty7-")?;
+            let cut = ["-macos-", "-linux-", "-windows-"]
+                .iter()
+                .find_map(|marker| rest.find(marker))?;
+            let version = &rest[..cut];
+            Some((parse_version(version)?, version.to_string()))
+        })
+        .max()
+        .map(|(_, version)| version)
 }
 
 fn build_http_client(manual_proxy: Option<&str>) -> Result<ReqwestClient> {
@@ -1877,26 +1932,34 @@ fn run_updater(updater: &Path, args: impl IntoIterator<Item = PathBuf>) -> Resul
 ///
 /// Ordering the release flag *before* the build number is what lets a stable
 /// release supersede the prerelease that carries the same core version: a
-/// Nightly stamped `26.7.1-nightly.20260716` is offered `v26.7.1` and graduates
-/// out of the prerelease no matter how recent its build is.
+/// Nightly stamped `26.7.1-nightly.202607161800` is offered `v26.7.1` and
+/// graduates out of the prerelease no matter how recent its build is.
 ///
 /// `build` then orders two prereleases sharing a core version against each
-/// other, by the date suffix the nightly workflow stamps. That comparison is
-/// the whole reason the Nightly channel can roll forward at all — without it
-/// every nightly compares equal to the next one. It is unreachable on Stable,
-/// which reads `/releases/latest` and so never sees a prerelease.
-fn parse_version(s: &str) -> Option<(u64, u64, u64, bool, u64)> {
+/// other, by the timestamp the nightly workflow stamps. That comparison is the
+/// whole reason the Nightly channel can roll forward at all — without it every
+/// nightly compares equal to the next one. It is unreachable on Stable, which
+/// reads `/releases/latest` and so never sees a prerelease.
+///
+/// Every numeric identifier in the prerelease is collected, not just the last
+/// one, and they are compared left to right the way semver compares them. The
+/// nightly stamp is a single number today, but reading only the last segment
+/// meant that appending one — a counter for a second build in the same day, a
+/// finer clock — would silently *reverse* the ordering (`…20260807.2` scoring
+/// 2) instead of failing where someone would notice. Non-numeric identifiers
+/// are skipped rather than ranked: `-beta` and `-rc` are not versions this
+/// project ships, and guessing an order between them buys nothing. A
+/// prerelease with no number at all yields an empty list, which sorts below
+/// every stamped build.
+fn parse_version(s: &str) -> Option<(u64, u64, u64, bool, Vec<u64>)> {
     let trimmed = s.trim();
     let core = trimmed.strip_prefix('v').unwrap_or(trimmed);
     let without_meta = core.split('+').next().unwrap_or(core);
     let is_release = !without_meta.contains('-');
-    // `26.8.2-nightly.20260807` -> 20260807. A prerelease tag with no trailing
-    // number (`-beta`) scores 0, which keeps it below every dated build rather
-    // than rejecting the version outright.
     let build = without_meta
         .split_once('-')
-        .and_then(|(_, pre)| pre.rsplit('.').next().and_then(|last| last.parse().ok()))
-        .unwrap_or(0);
+        .map(|(_, pre)| pre.split('.').filter_map(|id| id.parse().ok()).collect())
+        .unwrap_or_default();
     let core = core.split(['-', '+']).next().unwrap_or(core);
     let mut parts = core.split('.');
     let major = parts.next()?.parse().ok()?;
@@ -1970,25 +2033,69 @@ mod tests {
 
     #[test]
     fn parses_versions_with_and_without_prefix() {
-        assert_eq!(parse_version("v0.3.1"), Some((0, 3, 1, true, 0)));
-        assert_eq!(parse_version("0.3.1"), Some((0, 3, 1, true, 0)));
-        assert_eq!(parse_version(" 1.2.0 "), Some((1, 2, 0, true, 0)));
-        assert_eq!(parse_version("v2"), Some((2, 0, 0, true, 0)));
-        assert_eq!(parse_version("v2.5"), Some((2, 5, 0, true, 0)));
-        assert_eq!(parse_version("v0.4.0-rc.1"), Some((0, 4, 0, false, 1)));
+        let release = |major, minor, patch| Some((major, minor, patch, true, vec![]));
+        assert_eq!(parse_version("v0.3.1"), release(0, 3, 1));
+        assert_eq!(parse_version("0.3.1"), release(0, 3, 1));
+        assert_eq!(parse_version(" 1.2.0 "), release(1, 2, 0));
+        assert_eq!(parse_version("v2"), release(2, 0, 0));
+        assert_eq!(parse_version("v2.5"), release(2, 5, 0));
         assert_eq!(
-            parse_version("26.7.1-nightly.20260716"),
-            Some((26, 7, 1, false, 20260716))
+            parse_version("v0.4.0-rc.1"),
+            Some((0, 4, 0, false, vec![1]))
+        );
+        assert_eq!(
+            parse_version("26.7.1-nightly.202607161800"),
+            Some((26, 7, 1, false, vec![202607161800]))
         );
         // A prerelease with nothing numeric to order by still parses; it just
-        // sorts below every dated build of the same core version.
-        assert_eq!(parse_version("1.0.0-beta"), Some((1, 0, 0, false, 0)));
-        assert_eq!(parse_version("0.4.0+ci.7"), Some((0, 4, 0, true, 0)));
+        // sorts below every stamped build of the same core version.
+        assert_eq!(parse_version("1.0.0-beta"), Some((1, 0, 0, false, vec![])));
+        assert_eq!(parse_version("0.4.0+ci.7"), release(0, 4, 0));
         assert_eq!(parse_version("nightly"), None);
         assert_eq!(parse_version(""), None);
         assert_eq!(parse_version("v0.3.1.1"), None);
         assert_eq!(parse_version("0.3.1.0"), None);
         assert_eq!(parse_version("vv0.3.1"), None);
+    }
+
+    /// Every numeric identifier is collected, so appending one to the nightly
+    /// stamp extends the ordering instead of replacing it. Reading only the
+    /// last segment made `…20260807.2` score 2 and lose to the build before it.
+    #[test]
+    fn prerelease_identifiers_order_left_to_right() {
+        assert_eq!(
+            parse_version("26.8.2-nightly.20260807.2"),
+            Some((26, 8, 2, false, vec![20260807, 2]))
+        );
+        assert!(is_update_available(
+            "26.8.2-nightly.20260807.2",
+            "26.8.2-nightly.20260807"
+        ));
+        assert!(!is_update_available(
+            "26.8.2-nightly.20260807",
+            "26.8.2-nightly.20260807.2"
+        ));
+        // The day still dominates whatever trails it.
+        assert!(is_update_available(
+            "26.8.2-nightly.20260808",
+            "26.8.2-nightly.20260807.9"
+        ));
+        // And the move from date to minute stamps carries the installs that
+        // are already out there: 202608071800 > 20260807.
+        assert!(is_update_available(
+            "26.8.2-nightly.202608071800",
+            "26.8.2-nightly.20260807"
+        ));
+    }
+
+    /// Two builds in one day used to collide on the date and read as "up to
+    /// date" — the reason the stamp goes to the minute.
+    #[test]
+    fn two_builds_on_one_day_are_distinguishable() {
+        assert!(is_update_available(
+            "26.8.2-nightly.202608071800",
+            "26.8.2-nightly.202608070200"
+        ));
     }
 
     #[test]
@@ -2059,7 +2166,14 @@ mod tests {
     #[test]
     fn each_channel_reads_its_own_feed() {
         assert!(release_endpoint(UpdateChannel::Stable).ends_with("/releases/latest"));
-        assert!(release_endpoint(UpdateChannel::Nightly).ends_with("/releases/tags/nightly"));
+        assert!(
+            release_endpoint(UpdateChannel::Nightly)
+                .ends_with(&format!("/releases/tags/{NIGHTLY_TAG}"))
+        );
+        // The page a Nightly user is sent to has to be the release that feed
+        // reads. `concat!` cannot build the URL from the constant, so this is
+        // where the two are held together.
+        assert!(NIGHTLY_RELEASE_URL.ends_with(&format!("/releases/tag/{NIGHTLY_TAG}")));
     }
 
     /// The fallback for a nightly published without `nightly.json`. The tag is
@@ -2095,11 +2209,31 @@ mod tests {
         // order GitHub returns them in.
         let mixed = [
             github_asset("tty7-server-linux-x86_64-musl"),
-            github_asset("tty7-26.8.2-nightly.20260807-linux-x86_64.tar.gz"),
+            github_asset("tty7-26.8.2-nightly.202608071800-linux-x86_64.tar.gz"),
         ];
         assert_eq!(
             version_from_assets(&mixed).as_deref(),
-            Some("26.8.2-nightly.20260807")
+            Some("26.8.2-nightly.202608071800")
+        );
+    }
+
+    /// Tonight's packages are uploaded before last night's are pruned, so both
+    /// nights are briefly on the release at once — and stay that way for good
+    /// if the prune step ever fails. GitHub lists assets oldest first, so
+    /// taking the first match would take yesterday's build and read as "no
+    /// update", stalling the channel with no error anywhere.
+    #[test]
+    fn the_newest_asset_version_wins_when_two_nights_overlap() {
+        let assets = [
+            github_asset("tty7-26.8.2-nightly.202608062200-macos-arm64.zip"),
+            github_asset("tty7-26.8.2-nightly.202608062200-linux-x86_64.tar.gz"),
+            github_asset("checksums.txt"),
+            github_asset("tty7-26.8.2-nightly.202608071800-macos-arm64.zip"),
+            github_asset("tty7-26.8.2-nightly.202608071800-linux-x86_64.tar.gz"),
+        ];
+        assert_eq!(
+            version_from_assets(&assets).as_deref(),
+            Some("26.8.2-nightly.202608071800")
         );
     }
 

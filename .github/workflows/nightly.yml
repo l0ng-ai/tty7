@@ -1,9 +1,14 @@
 name: Nightly
 
 # Unattended nightly channel: build `main` every night, stamp a pre-release
-# CalVer version (<next-stable>-nightly.<YYYYMMDD>), and publish everything to
-# a single rolling `nightly` prerelease. Stable releases (release.yml) are
-# untouched; the update checker ignores prereleases via /releases/latest.
+# CalVer version (<next-stable>-nightly.<YYYYMMDDHHMM>), and publish everything
+# to a single rolling `nightly` prerelease. Stable releases (release.yml) are
+# untouched.
+#
+# This is a real update channel, not just a build: an installation set to
+# Nightly reads /releases/tags/nightly and rolls from one of these to the next.
+# Stable reads /releases/latest, which excludes prereleases, so it never sees
+# them. See `core::update::release_endpoint`.
 
 on:
   schedule:
@@ -39,13 +44,20 @@ jobs:
             echo "build=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Nightly version = next stable patch + date suffix, so semver
+          # Nightly version = next stable patch + timestamp suffix, so semver
           # ordering lands between the previous and the next stable release:
-          # 26.7.0 < 26.7.1-nightly.20260716 < 26.7.1.
+          # 26.7.0 < 26.7.1-nightly.202607161800 < 26.7.1.
+          #
+          # To the minute, not to the day: two builds on one day is what
+          # workflow_dispatch is for, and a date alone gives them the same
+          # version, which the updater reads as "already up to date" and never
+          # offers to the people who took the morning build. Still one numeric
+          # identifier, which is what `parse_version` orders nightlies by — it
+          # compares them all, so this stays sound if a segment is ever added.
           LAST=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
           BASE=${LAST#v}
           NEXT="${BASE%.*}.$(( ${BASE##*.} + 1 ))"
-          VERSION="${NEXT}-nightly.$(date -u +%Y%m%d)"
+          VERSION="${NEXT}-nightly.$(date -u +%Y%m%d%H%M)"
           echo "building $VERSION from ${GITHUB_SHA::7}"
           echo "build=true" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -320,7 +332,10 @@ jobs:
       # updater is left reverse-engineering the version out of asset filenames.
       #
       # Written before checksums.txt so the manifest is hashed along with
-      # everything else rather than shipping unverified.
+      # everything else. The updater reads it straight from the release without
+      # checking that hash — it only decides which version is on offer, and the
+      # package it then selects is verified the usual way — but the entry has to
+      # be there for anyone auditing the release by hand.
       - name: Generate nightly.json
         run: |
           set -euo pipefail
