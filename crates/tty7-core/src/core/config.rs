@@ -678,7 +678,6 @@ fn default_prefix() -> String {
 pub enum RightPanelTab {
     #[default]
     Info,
-    Outline,
     Changes,
     Files,
 }

@@ -3927,26 +3927,6 @@ impl TerminalView {
         self.smooth_scroll(delta, cx);
     }
 
-    pub fn command_marks(&self) -> Vec<crate::terminal::marks::CommandMark> {
-        self.terminal.marks().list()
-    }
-
-    pub fn scroll_to_mark(&mut self, row: i64, cx: &mut Context<Self>) -> bool {
-        use alacritty_terminal::grid::Dimensions as _;
-        let mut term = self.terminal.term.lock();
-        let history = term.grid().history_size() as i64;
-        if row < 0 || row > history + term.grid().screen_lines() as i64 {
-            return false;
-        }
-        let target = (history - row).max(0);
-        let current = term.grid().display_offset() as i64;
-        term.scroll_display(Scroll::Delta((target - current) as i32));
-        drop(term);
-        self.scroll_frac = 0.;
-        cx.notify();
-        true
-    }
-
     fn smooth_scroll(&mut self, delta: f32, cx: &mut Context<Self>) {
         let mut term = self.terminal.term.lock();
         let offset = term.grid().display_offset();

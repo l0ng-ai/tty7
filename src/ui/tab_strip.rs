@@ -391,11 +391,6 @@ impl Tty7App {
                 L10nKey::PanelInfoTitle,
             ),
             (
-                RightPanelTab::Outline,
-                Icon::empty().path("icons/list.svg"),
-                L10nKey::PanelOutlineTitle,
-            ),
-            (
                 RightPanelTab::Changes,
                 Icon::empty().path("icons/git-branch.svg"),
                 L10nKey::PanelChangesTitle,

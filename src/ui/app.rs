@@ -5341,9 +5341,6 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &ShowRightPanelInfo, _window, cx| {
                     this.set_right_panel_tab(crate::core::config::RightPanelTab::Info, cx)
                 }))
-                .on_action(cx.listener(|this, _: &ShowRightPanelOutline, _window, cx| {
-                    this.set_right_panel_tab(crate::core::config::RightPanelTab::Outline, cx)
-                }))
                 .on_action(cx.listener(|this, _: &ShowRightPanelChanges, _window, cx| {
                     this.set_right_panel_tab(crate::core::config::RightPanelTab::Changes, cx)
                 }))
