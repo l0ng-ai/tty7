@@ -528,7 +528,7 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.remote_host_errors.remove(&target.to_string());
+        self.clear_remote_host_error(&target);
         let header = match remote_connect::control_route(&target, cx) {
             Ok(header) => header.restart_server(),
             Err(e) => {
@@ -573,9 +573,9 @@ impl Tty7App {
     ) {
         let answer = window.prompt(
             PromptLevel::Warning,
-            &t_fmt(L10nKey::RemoteRestartTitle, &[("machine", &label)]),
+            &t_fmt(L10nKey::RemoteMismatchTitle, &[("machine", &label)]),
             Some(&t_fmt(L10nKey::RemoteReplaceBody, &[("machine", &label)])),
-            &[t(L10nKey::Cancel), t(L10nKey::RestartServer)],
+            &[t(L10nKey::Cancel), t(L10nKey::RemoteMismatchReplaceServer)],
             cx,
         );
         cx.spawn(async move |this, cx| {
@@ -596,7 +596,7 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.remote_host_errors.remove(&target.to_string());
+        self.clear_remote_host_error(&target);
         let route = match remote_connect::control_route(&target, cx) {
             Ok(header) => header.replace_server(),
             Err(e) => {
@@ -631,6 +631,19 @@ impl Tty7App {
             });
         })
         .detach();
+    }
+
+    /// Retire everything still on screen about this host's last failure. The
+    /// switcher paints a failed `connect` in preference to `remote_host_errors`,
+    /// so leaving one behind would show the stale complaint again in place of
+    /// whatever this attempt has to say.
+    fn clear_remote_host_error(&mut self, target: &RemoteTarget) {
+        self.remote_host_errors.remove(&target.to_string());
+        if let Some(ConnectFlow::Failed { choice, .. }) = &self.connect
+            && &choice.target == target
+        {
+            self.connect = None;
+        }
     }
 
     fn report_remote_host_error(

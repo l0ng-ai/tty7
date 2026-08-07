@@ -807,8 +807,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
              包括此窗口未显示的 shell。工作区和布局会被保留，并以全新的 shell 恢复。"
         }
         L10nKey::RemoteReplaceBody => {
-            "{machine} 上运行的 tty7-server 使用了此客户端无法识别的协议。\
-             tty7 会在该机器上重启为可识别的服务，如果 {machine} 尚未安装则会先安装。\n\
+            "tty7 会在 {machine} 上安装匹配的服务器端并启动它。\n\
              \n\
              {machine} 上运行的所有会话都会结束，包括此窗口未连接的会话。"
         }
@@ -851,6 +850,14 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteMismatchReplaceServer => "更新服务器端",
         L10nKey::RemoteMismatchUnknownBuild => "未知构建",
         L10nKey::RemoteMismatchUnknownBuildFromExe => "未知构建（来自 {exe}）",
+        L10nKey::RemoteServerOutdated => {
+            "{machine} 上的 tty7 服务器端太旧（{build}），当前这份 tty7 连不上它。\
+             更新它才能连接。"
+        }
+        L10nKey::RemoteServerTooNew => {
+            "{machine} 上的 tty7 服务器端（{build}）比当前这份 tty7 还新。\
+             请更新本机的 tty7，或把那边的服务器端替换成匹配的版本。"
+        }
         L10nKey::RemoteDaemonStartFailed => "无法启动 tty7 本地服务器：{error}",
         L10nKey::RemoteDaemonUnreachable => "无法连接到 tty7 本地服务器：{error}",
         L10nKey::RemoteDaemonTooOld => {

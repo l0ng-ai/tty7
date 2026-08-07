@@ -843,9 +843,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
              Workspaces and layouts are kept and come back with fresh shells."
         }
         L10nKey::RemoteReplaceBody => {
-            "The tty7-server running on {machine} speaks a protocol this client \
-             cannot. tty7 will restart the service there onto one that does, installing it \
-             first if {machine} does not already have it.\n\
+            "tty7 will install a matching server on {machine} and start it.\n\
              \n\
              Every session running on {machine} ends, including any this window is not \
              connected to."
@@ -890,6 +888,14 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteMismatchReplaceServer => "Update Server",
         L10nKey::RemoteMismatchUnknownBuild => "an unknown build",
         L10nKey::RemoteMismatchUnknownBuildFromExe => "an unknown build (from {exe})",
+        L10nKey::RemoteServerOutdated => {
+            "{machine} is running an old tty7 server ({build}) that this copy of tty7 \
+             cannot talk to. Update it to connect."
+        }
+        L10nKey::RemoteServerTooNew => {
+            "{machine} is running a newer tty7 server ({build}) than this copy of tty7. \
+             Update tty7 on this computer, or replace the server there with a matching one."
+        }
         L10nKey::RemoteDaemonStartFailed => "tty7's local server could not be started: {error}",
         L10nKey::RemoteDaemonUnreachable => "could not reach tty7's local server: {error}",
         L10nKey::RemoteDaemonTooOld => {

@@ -883,7 +883,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "これにより {machine} 上のすべてのシェルが停止します。表示されていないものも含め、実行中のものはすべて終了します。ワークスペースとレイアウトは保持され、新しいシェルで開きます"
         }
         L10nKey::RemoteReplaceBody => {
-            "{machine} で実行中の tty7-server は、このクライアントが理解できないプロトコルで通信しています。tty7 は対応するプロトコルのサーバーを再起動し、{machine} にまだない場合は先にインストールします。\n\n{machine} で実行中のすべてのセッションが終了します。このウィンドウが接続していないセッションも含みます"
+            "tty7 は {machine} に対応するサーバーをインストールして起動します。\n\n{machine} で実行中のすべてのセッションが終了します。このウィンドウが接続していないセッションも含みます"
         }
         L10nKey::RemoteRestartFailedTitle => {
             "「{machine}」上の tty7 サーバーは再起動されませんでした"
@@ -912,6 +912,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteMismatchReplaceServer => "サーバーを更新",
         L10nKey::RemoteMismatchUnknownBuild => "不明なビルド",
         L10nKey::RemoteMismatchUnknownBuildFromExe => "不明なビルド（{exe} から）",
+        L10nKey::RemoteServerOutdated => {
+            "{machine} の tty7 サーバーが古く（{build}）、この tty7 からは通信できません。更新すると接続できます"
+        }
+        L10nKey::RemoteServerTooNew => {
+            "{machine} の tty7 サーバー（{build}）は、この tty7 より新しいバージョンです。このコンピューターの tty7 を更新するか、向こうのサーバーを対応するものに置き換えてください"
+        }
         L10nKey::RemoteDaemonStartFailed => {
             "tty7 のローカルサーバーを起動できませんでした: {error}"
         }

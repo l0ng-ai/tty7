@@ -21,6 +21,29 @@ pub fn is_dialect_refusal(message: &str) -> bool {
     message.contains(DIALECT_MARKER)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DialectRefusal {
+    pub peer_build: String,
+    pub peer: u32,
+    pub ours: u32,
+}
+
+pub fn parse_dialect_refusal(message: &str) -> Option<DialectRefusal> {
+    const OPEN: &str = "control peer (build ";
+    const TAIL: &str = ", this build speaks v";
+
+    let rest = &message[message.find(OPEN)? + OPEN.len()..];
+    let (peer_build, rest) = rest.split_once(") ")?;
+    let rest = rest.strip_prefix(DIALECT_MARKER)?;
+    let (peer, rest) = rest.split_once(TAIL)?;
+    let ours: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    Some(DialectRefusal {
+        peer_build: peer_build.to_string(),
+        peer: peer.parse().ok()?,
+        ours: ours.parse().ok()?,
+    })
+}
+
 pub fn server_instance() -> &'static str {
     static INSTANCE: OnceLock<String> = OnceLock::new();
     INSTANCE.get_or_init(|| uuid::Uuid::new_v4().to_string())
@@ -2653,6 +2676,26 @@ mod tests {
             assert!(!is_dialect_refusal(other), "{other}");
         }
         assert!(is_dialect_refusal(&dialect_refusal("26.7.6", 2, 3)));
+    }
+
+    #[test]
+    fn a_dialect_refusal_parses_back_into_its_parts() {
+        let wrapped = format!("java answered: {}", dialect_refusal("26.7.7-nightly", 4, 5));
+        assert_eq!(
+            parse_dialect_refusal(&wrapped),
+            Some(DialectRefusal {
+                peer_build: "26.7.7-nightly".into(),
+                peer: 4,
+                ours: 5,
+            }),
+            "the GUI reads the build and both versions back out to say which side is behind"
+        );
+        for other in [
+            "Connection refused (os error 61)",
+            "control peer answered the handshake with Bye instead of HELLO_OK",
+        ] {
+            assert_eq!(parse_dialect_refusal(other), None, "{other}");
+        }
     }
 
     #[test]
