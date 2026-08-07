@@ -354,7 +354,9 @@ impl Tty7App {
     ) {
         self.close_switcher(window, cx);
         match row.adopt {
-            Some((target, remote)) => self.open_remote_workspace(target, *remote, window, cx),
+            Some((target, remote)) => {
+                self.open_remote_workspace(target, *remote, new_window, window, cx)
+            }
             None if new_window => crate::ui::windows::open(cx, Some(row.id)),
             None => self.reveal_workspace(row.id, window, cx),
         }

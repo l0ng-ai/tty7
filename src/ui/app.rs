@@ -897,11 +897,7 @@ impl Tty7App {
             let _ = handle.update(cx, |_, other, _| other.activate_window());
             return;
         }
-        if self.tabs.is_empty() {
-            self.switch_workspace(id, window, cx);
-        } else {
-            crate::ui::windows::open(cx, Some(id));
-        }
+        self.switch_workspace(id, window, cx);
     }
 
     pub(crate) fn switch_workspace(
@@ -6609,6 +6605,33 @@ mod ssh_rebuild_gpui_tests {
                     _ => false,
                 }),
                 "the remote pane's existing view is reused, not re-attached"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn reveal_workspace_with_tabs_switches_in_place(cx: &mut TestAppContext) {
+        let (app, mut vcx, _pane_stream) = harness_with_pane(cx);
+
+        let other = WindowView::default();
+        let other_id = other.id;
+        app.update_in(&mut vcx, |app, window, cx| {
+            crate::ui::windows::WindowRegistry::init(cx);
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![other],
+                    active: None,
+                },
+            );
+            assert!(
+                !app.tabs.is_empty(),
+                "the harness window must hold tabs for this regression test"
+            );
+            app.reveal_workspace(other_id, window, cx);
+            assert_eq!(
+                app.workspace, other_id,
+                "reveal must switch in place even when the window already has tabs"
             );
         });
     }

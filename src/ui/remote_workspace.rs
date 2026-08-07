@@ -390,12 +390,13 @@ impl Tty7App {
         &mut self,
         target: RemoteTarget,
         row: RemoteWorkspaceRow,
+        new_window: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let host = RemoteRef::new(target, row.id);
         let id = WorkspaceStore::claim_remote(cx, host);
-        self.enter_remote_workspace(id, window, cx);
+        self.enter_remote_workspace(id, new_window, window, cx);
     }
 
     pub(crate) fn create_remote_workspace(
@@ -411,23 +412,24 @@ impl Tty7App {
             "new remote workspace on {target} rooted at {}",
             home.display()
         );
-        self.enter_remote_workspace(id, window, cx);
+        self.enter_remote_workspace(id, false, window, cx);
     }
 
     fn enter_remote_workspace(
         &mut self,
         id: WorkspaceId,
+        new_window: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.connect = None;
         RemoteLinks::ensure_running(cx);
-        if self.tabs.is_empty() {
+        if new_window {
+            crate::ui::windows::open(cx, Some(id));
+        } else {
             let previous = self.spawn_host(cx);
             self.switch_workspace(id, window, cx);
             self.rebind_host(previous, cx);
-        } else {
-            crate::ui::windows::open(cx, Some(id));
         }
         cx.notify();
     }
