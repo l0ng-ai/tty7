@@ -118,6 +118,23 @@ Aider、Amp、OpenCode 等约 17 个）并在其外围加功能 —— 绝不包
 - 热路径全程无锁 —— 再大的 `cat` 也不会阻塞在渲染上
 - 触发背压前，守护进程最多可领先窗口缓冲 16 MiB
 
+## macOS 隐私
+
+窗格是从 app bundle 里的可执行文件 fork 出来的，所以程序申请受保护资源时，
+macOS 会把这次请求算到 tty7.app 头上。tty7 声明了对应的 TCC usage strings
+（摄像头、麦克风、通讯录、日历、提醒、照片、定位、本地网络、蓝牙、语音识别、
+Apple Events、系统管理），这样程序才能正常弹出一次性授权窗口，而不是连弹窗都
+没有就被直接拒绝。
+
+不受 usage strings 覆盖的：
+
+- **完全磁盘访问** —— 苹果没有为它定义 usage-string 键。要读写
+  `~/Library/Mail`、`~/Library/Messages`、`~/Library/Safari` 或
+  `~/Library/Containers`，需要在「系统设置」中手动授权。
+
+声明 usage string 不等于持有权限：tty7.app 自己一项都没有拿到。你看到的每个
+授权弹窗都属于你在窗格里运行的那个程序，也可以在「隐私与安全性」中撤销。
+
 ## 本地化
 
 GUI 目前提供英文、简体中文和日文三套文案。在「设置 → 外观 → 语言」中选择，或直接改

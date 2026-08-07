@@ -140,7 +140,6 @@ impl CommandKind {
             ToggleLeftPanel => "left-sidebar",
             ToggleRightPanel => "right-panel",
             ShowRightPanel(RightPanelTab::Info) => "right-panel-info",
-            ShowRightPanel(RightPanelTab::Outline) => "right-panel-outline",
             ShowRightPanel(RightPanelTab::Changes) => "right-panel-changes",
             ShowRightPanel(RightPanelTab::Files) => "right-panel-files",
             ClearTerminal => "clear-scrollback",
@@ -230,7 +229,6 @@ impl CommandKind {
             ToggleRightPanel => "ToggleRightPanel",
             ShowRightPanel(tab) => match tab {
                 RightPanelTab::Info => "ShowRightPanelInfo",
-                RightPanelTab::Outline => "ShowRightPanelOutline",
                 RightPanelTab::Changes => "ShowRightPanelChanges",
                 RightPanelTab::Files => "ShowRightPanelFiles",
             },
@@ -423,10 +421,6 @@ impl Command {
             Command::new(
                 t(L10nKey::CmdRightPanelInfo),
                 ShowRightPanel(RightPanelTab::Info),
-            ),
-            Command::new(
-                t(L10nKey::CmdRightPanelOutline),
-                ShowRightPanel(RightPanelTab::Outline),
             ),
             Command::new(
                 t(L10nKey::CmdRightPanelChanges),

@@ -267,7 +267,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsBell => "铃声",
         L10nKey::SettingsTerminalBell => "终端铃声",
-        L10nKey::SettingsTerminalBellDesc => "铃声（^G）的通知方式：静音、短暂闪烁或系统声音。",
+        L10nKey::SettingsTerminalBellDesc => {
+            "铃声（^G）的通知方式：静音、短暂闪烁、系统声音，或两者同时。"
+        }
         L10nKey::SettingsLinks => "链接",
         L10nKey::DetectUrls => "检测 URL",
         L10nKey::SettingsDetectUrlsDesc => "悬停时给链接加下划线，通过 {modifier}+点击 打开。",
@@ -282,6 +284,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsBellModeOff => "关",
         L10nKey::SettingsBellModeVisual => "闪烁",
         L10nKey::SettingsBellModeAudible => "声音",
+        L10nKey::SettingsBellModeBoth => "闪烁 + 声音",
         L10nKey::SettingsPrompt => "提示符",
         L10nKey::SettingsPromptIntro => {
             "shell 提示符处的 tty7 自带菜单。关闭某项即可把按键交还给 shell。"
@@ -400,13 +403,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "启用前缀后，单独按前缀键约 1 秒后会传给 shell，前缀 + 未绑定的按键会直接发送到终端。"
         }
         L10nKey::SettingsRestoreAllDefaults => "恢复全部默认值",
-        L10nKey::SettingsAboutDesc1 => "一个终端工作台：shell、工作区、SSH、编码 agent。",
-        L10nKey::SettingsAboutDesc2 => {
-            "每个 shell 都具备编辑器级输入；无需 tmux 也能让 shell 在退出和重启后继续运行；原生的 SSH 栈支持主机配置和端口转发；为运行编码 agent 的窗格提供实时状态。"
-        }
-        L10nKey::SettingsAboutTech => {
-            "纯 Rust · 基于 Zed 的 gpui 进行 GPU 渲染 · 来自 Alacritty 的 VT 核心"
-        }
+        L10nKey::SettingsAboutDesc1 => "终端工作台：常驻会话、远程工作、agent。",
+        L10nKey::SettingsAboutTech => "纯 Rust · GPU 渲染基于 Zed 的 gpui · VT 内核来自 Alacritty",
         L10nKey::SettingsVersion => "版本",
         L10nKey::SettingsUpdates => "更新",
         L10nKey::SettingsUpdateAndRelaunch => "更新并重新启动",
@@ -439,9 +437,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "该版本缺少 checksums.txt，因此 tty7 拒绝自动安装。"
         }
         L10nKey::SettingsVersionAvailable => "新版本 {version} 可用。",
-        L10nKey::SettingsCheckUpdatesDesc => {
-            "tty7 会在启动时检查稳定版发布。打包的 macOS 应用和为当前用户安装的 Windows 版本无需打开浏览器即可更新：专用助手会在替换前验证校验和与版本，然后重新启动界面。Linux、为所有用户安装的 Windows 版本以及其他不受支持的安装布局则会打开发布页面。"
-        }
+        L10nKey::SettingsCheckUpdatesDesc => "无法就地更新的安装方式会改为打开发布页面。",
         L10nKey::SettingsCheckUpdatesOnLaunch => "启动时检查更新",
         L10nKey::SettingsCommandLine => "命令行",
         L10nKey::SettingsCommandLineDesc => {
@@ -450,9 +446,14 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsInstallCliOnPath => "将 `tty7` 命令安装到 PATH",
         L10nKey::SettingsServer => "服务器",
         L10nKey::SettingsServerDesc => {
-            "重启这台计算机上的服务器以应用新授予的 macOS 权限，在无响应时恢复，或重新开始。这会结束此处所有正在运行的 shell；你的标签页和布局会以全新的 shell 重新打开。远程机器的服务器可从工作区切换器的对应菜单中重启。"
+            "重启在后台维持 shell 运行的服务器。这会结束这台计算机上所有正在运行的 shell；你的标签页和布局会以全新的 shell 重新打开。"
         }
         L10nKey::SettingsRestartServer => "重启服务器…",
+        L10nKey::SettingsAppHttpProxy => "更新代理",
+        L10nKey::SettingsAppHttpProxyDesc => {
+            "供 tty7 自身的更新检查和下载使用的可选代理。不影响面板中运行的程序，它们仍按各自的环境变量走。留空则跟随系统代理。例如：http://127.0.0.1:7890、socks5://127.0.0.1:1080。"
+        }
+        L10nKey::SettingsAppHttpProxyInvalid => "不是有效的代理地址，该值未保存。",
         L10nKey::SettingsAgentClaudeCode => "Claude Code",
         L10nKey::SettingsAgentCodex => "Codex",
         L10nKey::SettingsAgentCopilotCli => "Copilot CLI",
@@ -461,6 +462,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentGrokBuild => "Grok Build",
         L10nKey::SettingsSearchAboutKeywords => {
             "关于 版本 许可证 致谢 构建 更新 检查 github about version license credits update"
+        }
+        L10nKey::SettingsSearchAppHttpProxyKeywords => {
+            "代理 proxy http https socks socks5 clash v2ray 网络 下载 更新"
         }
         L10nKey::SettingsSearchAnsiColorsKeywords => {
             "ANSI颜色 调色板 终端颜色 主题 ansi colors palette terminal theme"
@@ -615,7 +619,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "Tab补全 补全 菜单 建议 tab completion suggestions prompt"
         }
         L10nKey::SettingsSearchTerminalBellKeywords => {
-            "终端铃声 铃声 提示音 闪烁 静音 beep bell terminal audible visual"
+            "终端铃声 铃声 提示音 闪烁 静音 两者 同时 beep bell terminal audible visual both"
         }
         L10nKey::SettingsSearchThemeKeywords => {
             "外观 颜色 主题 配色 深色 浅色 背景 前景 强调色 跟随系统 appearance color scheme dark light palette"
@@ -713,13 +717,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorFileTooLarge => "\"{path}\" 太大，无法在编辑器中打开（{size} MB）",
         L10nKey::EditorBinaryFile => "\"{path}\" 看起来是二进制文件",
         L10nKey::PanelInfoTitle => "信息",
-        L10nKey::PanelOutlineTitle => "大纲",
         L10nKey::PanelChangesTitle => "变更",
         L10nKey::PanelFilesTitle => "文件",
         L10nKey::PanelNoSession => "没有活动会话。",
         L10nKey::PanelNoSessionHint => "打开一个标签页以在此处查看其 shell、目录和进程。",
-        L10nKey::PanelNoCommands => "此窗格没有记录命令。",
-        L10nKey::PanelNoCommandsHint => "运行命令——shell 集成会标记每个命令，方便你跳回。",
         L10nKey::PanelNoWorkingDirectory => "没有工作目录。",
         L10nKey::PanelNoWorkingDirectoryHint => "此窗格尚未报告工作目录。",
         L10nKey::PanelLoading => "加载中…",
@@ -954,7 +955,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdTabBarMoveToTop => "标签栏：移到顶部",
         L10nKey::CmdTabBarMoveToLeftSidebar => "标签栏：移到左侧边栏",
         L10nKey::CmdRightPanelInfo => "右侧面板：信息",
-        L10nKey::CmdRightPanelOutline => "右侧面板：大纲",
         L10nKey::CmdRightPanelChanges => "右侧面板：变更",
         L10nKey::CmdRightPanelFiles => "右侧面板：文件",
         L10nKey::CmdChangeTheme => "更改主题…",
@@ -1143,6 +1143,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::TrayShowTty7 => "显示 tty7",
         L10nKey::TrayNotifications => "通知",
         L10nKey::TrayAgentNeedsInput => "需要输入",
+        L10nKey::NotifyCommandFinished => "命令运行完成，用时 {secs} 秒",
+        L10nKey::NotifyCommandFinishedWithCommand => "{command} 已完成，用时 {secs} 秒",
+        L10nKey::NotifyAgentFinished => "已完成，用时 {secs} 秒",
+        L10nKey::NotifyAgentWaiting => "等待你的输入",
+        L10nKey::NotifyTurnFinished => "本轮已完成",
         L10nKey::TabTooltipMore => "更多",
         L10nKey::TabTooltipShowSidebar => "显示侧栏",
         L10nKey::TabTooltipHideSidebar => "隐藏侧栏",

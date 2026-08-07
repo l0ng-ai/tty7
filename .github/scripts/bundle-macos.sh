@@ -68,6 +68,40 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
+    <!-- tty7 is a terminal workbench: panes are forked from the bundled
+         executable, so macOS attributes a child process's protected-resource
+         requests to tty7.app. Without these usage strings a program you run in
+         a pane that asks for camera / microphone / contacts / calendar /
+         photos / location / reminders / Apple Events is denied outright with
+         no prompt, and cannot even be granted in System Settings. Declaring
+         them mirrors what kitty and Kaku ship for exactly this reason: Mac
+         TCC reads the responsible bundle's usage string, not the child's. -->
+    <key>NSCameraUsageDescription</key>
+    <string>A program running inside tty7 would like to access the camera.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>A program running inside tty7 would like to access the microphone.</string>
+    <key>NSContactsUsageDescription</key>
+    <string>A program running inside tty7 would like to access your contacts.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>A program running inside tty7 would like to access your calendar data.</string>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>A program running inside tty7 would like to access your reminders.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>A program running inside tty7 would like to access your photo library.</string>
+    <key>NSLocationUsageDescription</key>
+    <string>A program running inside tty7 would like to access your location information.</string>
+    <key>NSMotionUsageDescription</key>
+    <string>A program running inside tty7 would like to access motion data.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>A program running inside tty7 would like to access the local network.</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>A program running inside tty7 would like to use Bluetooth.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>A program running inside tty7 would like to use speech recognition.</string>
+    <key>NSSystemAdministrationUsageDescription</key>
+    <string>A program running inside tty7 requires elevated privileges.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>A program running inside tty7 would like to control other applications via Apple Events.</string>
 </dict>
 </plist>
 PLIST
@@ -109,6 +143,18 @@ if [[ -n "$SIGN_ID" && -n "${APPLE_CERTIFICATE:-}" ]]; then
     <key>com.apple.security.cs.allow-jit</key><true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
     <key>com.apple.security.cs.disable-library-validation</key><true/>
+    <!-- Deliberately nothing beyond those three, and in particular no TCC
+         entitlement to match the usage strings in Info.plist. Those strings
+         are about a *child* process's request: macOS attributes it to tty7.app
+         as the responsible process and reads the wording from its bundle. The
+         hardened-runtime entitlement, by contrast, is checked against the
+         process actually sending the request — the child, carrying its own
+         signature, since entitlements are per-executable and never inherited.
+         So camera / microphone / location / apple-events on tty7.app would do
+         nothing for a pane, while widening what injected code could reach
+         under tty7's identity; this bundle already carries
+         disable-library-validation. Same reasoning the comments below use to
+         keep the GUI's entitlements off the CLI. -->
 </dict>
 </plist>
 ENT

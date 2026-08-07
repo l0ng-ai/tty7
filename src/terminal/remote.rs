@@ -13,6 +13,7 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{self, CursorShape, CursorStyle};
 
 use crate::terminal::marks::{MarkEvent, MarkScanner};
+use crate::terminal::parked_cursor::{CursorCut, ParkedCursorRepair, ParkedCursorScanner};
 
 use std::collections::VecDeque;
 
@@ -27,6 +28,7 @@ use crate::daemon::protocol::{
     WorkspaceRequest,
 };
 use crate::daemon::transport::{self, Stream};
+use gpui::EntityId;
 
 use super::size::TermSize;
 
@@ -534,6 +536,8 @@ impl RemoteTerminal {
                 let mut mode_tok = OscTokenizer::new(&[b"133"]);
                 let mut zle_tok = OscTokenizer::new(&[b"133"]);
                 let mut mark_scan = MarkScanner::new();
+                let mut cursor_scan = ParkedCursorScanner::new();
+                let mut parked_cursor = ParkedCursorRepair::default();
                 let mut pending: Vec<u8> = buffered;
                 let mut pending_size: Option<WinSize> = None;
                 // Kitty-graphics decode runs on its own thread with newest-frame
@@ -573,8 +577,18 @@ impl RemoteTerminal {
                     macro_rules! flush_batch {
                         () => {
                             if !out_batch.is_empty() {
-                                let mut cuts: Vec<(usize, MarkEvent)> = Vec::new();
-                                mark_scan.feed(&out_batch, |off, ev| cuts.push((off, ev)));
+                                // Both scanners report an offset one past the
+                                // sequence they matched, so the batch splits at
+                                // each of them: advance the emulator to the cut,
+                                // act on the state that sequence left behind,
+                                // carry on. In offset order, since a frame can
+                                // carry marks and cursor shows both.
+                                let mut cuts: Vec<(usize, Cut)> = Vec::new();
+                                mark_scan
+                                    .feed(&out_batch, |off, ev| cuts.push((off, Cut::Mark(ev))));
+                                cursor_scan
+                                    .feed(&out_batch, |off, c| cuts.push((off, Cut::Cursor(c))));
+                                cuts.sort_by_key(|(off, _)| *off);
                                 {
                                     let t0 = trace.then(std::time::Instant::now);
                                     let mut term = term.lock();
@@ -583,10 +597,15 @@ impl RemoteTerminal {
                                         processor.advance(&mut *term, &out_batch);
                                     } else {
                                         let mut at = 0usize;
-                                        for (off, ev) in cuts {
+                                        for (off, cut) in cuts {
                                             processor.advance(&mut *term, &out_batch[at..off]);
                                             at = off;
-                                            record_mark(&term, &marks, ev);
+                                            match cut {
+                                                Cut::Mark(ev) => record_mark(&term, &marks, ev),
+                                                Cut::Cursor(vis) => {
+                                                    parked_cursor.apply(&mut term, vis);
+                                                }
+                                            }
                                         }
                                         processor.advance(&mut *term, &out_batch[at..]);
                                     }
@@ -654,6 +673,8 @@ impl RemoteTerminal {
                             }
                             DaemonMsg::Snapshot(bytes) => {
                                 flush_batch!();
+                                cursor_scan.reset();
+                                parked_cursor.reset();
                                 proxy.replaying.store(true, Ordering::Relaxed);
                                 {
                                     let mut term = term.lock();
@@ -1364,6 +1385,13 @@ impl RemoteTerminal {
     }
 }
 
+/// Something in the pty stream the reader has to act on at the byte where it
+/// appeared, rather than after the whole batch has been parsed.
+enum Cut {
+    Mark(MarkEvent),
+    Cursor(CursorCut),
+}
+
 fn record_mark(term: &Term<EventProxy>, marks: &crate::terminal::marks::Marks, event: MarkEvent) {
     use alacritty_terminal::grid::Dimensions as _;
     match event {
@@ -1521,8 +1549,30 @@ fn stale_mode_resets(mode: TermMode) -> Vec<u8> {
 }
 
 pub(crate) fn notify_desktop(title: Option<&str>, body: &str) {
-    let summary = title.unwrap_or("tty7").to_string();
-    let body = body.to_string();
+    notify_desktop_for_pane(title, body, None);
+}
+
+/// Show a desktop notification.
+///
+/// Naming a `pane` makes the notification clickable where the platform supports
+/// it, so activating it reveals that pane. It is an `EntityId` on purpose: the
+/// tray dispatch identifies leaves by their gpui entity id, and taking a bare
+/// `u64` here is what lets a caller hand over a `pane_id` — a different number,
+/// assigned by the daemon — and get a notification that reveals nothing.
+///
+/// Every other case (no pane, unsupported platform, no room left to wait for a
+/// click) falls back to the plain `notify-rust` path below, which is why
+/// `try_clickable_notification` reports whether it took the job.
+pub(crate) fn notify_desktop_for_pane(title: Option<&str>, body: &str, pane: Option<EntityId>) {
+    let summary = sanitize_notification_text(title.unwrap_or("tty7"), NOTIFY_TITLE_MAX);
+    let body = sanitize_notification_text(body, NOTIFY_BODY_MAX);
+
+    if let Some(pane) = pane
+        && try_clickable_notification(&summary, &body, pane.as_u64())
+    {
+        return;
+    }
+
     std::thread::spawn(move || {
         #[cfg(target_os = "macos")]
         ensure_notification_app();
@@ -1539,6 +1589,291 @@ pub(crate) fn notify_desktop(title: Option<&str>, body: &str) {
         }
         let _ = notif.show();
     });
+}
+
+/// Longest title / body we hand to a notification backend.
+///
+/// The text comes straight off the terminal (OSC 9/777 payloads, window
+/// titles, an agent's own status line), so it is attacker-shaped: arbitrarily
+/// long, and free to contain control bytes. Every backend truncates in its own
+/// ugly way, and on Windows a stray `ESC` makes the toast XML fail to parse and
+/// the whole notification disappear — so clamp both here, once, for all paths.
+const NOTIFY_TITLE_MAX: usize = 96;
+const NOTIFY_BODY_MAX: usize = 512;
+
+fn sanitize_notification_text(s: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut taken = 0usize;
+    for ch in s.chars() {
+        // XML 1.0 allows exactly tab / LF / CR out of the control range.
+        if ch.is_control() && !matches!(ch, '\t' | '\n' | '\r') {
+            continue;
+        }
+        if taken == max_chars {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+        taken += 1;
+    }
+    out
+}
+
+/// Deliver a click-to-reveal notification, reporting whether it was taken.
+/// `false` means the caller should fall back to the plain notification path.
+#[cfg(all(target_os = "macos", not(test)))]
+fn try_clickable_notification(title: &str, body: &str, leaf_id: u64) -> bool {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // `mac-notification-sys` blocks the calling thread until the user acts on
+    // the notification, and its wait has no timeout: a banner nobody touches —
+    // the common case, since unclicked ones just pile up in Notification
+    // Center — parks its thread for the rest of the session. Cap how many can
+    // be outstanding and let the rest through as fire-and-forget, so a chatty
+    // agent cannot turn a session's notifications into a thread leak.
+    const MAX_PENDING_CLICKS: usize = 8;
+    static PENDING: AtomicUsize = AtomicUsize::new(0);
+
+    if PENDING
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            (n < MAX_PENDING_CLICKS).then_some(n + 1)
+        })
+        .is_err()
+    {
+        return false;
+    }
+
+    let (title, body) = (title.to_string(), body.to_string());
+    std::thread::spawn(move || {
+        show_macos_toast(&title, &body, leaf_id);
+        PENDING.fetch_sub(1, Ordering::AcqRel);
+    });
+    true
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn show_macos_toast(title: &str, body: &str, leaf_id: u64) {
+    use mac_notification_sys::{Notification, NotificationResponse};
+
+    // `send` sets the delivering application on first use and keeps it under a
+    // `Once`, so whoever notifies first decides the name and icon for the whole
+    // session. Without this the default wins — `com.apple.Finder` — and every
+    // later notification, this path or `notify-rust`'s, claims to be Finder.
+    ensure_notification_app();
+
+    let response = Notification::new()
+        .title(title)
+        .message(body)
+        .wait_for_click(true)
+        .send();
+
+    match response {
+        Ok(NotificationResponse::Click) => reveal_pane(leaf_id),
+        Ok(_) => {}
+        Err(e) => log::warn!("failed to show macOS notification: {e}"),
+    }
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
+fn try_clickable_notification(title: &str, body: &str, leaf_id: u64) -> bool {
+    // An AUMID the shell has not indexed makes `Show` report success and drops
+    // the toast on the floor, so without one the notify-rust path — which
+    // deliberately keeps PowerShell's identity rather than lose the toast — is
+    // the only one that shows anything at all.
+    if crate::core::aumid::toast_app_id().is_none() {
+        return false;
+    }
+    let Some(tx) = toast_thread() else {
+        return false;
+    };
+    tx.try_send((title.to_string(), body.to_string(), leaf_id))
+        .is_ok()
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
+type ToastRequest = (String, String, u64);
+
+/// Toasts are built, shown and *kept* on one dedicated thread.
+///
+/// A `ToastNotification` has to stay alive for its `Activated` event to reach
+/// us, and Windows parks toasts in Action Center long after they leave the
+/// screen — a thread per toast sleeping out a fixed window would both leak
+/// threads and stop working the moment the timer expired. Keeping them on a
+/// single thread also means the WinRT objects never cross a thread boundary.
+#[cfg(all(target_os = "windows", not(test)))]
+fn toast_thread() -> Option<&'static std::sync::mpsc::SyncSender<ToastRequest>> {
+    use std::sync::OnceLock;
+    use std::sync::mpsc::sync_channel;
+
+    static TX: OnceLock<Option<std::sync::mpsc::SyncSender<ToastRequest>>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = sync_channel::<ToastRequest>(32);
+        std::thread::Builder::new()
+            .name("tty7-toasts".into())
+            .spawn(move || toast_loop(rx))
+            .map_err(|e| log::warn!("failed to start the toast thread: {e}"))
+            .ok()
+            .map(|_| tx)
+    })
+    .as_ref()
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
+fn toast_loop(rx: std::sync::mpsc::Receiver<ToastRequest>) {
+    use std::collections::VecDeque;
+    use windows::UI::Notifications::ToastNotification;
+    use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
+
+    // MTA lets the Activated callback run on a thread-pool thread without a
+    // message loop of our own.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+
+    // How many past toasts stay clickable. Dropping the oldest is what bounds
+    // the memory here; there is no useful deadline to expire them on.
+    const MAX_LIVE_TOASTS: usize = 32;
+    let mut live: VecDeque<ToastNotification> = VecDeque::new();
+
+    while let Ok((title, body, leaf_id)) = rx.recv() {
+        if let Some(toast) = show_windows_toast(&title, &body, leaf_id) {
+            if live.len() == MAX_LIVE_TOASTS {
+                live.pop_front();
+            }
+            live.push_back(toast);
+        }
+    }
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
+fn show_windows_toast(
+    title: &str,
+    body: &str,
+    leaf_id: u64,
+) -> Option<windows::UI::Notifications::ToastNotification> {
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::Foundation::TypedEventHandler;
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+    use windows::core::IInspectable;
+
+    let app_id = crate::core::aumid::toast_app_id()?;
+
+    let xml = format!(
+        r#"<toast>
+  <visual>
+    <binding template="ToastText02">
+      <text id="1">{}</text>
+      <text id="2">{}</text>
+    </binding>
+  </visual>
+</toast>"#,
+        xml_escape(title),
+        xml_escape(body)
+    );
+
+    let doc = match XmlDocument::new() {
+        Ok(d) => {
+            if let Err(e) = d.LoadXml(&xml.into()) {
+                log::warn!("failed to load toast xml: {e}");
+                return None;
+            }
+            d
+        }
+        Err(e) => {
+            log::warn!("failed to create toast xml document: {e}");
+            return None;
+        }
+    };
+
+    let toast = match ToastNotification::CreateToastNotification(&doc) {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("failed to create toast notification: {e}");
+            return None;
+        }
+    };
+
+    if let Err(e) = toast.Activated(&TypedEventHandler::new(
+        move |_sender: &Option<ToastNotification>, _args: &Option<IInspectable>| {
+            reveal_pane(leaf_id);
+            Ok(())
+        },
+    )) {
+        log::warn!("failed to register toast activated handler: {e}");
+    }
+
+    let notifier = match ToastNotificationManager::CreateToastNotifierWithId(&app_id.into()) {
+        Ok(n) => n,
+        Err(e) => {
+            log::warn!("failed to create toast notifier: {e}");
+            return None;
+        }
+    };
+
+    if let Err(e) = notifier.Show(&toast) {
+        log::warn!("failed to show toast: {e}");
+        return None;
+    }
+
+    Some(toast)
+}
+
+/// Ask the tray dispatch loop to bring `leaf_id` to the front. Runs on whatever
+/// thread the platform hands the activation to, so it only touches the channel.
+#[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
+fn reveal_pane(leaf_id: u64) {
+    if let Some(tx) = crate::ui::tray::sender() {
+        let _ = tx.try_send(crate::ui::tray::TrayAction::RevealPane { leaf_id });
+    }
+}
+
+#[cfg(not(any(
+    all(target_os = "macos", not(test)),
+    all(target_os = "windows", not(test))
+)))]
+fn try_clickable_notification(_title: &str, _body: &str, _leaf_id: u64) -> bool {
+    // Linux notifications go through notify-rust; click-to-reveal would need a
+    // D-Bus action listener of its own.
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    #[test]
+    fn sanitizing_drops_control_bytes_but_keeps_line_breaks() {
+        let raw = "build \x1b[31mfailed\x07\nsee log\ttail";
+        assert_eq!(
+            sanitize_notification_text(raw, NOTIFY_BODY_MAX),
+            "build [31mfailed\nsee log\ttail"
+        );
+    }
+
+    #[test]
+    fn sanitizing_clamps_by_chars_not_bytes() {
+        let out = sanitize_notification_text(&"账".repeat(200), 8);
+        assert_eq!(out, format!("{}…", "账".repeat(8)));
+        assert_eq!(sanitize_notification_text("short", 8), "short");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn xml_escaping_covers_every_entity_once() {
+        assert_eq!(
+            xml_escape(r#"a & b < c > "d" 'e'"#),
+            "a &amp; b &lt; c &gt; &quot;d&quot; &apos;e&apos;"
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2470,6 +2805,60 @@ mod tests {
         assert!(
             !events.iter().any(|e| matches!(e, AlacEvent::PtyWrite(_))),
             "a query inside the replayed sync tail must stay suppressed"
+        );
+    }
+
+    /// Feeds one conhost-shaped repaint and reports the cell the cursor ends on,
+    /// waiting for the `X` the frame paints so the reader is known to be done.
+    fn cursor_after_conpty_frame(frame: &[u8]) -> (i32, usize) {
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        // Where the TUI put the cursor before conhost repainted over it.
+        DaemonMsg::Output(b"\x1b[6;4H".to_vec())
+            .encode(&mut daemon_side)
+            .unwrap();
+        DaemonMsg::Output(frame.to_vec())
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+
+        for _ in 0..600 {
+            {
+                let t = term.term.lock();
+                let painted = t.grid()[alacritty_terminal::index::Line(19)]
+                    [alacritty_terminal::index::Column(1)]
+                .c;
+                if painted == 'X' {
+                    let point = t.grid().cursor.point;
+                    return (point.line.0, point.column.0);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the reader never applied the frame");
+    }
+
+    #[test]
+    fn a_conpty_frame_that_shows_the_cursor_over_an_erase_keeps_the_cell_it_hid_on() {
+        assert_eq!(
+            cursor_after_conpty_frame(
+                b"\x1b[?25l\x1b[20;2HX\x1b[K\x1b[m\x1b[22;42H\x1b[K\x1b[?25h"
+            ),
+            (5, 3),
+            "conhost parked the cursor on the cell it erased last; the cursor \
+             belongs where it was when the repaint hid it"
+        );
+    }
+
+    #[test]
+    fn a_conpty_frame_that_moves_the_cursor_before_showing_it_is_obeyed() {
+        assert_eq!(
+            cursor_after_conpty_frame(
+                b"\x1b[?25l\x1b[20;2HX\x1b[K\x1b[m\x1b[22;42H\x1b[K\x1b[9;9H\x1b[?25h"
+            ),
+            (8, 8),
+            "the frame painted the cursor somewhere on purpose"
         );
     }
 

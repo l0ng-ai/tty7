@@ -122,6 +122,25 @@ a brief pause; `prefix` + an unbound key passes straight through.
 - Hot paths are lock-free — a big `cat` never waits on drawing
 - The daemon buffers up to 16 MiB ahead of the window before backpressure applies
 
+## macOS privacy
+
+Panes are forked from the bundled executable, so macOS attributes a program's
+request for a protected resource to tty7.app. tty7 declares the matching TCC
+usage strings (camera, microphone, contacts, calendar, reminders, photos,
+location, local network, Bluetooth, speech recognition, Apple Events, system
+administration) so that program gets the normal one-time prompt instead of
+being denied outright with no prompt at all.
+
+Not covered by usage strings:
+
+- **Full Disk Access** — Apple defines no usage-string key for it. Reaching
+  `~/Library/Mail`, `~/Library/Messages`, `~/Library/Safari` or
+  `~/Library/Containers` needs a manual grant in System Settings.
+
+Declaring a usage string is not the same as holding the permission: tty7.app
+itself is granted none of these resources. Every prompt you see belongs to
+whatever you ran in the pane, and you can revoke it under Privacy & Security.
+
 ## Localization
 
 The GUI ships English, Simplified Chinese and Japanese strings. Pick one in

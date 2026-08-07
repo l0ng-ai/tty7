@@ -308,7 +308,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsBell => "ベル通知",
         L10nKey::SettingsTerminalBell => "ターミナルベル",
         L10nKey::SettingsTerminalBellDesc => {
-            "ベル（^G）の通知方法: サイレント、短い点滅、またはシステムサウンド"
+            "ベル（^G）の通知方法: サイレント、短い点滅、システムサウンド、またはその両方"
         }
         L10nKey::SettingsLinks => "リンク",
         L10nKey::DetectUrls => "URL を自動検出",
@@ -326,6 +326,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsBellModeOff => "オフ",
         L10nKey::SettingsBellModeVisual => "視覚的（画面点滅）",
         L10nKey::SettingsBellModeAudible => "音声（効果音）",
+        L10nKey::SettingsBellModeBoth => "点滅 + 音声",
         L10nKey::SettingsPrompt => "プロンプト",
         L10nKey::SettingsPromptIntro => {
             "シェルプロンプトに表示する tty7 独自のメニュー。オフにするとキーはシェルに渡されます"
@@ -453,10 +454,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsRestoreAllDefaults => "すべてのデフォルトを復元",
         L10nKey::SettingsAboutDesc1 => {
-            "ターミナルワークベンチ: シェル、ワークスペース、SSH、コーディングエージェント"
-        }
-        L10nKey::SettingsAboutDesc2 => {
-            "すべてのシェルでエディタ級の入力。tmux なしで終了や再起動後も残るシェル。プロファイルとポートフォワーディングを備えた SSH。コーディングエージェントを実行するペインの状態をリアルタイム表示"
+            "ターミナルワークベンチ: 常駐セッション、リモート作業、エージェント"
         }
         L10nKey::SettingsAboutTech => {
             "Pure Rust · Zed の gpui で GPU レンダリング · Alacritty ベースの VT コア"
@@ -496,7 +494,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsVersionAvailable => "バージョン {version} が利用可能です",
         L10nKey::SettingsCheckUpdatesDesc => {
-            "tty7 は起動時に安定版リリースを確認します。パッケージ化された macOS アプリと、ユーザー単位でインストールされた Windows 版は、ブラウザーを開かずに更新できます。専用のヘルパーが置き換え前にチェックサムとバージョンを検証し、その後 GUI を再起動します。Linux、すべてのユーザー向けにインストールされた Windows 版、その他の未対応の構成では、リリースページを開きます"
+            "その場で更新できないインストール形式では、代わりにリリースページを開きます"
         }
         L10nKey::SettingsCheckUpdatesOnLaunch => "起動時にアップデートを確認",
         L10nKey::SettingsCommandLine => "コマンドライン",
@@ -506,9 +504,16 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsInstallCliOnPath => "`tty7` コマンドを PATH にインストール",
         L10nKey::SettingsServer => "デーモンサーバー",
         L10nKey::SettingsServerDesc => {
-            "このコンピュータ上のサーバーを再起動すると、新しい macOS 権限を反映したり、復旧したり、やり直したりできます。ここで実行中のすべてのシェルは終了します。タブとレイアウトは新しいシェルで開きます。リモートマシンのサーバーは、ワークスペーススイッチャーのそのマシンのメニューから再起動します"
+            "シェルを動かし続けているバックグラウンドサーバーを再起動します。このコンピュータ上のすべてのシェルが終了し、タブとレイアウトは新しいシェルで開き直します"
         }
         L10nKey::SettingsRestartServer => "サーバーを再起動…",
+        L10nKey::SettingsAppHttpProxy => "アップデート用プロキシ",
+        L10nKey::SettingsAppHttpProxyDesc => {
+            "tty7 自身の更新チェックとダウンロードに使う任意のプロキシです。ペインで実行中のプログラムには影響しません（それぞれの環境変数に従います）。空欄にするとシステムのプロキシ設定に従います。例: http://127.0.0.1:7890、socks5://127.0.0.1:1080"
+        }
+        L10nKey::SettingsAppHttpProxyInvalid => {
+            "プロキシアドレスとして正しくないため、この値は保存されませんでした"
+        }
         L10nKey::SettingsAgentClaudeCode => "Claude Code",
         L10nKey::SettingsAgentCodex => "Codex",
         L10nKey::SettingsAgentCopilotCli => "Copilot CLI",
@@ -517,6 +522,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentGrokBuild => "Grok Build",
         L10nKey::SettingsSearchAboutKeywords => {
             "バージョン ライセンス クレジット ビルド 更新 確認 github about version license credits update check"
+        }
+        L10nKey::SettingsSearchAppHttpProxyKeywords => {
+            "プロキシ 通信 ネットワーク ダウンロード アップデート proxy http https socks socks5 clash v2ray network download update"
         }
         L10nKey::SettingsSearchAnsiColorsKeywords => {
             "パレット 16 ANSI カラー ターミナル テーマ ansi colors palette terminal theme colours"
@@ -673,7 +681,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "補完 メニュー サジェスト タブ プロンプト tab completion menu suggestions prompt"
         }
         L10nKey::SettingsSearchTerminalBellKeywords => {
-            "ベル 可聴 視覚 フラッシュ サウンド サイレント ビープ ^g terminal bell audible visual flash sound silence beep"
+            "ベル 可聴 視覚 フラッシュ サウンド サイレント ビープ 両方 ^g terminal bell audible visual flash sound silence beep both"
         }
         L10nKey::SettingsSearchThemeKeywords => {
             "外観 色 配色 ダーク ライト パレット 背景 前景 アクセント 同期 システム os 自動 theme appearance color scheme palette background foreground accent sync auto"
@@ -773,16 +781,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorFileTooLarge => "「{path}」はエディタで開くには大きすぎます（{size} MB）",
         L10nKey::EditorBinaryFile => "「{path}」はバイナリファイルのようです",
         L10nKey::PanelInfoTitle => "情報",
-        L10nKey::PanelOutlineTitle => "アウトライン",
         L10nKey::PanelChangesTitle => "変更",
         L10nKey::PanelFilesTitle => "ファイル",
         L10nKey::PanelNoSession => "アクティブなセッションがありません",
         L10nKey::PanelNoSessionHint => {
             "タブを開くと、そのシェル、ディレクトリ、プロセスがここに表示されます"
-        }
-        L10nKey::PanelNoCommands => "このペインには記録されたコマンドがありません",
-        L10nKey::PanelNoCommandsHint => {
-            "コマンドを実行すると、シェル統合がそれを記録するため、後からその場所に戻れます"
         }
         L10nKey::PanelNoWorkingDirectory => "作業ディレクトリがありません",
         L10nKey::PanelNoWorkingDirectoryHint => {
@@ -1034,7 +1037,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdTabBarMoveToTop => "タブバー: 上部へ移動",
         L10nKey::CmdTabBarMoveToLeftSidebar => "タブバー: 左サイドバーへ移動",
         L10nKey::CmdRightPanelInfo => "右パネル: 情報",
-        L10nKey::CmdRightPanelOutline => "右パネル: アウトライン",
         L10nKey::CmdRightPanelChanges => "右パネル: 変更",
         L10nKey::CmdRightPanelFiles => "右パネル: ファイル",
         L10nKey::CmdChangeTheme => "テーマを変更…",
@@ -1237,6 +1239,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TrayShowTty7 => "tty7 を表示",
         L10nKey::TrayNotifications => "通知",
         L10nKey::TrayAgentNeedsInput => "入力が必要",
+        L10nKey::NotifyCommandFinished => "コマンドが {secs} 秒で完了しました",
+        L10nKey::NotifyCommandFinishedWithCommand => "{command} — {secs} 秒で完了しました",
+        L10nKey::NotifyAgentFinished => "{secs} 秒で完了しました",
+        L10nKey::NotifyAgentWaiting => "入力を待っています",
+        L10nKey::NotifyTurnFinished => "ターンが完了しました",
         L10nKey::TabTooltipMore => "その他",
         L10nKey::TabTooltipShowSidebar => "サイドバーを表示",
         L10nKey::TabTooltipHideSidebar => "サイドバーを非表示",

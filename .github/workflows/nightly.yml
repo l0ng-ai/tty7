@@ -166,7 +166,7 @@ jobs:
       - name: Fetch the bundled Linux server
         if: matrix.os == 'windows'
         continue-on-error: true
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: nightly-tty7-server-linux-x86_64-musl
           path: tty7/bundled-server

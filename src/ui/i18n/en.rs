@@ -308,7 +308,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsBell => "Bell",
         L10nKey::SettingsTerminalBell => "Terminal bell",
         L10nKey::SettingsTerminalBellDesc => {
-            "How a bell (^G) is signalled: silenced, a brief flash, or the system sound."
+            "How a bell (^G) is signalled: silenced, a brief flash, the system sound, or both."
         }
         L10nKey::SettingsLinks => "Links",
         L10nKey::DetectUrls => "Detect URLs",
@@ -326,6 +326,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsBellModeOff => "Off",
         L10nKey::SettingsBellModeVisual => "Visual",
         L10nKey::SettingsBellModeAudible => "Audible",
+        L10nKey::SettingsBellModeBoth => "Both",
         L10nKey::SettingsPrompt => "Prompt",
         L10nKey::SettingsPromptIntro => {
             "tty7's own menus at the shell prompt. Turn one off to hand the key back to the shell."
@@ -457,10 +458,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsRestoreAllDefaults => "Restore all defaults",
         L10nKey::SettingsAboutDesc1 => {
-            "A terminal workbench: shells, workspaces, SSH, coding agents."
-        }
-        L10nKey::SettingsAboutDesc2 => {
-            "Editor-grade input in every shell, shells that outlive quits and reboots without tmux, a native SSH stack with profiles and port forwarding, and live status for panes running coding agents."
+            "A terminal workbench: persistent sessions, remote work, agents."
         }
         L10nKey::SettingsAboutTech => {
             "Pure Rust · GPU rendering on Zed's gpui · VT core from Alacritty"
@@ -500,7 +498,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsVersionAvailable => "Version {version} is available.",
         L10nKey::SettingsCheckUpdatesDesc => {
-            "tty7 checks stable releases on launch. Packaged macOS bundles and per-user Windows installations update without opening a browser: a dedicated helper verifies the checksum and version before replacing anything, then relaunches the GUI. Linux, all-users Windows installations and other unsupported layouts fall back to the release page."
+            "Installations that cannot update in place open the release page instead."
         }
         L10nKey::SettingsCheckUpdatesOnLaunch => "Check for updates on launch",
         L10nKey::SettingsCommandLine => "Command line",
@@ -510,9 +508,16 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsInstallCliOnPath => "Install the `tty7` command on PATH",
         L10nKey::SettingsServer => "Server",
         L10nKey::SettingsServerDesc => {
-            "Restart the server on this computer to pick up a newly granted macOS permission, recover if it stops responding, or start from a clean slate. This ends all running shells here; your tabs and layout reopen with fresh shells. A remote machine's server is restarted from its own menu in the workspace switcher."
+            "Restarts the background server that keeps your shells running. This ends every shell on this computer; your tabs and layout reopen with fresh ones."
         }
         L10nKey::SettingsRestartServer => "Restart server…",
+        L10nKey::SettingsAppHttpProxy => "Proxy for updates",
+        L10nKey::SettingsAppHttpProxyDesc => {
+            "Optional proxy for tty7's own update checks and downloads. It does not affect programs running in your panes — those use their own environment. Leave empty to follow the system proxy. Examples: http://127.0.0.1:7890, socks5://127.0.0.1:1080."
+        }
+        L10nKey::SettingsAppHttpProxyInvalid => {
+            "Not a valid proxy address — this value was not saved."
+        }
         L10nKey::SettingsAgentClaudeCode => "Claude Code",
         L10nKey::SettingsAgentCodex => "Codex",
         L10nKey::SettingsAgentCopilotCli => "Copilot CLI",
@@ -520,6 +525,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAgentPi => "Pi",
         L10nKey::SettingsAgentGrokBuild => "Grok Build",
         L10nKey::SettingsSearchAboutKeywords => "version license credits build update check github",
+        L10nKey::SettingsSearchAppHttpProxyKeywords => {
+            "proxy http https socks socks5 clash v2ray network download update"
+        }
         L10nKey::SettingsSearchAnsiColorsKeywords => "palette 16 terminal colours theme",
         L10nKey::SettingsSearchArgumentsKeywords => "shell flags login args",
         L10nKey::SettingsSearchBlurKeywords => {
@@ -637,7 +645,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "complete completion menu suggestions tab prompt"
         }
         L10nKey::SettingsSearchTerminalBellKeywords => {
-            "bell audible visual flash sound silence beep ^g"
+            "bell audible visual flash sound silence beep both ^g"
         }
         L10nKey::SettingsSearchThemeKeywords => {
             "appearance color colours scheme dark light palette background foreground accent sync system os auto follow"
@@ -733,16 +741,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::EditorFileTooLarge => "\"{path}\" is too large for the editor ({size} MB)",
         L10nKey::EditorBinaryFile => "\"{path}\" looks like a binary file",
         L10nKey::PanelInfoTitle => "Info",
-        L10nKey::PanelOutlineTitle => "Outline",
         L10nKey::PanelChangesTitle => "Changes",
         L10nKey::PanelFilesTitle => "Files",
         L10nKey::PanelNoSession => "No active session.",
         L10nKey::PanelNoSessionHint => {
             "Open a tab to see its shell, directory, and processes here."
-        }
-        L10nKey::PanelNoCommands => "No commands recorded for this pane.",
-        L10nKey::PanelNoCommandsHint => {
-            "Run a command — shell integration marks each one so you can jump back to it."
         }
         L10nKey::PanelNoWorkingDirectory => "No working directory.",
         L10nKey::PanelNoWorkingDirectoryHint => "This pane has not reported one yet.",
@@ -1005,7 +1008,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdTabBarMoveToTop => "Tab Bar: Move to Top",
         L10nKey::CmdTabBarMoveToLeftSidebar => "Tab Bar: Move to Left Sidebar",
         L10nKey::CmdRightPanelInfo => "Right Panel: Info",
-        L10nKey::CmdRightPanelOutline => "Right Panel: Outline",
         L10nKey::CmdRightPanelChanges => "Right Panel: Changes",
         L10nKey::CmdRightPanelFiles => "Right Panel: Files",
         L10nKey::CmdChangeTheme => "Change Theme…",
@@ -1198,6 +1200,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TrayShowTty7 => "Show tty7",
         L10nKey::TrayNotifications => "Notifications",
         L10nKey::TrayAgentNeedsInput => "needs input",
+        L10nKey::NotifyCommandFinished => "Command finished after {secs}s",
+        L10nKey::NotifyCommandFinishedWithCommand => "{command} — finished after {secs}s",
+        L10nKey::NotifyAgentFinished => "Finished after {secs}s",
+        L10nKey::NotifyAgentWaiting => "Waiting for your input",
+        L10nKey::NotifyTurnFinished => "Turn finished",
         L10nKey::TabTooltipMore => "More",
         L10nKey::TabTooltipShowSidebar => "Show Sidebar",
         L10nKey::TabTooltipHideSidebar => "Hide Sidebar",

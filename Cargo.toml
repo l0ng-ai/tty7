@@ -141,6 +141,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Registry",
+    # `MessageBeep` (the terminal bell in `terminal::view`) is a user32 export,
+    # but the Win32 metadata files it under Diagnostics::Debug, so that is the
+    # module the binding needs — nothing here pulls in dbghelp.
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
@@ -155,6 +159,9 @@ async_zip = { version = "0.0.18", default-features = false, features = ["deflate
 # before it honors an unpackaged app's toast identity (otherwise the toast
 # backend falls back to PowerShell's). 0.58 is already in the tree via gpui.
 windows = { version = "0.58", features = [
+    "Data_Xml_Dom",
+    "Foundation",
+    "UI_Notifications",
     "Win32_Foundation",
     "Win32_Storage_EnhancedStorage",
     # IShellLinkW::GetPath takes a WIN32_FIND_DATAW, so reading an existing
@@ -187,6 +194,10 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "
 # NSData feeds the runtime Dock icon for bare (non-bundled) binaries — see
 # `set_dock_icon_for_bare_binary` in main.rs.
 objc2-foundation = { version = "0.3", features = ["NSData"] }
+# Clickable desktop notifications on macOS. `notify-rust` already pulls this
+# crate transitively for basic display; we depend on it directly to use
+# wait_for_click / NotificationResponse::Click.
+mac-notification-sys = "0.6"
 
 # Dictionary-based Chinese word segmentation for double-click selection
 # (`terminal::smart_select`), as a *fallback* where the OS has no tokenizer of

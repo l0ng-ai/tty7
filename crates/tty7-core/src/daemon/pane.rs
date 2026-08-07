@@ -406,9 +406,12 @@ fn pane_environment(
         .keys()
         .any(|key| key.eq_ignore_ascii_case("COLORFGBG"))
     {
-        // ConPTY consumes OSC 11 queries before tty7's emulator can answer
-        // them. Give TUI applications the conventional fallback hint while
-        // preserving an explicit user override below.
+        // The bundled ConPTY forwards OSC 11 queries, so this is no longer the
+        // only answer a Windows pane gets — but the in-box conhost still
+        // swallows them, and that is what a build without `conpty.dll` beside
+        // it runs on. Keep the conventional fallback hint for that case, and
+        // for applications that never learned to ask. An explicit user override
+        // still wins, below.
         let colorfgbg = if dark { "15;0" } else { "0;15" };
         env.push(("COLORFGBG".to_string(), colorfgbg.to_string()));
     }

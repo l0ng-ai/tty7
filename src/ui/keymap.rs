@@ -580,7 +580,6 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ToggleLeftPanel" => KeyBinding::new(keystroke, ToggleLeftPanel, None),
         "ToggleRightPanel" => KeyBinding::new(keystroke, ToggleRightPanel, None),
         "ShowRightPanelInfo" => KeyBinding::new(keystroke, ShowRightPanelInfo, None),
-        "ShowRightPanelOutline" => KeyBinding::new(keystroke, ShowRightPanelOutline, None),
         "ShowRightPanelChanges" => KeyBinding::new(keystroke, ShowRightPanelChanges, None),
         "ShowRightPanelFiles" => KeyBinding::new(keystroke, ShowRightPanelFiles, None),
         "FindInTerminal" => KeyBinding::new(keystroke, FindInTerminal, action_context(action)),
