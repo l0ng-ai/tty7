@@ -2274,20 +2274,19 @@ impl TerminalView {
         if self.upload_image_for_remote(&path, cx) {
             return true;
         }
-        // The upload declined or could not start. A local path is still worth
-        // pasting where the agent can open it, but on macOS that only ever
-        // happens for a remote pane, whose agent cannot — SYN is the better
-        // last resort there.
-        cfg!(not(target_os = "macos")) && {
-            let shares_localhost = self
-                .workspace
-                .as_ref()
-                .is_some_and(|w| w.shares_localhost());
-            let path = staged_path_for_pane(&path.to_string_lossy(), shares_localhost);
-            let text = shell_escape_path(&path);
-            self.paste(format!("{text} "), cx);
-            true
-        }
+        // The upload declined: a WSL pane, which needs a rewrite rather than a
+        // transfer, or a workspace with no SSH spec to piggyback on. A macOS
+        // pane only reaches this line when it is remote — a local one returned
+        // above — so pasting the path is right on every platform, and staying
+        // silent here would be the very no-op this route exists to avoid.
+        let shares_localhost = self
+            .workspace
+            .as_ref()
+            .is_some_and(|w| w.shares_localhost());
+        let path = staged_path_for_pane(&path.to_string_lossy(), shares_localhost);
+        let text = shell_escape_path(&path);
+        self.paste(format!("{text} "), cx);
+        true
     }
 
     /// Upload a locally staged clipboard image to the pane's remote host and
