@@ -3586,6 +3586,7 @@ impl Tty7App {
         let (shell_program_input, shell_args_input, wd_path_input) =
             self.build_shell_inputs(&mut subs, window, cx);
         let link_file_command_input = self.build_link_file_command_input(&mut subs, window, cx);
+        let http_proxy_input = self.build_http_proxy_input(&mut subs, window, cx);
         let scroll_slider = self.build_scroll_slider(&mut subs, window, cx);
         let window_opacity_slider = self.build_window_opacity_slider(&mut subs, window, cx);
         let theme_search = cx.new(|cx| {
@@ -3644,6 +3645,7 @@ impl Tty7App {
             shell_args_input,
             wd_path_input,
             link_file_command_input,
+            http_proxy_input,
             scroll_slider,
             window_opacity_slider,
             theme_editor: None,
@@ -3767,17 +3769,19 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<SelectState<SearchableVec<String>>> {
-        const CODES: &[&str] = &["en", "zh-CN"];
         let labels = || {
-            vec![
-                t(L10nKey::SettingsLanguageEnglish).to_string(),
-                t(L10nKey::SettingsLanguageChinese).to_string(),
-            ]
+            crate::ui::i18n::SUPPORTED_LANGUAGES
+                .iter()
+                .map(|lang| t(lang.label_key).to_string())
+                .collect::<Vec<_>>()
         };
         let cfg = cx.global::<Config>();
         let current = Self::normalize_gui_language(&cfg.gui_language);
         let rows = labels();
-        let selected = CODES.iter().position(|c| *c == current).unwrap_or(0);
+        let selected = crate::ui::i18n::SUPPORTED_LANGUAGES
+            .iter()
+            .position(|lang| lang.code == current)
+            .unwrap_or(0);
         let language_select = cx.new(|cx| {
             SelectState::new(
                 SearchableVec::new(rows),
@@ -3793,7 +3797,9 @@ impl Tty7App {
                 if let SelectEvent::Confirm(Some(label)) = ev {
                     let rows = labels();
                     if let Some(idx) = rows.iter().position(|r| r == label) {
-                        this.set_gui_language(CODES[idx], window, cx);
+                        if let Some(lang) = crate::ui::i18n::SUPPORTED_LANGUAGES.get(idx) {
+                            this.set_gui_language(lang.code, window, cx);
+                        }
                     }
                 }
             },
@@ -3802,10 +3808,9 @@ impl Tty7App {
     }
 
     fn normalize_gui_language(code: &str) -> &'static str {
-        match code {
-            "zh-CN" => "zh-CN",
-            _ => "en",
-        }
+        crate::ui::i18n::find_language(code)
+            .map(|lang| lang.code)
+            .unwrap_or_else(crate::ui::i18n::default_language_code)
     }
 
     pub(crate) fn set_gui_language(
@@ -3827,7 +3832,6 @@ impl Tty7App {
     }
 
     pub(crate) fn refresh_locale_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        const CODES: &[&str] = &["en", "zh-CN"];
         self.sidebar_search.update(cx, |state, cx| {
             state.set_placeholder(t(L10nKey::SearchTabs), window, cx)
         });
@@ -3835,14 +3839,17 @@ impl Tty7App {
             state.set_placeholder(t(L10nKey::SearchFiles), window, cx)
         });
         if let Some(s) = self.active_settings() {
-            let rows = vec![
-                t(L10nKey::SettingsLanguageEnglish).to_string(),
-                t(L10nKey::SettingsLanguageChinese).to_string(),
-            ];
+            let rows = crate::ui::i18n::SUPPORTED_LANGUAGES
+                .iter()
+                .map(|lang| t(lang.label_key).to_string())
+                .collect::<Vec<_>>();
             s.language_select.update(cx, |state, cx| {
                 state.set_items(SearchableVec::new(rows), window, cx);
                 let code = Self::normalize_gui_language(&cx.global::<Config>().gui_language);
-                let selected = CODES.iter().position(|c| *c == code).unwrap_or(0);
+                let selected = crate::ui::i18n::SUPPORTED_LANGUAGES
+                    .iter()
+                    .position(|lang| lang.code == code)
+                    .unwrap_or(0);
                 state.set_selected_index(Some(IndexPath::default().row(selected)), window, cx);
             });
             s.search.update(cx, |state, cx| {
@@ -3956,6 +3963,51 @@ impl Tty7App {
             }),
         );
         input
+    }
+
+    fn build_http_proxy_input(
+        &mut self,
+        subs: &mut Vec<Subscription>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        let value = cx.global::<Config>().http_proxy.clone().unwrap_or_default();
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("http://127.0.0.1:7890")
+                .default_value(value)
+        });
+        subs.push(
+            cx.subscribe_in(&input, window, move |this, _i, ev, _w, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.commit_http_proxy(cx);
+                }
+            }),
+        );
+        input
+    }
+
+    fn commit_http_proxy(&mut self, cx: &mut Context<Self>) {
+        let Some(value) = self
+            .active_settings()
+            .map(|s| s.http_proxy_input.read(cx).value().trim().to_string())
+        else {
+            return;
+        };
+        // Keep an unusable value out of `config.json`. The row renders a hint
+        // under the input, so the typo does not silently vanish either.
+        if !value.is_empty() && !tty7_core::daemon::install::proxy::is_valid_manual(&value) {
+            cx.notify();
+            return;
+        }
+        let value = (!value.is_empty()).then_some(value);
+        let cfg = cx.global_mut::<Config>();
+        if cfg.http_proxy == value {
+            return;
+        }
+        cfg.http_proxy = value;
+        cfg.save();
+        cx.notify();
     }
 
     fn commit_link_file_command(&mut self, cx: &mut Context<Self>) {

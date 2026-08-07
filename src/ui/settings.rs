@@ -429,6 +429,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: About,
+            title: SettingsAppHttpProxy,
+            keywords: SettingsSearchAppHttpProxyKeywords,
+        },
+        SearchEntry {
+            section: About,
             title: SettingsSearchHowShellsWorkTitle,
             keywords: SettingsSearchHowShellsWorkKeywords,
         },
@@ -482,6 +487,7 @@ pub(crate) struct SettingsState {
     pub(crate) shell_args_input: Entity<InputState>,
     pub(crate) wd_path_input: Entity<InputState>,
     pub(crate) link_file_command_input: Entity<InputState>,
+    pub(crate) http_proxy_input: Entity<InputState>,
     pub(crate) scroll_slider: Entity<SliderState>,
     pub(crate) window_opacity_slider: Entity<SliderState>,
     pub(crate) theme_editor: Option<ThemeEditor>,
@@ -4726,6 +4732,28 @@ impl Tty7App {
         );
         let phase_text = localized_update_phase(&update_status.phase);
         let check_for_updates = cx.global::<Config>().check_for_updates;
+        let http_proxy_input = match self.active_settings() {
+            Some(s) => s.http_proxy_input.clone(),
+            None => return div().into_any_element(),
+        };
+        // Only flags a committed value: the input commits on Enter/blur, so a
+        // half-typed address is never marked wrong mid-keystroke.
+        let http_proxy_value = http_proxy_input.read(cx).value().trim().to_string();
+        let http_proxy_invalid = !http_proxy_value.is_empty()
+            && !tty7_core::daemon::install::proxy::is_valid_manual(&http_proxy_value);
+        let http_proxy_control = v_flex()
+            .gap_1()
+            .w(px(260.))
+            .child(Input::new(&http_proxy_input).small())
+            .when(http_proxy_invalid, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.danger)
+                        .child(t(L10nKey::SettingsAppHttpProxyInvalid)),
+                )
+            })
+            .into_any_element();
 
         let logo = Arc::new(Image::from_bytes(
             ImageFormat::Png,
@@ -4861,6 +4889,12 @@ impl Tty7App {
                         ),
                     ),
             )
+            .child(self.settings_row(
+                t(L10nKey::SettingsAppHttpProxy),
+                t(L10nKey::SettingsAppHttpProxyDesc),
+                http_proxy_control,
+                cx,
+            ))
             .child(
                 v_flex()
                     .mt_6()

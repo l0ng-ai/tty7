@@ -143,13 +143,14 @@ whatever you ran in the pane, and you can revoke it under Privacy & Security.
 
 ## Localization
 
-The GUI ships English and Simplified Chinese strings. Pick one in Settings →
-Appearance → Language, or in `config.json`:
+The GUI ships English, Simplified Chinese and Japanese strings. Pick one in
+Settings → Appearance → Language, or in `config.json`:
 
 ```json
 { "gui_language": "zh-CN" }
 ```
 
-`en` and `zh-CN` are the only accepted values; anything else falls back to `en`.
+`en`, `zh-CN` and `ja-JP` are the only accepted values; anything else falls back
+to `en`.
 The choice is explicit — the system language is never inferred. CLI output stays
 English so agent and script integrations keep a stable, predictable surface.

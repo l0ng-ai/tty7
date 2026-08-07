@@ -4,6 +4,8 @@ use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
+pub const SUPPORTED_GUI_LANGUAGES: &[&str] = &["en", "zh-CN", "ja-JP"];
+
 #[derive(Default, Clone, Eq, PartialEq, Hash)]
 pub struct FontFeatures(pub Arc<Vec<(String, u32)>>);
 
@@ -197,6 +199,15 @@ pub struct Config {
     pub mouse_reporting: bool,
     pub clipboard_trim_trailing_spaces: bool,
     pub copy_on_select: bool,
+    /// Optional HTTP/SOCKS proxy for tty7's *own* update checks and release
+    /// downloads; when set it overrides the system proxy and the environment.
+    /// Programs running in a pane are unaffected — they inherit their proxy
+    /// from their own environment, as in any other terminal.
+    ///
+    /// Normalised by [`Config::sanitize`], so `Some` always means a non-blank
+    /// value. Examples: `http://127.0.0.1:7890`, `socks5://127.0.0.1:1080`.
+    #[serde(default)]
+    pub http_proxy: Option<String>,
     #[serde(default = "default_true")]
     pub smart_select: bool,
     #[serde(default = "default_word_separators")]
@@ -430,6 +441,7 @@ impl Default for Config {
             mouse_reporting: true,
             clipboard_trim_trailing_spaces: false,
             copy_on_select: false,
+            http_proxy: None,
             smart_select: true,
             word_separators: default_word_separators(),
             startup_mode: StartupMode::Normal,
@@ -502,9 +514,15 @@ impl Config {
         {
             self.link_file_command = None;
         }
-        match self.gui_language.as_str() {
-            "en" | "zh-CN" => {}
-            _ => self.gui_language = default_gui_language(),
+        // Normalise here so every reader can take the field as-is instead of
+        // repeating a trim-and-drop-if-blank dance.
+        self.http_proxy = self
+            .http_proxy
+            .take()
+            .map(|proxy| proxy.trim().to_string())
+            .filter(|proxy| !proxy.is_empty());
+        if !SUPPORTED_GUI_LANGUAGES.contains(&self.gui_language.as_str()) {
+            self.gui_language = default_gui_language();
         }
     }
 
@@ -1095,12 +1113,34 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_normalizes_blank_http_proxy_to_none() {
+        let normalize = |proxy: Option<&str>| {
+            let mut cfg = Config {
+                http_proxy: proxy.map(String::from),
+                ..Config::default()
+            };
+            cfg.sanitize();
+            cfg.http_proxy
+        };
+        assert_eq!(normalize(None), None);
+        assert_eq!(normalize(Some("")), None);
+        assert_eq!(normalize(Some("   ")), None);
+        assert_eq!(
+            normalize(Some("  http://127.0.0.1:7890 ")),
+            Some("http://127.0.0.1:7890".to_string())
+        );
+    }
+
+    #[test]
     fn gui_language_defaults_to_english_and_rejects_unsupported_values() {
         let cfg = Config::default();
         assert_eq!(cfg.gui_language, "en");
 
         let cfg: Config = serde_json::from_str(r#"{"gui_language": "zh-CN"}"#).unwrap();
         assert_eq!(cfg.gui_language, "zh-CN");
+
+        let cfg: Config = serde_json::from_str(r#"{"gui_language": "ja-JP"}"#).unwrap();
+        assert_eq!(cfg.gui_language, "ja-JP");
 
         let mut cfg: Config = serde_json::from_str(r#"{"gui_language": "ko"}"#).unwrap();
         cfg.sanitize();
