@@ -103,7 +103,7 @@ pub(crate) fn display_path(path: &std::path::Path) -> String {
     format!("…{tail}")
 }
 
-fn key_hint(action: &str, cx: &App) -> Option<String> {
+pub(crate) fn key_hint(action: &str, cx: &App) -> Option<String> {
     let spec = crate::ui::keymap::effective_key(action, cx)?;
     let first = spec.split_whitespace().next()?;
     let stroke = Keystroke::parse(first).ok()?;

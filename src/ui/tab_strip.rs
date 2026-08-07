@@ -63,7 +63,7 @@ pub(crate) fn abbreviate_home(path: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-fn short_title(raw: &str) -> String {
+pub(crate) fn short_title(raw: &str) -> String {
     let raw = raw.trim();
     if raw.is_empty() {
         return String::new();
@@ -127,6 +127,16 @@ pub(crate) struct DragTab;
 impl Render for DragTab {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
+    }
+}
+
+/// Says what the workspace head does, with its shortcut. The name alone was
+/// redundant — it is already the button's label.
+fn switcher_hint(cx: &gpui::App) -> String {
+    let what = t(L10nKey::HomeSwitchWorkspace);
+    match crate::ui::home::key_hint("ToggleSwitcher", cx) {
+        Some(keys) => format!("{what}  {keys}"),
+        None => what.to_string(),
     }
 }
 
@@ -292,7 +302,10 @@ impl Tty7App {
                                     .child(SharedString::from(current.clone())),
                             )
                             .child(
-                                Icon::new(IconName::ChevronDown)
+                                // Not a chevron-down: this opens a centred
+                                // panel, not a menu hanging off the button.
+                                Icon::empty()
+                                    .path("icons/chevrons-up-down.svg")
                                     .size(px(11.))
                                     .flex_shrink_0()
                                     .text_color(cx.theme().muted_foreground),
@@ -302,7 +315,7 @@ impl Tty7App {
                     .w_full()
                     .h(px(30.))
                     .rounded_md()
-                    .tooltip(SharedString::from(current))
+                    .tooltip(SharedString::from(switcher_hint(cx)))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_switcher(window, cx);
                     })),

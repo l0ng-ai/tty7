@@ -1,17 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use crate::core::codename::Names;
 use crate::host::Host;
-
-const ADJECTIVES: [&str; 24] = [
-    "quiet", "amber", "bold", "calm", "cedar", "coral", "dusky", "early", "fable", "gold", "hazel",
-    "ivory", "jade", "keen", "lunar", "mossy", "noble", "ochre", "pale", "rapid", "sunny", "tidal",
-    "vivid", "wild",
-];
-const NOUNS: [&str; 24] = [
-    "otter", "heron", "lynx", "wren", "fox", "elk", "crane", "finch", "gecko", "ibis", "koala",
-    "llama", "marten", "newt", "osprey", "puffin", "quail", "raven", "seal", "tern", "urchin",
-    "vole", "walrus", "yak",
-];
 
 #[derive(Debug)]
 pub struct NewWorktree {
@@ -57,27 +47,6 @@ fn branch_exists(host: &dyn Host, repo_root: &Path, name: &str) -> bool {
         ],
     )
     .is_ok()
-}
-
-fn seed() -> u64 {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x9E37_79B9_7F4A_7C15);
-    nanos ^ ((std::process::id() as u64) << 32) | 1
-}
-
-fn next(state: &mut u64) -> u64 {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
-    *state
-}
-
-fn candidate(state: &mut u64) -> String {
-    let a = ADJECTIVES[(next(state) % ADJECTIVES.len() as u64) as usize];
-    let n = NOUNS[(next(state) % NOUNS.len() as u64) as usize];
-    format!("{a}-{n}")
 }
 
 #[derive(Debug, Clone)]
@@ -159,18 +128,9 @@ fn repo_dir(host: &dyn Host, cwd: &Path) -> Result<(PathBuf, PathBuf), String> {
 pub fn defaults(host: &dyn Host, cwd: &Path) -> Result<WorktreeDefaults, String> {
     let (repo_root, dir) = repo_dir(host, cwd)?;
 
-    let mut state = seed();
-    let mut name = candidate(&mut state);
-    for attempt in 0..64 {
-        if !branch_exists(host, &repo_root, &name) && !host.exists(&host.join(&dir, &name)) {
-            break;
-        }
-        name = if attempt < 32 {
-            candidate(&mut state)
-        } else {
-            format!("{}-{}", candidate(&mut state), next(&mut state) % 1000)
-        };
-    }
+    let name = Names::new().unique(|name| {
+        branch_exists(host, &repo_root, name) || host.exists(&host.join(&dir, name))
+    });
 
     let base = git(host, &repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
         .unwrap_or_else(|_| "HEAD".to_string());
@@ -265,15 +225,6 @@ mod tests {
             branch: name.into(),
             base: "HEAD".into(),
         }
-    }
-
-    #[test]
-    fn candidate_is_two_pool_words() {
-        let mut state = seed();
-        let name = candidate(&mut state);
-        let (a, n) = name.split_once('-').unwrap();
-        assert!(ADJECTIVES.contains(&a));
-        assert!(NOUNS.contains(&n));
     }
 
     #[test]

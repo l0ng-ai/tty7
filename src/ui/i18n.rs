@@ -737,6 +737,12 @@ pub enum L10nKey {
     SwitcherDisconnect,
     SwitcherOpenInNewWindow,
     SwitcherRename,
+    SwitcherPickAWorkspace,
+    SwitcherNoTabs,
+    SwitcherTabsAfterOpening,
+    SwitcherTabCount,
+    SwitcherActiveTab,
+    SwitcherHoldToSwitch,
     SshPromptPasswordFor,
     SshPromptPassphraseFor,
     SshPromptTwoFactor,
@@ -1013,9 +1019,10 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::SearchTheme => ("Search…", "搜索…"),
         L10nKey::Search => ("Search", "搜索"),
-        L10nKey::SearchWorkspacesAndMachines => {
-            ("Search workspaces and machines", "搜索工作区与机器")
-        }
+        L10nKey::SearchWorkspacesAndMachines => (
+            "Search workspaces, tabs and machines",
+            "搜索工作区、标签页与机器",
+        ),
         L10nKey::SearchFonts => ("Search fonts…", "搜索字体…"),
         L10nKey::NewFolderName => ("New folder name", "新文件夹名"),
         L10nKey::NewFileName => ("New file name", "新文件名"),
@@ -2409,6 +2416,20 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         L10nKey::SwitcherDisconnect => ("Disconnect", "断开连接"),
         L10nKey::SwitcherOpenInNewWindow => ("Open in New Window", "在新窗口中打开"),
         L10nKey::SwitcherRename => ("Rename…", "重命名…"),
+        L10nKey::SwitcherPickAWorkspace => (
+            "Pick a workspace to see its tabs",
+            "选一个工作区查看它的标签页",
+        ),
+        L10nKey::SwitcherNoTabs => ("No tabs in this workspace", "这个工作区没有标签页"),
+        L10nKey::SwitcherTabsAfterOpening => (
+            "Open this workspace to see its tabs",
+            "打开这个工作区后才能看到它的标签页",
+        ),
+        L10nKey::SwitcherTabCount => ("{n} tabs", "{n} 个标签页"),
+        L10nKey::SwitcherActiveTab => ("active", "当前"),
+        L10nKey::SwitcherHoldToSwitch => {
+            ("Tab to move · release to switch", "按 Tab 移动 · 松开切换")
+        }
         L10nKey::SshPromptPasswordFor => ("Password for {user}@{host}", "{user}@{host} 的密码"),
         L10nKey::SshPromptPassphraseFor => ("Passphrase for {key_path}", "{key_path} 的密码短语"),
         L10nKey::SshPromptTwoFactor => ("Two-factor authentication", "双因素认证"),
@@ -3650,6 +3671,12 @@ mod tests {
             L10nKey::SwitcherDisconnect,
             L10nKey::SwitcherOpenInNewWindow,
             L10nKey::SwitcherRename,
+            L10nKey::SwitcherPickAWorkspace,
+            L10nKey::SwitcherNoTabs,
+            L10nKey::SwitcherTabsAfterOpening,
+            L10nKey::SwitcherTabCount,
+            L10nKey::SwitcherActiveTab,
+            L10nKey::SwitcherHoldToSwitch,
             L10nKey::SshPromptPasswordFor,
             L10nKey::SshPromptPassphraseFor,
             L10nKey::SshPromptTwoFactor,

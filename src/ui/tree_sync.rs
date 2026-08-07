@@ -909,17 +909,47 @@ fn start_prime(cx: &mut App, client_ws: WorkspaceId) {
         .get(&client_ws)
         .map(|s| s.epoch)
         .unwrap_or(0);
+    // Picked here, on the main thread, where the names already in use are
+    // readable. It is only spent if the workspace turns out to be new.
+    let fresh = fresh_workspace_name(cx, host);
     cx.spawn(async move |cx| {
         let outcome = cx
             .background_executor()
-            .spawn(async move { pull_or_create(&client, machine_ws) })
+            .spawn(async move { pull_or_create(&client, machine_ws, fresh) })
             .await;
         cx.update(|cx| finish_prime(cx, client_ws, epoch, outcome));
     })
     .detach();
 }
 
-fn pull_or_create(client: &ControlClient, machine_ws: WorkspaceId) -> io::Result<WsMirror> {
+/// A codename no workspace on `host` is using. Beats leaving new workspaces
+/// named after whatever directory their first shell happened to start in —
+/// three of those in a switcher all read the same.
+pub(crate) fn fresh_workspace_name(cx: &App, host: HostId) -> String {
+    let mut taken: Vec<String> = Vec::new();
+    if let Some(machine) = crate::ui::machine_mirror::MachineMirrors::machine(cx, host) {
+        taken.extend(machine.workspaces.iter().filter_map(|w| w.name.clone()));
+    }
+    // Labels are the names the switcher actually shows, which for an unnamed
+    // workspace is its directory. Counting those as taken is deliberately
+    // generous — it only ever costs another roll of the dice.
+    if cx.has_global::<WorkspaceStore>() {
+        taken.extend(
+            WorkspaceStore::all(cx)
+                .views
+                .iter()
+                .filter(|w| w.host_id() == host)
+                .filter_map(|w| w.label.clone()),
+        );
+    }
+    tty7_core::core::codename::unique(|name| taken.iter().any(|t| t == name))
+}
+
+fn pull_or_create(
+    client: &ControlClient,
+    machine_ws: WorkspaceId,
+    fresh: String,
+) -> io::Result<WsMirror> {
     match client.call(ControlRequest::WorkspaceTree {
         workspace: machine_ws,
     }) {
@@ -932,7 +962,7 @@ fn pull_or_create(client: &ControlClient, machine_ws: WorkspaceId) -> io::Result
         ))),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             match client.call(ControlRequest::WorkspaceCreate {
-                name: None,
+                name: Some(fresh),
                 workspace: Some(machine_ws),
             })? {
                 ReplyOk::WorkspaceTree(ws) => Ok(WsMirror {
@@ -1213,8 +1243,16 @@ fn pull_workspace(
             Ok((machine, mirror, session))
         }
         None => {
+            // The whole tree is already in hand, so the taken names can be read
+            // straight off it rather than passed down from the main thread.
+            let taken: Vec<&str> = machine
+                .workspaces
+                .iter()
+                .filter_map(|w| w.name.as_deref())
+                .collect();
+            let name = tty7_core::core::codename::unique(|n| taken.contains(&n));
             client.call(ControlRequest::WorkspaceCreate {
-                name: None,
+                name: Some(name),
                 workspace: Some(machine_ws),
             })?;
             Ok((machine, WsMirror::default(), Session::default()))

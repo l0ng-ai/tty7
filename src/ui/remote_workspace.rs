@@ -422,13 +422,9 @@ impl Tty7App {
     ) {
         self.connect = None;
         RemoteLinks::ensure_running(cx);
-        if self.tabs.is_empty() {
-            let previous = self.spawn_host(cx);
-            self.switch_workspace(id, window, cx);
-            self.rebind_host(previous, cx);
-        } else {
-            crate::ui::windows::open(cx, Some(id));
-        }
+        let previous = self.spawn_host(cx);
+        self.switch_workspace(Some(id), window, cx);
+        self.rebind_host(previous, cx);
         cx.notify();
     }
 

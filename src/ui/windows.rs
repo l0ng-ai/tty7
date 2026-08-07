@@ -174,6 +174,29 @@ pub fn open(cx: &mut App, workspace: Option<WorkspaceId>) {
     open_at(cx, workspace, None);
 }
 
+/// Reveals `workspace` and activates one of its tabs. The window may already be
+/// open, may belong to this process but be behind, or may not exist yet — the
+/// caller does not care which. The tab is named by id rather than position
+/// because the caller read it out of the machine tree, not out of that window.
+pub fn open_at_tab(cx: &mut App, workspace: WorkspaceId, tab: tty7_core::core::machine::TabId) {
+    open_at(cx, Some(workspace), None);
+    let Some(handle) = WindowRegistry::window_for(cx, workspace) else {
+        return;
+    };
+    let Some(app) = WindowRegistry::app_for(cx, workspace) else {
+        return;
+    };
+    let _ = handle.update(cx, |_, window, cx| {
+        window.activate_window();
+        let _ = app.update(cx, |this, cx| {
+            let Some(index) = this.tabs.iter().position(|t| t.tree_id.get() == tab) else {
+                return;
+            };
+            this.activate(index, window, cx);
+        });
+    });
+}
+
 pub fn open_at(
     cx: &mut App,
     workspace: Option<WorkspaceId>,

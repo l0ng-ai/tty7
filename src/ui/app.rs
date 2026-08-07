@@ -195,6 +195,9 @@ pub struct Tab {
     pub(crate) sidebar_group: std::cell::RefCell<Option<std::path::PathBuf>>,
     pub(crate) overlay_top: OverlayTop,
     pub(crate) tree_id: std::cell::Cell<tty7_core::core::machine::TabId>,
+    /// Monotonic stamp of when this tab was last activated, used to order the
+    /// switcher's tab column most-recently-used first. Zero means never.
+    pub(crate) last_used: std::cell::Cell<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -215,6 +218,7 @@ impl Tab {
             overlay_top: OverlayTop::default(),
             sidebar_group: std::cell::RefCell::new(None),
             tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
+            last_used: std::cell::Cell::new(0),
         }
     }
 
@@ -230,6 +234,7 @@ impl Tab {
                 tree.sidebar_group.clone().map(std::path::PathBuf::from),
             ),
             tree_id: std::cell::Cell::new(tree.id),
+            last_used: std::cell::Cell::new(0),
         }
     }
 
@@ -347,6 +352,11 @@ pub(crate) struct LoopbackForwardPanelState {
 pub struct Tty7App {
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
+    /// Hands out `Tab::last_used` stamps. A counter rather than a clock so two
+    /// activations in the same second still order.
+    tab_use_seq: std::cell::Cell<u64>,
+    /// A tab asked for before its workspace finished hydrating.
+    pending_tab: Option<tty7_core::core::machine::TabId>,
     pub(crate) font_size: f32,
     pub(crate) line_height: f32,
     pub(crate) font_family: String,
@@ -588,6 +598,9 @@ impl Tty7App {
         let activation_watch = cx.observe_window_activation(window, |this, window, cx| {
             this.dismiss_mod_hint(cx);
             this.set_link_modifier(false, cx);
+            // A modifier released over another window never reports here, so a
+            // Ctrl+Tab panel would hang waiting for a commit that cannot come.
+            this.switcher_release_hold(cx);
             if window.is_window_active() {
                 WorkspaceStore::focus(cx, this.workspace);
                 this.refresh_git_status_all(cx);
@@ -647,6 +660,8 @@ impl Tty7App {
         let mut app = Self {
             tabs,
             active,
+            tab_use_seq: std::cell::Cell::new(0),
+            pending_tab: None,
             font_size,
             line_height,
             font_family,
@@ -897,23 +912,25 @@ impl Tty7App {
             let _ = handle.update(cx, |_, other, _| other.activate_window());
             return;
         }
-        if self.tabs.is_empty() {
-            self.switch_workspace(id, window, cx);
-        } else {
-            crate::ui::windows::open(cx, Some(id));
-        }
+        // Switching workspaces happens in place. A second window is something
+        // you ask for — with the platform modifier, or "Open in New Window".
+        self.switch_workspace(Some(id), window, cx);
     }
 
+    /// Trades this window's workspace for another one. `None` starts a fresh
+    /// workspace here rather than opening one in a new window.
     pub(crate) fn switch_workspace(
         &mut self,
-        id: WorkspaceId,
+        id: Option<WorkspaceId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let previous = self.workspace;
-        if previous == id {
+        if id == Some(previous) {
             return;
         }
+        // Anything parked for the workspace we are leaving is now meaningless.
+        self.pending_tab = None;
         if self.tabs.is_empty() && crate::ui::tree_sync::window_is_informed(cx, previous) {
             crate::ui::tree_sync::fire_workspace_op(cx, previous, |ws| {
                 tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
@@ -927,7 +944,7 @@ impl Tty7App {
         }
         crate::ui::tree_sync::forget(cx, previous);
 
-        let claimed = WorkspaceStore::claim(cx, Some(id));
+        let claimed = WorkspaceStore::claim(cx, id);
         crate::ui::windows::WindowRegistry::rebind(cx, previous, claimed);
         crate::ui::remote_workspace::RemoteLinks::supervise(cx, claimed);
         self.adopt_workspace(claimed, Session::default(), window, cx);
@@ -997,6 +1014,7 @@ impl Tty7App {
                 overlay_top: OverlayTop::default(),
                 sidebar_group: std::cell::RefCell::new(st.sidebar_group),
                 tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
+                last_used: std::cell::Cell::new(0),
             },
         );
         self.active = insert_at;
@@ -2578,6 +2596,55 @@ impl Tty7App {
         }
     }
 
+    /// Activates the tab carrying `id`. A workspace this window just switched
+    /// to hydrates its tabs asynchronously, so when the tab is not here yet the
+    /// request is parked and claimed on the frame it arrives.
+    pub(crate) fn activate_tree_tab(
+        &mut self,
+        id: tty7_core::core::machine::TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.tabs.iter().position(|t| t.tree_id.get() == id) {
+            Some(index) => self.activate(index, window, cx),
+            None => self.pending_tab = Some(id),
+        }
+    }
+
+    fn claim_pending_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(want) = self.pending_tab else {
+            return;
+        };
+        let Some(index) = self.tabs.iter().position(|t| t.tree_id.get() == want) else {
+            return;
+        };
+        self.pending_tab = None;
+        self.activate(index, window, cx);
+    }
+
+    /// Stamps whichever tab is active right now. Called once per frame rather
+    /// than from the ten places that assign `self.active` — it is idempotent,
+    /// so the stamp only advances on the first frame after a switch.
+    pub(crate) fn touch_active_tab(&self) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let top = self.tab_use_seq.get();
+        if top != 0 && tab.last_used.get() == top {
+            return;
+        }
+        let next = top + 1;
+        self.tab_use_seq.set(next);
+        tab.last_used.set(next);
+    }
+
+    /// Tab indices most-recently-used first. The active tab always leads, even
+    /// before its own stamp lands; tabs never activated trail in strip order.
+    pub(crate) fn tabs_by_mru(&self) -> Vec<usize> {
+        let stamps: Vec<u64> = self.tabs.iter().map(|t| t.last_used.get()).collect();
+        mru_order(&stamps, self.active)
+    }
+
     fn cycle_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         let n = self.tabs.len();
         if n < 2 {
@@ -3295,7 +3362,7 @@ impl Tty7App {
         self.bump_command_frecency(&kind, cx);
         match kind {
             NewTab => self.new_tab(window, cx),
-            NewWorkspace => crate::ui::windows::open(cx, None),
+            NewWorkspace => self.switch_workspace(None, window, cx),
             OpenWorkspacePicker => self.open_switcher(window, cx),
             StopWorkspace => self.stop_workspace(self.workspace, window, cx),
             DeleteWorkspace => self.delete_workspace(self.workspace, window, cx),
@@ -4991,6 +5058,8 @@ impl Render for Tty7App {
         #[cfg(test)]
         render_probe::record();
         let prof = crate::ui::perf::enabled().then(std::time::Instant::now);
+        self.claim_pending_tab(window, cx);
+        self.touch_active_tab();
         if cx.has_active_drag() {
             crate::ui::reorder::clear_pending(&self.reorder);
         } else if let Some(order) = crate::ui::reorder::take_pending(&self.reorder) {
@@ -5223,8 +5292,8 @@ impl Render for Tty7App {
                     let id = this.workspace;
                     this.delete_workspace(id, window, cx);
                 }))
-                .on_action(cx.listener(|_this, _: &NewWorkspace, _window, cx| {
-                    crate::ui::windows::open(cx, None);
+                .on_action(cx.listener(|this, _: &NewWorkspace, window, cx| {
+                    this.switch_workspace(None, window, cx);
                 }))
                 .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                     if !this.editor_close_active_if_focused(window, cx) {
@@ -5274,10 +5343,10 @@ impl Render for Tty7App {
                     this.swap_pane(false, window, cx)
                 }))
                 .on_action(
-                    cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(true, window, cx)),
+                    cx.listener(|this, _: &NextTab, window, cx| this.tab_switch(true, window, cx)),
                 )
                 .on_action(
-                    cx.listener(|this, _: &PrevTab, window, cx| this.cycle_tab(false, window, cx)),
+                    cx.listener(|this, _: &PrevTab, window, cx| this.tab_switch(false, window, cx)),
                 )
                 .on_action(cx.listener(|this, _: &ActivateTab1, window, cx| {
                     this.activate_visual(0, window, cx)
@@ -5460,6 +5529,20 @@ impl Render for Tty7App {
     }
 }
 
+/// Orders tab indices most-recently-used first from their `last_used` stamps.
+/// A zero stamp means the tab was never activated, and those keep strip order
+/// at the back. `active` leads regardless — its own stamp only lands on the
+/// next frame.
+fn mru_order(stamps: &[u64], active: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..stamps.len()).collect();
+    order.sort_by_key(|&i| (stamps[i] == 0, std::cmp::Reverse(stamps[i]), i));
+    if let Some(pos) = order.iter().position(|&i| i == active) {
+        let lead = order.remove(pos);
+        order.insert(0, lead);
+    }
+    order
+}
+
 fn tab_to_session(tab: &Tab, cx: &App) -> SessionTab {
     SessionTab {
         name: tab.name.clone(),
@@ -5600,6 +5683,7 @@ fn tabs_from_session(
                 st.tree_id
                     .unwrap_or_else(tty7_core::core::machine::TabId::new),
             ),
+            last_used: std::cell::Cell::new(0),
         });
     }
     let active = session.active.min(tabs.len().saturating_sub(1));
@@ -6248,9 +6332,30 @@ mod window_drag_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        TabAgentSession, leaf_shares_the_window_daemon, pane_attachable, parse_ssh_connect_input,
-        parse_ssh_option_words,
+        TabAgentSession, leaf_shares_the_window_daemon, mru_order, pane_attachable,
+        parse_ssh_connect_input, parse_ssh_option_words,
     };
+
+    #[test]
+    fn mru_puts_the_active_tab_first_and_the_last_one_used_behind_it() {
+        // Tab 2 is active; 0 was used most recently before it, then 1.
+        assert_eq!(mru_order(&[7, 4, 9], 2), vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn mru_leads_with_the_active_tab_even_before_its_stamp_lands() {
+        assert_eq!(mru_order(&[5, 0, 3], 1), vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn mru_trails_never_activated_tabs_in_strip_order() {
+        assert_eq!(mru_order(&[0, 6, 0, 0], 1), vec![1, 0, 2, 3]);
+    }
+
+    #[test]
+    fn mru_of_a_windowless_workspace_is_empty() {
+        assert!(mru_order(&[], 0).is_empty());
+    }
 
     #[test]
     fn restore_only_attaches_panes_the_workspace_owns_or_nobody_claims() {
@@ -6447,6 +6552,41 @@ pub(crate) mod test_window {
             .unwrap();
         let vcx = VisualTestContext::from_window(window.into(), cx);
         (app, vcx)
+    }
+
+    /// A window carrying `n` quiet tabs, active on the first.
+    #[cfg(unix)]
+    pub(crate) fn harness_with_tabs(
+        cx: &mut TestAppContext,
+        n: usize,
+    ) -> (
+        Entity<Tty7App>,
+        VisualTestContext,
+        Vec<std::os::unix::net::UnixStream>,
+    ) {
+        use crate::terminal::view::quiet_test_pane;
+        use crate::ui::pane::{Pane, PaneSlot};
+
+        let (app, mut vcx) = harness(cx);
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.cursor_blink = false;
+            cx.set_global(cfg);
+        });
+        let streams = app.update_in(&mut vcx, |app, window, cx| {
+            let mut streams = Vec::new();
+            for i in 0..n {
+                let (view, stream) = quiet_test_pane(i as u64 + 1, window, cx);
+                app.tabs
+                    .push(super::Tab::new(Pane::leaf(PaneSlot::Ready(view))));
+                streams.push(stream);
+            }
+            app.active = 0;
+            cx.notify();
+            streams
+        });
+        vcx.background_executor.run_until_parked();
+        (app, vcx, streams)
     }
 
     #[cfg(unix)]
@@ -6793,7 +6933,7 @@ mod shell_menu_gpui_tests {
                     active: None,
                 },
             );
-            app.switch_workspace(remote_id, window, cx);
+            app.switch_workspace(Some(remote_id), window, cx);
         });
 
         assert!(

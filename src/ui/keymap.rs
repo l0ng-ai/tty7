@@ -441,6 +441,17 @@ pub(crate) fn key_chords(spec: &str) -> Vec<Vec<String>> {
     spec.split_whitespace().map(key_tokens).collect()
 }
 
+/// How to write the "secondary" modifier for this platform — ⌘ on macOS, Ctrl
+/// everywhere else. Anything spelling a shortcut out in the UI needs this
+/// rather than a literal ⌘.
+pub(crate) fn secondary_glyph() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "⌘"
+    } else {
+        "Ctrl"
+    }
+}
+
 pub(crate) fn key_tokens(spec: &str) -> Vec<String> {
     #[cfg(target_os = "macos")]
     const MODS: [(&str, &str); 6] = [

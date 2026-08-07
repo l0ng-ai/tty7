@@ -295,6 +295,55 @@ pub fn display_name_for(cx: &App, client_ws: WorkspaceId) -> Option<String> {
     display_name(cx, entry)
 }
 
+/// One tab of some workspace, flattened down to what a list row needs. The
+/// mirror is the only place that knows about workspaces this window does not
+/// own, so the switcher's tab column reads them from here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TabView {
+    pub id: TabId,
+    pub name: Option<String>,
+    pub title: String,
+    pub cwd: Option<String>,
+    pub agent: Option<crate::core::cli_agent::CLIAgent>,
+    pub status: Option<crate::core::cli_agent::AgentStatus>,
+    pub live: bool,
+    pub panes: usize,
+}
+
+pub fn tab_views_for(cx: &App, client_ws: WorkspaceId) -> Option<(Vec<TabView>, Option<TabId>)> {
+    let entry = crate::core::session::WorkspaceStore::all(cx).get(client_ws)?;
+    let (ws, panes) = view_of(cx, entry)?;
+    Some((tab_views_of(ws, panes), ws.active_tab))
+}
+
+pub fn tab_views_of(ws: &Workspace, panes: &[PaneRecord]) -> Vec<TabView> {
+    ws.tabs
+        .iter()
+        .map(|tab| {
+            let ids = tab.root.pane_ids();
+            let records: Vec<&PaneRecord> = ids
+                .iter()
+                .filter_map(|id| panes.iter().find(|p| p.id == *id))
+                .collect();
+            // The first pane stands in for the tab, the same way the strip shows
+            // its focused leaf — but any pane running an agent wins, since that
+            // is what someone scanning the list is looking for.
+            let head = records.first();
+            let facts = records.iter().find_map(|p| p.agent.as_ref());
+            TabView {
+                id: tab.id,
+                name: tab.name.clone(),
+                title: head.map(|p| p.title.clone()).unwrap_or_default(),
+                cwd: head.and_then(|p| p.cwd.clone()),
+                agent: facts.map(|f| f.agent),
+                status: facts.and_then(|f| f.status),
+                live: records.iter().any(|p| p.live),
+                panes: ids.len(),
+            }
+        })
+        .collect()
+}
+
 pub fn subject_path(cx: &App, entry: &crate::core::session::WindowView) -> Option<String> {
     match view_of(cx, entry) {
         Some((ws, panes)) => subject_path_of(ws, panes).or_else(|| entry.subject.clone()),

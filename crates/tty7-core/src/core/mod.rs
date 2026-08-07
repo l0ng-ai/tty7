@@ -1,5 +1,6 @@
 pub mod agent_hooks;
 pub mod cli_agent;
+pub mod codename;
 pub mod config;
 pub mod crash;
 pub mod git;

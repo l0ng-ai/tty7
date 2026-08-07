@@ -12,10 +12,11 @@ impl Tty7App {
     pub(crate) fn on_modifiers_changed(
         &mut self,
         ev: &ModifiersChangedEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let m = &ev.modifiers;
+        self.switcher_hold_changed(m, window, cx);
         self.set_link_modifier(m.secondary(), cx);
 
         let extra_platform = if cfg!(target_os = "macos") {
