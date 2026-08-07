@@ -942,7 +942,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SshPromptSubmit => "提交",
         L10nKey::HostOpsError => "{context}：{error}",
         L10nKey::TreeWindowOpenedEmpty => {
-            "这个窗口的服务器没有交出标签页，所以窗口是空的。什么都没有丢——服务器一旦响应，标签页就会回来；如果一直不回来，请在命令面板里执行「重启服务器」。"
+            "这个窗口的服务器没有交出标签页，所以窗口是空的。什么都没丢，它一响应就会回来。如果一直不回来，在命令面板里执行「重启服务器」。"
         }
         L10nKey::CmdGroupTabsPanes => "标签页与窗格",
         L10nKey::CmdGroupWorkspaces => "工作区",
@@ -1036,18 +1036,17 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdRecent => "最近使用",
         L10nKey::AppRestartServerTitle => "重启服务器？",
         L10nKey::AppRestartServerMismatchDetail => {
-            "正在运行你 shell 的服务器来自另一个构建（v{build}，协议 {protocol}；此应用使用 {ours}）。你可以继续使用，shell 也会保留，但协议格式已变更的功能可能会表现异常，直到重启服务器。重启会启动一个干净的服务器：标签页会以全新的 shell 重新打开，其中正在运行的所有内容都会被终止。"
+            "服务器是 v{build}，协议 {protocol}；此应用使用 {ours}。两者无法对话，标签页取不出来。\n\n退出：什么都不变，服务器和 shell 继续运行。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
         }
         L10nKey::AppRestartServerDialectDetail => {
-            "正在运行你 shell 的服务器来自较旧的构建（v{build}）：它使用 control 方言 v{dialect}，此应用使用 v{ours}。shell 会继续运行，但它无法把标签页交给此应用，在重启之前窗口都会是空的。重启会启动一个干净的服务器：标签页会以全新的 shell 重新打开，其中正在运行的所有内容都会被终止。"
+            "服务器是 v{build}：control 方言 v{dialect}，而此应用使用 v{ours}。它交不出标签页，所以每个窗口都开成空的。\n\n退出：什么都不变，服务器和 shell 继续运行。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
         }
         L10nKey::AppRestartServerDialectNewerDetail => {
-            "正在运行你 shell 的服务器来自更新的构建（v{build}）：它使用 control 方言 v{dialect}，此应用使用 v{ours}。shell 会继续运行，但它无法把标签页交给此应用，所以窗口会是空的。真正的解法是升级此应用；重启服务器也能换成此应用能对话的版本，但标签页会以全新的 shell 重新打开，其中正在运行的所有内容都会被终止。"
+            "服务器是 v{build}：control 方言 v{dialect}，而此应用使用 v{ours}。它交不出标签页，所以每个窗口都开成空的。\n\n退出并装上更新的构建：真正的解法，shell 全都还在。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
         }
         L10nKey::AppRestartServerOldDetail => {
-            "正在运行你 shell 的服务器来自应用的旧版本。你可以继续使用，shell 也会保留，但新功能可能会表现异常，直到重启服务器。重启会启动一个干净的服务器：标签页会以全新的 shell 重新打开，其中正在运行的所有内容都会被终止。"
+            "服务器早于版本握手，此应用无从得知它说的是什么。\n\n退出：什么都不变，服务器和 shell 继续运行。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
         }
-        L10nKey::AppKeepShells => "保留 Shell",
         L10nKey::AppRestart => "重启",
         L10nKey::AppRestartServerNotSsh => {
             "tty7 只能重启通过 SSH 连接的机器上的服务器。{label} 由本机提供服务——请改为停止其工作区。"

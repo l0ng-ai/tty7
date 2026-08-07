@@ -994,7 +994,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SshPromptSubmit => "Submit",
         L10nKey::HostOpsError => "{context}: {error}",
         L10nKey::TreeWindowOpenedEmpty => {
-            "This window's server never handed over its tabs, so it opened empty. Nothing was thrown away — the tabs come back once the server answers, and \"Restart Server\" in the command palette is what to reach for if it doesn't."
+            "This window's server never handed over its tabs, so it opened empty. Nothing was lost — they come back when it answers. If it doesn't, run \"Restart Server\" from the command palette."
         }
         L10nKey::CmdGroupTabsPanes => "Tabs & Panes",
         L10nKey::CmdGroupWorkspaces => "Workspaces",
@@ -1088,18 +1088,17 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdRecent => "Recent",
         L10nKey::AppRestartServerTitle => "Restart Server?",
         L10nKey::AppRestartServerMismatchDetail => {
-            "The server holding your shells is from another build (v{build}, protocol {protocol} — this app speaks {ours}). You can keep using it and your shells stay, but features whose wire format changed may misbehave until it's restarted. Restarting starts a clean server: tabs reopen with fresh shells and anything running in them is terminated."
+            "The server holding your shells is build v{build}, protocol {protocol}; this app speaks {ours}. They can't talk, so your tabs are out of reach.\n\nQuit: nothing changes — the server and your shells keep running.\nRestart: tabs come back with fresh shells, and anything running now is killed."
         }
         L10nKey::AppRestartServerDialectDetail => {
-            "The server holding your shells is from an older build (v{build}): it speaks control dialect v{dialect}, this app speaks v{ours}. Your shells keep running, but it cannot hand this app your tabs, so windows open empty until it's restarted. Restarting starts a clean server: tabs reopen with fresh shells and anything running in them is terminated."
+            "The server holding your shells is build v{build}: control dialect v{dialect}, where this app speaks v{ours}. It can't hand over your tabs, so every window opens empty.\n\nQuit: nothing changes — the server and your shells keep running.\nRestart: tabs come back with fresh shells, and anything running now is killed."
         }
         L10nKey::AppRestartServerDialectNewerDetail => {
-            "The server holding your shells is from a newer build (v{build}): it speaks control dialect v{dialect}, this app speaks v{ours}. Your shells keep running, but it cannot hand this app your tabs, so windows open empty. Updating this app is the real fix; restarting the server replaces it with one this app can talk to, but tabs reopen with fresh shells and anything running in them is terminated."
+            "The server holding your shells is build v{build}: control dialect v{dialect}, where this app speaks v{ours}. It can't hand over your tabs, so every window opens empty.\n\nQuit and install the newer build: the real fix, and your shells survive it.\nRestart: tabs come back with fresh shells, and anything running now is killed."
         }
         L10nKey::AppRestartServerOldDetail => {
-            "The server holding your shells is from an older version of the app. You can keep using it and your shells stay, but newer features may misbehave until it's restarted. Restarting starts a clean server: tabs reopen with fresh shells and anything running in them is terminated."
+            "The server holding your shells predates the version handshake, so this app can't tell what it speaks.\n\nQuit: nothing changes — the server and your shells keep running.\nRestart: tabs come back with fresh shells, and anything running now is killed."
         }
-        L10nKey::AppKeepShells => "Keep Shells",
         L10nKey::AppRestart => "Restart",
         L10nKey::AppRestartServerNotSsh => {
             "tty7 can only restart the server on machines it reaches over SSH. {label} is served from this computer — stop its workspace instead."

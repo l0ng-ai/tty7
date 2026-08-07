@@ -488,12 +488,27 @@ impl Tty7App {
         app
     }
 
+    /// Put a version-mismatched local server to the user, with no third way out.
+    ///
+    /// Both handshakes compare their version for equality and hang up on
+    /// anything else — the pane protocol in `daemon::spawn::ensure_running`, the
+    /// control dialect in `host::server`'s hello. So a server whose number
+    /// disagrees cannot be talked round, and carrying on beside it is not a
+    /// degraded mode but a broken one: panes still spawn while every
+    /// machine-tree call is refused, which is how a window comes to open with no
+    /// tabs and save none of the ones you make. This used to be offered as "Keep
+    /// Shells", and taking it was indistinguishable from the bug.
+    ///
+    /// Restart or quit, then. Quitting is the half that destroys nothing: the
+    /// server and every shell under it keep running, which is what makes it a
+    /// real answer for someone who would rather go install the matching build
+    /// than lose a session mid-flight.
     fn prompt_daemon_version_mismatch(window: &mut Window, cx: &mut Context<Self>) {
         let Some(mismatch) = crate::daemon::spawn::take_mismatched_daemon() else {
             return;
         };
         let ours = crate::daemon::protocol::PROTOCOL_VERSION;
-        let detail = match mismatch {
+        let detail = match &mismatch {
             DaemonMismatch::Protocol(Some(v)) => t_fmt(
                 L10nKey::AppRestartServerMismatchDetail,
                 &[
@@ -520,18 +535,31 @@ impl Tty7App {
                 ],
             ),
         };
+        // Quit first, like every other destructive prompt here. NSAlert and
+        // TaskDialog both give the first button Return, and this one arrives
+        // unasked at launch — the moment a stray Return is most likely — so the
+        // key that lands by reflex has to be the one that destroys nothing.
+        // Restarting is a click or an arrow key away, and it is the same shape
+        // as `restart_daemon` below: safe first, act on the second.
         let answer = window.prompt(
             PromptLevel::Warning,
             t(L10nKey::AppRestartServerTitle),
             Some(&detail),
-            &[t(L10nKey::AppKeepShells), t(L10nKey::AppRestart)],
+            &[t(L10nKey::CmdQuitTty7), t(L10nKey::RestartServer)],
             cx,
         );
-        cx.spawn(async move |this, cx| {
-            if !matches!(answer.await, Ok(1)) {
-                return;
+        cx.spawn(async move |this, cx| match answer.await {
+            Ok(1) => {
+                let _ = this.update_in(cx, |this, _window, cx| this.restart_daemon_confirmed(cx));
             }
-            let _ = this.update_in(cx, |this, _window, cx| this.restart_daemon_confirmed(cx));
+            Ok(_) => {
+                let _ = cx.update(|cx| cx.quit());
+            }
+            // Dismissed without an answer: the window went away before the
+            // question was settled. Arm it again so the next window asks, rather
+            // than letting the state this prompt exists to prevent slip through
+            // the gap.
+            Err(_) => crate::daemon::spawn::note_daemon_mismatch(mismatch),
         })
         .detach();
     }
