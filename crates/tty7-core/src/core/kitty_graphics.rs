@@ -716,6 +716,38 @@ impl Image {
         })
     }
 
+    /// Like [`to_rgba8`](Image::to_rgba8) but *moves* the pixel buffer out of the
+    /// image on the uncompressed fast path instead of cloning it, leaving
+    /// [`data`](Image::data) empty. This is the client hot path: a full-window
+    /// browser frame is ~26 MiB of RGBA, and the uncompressed shm/file transport
+    /// hands it to us already in the final `f=32` layout — so the clone
+    /// [`to_rgba8`] does there is pure waste at video frame rates. Only the pixel
+    /// buffer moves; the caller's `cols`/`rows`/`id`/`placement` metadata is
+    /// untouched. The compressed inflate and the PNG guard are identical to
+    /// [`to_rgba8`]; `f=24` still repacks (RGB→RGBA changes the length).
+    ///
+    /// [`to_rgba8`]: Image::to_rgba8
+    pub fn take_rgba8(&mut self) -> Option<Vec<u8>> {
+        if self.format == WireFormat::Png {
+            return None;
+        }
+        let data = std::mem::take(&mut self.data);
+        if self.compressed {
+            // Same bounded inflate as `to_rgba8` — see that method for why the
+            // limit is clamped to `MAX_IMAGE_BYTES` as well as the declared size.
+            let limit = self.decoded_len()?.min(MAX_IMAGE_BYTES);
+            let raw = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&data, limit).ok()?;
+            return Some(match self.format {
+                WireFormat::Rgb => rgb_to_rgba(&raw),
+                _ => raw,
+            });
+        }
+        Some(match self.format {
+            WireFormat::Rgb => rgb_to_rgba(&data),
+            _ => data, // Rgba — moved out of the frame, not cloned.
+        })
+    }
+
     /// The byte length of this image's *decoded* (pre-`rgb_to_rgba`) pixels —
     /// `width * height * bytes_per_pixel` for the wire format. `None` on overflow
     /// or a zero-sized/PNG image, which have no fixed raw length.
@@ -777,6 +809,48 @@ impl Image {
             format,
             compressed: bytes[29] != 0,
             data: bytes[HEADER_LEN..].to_vec(),
+        })
+    }
+
+    /// Like [`decode_frame`](Image::decode_frame) but consumes the frame buffer,
+    /// reusing its allocation for the pixel payload instead of copying the tail
+    /// into a fresh `Vec`. The client owns the frame `Vec` straight off the
+    /// socket, and the pixels are the overwhelming majority of it (a ~26 MiB
+    /// RGBA frame behind a 30-byte header), so draining the header in place turns
+    /// a full-frame copy into a cheap front shift. Behaviourally identical to
+    /// `decode_frame` — same header parse, same fields.
+    pub fn decode_frame_owned(mut frame: Vec<u8>) -> Option<Self> {
+        if frame.len() < HEADER_LEN {
+            return None;
+        }
+        let u32_at = |o: usize| u32::from_le_bytes(frame[o..o + 4].try_into().unwrap());
+        let id = u32_at(0);
+        let number = u32_at(4);
+        let placement = u32_at(8);
+        let width = u32_at(12);
+        let height = u32_at(16);
+        let cols = u32_at(20);
+        let rows = u32_at(24);
+        let format = match frame[28] {
+            24 => WireFormat::Rgb,
+            100 => WireFormat::Png,
+            _ => WireFormat::Rgba,
+        };
+        let compressed = frame[29] != 0;
+        // Reuse the socket buffer as the pixel buffer: drop the header off the
+        // front rather than allocating a new `Vec` for `frame[HEADER_LEN..]`.
+        frame.drain(..HEADER_LEN);
+        Some(Image {
+            id,
+            number,
+            placement,
+            width,
+            height,
+            cols,
+            rows,
+            format,
+            compressed,
+            data: frame,
         })
     }
 }
@@ -1903,6 +1977,98 @@ mod tests {
         assert_eq!(Image::decode_frame(&frame), Some(img));
         // A truncated frame is rejected, not panicked on.
         assert_eq!(Image::decode_frame(&frame[..HEADER_LEN - 1]), None);
+    }
+
+    #[test]
+    fn decode_frame_owned_matches_decode_frame() {
+        // The consuming variant reuses the frame's allocation for the pixel
+        // buffer; it must reconstruct the exact same `Image` as the borrowing one.
+        let img = Image {
+            id: 42,
+            number: 3,
+            placement: 1,
+            width: 1920,
+            height: 1080,
+            cols: 80,
+            rows: 24,
+            data: vec![9, 8, 7, 6, 5, 4, 3, 2, 1],
+            format: WireFormat::Rgb,
+            compressed: true,
+        };
+        let frame = img.encode_frame();
+        assert_eq!(Image::decode_frame_owned(frame.clone()), Some(img));
+        // Same rejection of a short buffer, no panic on the in-place drain.
+        assert_eq!(
+            Image::decode_frame_owned(frame[..HEADER_LEN - 1].to_vec()),
+            None
+        );
+    }
+
+    #[test]
+    fn take_rgba8_moves_the_uncompressed_buffer_and_matches_to_rgba8() {
+        // Uncompressed RGBA: `take_rgba8` returns the exact bytes `to_rgba8`
+        // clones, but empties `data` (the buffer was moved, not copied).
+        let pixels = vec![0x10u8, 0x20, 0x30, 0x40];
+        let mut img = Image {
+            id: 0,
+            number: 0,
+            placement: 0,
+            width: 1,
+            height: 1,
+            cols: 0,
+            rows: 0,
+            data: pixels.clone(),
+            format: WireFormat::Rgba,
+            compressed: false,
+        };
+        let borrowed = img.to_rgba8().unwrap();
+        assert_eq!(borrowed, pixels);
+        let moved = img.take_rgba8().unwrap();
+        assert_eq!(moved, pixels);
+        assert!(
+            img.data.is_empty(),
+            "the pixel buffer was moved out, not cloned"
+        );
+    }
+
+    #[test]
+    fn take_rgba8_still_expands_rgb_and_bounds_the_bomb() {
+        // f=24 repacks to RGBA (length changes, so it can't move) — same result
+        // as `to_rgba8`.
+        let mut rgb = Image {
+            id: 0,
+            number: 0,
+            placement: 0,
+            width: 1,
+            height: 1,
+            cols: 0,
+            rows: 0,
+            data: vec![0x10, 0x20, 0x30],
+            format: WireFormat::Rgb,
+            compressed: false,
+        };
+        assert_eq!(rgb.take_rgba8().unwrap(), [0x10, 0x20, 0x30, 0xff]);
+
+        // The declared-dimension inflate bound is preserved on the moving path.
+        let bomb = vec![0u8; 4 * 1024 * 1024];
+        let z = miniz_oxide::deflate::compress_to_vec_zlib(&bomb, 9);
+        let mut img = Image {
+            id: 1,
+            number: 0,
+            placement: 0,
+            width: 1,
+            height: 1,
+            cols: 0,
+            rows: 0,
+            data: z,
+            format: WireFormat::Rgba,
+            compressed: true,
+        };
+        assert_eq!(
+            img.take_rgba8(),
+            None,
+            "an over-budget inflate is still dropped"
+        );
     }
 
     #[test]

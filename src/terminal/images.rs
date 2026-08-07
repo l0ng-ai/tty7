@@ -516,7 +516,7 @@ impl DecodeWorker {
     fn spawn_with_decoder(
         store: ImageStore,
         wake: impl Fn() + Send + 'static,
-        decoder: impl Fn(&Image) -> Option<(Arc<RenderImage>, u32, u32)> + Send + 'static,
+        decoder: impl Fn(&mut Image) -> Option<(Arc<RenderImage>, u32, u32)> + Send + 'static,
     ) -> Self {
         let inbox = Arc::new(DecodeInbox::new());
         let worker_inbox = inbox.clone();
@@ -550,10 +550,10 @@ impl DecodeWorker {
         inbox: Arc<DecodeInbox>,
         store: ImageStore,
         wake: impl Fn(),
-        decoder: impl Fn(&Image) -> Option<(Arc<RenderImage>, u32, u32)>,
+        decoder: impl Fn(&mut Image) -> Option<(Arc<RenderImage>, u32, u32)>,
     ) {
-        while let Some(queued) = inbox.recv() {
-            match decoder(&queued.frame.img) {
+        while let Some(mut queued) = inbox.recv() {
+            match decoder(&mut queued.frame.img) {
                 Some(decoded) => {
                     if inbox.place_if_current(queued, decoded, &store) {
                         wake();
@@ -584,7 +584,14 @@ impl Drop for DecodeWorker {
 /// payload, then swap R↔B to the BGRA the sprite atlas wants. Returns the render
 /// image and its true pixel dimensions (a PNG carries its own, overriding any
 /// `s=`/`v=` the sender may have omitted). `None` if the payload can't be decoded.
-pub fn decode(img: &Image) -> Option<(Arc<RenderImage>, u32, u32)> {
+///
+/// Takes the [`Image`] by `&mut` so the uncompressed path can *move* its pixel
+/// buffer straight into the render image (via [`Image::take_rgba8`]) rather than
+/// cloning ~26 MiB per frame — the client hot path for a re-transmitting browser.
+/// Only the pixel buffer is consumed; the image's placement metadata is left
+/// intact for the caller.
+pub fn decode(img: &mut Image) -> Option<(Arc<RenderImage>, u32, u32)> {
+    let (src_w, src_h) = (img.width, img.height);
     let (mut rgba, w, h) = match img.format {
         WireFormat::Png => {
             // The one path pixels stay encoded through: decode with the `image`
@@ -596,8 +603,8 @@ pub fn decode(img: &Image) -> Option<(Arc<RenderImage>, u32, u32)> {
             (buf.into_raw(), w, h)
         }
         WireFormat::Rgb | WireFormat::Rgba => {
-            let rgba = img.to_rgba8()?;
-            (rgba, img.width, img.height)
+            let rgba = img.take_rgba8()?;
+            (rgba, src_w, src_h)
         }
     };
     if w == 0 || h == 0 || rgba.len() < (w as usize * h as usize * 4) {
@@ -640,7 +647,7 @@ mod tests {
     }
 
     fn placed(id: u32, placement: u32) -> PlacedImage {
-        let (data, w, h) = decode(&red_pixel()).unwrap();
+        let (data, w, h) = decode(&mut red_pixel()).unwrap();
         PlacedImage {
             data,
             anchor_row: 0,
@@ -657,11 +664,11 @@ mod tests {
 
     #[test]
     fn decodes_rgba_and_swaps_to_bgra() {
-        let img = Image {
+        let mut img = Image {
             data: vec![1, 2, 3, 4],
             ..red_pixel()
         };
-        let (data, w, h) = decode(&img).unwrap();
+        let (data, w, h) = decode(&mut img).unwrap();
         assert_eq!((w, h), (1, 1));
         // Red/blue swapped: RGBA [1,2,3,4] → BGRA [3,2,1,4].
         assert_eq!(data.as_bytes(0).unwrap(), &[3, 2, 1, 4]);

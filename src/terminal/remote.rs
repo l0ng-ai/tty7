@@ -715,7 +715,9 @@ impl RemoteTerminal {
                             DaemonMsg::Image(frame) => {
                                 flush_batch!();
                                 if let Some(img) =
-                                    tty7_core::core::kitty_graphics::Image::decode_frame(&frame)
+                                    tty7_core::core::kitty_graphics::Image::decode_frame_owned(
+                                        frame,
+                                    )
                                 {
                                     // Capture the anchor *now*, at the cursor cell
                                     // the transmission arrived on; the decode is
