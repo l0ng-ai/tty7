@@ -268,6 +268,8 @@ impl PaintColors {
 }
 
 fn paint_backgrounds(window: &mut Window, geom: &CellGeom, buf: &[RenderCell]) {
+    let scale = window.scale_factor();
+    let overlap = px(1.0 / scale);
     for row in 0..geom.rows {
         let mut col = 0;
         while col < geom.cols {
@@ -286,7 +288,9 @@ fn paint_backgrounds(window: &mut Window, geom: &CellGeom, buf: &[RenderCell]) {
                     break;
                 }
             }
-            window.paint_quad(fill(geom.cell_rect(row, start, col - start), bg));
+            let mut rect = geom.cell_rect(row, start, col - start);
+            rect.size.width += overlap;
+            window.paint_quad(fill(rect, bg));
         }
     }
 }
@@ -662,20 +666,28 @@ impl PowerlineShape {
 }
 
 fn powerline_path(bounds: Bounds<Pixels>, shape: PowerlineShape) -> gpui::Path<Pixels> {
-    let (x0, y0) = (bounds.origin.x, bounds.origin.y);
-    let (x1, y1) = (x0 + bounds.size.width, y0 + bounds.size.height);
+    let overlap = px(0.5);
+    let x0 = bounds.origin.x - overlap;
+    let y0 = bounds.origin.y - overlap;
+    let x1 = bounds.origin.x + bounds.size.width + overlap;
+    let y1 = bounds.origin.y + bounds.size.height + overlap;
     let ymid = y0 + bounds.size.height / 2.;
 
     let tri = |a: Point<Pixels>, b: Point<Pixels>, c: Point<Pixels>| {
         let mut p = gpui::Path::new(a);
         p.line_to(b);
         p.line_to(c);
+        p.line_to(a);
         p
     };
+
     let half_circle = |anchor_x: Pixels, dir: f32| {
         const SEGS: usize = 6;
 
-        let (rx, ry) = (bounds.size.width.as_f32(), bounds.size.height.as_f32() / 2.);
+        let (rx, ry) = (
+            (bounds.size.width + overlap * 2.).as_f32(),
+            ((y1 - y0) / 2.).as_f32(),
+        );
 
         let at = |scale: f32, theta: f32| {
             let x = anchor_x.as_f32() + dir * rx * scale * theta.cos();
@@ -696,6 +708,7 @@ fn powerline_path(bounds: Bounds<Pixels>, shape: PowerlineShape) -> gpui::Path<P
         }
         p
     };
+
     match shape {
         PowerlineShape::TriangleRight => tri(point(x0, y0), point(x1, ymid), point(x0, y1)),
         PowerlineShape::TriangleLeft => tri(point(x1, y0), point(x0, ymid), point(x1, y1)),
@@ -773,10 +786,7 @@ fn paint_glyphs(
                 }
                 RowSeg::Solo { col } => {
                     let cell = &buf[row_base + col];
-                    let cell_bounds = Bounds::new(
-                        point(geom.origin.x + geom.cell_width * (col as f32), y),
-                        size(geom.cell_width, geom.line_height),
-                    );
+                    let cell_bounds = geom.cell_rect(row, col, 1);
                     let native = if let Some(shape) = PowerlineShape::of(cell.c) {
                         let path = powerline_path(cell_bounds, shape);
                         window.paint_path(path, GlyphStyle::of(cell).fg);
@@ -1932,9 +1942,10 @@ mod tests {
     }
 
     #[test]
-    fn powerline_path_fills_exactly_one_cell() {
+    fn powerline_path_generates_valid_geometry() {
         let (x0, y0, w, h) = (px(10.), px(20.), px(9.), px(21.));
         let bounds = Bounds::new(point(x0, y0), size(w, h));
+
         for shape in [
             PowerlineShape::TriangleRight,
             PowerlineShape::TriangleLeft,
@@ -1947,22 +1958,14 @@ mod tests {
         ] {
             let path = powerline_path(bounds, shape);
             assert!(!path.vertices.is_empty(), "{shape:?} produced no geometry");
-            let (mut min_x, mut max_x) = (px(f32::MAX), px(f32::MIN));
+            let mut min_x = px(f32::MAX);
+            let mut max_x = px(f32::MIN);
             for v in &path.vertices {
-                let p = v.xy_position;
-                assert!(
-                    p.x >= x0 && p.x <= x0 + w && p.y >= y0 && p.y <= y0 + h,
-                    "{shape:?} vertex at {p:?} escapes the cell"
-                );
-                min_x = min_x.min(p.x);
-                max_x = max_x.max(p.x);
+                min_x = min_x.min(v.xy_position.x);
+                max_x = max_x.max(v.xy_position.x);
             }
-            assert_eq!(min_x, x0, "{shape:?} does not reach the left cell edge");
-            assert_eq!(
-                max_x,
-                x0 + w,
-                "{shape:?} does not reach the right cell edge"
-            );
+            assert!(min_x <= x0, "{shape:?} min_x should overlap or align with left edge");
+            assert!(max_x >= x0 + w, "{shape:?} max_x should overlap or align with right edge");
             match shape {
                 PowerlineShape::HalfCircleRight => assert!(
                     path.vertices[1].xy_position.x <= x0 + w * 0.4
