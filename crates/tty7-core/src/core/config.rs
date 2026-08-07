@@ -162,6 +162,16 @@ pub struct Config {
     #[serde(default, deserialize_with = "de_lenient")]
     pub notify_on_command_finish: NotifyMode,
     pub check_for_updates: bool,
+    /// Whether a found update is fetched and verified before the user asks for
+    /// it. On by default: it turns "spend five minutes downloading" into "press
+    /// restart", which is the whole difference between an update people apply
+    /// and one they postpone forever. Nothing is ever *installed* without an
+    /// explicit choice — the staged package waits in Settings.
+    ///
+    /// Worth turning off on a metered connection: the packages run 25–30 MB and
+    /// a check happens every six hours.
+    #[serde(default = "default_true")]
+    pub auto_download_updates: bool,
     /// Whether the GUI puts the bundled `tty7` CLI on PATH at launch (see
     /// `core::cli_install`). On by default: the CLI is the agent-facing half of
     /// this product and is worth nothing sitting unreachable inside the bundle.
@@ -422,6 +432,7 @@ impl Default for Config {
             sidebar_diff_preview: true,
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,
+            auto_download_updates: true,
             install_cli_on_path: true,
             gui_language: default_gui_language(),
             notify_threshold_secs: default_notify_threshold_secs(),

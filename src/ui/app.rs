@@ -1918,6 +1918,10 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.check_for_updates = on);
     }
 
+    pub(crate) fn set_auto_download_updates(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.auto_download_updates = on);
+    }
+
     /// Takes effect at next launch: `core::cli_install` runs once from `main`,
     /// before there is a window to flip this in. Turning it off does not remove
     /// a symlink already placed — the install is idempotent, not reversible.

@@ -45,6 +45,31 @@ fn note_local_daemon(version: Option<DaemonVersion>) {
     }
 }
 
+/// The build string of a running daemon that speaks our protocol but was
+/// compiled from different sources — the state an in-place upgrade leaves
+/// behind, since the GUI is replaced while the daemon keeps serving every pane
+/// from the old binary.
+///
+/// `PROTOCOL_VERSION` moves only when the wire format does (it has been 5 since
+/// July), so this is the *common* case after an update, not a rare one: the
+/// user sees a new version number while `pane.rs`, `shell_integration.rs` and
+/// the whole ssh stack still run last release's code.
+///
+/// Deliberately not a prompt and not an automatic restart. Restarting the
+/// daemon ends every process it owns — the shells, the agents, the SSH
+/// sessions — which is exactly what a user who just accepted an app update did
+/// not ask for. Settings surfaces it and lets them pick the moment.
+///
+/// A protocol mismatch is a different problem with its own prompt, so it is
+/// excluded here rather than reported twice.
+pub fn local_daemon_stale_build() -> Option<String> {
+    let guard = LOCAL_DAEMON.lock().ok()?;
+    let version = guard.as_ref()?;
+    let ours = env!("CARGO_PKG_VERSION");
+    (version.protocol == PROTOCOL_VERSION && !version.build.is_empty() && version.build != ours)
+        .then(|| version.build.clone())
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum VersionProbe {
     Speaks(DaemonVersion),
@@ -85,6 +110,14 @@ pub fn ensure_running() -> anyhow::Result<()> {
     if let Ok(mut stream) = transport::connect() {
         match query_daemon_version(&mut stream) {
             VersionProbe::Speaks(v) if v.protocol == PROTOCOL_VERSION => {
+                if !v.build.is_empty() && v.build != env!("CARGO_PKG_VERSION") {
+                    log::info!(
+                        "daemon build {} differs from this build {}; keeping it so its panes \
+                         survive the upgrade — Settings offers the restart",
+                        v.build,
+                        env!("CARGO_PKG_VERSION")
+                    );
+                }
                 note_local_daemon(Some(v));
                 return Ok(());
             }

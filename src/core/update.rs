@@ -4,18 +4,62 @@ use gpui::{AnyWindowHandle, App, AsyncApp, Global, PromptLevel, Window, http_cli
 use reqwest_client::ReqwestClient;
 use smol::future::FutureExt as _;
 use smol::io::AsyncReadExt as _;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tty7_core::daemon::install::AssetFetcher as _;
 
 use crate::core::config::Config;
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 const REPO: &str = "l0ng-ai/tty7";
 
 pub const RELEASES_URL: &str = "https://github.com/l0ng-ai/tty7/releases/latest";
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// A terminal workbench is left open for weeks, so a launch-only check reaches
+/// only the people who restart anyway — the ones who would have found the
+/// update themselves.
+const RECHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// How long "Later" silences one version for. It has to be a real delay rather
+/// than the old behaviour (prompted once, then silent forever), or declining an
+/// update once removes it from the user's world permanently.
+const REMIND_LATER: Duration = Duration::from_secs(3 * 24 * 60 * 60);
+
+/// Staging directories older than this belong to a run that died before its
+/// updater could clean up — a download the user cancelled by quitting, or a
+/// crash. On macOS they sit in /Applications, so nobody finds them by accident.
+const STAGE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Set by `cancel_download`, read by the transfer's progress callback. One
+/// download runs at a time (`spawn_download` refuses to start a second), so a
+/// single flag is the whole mechanism.
+static DOWNLOAD_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the user has asked to install as soon as the package is ready. Set
+/// by pressing the install button while a background download is still going,
+/// which is the common case now that checking starts one on its own.
+static INSTALL_WHEN_READY: AtomicBool = AtomicBool::new(false);
+
+/// Whether the staged package should be applied by the next launch without
+/// asking again.
+static APPLY_ON_LAUNCH: AtomicBool = AtomicBool::new(false);
+
+/// Byte counters the download thread publishes and the UI samples. Cheaper and
+/// less fussy than a channel for something the user reads a few times a second.
+static DOWNLOAD_RECEIVED: AtomicU64 = AtomicU64::new(0);
+/// Zero when the server sent no usable `content-length`.
+static DOWNLOAD_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// Set once the bytes are in and the hashing, unpacking and signature checks
+/// start. That work has no progress to report, and a percentage frozen at 100
+/// is indistinguishable from a hang.
+static DOWNLOAD_VERIFYING: AtomicBool = AtomicBool::new(false);
+
+const PROGRESS_TICK: Duration = Duration::from_millis(120);
 
 #[cfg(target_os = "windows")]
 const WINDOWS_INNO_INSTALL_MARKER: &str = ".tty7-inno-install";
@@ -29,6 +73,9 @@ pub struct AvailableUpdate {
     pub version: String,
     pub installable: bool,
     pub install_hint: Option<UpdateInstallHint>,
+    /// The release's own page. "Version 27.0.0 is available" tells nobody
+    /// whether it is worth a restart; this is where that answer lives.
+    pub notes_url: String,
     asset: Option<ReleaseAsset>,
 }
 
@@ -38,6 +85,10 @@ pub enum UpdateInstallHint {
     UnsupportedMacos,
     #[cfg(target_os = "linux")]
     UnsupportedLinux,
+    /// Linux updates by hand, but "use the release page" leaves the user to
+    /// work out which of five files is theirs. This names it.
+    #[cfg(target_os = "linux")]
+    LinuxManualPackage(String),
     #[cfg(target_os = "windows")]
     UnsupportedWindows,
     #[cfg(target_os = "windows")]
@@ -49,12 +100,20 @@ pub enum UpdateInstallHint {
 }
 
 impl UpdateInstallHint {
+    /// The reason in plain English, for an `anyhow` chain that ends up in a log
+    /// or an error string. Anything a user reads goes through
+    /// `localized_update_install_hint` instead.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     fn english(&self) -> String {
         match self {
             #[cfg(target_os = "macos")]
             Self::UnsupportedMacos => "This copy is not running from a writable tty7.app bundle, so replacing it would be unsafe. Move tty7 to Applications or another writable folder, or open the release page to install the update.".to_string(),
             #[cfg(target_os = "linux")]
-            Self::UnsupportedLinux => "The first in-app updater supports packaged macOS app bundles. Use the release page or your package manager to update this Linux installation.".to_string(),
+            Self::UnsupportedLinux => "The release has no Linux package for this architecture. Build from source or use your package manager.".to_string(),
+            #[cfg(target_os = "linux")]
+            Self::LinuxManualPackage(name) => format!(
+                "Linux installations are updated by hand. Download {name} from the release page, or use your package manager."
+            ),
             #[cfg(target_os = "windows")]
             Self::UnsupportedWindows => "Automatic Windows updates are available for recognized Inno Setup and portable ZIP installations. This copy is missing a valid installation marker, updater, or writable portable directory, so open the release page to update it manually.".to_string(),
             #[cfg(target_os = "windows")]
@@ -75,7 +134,14 @@ pub enum UpdatePhase {
     Idle,
     Checking,
     UpToDate,
-    Downloading,
+    Downloading {
+        received: u64,
+        total: Option<u64>,
+    },
+    /// Hashing the package and running the updater's pre-flight checks. Split
+    /// out from `Downloading` because it is the part with no progress to show,
+    /// and a percentage frozen at 100 reads as a hang.
+    Verifying,
     Installing,
     Failed(UpdateFailure),
 }
@@ -91,45 +157,87 @@ pub enum UpdateFailure {
 pub struct UpdateStatus {
     pub available: Option<AvailableUpdate>,
     pub phase: UpdatePhase,
+    /// A package that is downloaded, verified and waiting. Mirrors what is on
+    /// disk in `update.json` so the UI can offer "install now" without knowing
+    /// where the staging directory is.
+    pub ready: Option<PendingUpdate>,
+    /// The last failure, carried across restarts. A failure that evaporates
+    /// when the app closes is one the user can neither act on nor report.
+    pub failure: Option<FailureRecord>,
 }
 
 impl Global for UpdateStatus {}
 
 pub fn spawn_check(cx: &mut App) {
+    // Before the config gate: a package staged by an earlier run, or a failure
+    // from one, has to reach Settings whether or not checking is still on.
+    hydrate_from_disk(cx);
+    // Off the startup path: this can remove a 30 MB directory, and nothing
+    // waits on the result.
+    let keep = UpdateState::load().pending.map(|pending| pending.stage);
+    cx.background_executor()
+        .spawn(async move { sweep_orphaned_stages(keep) })
+        .detach();
     if !cx.global::<Config>().check_for_updates {
         return;
     }
     spawn_check_inner(false, cx);
+    spawn_recheck_loop(cx);
 }
 
 pub fn spawn_check_forced(cx: &mut App) {
     spawn_check_inner(true, cx);
 }
 
+/// Republishes what the last run left on disk. Without this the UI opens
+/// claiming nothing is happening while a verified package sits in staging.
+fn hydrate_from_disk(cx: &mut App) {
+    let mut state = UpdateState::load();
+    // A package for a version we are already running is finished business —
+    // most often because it is the very update that just installed itself.
+    if let Some(pending) = &state.pending
+        && (!pending.is_usable() || !is_update_available(&pending.version, current_version()))
+    {
+        let stage = pending.stage.clone();
+        state.pending = None;
+        state.save();
+        let _ = std::fs::remove_dir_all(stage);
+    }
+    let (ready, failure) = (state.pending.clone(), state.last_failure.clone());
+    update_status(cx, |status| {
+        status.ready = ready;
+        status.failure = failure;
+    });
+}
+
+fn spawn_recheck_loop(cx: &mut App) {
+    // No exit condition: the task is dropped with the executor when the app
+    // shuts down, and the config is re-read each time so switching checking off
+    // takes effect without tearing the loop down.
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(RECHECK_INTERVAL).await;
+            cx.update(|cx| {
+                if cx.global::<Config>().check_for_updates {
+                    spawn_check_inner(false, cx);
+                }
+            });
+        }
+    })
+    .detach();
+}
+
 fn spawn_check_inner(report_failure: bool, cx: &mut App) {
-    if cx.try_global::<UpdateStatus>().is_some_and(|status| {
-        matches!(
-            status.phase,
-            UpdatePhase::Checking | UpdatePhase::Downloading | UpdatePhase::Installing
-        )
-    }) {
+    if is_busy(cx) {
         return;
     }
-    let previous_available = cx
-        .try_global::<UpdateStatus>()
-        .and_then(|status| status.available.clone());
-    set_status(
-        UpdateStatus {
-            available: previous_available.clone(),
-            phase: UpdatePhase::Checking,
-        },
-        cx,
-    );
+    update_status(cx, |status| status.phase = UpdatePhase::Checking);
 
     let manual_proxy = cx.global::<Config>().http_proxy.clone();
+    let auto_download = cx.global::<Config>().auto_download_updates;
 
     cx.spawn(async move |cx| {
-        let current = env!("CARGO_PKG_VERSION");
+        let current = current_version();
         let release = match fetch_latest_release(manual_proxy)
             .or(async {
                 cx.background_executor().timer(CHECK_TIMEOUT).await;
@@ -140,20 +248,16 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
             Ok(v) => v,
             Err(e) => {
                 log::debug!("update check skipped: {e:#}");
-                if report_failure {
-                    let detail = format!("{e:#}");
-                    cx.update(|cx| {
-                        set_status(
-                            UpdateStatus {
-                                available: previous_available,
-                                phase: UpdatePhase::Failed(UpdateFailure::Check(detail)),
-                            },
-                            cx,
-                        )
-                    });
-                } else {
-                    cx.update(|cx| set_status(UpdateStatus::default(), cx));
-                }
+                let detail = format!("{e:#}");
+                cx.update(|cx| {
+                    update_status(cx, |status| {
+                        status.phase = if report_failure {
+                            UpdatePhase::Failed(UpdateFailure::Check(detail))
+                        } else {
+                            UpdatePhase::Idle
+                        };
+                    })
+                });
                 return;
             }
         };
@@ -164,13 +268,10 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
                 release.tag_name
             );
             cx.update(|cx| {
-                set_status(
-                    UpdateStatus {
-                        available: None,
-                        phase: UpdatePhase::UpToDate,
-                    },
-                    cx,
-                )
+                update_status(cx, |status| {
+                    status.available = None;
+                    status.phase = UpdatePhase::UpToDate;
+                })
             });
             return;
         }
@@ -181,24 +282,39 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
             version: version.clone(),
             installable: selection.asset.is_some(),
             install_hint: selection.reason,
+            notes_url: release_notes_url(&release.tag_name),
             asset: selection.asset,
         };
         log::info!("update available: {version} (running {current})");
 
         cx.update(|cx| {
-            set_status(
-                UpdateStatus {
-                    available: Some(available.clone()),
-                    phase: UpdatePhase::Idle,
-                },
-                cx,
-            )
+            update_status(cx, |status| {
+                status.available = Some(available.clone());
+                status.phase = UpdatePhase::Idle;
+            })
         });
 
-        if UpdateState::load().last_prompted.as_deref() == Some(version.as_str()) {
+        let state = UpdateState::load();
+        if state.skipped.as_deref() == Some(version.as_str()) {
+            log::debug!("update {version} was skipped by the user");
             return;
         }
 
+        // Fetch while the prompt is up rather than after it: the answer people
+        // give depends on how long the work sounds, and by the time they have
+        // read the dialog the package is usually already there.
+        let staged = state.pending.as_ref().is_some_and(|p| p.version == version);
+        if auto_download && available.installable && !staged {
+            // Fetching ahead is not consent to install. Cleared explicitly
+            // because the flag outlives one download: a package armed by an
+            // earlier "Install on Next Launch" must not arm this one too.
+            APPLY_ON_LAUNCH.store(false, Ordering::Relaxed);
+            cx.update(|cx| spawn_download(available.clone(), cx));
+        }
+
+        if !should_prompt(&state, &version) {
+            return;
+        }
         let Some(window) = wait_for_window(cx).await else {
             return;
         };
@@ -209,18 +325,62 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
                 })
                 .is_ok()
         });
-
         if shown {
-            UpdateState {
-                last_prompted: Some(version),
-            }
-            .save();
+            let mut state = UpdateState::load();
+            state.last_prompted = Some(version);
+            state.remind_after = None;
+            state.save();
         }
     })
     .detach();
 }
 
-fn set_status(status: UpdateStatus, cx: &mut App) {
+/// Whether this version has earned another interruption.
+///
+/// The rule this replaces was "prompted once, never again", which meant a
+/// failed install — or a mis-click — retired the version permanently and left
+/// Settings as the only place it still existed.
+fn should_prompt(state: &UpdateState, version: &str) -> bool {
+    if state.skipped.as_deref() == Some(version) {
+        return false;
+    }
+    if state.last_prompted.as_deref() != Some(version) {
+        return true;
+    }
+    // Same version we already asked about: only once "Later" has expired.
+    state.remind_after.is_some_and(|due| now_secs() >= due)
+}
+
+fn is_busy(cx: &App) -> bool {
+    cx.try_global::<UpdateStatus>().is_some_and(|status| {
+        matches!(
+            status.phase,
+            UpdatePhase::Checking
+                | UpdatePhase::Downloading { .. }
+                | UpdatePhase::Verifying
+                | UpdatePhase::Installing
+        )
+    })
+}
+
+fn current_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+fn release_notes_url(tag: &str) -> String {
+    format!("https://github.com/{REPO}/releases/tag/{tag}")
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+fn update_status(cx: &mut App, edit: impl FnOnce(&mut UpdateStatus)) {
+    let mut status = cx.try_global::<UpdateStatus>().cloned().unwrap_or_default();
+    edit(&mut status);
     cx.set_global(status);
     cx.refresh_windows();
 }
@@ -238,143 +398,387 @@ async fn wait_for_window(cx: &mut AsyncApp) -> Option<AnyWindowHandle> {
 }
 
 fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
-    let install_hint = update.install_hint.as_ref().map(UpdateInstallHint::english);
+    let hint = update
+        .install_hint
+        .as_ref()
+        .map(localized_update_install_hint);
     let detail = if update.installable {
-        let note = install_hint
-            .as_deref()
-            .map(|note| format!(" {note}"))
-            .unwrap_or_default();
-        format!(
-            "tty7 {} is available — you're on {}. tty7 can download the verified update, install \
-             it, and restart the app.{note}",
-            update.version,
-            env!("CARGO_PKG_VERSION")
-        )
+        let base = t_fmt(
+            L10nKey::UpdateDialogDetail,
+            &[
+                ("version", update.version.as_str()),
+                ("current", current_version()),
+            ],
+        );
+        match hint.as_deref() {
+            Some(note) => format!("{base} {note}"),
+            None => base,
+        }
     } else {
-        format!(
-            "tty7 {} is available — you're on {}. {}",
-            update.version,
-            env!("CARGO_PKG_VERSION"),
-            install_hint
-                .as_deref()
-                .unwrap_or("This installation cannot update itself.")
+        t_fmt(
+            L10nKey::UpdateDialogDetailManual,
+            &[
+                ("version", update.version.as_str()),
+                ("current", current_version()),
+                (
+                    "hint",
+                    hint.as_deref()
+                        .unwrap_or_else(|| t(L10nKey::UpdateDialogCannotSelfUpdate)),
+                ),
+            ],
         )
     };
-    let action = if update.installable {
-        "Update and Relaunch"
+    // "Later" is index 0 deliberately: Escape, a closed window, or a dropped
+    // channel all land there, and that choice has to be the one that changes
+    // nothing. Skipping a version is a decision people should have to reach for
+    // — it lives in Settings, not one stray keystroke away.
+    let buttons: Vec<&str> = if update.installable {
+        vec![
+            t(L10nKey::UpdateDialogLater),
+            t(L10nKey::UpdateDialogNextLaunch),
+            t(L10nKey::SettingsUpdateAndRelaunch),
+        ]
     } else {
-        "View Release"
+        vec![
+            t(L10nKey::UpdateDialogLater),
+            t(L10nKey::SettingsUpdateViewRelease),
+        ]
     };
     let answer = window.prompt(
         PromptLevel::Info,
-        "Update available",
+        t(L10nKey::UpdateDialogTitle),
         Some(&detail),
-        &["Later", action],
+        &buttons,
         cx,
     );
     let update = update.clone();
     cx.spawn(async move |cx| {
-        if let Ok(1) = answer.await {
-            if update.installable {
-                let _ = cx.update(|cx| install(update, cx));
-            } else {
-                open_releases_page();
+        let installable = update.installable;
+        match answer.await {
+            Ok(1) if installable => {
+                cx.update(|cx| stage_for_next_launch(update, cx));
             }
+            Ok(1) => open_releases_page(),
+            Ok(2) => {
+                cx.update(install_available);
+            }
+            _ => remind_later(),
         }
     })
     .detach();
 }
 
-pub fn install_available(cx: &mut App) {
-    let Some(update) = cx
+/// Pushes this version's next prompt out by `REMIND_LATER` instead of retiring
+/// it. Any background download already under way is left alone: the package
+/// being ready costs nothing and turns the next prompt into one keystroke.
+fn remind_later() {
+    let mut state = UpdateState::load();
+    state.remind_after = Some(now_secs() + REMIND_LATER.as_secs());
+    state.save();
+}
+
+/// Silences one version for good. Deliberately only reachable from Settings.
+pub fn skip_available_version(cx: &mut App) {
+    let Some(version) = cx
         .try_global::<UpdateStatus>()
-        .and_then(|status| status.available.clone())
+        .and_then(|status| status.available.as_ref().map(|u| u.version.clone()))
     else {
         return;
     };
-    if update.installable {
-        install(update, cx);
-    } else {
+    let mut state = UpdateState::load();
+    state.skipped = Some(version);
+    state.save();
+    discard_pending(cx);
+    update_status(cx, |status| {
+        status.available = None;
+        status.phase = UpdatePhase::Idle;
+    });
+}
+
+pub fn clear_skipped_version(cx: &mut App) {
+    let mut state = UpdateState::load();
+    state.skipped = None;
+    state.save();
+    spawn_check_forced(cx);
+}
+
+pub fn skipped_version() -> Option<String> {
+    UpdateState::load().skipped
+}
+
+/// Abandons the transfer. The staging directory is removed by the download
+/// thread as it unwinds, so nothing is left to collect.
+pub fn cancel_download(cx: &mut App) {
+    DOWNLOAD_CANCELLED.store(true, Ordering::Relaxed);
+    INSTALL_WHEN_READY.store(false, Ordering::Relaxed);
+    APPLY_ON_LAUNCH.store(false, Ordering::Relaxed);
+    update_status(cx, |status| status.phase = UpdatePhase::Idle);
+}
+
+/// Install as soon as there is something to install: now if the package is
+/// already staged, otherwise when the download in flight finishes.
+pub fn install_available(cx: &mut App) {
+    let status = cx.try_global::<UpdateStatus>().cloned().unwrap_or_default();
+    if let Some(pending) = status.ready.clone()
+        && pending.is_usable()
+        && is_update_available(&pending.version, current_version())
+    {
+        launch_pending(pending, cx);
+        return;
+    }
+    let Some(update) = status.available.clone() else {
+        return;
+    };
+    if !update.installable {
         open_releases_page();
+        return;
+    }
+    INSTALL_WHEN_READY.store(true, Ordering::Relaxed);
+    // Asking to install now overrides an earlier "at next launch": whatever
+    // lands is being handed straight to the updater.
+    APPLY_ON_LAUNCH.store(false, Ordering::Relaxed);
+    // A check with auto-download on has usually started one already; joining it
+    // beats running a second copy of the same transfer.
+    if !matches!(
+        status.phase,
+        UpdatePhase::Downloading { .. } | UpdatePhase::Verifying
+    ) {
+        spawn_download(update, cx);
     }
 }
 
-fn install(update: AvailableUpdate, cx: &mut App) {
-    if cx.try_global::<UpdateStatus>().is_some_and(|status| {
-        matches!(
-            status.phase,
-            UpdatePhase::Downloading | UpdatePhase::Installing
-        )
-    }) {
+/// Have the package waiting, and let the next launch apply it unattended. This
+/// is the option that costs the user nothing: no interrupted work now, and no
+/// decision to make later either.
+pub fn stage_for_next_launch(update: AvailableUpdate, cx: &mut App) {
+    APPLY_ON_LAUNCH.store(true, Ordering::Relaxed);
+    // Overrides a pending "install as soon as it lands": choosing next launch
+    // is choosing not to be restarted now.
+    INSTALL_WHEN_READY.store(false, Ordering::Relaxed);
+    let status = cx.try_global::<UpdateStatus>().cloned().unwrap_or_default();
+    if let Some(pending) = status
+        .ready
+        .clone()
+        .filter(|pending| pending.version == update.version && pending.is_usable())
+    {
+        arm_pending(pending, cx);
+        return;
+    }
+    if !matches!(
+        status.phase,
+        UpdatePhase::Downloading { .. } | UpdatePhase::Verifying
+    ) {
+        spawn_download(update, cx);
+    }
+}
+
+/// Marks an already-staged package for unattended install at next launch.
+fn arm_pending(mut pending: PendingUpdate, cx: &mut App) {
+    pending.apply_on_launch = true;
+    let mut state = UpdateState::load();
+    state.pending = Some(pending.clone());
+    state.save();
+    update_status(cx, |status| status.ready = Some(pending));
+}
+
+/// Throws away a staged package and its staging directory.
+pub fn discard_pending(cx: &mut App) {
+    let mut state = UpdateState::load();
+    if let Some(pending) = state.pending.take() {
+        let _ = std::fs::remove_dir_all(&pending.stage);
+    }
+    state.save();
+    update_status(cx, |status| status.ready = None);
+}
+
+/// Clears the recorded failure once the user has seen it.
+pub fn dismiss_failure(cx: &mut App) {
+    let mut state = UpdateState::load();
+    state.last_failure = None;
+    state.save();
+    update_status(cx, |status| {
+        status.failure = None;
+        if matches!(status.phase, UpdatePhase::Failed(_)) {
+            status.phase = UpdatePhase::Idle;
+        }
+    });
+}
+
+fn spawn_download(update: AvailableUpdate, cx: &mut App) {
+    if matches!(
+        cx.try_global::<UpdateStatus>().map(|status| &status.phase),
+        Some(UpdatePhase::Downloading { .. } | UpdatePhase::Verifying | UpdatePhase::Installing)
+    ) {
         return;
     }
     let Some(asset) = update.asset.clone() else {
         open_releases_page();
         return;
     };
-    set_status(
-        UpdateStatus {
-            available: Some(update.clone()),
-            phase: UpdatePhase::Downloading,
-        },
-        cx,
-    );
+
+    DOWNLOAD_CANCELLED.store(false, Ordering::Relaxed);
+    DOWNLOAD_VERIFYING.store(false, Ordering::Relaxed);
+    DOWNLOAD_RECEIVED.store(0, Ordering::Relaxed);
+    DOWNLOAD_TOTAL.store(0, Ordering::Relaxed);
+    update_status(cx, |status| {
+        status.available = Some(update.clone());
+        status.failure = None;
+        status.phase = UpdatePhase::Downloading {
+            received: 0,
+            total: None,
+        };
+    });
+    spawn_progress_pump(cx);
 
     let version = update.version.clone();
-    let task = cx
-        .background_executor()
-        .spawn(smol::unblock(move || prepare_update(&version, &asset)));
+    let task = cx.background_executor().spawn(smol::unblock(move || {
+        prepare_update(&version, &asset, &|received, total| {
+            DOWNLOAD_RECEIVED.store(received, Ordering::Relaxed);
+            DOWNLOAD_TOTAL.store(total.unwrap_or(0), Ordering::Relaxed);
+            if DOWNLOAD_CANCELLED.load(Ordering::Relaxed) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+    }));
+
     cx.spawn(async move |cx| {
         let prepared = match task.await {
             Ok(prepared) => prepared,
             Err(error) => {
+                // Both flags are consent to *this* attempt. Leaving either set
+                // would hand the next background download — one the user never
+                // asked for — a licence to restart the app under them.
+                INSTALL_WHEN_READY.store(false, Ordering::Relaxed);
+                APPLY_ON_LAUNCH.store(false, Ordering::Relaxed);
+                if DOWNLOAD_CANCELLED.load(Ordering::Relaxed) {
+                    log::info!("update download cancelled by the user");
+                    cx.update(|cx| update_status(cx, |status| status.phase = UpdatePhase::Idle));
+                    return;
+                }
                 let detail = format!("{error:#}");
                 log::error!("update failed: {detail}");
                 cx.update(|cx| {
-                    set_status(
-                        UpdateStatus {
-                            available: Some(update),
-                            phase: UpdatePhase::Failed(UpdateFailure::Prepare(detail)),
-                        },
-                        cx,
-                    )
+                    record_failure(&update.version, &detail, cx);
+                    update_status(cx, |status| {
+                        status.phase = UpdatePhase::Failed(UpdateFailure::Prepare(detail));
+                    });
                 });
                 return;
             }
         };
 
+        let pending = prepared.into_pending(
+            update.version.clone(),
+            APPLY_ON_LAUNCH.load(Ordering::Relaxed),
+        );
+        let mut state = UpdateState::load();
+        state.pending = Some(pending.clone());
+        state.last_failure = None;
+        state.save();
         cx.update(|cx| {
-            set_status(
-                UpdateStatus {
-                    available: Some(update.clone()),
-                    phase: UpdatePhase::Installing,
-                },
-                cx,
-            )
-        });
-        match prepared.launch() {
-            Ok(()) => {
-                let _ = cx.update(|cx| cx.quit());
+            update_status(cx, |status| {
+                status.ready = Some(pending.clone());
+                status.failure = None;
+                status.phase = UpdatePhase::Idle;
+            });
+            if INSTALL_WHEN_READY.swap(false, Ordering::Relaxed) {
+                launch_pending(pending, cx);
             }
-            Err(error) => {
-                let detail = format!("{error:#}");
-                log::error!("could not start the installer: {detail}");
-                cx.update(|cx| {
-                    set_status(
-                        UpdateStatus {
-                            available: Some(update),
-                            phase: UpdatePhase::Failed(UpdateFailure::Launch(detail)),
-                        },
-                        cx,
-                    )
+        });
+    })
+    .detach();
+}
+
+/// Samples the download counters into the global the UI renders from. Stops as
+/// soon as the phase leaves the transfer, so a finished, cancelled or failed
+/// download does not leave a timer running.
+fn spawn_progress_pump(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(PROGRESS_TICK).await;
+            let live = cx.update(|cx| {
+                let received = DOWNLOAD_RECEIVED.load(Ordering::Relaxed);
+                let total = DOWNLOAD_TOTAL.load(Ordering::Relaxed);
+                let verifying = DOWNLOAD_VERIFYING.load(Ordering::Relaxed);
+                let mut live = false;
+                update_status(cx, |status| {
+                    if matches!(
+                        status.phase,
+                        UpdatePhase::Downloading { .. } | UpdatePhase::Verifying
+                    ) {
+                        status.phase = if verifying {
+                            UpdatePhase::Verifying
+                        } else {
+                            UpdatePhase::Downloading {
+                                received,
+                                total: (total > 0).then_some(total),
+                            }
+                        };
+                        live = true;
+                    }
                 });
+                live
+            });
+            if !live {
+                return;
             }
         }
     })
     .detach();
 }
 
+fn launch_pending(pending: PendingUpdate, cx: &mut App) {
+    update_status(cx, |status| status.phase = UpdatePhase::Installing);
+    match pending.launch() {
+        Ok(()) => {
+            // The updater owns the staging directory from here. Forgetting it
+            // now is what stops a relaunch from trying to install it twice.
+            let mut state = UpdateState::load();
+            state.pending = None;
+            state.last_prompted = None;
+            state.save();
+            cx.quit();
+        }
+        Err(error) => {
+            let detail = format!("{error:#}");
+            log::error!("could not start the installer: {detail}");
+            record_failure(&pending.version, &detail, cx);
+            update_status(cx, |status| {
+                status.phase = UpdatePhase::Failed(UpdateFailure::Launch(detail));
+            });
+        }
+    }
+}
+
+/// Records a failure where the user can still find it tomorrow, and lets the
+/// version prompt again.
+///
+/// The old code wrote `last_prompted` the moment a dialog appeared and never
+/// looked back, so an install that failed a second later took the version with
+/// it: never prompted again, and the only trace was a phase that died with the
+/// process.
+fn record_failure(version: &str, detail: &str, cx: &mut App) {
+    let record = FailureRecord {
+        version: version.to_string(),
+        detail: detail.to_string(),
+    };
+    let mut state = UpdateState::load();
+    state.last_failure = Some(record.clone());
+    if state.last_prompted.as_deref() == Some(version) {
+        state.last_prompted = None;
+        state.remind_after = None;
+    }
+    state.save();
+    update_status(cx, |status| status.failure = Some(record));
+}
+
 pub fn open_releases_page() {
+    open_url(RELEASES_URL);
+}
+
+pub fn open_url(url: &str) {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(windows) {
@@ -382,15 +786,278 @@ pub fn open_releases_page() {
     } else {
         "xdg-open"
     };
-    if let Err(e) = std::process::Command::new(opener).arg(RELEASES_URL).spawn() {
-        log::warn!("failed to open releases page: {e}");
+    if let Err(e) = std::process::Command::new(opener).arg(url).spawn() {
+        log::warn!("failed to open {url}: {e}");
     }
+}
+
+/// Installs a package the user asked to have applied at the next launch, and
+/// reports whether this process should now get out of the way.
+///
+/// This is what makes "Install on Next Launch" worth offering: the user never
+/// waits for a download and never answers a second question — they quit tty7
+/// one evening and start a new version the next morning.
+///
+/// Must run before the daemon is contacted and before any window exists.
+/// Spawning a daemon this process is about to abandon costs a restart, and a
+/// window that appears and vanishes reads as a crash.
+///
+/// Every failure path clears the plan and returns `false`. An update that
+/// cannot be applied must never become an app that will not start.
+pub fn apply_pending_at_launch() -> bool {
+    let mut state = UpdateState::load();
+    let Some(pending) = state.pending.clone() else {
+        return false;
+    };
+    if !pending.apply_on_launch {
+        return false;
+    }
+    if !pending.is_usable() || !is_update_available(&pending.version, current_version()) {
+        log::info!(
+            "discarding the staged {} update: no longer applicable to {}",
+            pending.version,
+            current_version()
+        );
+        state.pending = None;
+        state.save();
+        let _ = std::fs::remove_dir_all(&pending.stage);
+        return false;
+    }
+
+    log::info!(
+        "applying the staged {} update before startup",
+        pending.version
+    );
+    // Cleared before the handover rather than after: the updater takes the
+    // staging directory with it, so a plan left on disk would be retried at the
+    // next launch against a directory that no longer exists.
+    state.pending = None;
+    state.last_prompted = None;
+    state.remind_after = None;
+    state.save();
+
+    match pending.launch() {
+        Ok(()) => true,
+        Err(error) => {
+            let detail = format!("{error:#}");
+            log::error!("could not apply the staged update: {detail}");
+            let mut state = UpdateState::load();
+            state.last_failure = Some(FailureRecord {
+                version: pending.version.clone(),
+                detail,
+            });
+            state.save();
+            false
+        }
+    }
+}
+
+/// Removes staging directories belonging to a run that died before its updater
+/// could clean up — quitting mid-download is the usual cause.
+///
+/// Worth doing: on macOS staging is created beside the app bundle, which is
+/// normally /Applications, and a hidden 30 MB directory there is one nobody
+/// finds on purpose. The live plan's own directory is kept however old it is.
+fn sweep_orphaned_stages(keep: Option<PathBuf>) {
+    for root in stage_roots() {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if keep.as_deref() == Some(path.as_path()) {
+                continue;
+            }
+            if !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(is_stage_name)
+            {
+                continue;
+            }
+            let expired = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > STAGE_TTL);
+            if expired {
+                log::info!("removing orphaned update staging at {}", path.display());
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        }
+    }
+}
+
+/// Where each platform's staging directories are created — beside the bundle on
+/// macOS (it has to be on the app's own volume to rename into place), and the
+/// per-user temp directory on Windows.
+// The `return`s are what let one cfg block win per platform; clippy sees only
+// the surviving one and reads it as redundant.
+#[allow(clippy::needless_return)]
+fn stage_roots() -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        return current_macos_app_bundle()
+            .and_then(|app| app.parent().map(Path::to_path_buf))
+            .into_iter()
+            .collect();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return vec![std::env::temp_dir()];
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    Vec::new()
+}
+
+/// The prefixes `update_staging_dir` and `system_update_staging_dir` hand to
+/// `tempfile`.
+fn is_stage_name(name: &str) -> bool {
+    name.starts_with(".tty7-update-") || name.starts_with("tty7-update-")
+}
+
+pub(crate) fn localized_update_phase(phase: &UpdatePhase) -> Option<String> {
+    match phase {
+        UpdatePhase::Idle => None,
+        UpdatePhase::Checking => Some(t(L10nKey::SettingsUpdateChecking).to_string()),
+        UpdatePhase::UpToDate => Some(t(L10nKey::SettingsUpdateUpToDate).to_string()),
+        UpdatePhase::Downloading { received, total } => Some(match total {
+            // A percentage needs both ends; GitHub occasionally serves the
+            // asset without a usable content-length, and "42%" of an unknown
+            // whole is worse than an honest byte count.
+            Some(total) if *total > 0 => t_fmt(
+                L10nKey::SettingsUpdateDownloadingPercent,
+                &[
+                    (
+                        "percent",
+                        &(received.saturating_mul(100) / total).min(100).to_string(),
+                    ),
+                    ("size", &human_bytes(*total)),
+                ],
+            ),
+            _ => t_fmt(
+                L10nKey::SettingsUpdateDownloadingBytes,
+                &[("received", &human_bytes(*received))],
+            ),
+        }),
+        UpdatePhase::Verifying => Some(t(L10nKey::SettingsUpdateVerifying).to_string()),
+        UpdatePhase::Installing => Some(t(L10nKey::SettingsUpdateInstalling).to_string()),
+        UpdatePhase::Failed(failure) => {
+            let (key, error) = match failure {
+                UpdateFailure::Check(error) => (L10nKey::SettingsUpdateCheckFailed, error),
+                UpdateFailure::Prepare(error) => (L10nKey::SettingsUpdatePrepareFailed, error),
+                UpdateFailure::Launch(error) => (L10nKey::SettingsUpdateLaunchFailed, error),
+            };
+            Some(t_fmt(key, &[("error", error)]))
+        }
+    }
+}
+
+pub(crate) fn localized_update_install_hint(hint: &UpdateInstallHint) -> String {
+    match hint {
+        #[cfg(target_os = "macos")]
+        UpdateInstallHint::UnsupportedMacos => {
+            t(L10nKey::SettingsUpdateUnsupportedMacos).to_string()
+        }
+        #[cfg(target_os = "linux")]
+        UpdateInstallHint::UnsupportedLinux => {
+            t(L10nKey::SettingsUpdateUnsupportedLinux).to_string()
+        }
+        #[cfg(target_os = "linux")]
+        UpdateInstallHint::LinuxManualPackage(name) => {
+            t_fmt(L10nKey::SettingsUpdateLinuxPackage, &[("name", name)])
+        }
+        #[cfg(target_os = "windows")]
+        UpdateInstallHint::UnsupportedWindows => {
+            t(L10nKey::SettingsUpdateUnsupportedWindows).to_string()
+        }
+        #[cfg(target_os = "windows")]
+        UpdateInstallHint::WindowsAllUsersInstall => {
+            t(L10nKey::SettingsUpdateWindowsAllUsers).to_string()
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        UpdateInstallHint::UnsupportedPlatform => {
+            t(L10nKey::SettingsUpdateUnsupportedPlatform).to_string()
+        }
+        UpdateInstallHint::MissingPackage(name) => {
+            t_fmt(L10nKey::SettingsUpdateMissingPackage, &[("name", name)])
+        }
+        UpdateInstallHint::MissingChecksums => {
+            t(L10nKey::SettingsUpdateMissingChecksums).to_string()
+        }
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    format!("{:.1} MB", bytes as f64 / MB)
+}
+
+/// A downloaded, verified package waiting to be installed.
+///
+/// Splitting "fetch" from "install" is the point of the whole design: it turns
+/// the question put to the user from "will you spend five minutes on this now"
+/// into "may I restart", which is the difference between an update that gets
+/// applied and one that gets postponed indefinitely.
+///
+/// The parent pid is *not* stored. It is the one argument that cannot survive a
+/// restart, so `launch` supplies it fresh — see `PreparedUpdate::args`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingUpdate {
+    pub version: String,
+    /// Whether the next launch installs this without asking. False for a
+    /// package that was merely fetched ahead of time: it waits in Settings.
+    #[serde(default)]
+    pub apply_on_launch: bool,
+    updater: PathBuf,
+    command: String,
+    rest: Vec<PathBuf>,
+    config_dir: Option<PathBuf>,
+    stage: PathBuf,
+}
+
+impl PendingUpdate {
+    /// Whether the package is still on disk. Staging lives in a temporary
+    /// directory that a cleaner, an antivirus, or a reboot may have taken.
+    pub fn is_usable(&self) -> bool {
+        self.updater.is_file() && self.stage.is_dir()
+    }
+
+    fn launch(&self) -> Result<()> {
+        PreparedUpdate {
+            updater: self.updater.clone(),
+            command: self.command.clone(),
+            rest: self.rest.clone(),
+            config_dir: self.config_dir.clone(),
+            stage: self.stage.clone(),
+        }
+        .launch()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FailureRecord {
+    pub version: String,
+    pub detail: String,
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct UpdateState {
+    /// The version a dialog has already been shown for. Paired with
+    /// `remind_after`, which decides when that stops counting.
     #[serde(default)]
     last_prompted: Option<String>,
+    /// A version the user asked never to be told about again.
+    #[serde(default)]
+    skipped: Option<String>,
+    /// Unix seconds after which `last_prompted` may prompt again.
+    #[serde(default)]
+    remind_after: Option<u64>,
+    #[serde(default)]
+    last_failure: Option<FailureRecord>,
+    #[serde(default)]
+    pending: Option<PendingUpdate>,
 }
 
 impl UpdateState {
@@ -559,8 +1226,21 @@ fn package_for_current_install(version: &str) -> Result<String, UpdateInstallHin
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = version;
-        return Err(UpdateInstallHint::UnsupportedLinux);
+        let arch = if cfg!(target_arch = "x86_64") {
+            "x86_64"
+        } else {
+            // The release publishes no Linux package for anything else, so
+            // there is no filename worth naming.
+            return Err(UpdateInstallHint::UnsupportedLinux);
+        };
+        // The AppImage runtime exports this, pointing at the image it mounted.
+        // Nothing else identifies which of the two Linux packages is installed.
+        let name = if std::env::var_os("APPIMAGE").is_some() {
+            format!("tty7-{version}-linux-{arch}.AppImage")
+        } else {
+            format!("tty7-{version}-linux-{arch}.tar.gz")
+        };
+        return Err(UpdateInstallHint::LinuxManualPackage(name));
     }
     #[cfg(target_os = "windows")]
     {
@@ -581,19 +1261,25 @@ fn package_for_current_install(version: &str) -> Result<String, UpdateInstallHin
     }
 }
 
-fn prepare_update(version: &str, asset: &ReleaseAsset) -> Result<PreparedUpdate> {
+fn prepare_update(
+    version: &str,
+    asset: &ReleaseAsset,
+    on_progress: &dyn Fn(u64, Option<u64>) -> ControlFlow<()>,
+) -> Result<PreparedUpdate> {
     // Runs off the main thread, so the `Config` global is out of reach.
     let cfg = Config::load();
     let fetcher =
         tty7_core::daemon::install::download::HttpsFetcher::new(cfg.http_proxy.as_deref());
+    // Fetched without progress: a few hundred bytes next to a 30 MB package.
     let checksums = fetcher
         .get(&asset.checksums_url)
         .map_err(anyhow::Error::msg)
         .context("downloading checksums.txt")?;
     let archive = fetcher
-        .get(&asset.url)
+        .get_cancellable(&asset.url, on_progress)
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("downloading {}", asset.name))?;
+    DOWNLOAD_VERIFYING.store(true, Ordering::Relaxed);
     #[cfg(target_os = "macos")]
     {
         return prepare_macos_update(version, &asset.name, &archive, &checksums);
@@ -609,17 +1295,42 @@ fn prepare_update(version: &str, asset: &ReleaseAsset) -> Result<PreparedUpdate>
 #[derive(Debug)]
 struct PreparedUpdate {
     updater: PathBuf,
-    args: Vec<PathBuf>,
+    /// The updater subcommand: `install`, or `install-portable` on Windows.
+    command: String,
+    /// Every argument after the parent pid.
+    rest: Vec<PathBuf>,
     config_dir: Option<PathBuf>,
     stage: PathBuf,
 }
 
 impl PreparedUpdate {
-    fn launch(self) -> Result<()> {
-        let stage = self.stage;
-        let mut command = Command::new(self.updater);
-        command.args(self.args);
-        if let Some(config_dir) = self.config_dir {
+    /// The pid is filled in here rather than baked into `rest`, so a plan
+    /// written to disk today still names the right process when a launch
+    /// tomorrow runs it.
+    fn args(&self) -> Vec<PathBuf> {
+        let mut args = Vec::with_capacity(self.rest.len() + 2);
+        args.push(PathBuf::from(&self.command));
+        args.push(std::process::id().to_string().into());
+        args.extend(self.rest.iter().cloned());
+        args
+    }
+
+    fn into_pending(self, version: String, apply_on_launch: bool) -> PendingUpdate {
+        PendingUpdate {
+            version,
+            apply_on_launch,
+            updater: self.updater,
+            command: self.command,
+            rest: self.rest,
+            config_dir: self.config_dir,
+            stage: self.stage,
+        }
+    }
+
+    fn launch(&self) -> Result<()> {
+        let mut command = Command::new(&self.updater);
+        command.args(self.args());
+        if let Some(config_dir) = &self.config_dir {
             command.env("TTY7_CONFIG_DIR", config_dir);
         }
         tty7_core::core::proc::hide_console(&mut command)
@@ -628,7 +1339,7 @@ impl PreparedUpdate {
             .stderr(Stdio::null())
             .spawn()
             .inspect_err(|_| {
-                let _ = std::fs::remove_dir_all(&stage);
+                let _ = std::fs::remove_dir_all(&self.stage);
             })
             .context("launching tty7-updater")?;
         Ok(())
@@ -694,9 +1405,8 @@ fn prepare_macos_update(
     let dir = staging.keep();
     Ok(PreparedUpdate {
         updater,
-        args: vec![
-            PathBuf::from("install"),
-            std::process::id().to_string().into(),
+        command: "install".to_string(),
+        rest: vec![
             current,
             archive,
             checksums,
@@ -778,9 +1488,8 @@ fn prepare_windows_update(
     let dir = staging.keep();
     Ok(PreparedUpdate {
         updater,
-        args: vec![
-            PathBuf::from(install_command),
-            std::process::id().to_string().into(),
+        command: install_command.to_string(),
+        rest: vec![
             package,
             checksums,
             PathBuf::from(asset_name),
@@ -1223,11 +1932,117 @@ mod tests {
 
         UpdateState {
             last_prompted: Some("0.4.0".into()),
+            ..Default::default()
         }
         .save();
         assert_eq!(UpdateState::load().last_prompted.as_deref(), Some("0.4.0"));
 
+        // A staged package has to survive the restart it exists for. Its
+        // whole point is being applied by a *later* process than the one that
+        // downloaded it.
+        UpdateState {
+            pending: Some(PendingUpdate {
+                version: "27.0.0".into(),
+                apply_on_launch: true,
+                updater: PathBuf::from("/tmp/tty7-updater"),
+                command: "install".into(),
+                rest: vec![PathBuf::from("/tmp/stage/tty7.zip")],
+                config_dir: None,
+                stage: PathBuf::from("/tmp/stage"),
+            }),
+            ..Default::default()
+        }
+        .save();
+        let pending = UpdateState::load().pending.expect("pending round-trips");
+        assert_eq!(pending.version, "27.0.0");
+        assert!(pending.apply_on_launch);
+        assert_eq!(pending.command, "install");
+
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The rule that replaced "prompted once, then silent forever".
+    #[test]
+    fn later_defers_a_version_instead_of_retiring_it() {
+        let asked = UpdateState {
+            last_prompted: Some("27.0.0".into()),
+            ..Default::default()
+        };
+        // Already asked, no expiry set: stay quiet.
+        assert!(!should_prompt(&asked, "27.0.0"));
+        // A different version is a new question however recently we asked.
+        assert!(should_prompt(&asked, "27.1.0"));
+
+        let deferred = UpdateState {
+            last_prompted: Some("27.0.0".into()),
+            remind_after: Some(now_secs() + 3600),
+            ..Default::default()
+        };
+        assert!(!should_prompt(&deferred, "27.0.0"));
+
+        let due = UpdateState {
+            last_prompted: Some("27.0.0".into()),
+            remind_after: Some(now_secs().saturating_sub(1)),
+            ..Default::default()
+        };
+        assert!(should_prompt(&due, "27.0.0"));
+
+        // Skipping is the only permanent silence, and only the user sets it.
+        let skipped = UpdateState {
+            skipped: Some("27.0.0".into()),
+            ..Default::default()
+        };
+        assert!(!should_prompt(&skipped, "27.0.0"));
+        assert!(should_prompt(&skipped, "27.1.0"));
+    }
+
+    /// A failure must not leave the version marked as "already asked about",
+    /// or one failed install retires it for good.
+    #[test]
+    fn a_failure_lets_the_version_prompt_again() {
+        let mut state = UpdateState {
+            last_prompted: Some("27.0.0".into()),
+            remind_after: Some(now_secs() + 3600),
+            ..Default::default()
+        };
+        assert!(!should_prompt(&state, "27.0.0"));
+
+        // The bookkeeping half of `record_failure`, which needs an App to run.
+        state.last_failure = Some(FailureRecord {
+            version: "27.0.0".into(),
+            detail: "downloading tty7-27.0.0-macos-arm64.zip: timed out".into(),
+        });
+        if state.last_prompted.as_deref() == Some("27.0.0") {
+            state.last_prompted = None;
+            state.remind_after = None;
+        }
+        assert!(should_prompt(&state, "27.0.0"));
+    }
+
+    #[test]
+    fn only_our_own_staging_directories_are_swept() {
+        assert!(is_stage_name(".tty7-update-abc123"));
+        assert!(is_stage_name("tty7-update-abc123"));
+        assert!(!is_stage_name("tty7.app"));
+        assert!(!is_stage_name(".Trash"));
+        assert!(!is_stage_name("tty7-update"));
+    }
+
+    #[test]
+    fn a_staged_plan_supplies_a_fresh_parent_pid() {
+        let prepared = PreparedUpdate {
+            updater: PathBuf::from("/tmp/tty7-updater"),
+            command: "install".into(),
+            rest: vec![PathBuf::from("/tmp/stage/tty7.zip")],
+            config_dir: None,
+            stage: PathBuf::from("/tmp/stage"),
+        };
+        let args = prepared.args();
+        assert_eq!(args[0], PathBuf::from("install"));
+        // The pid is the one argument that cannot be persisted: a plan written
+        // today names a process that is gone by the time it runs.
+        assert_eq!(args[1], PathBuf::from(std::process::id().to_string()));
+        assert_eq!(args[2], PathBuf::from("/tmp/stage/tty7.zip"));
     }
 
     #[cfg(target_os = "windows")]

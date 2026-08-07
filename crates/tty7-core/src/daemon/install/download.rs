@@ -1,10 +1,21 @@
 use std::io::Read as _;
+use std::ops::ControlFlow;
 use std::time::Duration;
 
 use super::AssetFetcher;
 use super::proxy;
 
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
+// `timeout_global` caps the whole request, so it has to be sized for the
+// largest asset over the slowest link anyone actually uses — not for a healthy
+// one. The old 180s meant a 28 MB release package needed a sustained 160 KB/s
+// just to finish, which a domestic connection to GitHub routinely misses: the
+// update then failed for everyone on a slow link, forever. 15 minutes asks for
+// 33 KB/s instead, and still bounds a connection that has genuinely died.
+//
+// Callers who want out sooner cancel — see `get_cancellable`.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 const MAX_ASSET_BYTES: u64 = 128 * 1024 * 1024;
 
@@ -18,6 +29,7 @@ impl HttpsFetcher {
     pub fn new(manual_proxy: Option<&str>) -> Self {
         let mut builder = ureq::Agent::config_builder()
             .timeout_global(Some(DOWNLOAD_TIMEOUT))
+            .timeout_connect(Some(CONNECT_TIMEOUT))
             .user_agent(concat!("tty7/", env!("CARGO_PKG_VERSION")));
 
         if let Some(proxy) = proxy::resolve("https://github.com", manual_proxy) {
@@ -36,15 +48,47 @@ impl Default for HttpsFetcher {
     }
 }
 
+/// Returned when `on_progress` asked to stop. Recognised by callers so a
+/// deliberate cancel is not reported to the user as a download failure.
+pub const CANCELLED: &str = "the download was cancelled";
+
+impl HttpsFetcher {
+    /// `get_with_progress` with a callback that can call the transfer off.
+    ///
+    /// The in-app updater is the reason this exists: a 30 MB package on a slow
+    /// link is precisely the download someone wants to abandon, and without
+    /// this the only way out is to kill the app.
+    pub fn get_cancellable(
+        &self,
+        url: &str,
+        on_progress: &dyn Fn(u64, Option<u64>) -> ControlFlow<()>,
+    ) -> Result<Vec<u8>, String> {
+        self.fetch(url, on_progress)
+    }
+}
+
 impl AssetFetcher for HttpsFetcher {
     fn get(&self, url: &str) -> Result<Vec<u8>, String> {
-        self.get_with_progress(url, &|_, _| {})
+        self.fetch(url, &|_, _| ControlFlow::Continue(()))
     }
 
     fn get_with_progress(
         &self,
         url: &str,
         on_progress: &dyn Fn(u64, Option<u64>),
+    ) -> Result<Vec<u8>, String> {
+        self.fetch(url, &|received, total| {
+            on_progress(received, total);
+            ControlFlow::Continue(())
+        })
+    }
+}
+
+impl HttpsFetcher {
+    fn fetch(
+        &self,
+        url: &str,
+        on_progress: &dyn Fn(u64, Option<u64>) -> ControlFlow<()>,
     ) -> Result<Vec<u8>, String> {
         let response = self
             .agent
@@ -86,7 +130,9 @@ impl AssetFetcher for HttpsFetcher {
                     "{url} is larger than the {MAX_ASSET_BYTES} byte ceiling for a release asset"
                 ));
             }
-            on_progress(bytes.len() as u64, declared);
+            if on_progress(bytes.len() as u64, declared).is_break() {
+                return Err(CANCELLED.to_string());
+            }
         }
         Ok(bytes)
     }

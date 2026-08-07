@@ -402,9 +402,41 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateViewRelease => "查看发布页面",
         L10nKey::SettingsUpdateChecking => "正在检查更新…",
         L10nKey::SettingsUpdateUpToDate => "当前已是最新版本。",
-        L10nKey::SettingsUpdateDownloading => "正在下载并验证更新…",
+        L10nKey::SettingsUpdateDownloadingPercent => "正在下载更新… {percent}%，共 {size}",
+        L10nKey::SettingsUpdateDownloadingBytes => "正在下载更新… 已下载 {received}",
+        L10nKey::SettingsUpdateVerifying => "正在校验下载的更新…",
         L10nKey::SettingsUpdateInstalling => "正在通过更新重新启动…",
         L10nKey::SettingsUpdateCheckNow => "立即检查",
+        L10nKey::SettingsUpdateCancel => "取消下载",
+        L10nKey::SettingsUpdateRetry => "重试",
+        L10nKey::SettingsUpdateDismiss => "知道了",
+        L10nKey::SettingsUpdateDownloadManually => "手动下载",
+        L10nKey::SettingsUpdateFailedTitle => "更新到 {version} 失败。",
+        L10nKey::SettingsUpdateReady => "{version} 已下载并校验完成，可以安装。",
+        L10nKey::SettingsUpdateReadyNextLaunch => "下次启动 tty7 时会自动装上。",
+        L10nKey::SettingsUpdateInstallNow => "安装并重启",
+        L10nKey::SettingsUpdateDiscard => "丢弃",
+        L10nKey::SettingsUpdateSkipVersion => "跳过此版本",
+        L10nKey::SettingsUpdateSkipped => "已跳过 {version}。",
+        L10nKey::SettingsUpdateUnskip => "取消跳过",
+        L10nKey::SettingsUpdateReleaseNotes => "更新内容",
+        L10nKey::SettingsAutoDownload => "后台下载更新",
+        L10nKey::SettingsAutoDownloadDesc => {
+            "发现新版本就先下载并校验好，安装时只需重启一下。不会未经确认就安装。用移动流量时可以关掉——安装包约 30 MB。"
+        }
+        L10nKey::SettingsDaemonStale => "后台服务仍运行在 {build}。",
+        L10nKey::SettingsDaemonStaleDesc => {
+            "tty7 是原地升级的，界面已经是新版本，但各个 pane 仍由旧版本的后台服务托管。重启服务才能用上新版本，代价是 pane 里正在跑的进程全部结束——shell、agent、SSH 会话都算。不急，挑个 pane 空闲的时候再重启。"
+        }
+        L10nKey::SettingsDaemonStaleRestart => "重启服务",
+        L10nKey::UpdateDialogTitle => "有可用更新",
+        L10nKey::UpdateDialogDetail => {
+            "tty7 {version} 已发布，你现在是 {current}。安装会重启应用；后台服务不动，pane 里开着的东西都还在。"
+        }
+        L10nKey::UpdateDialogDetailManual => "tty7 {version} 已发布，你现在是 {current}。{hint}",
+        L10nKey::UpdateDialogCannotSelfUpdate => "这份安装无法自行更新。",
+        L10nKey::UpdateDialogLater => "以后再说",
+        L10nKey::UpdateDialogNextLaunch => "下次启动时安装",
         L10nKey::SettingsUpdateCheckFailed => "无法检查更新：{error}",
         L10nKey::SettingsUpdatePrepareFailed => "更新失败：{error}",
         L10nKey::SettingsUpdateLaunchFailed => "无法启动安装程序：{error}",
@@ -412,7 +444,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "当前副本并非从可写的 tty7.app 包运行，直接替换并不安全。请将 tty7 移到“应用程序”或其他可写文件夹，或者打开发布页面安装更新。"
         }
         L10nKey::SettingsUpdateUnsupportedLinux => {
-            "当前应用内更新器支持打包的 macOS 应用。请通过发布页面或包管理器更新此 Linux 安装。"
+            "发布版本中没有适用于该架构的 Linux 包。请自行从源码构建，或使用包管理器。"
+        }
+        L10nKey::SettingsUpdateLinuxPackage => {
+            "Linux 需要手动更新。请到发布页面下载 {name}，或使用包管理器。"
         }
         L10nKey::SettingsUpdateUnsupportedWindows => {
             "Windows 自动更新适用于可识别的 Inno Setup 安装版和便携 ZIP 版。当前副本缺少有效的安装标记、更新程序或可写的便携目录，请打开发布页面手动更新。"

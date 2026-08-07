@@ -456,9 +456,45 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsUpdateViewRelease => "View Release",
         L10nKey::SettingsUpdateChecking => "Checking for updates…",
         L10nKey::SettingsUpdateUpToDate => "You're running the latest version.",
-        L10nKey::SettingsUpdateDownloading => "Downloading and verifying the update…",
+        L10nKey::SettingsUpdateDownloadingPercent => "Downloading the update… {percent}% of {size}",
+        L10nKey::SettingsUpdateDownloadingBytes => "Downloading the update… {received}",
+        L10nKey::SettingsUpdateVerifying => "Verifying the downloaded update…",
         L10nKey::SettingsUpdateInstalling => "Relaunching with the update…",
         L10nKey::SettingsUpdateCheckNow => "Check Now",
+        L10nKey::SettingsUpdateCancel => "Cancel Download",
+        L10nKey::SettingsUpdateRetry => "Try Again",
+        L10nKey::SettingsUpdateDismiss => "Dismiss",
+        L10nKey::SettingsUpdateDownloadManually => "Download Manually",
+        L10nKey::SettingsUpdateFailedTitle => "Updating to {version} failed.",
+        L10nKey::SettingsUpdateReady => "Version {version} is downloaded and ready to install.",
+        L10nKey::SettingsUpdateReadyNextLaunch => {
+            "It will be installed the next time you start tty7."
+        }
+        L10nKey::SettingsUpdateInstallNow => "Install and Relaunch",
+        L10nKey::SettingsUpdateDiscard => "Discard",
+        L10nKey::SettingsUpdateSkipVersion => "Skip This Version",
+        L10nKey::SettingsUpdateSkipped => "Version {version} is being skipped.",
+        L10nKey::SettingsUpdateUnskip => "Stop Skipping",
+        L10nKey::SettingsUpdateReleaseNotes => "What's New",
+        L10nKey::SettingsAutoDownload => "Download updates in the background",
+        L10nKey::SettingsAutoDownloadDesc => {
+            "Fetch and verify a new release as soon as it is found, so installing it is just a restart. Nothing is installed without asking. Turn this off on a metered connection — the packages are around 30 MB."
+        }
+        L10nKey::SettingsDaemonStale => "The background service is still running {build}.",
+        L10nKey::SettingsDaemonStaleDesc => {
+            "tty7 was updated in place, so the app is new but your panes are still served by the previous build. Restarting the service picks up the new one and ends every process running in your panes — shells, agents and SSH sessions alike. There is no hurry: pick a moment when your panes are idle."
+        }
+        L10nKey::SettingsDaemonStaleRestart => "Restart Service",
+        L10nKey::UpdateDialogTitle => "Update available",
+        L10nKey::UpdateDialogDetail => {
+            "tty7 {version} is available — you're on {current}. Installing restarts the app; the background service keeps running, so whatever is open in your panes survives."
+        }
+        L10nKey::UpdateDialogDetailManual => {
+            "tty7 {version} is available — you're on {current}. {hint}"
+        }
+        L10nKey::UpdateDialogCannotSelfUpdate => "This installation cannot update itself.",
+        L10nKey::UpdateDialogLater => "Later",
+        L10nKey::UpdateDialogNextLaunch => "Install on Next Launch",
         L10nKey::SettingsUpdateCheckFailed => "Could not check for updates: {error}",
         L10nKey::SettingsUpdatePrepareFailed => "Update failed: {error}",
         L10nKey::SettingsUpdateLaunchFailed => "Could not start the installer: {error}",
@@ -466,7 +502,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "This copy is not running from a writable tty7.app bundle, so replacing it would be unsafe. Move tty7 to Applications or another writable folder, or open the release page to install the update."
         }
         L10nKey::SettingsUpdateUnsupportedLinux => {
-            "The first in-app updater supports packaged macOS app bundles. Use the release page or your package manager to update this Linux installation."
+            "The release has no Linux package for this architecture. Build from source, or use your package manager."
+        }
+        L10nKey::SettingsUpdateLinuxPackage => {
+            "Linux installations are updated by hand. Download {name} from the release page, or use your package manager."
         }
         L10nKey::SettingsUpdateUnsupportedWindows => {
             "Automatic Windows updates are available for recognized Inno Setup and portable ZIP installations. This copy is missing a valid installation marker, updater, or writable portable directory, so open the release page to update it manually."

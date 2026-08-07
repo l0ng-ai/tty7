@@ -354,6 +354,17 @@ fn main() {
     if forward_open_path(open_path.as_deref()) {
         return;
     }
+
+    // A package the user asked to have applied at the next launch. Deliberately
+    // here: after the forward above, so a second launch that is really a
+    // request to an existing window never replaces the bundle out from under
+    // it, and before everything below, so there is no daemon to strand and no
+    // window to flash. On success the updater takes over and this process is
+    // done; on failure it has already discarded the plan and we start normally.
+    if crate::core::update::apply_pending_at_launch() {
+        return;
+    }
+
     let config = crate::core::config::Config::load();
     let gui_language = config.gui_language.clone();
 

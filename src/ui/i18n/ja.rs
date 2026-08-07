@@ -454,9 +454,47 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateViewRelease => "リリースページを開く",
         L10nKey::SettingsUpdateChecking => "アップデートを確認中…",
         L10nKey::SettingsUpdateUpToDate => "最新バージョンを使用しています",
-        L10nKey::SettingsUpdateDownloading => "アップデートをダウンロードして検証中…",
+        L10nKey::SettingsUpdateDownloadingPercent => {
+            "アップデートをダウンロード中… {size} 中 {percent}%"
+        }
+        L10nKey::SettingsUpdateDownloadingBytes => "アップデートをダウンロード中… {received}",
+        L10nKey::SettingsUpdateVerifying => "ダウンロードしたアップデートを検証中…",
         L10nKey::SettingsUpdateInstalling => "アップデートを適用して再起動中…",
         L10nKey::SettingsUpdateCheckNow => "今すぐ確認",
+        L10nKey::SettingsUpdateCancel => "ダウンロードを中止",
+        L10nKey::SettingsUpdateRetry => "再試行",
+        L10nKey::SettingsUpdateDismiss => "閉じる",
+        L10nKey::SettingsUpdateDownloadManually => "手動でダウンロード",
+        L10nKey::SettingsUpdateFailedTitle => "{version} へのアップデートに失敗しました。",
+        L10nKey::SettingsUpdateReady => {
+            "{version} のダウンロードと検証が完了し、インストールできます。"
+        }
+        L10nKey::SettingsUpdateReadyNextLaunch => "次回 tty7 を起動したときに適用されます。",
+        L10nKey::SettingsUpdateInstallNow => "インストールして再起動",
+        L10nKey::SettingsUpdateDiscard => "破棄",
+        L10nKey::SettingsUpdateSkipVersion => "このバージョンをスキップ",
+        L10nKey::SettingsUpdateSkipped => "{version} をスキップしています。",
+        L10nKey::SettingsUpdateUnskip => "スキップをやめる",
+        L10nKey::SettingsUpdateReleaseNotes => "変更内容",
+        L10nKey::SettingsAutoDownload => "アップデートをバックグラウンドでダウンロード",
+        L10nKey::SettingsAutoDownloadDesc => {
+            "新しいリリースを見つけ次第ダウンロードと検証を済ませておき、インストールは再起動するだけにします。確認なしにインストールすることはありません。従量制の回線ではオフにしてください（パッケージは約 30 MB です）。"
+        }
+        L10nKey::SettingsDaemonStale => "バックグラウンドサービスは {build} のままです。",
+        L10nKey::SettingsDaemonStaleDesc => {
+            "tty7 はその場で更新されたため、アプリは新しくなりましたが、各ペインは以前のビルドのサービスが処理しています。サービスを再起動すると新しいビルドに切り替わりますが、ペインで動いているプロセス（シェル、エージェント、SSH セッション）はすべて終了します。急ぐ必要はありません。ペインが空いているときに実行してください。"
+        }
+        L10nKey::SettingsDaemonStaleRestart => "サービスを再起動",
+        L10nKey::UpdateDialogTitle => "アップデートがあります",
+        L10nKey::UpdateDialogDetail => {
+            "tty7 {version} が利用できます（現在 {current}）。インストールするとアプリが再起動します。バックグラウンドサービスは動いたままなので、ペインで開いているものはそのまま残ります。"
+        }
+        L10nKey::UpdateDialogDetailManual => {
+            "tty7 {version} が利用できます（現在 {current}）。{hint}"
+        }
+        L10nKey::UpdateDialogCannotSelfUpdate => "このインストールは自動更新できません。",
+        L10nKey::UpdateDialogLater => "後で",
+        L10nKey::UpdateDialogNextLaunch => "次回起動時にインストール",
         L10nKey::SettingsUpdateCheckFailed => "アップデートを確認できませんでした: {error}",
         L10nKey::SettingsUpdatePrepareFailed => "アップデートに失敗しました: {error}",
         L10nKey::SettingsUpdateLaunchFailed => "インストーラーを起動できませんでした: {error}",
@@ -464,7 +502,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "この tty7 は書き込み可能な tty7.app バンドルから実行されていないため、そのまま置き換えるのは安全ではありません。tty7 を「アプリケーション」など書き込み可能なフォルダへ移動するか、リリースページを開いてアップデートをインストールしてください"
         }
         L10nKey::SettingsUpdateUnsupportedLinux => {
-            "アプリ内アップデーターが対応しているのは、パッケージ化された macOS アプリバンドルです。この Linux 環境ではリリースページかパッケージマネージャーから更新してください"
+            "このアーキテクチャ向けの Linux パッケージはリリースにありません。ソースからビルドするか、パッケージマネージャーをご利用ください"
+        }
+        L10nKey::SettingsUpdateLinuxPackage => {
+            "Linux は手動で更新します。リリースページから {name} をダウンロードするか、パッケージマネージャーをご利用ください"
         }
         L10nKey::SettingsUpdateUnsupportedWindows => {
             "Windows の自動更新は、認識可能な Inno Setup 版とポータブル ZIP 版に対応しています。この tty7 には有効なインストール情報・アップデーター・書き込み可能なポータブルディレクトリのいずれかが見つからないため、リリースページを開いて手動で更新してください"
