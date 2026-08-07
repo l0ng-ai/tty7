@@ -1922,6 +1922,21 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.auto_download_updates = on);
     }
 
+    /// Moves this installation to another release feed. See
+    /// `update::switch_channel` for what a switch invalidates, and why moving
+    /// back to Stable does not roll the running build back.
+    pub(crate) fn set_update_channel(
+        &mut self,
+        channel: crate::core::config::UpdateChannel,
+        cx: &mut Context<Self>,
+    ) {
+        if cx.global::<Config>().update_channel == channel {
+            return;
+        }
+        self.update_config(cx, |cfg| cfg.update_channel = channel);
+        crate::core::update::switch_channel(cx);
+    }
+
     /// Takes effect at next launch: `core::cli_install` runs once from `main`,
     /// before there is a window to flip this in. Turning it off does not remove
     /// a symlink already placed — the install is idempotent, not reversible.

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::core::config::{
-    BellMode, Config, CursorStyle, NewTabPosition, NotifyMode, TabBarPosition,
+    BellMode, Config, CursorStyle, NewTabPosition, NotifyMode, TabBarPosition, UpdateChannel,
 };
 use crate::core::keychain::CredentialRef;
 use crate::core::ssh_profile::{
@@ -4649,8 +4649,12 @@ impl Tty7App {
     }
 
     fn render_settings_about(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let (foreground, muted_fg) = (theme.foreground, theme.muted_foreground);
+        // Copied out rather than held: `self.segmented` below needs `cx`
+        // mutably, and a live `cx.theme()` borrow would keep it locked.
+        let (foreground, muted_fg, danger) = {
+            let theme = cx.theme();
+            (theme.foreground, theme.muted_foreground, theme.danger)
+        };
 
         let update_status = cx
             .try_global::<crate::core::update::UpdateStatus>()
@@ -4687,10 +4691,29 @@ impl Tty7App {
                 )
         });
         let failure = update_status.failure.clone();
-        let skipped = crate::core::update::skipped_version();
         let stale_daemon = crate::daemon::spawn::local_daemon_stale_build();
         let check_for_updates = cx.global::<Config>().check_for_updates;
         let auto_download = cx.global::<Config>().auto_download_updates;
+        let channel_idx = match cx.global::<Config>().update_channel {
+            UpdateChannel::Stable => 0,
+            UpdateChannel::Nightly => 1,
+        };
+        let channel_picker = self.segmented(
+            "wt-update-channel",
+            &[
+                t(L10nKey::SettingsUpdateChannelStable),
+                t(L10nKey::SettingsUpdateChannelNightly),
+            ],
+            channel_idx,
+            cx,
+            |this, ix, _w, cx| {
+                let channel = match ix {
+                    0 => UpdateChannel::Stable,
+                    _ => UpdateChannel::Nightly,
+                };
+                this.set_update_channel(channel, cx);
+            },
+        );
         let http_proxy_input = match self.active_settings() {
             Some(s) => s.http_proxy_input.clone(),
             None => return div().into_any_element(),
@@ -4708,7 +4731,7 @@ impl Tty7App {
                 this.child(
                     div()
                         .text_xs()
-                        .text_color(theme.danger)
+                        .text_color(danger)
                         .child(t(L10nKey::SettingsAppHttpProxyInvalid)),
                 )
             })
@@ -4778,7 +4801,7 @@ impl Tty7App {
                         this.child(
                             v_flex()
                                 .gap_1()
-                                .child(div().text_sm().text_color(theme.danger).child(t_fmt(
+                                .child(div().text_sm().text_color(danger).child(t_fmt(
                                     L10nKey::SettingsUpdateFailedTitle,
                                     &[("version", &failure.version)],
                                 )))
@@ -4862,58 +4885,19 @@ impl Tty7App {
                                 ),
                         )
                     })
+                    // Announcement only. Acting on an update is the update
+                    // dialog's job — duplicating its buttons here meant three
+                    // controls crowding the row for something the user has
+                    // already been asked about.
                     .when_some(update.filter(|_| ready.is_none()), |this, upd| {
-                        let button_label = if upd.installable {
-                            t(L10nKey::SettingsUpdateAndRelaunch).to_string()
-                        } else {
-                            t(L10nKey::SettingsUpdateViewRelease).to_string()
-                        };
                         let availability = t_fmt(
                             L10nKey::SettingsVersionAvailable,
                             &[("version", &upd.version)],
                         );
-                        let notes_url = upd.notes_url.clone();
                         this.child(
                             v_flex()
-                                .gap_1()
-                                .child(
-                                    h_flex()
-                                        .gap_3()
-                                        .items_center()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(foreground)
-                                                .child(availability),
-                                        )
-                                        .child(
-                                            Button::new("install-update")
-                                                .label(button_label)
-                                                .small()
-                                                .disabled(update_busy)
-                                                .on_click(cx.listener(|_, _, _window, cx| {
-                                                    crate::core::update::install_available(cx)
-                                                })),
-                                        )
-                                        // "Version X is available" answers
-                                        // nothing about whether it is worth a
-                                        // restart. This is where that lives.
-                                        .child(
-                                            Link::new("update-release-notes")
-                                                .href(notes_url)
-                                                .text_sm()
-                                                .child(t(L10nKey::SettingsUpdateReleaseNotes)),
-                                        )
-                                        .child(
-                                            Button::new("skip-version")
-                                                .label(t(L10nKey::SettingsUpdateSkipVersion))
-                                                .small()
-                                                .disabled(update_busy)
-                                                .on_click(cx.listener(|_, _, _window, cx| {
-                                                    crate::core::update::skip_available_version(cx)
-                                                })),
-                                        ),
-                                )
+                                .gap_2()
+                                .child(div().text_sm().text_color(foreground).child(availability))
                                 .when_some(upd.install_hint, |this, hint| {
                                     this.child(
                                         div()
@@ -4922,26 +4906,6 @@ impl Tty7App {
                                             .child(localized_update_install_hint(&hint)),
                                     )
                                 }),
-                        )
-                    })
-                    .when_some(skipped, |this, version| {
-                        this.child(
-                            h_flex()
-                                .gap_3()
-                                .items_center()
-                                .child(div().text_sm().text_color(muted_fg).child(t_fmt(
-                                    L10nKey::SettingsUpdateSkipped,
-                                    &[("version", &version)],
-                                )))
-                                .child(
-                                    Button::new("unskip-version")
-                                        .label(t(L10nKey::SettingsUpdateUnskip))
-                                        .small()
-                                        .disabled(update_busy)
-                                        .on_click(cx.listener(|_, _, _window, cx| {
-                                            crate::core::update::clear_skipped_version(cx)
-                                        })),
-                                ),
                         )
                     })
                     .when_some(phase_text, |this, text| {
@@ -4982,6 +4946,12 @@ impl Tty7App {
                                 )
                             }),
                     )
+                    .child(self.settings_row(
+                        t(L10nKey::SettingsUpdateChannel),
+                        t(L10nKey::SettingsUpdateChannelDesc),
+                        channel_picker,
+                        cx,
+                    ))
                     .child(
                         self.settings_row(
                             t(L10nKey::SettingsCheckUpdatesOnLaunch),

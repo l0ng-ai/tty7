@@ -11,12 +11,24 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tty7_core::daemon::install::AssetFetcher as _;
 
-use crate::core::config::Config;
+use crate::core::config::{Config, UpdateChannel};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 const REPO: &str = "l0ng-ai/tty7";
 
+/// The rolling prerelease the Nightly channel follows. Force-moved to a new
+/// commit every night, which is exactly why it cannot double as a version.
+const NIGHTLY_TAG: &str = "nightly";
+
+/// Published beside the nightly packages so the version is stated rather than
+/// inferred. See `resolve_version`.
+const NIGHTLY_MANIFEST: &str = "nightly.json";
+
 pub const RELEASES_URL: &str = "https://github.com/l0ng-ai/tty7/releases/latest";
+
+/// The nightly release's own page. Unlike Stable's, this URL is stable across
+/// nights — the tag stays put even as the commit under it moves.
+pub const NIGHTLY_RELEASE_URL: &str = "https://github.com/l0ng-ai/tty7/releases/tag/nightly";
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -73,9 +85,6 @@ pub struct AvailableUpdate {
     pub version: String,
     pub installable: bool,
     pub install_hint: Option<UpdateInstallHint>,
-    /// The release's own page. "Version 27.0.0 is available" tells nobody
-    /// whether it is worth a restart; this is where that answer lives.
-    pub notes_url: String,
     asset: Option<ReleaseAsset>,
 }
 
@@ -235,10 +244,11 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
 
     let manual_proxy = cx.global::<Config>().http_proxy.clone();
     let auto_download = cx.global::<Config>().auto_download_updates;
+    let channel = cx.global::<Config>().update_channel;
 
     cx.spawn(async move |cx| {
         let current = current_version();
-        let release = match fetch_latest_release(manual_proxy)
+        let (release, version) = match fetch_latest_release(channel, manual_proxy)
             .or(async {
                 cx.background_executor().timer(CHECK_TIMEOUT).await;
                 Err(anyhow::anyhow!("timed out after {CHECK_TIMEOUT:?}"))
@@ -262,11 +272,8 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
             }
         };
 
-        if !is_update_available(&release.tag_name, current) {
-            log::debug!(
-                "update check: up to date (latest {}, running {current})",
-                release.tag_name
-            );
+        if !is_update_available(&version, current) {
+            log::debug!("update check: up to date ({channel:?} {version}, running {current})");
             cx.update(|cx| {
                 update_status(cx, |status| {
                     status.available = None;
@@ -276,13 +283,11 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
             return;
         }
 
-        let version = release.tag_name.trim_start_matches('v').to_string();
         let selection = select_release_asset(&version, &release.assets);
         let available = AvailableUpdate {
             version: version.clone(),
             installable: selection.asset.is_some(),
             install_hint: selection.reason,
-            notes_url: release_notes_url(&release.tag_name),
             asset: selection.asset,
         };
         log::info!("update available: {version} (running {current})");
@@ -295,11 +300,6 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
         });
 
         let state = UpdateState::load();
-        if state.skipped.as_deref() == Some(version.as_str()) {
-            log::debug!("update {version} was skipped by the user");
-            return;
-        }
-
         // Fetch while the prompt is up rather than after it: the answer people
         // give depends on how long the work sounds, and by the time they have
         // read the dialog the package is usually already there.
@@ -341,9 +341,6 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
 /// failed install — or a mis-click — retired the version permanently and left
 /// Settings as the only place it still existed.
 fn should_prompt(state: &UpdateState, version: &str) -> bool {
-    if state.skipped.as_deref() == Some(version) {
-        return false;
-    }
     if state.last_prompted.as_deref() != Some(version) {
         return true;
     }
@@ -365,10 +362,6 @@ fn is_busy(cx: &App) -> bool {
 
 fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
-}
-
-fn release_notes_url(tag: &str) -> String {
-    format!("https://github.com/{REPO}/releases/tag/{tag}")
 }
 
 fn now_secs() -> u64 {
@@ -477,33 +470,31 @@ fn remind_later() {
     state.save();
 }
 
-/// Silences one version for good. Deliberately only reachable from Settings.
-pub fn skip_available_version(cx: &mut App) {
-    let Some(version) = cx
-        .try_global::<UpdateStatus>()
-        .and_then(|status| status.available.as_ref().map(|u| u.version.clone()))
-    else {
-        return;
-    };
-    let mut state = UpdateState::load();
-    state.skipped = Some(version);
-    state.save();
+/// Drops everything the previous channel produced, then checks the new feed.
+///
+/// A staged package and a deferred prompt are both answers to a question the
+/// old feed asked; neither carries over. The staged package especially — one
+/// armed for the next launch would otherwise install a Stable build onto
+/// someone who just moved to Nightly.
+///
+/// Nightly to Stable deliberately does *not* downgrade. The nightly in hand
+/// keeps running until a stable release supersedes it, which is already how
+/// `parse_version` orders a release above the prerelease sharing its core
+/// version. Rolling back to an older build to honour the switch immediately
+/// would be a bigger surprise than arriving there one release later.
+pub fn switch_channel(cx: &mut App) {
     discard_pending(cx);
+    let mut state = UpdateState::load();
+    state.last_prompted = None;
+    state.remind_after = None;
+    state.last_failure = None;
+    state.save();
     update_status(cx, |status| {
         status.available = None;
+        status.failure = None;
         status.phase = UpdatePhase::Idle;
     });
-}
-
-pub fn clear_skipped_version(cx: &mut App) {
-    let mut state = UpdateState::load();
-    state.skipped = None;
-    state.save();
     spawn_check_forced(cx);
-}
-
-pub fn skipped_version() -> Option<String> {
-    UpdateState::load().skipped
 }
 
 /// Abandons the transfer. The staging directory is removed by the download
@@ -774,8 +765,18 @@ fn record_failure(version: &str, detail: &str, cx: &mut App) {
     update_status(cx, |status| status.failure = Some(record));
 }
 
+/// Opens the page for whichever channel this installation follows. A Nightly
+/// user sent to the Stable release page would be handed the wrong package —
+/// and, since Linux and unsupported installs update by hand, that page is the
+/// entire update path for some of them.
+///
+/// Reads the config from disk rather than the global: several callers reach
+/// here from a background thread where the `App` is out of reach.
 pub fn open_releases_page() {
-    open_url(RELEASES_URL);
+    open_url(match Config::load().update_channel {
+        UpdateChannel::Stable => RELEASES_URL,
+        UpdateChannel::Nightly => NIGHTLY_RELEASE_URL,
+    });
 }
 
 pub fn open_url(url: &str) {
@@ -1048,9 +1049,6 @@ struct UpdateState {
     /// `remind_after`, which decides when that stops counting.
     #[serde(default)]
     last_prompted: Option<String>,
-    /// A version the user asked never to be told about again.
-    #[serde(default)]
-    skipped: Option<String>,
     /// Unix seconds after which `last_prompted` may prompt again.
     #[serde(default)]
     remind_after: Option<u64>,
@@ -1107,39 +1105,84 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
-async fn fetch_latest_release(manual_proxy: Option<String>) -> Result<LatestRelease> {
+/// `nightly.json`, written by the nightly workflow. Only `version` is read
+/// today; the rest is there so a build can be traced back to its commit
+/// without cross-referencing the release notes.
+#[derive(Clone, Debug, serde::Deserialize)]
+struct NightlyManifest {
+    version: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    commit: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    published_at: String,
+}
+
+/// The GitHub endpoint each channel reads.
+///
+/// Keeping the two feeds apart is the whole point of the channel: neither can
+/// hand the other an update, so an installation only changes channel when the
+/// user changes it in Settings.
+fn release_endpoint(channel: UpdateChannel) -> String {
+    match channel {
+        // Excludes prereleases by definition, so Stable can never be offered a
+        // nightly even though both live in the same repository.
+        UpdateChannel::Stable => format!("https://api.github.com/repos/{REPO}/releases/latest"),
+        UpdateChannel::Nightly => {
+            format!("https://api.github.com/repos/{REPO}/releases/tags/{NIGHTLY_TAG}")
+        }
+    }
+}
+
+/// Recovers the version from a package name such as
+/// `tty7-26.8.2-nightly.20260807-macos-arm64.zip`.
+///
+/// The platform segment is a closed set, which is what makes the split
+/// unambiguous — the version is everything between the `tty7-` prefix and the
+/// platform marker. `tty7-server-linux-x86_64-musl` matches that shape too but
+/// yields `server`, which `parse_version` rejects, so the remote-server assets
+/// sitting in the same release are skipped without special-casing them.
+fn version_from_assets(assets: &[GitHubAsset]) -> Option<String> {
+    assets.iter().find_map(|asset| {
+        let rest = asset.name.strip_prefix("tty7-")?;
+        let cut = ["-macos-", "-linux-", "-windows-"]
+            .iter()
+            .find_map(|marker| rest.find(marker))?;
+        let version = &rest[..cut];
+        parse_version(version).map(|_| version.to_string())
+    })
+}
+
+fn build_http_client(manual_proxy: Option<&str>) -> Result<ReqwestClient> {
     let user_agent = concat!("tty7/", env!("CARGO_PKG_VERSION"));
     // Normalise through the same helper the downloader uses, so a bare
     // `127.0.0.1:7890` proxies the check as well as the download.
-    let client = if let Some(proxy) = manual_proxy
-        .as_deref()
+    if let Some(proxy) = manual_proxy
         .and_then(tty7_core::daemon::install::proxy::normalize_manual)
         .and_then(|url| http_client::Url::parse(&url).ok())
     {
-        ReqwestClient::proxy_and_user_agent(Some(proxy), user_agent)
-            .context("building HTTP client")?
+        ReqwestClient::proxy_and_user_agent(Some(proxy), user_agent).context("building HTTP client")
     } else {
-        ReqwestClient::user_agent(user_agent).context("building HTTP client")?
-    };
+        ReqwestClient::user_agent(user_agent).context("building HTTP client")
+    }
+}
 
-    // `/releases/latest` intentionally excludes prereleases, so Nightly builds
-    // are offered the Stable release that supersedes them and no rolling
-    // prerelease can ever become an update source.
-    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let request = http_client::Request::get(&url)
+async fn fetch_json<T: serde::de::DeserializeOwned>(
+    client: &ReqwestClient,
+    url: &str,
+) -> Result<T> {
+    let request = http_client::Request::get(url)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .follow_redirects(RedirectPolicy::FollowAll)
         .body(AsyncBody::default())
         .context("building request")?;
 
-    let mut response = client
-        .send(request)
-        .await
-        .context("requesting latest release")?;
+    let mut response = client.send(request).await.context("sending the request")?;
 
     if !response.status().is_success() {
-        anyhow::bail!("GitHub API returned HTTP {}", response.status().as_u16());
+        anyhow::bail!("GitHub returned HTTP {}", response.status().as_u16());
     }
 
     let mut body = Vec::new();
@@ -1149,8 +1192,56 @@ async fn fetch_latest_release(manual_proxy: Option<String>) -> Result<LatestRele
         .await
         .context("reading response body")?;
 
-    let release: LatestRelease = serde_json::from_slice(&body).context("parsing release JSON")?;
-    Ok(release)
+    serde_json::from_slice(&body).context("parsing JSON")
+}
+
+/// Returns the release together with the version it advertises, which is not
+/// always something the release object states outright — see `resolve_version`.
+async fn fetch_latest_release(
+    channel: UpdateChannel,
+    manual_proxy: Option<String>,
+) -> Result<(LatestRelease, String)> {
+    let client = build_http_client(manual_proxy.as_deref())?;
+    let release: LatestRelease = fetch_json(&client, &release_endpoint(channel))
+        .await
+        .context("requesting the release")?;
+    let version = resolve_version(&client, &release)
+        .await
+        .with_context(|| format!("release {} advertises no usable version", release.tag_name))?;
+    Ok((release, version))
+}
+
+/// The version a release stands for.
+///
+/// Stable states it in the tag (`v26.8.1`) and needs nothing else. Nightly
+/// cannot: its tag is force-moved to a new commit every night and so is the
+/// literal string `nightly`, which carries no version at all. It publishes
+/// `nightly.json` beside the packages instead.
+///
+/// The fall back to asset names covers the two cases where the manifest is
+/// absent — a nightly published before it existed, and a night where writing it
+/// failed — because neither is a reason to strand the whole channel.
+async fn resolve_version(client: &ReqwestClient, release: &LatestRelease) -> Option<String> {
+    if parse_version(&release.tag_name).is_some() {
+        return Some(release.tag_name.trim_start_matches('v').to_string());
+    }
+    if let Some(asset) = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == NIGHTLY_MANIFEST)
+    {
+        match fetch_json::<NightlyManifest>(client, &asset.browser_download_url).await {
+            Ok(manifest) if parse_version(&manifest.version).is_some() => {
+                return Some(manifest.version);
+            }
+            Ok(manifest) => log::warn!(
+                "{NIGHTLY_MANIFEST} declares an unusable version {:?}; falling back to asset names",
+                manifest.version
+            ),
+            Err(e) => log::warn!("could not read {NIGHTLY_MANIFEST}: {e:#}"),
+        }
+    }
+    version_from_assets(&release.assets)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1782,17 +1873,30 @@ fn run_updater(updater: &Path, args: impl IntoIterator<Item = PathBuf>) -> Resul
     Ok(())
 }
 
-/// `(major, minor, patch, is_release)`. Ordering the release flag last, with
-/// `false < true`, is what lets a prerelease be superseded by the stable
-/// release that carries the same core version: a Nightly stamped
-/// `26.7.1-nightly.20260716` is offered `v26.7.1` and graduates out of the
-/// prerelease. Two prereleases sharing a core compare equal, so nothing here
-/// can walk a user from one prerelease to another — only `/releases/latest`
-/// feeds this comparison, and that endpoint never returns one.
-fn parse_version(s: &str) -> Option<(u64, u64, u64, bool)> {
+/// `(major, minor, patch, is_release, build)`.
+///
+/// Ordering the release flag *before* the build number is what lets a stable
+/// release supersede the prerelease that carries the same core version: a
+/// Nightly stamped `26.7.1-nightly.20260716` is offered `v26.7.1` and graduates
+/// out of the prerelease no matter how recent its build is.
+///
+/// `build` then orders two prereleases sharing a core version against each
+/// other, by the date suffix the nightly workflow stamps. That comparison is
+/// the whole reason the Nightly channel can roll forward at all — without it
+/// every nightly compares equal to the next one. It is unreachable on Stable,
+/// which reads `/releases/latest` and so never sees a prerelease.
+fn parse_version(s: &str) -> Option<(u64, u64, u64, bool, u64)> {
     let trimmed = s.trim();
     let core = trimmed.strip_prefix('v').unwrap_or(trimmed);
-    let is_release = !core.split('+').next().unwrap_or(core).contains('-');
+    let without_meta = core.split('+').next().unwrap_or(core);
+    let is_release = !without_meta.contains('-');
+    // `26.8.2-nightly.20260807` -> 20260807. A prerelease tag with no trailing
+    // number (`-beta`) scores 0, which keeps it below every dated build rather
+    // than rejecting the version outright.
+    let build = without_meta
+        .split_once('-')
+        .and_then(|(_, pre)| pre.rsplit('.').next().and_then(|last| last.parse().ok()))
+        .unwrap_or(0);
     let core = core.split(['-', '+']).next().unwrap_or(core);
     let mut parts = core.split('.');
     let major = parts.next()?.parse().ok()?;
@@ -1801,7 +1905,7 @@ fn parse_version(s: &str) -> Option<(u64, u64, u64, bool)> {
     if parts.next().is_some() {
         return None;
     }
-    Some((major, minor, patch, is_release))
+    Some((major, minor, patch, is_release, build))
 }
 
 fn is_update_available(latest: &str, current: &str) -> bool {
@@ -1866,17 +1970,20 @@ mod tests {
 
     #[test]
     fn parses_versions_with_and_without_prefix() {
-        assert_eq!(parse_version("v0.3.1"), Some((0, 3, 1, true)));
-        assert_eq!(parse_version("0.3.1"), Some((0, 3, 1, true)));
-        assert_eq!(parse_version(" 1.2.0 "), Some((1, 2, 0, true)));
-        assert_eq!(parse_version("v2"), Some((2, 0, 0, true)));
-        assert_eq!(parse_version("v2.5"), Some((2, 5, 0, true)));
-        assert_eq!(parse_version("v0.4.0-rc.1"), Some((0, 4, 0, false)));
+        assert_eq!(parse_version("v0.3.1"), Some((0, 3, 1, true, 0)));
+        assert_eq!(parse_version("0.3.1"), Some((0, 3, 1, true, 0)));
+        assert_eq!(parse_version(" 1.2.0 "), Some((1, 2, 0, true, 0)));
+        assert_eq!(parse_version("v2"), Some((2, 0, 0, true, 0)));
+        assert_eq!(parse_version("v2.5"), Some((2, 5, 0, true, 0)));
+        assert_eq!(parse_version("v0.4.0-rc.1"), Some((0, 4, 0, false, 1)));
         assert_eq!(
             parse_version("26.7.1-nightly.20260716"),
-            Some((26, 7, 1, false))
+            Some((26, 7, 1, false, 20260716))
         );
-        assert_eq!(parse_version("0.4.0+ci.7"), Some((0, 4, 0, true)));
+        // A prerelease with nothing numeric to order by still parses; it just
+        // sorts below every dated build of the same core version.
+        assert_eq!(parse_version("1.0.0-beta"), Some((1, 0, 0, false, 0)));
+        assert_eq!(parse_version("0.4.0+ci.7"), Some((0, 4, 0, true, 0)));
         assert_eq!(parse_version("nightly"), None);
         assert_eq!(parse_version(""), None);
         assert_eq!(parse_version("v0.3.1.1"), None);
@@ -1904,14 +2011,120 @@ mod tests {
         assert!(is_update_available("v26.7.1", "26.7.1-nightly.20260716"));
         assert!(!is_update_available("v26.7.0", "26.7.1-nightly.20260716"));
         assert!(!is_update_available("v26.7.1-rc.1", "26.7.1"));
-        // Nightly is a build channel, not an update channel: one Nightly never
-        // supersedes another. `/releases/latest` cannot return a prerelease, so
-        // this pair is unreachable in practice — asserted so a future change to
-        // the endpoint cannot quietly turn Nightly into an update source.
-        assert!(!is_update_available(
+    }
+
+    /// The Nightly channel's whole reason to exist: last night's build has to
+    /// be able to supersede the one before it. This is what the old ordering
+    /// deliberately refused to do, back when the only feed was
+    /// `/releases/latest` and no nightly could ever be offered.
+    #[test]
+    fn a_newer_nightly_supersedes_an_older_one() {
+        assert!(is_update_available(
             "26.7.1-nightly.20260717",
             "26.7.1-nightly.20260716"
         ));
+        assert!(!is_update_available(
+            "26.7.1-nightly.20260716",
+            "26.7.1-nightly.20260717"
+        ));
+        assert!(!is_update_available(
+            "26.7.1-nightly.20260716",
+            "26.7.1-nightly.20260716"
+        ));
+        // Across core versions the date is irrelevant — a nightly for the next
+        // patch wins however old its build is.
+        assert!(is_update_available(
+            "26.7.2-nightly.20260101",
+            "26.7.1-nightly.20260716"
+        ));
+    }
+
+    /// Ordering the release flag ahead of the build number is what keeps this
+    /// true: a stable release outranks every dated build sharing its core
+    /// version, so a user who switches back to Stable still graduates.
+    #[test]
+    fn a_stable_release_still_outranks_every_nightly_of_its_core_version() {
+        for date in ["20260101", "20991231"] {
+            assert!(is_update_available(
+                "v26.7.1",
+                &format!("26.7.1-nightly.{date}")
+            ));
+        }
+    }
+
+    /// Each channel reads its own release, which is the mechanism that keeps a
+    /// Nightly from being walked back onto Stable by an update it never asked
+    /// for. `/releases/latest` excludes prereleases by definition, so the two
+    /// feeds cannot see each other's builds.
+    #[test]
+    fn each_channel_reads_its_own_feed() {
+        assert!(release_endpoint(UpdateChannel::Stable).ends_with("/releases/latest"));
+        assert!(release_endpoint(UpdateChannel::Nightly).ends_with("/releases/tags/nightly"));
+    }
+
+    /// The fallback for a nightly published without `nightly.json`. The tag is
+    /// the literal "nightly", so the asset names are the only place left that
+    /// states which build this is.
+    #[test]
+    fn version_is_recovered_from_nightly_asset_names() {
+        let assets = [
+            github_asset("checksums.txt"),
+            github_asset("tty7-26.8.2-nightly.20260807-macos-arm64.zip"),
+            github_asset("tty7-26.8.2-nightly.20260807-windows-x86_64-setup.exe"),
+        ];
+        assert_eq!(
+            version_from_assets(&assets).as_deref(),
+            Some("26.8.2-nightly.20260807")
+        );
+    }
+
+    /// The remote-server binaries ride along in the same release and match the
+    /// `tty7-…-linux-…` shape, but have no version in front of the platform.
+    /// `parse_version` rejecting "server" is what skips them, so no name-based
+    /// special case is needed.
+    #[test]
+    fn remote_server_assets_are_not_mistaken_for_a_version() {
+        let assets = [
+            github_asset("checksums.txt"),
+            github_asset("tty7-server-linux-x86_64-musl"),
+            github_asset("tty7-server-linux-aarch64-musl"),
+        ];
+        assert_eq!(version_from_assets(&assets), None);
+
+        // And they must not win when a real package is also present, whatever
+        // order GitHub returns them in.
+        let mixed = [
+            github_asset("tty7-server-linux-x86_64-musl"),
+            github_asset("tty7-26.8.2-nightly.20260807-linux-x86_64.tar.gz"),
+        ];
+        assert_eq!(
+            version_from_assets(&mixed).as_deref(),
+            Some("26.8.2-nightly.20260807")
+        );
+    }
+
+    /// Pins the contract between `nightly.yml`'s manifest step and this side of
+    /// it. Renaming a field in the workflow silently drops Nightly back to
+    /// guessing versions out of filenames; this fails instead.
+    #[test]
+    fn nightly_manifest_matches_what_the_workflow_writes() {
+        let manifest: NightlyManifest = serde_json::from_str(
+            r#"{
+                "version": "26.8.2-nightly.20260807",
+                "commit": "0123456789abcdef0123456789abcdef01234567",
+                "published_at": "2026-08-07T02:11:00Z"
+            }"#,
+        )
+        .expect("the workflow's shape must deserialize");
+        assert_eq!(manifest.version, "26.8.2-nightly.20260807");
+        assert!(parse_version(&manifest.version).is_some());
+
+        // Older manifests, or a workflow that stops writing the extras, must
+        // still yield a usable version rather than failing the whole check.
+        let minimal: NightlyManifest =
+            serde_json::from_str(r#"{"version": "26.8.2-nightly.20260807"}"#)
+                .expect("version alone is enough");
+        assert_eq!(minimal.commit, "");
     }
 
     #[test]
@@ -1986,14 +2199,6 @@ mod tests {
             ..Default::default()
         };
         assert!(should_prompt(&due, "27.0.0"));
-
-        // Skipping is the only permanent silence, and only the user sets it.
-        let skipped = UpdateState {
-            skipped: Some("27.0.0".into()),
-            ..Default::default()
-        };
-        assert!(!should_prompt(&skipped, "27.0.0"));
-        assert!(should_prompt(&skipped, "27.1.0"));
     }
 
     /// A failure must not leave the version marked as "already asked about",

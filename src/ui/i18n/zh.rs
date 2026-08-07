@@ -416,14 +416,16 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateReadyNextLaunch => "下次启动 tty7 时会自动装上。",
         L10nKey::SettingsUpdateInstallNow => "安装并重启",
         L10nKey::SettingsUpdateDiscard => "丢弃",
-        L10nKey::SettingsUpdateSkipVersion => "跳过此版本",
-        L10nKey::SettingsUpdateSkipped => "已跳过 {version}。",
-        L10nKey::SettingsUpdateUnskip => "取消跳过",
-        L10nKey::SettingsUpdateReleaseNotes => "更新内容",
         L10nKey::SettingsAutoDownload => "后台下载更新",
         L10nKey::SettingsAutoDownloadDesc => {
             "发现新版本就先下载并校验好，安装时只需重启一下。不会未经确认就安装。用移动流量时可以关掉——安装包约 30 MB。"
         }
+        L10nKey::SettingsUpdateChannel => "更新通道",
+        L10nKey::SettingsUpdateChannelDesc => {
+            "Stable 跟随正式发布的版本，Nightly 跟随每晚从最新代码构建的版本——更新更快，但没有经过发布测试。"
+        }
+        L10nKey::SettingsUpdateChannelStable => "Stable",
+        L10nKey::SettingsUpdateChannelNightly => "Nightly",
         L10nKey::SettingsDaemonStale => "后台服务仍运行在 {build}。",
         L10nKey::SettingsDaemonStaleDesc => {
             "tty7 是原地升级的，界面已经是新版本，但各个 pane 仍由旧版本的后台服务托管。重启服务才能用上新版本，代价是 pane 里正在跑的进程全部结束——shell、agent、SSH 会话都算。不急，挑个 pane 空闲的时候再重启。"

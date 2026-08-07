@@ -472,14 +472,16 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateReadyNextLaunch => "次回 tty7 を起動したときに適用されます。",
         L10nKey::SettingsUpdateInstallNow => "インストールして再起動",
         L10nKey::SettingsUpdateDiscard => "破棄",
-        L10nKey::SettingsUpdateSkipVersion => "このバージョンをスキップ",
-        L10nKey::SettingsUpdateSkipped => "{version} をスキップしています。",
-        L10nKey::SettingsUpdateUnskip => "スキップをやめる",
-        L10nKey::SettingsUpdateReleaseNotes => "変更内容",
         L10nKey::SettingsAutoDownload => "アップデートをバックグラウンドでダウンロード",
         L10nKey::SettingsAutoDownloadDesc => {
             "新しいリリースを見つけ次第ダウンロードと検証を済ませておき、インストールは再起動するだけにします。確認なしにインストールすることはありません。従量制の回線ではオフにしてください（パッケージは約 30 MB です）。"
         }
+        L10nKey::SettingsUpdateChannel => "更新チャンネル",
+        L10nKey::SettingsUpdateChannelDesc => {
+            "Stable は正式リリースを、Nightly は最新のコードから毎晩ビルドされる版を追いかけます。新しい代わりに、リリース前のテストは経ていません。"
+        }
+        L10nKey::SettingsUpdateChannelStable => "Stable",
+        L10nKey::SettingsUpdateChannelNightly => "Nightly",
         L10nKey::SettingsDaemonStale => "バックグラウンドサービスは {build} のままです。",
         L10nKey::SettingsDaemonStaleDesc => {
             "tty7 はその場で更新されたため、アプリは新しくなりましたが、各ペインは以前のビルドのサービスが処理しています。サービスを再起動すると新しいビルドに切り替わりますが、ペインで動いているプロセス（シェル、エージェント、SSH セッション）はすべて終了します。急ぐ必要はありません。ペインが空いているときに実行してください。"

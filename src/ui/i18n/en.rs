@@ -472,14 +472,16 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsUpdateInstallNow => "Install and Relaunch",
         L10nKey::SettingsUpdateDiscard => "Discard",
-        L10nKey::SettingsUpdateSkipVersion => "Skip This Version",
-        L10nKey::SettingsUpdateSkipped => "Version {version} is being skipped.",
-        L10nKey::SettingsUpdateUnskip => "Stop Skipping",
-        L10nKey::SettingsUpdateReleaseNotes => "What's New",
         L10nKey::SettingsAutoDownload => "Download updates in the background",
         L10nKey::SettingsAutoDownloadDesc => {
             "Fetch and verify a new release as soon as it is found, so installing it is just a restart. Nothing is installed without asking. Turn this off on a metered connection — the packages are around 30 MB."
         }
+        L10nKey::SettingsUpdateChannel => "Update channel",
+        L10nKey::SettingsUpdateChannelDesc => {
+            "Stable follows published releases. Nightly rebuilds from the latest code every night — newer, but not release-tested."
+        }
+        L10nKey::SettingsUpdateChannelStable => "Stable",
+        L10nKey::SettingsUpdateChannelNightly => "Nightly",
         L10nKey::SettingsDaemonStale => "The background service is still running {build}.",
         L10nKey::SettingsDaemonStaleDesc => {
             "tty7 was updated in place, so the app is new but your panes are still served by the previous build. Restarting the service picks up the new one and ends every process running in your panes — shells, agents and SSH sessions alike. There is no hurry: pick a moment when your panes are idle."

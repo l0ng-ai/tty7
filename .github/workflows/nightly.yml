@@ -314,6 +314,24 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # The version has to be readable by a machine, and the tag cannot carry
+      # it: `nightly` is force-moved to a new commit every night, so the release
+      # object's `tag_name` is the literal string "nightly". Without this the
+      # updater is left reverse-engineering the version out of asset filenames.
+      #
+      # Written before checksums.txt so the manifest is hashed along with
+      # everything else rather than shipping unverified.
+      - name: Generate nightly.json
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg version "$VERSION" \
+            --arg commit "$GITHUB_SHA" \
+            --arg published_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{version: $version, commit: $commit, published_at: $published_at}' \
+            > dist/nightly.json
+          cat dist/nightly.json
+
       # Same contract as release.yml — see `install::asset`. Written
       # into dist/ before the upload below so it ships as an asset like any
       # other, and so the prune step at the end sees it as current.
