@@ -6742,6 +6742,51 @@ mod gpui_tests {
         panic!("the local editor never engaged at the prompt");
     }
 
+    /// Handing the line back to the shell walks the cursor left once per
+    /// character it sat before. Those are arrow keys like any other, so under
+    /// DECCKM they have to be SS3 — and zsh's zle does turn DECCKM on, so this
+    /// is the ordinary case rather than the exotic one.
+    #[gpui::test]
+    fn a_handoff_walks_the_cursor_back_in_ss3_under_app_cursor_mode(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Output(b"\x1b[?1h".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for_input_active(&window, cx);
+
+        window
+            .update(cx, |view, window, cx| {
+                assert!(
+                    view.key_flags().app_cursor(),
+                    "the shell asked for application cursor keys"
+                );
+                for ch in ["z", "z", "q", "q", "x"] {
+                    type_char(view, ch, window, cx);
+                }
+                view.handle_editor_key(&key("left"), cx);
+                view.handle_editor_key(&key("left"), cx);
+                view.complete_tab(true, cx);
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"zzqqx".to_vec())
+        );
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"\x1bOD\x1bOD".to_vec()),
+            "the cursor walks back in SS3, not CSI"
+        );
+    }
+
     #[gpui::test]
     fn tab_with_no_candidates_hands_the_line_to_the_shell(cx: &mut TestAppContext) {
         let (window, mut daemon) = harness(cx);
