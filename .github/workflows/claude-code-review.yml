@@ -1,0 +1,65 @@
+name: Claude Code Review
+
+# Automated PR review, run on our own Actions minutes rather than the managed
+# Code Review service (that one is Team/Enterprise only, and bills per review).
+# A run reads the diff in the context of the whole checkout and posts what it
+# found back onto the PR; findings are advisory and never gate a merge, so the
+# required checks on main stay exactly `rustfmt` and the three
+# `build & test (<target>)` jobs.
+#
+# Setup, both steps one-time and both outside this file:
+#   1. Install the Claude GitHub App on l0ng-ai/tty7 -> https://github.com/apps/claude
+#   2. Add the repo secret CLAUDE_CODE_OAUTH_TOKEN, from `claude setup-token`
+#      locally. That token bills against the Claude subscription instead of a
+#      separate API bill. To use an API key instead, swap the input below for
+#      `anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}`.
+# `/install-github-app` inside a local claude session does both for you.
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+# Same reasoning as ci.yml: a superseded review is dead weight, and unlike a
+# build its output would be actively misleading — comments describing a diff
+# that no longer exists.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: claude review
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # tty7 is public, and GitHub withholds secrets from fork-PR runs, so the
+    # action would fail its auth step rather than skip. Gate on the head repo
+    # so a fork PR simply doesn't queue a job.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      pull-requests: write # post the review comment
+      issues: write # the action's tracking comment lives on the issue timeline
+      id-token: write # required for the action's GitHub App auth
+      actions: read # let the review see whether CI passed
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # A shallow clone has no merge base, and the review's first move is
+          # `git diff main...HEAD`.
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The same multi-agent review plugin the managed service runs.
+          plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
+          plugins: "code-review@claude-code-plugins"
+          prompt: "/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+          # Without this the findings only reach the workflow run log.
+          track_progress: true
+          # The rules a general-purpose reviewer cannot know. Everything CI
+          # already enforces (rustfmt, the host-boundary grep, clippy) is
+          # deliberately absent: a second opinion on a check that already
+          # failed is noise.
+          claude_args: |
+            --append-system-prompt "This is tty7, a Rust terminal workspace app (GPUI). Repo-specific review rules, in addition to the usual correctness review: (1) Anything that changes the wire format between the app and tty7-server must bump the control/protocol dialect in RemoteProtocol::of_this_build and stay readable to an older peer, or say why a hard break is correct. (2) Rendering and layout live in src/ui; a workspace path there may belong to a remote machine, so filesystem and git access must go through the Host trait. (3) User-visible strings live in src/ui/i18n/{en,zh,ja}.rs and all three must gain the key together. (4) Do not comment on formatting, import order, or anything rustfmt and clippy already decide."
