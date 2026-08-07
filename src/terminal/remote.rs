@@ -960,19 +960,6 @@ impl RemoteTerminal {
             .unwrap_or(false)
     }
 
-    /// Whether the shell is off its prompt running a command. Not simply
-    /// `!at_prompt()`: both answers are gated on `active`, so a pane whose
-    /// shell integration never reported (plain cmd.exe, an ssh without
-    /// OSC 133) reads as neither at the prompt *nor* busy, rather than
-    /// permanently busy. Feeds the Windows taskbar overlay.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub fn shell_busy(&self) -> bool {
-        self.shell_state
-            .lock()
-            .map(|s| s.active && !s.at_prompt)
-            .unwrap_or(false)
-    }
-
     pub fn prompt_seq(&self) -> u64 {
         self.shell_state.lock().map(|s| s.seq).unwrap_or(0)
     }

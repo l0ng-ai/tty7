@@ -55,6 +55,9 @@ impl Marks {
         }
     }
 
+    /// Only the tests read the store back; the panel that used to has been
+    /// removed, and prompt state reaches the client over the wire instead.
+    #[cfg(test)]
     pub fn list(&self) -> Vec<CommandMark> {
         let Ok(marks) = self.0.lock() else {
             return Vec::new();
@@ -296,7 +299,7 @@ mod tests {
         let got = scan(&[b"\x1b]0;a title\x07\x1b]7;file://h/x\x07\x1b]133;B\x07"]);
         assert!(
             got.is_empty(),
-            "titles, cwd reports and prompt-end carry nothing the outline wants"
+            "titles, cwd reports and prompt-end are not command marks"
         );
     }
 
