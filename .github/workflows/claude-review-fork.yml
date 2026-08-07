@@ -14,7 +14,16 @@ name: Claude Code Review (fork)
 # What keeps it honest, in the order the steps below apply it:
 #
 #   1. A label, not the PR opening, starts the run. Applying one needs write
-#      access, so a maintainer decides. This is the approval gate.
+#      access, so a maintainer decides. The label then stays on as a
+#      subscription: later pushes re-review, and removing it stops that.
+#
+#      Worth being clear about what this gate is and is not, because a
+#      subscription that survives the next push plainly does not gate the next
+#      push's code. It is not the security boundary -- 2 through 4 are, and they
+#      hold on the hundredth push exactly as on the first. What it gates is
+#      spend and attention: whose pull request is worth the tokens, and which
+#      ones we care to keep watching. If safety rested here, re-reviewing
+#      automatically would be indefensible.
 #   2. The workspace root is the base branch. This is the whole game: the root
 #      is what Claude Code reads as *the project*, so a fork checked out there
 #      would supply its own `CLAUDE.md` through the channel meant for
@@ -43,7 +52,7 @@ name: Claude Code Review (fork)
 
 on:
   pull_request_target:
-    types: [labeled]
+    types: [labeled, synchronize]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
@@ -54,7 +63,13 @@ jobs:
     name: claude review (fork)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: github.event.label.name == 'claude-review'
+    # `labeled` carries the label that was just applied; `synchronize` carries
+    # none, so it has to look at what the PR is already wearing. The two need
+    # separate clauses: testing only the label list would spend a review every
+    # time any other label -- `bug`, `blocked` -- landed on a subscribed PR.
+    if: >-
+      (github.event.action == 'labeled' && github.event.label.name == 'claude-review') ||
+      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'claude-review'))
     permissions:
       contents: read
       pull-requests: write # the last step posts the review comment
