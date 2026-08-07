@@ -503,8 +503,16 @@ impl Tty7App {
                 ],
             ),
             DaemonMismatch::Protocol(None) => t(L10nKey::AppRestartServerOldDetail).to_string(),
+            // The handshake only reports disagreement, not direction, and a
+            // daemon left behind by a newer build is as much a mismatch as one
+            // left behind by an older. Calling that one "older" would be the
+            // same wrong guess the remote path stopped making.
             DaemonMismatch::Dialect(refusal) => t_fmt(
-                L10nKey::AppRestartServerDialectDetail,
+                if refusal.peer < refusal.ours {
+                    L10nKey::AppRestartServerDialectDetail
+                } else {
+                    L10nKey::AppRestartServerDialectNewerDetail
+                },
                 &[
                     ("build", &refusal.peer_build),
                     ("dialect", &refusal.peer.to_string()),

@@ -662,6 +662,14 @@ struct WsState {
     /// from it until the pull is retried — an empty window diffs into
     /// "close every tab" and would wipe the layout off the machine.
     rehydrate: Option<Adopt>,
+    /// Whether this window has already been told why it opened empty.
+    ///
+    /// The retry is as quiet as the failure was, so a window whose machine
+    /// never answers re-enters `hydrate` on every `sync_window` and would say
+    /// the same thing again every fifteen seconds. Saying it once is the
+    /// point; saying it on a loop is noise. Cleared once a pull lands, so a
+    /// later outage is still worth a word.
+    said_why_empty: bool,
 }
 
 impl Default for WsState {
@@ -676,6 +684,7 @@ impl Default for WsState {
             informed: false,
             epoch: 0,
             rehydrate: None,
+            said_why_empty: false,
         }
     }
 }
@@ -1196,11 +1205,18 @@ fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
         };
         let Some(client) = client else {
             cx.update(|cx| {
-                owe_rehydration(cx, client_ws, epoch, adopt);
+                // Only the attempt that still owns the window gets to speak: a
+                // superseded one is being retried right now, and announcing an
+                // emptiness someone else is already filling would be a lie by
+                // the time it is read.
+                //
                 // A machine that answers late is normal for a remote one, and
                 // the switcher already says so there. On this computer nothing
                 // else would.
-                if adopt == Adopt::IfEmpty && host.is_local() {
+                if owe_rehydration(cx, client_ws, epoch, adopt)
+                    && adopt == Adopt::IfEmpty
+                    && host.is_local()
+                {
                     say_why_the_window_is_empty(cx, client_ws);
                 }
             });
@@ -1222,6 +1238,10 @@ fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
 /// dialect behind reads as "tty7 lost my tabs" with nothing anywhere to say
 /// otherwise. This is that "otherwise", said in the window it happened to.
 fn say_why_the_window_is_empty(cx: &mut App, client_ws: WorkspaceId) {
+    match cx.default_global::<TreeSync>().windows.get_mut(&client_ws) {
+        Some(state) if !state.said_why_empty => state.said_why_empty = true,
+        _ => return,
+    }
     let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, client_ws) else {
         return;
     };
@@ -1236,18 +1256,22 @@ fn say_why_the_window_is_empty(cx: &mut App, client_ws: WorkspaceId) {
 /// the next `sync_window` would push that emptiness to the machine as "close
 /// every tab". Instead the pull is retried the next time the window syncs —
 /// which is what a reconnect does through `on_link_up`.
-fn owe_rehydration(cx: &mut App, client_ws: WorkspaceId, epoch: u64, adopt: Adopt) {
+///
+/// Returns whether the debt was taken on. A superseded attempt gets `false`:
+/// a newer hydration owns the window now, and this one speaks for nothing.
+fn owe_rehydration(cx: &mut App, client_ws: WorkspaceId, epoch: u64, adopt: Adopt) -> bool {
     let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
-        return;
+        return false;
     };
     if state.epoch != epoch {
-        return;
+        return false;
     }
     if let SyncPhase::Unprimed { priming, .. } = &mut state.sync {
         *priming = false;
     }
     state.rehydrate = Some(adopt);
     log::info!("workspace {client_ws}: will pull its layout again once its machine answers");
+    true
 }
 
 fn pull_workspace(
@@ -1305,7 +1329,7 @@ fn finish_hydration(
         Ok(pulled) => pulled,
         Err(e) => {
             log::warn!("could not hydrate workspace {client_ws} from its machine: {e}");
-            owe_rehydration(cx, client_ws, epoch, adopt);
+            let _ = owe_rehydration(cx, client_ws, epoch, adopt);
             return;
         }
     };
@@ -1318,6 +1342,9 @@ fn finish_hydration(
         let dirty = matches!(state.sync, SyncPhase::Unprimed { dirty: true, .. });
         state.informed |= mirror.tabs.is_empty();
         state.sync = SyncPhase::Primed(mirror);
+        // The machine answered, so the explanation has been overtaken by events
+        // and a later outage deserves its own.
+        state.said_why_empty = false;
         dirty
     };
     let Some(app) =

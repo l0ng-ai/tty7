@@ -892,7 +892,7 @@ mod tests {
 
     #[test]
     fn an_older_control_dialect_is_named_even_though_the_pane_protocol_agrees() {
-        let (client, server) = control_peer_speaking(CONTROL_VERSION - 1, "26.7.7-nightly");
+        let (client, peer) = control_peer_speaking(CONTROL_VERSION - 1, "26.7.7-nightly");
         let refusal = dialect_of(&client).expect("a dialect a version behind is a mismatch");
         assert_eq!(refusal.peer, CONTROL_VERSION - 1);
         assert_eq!(refusal.ours, CONTROL_VERSION);
@@ -900,25 +900,39 @@ mod tests {
             refusal.peer_build, "26.7.7-nightly",
             "the prompt names the build the user has to restart"
         );
-        server.join().unwrap();
+        peer.join().unwrap();
+    }
+
+    /// A daemon left behind by a *newer* build is just as unreachable, and the
+    /// refusal has to carry which side is ahead — the prompt reads the two
+    /// numbers to decide whether to tell the user to restart or to update.
+    #[test]
+    fn a_newer_control_dialect_is_a_mismatch_too_and_says_which_side_is_ahead() {
+        let (client, peer) = control_peer_speaking(CONTROL_VERSION + 1, "26.9.0-nightly");
+        let refusal = dialect_of(&client).expect("a dialect a version ahead is a mismatch");
+        assert!(
+            refusal.peer > refusal.ours,
+            "the peer is ahead and the refusal must show it: {refusal:?}"
+        );
+        peer.join().unwrap();
     }
 
     #[test]
     fn a_server_of_our_own_dialect_is_not_a_mismatch() {
-        let (client, server) = control_peer_speaking(CONTROL_VERSION, "26.8.2-nightly");
+        let (client, peer) = control_peer_speaking(CONTROL_VERSION, "26.8.2-nightly");
         assert!(dialect_of(&client).is_none());
-        server.join().unwrap();
+        peer.join().unwrap();
     }
 
     #[test]
     fn a_control_socket_that_says_nothing_is_left_alone() {
-        let (client, server) = UnixStream::pair().unwrap();
+        let (client, peer) = UnixStream::pair().unwrap();
         client.set_read_timeout(Some(HANDSHAKE_TIMEOUT)).unwrap();
         assert!(
             dialect_of(&client).is_none(),
             "a server still coming up must not be reported as the wrong version"
         );
-        drop(server);
+        drop(peer);
     }
 
     #[test]

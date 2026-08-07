@@ -1052,6 +1052,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppRestartServerDialectDetail => {
             "The server holding your shells is from an older build (v{build}): it speaks control dialect v{dialect}, this app speaks v{ours}. Your shells keep running, but it cannot hand this app your tabs, so windows open empty until it's restarted. Restarting starts a clean server: tabs reopen with fresh shells and anything running in them is terminated."
         }
+        L10nKey::AppRestartServerDialectNewerDetail => {
+            "The server holding your shells is from a newer build (v{build}): it speaks control dialect v{dialect}, this app speaks v{ours}. Your shells keep running, but it cannot hand this app your tabs, so windows open empty. Updating this app is the real fix; restarting the server replaces it with one this app can talk to, but tabs reopen with fresh shells and anything running in them is terminated."
+        }
         L10nKey::AppRestartServerOldDetail => {
             "The server holding your shells is from an older version of the app. You can keep using it and your shells stay, but newer features may misbehave until it's restarted. Restarting starts a clean server: tabs reopen with fresh shells and anything running in them is terminated."
         }

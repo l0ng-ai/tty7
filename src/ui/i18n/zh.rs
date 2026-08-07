@@ -1004,6 +1004,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppRestartServerDialectDetail => {
             "正在运行你 shell 的服务器来自较旧的构建（v{build}）：它使用 control 方言 v{dialect}，此应用使用 v{ours}。shell 会继续运行，但它无法把标签页交给此应用，在重启之前窗口都会是空的。重启会启动一个干净的服务器：标签页会以全新的 shell 重新打开，其中正在运行的所有内容都会被终止。"
         }
+        L10nKey::AppRestartServerDialectNewerDetail => {
+            "正在运行你 shell 的服务器来自更新的构建（v{build}）：它使用 control 方言 v{dialect}，此应用使用 v{ours}。shell 会继续运行，但它无法把标签页交给此应用，所以窗口会是空的。真正的解法是升级此应用；重启服务器也能换成此应用能对话的版本，但标签页会以全新的 shell 重新打开，其中正在运行的所有内容都会被终止。"
+        }
         L10nKey::AppRestartServerOldDetail => {
             "正在运行你 shell 的服务器来自应用的旧版本。你可以继续使用，shell 也会保留，但新功能可能会表现异常，直到重启服务器。重启会启动一个干净的服务器：标签页会以全新的 shell 重新打开，其中正在运行的所有内容都会被终止。"
         }
