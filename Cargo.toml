@@ -141,6 +141,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Registry",
+    # `MessageBeep` (the terminal bell in `terminal::view`) is a user32 export,
+    # but the Win32 metadata files it under Diagnostics::Debug, so that is the
+    # module the binding needs — nothing here pulls in dbghelp.
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

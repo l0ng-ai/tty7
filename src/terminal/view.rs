@@ -310,13 +310,31 @@ fn notify_agent_finished(agent: crate::core::cli_agent::CLIAgent, elapsed: std::
     super::remote::notify_desktop(Some(agent.display_name()), &body);
 }
 
+/// Ring the platform's alert sound, reporting whether one was actually made —
+/// `Audible` falls back to a flash when it wasn't, so a silent `false` is the
+/// difference between "you heard the bell" and "you saw it instead".
+///
+/// Linux has no equivalent worth the dependency: the desktop sound APIs
+/// (libcanberra, PipeWire) are a runtime link away and X11's `XBell` does
+/// nothing under Wayland, so the flash fallback stays the answer there.
 fn ring_system_bell() -> bool {
     #[cfg(target_os = "macos")]
     {
         objc2_app_kit::NSBeep();
         true
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        // MB_OK is the "Default Beep" scheme entry, so this follows whatever
+        // the user picked in Sound Settings — including "None", which is a
+        // deliberate silence and still reports success. Deliberately not
+        // `Beep()`, which synthesizes a fixed tone straight at the speaker and
+        // ignores the scheme. Returns immediately; the sound plays async.
+        use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
+        use windows_sys::Win32::UI::WindowsAndMessaging::MB_OK;
+        unsafe { MessageBeep(MB_OK) != 0 }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         false
     }
@@ -1152,6 +1170,10 @@ impl TerminalView {
                     if !ring_system_bell() {
                         self.flash_bell(cx);
                     }
+                }
+                BellMode::Both => {
+                    ring_system_bell();
+                    self.flash_bell(cx);
                 }
             },
             AlacEvent::TextAreaSizeRequest(fmt) => {
@@ -3903,26 +3925,6 @@ impl TerminalView {
         }
 
         self.smooth_scroll(delta, cx);
-    }
-
-    pub fn command_marks(&self) -> Vec<crate::terminal::marks::CommandMark> {
-        self.terminal.marks().list()
-    }
-
-    pub fn scroll_to_mark(&mut self, row: i64, cx: &mut Context<Self>) -> bool {
-        use alacritty_terminal::grid::Dimensions as _;
-        let mut term = self.terminal.term.lock();
-        let history = term.grid().history_size() as i64;
-        if row < 0 || row > history + term.grid().screen_lines() as i64 {
-            return false;
-        }
-        let target = (history - row).max(0);
-        let current = term.grid().display_offset() as i64;
-        term.scroll_display(Scroll::Delta((target - current) as i32));
-        drop(term);
-        self.scroll_frac = 0.;
-        cx.notify();
-        true
     }
 
     fn smooth_scroll(&mut self, delta: f32, cx: &mut Context<Self>) {
