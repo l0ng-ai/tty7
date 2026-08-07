@@ -256,6 +256,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsScrollbackDesc => "每个窗格保留的历史行数。仅适用于新窗格。",
         L10nKey::SettingsScrollSpeed => "滚动速度",
         L10nKey::SettingsScrollSpeedDesc => "应用于鼠标滚轮滚动的倍率。",
+        L10nKey::SettingsSmoothScroll => "平滑滚动",
+        L10nKey::SettingsSmoothScrollDesc => {
+            "滚轮每一格分几帧滚到位，而不是一次跳完。触控板本来就是连续滚动，不受影响。"
+        }
         L10nKey::SettingsMouse => "鼠标",
         L10nKey::SettingsFocusFollowsMouse => "焦点跟随鼠标",
         L10nKey::SettingsFocusFollowsMouseDesc => "悬停窗格即聚焦，无需点击。",

@@ -63,6 +63,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   touch one it didn't, so a hand-written skill that happens to share the
   directory name survives. (#248)
 
+- **Smooth scrolling for wheel mice** — a notch now eases into place over a
+  handful of frames instead of jumping the whole distance at once.
+  **Settings → Terminal → Scrolling → Smooth scrolling**, on by default.
+
+  Sub-line scroll positions have been in place for a while: the view keeps a
+  fractional remainder and paints the grid shifted by it, so the scrollback
+  need not land on a line boundary. But the position was a function of the
+  *event*, not of *time* — a notch arrived and the whole thing was applied at
+  once. Whether that looked smooth came down entirely to how fine-grained the
+  platform's deltas were. A macOS trackpad reports pixels, so it did. A wheel
+  on Windows reports whole lines (gpui multiplies the notch by the system's
+  scroll-lines setting, three by default), the fraction came out zero every
+  time, and the view jumped three lines per notch — the sub-line machinery was
+  present and never engaged. That is the "no smooth scroll on Windows" report.
+
+  A 120-step wheel notch is one discrete pulse; no amount of arithmetic on the
+  delta recovers a continuous gesture from it. So the fix is to make position a
+  function of time: a notch adds to a remaining distance, and each frame
+  consumes a share of what is left. Roughly 120ms to land, exponential, so most
+  of the travel happens immediately and the tail is invisible — under a pixel
+  of remainder is snapped rather than approached, since every frame of it costs
+  a repaint.
+
+  Trackpads keep the direct path. They already deliver a continuous pixel
+  stream, and putting an animation between the fingers and the grid would only
+  add lag. The split falls out of the event itself — line deltas are discrete
+  and get animated, pixel deltas are continuous and do not. Mouse reporting and
+  alternate-scroll are untouched too: those forward whole lines to the
+  application, which cannot be spread over frames.
+
+  The distance in flight is relative, not an absolute target, so output
+  arriving mid-scroll shifts the grid without dragging the animation somewhere
+  else. Everything that moves the view on its own — jumping to a prompt,
+  dragging a selection past the edge, clearing the scrollback, the keyboard and
+  mouse-reporting paths — cancels what is in flight first.
+
 ### Fixed
 
 - **Scoop shims work again when tty7 is launched from a hardened Windows

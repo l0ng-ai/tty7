@@ -283,6 +283,8 @@ pub enum L10nKey {
     SettingsScrollbackDesc,
     SettingsScrollSpeed,
     SettingsScrollSpeedDesc,
+    SettingsSmoothScroll,
+    SettingsSmoothScrollDesc,
     SettingsMouse,
     SettingsFocusFollowsMouse,
     SettingsFocusFollowsMouseDesc,

@@ -292,6 +292,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsScrollSpeed => "スクロール速度",
         L10nKey::SettingsScrollSpeedDesc => "マウスホイールのスクロールに適用する倍率",
+        L10nKey::SettingsSmoothScroll => "スムーズスクロール",
+        L10nKey::SettingsSmoothScrollDesc => {
+            "ホイール1ノッチ分を一気に飛ばさず、数フレームかけて動かす。\
+             トラックパッドは元から連続的なので影響しない"
+        }
         L10nKey::SettingsMouse => "マウス",
         L10nKey::SettingsFocusFollowsMouse => "フォーカスがマウスに追従する",
         L10nKey::SettingsFocusFollowsMouseDesc => {

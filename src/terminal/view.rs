@@ -85,6 +85,25 @@ struct DragScroll {
     side: Side,
 }
 
+/// In-flight wheel animation. `remaining` is what is left to scroll, in lines,
+/// relative to wherever the view happens to be — deliberately not an absolute
+/// target, so output arriving mid-animation shifts the grid under us without
+/// dragging the animation somewhere else.
+#[derive(Clone, Copy)]
+struct ScrollAnim {
+    remaining: f32,
+    last: std::time::Instant,
+}
+
+/// Fraction of the remaining distance consumed per [`SCROLL_ANIM_FRAME`].
+const SCROLL_ANIM_SMOOTH: f32 = 0.4;
+/// The frame `SCROLL_ANIM_SMOOTH` is calibrated against, and the tick interval.
+const SCROLL_ANIM_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+/// Below this much left to travel, land instead of asymptoting toward it. A
+/// twentieth of a line is around a pixel — the tail of an exponential decay is
+/// invisible long before it ends, and every frame of it costs a full repaint.
+const SCROLL_ANIM_MIN: f32 = 0.05;
+
 fn cwd_is_on_host(pane_runs_remotely: bool, host_is_local: bool) -> bool {
     match pane_runs_remotely {
         false => host_is_local,
@@ -118,6 +137,8 @@ pub struct TerminalView {
     selecting: bool,
     drag_scroll: Option<DragScroll>,
     drag_scroll_epoch: u64,
+    scroll_anim: Option<ScrollAnim>,
+    scroll_anim_epoch: u64,
     pub title: String,
     pub marked_text: String,
     last_mouse_cell: Option<(usize, usize)>,
@@ -915,6 +936,8 @@ impl TerminalView {
             selecting: false,
             drag_scroll: None,
             drag_scroll_epoch: 0,
+            scroll_anim: None,
+            scroll_anim_epoch: 0,
             title: "tty7".to_string(),
             marked_text: String::new(),
             last_mouse_cell: None,
@@ -1904,6 +1927,7 @@ impl TerminalView {
     }
 
     fn jump_to_prompt(&mut self) {
+        self.cancel_scroll_anim();
         let mut term = self.terminal.term.lock();
         term.selection = None;
         term.scroll_display(Scroll::Bottom);
@@ -2071,6 +2095,7 @@ impl TerminalView {
         if lines == 0 {
             return;
         }
+        self.cancel_scroll_anim();
         let mut mode = *self.terminal.term.lock().mode();
         if !self.report_mouse {
             mode.remove(TermMode::MOUSE_MODE);
@@ -2400,6 +2425,7 @@ impl TerminalView {
     }
 
     pub fn clear_scrollback(&mut self, cx: &mut Context<Self>) {
+        self.cancel_scroll_anim();
         self.terminal.term.lock().grid_mut().clear_history();
         self.scroll_frac = 0.;
         self.terminal.marks().clear();
@@ -3918,6 +3944,7 @@ impl TerminalView {
         let Some(ds) = self.drag_scroll else {
             return false;
         };
+        self.cancel_scroll_anim();
         let mut term = self.terminal.term.lock();
         let before = term.grid().display_offset();
         term.scroll_display(Scroll::Delta(drag_scroll_step(ds.overshoot)));
@@ -3963,9 +3990,12 @@ impl TerminalView {
 
     fn on_scroll(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let mult = cx.global::<Config>().mouse_scroll_multiplier;
-        let raw = match ev.delta {
-            ScrollDelta::Lines(p) => p.y,
-            ScrollDelta::Pixels(p) => p.y.as_f32() / self.line_height.as_f32(),
+        // A wheel notch is one discrete pulse — applying it whole is what makes
+        // scrolling look like it jumps. A trackpad already sends a fine-grained
+        // pixel stream, so it stays on the direct path.
+        let (raw, discrete) = match ev.delta {
+            ScrollDelta::Lines(p) => (p.y, true),
+            ScrollDelta::Pixels(p) => (p.y.as_f32() / self.line_height.as_f32(), false),
         };
         let delta = raw * mult;
 
@@ -3975,6 +4005,9 @@ impl TerminalView {
                 || mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
         };
         if quantized {
+            // Whole lines are what the application gets told about, so this path
+            // cannot be spread over frames.
+            self.cancel_scroll_anim();
             let total = self.scroll_debt + delta;
             let lines = total.trunc() as i32;
             self.scroll_debt = total - lines as f32;
@@ -3984,10 +4017,80 @@ impl TerminalView {
             return;
         }
 
-        self.smooth_scroll(delta, cx);
+        if discrete && cx.global::<Config>().smooth_scroll {
+            self.queue_scroll_anim(delta, cx);
+        } else {
+            self.cancel_scroll_anim();
+            self.smooth_scroll(delta, cx);
+        }
     }
 
-    fn smooth_scroll(&mut self, delta: f32, cx: &mut Context<Self>) {
+    /// Add `delta` to the in-flight animation, starting the frame loop if it is
+    /// idle. Successive notches accumulate rather than restart, so spinning the
+    /// wheel fast still lands exactly where the notches asked for.
+    fn queue_scroll_anim(&mut self, delta: f32, cx: &mut Context<Self>) {
+        if let Some(anim) = self.scroll_anim.as_mut() {
+            anim.remaining += delta;
+            return;
+        }
+        self.scroll_anim = Some(ScrollAnim {
+            remaining: delta,
+            last: std::time::Instant::now(),
+        });
+        self.scroll_anim_epoch += 1;
+        let epoch = self.scroll_anim_epoch;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(SCROLL_ANIM_FRAME).await;
+                if !matches!(
+                    this.update(cx, |view, cx| view.scroll_anim_tick(epoch, cx)),
+                    Ok(true)
+                ) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Drop whatever is left to travel. Every other way the display offset moves
+    /// — jumping to a prompt, dragging a selection past the edge, the keyboard
+    /// and mouse-reporting paths — has to come through here first, or the
+    /// animation would keep walking away from wherever it put us.
+    fn cancel_scroll_anim(&mut self) {
+        if self.scroll_anim.take().is_some() {
+            self.scroll_anim_epoch += 1;
+        }
+    }
+
+    fn scroll_anim_tick(&mut self, epoch: u64, cx: &mut Context<Self>) -> bool {
+        if epoch != self.scroll_anim_epoch {
+            return false;
+        }
+        let Some(anim) = self.scroll_anim.as_mut() else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(anim.last);
+        anim.last = now;
+        let (step, last) = scroll_anim_step(anim.remaining, dt);
+        anim.remaining -= step;
+        if last {
+            self.scroll_anim = None;
+        }
+        // Hitting the top or the bottom of the scrollback consumes nothing; the
+        // remaining distance has nowhere to go, so stop instead of decaying it
+        // against the clamp for another 100ms.
+        let moved = self.smooth_scroll(step, cx);
+        if !moved {
+            self.cancel_scroll_anim();
+            return false;
+        }
+        !last
+    }
+
+    /// Apply `delta` lines right now. Returns whether anything actually moved.
+    fn smooth_scroll(&mut self, delta: f32, cx: &mut Context<Self>) -> bool {
         let mut term = self.terminal.term.lock();
         let offset = term.grid().display_offset();
         let max = term.grid().history_size();
@@ -3999,7 +4102,9 @@ impl TerminalView {
         if jump != 0 || frac != self.scroll_frac {
             self.scroll_frac = frac;
             cx.notify();
+            return true;
         }
+        false
     }
 
     fn grid_line(
@@ -5357,6 +5462,23 @@ fn smooth_scroll_step(offset: usize, frac: f32, delta: f32, max: usize) -> (i32,
     (new_offset as i32 - offset as i32, pos - new_offset)
 }
 
+/// How much of `remaining` to consume this frame, and whether this is the last
+/// one. Decay is scaled by the real elapsed time so a dropped frame covers the
+/// ground it missed instead of stretching the animation out.
+fn scroll_anim_step(remaining: f32, dt: std::time::Duration) -> (f32, bool) {
+    if remaining.abs() <= SCROLL_ANIM_MIN {
+        return (remaining, true);
+    }
+    let frames = (dt.as_secs_f32() / SCROLL_ANIM_FRAME.as_secs_f32()).clamp(0.1, 8.);
+    let consumed = 1. - (1. - SCROLL_ANIM_SMOOTH).powf(frames);
+    let step = remaining * consumed;
+    if (remaining - step).abs() <= SCROLL_ANIM_MIN {
+        (remaining, true)
+    } else {
+        (step, false)
+    }
+}
+
 fn drag_scroll_step(overshoot: f32) -> i32 {
     let lines = overshoot.abs().ceil().clamp(1., 8.) as i32;
     if overshoot < 0. { -lines } else { lines }
@@ -5369,6 +5491,7 @@ mod tests {
         compose_notification_title, cwd_is_on_host, display_width, is_typeahead_interrupt,
         loopback_plan, observe_typeahead_for_owner,
     };
+    use super::{SCROLL_ANIM_FRAME, scroll_anim_step};
     use super::{
         drag_scroll_step, encode_mouse, escape_candidate, expand_file_command_template,
         fallback_chain, fig_icon_emoji, fig_icon_glyph, focus_report_bytes, input_overflow_shift,
@@ -6101,6 +6224,58 @@ mod tests {
     }
 
     #[test]
+    fn scroll_anim_step_converges_and_lands() {
+        let frame = SCROLL_ANIM_FRAME;
+        // A notch is spread over frames instead of being applied whole.
+        let (step, last) = scroll_anim_step(3.0, frame);
+        assert!(!last);
+        assert!(
+            step > 0. && step < 3.0,
+            "took {step} of 3 lines in one frame"
+        );
+
+        // And it converges: no notch is left hanging.
+        let mut remaining = 3.0_f32;
+        let mut frames = 0u32;
+        loop {
+            let (step, last) = scroll_anim_step(remaining, frame);
+            remaining -= step;
+            frames += 1;
+            if last {
+                break;
+            }
+            assert!(frames < 200, "still {remaining} lines short after {frames}");
+        }
+        assert!(remaining.abs() < 1e-4, "landed {remaining} lines off");
+        // Slow enough to read as motion, fast enough not to feel like lag.
+        let ms = frames * SCROLL_ANIM_FRAME.as_millis() as u32;
+        assert!((60..=200).contains(&ms), "a 3-line notch took {ms}ms");
+    }
+
+    #[test]
+    fn scroll_anim_step_covers_dropped_frames() {
+        // A late tick has to make up the ground it missed, or a busy pane would
+        // scroll slower than an idle one.
+        let (one, _) = scroll_anim_step(10.0, SCROLL_ANIM_FRAME);
+        let (four, _) = scroll_anim_step(10.0, SCROLL_ANIM_FRAME * 4);
+        assert!(four > one * 2., "{four} should far outpace {one}");
+        // But the catch-up is capped, so a tick after a long stall never
+        // overshoots what was actually asked for.
+        let (stalled, _) = scroll_anim_step(10.0, std::time::Duration::from_secs(5));
+        assert!(
+            stalled > four && stalled <= 10.0,
+            "stalled tick took {stalled}"
+        );
+    }
+
+    #[test]
+    fn scroll_anim_step_lands_on_a_negligible_remainder() {
+        let (step, last) = scroll_anim_step(-0.005, SCROLL_ANIM_FRAME);
+        assert!(last);
+        assert_eq!(step, -0.005);
+    }
+
+    #[test]
     fn drag_scroll_step_scales_with_overshoot_and_caps() {
         assert_eq!(drag_scroll_step(0.2), 1);
         assert_eq!(drag_scroll_step(-0.2), -1);
@@ -6478,10 +6653,14 @@ pub(crate) fn quiet_test_ssh_pane(
 mod gpui_tests {
     use super::*;
     use crate::daemon::protocol::{ClientMsg, DaemonMsg};
-    use gpui::TestAppContext;
+    use gpui::{TestAppContext, point};
     use std::os::unix::net::UnixStream;
 
     fn harness(cx: &mut TestAppContext) -> (gpui::WindowHandle<TerminalView>, UnixStream) {
+        // Building a view reads the config. Whether that hit the real user
+        // directory used to come down to which test happened to pin the
+        // scratch dir first.
+        crate::core::config::pin_test_config_dir();
         cx.executor().allow_parking();
         let (client_side, daemon_side) = UnixStream::pair().unwrap();
         cx.update(|cx| {
@@ -7941,6 +8120,90 @@ mod gpui_tests {
 
     fn display_offset(view: &TerminalView) -> usize {
         view.terminal.term.lock().grid().display_offset()
+    }
+
+    fn wheel(delta: gpui::ScrollDelta) -> ScrollWheelEvent {
+        ScrollWheelEvent {
+            delta,
+            ..Default::default()
+        }
+    }
+
+    /// The whole point of the animation: a notch must not land in one go.
+    #[gpui::test]
+    fn a_wheel_notch_is_spread_over_frames(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, w, cx| {
+                scroll_into_history(view, 10);
+                view.on_scroll(&wheel(gpui::ScrollDelta::Lines(point(0., -3.))), w, cx);
+                assert_eq!(
+                    display_offset(view),
+                    10,
+                    "the notch was applied whole, before a single frame ran"
+                );
+                assert_eq!(view.scroll_frac, 0., "and not even a sliver of it");
+                assert!(view.scroll_anim.is_some(), "nothing was left to animate");
+            })
+            .unwrap();
+    }
+
+    /// A trackpad is already a continuous stream — animating it would only put
+    /// lag between the fingers and the grid.
+    #[gpui::test]
+    fn a_trackpad_still_scrolls_the_instant_it_is_touched(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, w, cx| {
+                scroll_into_history(view, 10);
+                let lines = view.line_height.as_f32() * -3.;
+                view.on_scroll(
+                    &wheel(gpui::ScrollDelta::Pixels(point(px(0.), px(lines)))),
+                    w,
+                    cx,
+                );
+                assert_eq!(display_offset(view), 7, "the pixels were held back");
+                assert!(
+                    view.scroll_anim.is_none(),
+                    "a trackpad started an animation"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn turning_smooth_scrolling_off_restores_the_direct_path(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        cx.update(|cx| cx.global_mut::<Config>().smooth_scroll = false);
+        window
+            .update(cx, |view, w, cx| {
+                scroll_into_history(view, 10);
+                view.on_scroll(&wheel(gpui::ScrollDelta::Lines(point(0., -3.))), w, cx);
+                assert_eq!(display_offset(view), 7);
+                assert!(view.scroll_anim.is_none());
+            })
+            .unwrap();
+    }
+
+    /// An animation that kept walking after the view was moved out from under
+    /// it would drag the user back off the prompt they just jumped to.
+    #[gpui::test]
+    fn moving_the_viewport_cancels_an_animation_in_flight(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, w, cx| {
+                scroll_into_history(view, 10);
+                view.on_scroll(&wheel(gpui::ScrollDelta::Lines(point(0., -3.))), w, cx);
+                assert!(view.scroll_anim.is_some());
+
+                view.jump_to_prompt();
+                assert!(
+                    view.scroll_anim.is_none(),
+                    "the animation outlived the jump"
+                );
+                assert_eq!(display_offset(view), 0);
+            })
+            .unwrap();
     }
 
     #[gpui::test]

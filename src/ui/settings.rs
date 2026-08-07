@@ -3444,6 +3444,7 @@ impl Tty7App {
         let mouse_hide = cfg.mouse_hide_while_typing;
         let focus_follows = cfg.focus_follows_mouse;
         let scroll_mult = cfg.mouse_scroll_multiplier;
+        let smooth_scroll = cfg.smooth_scroll;
         let mouse_reporting = cfg.mouse_reporting;
         let bell = cfg.bell;
         let scrollback_idx = match cfg.scrollback_limit {
@@ -3544,6 +3545,10 @@ impl Tty7App {
                     .child(format!("{scroll_mult:.2}×")),
             )
             .into_any_element();
+        let smooth_scroll_switch = crate::ui::theme::switch("term-smooth-scroll", cx)
+            .checked(smooth_scroll)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_smooth_scroll(*on, cx)))
+            .into_any_element();
 
         v_flex()
             .child(self.render_shell_group(cx))
@@ -3559,6 +3564,12 @@ impl Tty7App {
                 t(L10nKey::SettingsScrollSpeed),
                 t(L10nKey::SettingsScrollSpeedDesc),
                 scroll_control,
+                cx,
+            ))
+            .child(self.settings_row(
+                t(L10nKey::SettingsSmoothScroll),
+                t(L10nKey::SettingsSmoothScrollDesc),
+                smooth_scroll_switch,
                 cx,
             ))
             .child(self.section_rule(cx))

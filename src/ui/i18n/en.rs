@@ -294,6 +294,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsScrollbackDesc => "Lines of history kept per pane. Applies to new panes.",
         L10nKey::SettingsScrollSpeed => "Scroll speed",
         L10nKey::SettingsScrollSpeedDesc => "Multiplier applied to mouse-wheel scrolling.",
+        L10nKey::SettingsSmoothScroll => "Smooth scrolling",
+        L10nKey::SettingsSmoothScrollDesc => {
+            "Ease each wheel notch into place instead of jumping the whole way at once. \
+             Trackpads scroll continuously already and are unaffected."
+        }
         L10nKey::SettingsMouse => "Mouse",
         L10nKey::SettingsFocusFollowsMouse => "Focus follows mouse",
         L10nKey::SettingsFocusFollowsMouseDesc => "Hovering a pane focuses it without a click.",

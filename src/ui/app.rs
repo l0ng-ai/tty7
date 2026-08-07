@@ -2082,6 +2082,10 @@ impl Tty7App {
         });
     }
 
+    pub(crate) fn set_smooth_scroll(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.smooth_scroll = on);
+    }
+
     pub(crate) fn set_clipboard_trim(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.clipboard_trim_trailing_spaces = on);
     }
