@@ -92,6 +92,14 @@ Source: "{#StageDir}\tty7-updater.exe"; DestDir: "{app}"; Flags: ignoreversion s
 ; updates. The portable archive is created before the marker enters the stage.
 Source: "{#StageDir}\.tty7-inno-install"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#StageDir}\completions\*"; DestDir: "{app}\completions"; Flags: ignoreversion recursesubdirs
+; Microsoft's redistributable ConPTY. It has to land in {app} rather than a
+; subdirectory: `portable-pty` finds it through the DLL search path, which
+; starts at the directory of the executable that loads it (the daemon is
+; {app}\tty7-app.exe). The two files are a matched pair — never update one
+; alone. See assets\windows\conpty\README.md.
+Source: "{#StageDir}\conpty.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\OpenConsole.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\LICENSE-ConPTY.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 ; The Linux musl tty7-server, for serving WSL distros without a download.

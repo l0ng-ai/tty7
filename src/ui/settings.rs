@@ -3499,6 +3499,7 @@ impl Tty7App {
             BellMode::None => 0,
             BellMode::Visual => 1,
             BellMode::Audible => 2,
+            BellMode::Both => 3,
         };
         let bell_control = self.segmented(
             "term-bell",
@@ -3506,6 +3507,7 @@ impl Tty7App {
                 t(L10nKey::SettingsBellModeOff),
                 t(L10nKey::SettingsBellModeVisual),
                 t(L10nKey::SettingsBellModeAudible),
+                t(L10nKey::SettingsBellModeBoth),
             ],
             bell_idx,
             cx,
@@ -3513,7 +3515,9 @@ impl Tty7App {
                 let mode = match ix {
                     0 => BellMode::None,
                     1 => BellMode::Visual,
-                    _ => BellMode::Audible,
+                    2 => BellMode::Audible,
+                    3 => BellMode::Both,
+                    _ => BellMode::default(),
                 };
                 this.set_bell_mode(mode, cx);
             },
@@ -4759,27 +4763,11 @@ impl Tty7App {
                     ),
             )
             .child(
-                v_flex()
-                    .mt_5()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(foreground)
-                            .child(t(L10nKey::SettingsAboutDesc1)),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(muted_fg)
-                            .child(t(L10nKey::SettingsAboutDesc2)),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted_fg)
-                            .child(t(L10nKey::SettingsAboutTech)),
-                    ),
+                div()
+                    .mt_4()
+                    .text_sm()
+                    .text_color(muted_fg)
+                    .child(t(L10nKey::SettingsAboutDesc1)),
             )
             .child(
                 v_flex()
@@ -4840,12 +4828,6 @@ impl Tty7App {
                         this.child(div().text_sm().text_color(muted_fg).child(text))
                     })
                     .child(
-                        div()
-                            .text_sm()
-                            .text_color(muted_fg)
-                            .child(t(L10nKey::SettingsCheckUpdatesDesc)),
-                    )
-                    .child(
                         h_flex().child(
                             Button::new("check-update-now")
                                 .label(
@@ -4866,22 +4848,17 @@ impl Tty7App {
                         ),
                     )
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                crate::ui::theme::switch("check-updates", cx)
-                                    .checked(check_for_updates)
-                                    .on_click(cx.listener(|this, on: &bool, _w, cx| {
-                                        this.set_check_for_updates(*on, cx)
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(foreground)
-                                    .child(t(L10nKey::SettingsCheckUpdatesOnLaunch)),
-                            ),
+                        self.settings_row(
+                            t(L10nKey::SettingsCheckUpdatesOnLaunch),
+                            t(L10nKey::SettingsCheckUpdatesDesc),
+                            crate::ui::theme::switch("check-updates", cx)
+                                .checked(check_for_updates)
+                                .on_click(cx.listener(|this, on: &bool, _w, cx| {
+                                    this.set_check_for_updates(*on, cx)
+                                }))
+                                .into_any_element(),
+                            cx,
+                        ),
                     ),
             )
             .child(
@@ -4912,6 +4889,13 @@ impl Tty7App {
                                 })),
                         ),
                     ),
+            )
+            .child(
+                div()
+                    .mt_8()
+                    .text_xs()
+                    .text_color(muted_fg)
+                    .child(t(L10nKey::SettingsAboutTech)),
             )
             .into_any_element()
     }

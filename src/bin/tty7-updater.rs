@@ -488,7 +488,11 @@ mod windows {
     const PORTABLE_MARKER_CONTENT: &[u8] = b"portable-v1";
     const MAX_PORTABLE_ENTRIES: usize = 4096;
     const MAX_PORTABLE_EXPANDED_BYTES: u64 = 1024 * 1024 * 1024;
-    const PORTABLE_MANAGED_ROOTS: [&str; 8] = [
+    // Everything the release package owns: an entry outside this list is
+    // rejected on extraction, and everything in it is moved aside and replaced
+    // during an in-place portable update. A file the package ships but this
+    // list omits would survive forever at its installed version.
+    const PORTABLE_MANAGED_ROOTS: [&str; 11] = [
         "tty7-app.exe",
         "tty7.exe",
         "tty7-updater.exe",
@@ -497,6 +501,14 @@ mod windows {
         "server",
         "LICENSE.txt",
         "README.md",
+        // The bundled ConPTY pair and its notice. Deliberately absent from
+        // `verify_portable_payload`: tty7 runs without them, falling back to
+        // the in-box conhost, so a package that forgot them is a release bug
+        // to catch in CI (verify-windows-package.ps1) rather than a reason to
+        // abort a user's update after the download.
+        "conpty.dll",
+        "OpenConsole.exe",
+        "LICENSE-ConPTY.txt",
     ];
 
     pub fn run() -> Result<(), String> {
@@ -1729,6 +1741,9 @@ mod windows {
                     ("completions/powershell.json", b"{}".to_vec()),
                     ("LICENSE.txt", b"license".to_vec()),
                     ("README.md", b"readme".to_vec()),
+                    ("conpty.dll", b"conpty".to_vec()),
+                    ("OpenConsole.exe", b"openconsole".to_vec()),
+                    ("LICENSE-ConPTY.txt", b"conpty license".to_vec()),
                 ],
             );
             write_manifest(&archive, &manifest, &asset_name);
@@ -1746,6 +1761,10 @@ mod windows {
                 PORTABLE_MARKER_CONTENT
             );
             assert!(payload.join("completions/powershell.json").is_file());
+            // The bundled ConPTY has to arrive with the rest: a portable update
+            // that dropped it would leave the pane host it replaced behind.
+            assert!(payload.join("conpty.dll").is_file());
+            assert!(payload.join("OpenConsole.exe").is_file());
         }
 
         #[test]
