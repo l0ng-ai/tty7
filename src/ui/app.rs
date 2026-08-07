@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::core::actions::*;
 use crate::core::config::{
     Config, CursorStyle as ConfigCursorStyle, NewTabPosition, RightPanelTab, ShellConfig,
-    TabBarPosition,
+    SidebarMode, TabBarPosition,
 };
 use crate::core::session::{
     Session, SessionAxis, SessionPane, SessionTab, WorkspaceId, WorkspaceStore,
@@ -389,6 +389,7 @@ pub struct Tty7App {
     pub(crate) right_panel_visible: bool,
     pub(crate) right_panel_tab: RightPanelTab,
     pub(crate) sidebar_collapsed: bool,
+    pub(crate) sidebar_mode: SidebarMode,
     pub(crate) sidebar_scroll: gpui::ScrollHandle,
     pub(crate) reorder: Rc<RefCell<Option<crate::ui::reorder::Reorder>>>,
     pub(crate) sidebar_search: Entity<InputState>,
@@ -403,13 +404,13 @@ pub struct Tty7App {
     pub(crate) workspace_rename: Option<WorkspaceRename>,
     window_title: std::cell::RefCell<String>,
     pub(crate) connect: Option<crate::ui::remote_workspace::ConnectFlow>,
-    pub(crate) switcher: Option<crate::ui::switcher::Switcher>,
+    pub(crate) workspaces_panel: Option<crate::ui::workspaces_panel::WorkspacesPanel>,
     pub(crate) host_snapshots: std::collections::HashMap<
         crate::ui::host_registry::HostId,
-        crate::ui::switcher::HostSnapshot,
+        crate::ui::workspaces_panel::HostSnapshot,
     >,
     /// Errors reported for a remote host that should be shown inside that host's
-    /// switcher group instead of as a global modal or toast.
+    /// workspace group instead of as a global modal or toast.
     pub(crate) remote_host_errors: std::collections::HashMap<String, String>,
 }
 
@@ -566,6 +567,7 @@ impl Tty7App {
         let right_panel_visible = cx.global::<Config>().right_panel_visible;
         let right_panel_tab = cx.global::<Config>().right_panel_tab;
         let sidebar_collapsed = cx.global::<Config>().sidebar_collapsed;
+        let sidebar_mode = cx.global::<Config>().sidebar_mode;
         let config_watch = cx.observe_global_in::<Config>(window, |this, window, cx| {
             this.reload_from_config(window, cx)
         });
@@ -697,6 +699,7 @@ impl Tty7App {
             right_panel_visible,
             right_panel_tab,
             sidebar_collapsed,
+            sidebar_mode,
             sidebar_scroll: gpui::ScrollHandle::new(),
             reorder: Rc::new(RefCell::new(None)),
             sidebar_search,
@@ -711,7 +714,7 @@ impl Tty7App {
             workspace_rename: None,
             window_title: std::cell::RefCell::new(String::new()),
             connect: None,
-            switcher: None,
+            workspaces_panel: None,
             host_snapshots: std::collections::HashMap::new(),
             remote_host_errors: std::collections::HashMap::new(),
         };
@@ -902,11 +905,7 @@ impl Tty7App {
             let _ = handle.update(cx, |_, other, _| other.activate_window());
             return;
         }
-        if self.tabs.is_empty() {
-            self.switch_workspace(id, window, cx);
-        } else {
-            crate::ui::windows::open(cx, Some(id));
-        }
+        self.switch_workspace(id, window, cx);
     }
 
     pub(crate) fn switch_workspace(
@@ -2022,6 +2021,23 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.sidebar_diff_preview = on);
     }
 
+    pub(crate) fn set_sidebar_mode(&mut self, mode: SidebarMode, cx: &mut Context<Self>) {
+        self.sidebar_mode = mode;
+        self.sidebar_collapsed = false;
+        self.update_config(cx, |cfg| {
+            cfg.sidebar_mode = mode;
+            cfg.sidebar_collapsed = false;
+        });
+    }
+
+    pub(crate) fn toggle_sidebar_mode(&mut self, cx: &mut Context<Self>) {
+        let next = match self.sidebar_mode {
+            SidebarMode::Workspaces => SidebarMode::Outline,
+            SidebarMode::Outline => SidebarMode::Workspaces,
+        };
+        self.set_sidebar_mode(next, cx);
+    }
+
     pub(crate) fn toggle_tab_sidebar(&mut self, cx: &mut Context<Self>) {
         let next = match cx.global::<Config>().tab_bar_position {
             TabBarPosition::Top => TabBarPosition::Left,
@@ -2031,22 +2047,14 @@ impl Tty7App {
     }
 
     pub(crate) fn toggle_left_panel(&mut self, cx: &mut Context<Self>) {
-        let (pos, collapsed) = match cx.global::<Config>().tab_bar_position {
-            TabBarPosition::Top => (TabBarPosition::Left, false),
-            TabBarPosition::Left => (TabBarPosition::Left, !self.sidebar_collapsed),
-        };
+        let collapsed = !self.sidebar_collapsed;
         self.sidebar_collapsed = collapsed;
-        self.update_config(cx, |cfg| {
-            cfg.tab_bar_position = pos;
-            cfg.sidebar_collapsed = collapsed;
-        });
+        self.update_config(cx, |cfg| cfg.sidebar_collapsed = collapsed);
         cx.notify();
     }
 
-    pub(crate) fn left_panel_open(&self, cx: &gpui::App) -> bool {
-        matches!(cx.global::<Config>().tab_bar_position, TabBarPosition::Left)
-            && !self.sidebar_collapsed
-            && !self.tabs.is_empty()
+    pub(crate) fn left_panel_open(&self, _cx: &gpui::App) -> bool {
+        !self.sidebar_collapsed
     }
 
     pub(crate) fn set_notify_mode(
@@ -3188,6 +3196,8 @@ impl Tty7App {
             },
         )];
         self.workspace_rename = Some(WorkspaceRename { input, _subs: subs });
+        self.sidebar_mode = SidebarMode::Outline;
+        self.sidebar_collapsed = false;
         cx.notify();
     }
 
@@ -3333,7 +3343,7 @@ impl Tty7App {
         match kind {
             NewTab => self.new_tab(window, cx),
             NewWorkspace => crate::ui::windows::open(cx, None),
-            OpenWorkspacePicker => self.open_switcher(window, cx),
+            OpenWorkspacePicker => self.set_sidebar_mode(SidebarMode::Workspaces, cx),
             StopWorkspace => self.stop_workspace(self.workspace, window, cx),
             DeleteWorkspace => self.delete_workspace(self.workspace, window, cx),
             SplitRight => self.split(Axis::Horizontal, window, cx),
@@ -3357,6 +3367,9 @@ impl Tty7App {
             ToggleFullscreen => window.toggle_fullscreen(),
             ToggleTabSidebar => self.toggle_tab_sidebar(cx),
             ToggleLeftPanel => self.toggle_left_panel(cx),
+            ToggleSidebarMode => self.toggle_sidebar_mode(cx),
+            ShowSidebarWorkspaces => self.set_sidebar_mode(SidebarMode::Workspaces, cx),
+            ShowSidebarOutline => self.set_sidebar_mode(SidebarMode::Outline, cx),
             ToggleRightPanel => self.toggle_right_panel(cx),
             ShowRightPanel(tab) => self.set_right_panel_tab(tab, cx),
             ResetFontSize => self.reset_font_size(cx),
@@ -5079,11 +5092,10 @@ impl Render for Tty7App {
         {
             cx.set_active_drag_cursor_style(gpui::CursorStyle::ClosedHand, window);
         }
-        let vertical = matches!(cx.global::<Config>().tab_bar_position, TabBarPosition::Left)
-            && !self.tabs.is_empty();
-        let rail = vertical && !self.sidebar_collapsed;
-        let strip = self.tab_strip(!vertical, window, cx);
-        let sidebar = rail.then(|| self.tab_sidebar(window, cx));
+        let sidebar_visible = self.left_panel_open(cx);
+        let show_chips = matches!(cx.global::<Config>().tab_bar_position, TabBarPosition::Top);
+        let strip = self.tab_strip(show_chips, window, cx);
+        let sidebar = sidebar_visible.then(|| self.left_sidebar(window, cx));
         let ssh_status = self
             .tabs
             .get(self.active)
@@ -5290,8 +5302,14 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &RenameWorkspace, window, cx| {
                     this.start_workspace_rename(window, cx)
                 }))
-                .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| {
-                    this.toggle_switcher(window, cx)
+                .on_action(cx.listener(|this, _: &ToggleSidebarMode, _window, cx| {
+                    this.toggle_sidebar_mode(cx)
+                }))
+                .on_action(cx.listener(|this, _: &ShowSidebarWorkspaces, _window, cx| {
+                    this.set_sidebar_mode(SidebarMode::Workspaces, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ShowSidebarOutline, _window, cx| {
+                    this.set_sidebar_mode(SidebarMode::Outline, cx)
                 }))
                 .on_action(cx.listener(|this, _: &StopWorkspace, window, cx| {
                     let id = this.workspace;
@@ -5527,7 +5545,6 @@ impl Render for Tty7App {
                 })
                 .child(main_layout)
                 .when_some(settings_overlay, |this, overlay| this.child(overlay))
-                .children(self.render_switcher(cx))
                 .when_some(self.palette.clone(), |this, palette| this.child(palette))
                 .children(gpui_component::Root::render_notification_layer(window, cx));
 

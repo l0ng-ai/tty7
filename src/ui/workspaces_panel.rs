@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, MouseButton, MouseDownEvent, Subscription,
-    Window, div, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, Entity, MouseButton, Subscription, Window, div,
+    prelude::*, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -20,30 +20,14 @@ use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow, human_bytes};
 use crate::ui::remote_workspace::ConnectFlow;
 
-const CARD_W: f32 = 560.0;
-
-const CARD_TOP: f32 = 120.0;
-
-const BODY_MAX_H: f32 = 420.0;
-
-const ROW_AVATAR: f32 = 20.0;
-
 const ROW_H: f32 = 32.0;
 const HOST_H: f32 = 34.0;
-
 const GUTTER: f32 = 26.0;
-
 const ICON: f32 = 16.0;
-
 const KID_INDENT: f32 = 16.0;
-
-const RAIL_X: f32 = ROW_PAD + GUTTER / 2.;
-
 const ROW_PAD: f32 = 8.0;
-
-const WHEN_W: f32 = 96.0;
-
 const PROGRESS_H: f32 = 3.0;
+const ROW_AVATAR: f32 = 20.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Link {
@@ -83,15 +67,14 @@ pub(crate) struct HostSnapshot {
     pub rows: Vec<RemoteWorkspaceRow>,
 }
 
-pub(crate) struct Switcher {
+pub(crate) struct WorkspacesPanel {
     pub query: Entity<InputState>,
     collapsed: HashSet<String>,
-    show_others: bool,
     renaming: Option<(WorkspaceId, Entity<InputState>)>,
     _subs: Vec<Subscription>,
 }
 
-impl Switcher {
+impl WorkspacesPanel {
     fn text(&self, cx: &App) -> String {
         self.query.read(cx).value().trim().to_lowercase()
     }
@@ -102,53 +85,119 @@ impl Switcher {
 }
 
 impl Tty7App {
-    pub(crate) fn toggle_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.switcher.is_some() {
-            self.close_switcher(window, cx);
-        } else {
-            self.open_switcher(window, cx);
+    pub(crate) fn workspaces_panel_state(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> &mut WorkspacesPanel {
+        if self.workspaces_panel.is_none() {
+            remote_connect::register(cx);
+            remote_connect::sweep_wsl(cx);
+            let query = cx.new(|cx| {
+                InputState::new(window, cx).placeholder(t(L10nKey::SidebarSearchWorkspaces))
+            });
+            let subs = vec![cx.subscribe_in(
+                &query,
+                window,
+                |_this, _input, ev: &InputEvent, _window, cx| {
+                    if matches!(ev, InputEvent::Change) {
+                        cx.notify();
+                    }
+                },
+            )];
+            self.workspaces_panel = Some(WorkspacesPanel {
+                query,
+                collapsed: HashSet::new(),
+                renaming: None,
+                _subs: subs,
+            });
         }
+        self.workspaces_panel.as_mut().unwrap()
     }
 
-    pub(crate) fn open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        remote_connect::register(cx);
-        remote_connect::sweep_wsl(cx);
-        let query = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(crate::ui::i18n::t(
-                crate::ui::i18n::L10nKey::SearchWorkspacesAndMachines,
-            ))
-        });
-        query.update(cx, |state, cx| state.focus(window, cx));
-        let subs = vec![cx.subscribe_in(
-            &query,
-            window,
-            |_this, _input, ev: &InputEvent, _window, cx| {
-                if matches!(ev, InputEvent::Change) {
-                    cx.notify();
-                }
-            },
-        )];
-        self.switcher = Some(Switcher {
-            query,
-            collapsed: HashSet::new(),
-            show_others: false,
-            renaming: None,
-            _subs: subs,
-        });
-        cx.notify();
-    }
+    pub(crate) fn workspaces_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let _state = self.workspaces_panel_state(window, cx);
+        let groups = self.workspace_groups(cx);
+        let others = self.other_hosts(&groups, cx);
+        let query = self
+            .workspaces_panel
+            .as_ref()
+            .map(|p| p.text(cx))
+            .unwrap_or_default();
 
-    pub(crate) fn close_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.switcher.take().is_some() {
-            if matches!(self.connect, Some(ConnectFlow::Failed { .. })) {
-                self.connect = None;
-            }
-            self.focus_active(window, cx);
-            cx.notify();
+        let mut body = v_flex().gap(px(6.));
+        let mut shown = 0usize;
+        for group in &groups {
+            let Some(rendered) = self.render_workspace_group(group, &query, cx) else {
+                continue;
+            };
+            shown += 1;
+            body = body.child(rendered);
         }
+        if let Some(band) = self.render_workspace_other_hosts(&others, &query, cx) {
+            shown += 1;
+            body = body.child(band);
+        }
+        if shown == 0 {
+            body = body.child(
+                div()
+                    .px(px(ROW_PAD))
+                    .py(px(14.))
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if query.is_empty() {
+                        t(L10nKey::SidebarNoWorkspaces)
+                    } else {
+                        t(L10nKey::SwitcherNoMatch)
+                    }),
+            );
+        }
+
+        let chip_inset = crate::ui::app::CONTENT_INSET - 7. + 4.;
+        let top_bar = h_flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap(px(6.))
+            .h(px(44.))
+            .pl(px(chip_inset))
+            .pr(px(crate::ui::app::CONTENT_INSET))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(20.))
+                    .child(
+                        Icon::new(IconName::Search)
+                            .size(px(14.))
+                            .text_color(cx.theme().muted_foreground),
+                    ),
+            )
+            .child(
+                div().flex_1().min_w_0().child(
+                    Input::new(&self.workspaces_panel.as_ref().unwrap().query)
+                        .appearance(false)
+                        .pl_0(),
+                ),
+            );
+
+        v_flex().size_full().child(top_bar).child(
+            div()
+                .id("workspaces-panel-body")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .p(px(6.))
+                .child(body),
+        )
     }
 
-    fn switcher_groups(&self, cx: &mut Context<Self>) -> Vec<Group> {
+    fn workspace_groups(&self, cx: &mut Context<Self>) -> Vec<Group> {
         let now = crate::ui::home::now_secs();
         let current = self.workspace;
         crate::terminal::pane_liveness::sweep(cx);
@@ -162,7 +211,7 @@ impl Tty7App {
                 let (key, label, target) = match w.host.as_ref() {
                     None => (
                         String::new(),
-                        t(L10nKey::SwitcherThisComputer).to_string(),
+                        t(L10nKey::SidebarThisComputer).to_string(),
                         None,
                     ),
                     Some(r) => {
@@ -225,7 +274,7 @@ impl Tty7App {
                 0,
                 Group {
                     key: String::new(),
-                    label: t(L10nKey::SwitcherThisComputer).to_string(),
+                    label: t(L10nKey::SidebarThisComputer).to_string(),
                     endpoint: String::new(),
                     target: None,
                     link: Link::Offline,
@@ -259,7 +308,7 @@ impl Tty7App {
                     group.endpoint = known.detail.clone();
                 }
             }
-            group.link = self.link_state(&target, cx);
+            group.link = self.workspace_link_state(&target, cx);
             if let Some(ConnectFlow::Failed { choice, error }) = &self.connect
                 && choice.target == target
             {
@@ -298,7 +347,7 @@ impl Tty7App {
         out
     }
 
-    fn link_state(&self, target: &RemoteTarget, cx: &mut Context<Self>) -> Link {
+    fn workspace_link_state(&self, target: &RemoteTarget, cx: &mut Context<Self>) -> Link {
         match &self.connect {
             Some(ConnectFlow::Connecting { choice }) if &choice.target == target => {
                 return Link::Connecting;
@@ -322,7 +371,7 @@ impl Tty7App {
             .collect()
     }
 
-    fn switcher_toggle_host(&mut self, group: &GroupRef, cx: &mut Context<Self>) {
+    fn workspace_toggle_host(&mut self, group: &GroupRef, cx: &mut Context<Self>) {
         if group.link == Link::Offline
             && let Some(target) = group.target.clone()
         {
@@ -332,35 +381,40 @@ impl Tty7App {
                 detail: String::new(),
             };
             self.connect_to_host(choice, cx);
-            if let Some(sw) = self.switcher.as_mut() {
-                sw.collapsed.remove(&group.key);
+            if let Some(panel) = self.workspaces_panel.as_mut() {
+                panel.collapsed.remove(&group.key);
             }
             return;
         }
-        if let Some(sw) = self.switcher.as_mut() {
-            if !sw.collapsed.remove(&group.key) {
-                sw.collapsed.insert(group.key.clone());
+        if let Some(panel) = self.workspaces_panel.as_mut() {
+            if !panel.collapsed.remove(&group.key) {
+                panel.collapsed.insert(group.key.clone());
             }
         }
         cx.notify();
     }
 
-    fn switcher_open(
+    pub(crate) fn activate_workspace_row(
         &mut self,
         row: RowRef,
         new_window: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_switcher(window, cx);
         match row.adopt {
             Some((target, remote)) => self.open_remote_workspace(target, *remote, window, cx),
             None if new_window => crate::ui::windows::open(cx, Some(row.id)),
-            None => self.reveal_workspace(row.id, window, cx),
+            None => {
+                if let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, row.id) {
+                    let _ = handle.update(cx, |_, other, _| other.activate_window());
+                    return;
+                }
+                self.switch_workspace(row.id, window, cx);
+            }
         }
     }
 
-    fn switcher_rename(&mut self, id: WorkspaceId, window: &mut Window, cx: &mut Context<Self>) {
+    fn workspace_rename(&mut self, id: WorkspaceId, window: &mut Window, cx: &mut Context<Self>) {
         let current = crate::ui::machine_mirror::display_name_for(cx, id).unwrap_or_default();
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
         input.update(cx, |state, cx| state.focus(window, cx));
@@ -369,20 +423,24 @@ impl Tty7App {
             window,
             move |this, _input, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { .. } | InputEvent::Blur => {
-                    this.switcher_commit_rename(window, cx)
+                    this.workspace_commit_rename(window, cx)
                 }
                 _ => {}
             },
         );
-        if let Some(sw) = self.switcher.as_mut() {
-            sw.renaming = Some((id, input));
-            sw._subs.push(sub);
+        if let Some(panel) = self.workspaces_panel.as_mut() {
+            panel.renaming = Some((id, input));
+            panel._subs.push(sub);
         }
         cx.notify();
     }
 
-    fn switcher_commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((id, input)) = self.switcher.as_mut().and_then(|sw| sw.renaming.take()) else {
+    fn workspace_commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((id, input)) = self
+            .workspaces_panel
+            .as_mut()
+            .and_then(|panel| panel.renaming.take())
+        else {
             return;
         };
         let value = input.read(cx).value().trim().to_string();
@@ -391,13 +449,10 @@ impl Tty7App {
         if id == self.workspace {
             self.sync_window_title(window, cx);
         }
-        if let Some(sw) = self.switcher.as_ref() {
-            sw.query.update(cx, |state, cx| state.focus(window, cx));
-        }
         cx.notify();
     }
 
-    fn switcher_disconnect(&mut self, target: &RemoteTarget, cx: &mut Context<Self>) {
+    fn workspace_disconnect(&mut self, target: &RemoteTarget, cx: &mut Context<Self>) {
         crate::ui::remote_workspace::RemoteLinks::disconnect(cx, target.host_id());
         if self
             .connect
@@ -410,8 +465,7 @@ impl Tty7App {
         cx.notify();
     }
 
-    fn switcher_new(&mut self, group: &GroupRef, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_switcher(window, cx);
+    fn workspace_new(&mut self, group: &GroupRef, window: &mut Window, cx: &mut Context<Self>) {
         match (group.target.clone(), group.home.clone()) {
             (Some(target), Some(home)) => self.create_remote_workspace(target, home, window, cx),
             (Some(_), None) => {}
@@ -419,172 +473,7 @@ impl Tty7App {
         }
     }
 
-    pub(crate) fn render_switcher(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        self.switcher.as_ref()?;
-        let groups = self.switcher_groups(cx);
-        let others = self.other_hosts(&groups, cx);
-        let query = self
-            .switcher
-            .as_ref()
-            .map(|sw| sw.text(cx))
-            .unwrap_or_default();
-
-        let theme = cx.theme();
-        let (border, card_bg) = (theme.border, theme.popover);
-        let scrim = crate::ui::presets::scrim_fill(cx);
-
-        let mut body = v_flex().gap(px(6.));
-        let mut shown = 0usize;
-        for group in &groups {
-            let Some(rendered) = self.render_group(group, &query, cx) else {
-                continue;
-            };
-            shown += 1;
-            body = body.child(rendered);
-        }
-        if let Some(band) = self.render_other_hosts(&others, &query, cx) {
-            shown += 1;
-            body = body.child(band);
-        }
-        if shown == 0 {
-            body = body.child(
-                div()
-                    .px(px(ROW_PAD))
-                    .py(px(14.))
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(t(L10nKey::SwitcherNoMatch)),
-            );
-        }
-
-        let card = v_flex()
-            .w(px(CARD_W))
-            .bg(card_bg)
-            .border_1()
-            .border_color(border)
-            .rounded(px(10.))
-            .shadow_xl()
-            .overflow_hidden()
-            .child(self.render_search(cx))
-            .child(
-                div()
-                    .id("switcher-body")
-                    .max_h(px(BODY_MAX_H))
-                    .overflow_y_scroll()
-                    .p(px(6.))
-                    .child(body),
-            )
-            .child(self.render_footer(cx));
-
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_start()
-                .justify_center()
-                .pt(px(CARD_TOP))
-                .bg(scrim)
-                .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
-                    if ev.keystroke.key == "escape" {
-                        cx.stop_propagation();
-                        this.close_switcher(window, cx);
-                    }
-                }))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                        this.close_switcher(window, cx)
-                    }),
-                )
-                .child(div().occlude().child(card))
-                .into_any_element(),
-        )
-    }
-
-    fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let (muted, border) = (theme.muted_foreground, theme.border);
-        h_flex()
-            .items_center()
-            .gap(px(8.))
-            .pl(px(6. + ROW_PAD))
-            .pr(px(12.))
-            .h(px(42.))
-            .border_b_1()
-            .border_color(border)
-            .child(glyph_col(
-                GUTTER,
-                Icon::new(IconName::Search).size(px(ICON)).text_color(muted),
-            ))
-            .children(
-                self.switcher
-                    .as_ref()
-                    .map(|sw| Input::new(&sw.query).appearance(false).small().pl_0()),
-            )
-    }
-
-    fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let (muted, dim, border) = (
-            theme.muted_foreground,
-            theme.muted_foreground.opacity(0.7),
-            theme.border,
-        );
-        let hover = hover_fill(cx);
-        h_flex()
-            .items_center()
-            .justify_between()
-            .border_t_1()
-            .border_color(border)
-            .p(px(6.))
-            .child(
-                h_flex()
-                    .id("switcher-add-host")
-                    .items_center()
-                    .gap(px(8.))
-                    .h(px(ROW_H))
-                    .px(px(ROW_PAD))
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .hover(move |r| r.bg(hover))
-                    .text_sm()
-                    .text_color(muted)
-                    .child(glyph_col(
-                        GUTTER,
-                        Icon::new(IconName::Plus).size(px(ICON)).text_color(dim),
-                    ))
-                    .child(t(L10nKey::AddSshHost))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.close_switcher(window, cx);
-                        this.open_settings_section(
-                            crate::ui::settings::SettingsSection::Ssh,
-                            window,
-                            cx,
-                        );
-                    })),
-            )
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .pr(px(ROW_PAD))
-                    .text_xs()
-                    .text_color(dim)
-                    .child(
-                        div()
-                            .px(px(5.))
-                            .py(px(1.))
-                            .rounded(px(4.))
-                            .border_1()
-                            .border_color(border)
-                            .child("⌘"),
-                    )
-                    .child(t(L10nKey::ClickForNewWindow)),
-            )
-    }
-
-    fn render_group(
+    fn render_workspace_group(
         &self,
         group: &Group,
         query: &str,
@@ -606,16 +495,16 @@ impl Tty7App {
         }
 
         let collapsed = self
-            .switcher
+            .workspaces_panel
             .as_ref()
-            .map(|sw| sw.collapsed.contains(&group.key))
+            .map(|panel| panel.collapsed.contains(&group.key))
             .unwrap_or(false);
         let expanded = (!collapsed || !query.is_empty()) && group.link != Link::Offline;
 
         let mut block = v_flex().gap(px(1.));
-        block = block.child(self.render_group_header(group, expanded, cx));
+        block = block.child(self.render_workspace_group_header(group, expanded, cx));
         if let Some(phase) = group.installing {
-            block = block.child(self.render_install_progress(phase, cx));
+            block = block.child(self.render_workspace_install_progress(phase, cx));
         }
         if let Some(error) = group.error.as_ref().filter(|_| group.installing.is_none()) {
             let retry = GroupRef::of(group);
@@ -648,7 +537,7 @@ impl Tty7App {
                                 .gap(px(4.))
                                 .child(
                                     Button::new(gpui::SharedString::from(format!(
-                                        "switcher-retry:{}",
+                                        "workspace-retry:{}",
                                         group.key
                                     )))
                                     .label(t(L10nKey::TryAgain))
@@ -674,7 +563,7 @@ impl Tty7App {
                                     |row| {
                                         row.child(
                                             Button::new(gpui::SharedString::from(format!(
-                                                "switcher-replace:{}",
+                                                "workspace-replace:{}",
                                                 group.key
                                             )))
                                             .label(t(L10nKey::RestartServer))
@@ -696,7 +585,7 @@ impl Tty7App {
                                 )
                                 .child(
                                     Button::new(gpui::SharedString::from(format!(
-                                        "switcher-dismiss:{}",
+                                        "workspace-dismiss:{}",
                                         group.key
                                     )))
                                     .label(t(L10nKey::Dismiss))
@@ -704,10 +593,6 @@ impl Tty7App {
                                     .xsmall()
                                     .on_click(cx.listener(move |this, _, _window, cx| {
                                         this.remote_host_errors.remove(&dismiss_key);
-                                        // The other half of this block can come from a
-                                        // failed connect. Retire that too, but only when
-                                        // it is this host's failure — a connect to
-                                        // anywhere else is still in flight.
                                         if let Some(ConnectFlow::Failed { choice, .. }) =
                                             &this.connect
                                             && Some(&choice.target) == dismiss_target.as_ref()
@@ -723,14 +608,14 @@ impl Tty7App {
         if expanded && !rows.is_empty() {
             let mut kids = v_flex().gap(px(1.));
             for row in rows {
-                kids = kids.child(self.render_row(group, row, cx));
+                kids = kids.child(self.render_workspace_row(group, row, cx));
             }
-            block = block.child(self.indent(group, kids, cx));
+            block = block.child(self.workspace_indent(group, kids, cx));
         }
         Some(block.into_any_element())
     }
 
-    fn render_install_progress(
+    fn render_workspace_install_progress(
         &self,
         phase: InstallPhase,
         cx: &mut Context<Self>,
@@ -785,7 +670,12 @@ impl Tty7App {
             )
     }
 
-    fn indent(&self, group: &Group, kids: impl IntoElement, cx: &mut Context<Self>) -> AnyElement {
+    fn workspace_indent(
+        &self,
+        group: &Group,
+        kids: impl IntoElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let rail = cx.theme().border;
         div()
             .relative()
@@ -794,7 +684,7 @@ impl Tty7App {
                 wrap.child(
                     div()
                         .absolute()
-                        .left(px(RAIL_X))
+                        .left(px(ROW_PAD + GUTTER / 2.))
                         .top(px(0.))
                         .bottom(px(ROW_H / 2.))
                         .w(px(1.))
@@ -804,7 +694,7 @@ impl Tty7App {
             .into_any_element()
     }
 
-    fn render_group_header(
+    fn render_workspace_group_header(
         &self,
         group: &Group,
         expanded: bool,
@@ -860,7 +750,7 @@ impl Tty7App {
 
         h_flex()
             .id(gpui::SharedString::from(format!(
-                "switcher-host:{}",
+                "workspace-host:{}",
                 group.key
             )))
             .items_center()
@@ -922,14 +812,14 @@ impl Tty7App {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         Button::new(gpui::SharedString::from(format!(
-                            "switcher-host-more:{}",
+                            "workspace-host-more:{}",
                             group.key
                         )))
                         .icon(IconName::Ellipsis)
                         .ghost()
                         .xsmall()
                         .dropdown_menu(move |menu, _window, _cx| {
-                            group_menu(menu, &menu_ref, app.clone())
+                            workspace_group_menu(menu, &menu_ref, app.clone())
                         }),
                     ),
             )
@@ -943,18 +833,20 @@ impl Tty7App {
                 .text_color(dim),
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                this.switcher_toggle_host(&gref, cx)
+                this.workspace_toggle_host(&gref, cx)
             }))
-            .context_menu(move |menu, _window, _cx| group_menu(menu, &ctx_ref, app2.clone()))
+            .context_menu(move |menu, _window, _cx| {
+                workspace_group_menu(menu, &ctx_ref, app2.clone())
+            })
     }
 
-    fn render_row(&self, group: &Group, row: &Row, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(sw) = self.switcher.as_ref()
-            && let Some((id, input)) = sw.renaming.as_ref()
+    fn render_workspace_row(&self, group: &Group, row: &Row, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(panel) = self.workspaces_panel.as_ref()
+            && let Some((id, input)) = panel.renaming.as_ref()
             && *id == row.id
         {
             return h_flex()
-                .id(("switcher-rename", row.id.element_key() as usize))
+                .id(("workspace-rename", row.id.element_key() as usize))
                 .items_center()
                 .h(px(ROW_H))
                 .px(px(ROW_PAD))
@@ -990,8 +882,8 @@ impl Tty7App {
         };
 
         h_flex()
-            .id(("switcher-row", key))
-            .group("switcher-row")
+            .id(("workspace-row", key))
+            .group("workspace-row")
             .items_center()
             .gap(px(8.))
             .h(px(ROW_H))
@@ -1038,9 +930,7 @@ impl Tty7App {
             .child(
                 div()
                     .flex_shrink_0()
-                    .w(px(WHEN_W))
                     .truncate()
-                    .text_right()
                     .text_xs()
                     .text_color(dim)
                     .child(row.when.clone()),
@@ -1049,26 +939,28 @@ impl Tty7App {
                 div()
                     .invisible()
                     .flex_shrink_0()
-                    .group_hover("switcher-row", |x| x.visible())
+                    .group_hover("workspace-row", |x| x.visible())
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
-                        Button::new(("switcher-row-more", key))
+                        Button::new(("workspace-row-more", key))
                             .icon(IconName::Ellipsis)
                             .ghost()
                             .xsmall()
                             .dropdown_menu(move |menu, _window, _cx| {
-                                row_menu(menu, &menu_ref, app.clone())
+                                workspace_row_menu(menu, &menu_ref, app.clone())
                             }),
                     ),
             )
             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
-                this.switcher_open(click_ref.clone(), ev.modifiers().platform, window, cx)
+                this.activate_workspace_row(click_ref.clone(), ev.modifiers().platform, window, cx)
             }))
-            .context_menu(move |menu, _window, _cx| row_menu(menu, &ctx_ref, app2.clone()))
+            .context_menu(move |menu, _window, _cx| {
+                workspace_row_menu(menu, &ctx_ref, app2.clone())
+            })
             .into_any_element()
     }
 
-    fn render_other_hosts(
+    fn render_workspace_other_hosts(
         &self,
         others: &[HostChoice],
         query: &str,
@@ -1084,12 +976,7 @@ impl Tty7App {
         if hits.is_empty() {
             return None;
         }
-        let expanded = self
-            .switcher
-            .as_ref()
-            .map(|sw| sw.show_others)
-            .unwrap_or(false)
-            || !query.is_empty();
+        let expanded = !query.is_empty();
 
         let theme = cx.theme();
         let (muted, dim) = (theme.muted_foreground, theme.muted_foreground.opacity(0.7));
@@ -1097,7 +984,7 @@ impl Tty7App {
 
         let mut block = v_flex().gap(px(1.)).child(
             h_flex()
-                .id("switcher-others")
+                .id("workspace-others")
                 .items_center()
                 .gap(px(8.))
                 .h(px(HOST_H))
@@ -1131,10 +1018,7 @@ impl Tty7App {
                     .size(px(ICON))
                     .text_color(dim),
                 )
-                .on_click(cx.listener(|this, _, _window, cx| {
-                    if let Some(sw) = this.switcher.as_mut() {
-                        sw.show_others = !sw.show_others;
-                    }
+                .on_click(cx.listener(|_this, _, _window, cx| {
                     cx.notify();
                 })),
         );
@@ -1145,7 +1029,7 @@ impl Tty7App {
                 let choice = (*host).clone();
                 kids = kids.child(
                     h_flex()
-                        .id(("switcher-other", i))
+                        .id(("workspace-other", i))
                         .items_center()
                         .gap(px(8.))
                         .h(px(ROW_H))
@@ -1234,7 +1118,7 @@ impl GroupRef {
 }
 
 #[derive(Clone)]
-struct RowRef {
+pub(crate) struct RowRef {
     id: WorkspaceId,
     live: bool,
     adopt: Option<(RemoteTarget, Box<RemoteWorkspaceRow>)>,
@@ -1253,7 +1137,7 @@ impl RowRef {
     }
 }
 
-fn group_menu(
+fn workspace_group_menu(
     menu: gpui_component::menu::PopupMenu,
     group: &GroupRef,
     app: gpui::WeakEntity<Tty7App>,
@@ -1265,7 +1149,7 @@ fn group_menu(
         PopupMenuItem::new(t(L10nKey::AppMenuNewWorkspace))
             .disabled(!can_create)
             .on_click(move |_, window, cx| {
-                let _ = a1.update(cx, |this, cx| this.switcher_new(&gref, window, cx));
+                let _ = a1.update(cx, |this, cx| this.workspace_new(&gref, window, cx));
             }),
     );
     let Some(target) = group.target.clone() else {
@@ -1278,7 +1162,7 @@ fn group_menu(
         PopupMenuItem::new(t(L10nKey::SwitcherDisconnect))
             .disabled(!connected)
             .on_click(move |_, _window, cx| {
-                let _ = a2.update(cx, |this, cx| this.switcher_disconnect(&target, cx));
+                let _ = a2.update(cx, |this, cx| this.workspace_disconnect(&target, cx));
             }),
     );
     if !restartable {
@@ -1293,7 +1177,7 @@ fn group_menu(
     )
 }
 
-fn row_menu(
+fn workspace_row_menu(
     menu: gpui_component::menu::PopupMenu,
     row: &RowRef,
     app: gpui::WeakEntity<Tty7App>,
@@ -1305,15 +1189,14 @@ fn row_menu(
         PopupMenuItem::new(t(L10nKey::SwitcherRename))
             .disabled(adopt)
             .on_click(move |_, window, cx| {
-                let _ = a1.update(cx, |this, cx| this.switcher_rename(id, window, cx));
+                let _ = a1.update(cx, |this, cx| this.workspace_rename(id, window, cx));
             }),
     )
     .item(
         PopupMenuItem::new(t(L10nKey::SwitcherOpenInNewWindow))
             .disabled(adopt)
-            .on_click(move |_, window, cx| {
-                let _ = a2.update(cx, |this, cx| {
-                    this.close_switcher(window, cx);
+            .on_click(move |_, _window, cx| {
+                let _ = a2.update(cx, |_this, cx| {
                     crate::ui::windows::open(cx, Some(id));
                 });
             }),
@@ -1324,7 +1207,6 @@ fn row_menu(
             .disabled(adopt || !stoppable)
             .on_click(move |_, window, cx| {
                 let _ = a3.update(cx, |this, cx| {
-                    this.close_switcher(window, cx);
                     this.stop_workspace(id, window, cx);
                 });
             }),
@@ -1334,7 +1216,6 @@ fn row_menu(
             .disabled(adopt)
             .on_click(move |_, window, cx| {
                 let _ = a4.update(cx, |this, cx| {
-                    this.close_switcher(window, cx);
                     this.delete_workspace(id, window, cx);
                 });
             }),

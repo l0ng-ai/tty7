@@ -369,7 +369,7 @@ impl Tty7App {
                 let rows = connected.rows.clone();
                 self.host_snapshots.insert(
                     choice.target.host_id(),
-                    crate::ui::switcher::HostSnapshot {
+                    crate::ui::workspaces_panel::HostSnapshot {
                         target: choice.target.clone(),
                         rows: rows.clone(),
                     },
@@ -422,13 +422,9 @@ impl Tty7App {
     ) {
         self.connect = None;
         RemoteLinks::ensure_running(cx);
-        if self.tabs.is_empty() {
-            let previous = self.spawn_host(cx);
-            self.switch_workspace(id, window, cx);
-            self.rebind_host(previous, cx);
-        } else {
-            crate::ui::windows::open(cx, Some(id));
-        }
+        let previous = self.spawn_host(cx);
+        self.switch_workspace(id, window, cx);
+        self.rebind_host(previous, cx);
         cx.notify();
     }
 
@@ -645,12 +641,12 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The grouped report is only visible while the switcher is open. Anywhere
-        // else — the window menu's "restart server", or a mismatch raised mid-connect
-        // — the modal is the only thing the user would see, so keep it.
-        if let (Some(target), Some(switcher)) = (target, self.switcher.as_mut()) {
+        // The grouped report is only visible while the Workspaces panel is shown.
+        // Anywhere else — the window menu's "restart server", or a mismatch raised
+        // mid-connect — the modal is the only thing the user would see, so keep it.
+        if let (Some(target), Some(panel)) = (target, self.workspaces_panel.as_mut()) {
             let key = target.to_string();
-            switcher.expand(&key);
+            panel.expand(&key);
             self.remote_host_errors.insert(key, error.to_string());
             cx.notify();
             return;

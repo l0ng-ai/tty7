@@ -303,8 +303,8 @@ impl Tty7App {
                     .h(px(30.))
                     .rounded_md()
                     .tooltip(SharedString::from(current))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_switcher(window, cx);
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.set_sidebar_mode(crate::core::config::SidebarMode::Workspaces, cx);
                     })),
             )
             .into_any_element()
@@ -1013,7 +1013,7 @@ impl Tty7App {
             ),
         );
 
-        let rail_collapsed = !show_chips && !self.left_panel_open(cx);
+        let rail_collapsed = !self.left_panel_open(cx);
         let left_group = rail_collapsed.then(|| {
             h_flex()
                 .flex_shrink_0()

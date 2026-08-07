@@ -1,31 +1,24 @@
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Axis, Bounds, Context, Div, FontWeight, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, SharedString, Stateful, Window, canvas,
-    deferred, div, ease_out_quint, linear_color_stop, linear_gradient, prelude::*, px,
+    MouseDownEvent, Pixels, SharedString, Stateful, Window, canvas, deferred, div, ease_out_quint,
+    linear_color_stop, linear_gradient, prelude::*, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenu, ContextMenuExt as _};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use std::path::{Path, PathBuf};
 
 use crate::core::config::{Config, SidebarGrouping};
 use crate::terminal::git_status::GitStatusCache;
-use crate::ui::app::{TITLE_BAR_HEIGHT, Tty7App};
+use crate::ui::app::Tty7App;
 use crate::ui::hints::tab_badge_label;
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::reorder::{self, Reorder, Surface};
 use crate::ui::tab_strip::{DragTab, REORDER_SLIDE_MS};
-
-const MIN_SIDEBAR_WIDTH: f32 = 180.;
-
-const GRAB_HANDLE_W: f32 = 48.;
-const MAX_SIDEBAR_WIDTH_RATIO: f32 = 0.5;
-
-const RESIZE_HANDLE_WIDTH: f32 = 8.;
 
 const ROW_GAP: f32 = 2.;
 
@@ -39,7 +32,15 @@ impl Render for DragGroup {
 }
 
 impl Tty7App {
-    pub(crate) fn tab_sidebar(
+    pub(crate) fn outline_panel(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        self.render_tab_list(window, cx)
+    }
+
+    fn render_tab_list(
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -47,9 +48,6 @@ impl Tty7App {
         let active = self.active;
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let show_badges = self.mod_hint_badges;
-        let max_width = (window.viewport_size().width.as_f32() * MAX_SIDEBAR_WIDTH_RATIO)
-            .max(MIN_SIDEBAR_WIDTH);
-        let width = self.sidebar_width.get().clamp(MIN_SIDEBAR_WIDTH, max_width);
         let query = self.sidebar_search.read(cx).value().trim().to_lowercase();
 
         let mut list = v_flex()
@@ -513,58 +511,6 @@ impl Tty7App {
             });
         }
 
-        let controls = h_flex()
-            .flex_shrink_0()
-            .h(px(TITLE_BAR_HEIGHT))
-            .border_b_1()
-            .border_color(cx.theme().transparent)
-            .items_center()
-            .justify_end()
-            .gap(px(2.))
-            .pr(px(crate::ui::app::tile_trailing_inset()))
-            .when_some(crate::ui::app::window_mark(), |row, mark| {
-                row.child(
-                    div()
-                        .flex_shrink_0()
-                        .pl(px(crate::ui::app::CONTENT_INSET))
-                        .child(mark),
-                )
-                .child(div().flex_1().min_w(px(GRAB_HANDLE_W)))
-            })
-            .child(
-                div().occlude().flex_shrink_0().child(
-                    self.attach_new_tab_menu(
-                        crate::ui::tab_strip::chrome_tile_sized(
-                            Button::new("sidebar-add").icon(Icon::new(IconName::Plus)),
-                            crate::ui::app::TILE_SIZE,
-                            crate::ui::app::TILE_GLYPH_LINE,
-                            false,
-                            cx,
-                        )
-                        .rounded_lg(),
-                        cx,
-                    ),
-                ),
-            )
-            .child(
-                div().occlude().flex_shrink_0().child(
-                    crate::ui::tab_strip::chrome_tile(
-                        Button::new("sidebar-collapse")
-                            .icon(Icon::empty().path("icons/panel-left.svg")),
-                        false,
-                        cx,
-                    )
-                    .rounded_lg()
-                    .tooltip(t(L10nKey::TabTooltipHideSidebar))
-                    .on_click(cx.listener(|this, _, _window, cx| this.toggle_left_panel(cx))),
-                ),
-            );
-        let workspace_head = h_flex()
-            .flex_shrink_0()
-            .px(px(crate::ui::app::CONTENT_INSET - 7.))
-            .pt(px(4.))
-            .child(self.workspace_head(cx));
-
         let chip_inset = crate::ui::app::CONTENT_INSET - 7. + 4.;
         let top_bar = h_flex()
             .flex_shrink_0()
@@ -593,114 +539,14 @@ impl Tty7App {
                     .child(Input::new(&self.sidebar_search).appearance(false).pl_0()),
             );
 
-        let container: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
-        let backing = canvas(
-            {
-                let container = container.clone();
-                move |bounds, _window, _cx| container.set(Some(bounds))
-            },
-            {
-                let container = container.clone();
-                let width_cell = self.sidebar_width.clone();
-                let dragging = self.sidebar_dragging.clone();
-                move |_bounds, _state, window, _cx| {
-                    window.on_mouse_event({
-                        let container = container.clone();
-                        let width_cell = width_cell.clone();
-                        let dragging = dragging.clone();
-                        move |ev: &MouseMoveEvent, _phase, window, _cx| {
-                            if !dragging.get() {
-                                return;
-                            }
-                            let Some(b) = container.get() else {
-                                return;
-                            };
-                            let raw = (ev.position.x - b.origin.x).as_f32();
-                            let max = (window.viewport_size().width.as_f32()
-                                * MAX_SIDEBAR_WIDTH_RATIO)
-                                .max(MIN_SIDEBAR_WIDTH);
-                            width_cell.set(raw.clamp(MIN_SIDEBAR_WIDTH, max));
-                            window.refresh();
-                        }
-                    });
-                    window.on_mouse_event({
-                        let width_cell = width_cell.clone();
-                        let dragging = dragging.clone();
-                        move |_ev: &MouseUpEvent, _phase, window, cx| {
-                            if !dragging.get() {
-                                return;
-                            }
-                            dragging.set(false);
-                            let w = width_cell.get();
-                            let cfg = cx.global_mut::<Config>();
-                            if cfg.sidebar_width != w {
-                                cfg.sidebar_width = w;
-                                cfg.save();
-                            }
-                            window.refresh();
-                        }
-                    });
-                }
-            },
-        )
-        .absolute()
-        .size_full();
-
-        let handle_active = self.sidebar_dragging.get();
-        let handle = div()
-            .group("sidebar-resize")
-            .occlude()
-            .absolute()
-            .top_0()
-            .right(px(-(RESIZE_HANDLE_WIDTH / 2.)))
-            .w(px(RESIZE_HANDLE_WIDTH))
-            .h_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_col_resize()
-            .child(
-                div()
-                    .w(px(1.))
-                    .h_full()
-                    .when(handle_active, |d| d.bg(cx.theme().drag_border))
-                    .group_hover("sidebar-resize", |s| s.bg(cx.theme().drag_border)),
-            )
-            .on_mouse_down(MouseButton::Left, {
-                let dragging = self.sidebar_dragging.clone();
-                move |_ev, window, _cx| {
-                    dragging.set(true);
-                    window.refresh();
-                }
-            });
-
-        div()
-            .relative()
-            .flex_shrink_0()
-            .w(px(width))
-            .h_full()
-            .bg(cx.theme().sidebar)
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
-            .child(backing)
-            .child(
-                v_flex()
-                    .size_full()
-                    .child(crate::ui::app::title_bar_drag(
-                        controls.id("sidebar-titlebar-drag"),
-                        "sidebar-titlebar-drag",
-                        window,
-                        cx,
-                    ))
-                    .child(workspace_head)
-                    .child(top_bar)
-                    .child(crate::ui::scrollbar::with_vertical_scrollbar(
-                        "tab-sidebar-scrollbar",
-                        list,
-                        &self.sidebar_scroll,
-                    )),
-            )
-            .child(handle)
+        v_flex()
+            .size_full()
+            .child(top_bar)
+            .child(crate::ui::scrollbar::with_vertical_scrollbar(
+                "tab-sidebar-scrollbar",
+                list,
+                &self.sidebar_scroll,
+            ))
     }
 
     fn sidebar_group_keys(&self, cx: &gpui::App) -> Vec<Option<PathBuf>> {

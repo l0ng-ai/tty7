@@ -52,6 +52,9 @@ pub enum CommandKind {
     ToggleFullscreen,
     ToggleTabSidebar,
     ToggleLeftPanel,
+    ToggleSidebarMode,
+    ShowSidebarWorkspaces,
+    ShowSidebarOutline,
     ToggleRightPanel,
     ShowRightPanel(RightPanelTab),
     ClearTerminal,
@@ -138,6 +141,9 @@ impl CommandKind {
             ToggleFullscreen => "full-screen",
             ToggleTabSidebar => "tab-bar-position",
             ToggleLeftPanel => "left-sidebar",
+            ToggleSidebarMode => "toggle-sidebar-mode",
+            ShowSidebarWorkspaces => "sidebar-workspaces",
+            ShowSidebarOutline => "sidebar-outline",
             ToggleRightPanel => "right-panel",
             ShowRightPanel(RightPanelTab::Info) => "right-panel-info",
             ShowRightPanel(RightPanelTab::Changes) => "right-panel-changes",
@@ -226,6 +232,9 @@ impl CommandKind {
             ToggleFullscreen => "ToggleFullscreen",
             ToggleTabSidebar => "ToggleTabSidebar",
             ToggleLeftPanel => "ToggleLeftPanel",
+            ToggleSidebarMode => "ToggleSidebarMode",
+            ShowSidebarWorkspaces => "ShowSidebarWorkspaces",
+            ShowSidebarOutline => "ShowSidebarOutline",
             ToggleRightPanel => "ToggleRightPanel",
             ShowRightPanel(tab) => match tab {
                 RightPanelTab::Info => "ShowRightPanelInfo",
@@ -345,7 +354,7 @@ impl Command {
         use CommandKind::*;
         let cfg = cx.global::<Config>();
         let tab_bar_left = cfg.tab_bar_position == TabBarPosition::Left;
-        let sidebar_hidden = chrome.rail_collapsed || !tab_bar_left;
+        let sidebar_hidden = chrome.rail_collapsed;
         let right_panel_open = chrome.right_panel_visible;
 
         let tabs = [
@@ -430,6 +439,9 @@ impl Command {
                 t(L10nKey::CmdRightPanelFiles),
                 ShowRightPanel(RightPanelTab::Files),
             ),
+            Command::new(t(L10nKey::CmdSidebarWorkspaces), ShowSidebarWorkspaces),
+            Command::new(t(L10nKey::CmdSidebarOutline), ShowSidebarOutline),
+            Command::new(t(L10nKey::CmdToggleSidebarMode), ToggleSidebarMode),
             Command::new(t(L10nKey::CmdChangeTheme), OpenThemePicker),
             Command::new(t(L10nKey::CmdResetFontSize), ResetFontSize),
             Command::new(t(L10nKey::CmdEnterFullScreen), ToggleFullscreen),

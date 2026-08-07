@@ -24,7 +24,7 @@ const LOGO_PX: f32 = 20.0;
 const HOME_SHORTCUTS: [&str; 7] = [
     "NewTab",
     "ReopenClosedTab",
-    "ToggleSwitcher",
+    "ToggleSidebarMode",
     "TogglePalette",
     "SplitRight",
     "SplitDown",
@@ -114,7 +114,7 @@ fn home_shortcut_label(action: &str, closed: Option<&str>) -> String {
     let label = match action {
         "NewTab" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeNewTab),
         "ReopenClosedTab" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeReopenClosedTab),
-        "ToggleSwitcher" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSwitchWorkspace),
+        "ToggleSidebarMode" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSwitchWorkspace),
         "TogglePalette" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeCommandPalette),
         "SplitRight" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSplitRight),
         "SplitDown" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSplitDown),

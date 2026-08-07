@@ -1,3 +1,4 @@
+pub mod activity_bar;
 pub mod app;
 pub mod assets;
 pub mod code_editor;
@@ -12,6 +13,7 @@ pub mod host_ops;
 pub mod host_registry;
 pub mod i18n;
 pub mod keymap;
+pub mod left_sidebar;
 pub mod local_link;
 pub mod machine_mirror;
 pub mod palette;
@@ -29,7 +31,6 @@ pub mod settings;
 pub mod sftp;
 pub mod ssh_connect;
 pub mod ssh_prompt;
-pub mod switcher;
 pub mod tab_sidebar;
 pub mod tab_strip;
 // Taskbar overlay badges are a Windows concept (`ITaskbarList3`); macOS's
@@ -40,4 +41,5 @@ pub mod theme;
 pub mod tray;
 pub mod tree_sync;
 pub mod windows;
+pub mod workspaces_panel;
 pub mod worktree_prompt;

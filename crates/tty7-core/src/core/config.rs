@@ -147,6 +147,8 @@ pub struct Config {
     pub sidebar_width: f32,
     #[serde(default)]
     pub sidebar_collapsed: bool,
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub sidebar_mode: SidebarMode,
     #[serde(default)]
     pub right_panel_visible: bool,
     #[serde(default = "default_right_panel_width")]
@@ -319,6 +321,14 @@ pub enum TabBarPosition {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum SidebarMode {
+    #[default]
+    Outline,
+    Workspaces,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SidebarGrouping {
     #[default]
     Repo,
@@ -419,6 +429,7 @@ impl Default for Config {
             tab_bar_position: TabBarPosition::Left,
             sidebar_width: default_sidebar_width(),
             sidebar_collapsed: false,
+            sidebar_mode: SidebarMode::Outline,
             right_panel_visible: false,
             right_panel_width: default_right_panel_width(),
             right_panel_tab: RightPanelTab::Info,
