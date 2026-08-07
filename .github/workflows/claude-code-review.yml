@@ -17,10 +17,21 @@ name: Claude Code Review
 
 on:
   pull_request:
-    # `labeled` is the manual re-run: a PR opened before this workflow existed
-    # has no run to re-run from the Actions tab, and reopening fires `reopened`
-    # rather than `opened`. Applying the label needs write access, so the same
-    # label doubles as the approval gate in claude-review-fork.yml.
+    # `labeled` is the manual re-run: reopening a PR fires `reopened`, not
+    # `opened`, and a PR that predates this file has no run to restart from the
+    # Actions tab. Applying the label needs write access, so the same label
+    # doubles as the approval gate in claude-review-fork.yml.
+    #
+    # It does not reach the PRs that need it most, and the reason is worth
+    # knowing before you conclude the label is broken. A `pull_request` workflow
+    # is read from the PR's merge ref, which GitHub recomputes on a push and not
+    # otherwise. A PR whose last push predates this file therefore has a merge
+    # ref that does not contain it, and no label will summon a workflow that,
+    # from that ref's point of view, does not exist. Push to the branch and the
+    # merge ref catches up -- though by then the push has triggered
+    # `synchronize` anyway, which is why the empty-commit trick works and the
+    # label appears not to. `claude-review-fork.yml` is exempt: a
+    # `pull_request_target` workflow is read from the base branch.
     types: [opened, synchronize, labeled]
 
 # Same reasoning as ci.yml: a superseded review is dead weight, and unlike a

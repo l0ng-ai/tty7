@@ -69,13 +69,22 @@ jobs:
     name: claude review (fork)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # `labeled` carries the label that was just applied; `synchronize` carries
-    # none, so it has to look at what the PR is already wearing. The two need
-    # separate clauses: testing only the label list would spend a review every
-    # time any other label -- `bug`, `blocked` -- landed on a subscribed PR.
+    # First clause: forks only. Everything below trades review quality for
+    # safety against code we do not control -- no plugin, no whole-repo context,
+    # read-only tools -- and a branch in this repository has earned none of that.
+    # `pull_request_target` does not care where the head is, so if this job does
+    # not say so, labelling one of our own PRs lands it here and it silently
+    # gets the weaker review instead of the one in claude-code-review.yml.
+    #
+    # Then: `labeled` carries the label that was just applied; `synchronize`
+    # carries none, so it has to look at what the PR is already wearing. Those
+    # two need separate clauses, because testing only the label list would spend
+    # a review every time an unrelated label -- `bug`, `blocked` -- landed on a
+    # subscribed PR.
     if: >-
-      (github.event.action == 'labeled' && github.event.label.name == 'claude-review') ||
-      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'claude-review'))
+      github.event.pull_request.head.repo.full_name != github.repository &&
+      ((github.event.action == 'labeled' && github.event.label.name == 'claude-review') ||
+       (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'claude-review')))
     permissions:
       contents: read
       pull-requests: write # the last step posts the review comment
