@@ -6,11 +6,10 @@ mod zh;
 
 use en::{translate_en, translate_variant_en};
 use ja::{translate_ja, translate_variant_ja};
-use zh::{translate_zh, translate_variant_zh};
+use zh::{translate_variant_zh, translate_zh};
 
 pub struct LanguageInfo {
     pub code: &'static str,
-    pub label: &'static str,
     pub label_key: L10nKey,
     pub translate_fn: fn(L10nKey) -> Option<&'static str>,
     pub translate_variant_fn: fn(L10nKey, &'static str) -> Option<&'static str>,
@@ -19,21 +18,18 @@ pub struct LanguageInfo {
 pub const SUPPORTED_LANGUAGES: &[LanguageInfo] = &[
     LanguageInfo {
         code: "en",
-        label: "English",
         label_key: L10nKey::SettingsLanguageEnglish,
         translate_fn: |k| Some(translate_en(k)),
         translate_variant_fn: translate_variant_en,
     },
     LanguageInfo {
         code: "zh-CN",
-        label: "中文 (Simplified Chinese)",
         label_key: L10nKey::SettingsLanguageChinese,
         translate_fn: translate_zh,
         translate_variant_fn: translate_variant_zh,
     },
     LanguageInfo {
         code: "ja-JP",
-        label: "日本語 (Japanese)",
         label_key: L10nKey::SettingsLanguageJapanese,
         translate_fn: translate_ja,
         translate_variant_fn: translate_variant_ja,
@@ -42,10 +38,6 @@ pub const SUPPORTED_LANGUAGES: &[LanguageInfo] = &[
 
 pub fn find_language(code: &str) -> Option<&'static LanguageInfo> {
     SUPPORTED_LANGUAGES.iter().find(|lang| lang.code == code)
-}
-
-pub fn is_supported_language(code: &str) -> bool {
-    find_language(code).is_some()
 }
 
 pub fn default_language_code() -> &'static str {
@@ -402,27 +394,29 @@ pub enum L10nKey {
     SettingsAboutTech,
     SettingsVersion,
     SettingsUpdates,
+    SettingsUpdateAndRelaunch,
+    SettingsUpdateViewRelease,
+    SettingsUpdateChecking,
+    SettingsUpdateUpToDate,
+    SettingsUpdateDownloading,
+    SettingsUpdateInstalling,
+    SettingsUpdateCheckNow,
+    SettingsUpdateCheckFailed,
+    SettingsUpdatePrepareFailed,
+    SettingsUpdateLaunchFailed,
+    SettingsUpdateUnsupportedMacos,
+    SettingsUpdateUnsupportedLinux,
+    SettingsUpdateUnsupportedWindows,
+    SettingsUpdateWindowsAllUsers,
+    SettingsUpdateUnsupportedPlatform,
+    SettingsUpdateMissingPackage,
+    SettingsUpdateMissingChecksums,
     SettingsVersionAvailable,
     SettingsCheckUpdatesDesc,
     SettingsCheckUpdatesOnLaunch,
     SettingsCommandLine,
     SettingsCommandLineDesc,
     SettingsInstallCliOnPath,
-    SettingsExplorerContextMenu,
-    SettingsExplorerContextMenuDesc,
-    SettingsExplorerNotRegistered,
-    SettingsExplorerRegistered,
-    SettingsExplorerNeedsUpdate,
-    SettingsExplorerUnavailable,
-    SettingsExplorerStatusUnavailable,
-    SettingsExplorerRegister,
-    SettingsExplorerUpdate,
-    SettingsExplorerUnregister,
-    SettingsExplorerRegisteredNote,
-    SettingsExplorerUnregisteredNote,
-    SettingsExplorerRegisterFailed,
-    SettingsExplorerUnregisterFailed,
-    SettingsExplorerWindows11Note,
     SettingsServer,
     SettingsServerDesc,
     SettingsRestartServer,
@@ -450,7 +444,6 @@ pub enum L10nKey {
     SettingsSearchDetectUrlsKeywords,
     SettingsSearchDiffPreviewFromCountsKeywords,
     SettingsSearchDimInactivePanesKeywords,
-    SettingsSearchExplorerContextMenuKeywords,
     SettingsSearchFocusFollowsMouseKeywords,
     SettingsSearchFontFamilyKeywords,
     SettingsSearchFontLigaturesKeywords,
@@ -527,6 +520,7 @@ pub enum L10nKey {
     SftpTransferDone,
     SftpTransferCancelled,
     SftpTransferError,
+    SftpImagePasteUploadFailed,
     ForwardPanelTitle,
     ForwardDisconnected,
     ForwardDisconnectedFrom,
@@ -754,6 +748,7 @@ pub enum L10nKey {
     RemoteMismatchDetail,
     RemoteMismatchUnknownBuild,
     RemoteMismatchUnknownBuildFromExe,
+    RemoteMismatchReplaceServer,
     RemoteDaemonStartFailed,
     RemoteDaemonUnreachable,
     RemoteDaemonTooOld,
@@ -1009,7 +1004,11 @@ pub fn t_plural(key: L10nKey, count: usize, args: &[(&str, &str)]) -> String {
 
 /// Select a named branch of a translation and fill placeholders.
 pub fn t_select(key: L10nKey, branch: &'static str, args: &[(&str, &str)]) -> String {
-    apply_template(translate_variant(current_locale_index(), key, branch), args, None)
+    apply_template(
+        translate_variant(current_locale_index(), key, branch),
+        args,
+        None,
+    )
 }
 
 fn apply_template(template: &'static str, args: &[(&str, &str)], count: Option<usize>) -> String {
@@ -1374,27 +1373,29 @@ mod tests {
             L10nKey::SettingsAboutDesc2,
             L10nKey::SettingsAboutTech,
             L10nKey::SettingsUpdates,
+            L10nKey::SettingsUpdateAndRelaunch,
+            L10nKey::SettingsUpdateViewRelease,
+            L10nKey::SettingsUpdateChecking,
+            L10nKey::SettingsUpdateUpToDate,
+            L10nKey::SettingsUpdateDownloading,
+            L10nKey::SettingsUpdateInstalling,
+            L10nKey::SettingsUpdateCheckNow,
+            L10nKey::SettingsUpdateCheckFailed,
+            L10nKey::SettingsUpdatePrepareFailed,
+            L10nKey::SettingsUpdateLaunchFailed,
+            L10nKey::SettingsUpdateUnsupportedMacos,
+            L10nKey::SettingsUpdateUnsupportedLinux,
+            L10nKey::SettingsUpdateUnsupportedWindows,
+            L10nKey::SettingsUpdateWindowsAllUsers,
+            L10nKey::SettingsUpdateUnsupportedPlatform,
+            L10nKey::SettingsUpdateMissingPackage,
+            L10nKey::SettingsUpdateMissingChecksums,
             L10nKey::SettingsVersionAvailable,
             L10nKey::SettingsCheckUpdatesDesc,
             L10nKey::SettingsCheckUpdatesOnLaunch,
             L10nKey::SettingsCommandLine,
             L10nKey::SettingsCommandLineDesc,
             L10nKey::SettingsInstallCliOnPath,
-            L10nKey::SettingsExplorerContextMenu,
-            L10nKey::SettingsExplorerContextMenuDesc,
-            L10nKey::SettingsExplorerNotRegistered,
-            L10nKey::SettingsExplorerRegistered,
-            L10nKey::SettingsExplorerNeedsUpdate,
-            L10nKey::SettingsExplorerUnavailable,
-            L10nKey::SettingsExplorerStatusUnavailable,
-            L10nKey::SettingsExplorerRegister,
-            L10nKey::SettingsExplorerUpdate,
-            L10nKey::SettingsExplorerUnregister,
-            L10nKey::SettingsExplorerRegisteredNote,
-            L10nKey::SettingsExplorerUnregisteredNote,
-            L10nKey::SettingsExplorerRegisterFailed,
-            L10nKey::SettingsExplorerUnregisterFailed,
-            L10nKey::SettingsExplorerWindows11Note,
             L10nKey::SettingsServer,
             L10nKey::SettingsServerDesc,
             L10nKey::SettingsRestartServer,
@@ -1422,7 +1423,6 @@ mod tests {
             L10nKey::SettingsSearchDetectUrlsKeywords,
             L10nKey::SettingsSearchDiffPreviewFromCountsKeywords,
             L10nKey::SettingsSearchDimInactivePanesKeywords,
-            L10nKey::SettingsSearchExplorerContextMenuKeywords,
             L10nKey::SettingsSearchFocusFollowsMouseKeywords,
             L10nKey::SettingsSearchFontFamilyKeywords,
             L10nKey::SettingsSearchFontLigaturesKeywords,
@@ -1499,6 +1499,7 @@ mod tests {
             L10nKey::SftpTransferDone,
             L10nKey::SftpTransferCancelled,
             L10nKey::SftpTransferError,
+            L10nKey::SftpImagePasteUploadFailed,
             L10nKey::ForwardPanelTitle,
             L10nKey::ForwardDisconnected,
             L10nKey::ForwardDisconnectedFrom,
@@ -1726,6 +1727,7 @@ mod tests {
             L10nKey::RemoteMismatchDetail,
             L10nKey::RemoteMismatchUnknownBuild,
             L10nKey::RemoteMismatchUnknownBuildFromExe,
+            L10nKey::RemoteMismatchReplaceServer,
             L10nKey::RemoteDaemonStartFailed,
             L10nKey::RemoteDaemonUnreachable,
             L10nKey::RemoteDaemonTooOld,
@@ -1930,11 +1932,15 @@ mod tests {
             L10nKey::SftpErrorInvalidOctalMode,
         ] {
             assert!(
-                !translate(1, key).is_empty(),
+                translate_zh(key).is_some_and(|text| !text.is_empty()),
                 "missing zh translation for {key:?}"
             );
             assert!(
-                !translate(0, key).is_empty(),
+                translate_ja(key).is_some_and(|text| !text.is_empty()),
+                "missing ja translation for {key:?}"
+            );
+            assert!(
+                !translate_en(key).is_empty(),
                 "missing en translation for {key:?}"
             );
         }
@@ -1950,44 +1956,6 @@ mod tests {
         assert_eq!(current_locale_index(), 0);
         set_locale("ko");
         assert_eq!(current_locale_index(), 0);
-    }
-
-    #[test]
-    fn explorer_settings_are_translated_with_error_details() {
-        let keys = [
-            L10nKey::SettingsExplorerContextMenu,
-            L10nKey::SettingsExplorerContextMenuDesc,
-            L10nKey::SettingsExplorerNotRegistered,
-            L10nKey::SettingsExplorerRegistered,
-            L10nKey::SettingsExplorerNeedsUpdate,
-            L10nKey::SettingsExplorerUnavailable,
-            L10nKey::SettingsExplorerStatusUnavailable,
-            L10nKey::SettingsExplorerRegister,
-            L10nKey::SettingsExplorerUpdate,
-            L10nKey::SettingsExplorerUnregister,
-            L10nKey::SettingsExplorerRegisteredNote,
-            L10nKey::SettingsExplorerUnregisteredNote,
-            L10nKey::SettingsExplorerRegisterFailed,
-            L10nKey::SettingsExplorerUnregisterFailed,
-            L10nKey::SettingsExplorerWindows11Note,
-            L10nKey::SettingsSearchExplorerContextMenuKeywords,
-        ];
-        for key in keys {
-            assert_ne!(
-                translate(0, key),
-                translate(1, key),
-                "Simplified Chinese should not fall back to English for {key:?}"
-            );
-        }
-
-        assert_eq!(
-            apply_template(
-                translate(1, L10nKey::SettingsExplorerRegisterFailed),
-                &[("error", "access denied")],
-                None,
-            ),
-            "无法注册：access denied"
-        );
     }
 
     #[test]
@@ -2020,6 +1988,23 @@ mod tests {
                     !translate_variant(1, key, branch).is_empty(),
                     "missing zh plural/select branch {branch:?} for {key:?}"
                 );
+                assert!(
+                    !translate_variant(2, key, branch).is_empty(),
+                    "missing ja plural/select branch {branch:?} for {key:?}"
+                );
+                // Not every key spells out a "zero" branch; the ones that do
+                // must spell it out in every language rather than lean on the
+                // English fallback.
+                if translate_variant_en(key, branch).is_some() {
+                    assert!(
+                        translate_variant_zh(key, branch).is_some(),
+                        "zh is missing plural/select branch {branch:?} for {key:?}"
+                    );
+                    assert!(
+                        translate_variant_ja(key, branch).is_some(),
+                        "ja is missing plural/select branch {branch:?} for {key:?}"
+                    );
+                }
             }
             // Smoke-check t_plural does not produce empty strings.
             assert!(!t_plural(key, 0, &[]).is_empty());

@@ -139,9 +139,33 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Storage_FileSystem",
     "Win32_System_Registry",
+    "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+] }
+# The standalone updater extracts only Windows release ZIPs. Reuse the async
+# reader already present in Cargo.lock and enable only the Deflate codec emitted
+# by PowerShell's Compress-Archive.
+async_zip = { version = "0.0.18", default-features = false, features = ["deflate"], optional = true }
+
+# COM for toast branding (`core::aumid`): IShellLinkW + IPropertyStore stamp
+# System.AppUserModel.ID onto the Start Menu shortcut, which Windows requires
+# before it honors an unpackaged app's toast identity (otherwise the toast
+# backend falls back to PowerShell's). 0.58 is already in the tree via gpui.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Storage_EnhancedStorage",
+    # IShellLinkW::GetPath takes a WIN32_FIND_DATAW, so reading an existing
+    # shortcut's target back — which is how `aumid` decides whether it has to
+    # write at all — needs the file-system bindings too.
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
 ] }
 
 # Embeds `assets/favicon.ico` into the `.exe` so Windows shows the tty7 logo in
@@ -197,7 +221,7 @@ workspace = true
 
 [features]
 default = []
-updater = []
+updater = ["dep:async_zip"]
 
 # ---- Standalone workspace mirroring gpui-component's pins so the git/source
 # ---- caches are shared and versions stay aligned. ----

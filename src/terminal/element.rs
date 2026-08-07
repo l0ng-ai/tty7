@@ -15,7 +15,7 @@ use gpui::{
 };
 use gpui_component::ActiveTheme as _;
 
-use super::view::TerminalView;
+use super::view::{TerminalView, should_show_context_menu};
 use crate::core::config::Config;
 
 const DIM_OPACITY: f32 = 0.66;
@@ -659,6 +659,21 @@ impl PowerlineShape {
             _ => return None,
         })
     }
+
+    fn closing_edge_x(self, bounds: Bounds<Pixels>) -> Pixels {
+        // Keep this match exhaustive so adding a shape cannot silently assign
+        // its solid closing edge to the wrong side of the cell.
+        match self {
+            Self::TriangleRight
+            | Self::HalfCircleRight
+            | Self::SlantLowerLeft
+            | Self::SlantUpperLeft => bounds.left(),
+            Self::TriangleLeft
+            | Self::HalfCircleLeft
+            | Self::SlantLowerRight
+            | Self::SlantUpperRight => bounds.right(),
+        }
+    }
 }
 
 fn powerline_path(bounds: Bounds<Pixels>, shape: PowerlineShape) -> gpui::Path<Pixels> {
@@ -672,6 +687,30 @@ fn powerline_path(bounds: Bounds<Pixels>, shape: PowerlineShape) -> gpui::Path<P
         p.line_to(c);
         p
     };
+    let half_circle = |anchor_x: Pixels, dir: f32| {
+        const SEGS: usize = 12;
+
+        let (rx, ry) = (bounds.size.width.as_f32(), bounds.size.height.as_f32() / 2.);
+
+        let at = |scale: f32, theta: f32| {
+            let x = anchor_x.as_f32() + dir * rx * scale * theta.cos();
+            let y = ymid.as_f32() + ry * scale * theta.sin();
+            point(
+                px(x.clamp(x0.as_f32(), x1.as_f32())),
+                px(y.clamp(y0.as_f32(), y1.as_f32())),
+            )
+        };
+
+        let step = std::f32::consts::PI / SEGS as f32;
+        let mut p = gpui::Path::new(at(1., -std::f32::consts::FRAC_PI_2));
+        for i in 0..SEGS {
+            let t0 = -std::f32::consts::FRAC_PI_2 + step * i as f32;
+            let t1 = t0 + step;
+            let ctrl = at(1. / (step / 2.).cos(), (t0 + t1) / 2.);
+            p.curve_to(at(1., t1), ctrl);
+        }
+        p
+    };
     match shape {
         PowerlineShape::TriangleRight => tri(point(x0, y0), point(x1, ymid), point(x0, y1)),
         PowerlineShape::TriangleLeft => tri(point(x1, y0), point(x0, ymid), point(x1, y1)),
@@ -679,19 +718,43 @@ fn powerline_path(bounds: Bounds<Pixels>, shape: PowerlineShape) -> gpui::Path<P
         PowerlineShape::SlantLowerRight => tri(point(x1, y0), point(x1, y1), point(x0, y1)),
         PowerlineShape::SlantUpperLeft => tri(point(x0, y0), point(x1, y0), point(x0, y1)),
         PowerlineShape::SlantUpperRight => tri(point(x0, y0), point(x1, y0), point(x1, y1)),
-        PowerlineShape::HalfCircleRight => {
-            let mut p = gpui::Path::new(point(x0, y0));
-            p.curve_to(point(x1, ymid), point(x1, y0));
-            p.curve_to(point(x0, y1), point(x1, y1));
-            p
-        }
-        PowerlineShape::HalfCircleLeft => {
-            let mut p = gpui::Path::new(point(x1, y0));
-            p.curve_to(point(x0, ymid), point(x0, y0));
-            p.curve_to(point(x1, y1), point(x0, y1));
-            p
-        }
+        PowerlineShape::HalfCircleRight => half_circle(x0, 1.),
+        PowerlineShape::HalfCircleLeft => half_circle(x1, -1.),
     }
+}
+
+fn powerline_solid_edge(
+    bounds: Bounds<Pixels>,
+    shape: PowerlineShape,
+    scale_factor: f32,
+    fg_alpha: f32,
+) -> Option<Bounds<Pixels>> {
+    // A filled path anti-aliases a closing edge that falls between device
+    // pixels. Cover exactly that partially occupied pixel with opaque
+    // foreground color; an already aligned edge needs no extra primitive.
+    //
+    // Only opaque separators qualify. A translucent one (DIM) would composite
+    // the cover quad and the path on top of each other, pushing that single
+    // column past the glyph's own alpha and tinting the neighboring cell.
+    if !fg_alpha.is_finite() || fg_alpha < 1. {
+        return None;
+    }
+    let scale_factor = if scale_factor.is_finite() && scale_factor > 0. {
+        scale_factor
+    } else {
+        1.
+    };
+    let physical_edge = shape.closing_edge_x(bounds).as_f32() * scale_factor;
+    let physical_left = physical_edge.floor();
+    let physical_right = physical_edge.ceil();
+    if physical_left == physical_right {
+        return None;
+    }
+
+    Some(Bounds::from_corners(
+        point(px(physical_left / scale_factor), bounds.top()),
+        point(px(physical_right / scale_factor), bounds.bottom()),
+    ))
 }
 
 fn native_cell_residue(style: &GlyphStyle) -> Option<char> {
@@ -764,8 +827,14 @@ fn paint_glyphs(
                         size(geom.cell_width, geom.line_height),
                     );
                     let native = if let Some(shape) = PowerlineShape::of(cell.c) {
+                        let fg = GlyphStyle::of(cell).fg;
+                        if let Some(edge) =
+                            powerline_solid_edge(cell_bounds, shape, window.scale_factor(), fg.a)
+                        {
+                            window.paint_quad(fill(edge, fg));
+                        }
                         let path = powerline_path(cell_bounds, shape);
-                        window.paint_path(path, GlyphStyle::of(cell).fg);
+                        window.paint_path(path, fg);
                         true
                     } else if let Some(ink) =
                         super::boxdraw::glyph(cell.c, cell_bounds, window.scale_factor())
@@ -1199,7 +1268,10 @@ impl TerminalElement {
                 {
                     return;
                 }
-                if v.mouse_mode() && !mods.shift {
+                // The mirror image of the context-menu gate in
+                // `TerminalView::render`: a click the application gets is never
+                // also a click tty7 acts on, and vice versa.
+                if !should_show_context_menu(v.mouse_mode(), mods.shift) {
                     v.mouse_press(button, col, row, &mods);
                     return;
                 }
@@ -1949,6 +2021,123 @@ mod tests {
                 x0 + w,
                 "{shape:?} does not reach the right cell edge"
             );
+            match shape {
+                PowerlineShape::HalfCircleRight => assert!(
+                    path.vertices[1].xy_position.x <= x0 + w * 0.4
+                        && path.vertices[path.vertices.len() - 2].xy_position.x <= x0 + w * 0.4,
+                    "right caps should not collapse into a diagonal wedge"
+                ),
+                PowerlineShape::HalfCircleLeft => assert!(
+                    path.vertices[1].xy_position.x >= x0 + w * 0.6
+                        && path.vertices[path.vertices.len() - 2].xy_position.x >= x0 + w * 0.6,
+                    "left caps should not collapse into a diagonal wedge"
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn powerline_solid_edge_covers_only_the_fractional_device_pixel() {
+        let bounds = Bounds::new(point(px(10.2), px(20.)), size(px(9.2), px(21.)));
+        let scale = 1.25;
+
+        for shape in [
+            PowerlineShape::TriangleRight,
+            PowerlineShape::HalfCircleRight,
+            PowerlineShape::SlantLowerLeft,
+            PowerlineShape::SlantUpperLeft,
+        ] {
+            assert_eq!(
+                powerline_solid_edge(bounds, shape, scale, 1.),
+                Some(Bounds::from_corners(
+                    point(px(12. / scale), bounds.top()),
+                    point(px(13. / scale), bounds.bottom()),
+                )),
+                "{shape:?} must cover only the device pixel containing its left edge"
+            );
+        }
+
+        for shape in [
+            PowerlineShape::TriangleLeft,
+            PowerlineShape::HalfCircleLeft,
+            PowerlineShape::SlantLowerRight,
+            PowerlineShape::SlantUpperRight,
+        ] {
+            assert_eq!(
+                powerline_solid_edge(bounds, shape, scale, 1.),
+                Some(Bounds::from_corners(
+                    point(px(24. / scale), bounds.top()),
+                    point(px(25. / scale), bounds.bottom()),
+                )),
+                "{shape:?} must cover only the device pixel containing its right edge"
+            );
+        }
+    }
+
+    #[test]
+    fn powerline_solid_edge_skips_device_aligned_edges() {
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(9.), px(21.)));
+
+        for shape in [
+            PowerlineShape::TriangleRight,
+            PowerlineShape::TriangleLeft,
+            PowerlineShape::HalfCircleRight,
+            PowerlineShape::HalfCircleLeft,
+            PowerlineShape::SlantLowerLeft,
+            PowerlineShape::SlantLowerRight,
+            PowerlineShape::SlantUpperLeft,
+            PowerlineShape::SlantUpperRight,
+        ] {
+            assert_eq!(
+                powerline_solid_edge(bounds, shape, 2., 1.),
+                None,
+                "{shape:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn powerline_solid_edge_sanitizes_invalid_scale() {
+        let bounds = Bounds::new(point(px(10.25), px(20.)), size(px(9.), px(21.)));
+        let expected = Some(Bounds::from_corners(
+            point(px(10.), bounds.top()),
+            point(px(11.), bounds.bottom()),
+        ));
+
+        for scale in [0., -1., f32::NAN] {
+            assert_eq!(
+                powerline_solid_edge(bounds, PowerlineShape::TriangleRight, scale, 1.),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn powerline_solid_edge_skips_translucent_separators() {
+        let bounds = Bounds::new(point(px(10.2), px(20.)), size(px(9.2), px(21.)));
+
+        for shape in [
+            PowerlineShape::TriangleRight,
+            PowerlineShape::TriangleLeft,
+            PowerlineShape::HalfCircleRight,
+            PowerlineShape::HalfCircleLeft,
+            PowerlineShape::SlantLowerLeft,
+            PowerlineShape::SlantLowerRight,
+            PowerlineShape::SlantUpperLeft,
+            PowerlineShape::SlantUpperRight,
+        ] {
+            assert!(
+                powerline_solid_edge(bounds, shape, 1.25, 1.).is_some(),
+                "{shape:?} still needs the cover quad when opaque"
+            );
+            for alpha in [DIM_OPACITY, 0., 0.99, f32::NAN] {
+                assert_eq!(
+                    powerline_solid_edge(bounds, shape, 1.25, alpha),
+                    None,
+                    "{shape:?} must not stack a cover quad under a translucent path"
+                );
+            }
         }
     }
 
