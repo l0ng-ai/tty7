@@ -4,6 +4,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::core::config;
+use crate::daemon::control::DialectRefusal;
 use crate::daemon::protocol::{ClientMsg, DaemonMsg, DaemonVersion, PROTOCOL_VERSION};
 use crate::daemon::{pidfile, transport};
 
@@ -19,14 +20,35 @@ const REAP_TERM_TIMEOUT: Duration = Duration::from_secs(6);
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const REAP_KILL_TIMEOUT: Duration = Duration::from_secs(2);
 
-pub struct MismatchedDaemon {
-    pub version: Option<DaemonVersion>,
+/// Why the daemon that answered is not the one this build expects.
+///
+/// One process carries two version numbers — the pane protocol on `daemon.sock`
+/// and the control dialect on the control socket — and a release can move one
+/// without the other. They also fail differently, so a mismatch has to say
+/// which it is: the first garbles pane traffic, the second leaves panes working
+/// while every machine-tree call is refused, which costs the window its tabs.
+pub enum DaemonMismatch {
+    /// The pane protocol differs, or predates versioning entirely.
+    Protocol(Option<DaemonVersion>),
+    /// The pane protocol agrees but the control dialect does not.
+    Dialect(DialectRefusal),
 }
 
-static MISMATCHED_DAEMON: std::sync::Mutex<Option<MismatchedDaemon>> = std::sync::Mutex::new(None);
+static MISMATCHED_DAEMON: std::sync::Mutex<Option<DaemonMismatch>> = std::sync::Mutex::new(None);
 
-pub fn take_mismatched_daemon() -> Option<MismatchedDaemon> {
+pub fn take_mismatched_daemon() -> Option<DaemonMismatch> {
     MISMATCHED_DAEMON.lock().ok()?.take()
+}
+
+/// Arms the launch prompt for the next window built.
+///
+/// Callers that meet the mismatch later than [`ensure_running`] — a control
+/// link that comes back refused, say — record it here so the next window still
+/// offers the restart rather than opening empty with no explanation.
+pub fn note_daemon_mismatch(mismatch: DaemonMismatch) {
+    if let Ok(mut slot) = MISMATCHED_DAEMON.lock() {
+        *slot = Some(mismatch);
+    }
 }
 
 static LOCAL_DAEMON: std::sync::Mutex<Option<DaemonVersion>> = std::sync::Mutex::new(None);
@@ -86,6 +108,22 @@ pub fn ensure_running() -> anyhow::Result<()> {
         match query_daemon_version(&mut stream) {
             VersionProbe::Speaks(v) if v.protocol == PROTOCOL_VERSION => {
                 note_local_daemon(Some(v));
+                // Agreeing here is only half the handshake: the control dialect
+                // is versioned apart and moves on its own, so a daemon from
+                // before a dialect bump passes this check and then refuses
+                // every machine-tree call. Ask the other socket before calling
+                // the daemon ours, or the window opens with no tabs and nothing
+                // to explain why.
+                if let Some(refusal) = control_dialect_refusal() {
+                    log::warn!(
+                        "daemon (build {}) speaks control v{}, this build speaks v{}; \
+                         its machine tree is out of reach until it restarts",
+                        refusal.peer_build,
+                        refusal.peer,
+                        refusal.ours
+                    );
+                    note_daemon_mismatch(DaemonMismatch::Dialect(refusal));
+                }
                 return Ok(());
             }
             VersionProbe::Speaks(v) => {
@@ -97,9 +135,7 @@ pub fn ensure_running() -> anyhow::Result<()> {
                     PROTOCOL_VERSION
                 );
                 note_local_daemon(Some(v.clone()));
-                if let Ok(mut slot) = MISMATCHED_DAEMON.lock() {
-                    *slot = Some(MismatchedDaemon { version: Some(v) });
-                }
+                note_daemon_mismatch(DaemonMismatch::Protocol(Some(v)));
                 return Ok(());
             }
             VersionProbe::Legacy => {
@@ -107,9 +143,7 @@ pub fn ensure_running() -> anyhow::Result<()> {
                     "daemon predates protocol versioning; keeping it and deferring to the user"
                 );
                 note_local_daemon(None);
-                if let Ok(mut slot) = MISMATCHED_DAEMON.lock() {
-                    *slot = Some(MismatchedDaemon { version: None });
-                }
+                note_daemon_mismatch(DaemonMismatch::Protocol(None));
                 return Ok(());
             }
             VersionProbe::Unresponsive => {
@@ -171,6 +205,53 @@ fn query_daemon_version(stream: &mut transport::Stream) -> VersionProbe {
             VersionProbe::Unresponsive
         }
         _ => VersionProbe::Legacy,
+    }
+}
+
+/// The control dialect the running daemon speaks, if it is not ours.
+///
+/// A control link would find this out on its own, but only after the first
+/// window is already on screen and already empty. Asking here — one handshake
+/// on a socket the daemon answers before it touches any state — is what lets
+/// launch put the question to the user instead of a log line nobody reads.
+///
+/// Silence is not agreement: a daemon that is still coming up, or one whose
+/// control socket is unreachable, answers nothing and is left alone.
+fn control_dialect_refusal() -> Option<DialectRefusal> {
+    #[cfg(unix)]
+    let sock =
+        std::os::unix::net::UnixStream::connect(crate::host::server::control_socket_path().ok()?)
+            .ok()?;
+    #[cfg(windows)]
+    let sock = crate::host::server::connect_control().ok()?;
+
+    sock.set_read_timeout(Some(HANDSHAKE_TIMEOUT)).ok()?;
+    dialect_of(&sock)
+}
+
+/// The dialect half of a control handshake, over a link already open.
+fn dialect_of<S: io::Read + io::Write>(mut link: S) -> Option<DialectRefusal> {
+    use crate::daemon::control::{
+        CONTROL_VERSION, ControlClientMsg, ControlHello, ControlServerMsg,
+    };
+
+    // Not `gui()`: this connection asks one question and hangs up, and a GUI
+    // hello is a claim on a workspace.
+    let hello =
+        ControlHello::host_rpc(crate::daemon::protocol::process_instance(), "this computer");
+    ControlClientMsg::Hello(hello)
+        .encode(&mut link)
+        .and_then(|()| link.flush())
+        .ok()?;
+    match ControlServerMsg::read(&mut link) {
+        Ok(ControlServerMsg::HelloOk(ok)) if ok.control_version != CONTROL_VERSION => {
+            Some(DialectRefusal {
+                peer_build: ok.build,
+                peer: ok.control_version,
+                ours: CONTROL_VERSION,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -661,6 +742,7 @@ mod exe_name_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::daemon::control::CONTROL_VERSION;
     use std::io::ErrorKind;
     use std::os::unix::net::UnixStream;
 
@@ -781,6 +863,62 @@ mod tests {
         );
         assert!(start.elapsed() >= HANDSHAKE_TIMEOUT);
         drop(daemon);
+    }
+
+    /// A control server on one end of a pair, answering the handshake with
+    /// `control_version` and nothing else.
+    fn control_peer_speaking(
+        version: u32,
+        build: &'static str,
+    ) -> (UnixStream, std::thread::JoinHandle<()>) {
+        use crate::daemon::control::{ControlClientMsg, ControlHelloOk, ControlServerMsg};
+
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let joined = std::thread::spawn(move || {
+            let _ = ControlClientMsg::read(&mut server);
+            let _ = ControlServerMsg::HelloOk(ControlHelloOk {
+                control_version: version,
+                protocol_version: PROTOCOL_VERSION,
+                build: build.to_string(),
+                separator: '/',
+                home: "/home/test".into(),
+                features: Vec::new(),
+                instance: "test".into(),
+            })
+            .encode(&mut server);
+        });
+        (client, joined)
+    }
+
+    #[test]
+    fn an_older_control_dialect_is_named_even_though_the_pane_protocol_agrees() {
+        let (client, server) = control_peer_speaking(CONTROL_VERSION - 1, "26.7.7-nightly");
+        let refusal = dialect_of(&client).expect("a dialect a version behind is a mismatch");
+        assert_eq!(refusal.peer, CONTROL_VERSION - 1);
+        assert_eq!(refusal.ours, CONTROL_VERSION);
+        assert_eq!(
+            refusal.peer_build, "26.7.7-nightly",
+            "the prompt names the build the user has to restart"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_server_of_our_own_dialect_is_not_a_mismatch() {
+        let (client, server) = control_peer_speaking(CONTROL_VERSION, "26.8.2-nightly");
+        assert!(dialect_of(&client).is_none());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_control_socket_that_says_nothing_is_left_alone() {
+        let (client, server) = UnixStream::pair().unwrap();
+        client.set_read_timeout(Some(HANDSHAKE_TIMEOUT)).unwrap();
+        assert!(
+            dialect_of(&client).is_none(),
+            "a server still coming up must not be reported as the wrong version"
+        );
+        drop(server);
     }
 
     #[test]

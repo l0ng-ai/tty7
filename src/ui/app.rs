@@ -25,6 +25,7 @@ use crate::core::shells::ShellInventory;
 use crate::core::ssh_config;
 use crate::core::window_state::{WindowGeometry as _, WindowState};
 use crate::daemon::protocol::{RemoteContext, ShellSpec, ssh_option_takes_value};
+use crate::daemon::spawn::DaemonMismatch;
 use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::host_registry::HostId;
 use crate::ui::i18n::{L10nKey, set_locale, t, t_fmt};
@@ -492,8 +493,8 @@ impl Tty7App {
             return;
         };
         let ours = crate::daemon::protocol::PROTOCOL_VERSION;
-        let detail = match mismatch.version {
-            Some(v) => t_fmt(
+        let detail = match mismatch {
+            DaemonMismatch::Protocol(Some(v)) => t_fmt(
                 L10nKey::AppRestartServerMismatchDetail,
                 &[
                     ("build", &v.build.to_string()),
@@ -501,7 +502,15 @@ impl Tty7App {
                     ("ours", &ours.to_string()),
                 ],
             ),
-            None => t(L10nKey::AppRestartServerOldDetail).to_string(),
+            DaemonMismatch::Protocol(None) => t(L10nKey::AppRestartServerOldDetail).to_string(),
+            DaemonMismatch::Dialect(refusal) => t_fmt(
+                L10nKey::AppRestartServerDialectDetail,
+                &[
+                    ("build", &refusal.peer_build),
+                    ("dialect", &refusal.peer.to_string()),
+                    ("ours", &refusal.ours.to_string()),
+                ],
+            ),
         };
         let answer = window.prompt(
             PromptLevel::Warning,

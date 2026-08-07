@@ -3,6 +3,7 @@ use std::io;
 use std::sync::Arc;
 
 use gpui::{App, Global};
+use gpui_component::WindowExt as _;
 use tty7_core::core::machine::{
     AgentFacts, Axis as TreeAxis, LayoutDelta, Machine, PaneNode, PaneRecord, PaneSeed, Side,
     Tab as TreeTab, TabId,
@@ -12,6 +13,7 @@ use tty7_core::host::HostId;
 
 use crate::core::session::{Session, SessionPane, SessionTab, WorkspaceId, WorkspaceStore};
 use crate::ui::app::Tty7App;
+use crate::ui::i18n::{L10nKey, t};
 use crate::ui::pane::{Pane, PaneSlot};
 
 pub(crate) fn control_for(cx: &mut App, host: HostId) -> Option<Arc<ControlClient>> {
@@ -1193,7 +1195,15 @@ fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
             }
         };
         let Some(client) = client else {
-            cx.update(|cx| owe_rehydration(cx, client_ws, epoch, adopt));
+            cx.update(|cx| {
+                owe_rehydration(cx, client_ws, epoch, adopt);
+                // A machine that answers late is normal for a remote one, and
+                // the switcher already says so there. On this computer nothing
+                // else would.
+                if adopt == Adopt::IfEmpty && host.is_local() {
+                    say_why_the_window_is_empty(cx, client_ws);
+                }
+            });
             return;
         };
         let outcome = cx
@@ -1203,6 +1213,21 @@ fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
         cx.update(|cx| finish_hydration(cx, client_ws, epoch, adopt, outcome));
     })
     .detach();
+}
+
+/// Tells the window it opened empty because its machine never answered.
+///
+/// An empty window is also what a window with no tabs looks like, and the retry
+/// that would fill it in is as quiet as the failure was — so a server one
+/// dialect behind reads as "tty7 lost my tabs" with nothing anywhere to say
+/// otherwise. This is that "otherwise", said in the window it happened to.
+fn say_why_the_window_is_empty(cx: &mut App, client_ws: WorkspaceId) {
+    let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, client_ws) else {
+        return;
+    };
+    let _ = handle.update(cx, |_, window, cx| {
+        window.push_notification(t(L10nKey::TreeWindowOpenedEmpty), cx);
+    });
 }
 
 /// Records that a hydration failed and still owes `client_ws` its layout.

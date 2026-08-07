@@ -104,9 +104,20 @@ impl LocalLink {
                         );
                         crate::ui::tree_sync::on_link_up(cx, tty7_core::host::HostId::LOCAL);
                     }
-                    Err(e) => {
-                        log::debug!("local control link attempt failed: {e}");
-                    }
+                    Err(e) => match dialect_refusal(&e) {
+                        // Retrying will not talk this server round, and the
+                        // window already on screen has no tabs to show. Arm the
+                        // prompt so the next window built offers the restart.
+                        Some(refusal) => {
+                            log::warn!(
+                                "the local server refused this build's control dialect: {e}"
+                            );
+                            crate::daemon::spawn::note_daemon_mismatch(
+                                crate::daemon::spawn::DaemonMismatch::Dialect(refusal),
+                            );
+                        }
+                        None => log::debug!("local control link attempt failed: {e}"),
+                    },
                 }
             });
         })
@@ -130,6 +141,14 @@ fn connect_blocking() -> std::io::Result<Arc<ControlClient>> {
     let client =
         ControlClient::over_tcp(tty7_core::host::server::connect_control()?, &hello, sink)?;
     Ok(Arc::new(client))
+}
+
+/// The dialect mismatch behind a failed connect, if that is what it was.
+///
+/// It arrives as the handshake's own wording rather than a typed error, so this
+/// is where the string becomes the fact again.
+fn dialect_refusal(e: &std::io::Error) -> Option<tty7_core::daemon::control::DialectRefusal> {
+    tty7_core::daemon::control::parse_dialect_refusal(&e.to_string())
 }
 
 fn local_event_sink(event: tty7_core::daemon::control::ControlEvent) {

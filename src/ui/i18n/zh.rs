@@ -904,6 +904,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SshPromptUnlock => "解锁",
         L10nKey::SshPromptSubmit => "提交",
         L10nKey::HostOpsError => "{context}：{error}",
+        L10nKey::TreeWindowOpenedEmpty => {
+            "这个窗口的服务器没有交出标签页，所以窗口是空的。什么都没有丢——服务器一旦响应，标签页就会回来；如果一直不回来，请在命令面板里执行「重启服务器」。"
+        }
         L10nKey::CmdGroupTabsPanes => "标签页与窗格",
         L10nKey::CmdGroupWorkspaces => "工作区",
         L10nKey::CmdGroupView => "视图",
@@ -997,6 +1000,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppRestartServerTitle => "重启服务器？",
         L10nKey::AppRestartServerMismatchDetail => {
             "正在运行你 shell 的服务器来自另一个构建（v{build}，协议 {protocol}；此应用使用 {ours}）。你可以继续使用，shell 也会保留，但协议格式已变更的功能可能会表现异常，直到重启服务器。重启会启动一个干净的服务器：标签页会以全新的 shell 重新打开，其中正在运行的所有内容都会被终止。"
+        }
+        L10nKey::AppRestartServerDialectDetail => {
+            "正在运行你 shell 的服务器来自较旧的构建（v{build}）：它使用 control 方言 v{dialect}，此应用使用 v{ours}。shell 会继续运行，但它无法把标签页交给此应用，在重启之前窗口都会是空的。重启会启动一个干净的服务器：标签页会以全新的 shell 重新打开，其中正在运行的所有内容都会被终止。"
         }
         L10nKey::AppRestartServerOldDetail => {
             "正在运行你 shell 的服务器来自应用的旧版本。你可以继续使用，shell 也会保留，但新功能可能会表现异常，直到重启服务器。重启会启动一个干净的服务器：标签页会以全新的 shell 重新打开，其中正在运行的所有内容都会被终止。"
