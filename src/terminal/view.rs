@@ -294,6 +294,22 @@ fn integration_notice_message(wrapper: Option<&str>) -> String {
     }
 }
 
+/// Join whatever context a pane has into a notification title, most specific
+/// part first: an agent name if one is running, otherwise the machine the pane
+/// lives on, then the workspace it belongs to. Kept to two segments — Windows
+/// toast titles are a single line and ellipsize anything longer.
+fn compose_notification_title(
+    lead: Option<String>,
+    host: Option<String>,
+    workspace: Option<String>,
+) -> String {
+    match (lead.or(host), workspace) {
+        (Some(lead), Some(workspace)) => format!("{lead} · {workspace}"),
+        (Some(only), None) | (None, Some(only)) => only,
+        (None, None) => "tty7".to_string(),
+    }
+}
+
 impl TerminalView {
     fn notify_command_finished(
         &self,
@@ -311,31 +327,38 @@ impl TerminalView {
                 &[("command", command), ("secs", &secs)],
             )
         };
-        let title = self.notification_title(cx);
-        super::remote::notify_desktop_at(Some(&title), &body, Some(self.pane_id));
+        self.notify_pane(None, &body, cx);
     }
 
     fn notify_agent_finished(
         &self,
         agent: crate::core::cli_agent::CLIAgent,
         elapsed: std::time::Duration,
+        cx: &mut Context<Self>,
     ) {
         let secs = elapsed.as_secs().to_string();
         let body = t_fmt(L10nKey::NotifyAgentFinished, &[("secs", &secs)]);
-        super::remote::notify_desktop_at(Some(agent.display_name()), &body, Some(self.pane_id));
+        self.notify_pane(Some(agent.display_name()), &body, cx);
     }
 
-    fn notification_title(&self, cx: &App) -> String {
+    /// Notify about this pane, with a title describing where it lives and a
+    /// click that reveals it. The id has to be the pane's *gpui entity id*:
+    /// that is what `TrayAction::RevealPane` matches leaves on, and it is a
+    /// different number from `pane_id`, which the daemon assigns.
+    fn notify_pane(&self, lead: Option<&str>, body: &str, cx: &mut Context<Self>) {
+        let title = self.notification_title(lead, cx);
+        super::remote::notify_desktop_for_pane(Some(&title), body, Some(cx.entity_id()));
+    }
+
+    fn notification_title(&self, lead: Option<&str>, cx: &App) -> String {
         let host = self
             .workspace
             .as_ref()
-            .map(|w| crate::ui::remote_connect::label_for(&w.target, cx))
-            .unwrap_or_else(|| t(L10nKey::RemoteThisComputer).to_string());
+            .map(|w| crate::ui::remote_connect::label_for(&w.target, cx));
         let workspace = self
             .owner_workspace
-            .and_then(|id| crate::ui::machine_mirror::display_name_for(cx, id))
-            .unwrap_or_else(|| t(L10nKey::WindowUntitled).to_string());
-        format!("{host} · {workspace}")
+            .and_then(|id| crate::ui::machine_mirror::display_name_for(cx, id));
+        compose_notification_title(lead.map(str::to_string), host, workspace)
     }
 }
 
@@ -2499,7 +2522,7 @@ impl TerminalView {
                 if notify_allowed {
                     match agent {
                         Some(_) if self.agent_was_rich => {}
-                        Some(agent) => self.notify_agent_finished(agent, elapsed),
+                        Some(agent) => self.notify_agent_finished(agent, elapsed, cx),
                         None => {
                             let threshold = std::time::Duration::from_secs(
                                 cx.global::<Config>().notify_threshold_secs,
@@ -2743,8 +2766,7 @@ impl TerminalView {
                     .as_ref()
                     .and_then(|s| s.message.clone())
                     .unwrap_or_else(|| t(L10nKey::NotifyAgentWaiting).to_string());
-                let title = format!("{} · {}", self.notification_title(cx), agent_name);
-                super::remote::notify_desktop_at(Some(&title), &body, Some(self.pane_id));
+                self.notify_pane(Some(agent_name), &body, cx);
             }
             Some(AgentStatus::Done)
                 if rich
@@ -2761,8 +2783,7 @@ impl TerminalView {
                     }
                     None => t(L10nKey::NotifyTurnFinished).to_string(),
                 };
-                let title = format!("{} · {}", self.notification_title(cx), agent_name);
-                super::remote::notify_desktop_at(Some(&title), &body, Some(self.pane_id));
+                self.notify_pane(Some(agent_name), &body, cx);
             }
             _ => {}
         }
@@ -5368,8 +5389,8 @@ fn drag_scroll_step(overshoot: f32) -> i32 {
 mod tests {
     use super::{
         LoopbackPlan, RawInput, SelectEndCopy, Typeahead, WheelRoute, clipboard_paste_text,
-        cwd_is_on_host, display_width, is_typeahead_interrupt, loopback_plan,
-        observe_typeahead_for_owner,
+        compose_notification_title, cwd_is_on_host, display_width, is_typeahead_interrupt,
+        loopback_plan, observe_typeahead_for_owner,
     };
     use super::{
         drag_scroll_step, encode_mouse, escape_candidate, expand_file_command_template,
@@ -5388,6 +5409,27 @@ mod tests {
     use crate::core::session::{RemoteTarget, WorkspaceId};
     use crate::daemon::protocol::RemoteKind;
     use crate::terminal::PaneWorkspace;
+
+    #[test]
+    fn a_notification_title_keeps_at_most_two_segments() {
+        let ws = || Some("tty7".to_string());
+        assert_eq!(
+            compose_notification_title(None, Some("build-box".into()), ws()),
+            "build-box · tty7"
+        );
+        // An agent takes the machine's place rather than adding a third part.
+        assert_eq!(
+            compose_notification_title(Some("Claude".into()), Some("build-box".into()), ws()),
+            "Claude · tty7"
+        );
+        // A local pane has no machine label; a nameless workspace has no name.
+        assert_eq!(compose_notification_title(None, None, ws()), "tty7");
+        assert_eq!(
+            compose_notification_title(Some("Claude".into()), None, None),
+            "Claude"
+        );
+        assert_eq!(compose_notification_title(None, None, None), "tty7");
+    }
 
     #[test]
     fn alt_screen_exit_discards_the_boundary_input_before_recording_shell_text() {

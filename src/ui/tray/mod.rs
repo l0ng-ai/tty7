@@ -9,7 +9,7 @@ use native::Backend;
 #[cfg(target_os = "linux")]
 use sni::Backend;
 
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 use crate::core::cli_agent::AgentStatus;
 use crate::core::config::{Config, NotifyMode};
@@ -18,11 +18,20 @@ use gpui::App;
 
 const POLL: std::time::Duration = std::time::Duration::from_millis(1000);
 
-static SENDER: OnceLock<smol::channel::Sender<TrayAction>> = OnceLock::new();
+/// Handed out to callers that live outside the UI thread — notification click
+/// handlers, which run on a platform callback thread and can only enqueue.
+///
+/// `init` runs again whenever the window count drops to zero and comes back, so
+/// this has to be replaceable: holding the first channel forever would keep its
+/// (long dead) dispatch loop alive and send later clicks nowhere.
+static SENDER: Mutex<Option<smol::channel::Sender<TrayAction>>> = Mutex::new(None);
 
-/// Returns the global tray action sender, if the tray has been initialized.
-pub(crate) fn sender() -> Option<&'static smol::channel::Sender<TrayAction>> {
-    SENDER.get()
+/// A sender for the current tray dispatch loop, if one is running.
+// Only the platform notification callbacks call this, and those are compiled
+// out of test builds so unit tests never raise a real toast.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn sender() -> Option<smol::channel::Sender<TrayAction>> {
+    SENDER.lock().ok()?.clone()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -338,7 +347,9 @@ fn dispatch(action: TrayAction, cx: &mut App) {
 
 pub(crate) fn init(cx: &mut App) {
     let (tx, rx) = smol::channel::unbounded::<TrayAction>();
-    let _ = SENDER.set(tx.clone());
+    if let Ok(mut slot) = SENDER.lock() {
+        *slot = Some(tx.clone());
+    }
 
     cx.spawn(async move |cx| {
         while let Ok(action) = rx.recv().await {

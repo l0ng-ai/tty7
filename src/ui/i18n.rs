@@ -2815,7 +2815,7 @@ fn translate(locale: Locale, key: L10nKey) -> &'static str {
         ),
         L10nKey::NotifyCommandFinishedWithCommand => (
             "{command} — finished after {secs}s",
-            "{command} — 已完成，用时 {secs} 秒",
+            "{command} 已完成，用时 {secs} 秒",
         ),
         L10nKey::NotifyAgentFinished => ("Finished after {secs}s", "已完成，用时 {secs} 秒"),
         L10nKey::NotifyAgentWaiting => ("Waiting for your input", "等待你的输入"),
