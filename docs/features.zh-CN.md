@@ -62,7 +62,6 @@ Aider、Amp、OpenCode 等约 17 个）并在其外围加功能 —— 绝不包
 - **复制 Session ID** —— 把 agent 的原生 session id 复制到剪贴板，就在 *Copy Working Directory* 旁边，方便粘进 `codex resume`、bug 报告或别的工具
 - **上下文回填** —— 面板命令把当前选区或仓库 `git diff` 打包成 prompt 直接喂给正在跑的 agent
 - **托盘图标** —— 系统托盘 / 菜单栏常驻图标，任何 agent 等你输入时立即切换为提醒态；菜单列出所有 agent pane（品牌头像 + 状态点，点击直达）、可切换通知策略，并在保留会话的普通退出之外提供 *Quit and Stop Daemon*（`show_tray_icon`，默认开启）
-- **任务栏状态点（Windows）** —— 每个窗口的任务栏按钮都会带一个彩色角标：命令或 agent 运行中为蓝色，agent 等你输入为琥珀色，窗口未聚焦时工作完成为绿色（切回窗口即清除）。颜色与窗口内状态点完全一致，语义不会漂移。可在「设置 → 窗口与标签」开关，或在 `config.json` 里用 `taskbar_status_icon` 控制（默认开启；仅 Windows）
 - **`tty7 wait`** —— CLI 的编排原语：阻塞到某个 pane 的 agent 等待输入或完成一轮（`tty7 wait %3 --until waiting,done --changed --timeout 600`，超时退出码 124），让一个 agent 睡到同伴卡在权限确认的那一刻，而不是抓屏猜——然后 `tty7 capture %3 --plain` 收结果。agent 状态是电平不是边沿，所以 `--changed` 会忽略 wait 开始时 pane 本来就处在的那个状态；不加它的话，JSON 里的 `stale` 标记会告诉你这个答案是不是上一轮留下的
 - **Orchestration skill** —— 一个开关（设置 → Agents），安装一个 Claude Code skill（`~/.claude/skills/tty7-orchestration`），教 *primary* agent 完整的委派循环——开 worker pane、发一个边界清晰的任务、`wait` 等待、收结果。特意做成 skill 而非全局指令：平时只有一行描述占上下文，显式调用才加载全文，worker agent 也不会继承编排权限
 - **`tty7` 上 PATH** —— CLI 随每个安装包一起发布，启动时自动放到 PATH 上，脚本和 coding agent 在任何终端里都能驱动 tty7。tty7 自己的 pane 里则一定可用，因为 pane 继承 app 的环境。Unix 上是往 `/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin`、`~/bin`、`~/.cargo/bin` 中你 PATH 已经覆盖的那个目录里放一个软链；Windows 上是把安装目录追加到用户 PATH，卸载时再摘掉。你自己装的 `tty7` 一律保持原样，不会被覆盖。关掉：设置 → Agents，或 `config.json` 里 `install_cli_on_path: false`
