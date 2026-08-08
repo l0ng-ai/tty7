@@ -918,7 +918,17 @@ impl Tty7App {
                 .absolute()
                 .inset_0()
                 .occlude()
-                .bg(cx.theme().background)
+                // Opaque on purpose: this overlay covers the whole workspace
+                // (everything but the detail panel) and an open file must never
+                // let the window translucency / backdrop material show through
+                // it. The preset's gradient fill is preserved, just with
+                // alpha 1 — the same paint the settings overlay uses.
+                .bg(
+                    match cx.try_global::<crate::ui::presets::ActiveBackground>() {
+                        Some(bg) => crate::ui::theme::window_background_opaque(bg),
+                        None => cx.theme().background.alpha(1.0).into(),
+                    },
+                )
                 .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                     if ev.keystroke.key == "escape" {
                         this.toggle_code_panel(window, cx);
