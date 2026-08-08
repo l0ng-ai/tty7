@@ -560,6 +560,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentOpencode => "OpenCode",
         L10nKey::SettingsAgentPi => "Pi",
         L10nKey::SettingsAgentGrokBuild => "Grok Build",
+        L10nKey::SettingsAgentOhMyPi => "Oh My Pi",
         L10nKey::SettingsSearchAboutKeywords => {
             "バージョン ライセンス クレジット ビルド 更新 確認 github about version license credits update check"
         }
@@ -671,6 +672,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchOptionAsMetaKeywords => {
             "alt キーボード 修飾キー エスケープ macos option meta option acts as meta keyboard modifier"
+        }
+        L10nKey::SettingsSearchOhMyPiKeywords => {
+            "エージェント 統合 拡張 インストール omp oh my pi agent integration extension install"
         }
         L10nKey::SettingsSearchPiKeywords => {
             "エージェント 統合 拡張 インストール pi agent integration extension install"

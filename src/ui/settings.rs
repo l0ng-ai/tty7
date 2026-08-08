@@ -312,6 +312,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchGrokBuildKeywords,
         },
         SearchEntry {
+            section: Agents,
+            title: SettingsAgentOhMyPi,
+            keywords: SettingsSearchOhMyPiKeywords,
+        },
+        SearchEntry {
             section: WindowTabs,
             title: SettingsStartupWindow,
             keywords: SettingsSearchStartupWindowKeywords,

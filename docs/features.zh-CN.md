@@ -51,14 +51,14 @@ fallback 只有在**汉字 advance 等于主字体西文 advance 的两倍**时�
 ## Coding agent
 
 tty7 能识别 pane 里跑着的第三方 coding agent（Claude Code、Codex、Gemini CLI、
-Aider、Amp、OpenCode 等约 17 个）并在其外围加功能 —— 绝不包裹或替代 agent 本身。
+Aider、Amp、OpenCode 等约 18 个）并在其外围加功能 —— 绝不包裹或替代 agent 本身。
 
 - **品牌头像** —— 标签 chip / 侧栏行显示每个 pane 跑的是哪个 agent；自定义包装命令可通过 `config.json` 的 `agent_commands` 映射
-- **状态点** —— 工作中（蓝）/ 等你输入（琥珀）/ 完成（绿），由 agent 自己上报的 OSC 事件驱动；在 设置 → Agents 一键装好对应 hooks（Claude Code、Codex、Copilot CLI、OpenCode、Pi、Grok Build）
+- **状态点** —— 工作中（蓝）/ 等你输入（琥珀）/ 完成（绿），由 agent 自己上报的 OSC 事件驱动；在 设置 → Agents 一键装好对应 hooks（Claude Code、Codex、Copilot CLI、OpenCode、Pi、Grok Build、Oh My Pi）
 - **通知** —— agent 卡在等你批准的那一刻弹 "needs your permission…"，每轮结束弹 "finished after Ns"，遵循你的通知策略
 - **一眼看分支** —— 侧栏每行显示该 pane 的 git 分支和工作区改动（`+N −M`），`cd` 或命令跑完时自动刷新；点改动数字会打开 diff 浮层，关掉它（设置 → 窗口与标签，或 `config.json` 的 `sidebar_diff_preview: false`）分支和数字照常显示，只是不再可点
 - **会话恢复** —— 重启后无法重连的 pane 会自动续上 agent 对话，并带上原始启动 flags（`claude --dangerously-skip-permissions --resume …`；`restore_agent_sessions`，默认开启）
-- **Fork 会话** —— 直接调 agent 自己的 fork 命令（`codex fork <id>`、`claude --resume <id> --fork-session`，OpenCode 和 Grok Build 同样支持），把当前对话分叉成一个独立会话；原会话原封不动，两边各自往下走。在 pane 上右键可选择分屏位置，在标签 / 侧栏行上右键则直接开新标签。需要先装好该 agent 的 hooks（fork 认的是 hooks 上报的 session id）；远程 pane 不能 fork，因为命令会跑在本机的 agent 上；另外 fork 会整份复制对话历史，反复 fork 会在 agent 自己的会话目录里占掉不少磁盘
+- **Fork 会话** —— 直接调 agent 自己的 fork 命令（`codex fork <id>`、`claude --resume <id> --fork-session`，OpenCode、Grok Build 和 Oh My Pi 同样支持），把当前对话分叉成一个独立会话；原会话原封不动，两边各自往下走。在 pane 上右键可选择分屏位置，在标签 / 侧栏行上右键则直接开新标签。需要先装好该 agent 的 hooks（fork 认的是 hooks 上报的 session id）；远程 pane 不能 fork，因为命令会跑在本机的 agent 上；另外 fork 会整份复制对话历史，反复 fork 会在 agent 自己的会话目录里占掉不少磁盘
 - **复制 Session ID** —— 把 agent 的原生 session id 复制到剪贴板，就在 *Copy Working Directory* 旁边，方便粘进 `codex resume`、bug 报告或别的工具
 - **上下文回填** —— 面板命令把当前选区或仓库 `git diff` 打包成 prompt 直接喂给正在跑的 agent
 - **托盘图标** —— 系统托盘 / 菜单栏常驻图标，任何 agent 等你输入时立即切换为提醒态；菜单列出所有 agent pane（品牌头像 + 状态点，点击直达）、可切换通知策略，并在保留会话的普通退出之外提供 *Quit and Stop Daemon*（`show_tray_icon`，默认开启）

@@ -114,6 +114,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dragging a selection past the edge, clearing the scrollback, the keyboard and
   mouse-reporting paths — cancels what is in flight first.
 
+- **Oh My Pi (`omp`) is a first-class agent** — the eighteenth CLI tty7
+  recognizes in a pane, with the full set: brand avatar, status dot, session
+  resume (`omp --resume <id>`), and **Fork Session** (`omp --fork <id>`).
+  **Settings → Agents** installs its hooks like the others.
+
+  Oh My Pi is a fork of Pi, but it is its own binary with its own
+  `~/.omp` config directory, so it gets its own entry rather than sharing
+  Pi's — a pane running `omp` was previously not detected at all, and
+  aliasing it onto Pi would have written the bridge to `~/.pi` and offered
+  `pi --session <id>` to a binary that spells it `--resume`. The status
+  bridge is the Pi extension the fork inherited (same default-exported
+  factory, same four lifecycle events), so one template now serves both,
+  landing at `~/.omp/agent/extensions/tty7/index.ts`.
+
 ### Fixed
 
 - **Pasting a screenshot into a remote pane works on macOS too** — the

@@ -1,0 +1,15 @@
+<!-- Oh My Pi's own brand mark, from can1357/oh-my-pi assets/icon.svg (MIT).
+     Normalized to tty7's 24x24 icon format: the source is a 120x90 box whose
+     art spans x[10,110] y[8,82], scaled by 0.2 and centred, so every edge lands
+     on a tenth of a unit and the proportions are unchanged. The source paints
+     the glyph white with an orange plug and two dark prongs; the avatars are
+     tinted flat by the app, so the multi-colour split collapses to the single
+     sentinel fill the rest of the set uses, and the prongs — a quarter of a
+     unit wide here — are dropped rather than rendered as invisible slivers.
+     The plug itself stays: it is what separates this mark from a plain pi. -->
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect x="2" y="4.6" width="20" height="2.4" rx="0.4" fill="#FF0000"/>
+<rect x="5" y="7" width="2.4" height="12.4" rx="0.4" fill="#FF0000"/>
+<rect x="15" y="7" width="2.4" height="9" rx="0.4" fill="#FF0000"/>
+<rect x="14.2" y="14" width="4" height="3.2" rx="0.6" fill="#FF0000"/>
+</svg>

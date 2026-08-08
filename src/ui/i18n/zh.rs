@@ -495,6 +495,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentOpencode => "OpenCode",
         L10nKey::SettingsAgentPi => "Pi",
         L10nKey::SettingsAgentGrokBuild => "Grok Build",
+        L10nKey::SettingsAgentOhMyPi => "Oh My Pi",
         L10nKey::SettingsSearchAboutKeywords => {
             "关于 版本 许可证 致谢 构建 更新 检查 github about version license credits update"
         }
@@ -604,6 +605,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchOptionAsMetaKeywords => {
             "Option作为Meta 修饰键 alt option meta 转义 escape macos keyboard modifier"
+        }
+        L10nKey::SettingsSearchOhMyPiKeywords => {
+            "Oh My Pi agent 集成 扩展 安装 omp oh my pi agent integration extension install"
         }
         L10nKey::SettingsSearchPiKeywords => {
             "Pi agent 集成 扩展 安装 pi agent integration extension install"

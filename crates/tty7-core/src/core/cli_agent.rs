@@ -21,10 +21,11 @@ pub enum CLIAgent {
     Antigravity,
     Grok,
     Qwen,
+    OhMyPi,
 }
 
 impl CLIAgent {
-    pub const ALL: [CLIAgent; 17] = [
+    pub const ALL: [CLIAgent; 18] = [
         CLIAgent::Claude,
         CLIAgent::Codex,
         CLIAgent::Gemini,
@@ -42,6 +43,7 @@ impl CLIAgent {
         CLIAgent::Antigravity,
         CLIAgent::Grok,
         CLIAgent::Qwen,
+        CLIAgent::OhMyPi,
     ];
 
     fn aliases(self) -> &'static [&'static str] {
@@ -63,6 +65,9 @@ impl CLIAgent {
             CLIAgent::Antigravity => &["agy", "antigravity"],
             CLIAgent::Grok => &["grok"],
             CLIAgent::Qwen => &["qwen", "qwen-code"],
+            // Oh My Pi is a fork of Pi, but it ships one binary of its own and
+            // never installs a `pi`, so the two names stay disjoint.
+            CLIAgent::OhMyPi => &["omp"],
         }
     }
 
@@ -85,6 +90,7 @@ impl CLIAgent {
             CLIAgent::Antigravity => "antigravity",
             CLIAgent::Grok => "grok",
             CLIAgent::Qwen => "qwen",
+            CLIAgent::OhMyPi => "omp",
         }
     }
 
@@ -112,6 +118,7 @@ impl CLIAgent {
             CLIAgent::Antigravity => "Antigravity",
             CLIAgent::Grok => "Grok",
             CLIAgent::Qwen => "Qwen Code",
+            CLIAgent::OhMyPi => "Oh My Pi",
         }
     }
 
@@ -134,19 +141,23 @@ impl CLIAgent {
             CLIAgent::Copilot => Some(format!("copilot{flags} --resume {session_id}")),
             CLIAgent::Grok => Some(format!("grok{flags} --resume {session_id}")),
             CLIAgent::Pi => Some(format!("pi{flags} --session {session_id}")),
+            CLIAgent::OhMyPi => Some(format!("omp{flags} --resume {session_id}")),
             _ => None,
         }
     }
 
     fn opts_out_of_sessions(self, argv: &[String]) -> bool {
         let ephemeral: &[&str] = match self {
-            CLIAgent::Pi => &["--no-session"],
+            CLIAgent::Pi | CLIAgent::OhMyPi => &["--no-session"],
             _ => &[],
         };
         argv.iter().any(|t| ephemeral.contains(&t.as_str()))
     }
 
     pub fn fork_command(self, session_id: &str, launch_argv: Option<&[String]>) -> Option<String> {
+        if launch_argv.is_some_and(|argv| self.opts_out_of_sessions(argv)) {
+            return None;
+        }
         let flags = self.session_command_flags(session_id, launch_argv)?;
         match self {
             CLIAgent::Codex => Some(format!("codex fork {session_id}{flags}")),
@@ -155,15 +166,18 @@ impl CLIAgent {
             )),
             CLIAgent::Grok => Some(format!("grok{flags} --resume {session_id} --fork-session")),
             CLIAgent::OpenCode => Some(format!("opencode{flags} --session {session_id} --fork")),
+            CLIAgent::OhMyPi => Some(format!("omp{flags} --fork {session_id}")),
             _ => None,
         }
     }
 
     pub fn fork_label(self) -> Option<&'static str> {
         match self {
-            CLIAgent::Claude | CLIAgent::Codex | CLIAgent::Grok | CLIAgent::OpenCode => {
-                Some("Fork Session")
-            }
+            CLIAgent::Claude
+            | CLIAgent::Codex
+            | CLIAgent::Grok
+            | CLIAgent::OpenCode
+            | CLIAgent::OhMyPi => Some("Fork Session"),
             _ => None,
         }
     }
@@ -234,6 +248,9 @@ impl CLIAgent {
                 "--continue",
                 "-c",
             ],
+            // `--resume`, `-r` and `--session` are three spellings of one flag
+            // in Oh My Pi; `--session-dir` is a different one and survives.
+            CLIAgent::OhMyPi => &["--resume", "-r", "--session", "--fork", "--continue", "-c"],
             CLIAgent::Grok => &[
                 "--resume",
                 "-r",
@@ -305,6 +322,7 @@ impl CLIAgent {
             CLIAgent::Antigravity => 0x2563EB,
             CLIAgent::Grok => 0x000000,
             CLIAgent::Qwen => 0x7C3AED,
+            CLIAgent::OhMyPi => 0xF97316,
         }
     }
 
@@ -321,6 +339,7 @@ impl CLIAgent {
             CLIAgent::Droid => "icons/agents/droid.svg",
             CLIAgent::Grok => "icons/agents/grok.svg",
             CLIAgent::Pi => "icons/agents/pi.svg",
+            CLIAgent::OhMyPi => "icons/agents/omp.svg",
             CLIAgent::Aider
             | CLIAgent::Auggie
             | CLIAgent::Hermes
@@ -717,6 +736,10 @@ mod tests {
             fallback,
             ["aider", "auggie", "hermes", "vibe", "antigravity", "qwen"]
         );
+        assert!(
+            !fallback.contains(&"omp"),
+            "Oh My Pi ships its own mark and must not fall back"
+        );
         for a in CLIAgent::ALL {
             let path = a.icon_path();
             assert!(
@@ -737,9 +760,28 @@ mod tests {
             ("/usr/local/bin/qwen", CLIAgent::Qwen),
             ("pi", CLIAgent::Pi),
             ("hermes", CLIAgent::Hermes),
+            ("omp", CLIAgent::OhMyPi),
+            ("/opt/homebrew/bin/omp", CLIAgent::OhMyPi),
         ] {
             assert_eq!(CLIAgent::detect_from_argv(&argv(&[cmd])), Some(agent));
         }
+    }
+
+    /// Oh My Pi is a Pi fork, but it is its own binary with its own config
+    /// directory and its own flags — one must never be detected as the other.
+    #[test]
+    fn oh_my_pi_and_pi_stay_distinct() {
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&["omp"])),
+            Some(CLIAgent::OhMyPi)
+        );
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&["pi"])),
+            Some(CLIAgent::Pi)
+        );
+        assert_eq!(CLIAgent::from_slug("omp"), Some(CLIAgent::OhMyPi));
+        assert_eq!(CLIAgent::from_slug("oh-my-pi"), None);
+        assert_ne!(CLIAgent::Pi.icon_path(), CLIAgent::OhMyPi.icon_path());
     }
 
     #[test]
@@ -1191,6 +1233,62 @@ mod tests {
                 .as_deref(),
             Some("grok --yolo --resume g-3")
         );
+    }
+
+    #[test]
+    fn oh_my_pi_resume_and_fork_use_its_own_flags() {
+        let argv = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            CLIAgent::OhMyPi.resume_command("s-1", None).as_deref(),
+            Some("omp --resume s-1")
+        );
+        assert_eq!(
+            CLIAgent::OhMyPi.fork_command("s-1", None).as_deref(),
+            Some("omp --fork s-1")
+        );
+        assert_eq!(
+            CLIAgent::OhMyPi
+                .resume_command(
+                    "s-2",
+                    Some(&argv(&["omp", "--session", "s-1", "--model", "opus"]))
+                )
+                .as_deref(),
+            Some("omp --model opus --resume s-2"),
+            "--session is a third spelling of --resume and sheds with it"
+        );
+        assert_eq!(
+            CLIAgent::OhMyPi
+                .fork_command(
+                    "s-2",
+                    Some(&argv(&["omp", "--fork", "s-1", "-c", "--yolo"]))
+                )
+                .as_deref(),
+            Some("omp --yolo --fork s-2")
+        );
+        assert_eq!(
+            CLIAgent::OhMyPi
+                .resume_command(
+                    "s-3",
+                    Some(&argv(&["omp", "--session-dir", "/w/.sessions"]))
+                )
+                .as_deref(),
+            Some("omp --session-dir /w/.sessions --resume s-3"),
+            "--session-dir is a different flag and rides along"
+        );
+
+        // `--no-session` means the run never persisted one, so there is
+        // nothing to resume from and Oh My Pi rejects `--fork` outright.
+        for id in ["s-4"] {
+            assert_eq!(
+                CLIAgent::OhMyPi.resume_command(id, Some(&argv(&["omp", "--no-session"]))),
+                None
+            );
+            assert_eq!(
+                CLIAgent::OhMyPi.fork_command(id, Some(&argv(&["omp", "--no-session"]))),
+                None
+            );
+        }
     }
 
     #[test]
