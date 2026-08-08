@@ -612,6 +612,27 @@ fn notify(st: &mut PaneState, msg: DaemonMsg) {
     });
 }
 
+/// Apply a resize to the pane's shared state: seal the replay ring's segment
+/// and tell every connected client the new geometry.
+///
+/// The controller's `Size` echo has to be sent while the state lock is held —
+/// output is fanned out under the same lock, so the frame lands in the stream
+/// after every byte produced at the old size and before the repaint the PTY
+/// emits once it is actually resized (which happens after the lock is
+/// released). A client that speaks `FEATURE_RESIZE_ECHO` defers its grid
+/// reflow to this marker instead of reflowing the moment its window changed:
+/// the channel can hold megabytes of old-width output (the pane gate allows
+/// 16 MiB), and reflowing ahead of it parsed old-width bytes into a new-width
+/// grid, garbling the pane on maximize during a burst of output.
+fn resize_state(st: &mut PaneState, size: WinSize) {
+    st.ring.resize(size);
+    if let Some(sub) = &st.subscriber {
+        let _ = sub.send(DaemonMsg::Size(size));
+    }
+    st.observers
+        .retain(|obs| obs.tx.send(DaemonMsg::Size(size)).is_ok());
+}
+
 /// One gated message to the controller and to every observer.
 ///
 /// A send error just means that client is gone; ignore it and let the next
@@ -1385,12 +1406,7 @@ impl DaemonPane {
     }
 
     pub fn resize(&self, size: WinSize) {
-        {
-            let mut st = self.state.lock().unwrap();
-            st.ring.resize(size);
-            st.observers
-                .retain(|obs| obs.tx.send(DaemonMsg::Size(size)).is_ok());
-        }
+        resize_state(&mut self.state.lock().unwrap(), size);
         match &self.backend {
             PaneBackend::Pty(p) => {
                 if let Ok(master) = p.master.lock() {
@@ -3646,6 +3662,32 @@ mod tests {
             "an observer that keeps draining must stay subscribed"
         );
         assert_eq!(got, sends * chunk.len(), "and must miss no bytes");
+    }
+
+    #[test]
+    fn resize_echoes_size_to_the_controller_between_old_and_new_output() {
+        let mut st = test_state(true);
+        let (controller_tx, controller_rx) = mpsc::channel();
+        attach_subscriber(&mut st, controller_tx);
+        drain(&controller_rx);
+
+        let pane_gate = OutputGate::new();
+        fan_out_output(&mut st, b"old-width bytes", Vec::new(), &pane_gate);
+        resize_state(&mut st, ws(120, 30));
+        fan_out_output(&mut st, b"new-width bytes", Vec::new(), &pane_gate);
+
+        match controller_rx.try_recv().unwrap() {
+            DaemonMsg::Output(b) => assert_eq!(b, b"old-width bytes"),
+            other => panic!("expected the pre-resize Output first, got {other:?}"),
+        }
+        match controller_rx.try_recv().unwrap() {
+            DaemonMsg::Size(size) => assert_eq!((size.cols, size.rows), (120, 30)),
+            other => panic!("expected the Size echo in stream order, got {other:?}"),
+        }
+        match controller_rx.try_recv().unwrap() {
+            DaemonMsg::Output(b) => assert_eq!(b, b"new-width bytes"),
+            other => panic!("expected the post-resize Output last, got {other:?}"),
+        }
     }
 
     #[test]

@@ -130,6 +130,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Maximizing a pane mid-burst no longer garbles it** — the client reflowed
+  its grid the instant the window changed, then went on parsing whatever the
+  daemon still had queued for it, and that backlog (up to the 16 MiB the
+  output gate allows) was produced at the old width. Old-width bytes laid
+  out on a new-width grid, topped by ConPTY's own post-resize repaint, left
+  command output interleaved with prompts and the cursor stranded
+  mid-screen. Reattach never had this bug: its replay tags every ring
+  segment with the geometry it was recorded at. A live resize now works the
+  same way — the daemon echoes a `Size` frame to the controller at the
+  exact stream position where the PTY changed geometry, and the client
+  defers its reflow to that marker, so every queued byte still parses into
+  the grid it was rendered for. Observers, which already got live `Size`
+  frames but only ever applied them after a replay snapshot, now follow the
+  controller's resizes at the right moment too. A client facing an older
+  daemon that never echoes keeps the reflow-at-request-time behavior (new
+  `resize-echo` feature probe).
+
 - **Pasting a screenshot into a remote pane works on macOS too** — the
   clipboard-image paste that stages a file and hands the agent its path was
   built off macOS only, because a local macOS agent reads the system

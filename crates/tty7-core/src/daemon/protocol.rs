@@ -9,6 +9,13 @@ pub const PROTOCOL_VERSION: u32 = 5;
 
 pub const FEATURE_PANE_OWNER: &str = "pane-owner";
 
+/// The daemon echoes a `DaemonMsg::Size` to the controlling subscriber, in
+/// stream order, when it applies a `ClientMsg::Resize`. A client that sees
+/// this feature defers its local grid reflow to that echo so the reflow lands
+/// at the stream position where the PTY actually changed geometry; against an
+/// older daemon it must keep reflowing locally at request time.
+pub const FEATURE_RESIZE_ECHO: &str = "resize-echo";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonVersion {
     pub protocol: u32,
@@ -25,7 +32,10 @@ impl DaemonVersion {
         DaemonVersion {
             protocol: PROTOCOL_VERSION,
             build: env!("CARGO_PKG_VERSION").to_string(),
-            features: vec![FEATURE_PANE_OWNER.to_string()],
+            features: vec![
+                FEATURE_PANE_OWNER.to_string(),
+                FEATURE_RESIZE_ECHO.to_string(),
+            ],
             instance: process_instance().to_string(),
         }
     }

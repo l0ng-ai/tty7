@@ -193,6 +193,10 @@ pub struct RemoteTerminal {
     /// flag under the term lock before every grid mutation, so once it is set
     /// the abandoned thread can only exit, never write.
     reader_quit: Arc<AtomicBool>,
+    /// Test hook: pretend the daemon advertised `FEATURE_RESIZE_ECHO`.
+    /// Production code probes the real daemon per call in [`Self::resize`].
+    #[cfg(test)]
+    force_resize_echo: bool,
 }
 
 /// The workspace id a spawn carries, so the pane's shell gets `$TTY7_WS` and a
@@ -510,6 +514,8 @@ impl RemoteTerminal {
             proxy,
             reader_thread: Some(reader_thread),
             reader_quit,
+            #[cfg(test)]
+            force_resize_echo: false,
         })
     }
 
@@ -578,7 +584,6 @@ impl RemoteTerminal {
                 let mut cursor_scan = ParkedCursorScanner::new();
                 let mut parked_cursor = ParkedCursorRepair::default();
                 let mut pending: Vec<u8> = buffered;
-                let mut pending_size: Option<WinSize> = None;
                 // Kitty-graphics decode runs on its own thread with newest-frame
                 // coalescing (issue #213): inflating a full-window browser frame
                 // is ~42 ms, and doing it inline here would block PTY output and
@@ -724,9 +729,26 @@ impl RemoteTerminal {
                             }
                         };
                         match msg {
+                            // Geometry, applied at this exact stream position.
+                            // During replay each ring segment is preceded by
+                            // its Size; live, the daemon echoes one when it
+                            // applies our Resize (FEATURE_RESIZE_ECHO), which
+                            // is the point in the stream where the bytes stop
+                            // being old-width — everything still queued before
+                            // this frame must be parsed into the old grid.
                             DaemonMsg::Size(ws) => {
                                 flush_batch!();
-                                pending_size = Some(ws);
+                                {
+                                    let mut term = term.lock();
+                                    if quit.load(Ordering::SeqCst) {
+                                        return;
+                                    }
+                                    term.resize(TermSize::new(
+                                        ws.cols as usize,
+                                        ws.rows as usize,
+                                    ));
+                                }
+                                proxy.send_event(AlacEvent::Wakeup);
                             }
                             DaemonMsg::Snapshot(bytes) => {
                                 flush_batch!();
@@ -737,12 +759,6 @@ impl RemoteTerminal {
                                     let mut term = term.lock();
                                     if quit.load(Ordering::SeqCst) {
                                         return;
-                                    }
-                                    if let Some(ws) = pending_size.take() {
-                                        term.resize(TermSize::new(
-                                            ws.cols as usize,
-                                            ws.rows as usize,
-                                        ));
                                     }
                                     processor.advance(&mut *term, &bytes);
                                     if processor.sync_timeout().sync_timeout().is_some() {
@@ -996,7 +1012,27 @@ impl RemoteTerminal {
         }
     }
 
+    /// Whether the daemon behind this pane echoes a `DaemonMsg::Size` into the
+    /// output stream when it applies our `ClientMsg::Resize`. When it does, the
+    /// local grid reflow is deferred to that echo on the reader thread: any
+    /// backlog still queued between daemon and client was produced at the old
+    /// geometry, and reflowing before it drains parses old-width bytes into a
+    /// new-width grid (maximize during a burst of output garbled the pane).
+    /// Non-local routes and older daemons never send the echo, so those keep
+    /// the reflow-at-request-time behavior.
+    fn resize_echoed(&self) -> bool {
+        #[cfg(test)]
+        if self.force_resize_echo {
+            return true;
+        }
+        self.route.is_local()
+            && crate::daemon::spawn::local_daemon_supports(
+                crate::daemon::protocol::FEATURE_RESIZE_ECHO,
+            )
+    }
+
     pub fn resize(&mut self, size: TermSize, cell_w: u16, cell_h: u16) {
+        let echoed = self.resize_echoed();
         // The cell size has to be part of the early-out, not just cols/rows: it
         // is reported in *device* pixels, so moving the window between a 2x and
         // a 1x display changes `ws_xpixel`/`ws_ypixel` while the grid stays
@@ -1004,6 +1040,12 @@ impl RemoteTerminal {
         // and leave a pixel-aware child rendering for the old framebuffer.
         let cell = (cell_w, cell_h);
         if self.synced_size && size == self.size && cell == self.synced_cell {
+            if echoed {
+                // The grid follows the daemon's Size echoes; disagreement here
+                // just means an echo is still in flight (or a replay segment is
+                // mid-apply), not that the request needs re-sending.
+                return;
+            }
             use alacritty_terminal::grid::Dimensions as _;
             let term = self.term.lock();
             if term.columns() == size.cols && term.screen_lines() == size.rows {
@@ -1013,7 +1055,9 @@ impl RemoteTerminal {
         self.synced_size = true;
         self.size = size;
         self.synced_cell = cell;
-        self.term.lock().resize(size);
+        if !echoed {
+            self.term.lock().resize(size);
+        }
 
         let win = win_size(size, cell_w, cell_h);
         if let Ok(mut writer) = self.writer.lock() {
@@ -3091,6 +3135,68 @@ mod tests {
             }
             other => panic!("expected Resize, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn echoed_resize_defers_the_grid_reflow_to_the_daemons_size_frame() {
+        use alacritty_terminal::grid::Dimensions as _;
+        use alacritty_terminal::index::{Column, Line};
+
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        term.force_resize_echo = true;
+
+        term.resize(TermSize::new(120, 30), 8, 17);
+        assert!(matches!(
+            ClientMsg::read(&mut daemon_side).unwrap(),
+            ClientMsg::Resize(ws) if ws.cols == 120 && ws.rows == 30
+        ));
+        assert_eq!(
+            term.term.lock().columns(),
+            80,
+            "the grid keeps the old geometry until the daemon's echo arrives"
+        );
+
+        // Old-width bytes still in flight ahead of the echo: a CUP to column
+        // 100 must clamp on the 80-col grid. The same addressing after the
+        // echo reaches the real column on the 120-col grid.
+        DaemonMsg::Output(b"\x1b[1;100HA".to_vec())
+            .encode(&mut daemon_side)
+            .unwrap();
+        DaemonMsg::Size(WinSize {
+            cols: 120,
+            rows: 30,
+            cell_w: 8,
+            cell_h: 17,
+        })
+        .encode(&mut daemon_side)
+        .unwrap();
+        DaemonMsg::Output(b"\x1b[2;100HB".to_vec())
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+
+        for _ in 0..400 {
+            {
+                let t = term.term.lock();
+                if t.columns() == 120 && t.grid()[Line(1)][Column(99)].c == 'B' {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let t = term.term.lock();
+        let grid = t.grid();
+        assert_eq!(
+            grid[Line(0)][Column(79)].c,
+            'A',
+            "bytes queued before the echo parse at the old width"
+        );
+        assert_eq!(
+            grid[Line(1)][Column(99)].c,
+            'B',
+            "bytes after the echo parse at the new width"
+        );
     }
 
     #[test]
