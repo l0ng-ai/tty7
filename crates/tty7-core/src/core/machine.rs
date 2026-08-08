@@ -1158,7 +1158,7 @@ fn load_machine(path: &Path) -> Machine {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Machine::default(),
         Err(e) => {
             log::warn!("could not read {}; quarantining it: {e}", path.display());
-            quarantine_by_rename(path);
+            crate::core::config::quarantine_by_rename(path);
             return Machine::default();
         }
     };
@@ -1171,7 +1171,7 @@ fn load_machine(path: &Path) -> Machine {
         }
         Err(e) => {
             log::warn!("{} does not parse ({e}); quarantining it", path.display());
-            quarantine(path);
+            crate::core::config::quarantine(path);
             Machine::default()
         }
     }
@@ -1201,35 +1201,6 @@ pub(crate) fn withdraw_observations() {
 
 #[cfg(test)]
 pub(crate) static OBSERVE_SLOT: Mutex<()> = Mutex::new(());
-
-fn quarantine(path: &Path) {
-    let aside = quarantine_path(path);
-    match std::fs::copy(path, &aside) {
-        Ok(_) => log::warn!("the previous contents were kept at {}", aside.display()),
-        Err(e) => log::warn!("could not keep a copy at {}: {e}", aside.display()),
-    }
-}
-
-fn quarantine_by_rename(path: &Path) {
-    let aside = quarantine_path(path);
-    match std::fs::rename(path, &aside) {
-        Ok(()) => log::warn!("the previous contents were moved to {}", aside.display()),
-        Err(e) => log::warn!("could not move the file to {}: {e}", aside.display()),
-    }
-}
-
-fn quarantine_path(path: &Path) -> PathBuf {
-    const MAX_QUARANTINED: u32 = 8;
-
-    let base = path.with_extension("json.corrupt");
-    if !base.exists() {
-        return base;
-    }
-    (1..MAX_QUARANTINED)
-        .map(|n| path.with_extension(format!("json.corrupt.{n}")))
-        .find(|candidate| !candidate.exists())
-        .unwrap_or(base)
-}
 
 pub fn default_machine_path() -> io::Result<PathBuf> {
     Ok(data_dir()?.join(MACHINE_FILE))

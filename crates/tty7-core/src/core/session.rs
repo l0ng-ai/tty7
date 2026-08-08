@@ -285,7 +285,14 @@ impl WindowViews {
         match serde_json::from_str(crate::core::config::strip_bom(&text)) {
             Ok(loaded) => Some(loaded),
             Err(e) => {
-                log::warn!("failed to parse views at {}: {e}; ignoring", path.display());
+                // The next `save` overwrites this file wholesale, so ignoring a
+                // corrupt one quietly discards whatever it held. Keep a copy
+                // aside first, the way `load_machine` does.
+                log::warn!(
+                    "failed to parse views at {}: {e}; quarantining it",
+                    path.display()
+                );
+                crate::core::config::quarantine(&path);
                 None
             }
         }
@@ -416,6 +423,30 @@ mod tests {
         assert!(!only.open);
         assert_eq!(only.last_active, 1_700_000_000);
         assert_eq!(loaded.active, Some(id));
+    }
+
+    #[test]
+    fn a_corrupt_views_file_is_kept_aside_before_being_ignored() {
+        let _file = lock_session_file();
+        let dir = pin_config_dir();
+        let path = dir.join("views.json");
+        let aside = dir.join("views.json.corrupt");
+        std::fs::remove_file(&aside).ok();
+        std::fs::write(&path, "{ not json").unwrap();
+
+        assert!(
+            WindowViews::load().is_none(),
+            "a corrupt file yields nothing rather than a guess"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&aside).as_deref().ok(),
+            Some("{ not json"),
+            "the next save overwrites views.json wholesale, so the old contents \
+             must already be parked beside it"
+        );
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&aside).ok();
     }
 
     #[test]

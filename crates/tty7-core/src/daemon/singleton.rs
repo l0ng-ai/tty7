@@ -121,7 +121,12 @@ fn open_exclusive(path: &std::path::Path) -> std::io::Result<Option<File>> {
 
 #[cfg(not(any(unix, windows)))]
 fn open_exclusive(_path: &std::path::Path) -> std::io::Result<Option<File>> {
-    Ok(None)
+    // No lock primitive here. `Ok(None)` would read as "taken" and stop the
+    // server from ever starting; not being able to ask is `Unavailable`.
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "no single-server lock on this platform",
+    ))
 }
 
 #[cfg(test)]

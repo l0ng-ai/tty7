@@ -622,6 +622,39 @@ pub fn strip_bom(text: &str) -> &str {
     text.strip_prefix('\u{FEFF}').unwrap_or(text)
 }
 
+/// Sets a corrupt state file aside (copied, the original left in place) so the
+/// caller can fall back to defaults without silently destroying what was there.
+pub(crate) fn quarantine(path: &std::path::Path) {
+    let aside = quarantine_path(path);
+    match std::fs::copy(path, &aside) {
+        Ok(_) => log::warn!("the previous contents were kept at {}", aside.display()),
+        Err(e) => log::warn!("could not keep a copy at {}: {e}", aside.display()),
+    }
+}
+
+/// Like [`quarantine`], but moves the file out of the way — for files that
+/// cannot even be read, where copying would fail too.
+pub(crate) fn quarantine_by_rename(path: &std::path::Path) {
+    let aside = quarantine_path(path);
+    match std::fs::rename(path, &aside) {
+        Ok(()) => log::warn!("the previous contents were moved to {}", aside.display()),
+        Err(e) => log::warn!("could not move the file to {}: {e}", aside.display()),
+    }
+}
+
+fn quarantine_path(path: &std::path::Path) -> PathBuf {
+    const MAX_QUARANTINED: u32 = 8;
+
+    let base = path.with_extension("json.corrupt");
+    if !base.exists() {
+        return base;
+    }
+    (1..MAX_QUARANTINED)
+        .map(|n| path.with_extension(format!("json.corrupt.{n}")))
+        .find(|candidate| !candidate.exists())
+        .unwrap_or(base)
+}
+
 pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     write_atomic_mode(path, bytes, false)
 }
