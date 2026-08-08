@@ -354,6 +354,23 @@ pub(crate) fn resolved_background_appearance(
     }
 }
 
+/// Whether the resolved backdrop on this platform is actually a material —
+/// i.e. the window content sits over a blur/mica layer instead of plain
+/// transparency. Derived from `resolved_background_appearance` so the
+/// opacity defaulting and the appearance resolution can never disagree: on
+/// very old builds `Blur`/`Acrylic` fall back to `Transparent`, and a
+/// see-through window with no material behind it gets no special opacity.
+pub(crate) fn material_active(backdrop: WindowBackdrop, blur: bool) -> bool {
+    cfg!(target_os = "windows")
+        && matches!(
+            resolved_background_appearance(backdrop, blur),
+            WindowBackgroundAppearance::Blurred
+                | WindowBackgroundAppearance::MicaBackdrop
+                | WindowBackgroundAppearance::MicaAltBackdrop
+                | WindowBackgroundAppearance::AcrylicBackdrop
+        )
+}
+
 pub(crate) fn background_appearance(cx: &App) -> WindowBackgroundAppearance {
     let config = cx.global::<Config>();
     let theme = presets::by_id(cx, &effective_preset_id(cx));
@@ -380,9 +397,12 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     } else {
         ThemeMode::Light
     };
+    let blur = config.window_blur.unwrap_or(theme.blur);
     // A material needs some translucency to be visible; without an explicit
-    // opacity override it defaults to SYSTEM_MATERIAL_OPACITY instead of 1.0.
-    let material_opacity = cfg!(target_os = "windows") && config.window_backdrop.is_material();
+    // opacity override it defaults to SYSTEM_MATERIAL_OPACITY instead of
+    // 1.0. Derived from the *resolved* appearance so old builds where
+    // Blur/Acrylic fall back to plain transparency stay opaque by default.
+    let material_opacity = material_active(config.window_backdrop, blur);
     let default_opacity = if material_opacity {
         SYSTEM_MATERIAL_OPACITY
     } else {
@@ -393,7 +413,6 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
         .or(theme.opacity)
         .unwrap_or(default_opacity);
     let opacity = (opacity < 1.0).then_some(opacity);
-    let blur = config.window_blur.unwrap_or(theme.blur);
     if !follow {
         sync_native_appearance(Some(theme.dark));
     }

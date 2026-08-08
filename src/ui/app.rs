@@ -1480,8 +1480,9 @@ impl Tty7App {
     pub(crate) fn effective_window_opacity(cx: &App) -> f32 {
         let config = cx.global::<Config>();
         let theme = crate::ui::presets::by_id(cx, &crate::ui::theme::effective_preset_id(cx));
+        let blur = config.window_blur.unwrap_or(theme.blur);
         config.window_opacity.or(theme.opacity).unwrap_or_else(|| {
-            if cfg!(target_os = "windows") && config.window_backdrop.is_material() {
+            if crate::ui::theme::material_active(config.window_backdrop, blur) {
                 crate::ui::theme::SYSTEM_MATERIAL_OPACITY
             } else {
                 1.0
@@ -1514,6 +1515,7 @@ impl Tty7App {
         cx.notify();
     }
 
+    #[cfg(target_os = "windows")]
     pub(crate) fn set_window_backdrop(
         &mut self,
         backdrop: WindowBackdrop,
