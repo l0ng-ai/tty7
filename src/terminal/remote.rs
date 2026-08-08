@@ -682,10 +682,16 @@ impl RemoteTerminal {
                         };
                     }
 
-                    if quit.load(Ordering::SeqCst) {
-                        return;
-                    }
                     loop {
+                        // Checked per frame, not just per read: a retired
+                        // reader may still hold complete frames in `pending`,
+                        // and every arm below writes shared state that
+                        // outlives a relink (cwd, prompt, agent — and
+                        // `Exited`, which would close the freshly adopted
+                        // pane via `child_exited`).
+                        if quit.load(Ordering::SeqCst) {
+                            return;
+                        }
                         let frame = match crate::daemon::protocol::take_frame(&mut pending) {
                             Ok(Some(frame)) => frame,
                             Ok(None) => break,
@@ -2085,7 +2091,7 @@ mod windows_teardown_tests {
     #[test]
     fn adopt_relink_swaps_links_promptly_when_the_old_peer_stays_silent() {
         crate::core::config::pin_test_config_dir();
-        let (old_client, _old_daemon) = tcp_pair();
+        let (old_client, mut _old_daemon) = tcp_pair();
         let (new_client, mut new_daemon) = tcp_pair();
         let term = RemoteTerminal::from_stream(old_client, TermSize::new(80, 24)).unwrap();
         // Let the old reader park in read() on the silent link.
@@ -2119,6 +2125,22 @@ mod windows_teardown_tests {
         assert!(
             !term.exited_flag.load(Ordering::SeqCst),
             "retiring the old reader must not mark the pane as exited"
+        );
+
+        // Late traffic on the abandoned link must be ignored wholesale: an
+        // Exited frame processed by the retired reader would flip
+        // `child_exited` and close the freshly adopted pane from under the
+        // user. Give the retired reader a full quit-poll tick to (mis)handle
+        // it before checking.
+        let _ = DaemonMsg::Exited { code: Some(0) }.encode(&mut _old_daemon);
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        assert!(
+            !term.child_exited(),
+            "an Exited frame on the abandoned link must not close the pane"
+        );
+        assert!(
+            !term.exited_flag.load(Ordering::SeqCst),
+            "the abandoned link must not tear the adopted pane down"
         );
     }
 }
