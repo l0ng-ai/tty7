@@ -95,10 +95,13 @@ pub(crate) fn held() -> bool {
     let Ok(contents) = std::fs::read_to_string(&path) else {
         return false;
     };
-    let written = std::fs::metadata(&path).and_then(|meta| meta.modified()).ok();
-    let holds = contents.trim().parse::<u32>().ok().is_some_and(|pid| {
-        writer_holds(process_alive(pid), winproc::creation_time(pid), written)
-    });
+    let written = std::fs::metadata(&path)
+        .and_then(|meta| meta.modified())
+        .ok();
+    let holds =
+        contents.trim().parse::<u32>().ok().is_some_and(|pid| {
+            writer_holds(process_alive(pid), winproc::creation_time(pid), written)
+        });
     if !holds {
         log::info!("removing a stale update guard at {}", path.display());
         let _ = std::fs::remove_file(&path);
@@ -108,11 +111,7 @@ pub(crate) fn held() -> bool {
 
 /// The staleness policy, pure so every case is testable: `started` is when
 /// the process wearing the recorded pid began, `written` the guard's mtime.
-fn writer_holds(
-    alive: bool,
-    started: Option<SystemTime>,
-    written: Option<SystemTime>,
-) -> bool {
+fn writer_holds(alive: bool, started: Option<SystemTime>, written: Option<SystemTime>) -> bool {
     if !alive {
         return false;
     }

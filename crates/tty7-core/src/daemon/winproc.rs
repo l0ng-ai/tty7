@@ -143,7 +143,10 @@ pub(crate) fn creation_time(pid: u32) -> Option<std::time::SystemTime> {
         let unix_ticks = ticks.checked_sub(11_644_473_600 * 10_000_000)?;
         Some(
             std::time::UNIX_EPOCH
-                + std::time::Duration::new(unix_ticks / 10_000_000, (unix_ticks % 10_000_000) as u32 * 100),
+                + std::time::Duration::new(
+                    unix_ticks / 10_000_000,
+                    (unix_ticks % 10_000_000) as u32 * 100,
+                ),
         )
     }
 }
