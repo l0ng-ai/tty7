@@ -3543,7 +3543,11 @@ impl TerminalView {
             .paths_are_local()
             .then(|| self.local_cwd().or_else(|| std::env::current_dir().ok()))
             .flatten();
-        let share_cwd = if cwd.is_none() { self.wsl_share_cwd() } else { None };
+        let share_cwd = if cwd.is_none() {
+            self.wsl_share_cwd()
+        } else {
+            None
+        };
         let line = self.cmd.text();
         let cursor = self.cmd.cursor();
         let comp = match &share_cwd {

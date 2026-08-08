@@ -114,7 +114,11 @@ fn complete_inner(
         match complete_signature(&chars, word_start, &word, cwd) {
             Some(sig) => (
                 sig.cands,
-                if this_machine { sig.pending } else { Vec::new() },
+                if this_machine {
+                    sig.pending
+                } else {
+                    Vec::new()
+                },
             ),
             None => match cwd {
                 None => (Vec::new(), Vec::new()),
