@@ -3642,7 +3642,14 @@ impl TerminalView {
     /// filesystem is a WSL distro's: the local wsl.exe pane (tagged by its
     /// remote context) and the WSL-workspace pane (tagged by its workspace
     /// target) both report a POSIX cwd this process cannot read natively.
+    ///
+    /// Only for panes on this machine: a WSL pane owned by a remote host
+    /// reaches its distro through that host, not through a `\\wsl$` share
+    /// here — a same-named local distro would list the wrong machine.
     fn wsl_share_cwd(&self) -> Option<std::path::PathBuf> {
+        if !self.host_id.is_local() {
+            return None;
+        }
         let distro = match self.terminal.remote_context() {
             Some(remote) => (remote.kind == crate::daemon::protocol::RemoteKind::Wsl)
                 .then_some(remote.target)?,
