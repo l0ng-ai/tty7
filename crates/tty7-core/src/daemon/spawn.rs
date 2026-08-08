@@ -198,16 +198,26 @@ pub fn ensure_running() -> anyhow::Result<()> {
         }
     }
 
-    // While an updater is replacing the installation, spawning a daemon would
-    // relock the very images the installer is clearing — the update would fail
+    // While an installer is replacing the installation, spawning a daemon
+    // would relock the very images it is clearing — the update would fail
     // with "files in use" caused by us. Connecting to a live daemon above is
-    // fine; only creating a new one waits.
+    // fine; only creating a new one waits. The short patience first is for
+    // the guard's holder being a Setup that is exiting right now — the
+    // post-install "Launch tty7" click — where the launch deserves its
+    // daemon, not an error.
     #[cfg(windows)]
-    if crate::daemon::update_guard::held() {
-        anyhow::bail!(
-            "a tty7 update is being installed right now; the daemon will return \
-             when the updater relaunches the app"
-        );
+    {
+        const UPDATE_GUARD_PATIENCE: Duration = Duration::from_secs(5);
+        let deadline = Instant::now() + UPDATE_GUARD_PATIENCE;
+        while crate::daemon::update_guard::held() {
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "a tty7 update is being installed right now; the daemon will return \
+                     when the installer relaunches the app"
+                );
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
     }
 
     spawn_detached()?;
@@ -400,14 +410,7 @@ fn reap_process(pid: libc::pid_t) {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn signal_and_await_exit(pid: libc::pid_t, sig: libc::c_int, timeout: Duration) -> bool {
     unsafe { libc::kill(pid, sig) };
-    let deadline = Instant::now() + timeout;
-    while process_alive(pid) {
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
-    true
+    wait_for_recorded_exit(pid as u32, timeout)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

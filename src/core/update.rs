@@ -1015,13 +1015,20 @@ fn reconcile_portable_backups() -> Vec<PathBuf> {
         return Vec::new();
     };
     let (interrupted, finished) = scan_portable_backups(&dir);
-    if let Some(backup) = interrupted.first() {
+    if !interrupted.is_empty() {
+        // All of them, not the first: two interrupted attempts in a row leave
+        // two backups, and one the user never hears about is one they delete
+        // blind or keep forever.
+        let preserved = interrupted
+            .iter()
+            .map(|backup| backup.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         let detail = format!(
             "a previous update was interrupted while replacing the installed files, so {} may \
-             mix two versions; the files from before that update are preserved at {} — restore \
+             mix two versions; the files from before are preserved at {preserved} — restore \
              them or reinstall, then delete the backup",
-            dir.display(),
-            backup.display()
+            dir.display()
         );
         log::warn!("{detail}");
         let mut state = UpdateState::load();

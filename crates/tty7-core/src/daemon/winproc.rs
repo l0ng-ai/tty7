@@ -113,6 +113,41 @@ pub(crate) fn image_path(pid: u32) -> Option<std::path::PathBuf> {
     }
 }
 
+/// When the process started, or `None` for one this user cannot query. What
+/// makes a pid an identity: a process claiming to be the writer of a file
+/// must have started *before* that file was written, or it merely inherited
+/// the writer's number.
+pub(crate) fn creation_time(pid: u32) -> Option<std::time::SystemTime> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut creation: FILETIME = std::mem::zeroed();
+        let mut exit: FILETIME = std::mem::zeroed();
+        let mut kernel: FILETIME = std::mem::zeroed();
+        let mut user: FILETIME = std::mem::zeroed();
+        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        let ticks = (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
+        // FILETIME counts 100 ns ticks from 1601-01-01; Unix time starts
+        // 11 644 473 600 seconds later.
+        let unix_ticks = ticks.checked_sub(11_644_473_600 * 10_000_000)?;
+        Some(
+            std::time::UNIX_EPOCH
+                + std::time::Duration::new(unix_ticks / 10_000_000, (unix_ticks % 10_000_000) as u32 * 100),
+        )
+    }
+}
+
 /// Waits until the process is gone, up to `timeout`. Returns whether it exited
 /// in time. A pid that cannot be opened is reported as exited: the handle is
 /// what names the process, and no handle means there is nothing left to wait
@@ -166,10 +201,29 @@ pub(crate) fn reap_descendants_of(root: u32, timeout: std::time::Duration) {
 /// to shut down.
 pub(crate) fn processes_running_from(dir: &std::path::Path) -> Vec<u32> {
     let own = std::process::id();
+    // Image paths come back in long, resolved form, so a `dir` spelled
+    // through a junction, a subst drive, or an 8.3 short name would never
+    // prefix-match them. Trying the canonical spelling as well closes that —
+    // one syscall for the directory, not one per process. (A miss here still
+    // cannot let an installer proceed over a lock: `wait_until_images_unlocked`
+    // probes the files themselves and its callers abort on timeout.)
+    let canonical = std::fs::canonicalize(dir).ok().and_then(|real| {
+        let text = real.to_str()?;
+        Some(std::path::PathBuf::from(
+            text.strip_prefix(r"\\?\").unwrap_or(text),
+        ))
+    });
     snapshot()
         .iter()
         .filter(|p| p.pid != own && p.pid > 4)
-        .filter(|p| image_path(p.pid).is_some_and(|image| path_is_under(&image, dir)))
+        .filter(|p| {
+            image_path(p.pid).is_some_and(|image| {
+                path_is_under(&image, dir)
+                    || canonical
+                        .as_deref()
+                        .is_some_and(|canonical| path_is_under(&image, canonical))
+            })
+        })
         .map(|p| p.pid)
         .collect()
 }
@@ -288,6 +342,12 @@ mod tests {
             Path::new(r"C:\Users\me\Apps\tty7\"),
         ));
         assert!(!path_is_under(Path::new(r"C:\anything"), Path::new("")));
+    }
+
+    #[test]
+    fn creation_time_of_this_process_is_in_the_past() {
+        let started = creation_time(std::process::id()).expect("own process is queryable");
+        assert!(started <= std::time::SystemTime::now());
     }
 
     #[test]

@@ -365,6 +365,12 @@ fn main() {
         // not). Invoked by the Inno PrepareToInstall step and the updater.
         #[cfg(windows)]
         if let Some(dir) = update_install_dir_from(args.iter().cloned()) {
+            // Held in the *parent's* name: this helper returns in seconds,
+            // but the Setup (or uninstaller) that invoked it keeps replacing
+            // files in `dir` until it exits — and a daemon spawned in that
+            // window would relock them. The guard needs no clearing; it goes
+            // stale the moment that parent is gone.
+            tty7_core::daemon::update_guard::hold_for_parent();
             if let Err(error) = crate::daemon::spawn::stop_for_update(&dir) {
                 log::error!(
                     "preparing {} for replacement failed: {error}",
