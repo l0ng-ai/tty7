@@ -2312,9 +2312,9 @@ impl Tty7App {
         if !self.guard_local_spawn(window, cx) {
             return;
         }
-        let pane_ws = self.window_workspace(cx);
+        let group = self.spawn_group(cwd.as_deref(), cx);
         let tab = match new_terminal(
-            pane_ws,
+            self.window_workspace(cx),
             Some(self.workspace),
             self.font_size,
             cwd,
@@ -2336,7 +2336,11 @@ impl Tty7App {
         self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
-        self.tabs.insert(insert_at, Tab::new(Pane::leaf(tab)));
+        let new_tab = Tab::new(Pane::leaf(tab));
+        if let Some(group) = group {
+            *new_tab.sidebar_group.borrow_mut() = group;
+        }
+        self.tabs.insert(insert_at, new_tab);
         self.active = insert_at;
         self.focus_active(window, cx);
         self.save_session(cx);
@@ -2968,6 +2972,7 @@ impl Tty7App {
             let view = source.read(cx);
             (view.local_cwd(), view.shell_spec())
         };
+        let group = self.spawn_group(cwd.as_deref(), cx);
         let new = match new_terminal(
             self.window_workspace(cx),
             Some(self.workspace),
@@ -3000,7 +3005,11 @@ impl Tty7App {
                 self.remember_active_pane(window, cx);
                 self.maximized = None;
                 let insert_at = self.new_tab_insert_at(cx);
-                self.tabs.insert(insert_at, Tab::new(Pane::leaf(new)));
+                let tab = Tab::new(Pane::leaf(new));
+                if let Some(group) = group {
+                    *tab.sidebar_group.borrow_mut() = group;
+                }
+                self.tabs.insert(insert_at, tab);
                 self.active = insert_at;
                 self.focus_active(window, cx);
             }
