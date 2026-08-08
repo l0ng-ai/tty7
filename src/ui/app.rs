@@ -2251,13 +2251,11 @@ impl Tty7App {
         if let Some(cmd) = resume {
             view.read(cx).run_command_line(&cmd);
         }
-        if let Some(session_id) = pending.read(cx).spawn.agent_session_id.clone() {
-            let state = crate::core::cli_agent::AgentSessionState {
-                rich: true,
-                session_id: Some(session_id),
-                ..Default::default()
-            };
-            view.read(cx).set_agent_session(state);
+        {
+            let spawn = &pending.read(cx).spawn;
+            if let (Some(a), Some(session_id)) = (spawn.agent, spawn.agent_session_id.clone()) {
+                view.read(cx).restore_agent(a, session_id);
+            }
         }
         let slot = PaneSlot::Ready(view.clone());
         self.tabs
@@ -5839,6 +5837,9 @@ fn session_to_pane(
                         cx,
                     ) {
                         terminal.read(cx).run_command_line(&cmd);
+                    }
+                    if let (Some(a), Some(session_id)) = (*agent, agent_session_id.clone()) {
+                        terminal.read(cx).restore_agent(a, session_id);
                     }
                 }
                 PaneSlot::Ready(_) => {}

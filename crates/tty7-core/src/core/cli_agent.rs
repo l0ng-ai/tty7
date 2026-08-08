@@ -745,10 +745,7 @@ mod tests {
             .filter(|a| a.icon_path() == "icons/bot.svg")
             .map(CLIAgent::slug)
             .collect();
-        assert_eq!(
-            fallback,
-            ["aider", "auggie", "hermes", "vibe", "qwen"]
-        );
+        assert_eq!(fallback, ["aider", "auggie", "hermes", "vibe", "qwen"]);
         assert!(
             !fallback.contains(&"omp"),
             "Oh My Pi ships its own mark and must not fall back"
@@ -1066,7 +1063,9 @@ mod tests {
             Some("pi --session 0199c3f2-1b0e-7c3a-9f21-6d4b8e2a5c17")
         );
         assert_eq!(
-            CLIAgent::Antigravity.resume_command("abc-123", None).as_deref(),
+            CLIAgent::Antigravity
+                .resume_command("abc-123", None)
+                .as_deref(),
             Some("agy --conversation abc-123")
         );
         assert_eq!(CLIAgent::Aider.resume_command("abc", None), None);

@@ -174,6 +174,7 @@ pub struct TerminalView {
     running_since: Option<std::time::Instant>,
     running_title: String,
     running_agent: Option<crate::core::cli_agent::CLIAgent>,
+    restored_agent: std::cell::Cell<Option<crate::core::cli_agent::CLIAgent>>,
     last_agent_status: Option<crate::core::cli_agent::AgentStatus>,
     last_agent_session: (Option<String>, Option<Vec<String>>),
     agent_turn_started: Option<std::time::Instant>,
@@ -1014,6 +1015,7 @@ impl TerminalView {
             running_since: None,
             running_title: String::new(),
             running_agent: None,
+            restored_agent: std::cell::Cell::new(None),
             last_agent_status: None,
             last_agent_session: (None, None),
             agent_turn_started: None,
@@ -1178,15 +1180,23 @@ impl TerminalView {
     }
 
     pub fn agent(&self) -> Option<crate::core::cli_agent::CLIAgent> {
-        self.terminal.foreground_agent()
+        self.terminal
+            .foreground_agent()
+            .or_else(|| self.restored_agent.get())
+    }
+
+    pub fn restore_agent(&self, agent: crate::core::cli_agent::CLIAgent, session_id: String) {
+        self.restored_agent.set(Some(agent));
+        self.terminal
+            .set_agent_session(crate::core::cli_agent::AgentSessionState {
+                rich: true,
+                session_id: Some(session_id),
+                ..Default::default()
+            });
     }
 
     pub fn agent_session(&self) -> Option<crate::core::cli_agent::AgentSessionState> {
         self.terminal.agent_session()
-    }
-
-    pub fn set_agent_session(&self, state: crate::core::cli_agent::AgentSessionState) {
-        self.terminal.set_agent_session(state);
     }
 
     pub fn agent_result_unread(&self) -> bool {

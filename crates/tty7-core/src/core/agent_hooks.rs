@@ -817,9 +817,10 @@ fn antigravity_hooks_json(target: &HookTarget) -> Option<String> {
     let root = serde_json::json!({
         "tty7": {
             "PreInvocation": [handler("prompt-submit", 5)],
-            "PostToolUse": [
-                { "matcher": "*", "hooks": [handler("tool-complete", 5)] }
-            ],
+            "PostToolUse": [{
+                "matcher": "*",
+                "hooks": [handler("tool-complete", 5)],
+            }],
             "Stop": [handler("stop", 10)],
         }
     });
@@ -932,11 +933,8 @@ export const Tty7Presence = async ({{ $ }}) => {{
   if (!process.env["TTY7"]) return {{}}
   const cmd = {prefix}
   const emit = (event, sessionID) => {{
-    if (sessionID) {{
-      const payload = new Response(JSON.stringify({{ session_id: sessionID }}))
-      return $`sh -c ${{cmd + event}} < ${{payload}}`.quiet().nothrow()
-    }}
-    return $`sh -c ${{cmd + event}}`.quiet().nothrow()
+    const run = $`sh -c ${{cmd + event}}`.quiet().nothrow()
+    return sessionID ? run.input(JSON.stringify({{ session_id: sessionID }})) : run
   }}
 
   // Plugin load = the agent is running in this pane.
@@ -1093,8 +1091,8 @@ mod tests {
             "prompt-submit",
             r#"{"conversationId":"ag-9"}"#,
         );
-        let ev = parse_agent_event(&seq[2..seq.len() - 1])
-            .expect("daemon parses the antigravity event");
+        let ev =
+            parse_agent_event(&seq[2..seq.len() - 1]).expect("daemon parses the antigravity event");
         assert_eq!(ev.agent, Some(CLIAgent::Antigravity));
         assert_eq!(ev.kind, AgentEventKind::PromptSubmit);
         assert_eq!(ev.session_id.as_deref(), Some("ag-9"));
