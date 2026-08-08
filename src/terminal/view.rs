@@ -615,6 +615,32 @@ fn wsl_share_path(distro: &str, posix: &str) -> Option<std::path::PathBuf> {
     )))
 }
 
+/// The distro whose `\\wsl$` share holds a pane's filesystem, or `None` when
+/// the pane is not a WSL one and Tab belongs to the shell.
+///
+/// The two kinds of WSL pane are told apart by who reports the distro. A pane
+/// that runs `wsl.exe` is tagged by its remote context, and it reaches the
+/// distro of whichever machine *hosts* it — so only this machine's panes may
+/// take the share; a remote host's same-named distro would list the wrong
+/// files. A pane in a WSL workspace is tagged by its workspace target instead,
+/// and needs no such check: tty7 reaches those distros by running `wsl.exe`
+/// here, so the share is this machine's by construction — even though the
+/// pane's host, being the distro's own server, is not `HostId::LOCAL`.
+fn wsl_share_distro(
+    remote: Option<&crate::daemon::protocol::RemoteContext>,
+    workspace: Option<&crate::terminal::PaneWorkspace>,
+    host_is_local: bool,
+) -> Option<String> {
+    match remote {
+        Some(remote) => (remote.kind == crate::daemon::protocol::RemoteKind::Wsl && host_is_local)
+            .then(|| remote.target.clone()),
+        None => match &workspace?.target {
+            crate::core::session::RemoteTarget::Wsl { distro } => Some(distro.clone()),
+            _ => None,
+        },
+    }
+}
+
 /// The staged image's path as the pane's own filesystem spells it.
 ///
 /// A WSL pane shares this machine's disk but not its path syntax: an agent in
@@ -3644,22 +3670,12 @@ impl TerminalView {
     /// filesystem is a WSL distro's: the local wsl.exe pane (tagged by its
     /// remote context) and the WSL-workspace pane (tagged by its workspace
     /// target) both report a POSIX cwd this process cannot read natively.
-    ///
-    /// Only for panes on this machine: a WSL pane owned by a remote host
-    /// reaches its distro through that host, not through a `\\wsl$` share
-    /// here — a same-named local distro would list the wrong machine.
     fn wsl_share_cwd(&self) -> Option<std::path::PathBuf> {
-        if !self.host_id.is_local() {
-            return None;
-        }
-        let distro = match self.terminal.remote_context() {
-            Some(remote) => (remote.kind == crate::daemon::protocol::RemoteKind::Wsl)
-                .then_some(remote.target)?,
-            None => match &self.workspace.as_ref()?.target {
-                crate::core::session::RemoteTarget::Wsl { distro } => distro.clone(),
-                _ => return None,
-            },
-        };
+        let distro = wsl_share_distro(
+            self.terminal.remote_context().as_ref(),
+            self.workspace.as_ref(),
+            self.host_id.is_local(),
+        )?;
         let cwd = self.cwd()?;
         wsl_share_path(&distro, &cwd.to_string_lossy())
     }
@@ -5701,7 +5717,7 @@ mod tests {
     };
     use super::{
         remote_paste_spec, staged_path_for_pane, stages_clipboard_image, staging_cache,
-        staging_dir_is_safe, wsl_path, wsl_share_path,
+        staging_dir_is_safe, wsl_path, wsl_share_distro, wsl_share_path,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
@@ -5949,6 +5965,55 @@ mod tests {
     fn standalone_ssh_panes_upload_images_for_the_ssh_user() {
         let spec = native_spec();
         assert_eq!(remote_paste_user(None, Some(&spec)), Some("me"));
+    }
+
+    fn wsl_context(distro: &str) -> crate::daemon::protocol::RemoteContext {
+        crate::daemon::protocol::RemoteContext {
+            kind: RemoteKind::Wsl,
+            argv: Vec::new(),
+            target: distro.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_wsl_exe_pane_on_this_machine_completes_over_its_own_share() {
+        assert_eq!(
+            wsl_share_distro(Some(&wsl_context("Ubuntu-24.04")), None, true),
+            Some("Ubuntu-24.04".to_string())
+        );
+    }
+
+    /// The same pane on a remote machine reaches that machine's distro, which
+    /// no share here can list.
+    #[test]
+    fn a_remote_hosts_wsl_exe_pane_leaves_tab_to_the_shell() {
+        assert_eq!(
+            wsl_share_distro(Some(&wsl_context("Ubuntu-24.04")), None, false),
+            None
+        );
+    }
+
+    /// A WSL workspace's panes are served by the daemon inside the distro, so
+    /// their host is never `LOCAL` — and the distro is still on this machine.
+    #[test]
+    fn a_wsl_workspace_pane_completes_over_the_share_its_target_names() {
+        let w = ws(
+            RemoteTarget::Wsl {
+                distro: "Ubuntu-24.04".into(),
+            },
+            false,
+        );
+        assert_eq!(
+            wsl_share_distro(None, Some(&w), false),
+            Some("Ubuntu-24.04".to_string())
+        );
+    }
+
+    #[test]
+    fn panes_with_no_distro_of_their_own_have_no_share() {
+        let ssh = ws(RemoteTarget::direct("me", "dev.box", 22), true);
+        assert_eq!(wsl_share_distro(None, Some(&ssh), false), None);
+        assert_eq!(wsl_share_distro(None, None, true), None);
     }
 
     #[test]
