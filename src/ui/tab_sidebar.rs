@@ -679,7 +679,7 @@ impl Tty7App {
             .flex_shrink_0()
             .w(px(width))
             .h_full()
-            .bg(cx.theme().sidebar)
+            .bg(crate::ui::theme::workspace_surface_color(cx))
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
             .child(backing)

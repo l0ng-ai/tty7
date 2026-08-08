@@ -3,7 +3,7 @@ use gpui::{
     WindowBackgroundAppearance, linear_color_stop, linear_gradient, point, px, rgb,
 };
 use gpui_component::scroll::ScrollbarShow;
-use gpui_component::{Theme, ThemeMode};
+use gpui_component::{ActiveTheme, Theme, ThemeMode};
 
 use crate::core::actions::*;
 use crate::core::config::{Config, WindowBackdrop};
@@ -423,6 +423,47 @@ pub(crate) fn default_window_opacity(backdrop: WindowBackdrop, blur: bool) -> f3
     }
 }
 
+/// The fill for the workspace's large translucent surfaces (file sidebar,
+/// right panel, SFTP panel). While a material is active and the window is
+/// translucent, the surface paints on top of the already-alpha window
+/// background, so its own alpha stacks (src-over) and the material would
+/// show through far less than behind the terminal; a constant 0.15 keeps
+/// the backdrop ratio at ~85% of the terminal's at every opacity setting.
+/// `theme.sidebar` itself stays opaque — the settings theme picker paints
+/// with it on top of the opaque settings overlay and must stay legible.
+pub(crate) fn workspace_surface_color(cx: &App) -> Hsla {
+    let base: Hsla = cx.theme().sidebar;
+    let translucent = cx
+        .try_global::<presets::ActiveBackground>()
+        .and_then(|bg| bg.opacity)
+        .is_some_and(|o| o < 1.0);
+    if !translucent {
+        return base;
+    }
+    let config = cx.global::<Config>();
+    let theme = presets::by_id(cx, &effective_preset_id(cx));
+    let blur = config.window_blur.unwrap_or(theme.blur);
+    if material_active(config.window_backdrop, blur) {
+        base.alpha(0.15)
+    } else {
+        base
+    }
+}
+
+/// The backdrop presets offered in the settings dropdown: everything the
+/// current build supports, plus the stored value even if it is not
+/// supported here (e.g. Mica synced from a newer machine) — so the label
+/// always matches what the window actually resolves to instead of quietly
+/// showing "Auto" while a fallback appearance is applied.
+#[cfg(target_os = "windows")]
+pub(crate) fn backdrop_options(current: WindowBackdrop) -> Vec<WindowBackdrop> {
+    let mut list = supported_backdrops().to_vec();
+    if !list.contains(&current) {
+        list.push(current);
+    }
+    list
+}
+
 pub(crate) fn background_appearance(cx: &App) -> WindowBackgroundAppearance {
     let config = cx.global::<Config>();
     let theme = presets::by_id(cx, &effective_preset_id(cx));
@@ -454,9 +495,6 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // opacity override it defaults to SYSTEM_MATERIAL_OPACITY instead of
     // 1.0. Derived from the *resolved* appearance so old builds where
     // Blur/Acrylic fall back to plain transparency stay opaque by default.
-    // Computed up front as plain bools so the config borrow ends before the
-    // mutable cx borrows below (the sidebar compensation reuses it later).
-    let material_opacity = material_active(config.window_backdrop, blur);
     let default_opacity = default_window_opacity(config.window_backdrop, blur);
     let opacity = config
         .window_opacity
@@ -632,24 +670,13 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
 
     t.radius = px(8.);
 
-    let mut sidebar_bg = Hsla::from(rgb(m.sidebar));
+    let sidebar_bg = Hsla::from(rgb(m.sidebar));
     let sidebar_sel = rgb(surfaces.sidebar.selected);
-    // Large workspace surfaces (file sidebar, right panel) stay as
-    // translucent as the window background so the backdrop material shows
-    // through them too; row-level accents stay opaque for readability.
-    //
-    // While a material is active, the sidebar paints on top of the
-    // already-alpha window background, so its own alpha stacks (src-over)
-    // and the material would show through far less than behind the
-    // terminal. A constant 0.15 keeps the backdrop ratio at ~85% of the
-    // terminal's at every opacity setting. Without a material — or with
-    // an explicitly opaque window — the sidebar keeps its own surface
-    // color: the compensation only makes sense over a translucent
-    // window, and diluting the sidebar shade everywhere would wash out
-    // the visual separation on macOS, Linux and non-material Windows.
-    if material_opacity && base.a < 1.0 {
-        sidebar_bg = sidebar_bg.alpha(0.15);
-    }
+    // `t.sidebar` stays the opaque theme token: the settings theme picker
+    // paints with it on top of the (opaque) settings overlay, so diluting
+    // it would wash out that panel. The workspace sidebar/right-panel
+    // surfaces get their translucent variant at render time instead —
+    // see `workspace_surface_color`.
     t.sidebar = sidebar_bg.into();
     t.tokens.sidebar = sidebar_bg.into();
     t.sidebar_border = rgb(m.border).into();

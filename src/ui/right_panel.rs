@@ -97,7 +97,7 @@ impl Tty7App {
                 .w(px(width))
                 .h_full()
                 .child(backing)
-                .bg(cx.theme().sidebar)
+                .bg(crate::ui::theme::workspace_surface_color(cx))
                 .border_l_1()
                 .border_color(cx.theme().sidebar_border)
                 .children(cfg!(target_os = "macos").then(|| {

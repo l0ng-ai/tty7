@@ -1333,7 +1333,7 @@ impl Tty7App {
         let danger = cx.theme().danger;
         let accent = cx.theme().accent;
         let border = cx.theme().border;
-        let sidebar = cx.theme().sidebar;
+        let sidebar = crate::ui::theme::workspace_surface_color(cx);
         let hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().sidebar.hover);
         let expanded = self.sftp_panel.tray_expanded || history;
 
