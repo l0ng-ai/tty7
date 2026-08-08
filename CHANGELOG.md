@@ -130,6 +130,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The ConPTY resize fix now actually engages** — the one-line opt-in that
+  switches Windows panes onto conhost's resize model was lost from the
+  working tree between verification and commit, and nothing caught it: the
+  field defaults to off in the vendored `alacritty_terminal`, so the build,
+  the test suite, and CI all stayed green while the previous nightly
+  shipped with the semantics half of the fix disabled and the maximize
+  garbling intact. The flag is back, and a regression test now pins the
+  wiring itself so the flag can't silently drop again.
+
 - **Maximizing a Windows pane no longer shreds it** — two separate resize
   disagreements stacked up here, and the visible one was the second.
 

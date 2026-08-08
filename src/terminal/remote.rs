@@ -2085,7 +2085,33 @@ fn terminal_config_from_user(user_config: &crate::core::config::Config) -> Confi
         default_cursor_style: alacritty_cursor_style(user_config.cursor_style),
         semantic_escape_chars: user_config.word_separators.clone(),
         kitty_keyboard: true,
+        // Every pane on Windows is presented through ConPTY (a shell, wsl.exe,
+        // ssh.exe — conhost mediates them all), which repaints nothing after a
+        // resize and keeps addressing the screen against its own re-anchored
+        // layout: grow keeps rows/cursor pinned and opens blank rows below,
+        // shrink scrolls the last written row to the new bottom. The grid must
+        // resize the same way or every later absolute-CUP paint (PSReadLine
+        // redraws its prompt that way per keystroke) lands rows off, shredding
+        // the screen the first time a maximized pane draws anything.
+        conpty_resize: cfg!(windows),
         ..Config::default()
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    /// The whole conhost-semantics fix hangs on this one field: it defaults to
+    /// off in `alacritty_terminal`, so dropping the line compiles clean, passes
+    /// every other test, and quietly resurrects the maximize garbling — which
+    /// is exactly how it shipped disabled once (#415 follow-up).
+    #[test]
+    fn windows_panes_opt_into_conpty_resize_semantics() {
+        let config = terminal_config_from_user(&crate::core::config::Config::default());
+        assert_eq!(config.conpty_resize, cfg!(windows));
+        #[cfg(windows)]
+        assert!(config.conpty_resize);
     }
 }
 
