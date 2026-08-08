@@ -4200,6 +4200,12 @@ impl TerminalView {
         self.scroll_anim_epoch += 1;
         let epoch = self.scroll_anim_epoch;
         schedule_scroll_anim_frame(cx.weak_entity(), epoch, window);
+        // Ask for a frame right away: the callback chain's first step then
+        // fires on the next display refresh even on a backend that only draws
+        // when the window is dirty, and the callback keeps it dirty from then
+        // on. Without this, a wheel notch queued on an idle, unfocused pane
+        // could sit dormant instead of spreading over frames.
+        cx.notify();
     }
 
     /// Drop whatever is left to travel. Every other way the display offset moves
