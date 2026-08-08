@@ -1120,8 +1120,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "The server holding your shells predates the version handshake, so this app can't tell what it speaks.\n\nQuit: nothing changes — the server and your shells keep running.\nRestart: tabs come back with fresh shells, and anything running now is killed."
         }
         L10nKey::AppRestart => "Restart",
-        L10nKey::AppRestartServerNotSsh => {
-            "tty7 can only restart the server on machines it reaches over SSH. {label} is served from this computer — stop its workspace instead."
+        L10nKey::AppRestartServerNoServer => {
+            "tty7 has no server of its own to restart on {label} — it is a program this computer runs over --stdio. Stop its workspace instead."
         }
         L10nKey::AppRestartServerBody => {
             "This stops every running shell on this computer — anything still running in them will be terminated. Your tabs and layout are kept and reopened with fresh shells."

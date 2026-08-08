@@ -603,6 +603,20 @@ pub fn restart_wsl_daemon(distro: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Restart the distro's daemon after making sure the binary it launches is this
+/// build's. The bundled server is already on this computer, so unlike SSH there
+/// is nothing to download — the copy is the whole install.
+pub fn replace_wsl_server(distro: &str) -> io::Result<()> {
+    validate_distro(distro)?;
+    let ops = WslRemoteOps::new(distro);
+    let source = BundledServerBinary::discover();
+    let confirm = install_confirm();
+    let lock = install_lock(distro);
+    let _held = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    Installer::with_source(&ops, &source, confirm.as_ref(), host_label(distro)).replace()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1160,9 +1160,9 @@ impl Tty7App {
         };
         let target = remote.target.clone();
         let label = crate::ui::remote_connect::label_for(&target, cx);
-        if !target.is_ssh() {
+        if !target.hosts_our_server() {
             window.push_notification(
-                t_fmt(L10nKey::AppRestartServerNotSsh, &[("label", &label)]),
+                t_fmt(L10nKey::AppRestartServerNoServer, &[("label", &label)]),
                 cx,
             );
             return;

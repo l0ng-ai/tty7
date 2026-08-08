@@ -1155,8 +1155,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "サーバーはバージョン照合より前のもので、何を話すか分かりません。\n\n終了：何も変わりません。サーバーもシェルも動き続けます。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
         }
         L10nKey::AppRestart => "再起動",
-        L10nKey::AppRestartServerNotSsh => {
-            "tty7 は SSH で到達できるマシン上のサーバーしか再起動できません。{label} はこのコンピュータで実行されています。代わりにそのワークスペースを止めてください"
+        L10nKey::AppRestartServerNoServer => {
+            "{label} には再起動できる tty7 自身のサーバーがありません。これはこのコンピュータが --stdio で実行しているプログラムです。代わりにそのワークスペースを止めてください"
         }
         L10nKey::AppRestartServerBody => {
             "このコンピュータで実行中のすべてのシェルが停止します。タブとレイアウトは保持され、新しいシェルで開きます"

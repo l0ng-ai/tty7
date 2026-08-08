@@ -162,6 +162,14 @@ impl RemoteTarget {
         }
     }
 
+    /// Whether the far end is served by a tty7 daemon this computer installed
+    /// and can therefore restart. SSH machines and WSL distros both are; a
+    /// `--stdio` program is whatever the user named, and stopping it is its
+    /// workspace's business.
+    pub fn hosts_our_server(&self) -> bool {
+        !matches!(self, RemoteTarget::LocalStdio { .. })
+    }
+
     pub fn host_id(&self) -> crate::host::HostId {
         crate::host::HostId::from_connection_key(&self.connection_key())
     }

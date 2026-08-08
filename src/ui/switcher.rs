@@ -2242,7 +2242,7 @@ fn group_menu(
         return menu;
     };
     let connected = group.link == Link::Connected;
-    let restartable = target.is_ssh();
+    let restartable = target.hosts_our_server();
     let (label, for_restart) = (group.label.clone(), target.clone());
     let menu = menu.separator().item(
         PopupMenuItem::new(t(L10nKey::SwitcherDisconnect))
