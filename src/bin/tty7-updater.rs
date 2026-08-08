@@ -668,6 +668,18 @@ mod windows {
             return recover_from_failed_update(&plan, error);
         }
 
+        // Setup's own PrepareToInstall repeats this, but doing it here first
+        // means a directory that cannot be cleared fails with a named cause in
+        // this log instead of Inno's bare "DeleteFile failed; code 5" — and the
+        // previous app is relaunched instead of being left half-replaced.
+        log_line(
+            &plan.log,
+            "stopping the tty7 daemon and clearing installed-file locks",
+        );
+        if let Err(error) = tty7_core::daemon::spawn::stop_for_update(&plan.install_dir) {
+            return recover_from_failed_update(&plan, error);
+        }
+
         log_line(&plan.log, "running the tty7 Windows installer");
         let status = match run_installer(&plan.installer, &plan.log) {
             Ok(status) => status,
@@ -726,7 +738,7 @@ mod windows {
             &plan.log,
             "stopping the tty7 daemon before replacing portable files",
         );
-        if let Err(error) = stop_daemon_from_payload(&payload) {
+        if let Err(error) = stop_daemon_from_payload(&payload, &plan.install_dir) {
             return recover_without_replacement(&plan.log, &plan.install_dir, &plan.stage, error);
         }
 
@@ -1097,10 +1109,12 @@ mod windows {
             .map_err(|error| format!("starting {}: {error}", installer.display()))
     }
 
-    fn stop_daemon_from_payload(payload: &Path) -> Result<(), String> {
+    fn stop_daemon_from_payload(payload: &Path, install_dir: &Path) -> Result<(), String> {
         let executable = payload.join("tty7-app.exe");
         let status = Command::new(&executable)
             .arg("--stop-daemon")
+            .arg("--update-install-dir")
+            .arg(install_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

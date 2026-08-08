@@ -496,6 +496,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::UpdateDialogDetail => {
             "tty7 {version} is available — you're on {current}. Installing restarts the app; the background service keeps running, so whatever is open in your panes survives."
         }
+        L10nKey::UpdateDialogDetailWindows => {
+            "tty7 {version} is available — you're on {current}. Installing restarts the app and the background service: processes running in your panes are ended, and your tabs and layout come back with fresh shells."
+        }
         L10nKey::UpdateDialogDetailManual => {
             "tty7 {version} is available — you're on {current}. {hint}"
         }

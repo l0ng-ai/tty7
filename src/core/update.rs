@@ -406,8 +406,16 @@ fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
         .as_ref()
         .map(localized_update_install_hint);
     let detail = if update.installable {
+        // Windows cannot replace a running daemon's image, so its install path
+        // stops the background service — the promise that panes survive is
+        // only true where the daemon really does keep running (macOS).
+        let detail_key = if cfg!(target_os = "windows") {
+            L10nKey::UpdateDialogDetailWindows
+        } else {
+            L10nKey::UpdateDialogDetail
+        };
         let base = t_fmt(
-            L10nKey::UpdateDialogDetail,
+            detail_key,
             &[
                 ("version", update.version.as_str()),
                 ("current", current_version()),

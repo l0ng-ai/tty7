@@ -496,6 +496,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::UpdateDialogDetail => {
             "tty7 {version} が利用できます（現在 {current}）。インストールするとアプリが再起動します。バックグラウンドサービスは動いたままなので、ペインで開いているものはそのまま残ります。"
         }
+        L10nKey::UpdateDialogDetailWindows => {
+            "tty7 {version} が利用できます（現在 {current}）。インストールするとアプリとバックグラウンドサービスが再起動します。ペインで実行中のプロセスは終了し、タブとレイアウトは新しいシェルで復元されます。"
+        }
         L10nKey::UpdateDialogDetailManual => {
             "tty7 {version} が利用できます（現在 {current}）。{hint}"
         }

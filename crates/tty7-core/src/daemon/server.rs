@@ -447,6 +447,18 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
         ClientMsg::Shutdown => {
             log::info!("daemon shutting down on client request");
             registry.drain_and_kill();
+            // The ConPTY hosts (OpenConsole.exe) are this process's children,
+            // not the shells', so the per-pane kill never reaches them — and
+            // exiting right away would leave them holding the installed
+            // OpenConsole.exe image open while an updater tries to replace it.
+            // Reap everything still below us and wait for the images to be
+            // released before the endpoint disappears, because the endpoint
+            // going away is what tells `spawn::stop` the shutdown is complete.
+            #[cfg(windows)]
+            crate::daemon::winproc::reap_descendants_of(
+                std::process::id(),
+                std::time::Duration::from_secs(3),
+            );
             on_shutdown();
             std::process::exit(0);
         }

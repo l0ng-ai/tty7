@@ -439,6 +439,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::UpdateDialogDetail => {
             "tty7 {version} 已发布，你现在是 {current}。安装会重启应用；后台服务不动，pane 里开着的东西都还在。"
         }
+        L10nKey::UpdateDialogDetailWindows => {
+            "tty7 {version} 已发布，你现在是 {current}。安装会重启应用和后台服务：pane 里正在运行的进程会被结束，标签页和布局会以全新的 shell 恢复。"
+        }
         L10nKey::UpdateDialogDetailManual => "tty7 {version} 已发布，你现在是 {current}。{hint}",
         L10nKey::UpdateDialogCannotSelfUpdate => "这份安装无法自行更新。",
         L10nKey::UpdateDialogLater => "以后再说",
