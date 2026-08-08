@@ -1819,8 +1819,7 @@ fn apply_signals(st: &mut PaneState, signals: SniffSignals) {
         if shell_mark_capture_changed(&st.shell, &shell) {
             apply_agent(
                 st,
-                agent_from_shell_mark(&shell, crate::core::config::agent_commands_cached())
-                    .map(|agent| (agent, Vec::new())),
+                agent_from_shell_mark(&shell, crate::core::config::agent_commands_cached()),
             );
         }
         st.shell = shell.clone();
@@ -1845,11 +1844,10 @@ fn shell_mark_capture_changed(prev: &ShellState, next: &ShellState) -> bool {
 fn agent_from_shell_mark(
     shell: &ShellState,
     custom: &std::collections::HashMap<String, String>,
-) -> Option<crate::core::cli_agent::CLIAgent> {
-    shell
-        .command
-        .as_deref()
-        .and_then(|cmd| crate::core::cli_agent::CLIAgent::detect_from_command_with(cmd, custom))
+) -> Option<(crate::core::cli_agent::CLIAgent, Vec<String>)> {
+    let cmd = shell.command.as_deref()?;
+    let agent = crate::core::cli_agent::CLIAgent::detect_from_command_with(cmd, custom)?;
+    Some((agent, crate::core::cli_agent::command_argv(cmd)))
 }
 
 fn apply_agent_signals(
@@ -2827,7 +2825,10 @@ mod tests {
         assert_eq!(shell.command.as_deref(), Some("claude --help"));
         assert_eq!(
             agent_from_shell_mark(shell, &custom),
-            Some(crate::core::cli_agent::CLIAgent::Claude)
+            Some((
+                crate::core::cli_agent::CLIAgent::Claude,
+                vec!["claude".to_string(), "--help".to_string()],
+            ))
         );
 
         let d = s.feed(b"\x1b]133;D;0\x07");
@@ -2857,6 +2858,41 @@ mod tests {
 
         let c = s.feed(b"\x1b]133;C;%20%20\x07");
         assert_eq!(c.shell.last().unwrap().command, None);
+    }
+
+    #[test]
+    fn shell_mark_agent_detection_keeps_launch_argv_for_resume() {
+        let custom = std::collections::HashMap::new();
+        let mut s = OscSniffer::new();
+
+        let c = s.feed(b"\x1b]133;C;claude%20--dangerously-skip-permissions\x07");
+        let (agent, argv) = agent_from_shell_mark(c.shell.last().unwrap(), &custom).unwrap();
+        assert_eq!(agent, crate::core::cli_agent::CLIAgent::Claude);
+        assert_eq!(
+            agent.resume_command("abc-123", Some(&argv)).as_deref(),
+            Some("claude --dangerously-skip-permissions --resume abc-123")
+        );
+
+        // Case must survive capture: a lowercased path or model name would
+        // replay the wrong flags.
+        let c = s.feed(b"\x1b]133;C;claude%20--model%20Opus\x07");
+        let (agent, argv) = agent_from_shell_mark(c.shell.last().unwrap(), &custom).unwrap();
+        assert_eq!(argv, ["claude", "--model", "Opus"]);
+        assert_eq!(
+            agent.resume_command("abc", Some(&argv)).as_deref(),
+            Some("claude --model Opus --resume abc")
+        );
+
+        // PowerShell call-operator launches keep working end to end.
+        let c = s.feed(b"\x1b]133;C;%26%20%22C%3A%5Ctools%5Cclaude.exe%22%20--continue\x07");
+        let (agent, argv) = agent_from_shell_mark(c.shell.last().unwrap(), &custom).unwrap();
+        assert_eq!(agent, crate::core::cli_agent::CLIAgent::Claude);
+        assert_eq!(argv, [r"C:\tools\claude.exe", "--continue"]);
+        assert_eq!(
+            agent.resume_command("abc", Some(&argv)).as_deref(),
+            Some("claude --resume abc"),
+            "stale session flags are dropped, not replayed"
+        );
     }
 
     #[test]

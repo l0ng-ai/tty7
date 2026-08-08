@@ -404,16 +404,28 @@ impl CLIAgent {
         command: &str,
         custom: &HashMap<String, String>,
     ) -> Option<CLIAgent> {
-        let mut argv: Vec<String> = command
-            .split_whitespace()
-            .map(|t| t.trim_matches(['"', '\'']).to_ascii_lowercase())
-            .filter(|t| !t.is_empty())
+        let argv: Vec<String> = command_argv(command)
+            .iter()
+            .map(|t| t.to_ascii_lowercase())
             .collect();
-        if argv.first().is_some_and(|t| t == "&") {
-            argv.remove(0);
-        }
         Self::detect_from_argv_with(&argv, custom)
     }
+}
+
+/// Splits a shell-integration command capture into argv tokens, preserving
+/// case so the result can serve as `launch_argv` for flag replay on resume.
+/// Quoted arguments containing spaces come out split; `replay_flags` rejects
+/// such tokens rather than replaying them wrong.
+pub fn command_argv(command: &str) -> Vec<String> {
+    let mut argv: Vec<String> = command
+        .split_whitespace()
+        .map(|t| t.trim_matches(['"', '\'']).to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if argv.first().is_some_and(|t| t == "&") {
+        argv.remove(0);
+    }
+    argv
 }
 
 fn is_env_assignment(token: &str) -> bool {
@@ -857,6 +869,34 @@ mod tests {
         assert_eq!(
             CLIAgent::detect_from_command_with("cc -c", &custom),
             Some(CLIAgent::Claude)
+        );
+    }
+
+    #[test]
+    fn command_argv_preserves_case_for_flag_replay() {
+        assert_eq!(
+            command_argv("claude --dangerously-skip-permissions"),
+            ["claude", "--dangerously-skip-permissions"]
+        );
+        assert_eq!(
+            command_argv("claude --model Opus --resume Abc-123"),
+            ["claude", "--model", "Opus", "--resume", "Abc-123"]
+        );
+        assert_eq!(
+            command_argv(r#"& "C:\Tools\claude.exe" --continue"#),
+            [r"C:\Tools\claude.exe", "--continue"]
+        );
+        assert_eq!(command_argv("  "), [""; 0]);
+        assert_eq!(
+            CLIAgent::Claude
+                .resume_command(
+                    "abc",
+                    Some(&command_argv("claude --dangerously-skip-permissions"))
+                )
+                .as_deref(),
+            Some("claude --dangerously-skip-permissions --resume abc"),
+            "a shell-integration command capture must round-trip into a resume \
+             command that keeps the launch flags"
         );
     }
 
