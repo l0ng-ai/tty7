@@ -165,6 +165,27 @@ macro_rules! startup_note {
 }
 
 pub fn run_daemon() -> anyhow::Result<()> {
+    // Before either endpoint, and before the machine tree is opened. Whoever
+    // holds this is the server; everyone else stands down while it lives.
+    //
+    // The endpoints cannot decide this between themselves. They are bound in
+    // sequence, so a second server can take one of them in the window before
+    // the first takes the other, and the two then serve half a machine each —
+    // panes on one socket, an empty pane registry answering the machine tree on
+    // the other. That is how a workspace switch came to rebuild live sessions:
+    // no error anywhere, just every pane reading as dead. See `singleton`.
+    let _seat = match crate::daemon::singleton::claim() {
+        crate::daemon::singleton::Claim::Held(seat) => Some(seat),
+        crate::daemon::singleton::Claim::Taken => {
+            startup_note!("tty7-server: another server already serves this config dir; exiting");
+            return Ok(());
+        }
+        crate::daemon::singleton::Claim::Unavailable(why) => {
+            startup_note!("tty7-server: starting without the single-server lock ({why})");
+            None
+        }
+    };
+
     let registry = Arc::new(Registry::new());
 
     #[cfg(any(unix, windows))]

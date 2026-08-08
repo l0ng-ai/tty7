@@ -9,6 +9,7 @@ pub(crate) mod remote;
 pub mod remote_link;
 pub mod router;
 pub mod server;
+pub mod singleton;
 pub mod spawn;
 pub mod ssh;
 pub mod transport;

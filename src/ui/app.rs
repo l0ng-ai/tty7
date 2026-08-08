@@ -838,7 +838,7 @@ impl Tty7App {
         let answered = WorkspaceStore::machine_is_connected(cx, self.workspace);
         if self.tabs.is_empty()
             && answered
-            && crate::ui::tree_sync::window_is_informed(cx, self.workspace)
+            && crate::ui::tree_sync::workspace_is_disposable(cx, self.workspace)
         {
             crate::ui::tree_sync::fire_workspace_op(cx, self.workspace, |ws| {
                 tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
@@ -939,7 +939,7 @@ impl Tty7App {
         }
         // Anything parked for the workspace we are leaving is now meaningless.
         self.pending_tab = None;
-        if self.tabs.is_empty() && crate::ui::tree_sync::window_is_informed(cx, previous) {
+        if self.tabs.is_empty() && crate::ui::tree_sync::workspace_is_disposable(cx, previous) {
             crate::ui::tree_sync::fire_workspace_op(cx, previous, |ws| {
                 tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
             });
