@@ -6,7 +6,7 @@ use alacritty_terminal::term::TermMode;
 use gpui::{
     App, ClipboardEntry, ClipboardItem, Context, ExternalPaths, FocusHandle, Focusable, Font,
     KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, Pixels, ScrollDelta, ScrollWheelEvent,
-    Window, actions, div, prelude::*, px,
+    WeakEntity, Window, actions, div, prelude::*, px,
 };
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
@@ -97,7 +97,9 @@ struct ScrollAnim {
 
 /// Fraction of the remaining distance consumed per [`SCROLL_ANIM_FRAME`].
 const SCROLL_ANIM_SMOOTH: f32 = 0.4;
-/// The frame `SCROLL_ANIM_SMOOTH` is calibrated against, and the tick interval.
+/// The frame `SCROLL_ANIM_SMOOTH` is calibrated against: one nominal 60 Hz
+/// frame. Decay is scaled by real elapsed time, so the same feel holds at any
+/// refresh rate.
 const SCROLL_ANIM_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 /// Below this much left to travel, land instead of asymptoting toward it. A
 /// twentieth of a line is around a pixel — the tail of an exponential decay is
@@ -4118,7 +4120,7 @@ impl TerminalView {
         }
     }
 
-    fn on_scroll(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_scroll(&mut self, ev: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         let mult = cx.global::<Config>().mouse_scroll_multiplier;
         let raw = match ev.delta {
             ScrollDelta::Lines(p) => p.y,
@@ -4146,7 +4148,7 @@ impl TerminalView {
         }
 
         if self.should_animate_scroll(delta, gesturing, cx) {
-            self.queue_scroll_anim(delta, cx);
+            self.queue_scroll_anim(delta, window, cx);
         } else {
             self.cancel_scroll_anim();
             self.smooth_scroll(delta, cx);
@@ -4186,7 +4188,7 @@ impl TerminalView {
     /// Add `delta` to the in-flight animation, starting the frame loop if it is
     /// idle. Successive notches accumulate rather than restart, so spinning the
     /// wheel fast still lands exactly where the notches asked for.
-    fn queue_scroll_anim(&mut self, delta: f32, cx: &mut Context<Self>) {
+    fn queue_scroll_anim(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(anim) = self.scroll_anim.as_mut() {
             anim.remaining += delta;
             return;
@@ -4197,18 +4199,7 @@ impl TerminalView {
         });
         self.scroll_anim_epoch += 1;
         let epoch = self.scroll_anim_epoch;
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(SCROLL_ANIM_FRAME).await;
-                if !matches!(
-                    this.update(cx, |view, cx| view.scroll_anim_tick(epoch, cx)),
-                    Ok(true)
-                ) {
-                    break;
-                }
-            }
-        })
-        .detach();
+        schedule_scroll_anim_frame(cx.weak_entity(), epoch, window);
     }
 
     /// Drop whatever is left to travel. Every other way the display offset moves
@@ -4221,7 +4212,12 @@ impl TerminalView {
         }
     }
 
-    fn scroll_anim_tick(&mut self, epoch: u64, cx: &mut Context<Self>) -> bool {
+    /// Advance the in-flight animation by the ground it covered since the
+    /// previous frame. Runs at frame time — right before the next frame is
+    /// drawn — so every presented frame shows exactly one decay step and no
+    /// step is ever skipped or doubled against the monitor's cadence. Returns
+    /// whether the animation is still going.
+    fn scroll_anim_frame(&mut self, epoch: u64, cx: &mut Context<Self>) -> bool {
         if epoch != self.scroll_anim_epoch {
             return false;
         }
@@ -5636,6 +5632,28 @@ fn smooth_scroll_step(offset: usize, frac: f32, delta: f32, max: usize) -> (i32,
     let pos = (offset as f32 + frac + delta).clamp(0., max as f32);
     let new_offset = pos.floor();
     (new_offset as i32 - offset as i32, pos - new_offset)
+}
+
+/// Advance the in-flight scroll animation once per presented frame.
+///
+/// Registered from [`TerminalView::queue_scroll_anim`]: gpui runs the callback
+/// immediately before the next frame is drawn, and it re-registers itself as
+/// long as the animation lives. Stepping at frame time instead of on a
+/// free-running timer keeps the decay steps locked to the monitor's vblank
+/// cadence — a 16 ms timer drifting against a 16.67 ms vblank makes some
+/// presented frames show twice the movement of their neighbours and others
+/// none, which reads as stutter. Frame-aligned stepping shows every frame
+/// exactly the ground it covered. The weak handle and the epoch guard make the
+/// chain die quietly when the pane is closed or the animation is cancelled.
+fn schedule_scroll_anim_frame(view: WeakEntity<TerminalView>, epoch: u64, window: &mut Window) {
+    window.on_next_frame(move |window, cx| {
+        let Some(view) = view.upgrade() else {
+            return;
+        };
+        if view.update(cx, |view, cx| view.scroll_anim_frame(epoch, cx)) {
+            schedule_scroll_anim_frame(view.downgrade(), epoch, window);
+        }
+    });
 }
 
 /// How much of `remaining` to consume this frame, and whether this is the last
@@ -8522,6 +8540,28 @@ mod gpui_tests {
                     "the animation outlived the jump"
                 );
                 assert_eq!(display_offset(view), 0);
+            })
+            .unwrap();
+    }
+
+    /// A frame callback that was already queued when the animation was
+    /// cancelled must not walk the viewport on its stale epoch.
+    #[gpui::test]
+    fn a_stale_frame_after_cancellation_does_not_walk(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, w, cx| {
+                scroll_into_history(view, 10);
+                let ev = notch(view, -4.9);
+                view.on_scroll(&ev, w, cx);
+                let epoch = view.scroll_anim_epoch;
+                view.cancel_scroll_anim();
+
+                assert!(
+                    !view.scroll_anim_frame(epoch, cx),
+                    "a stale frame callback kept the animation alive"
+                );
+                assert_eq!(display_offset(view), 10, "the stale frame moved");
             })
             .unwrap();
     }
