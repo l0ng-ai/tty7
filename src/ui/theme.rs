@@ -568,7 +568,13 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // Large workspace surfaces (file sidebar, right panel) stay as
     // translucent as the window background so the backdrop material shows
     // through them too; row-level accents stay opaque for readability.
-    let sidebar_bg = Hsla::from(sidebar_bg).alpha(base.a);
+    //
+    // The sidebar paints on top of the already-translucent window
+    // background, so its own alpha stacks (src-over) and the material
+    // would otherwise show through far less than behind the terminal. A
+    // constant 0.15 keeps the backdrop ratio at ~85% of the terminal's at
+    // every opacity setting.
+    let sidebar_bg = Hsla::from(sidebar_bg).alpha(0.15);
     t.sidebar = sidebar_bg.into();
     t.tokens.sidebar = sidebar_bg.into();
     t.sidebar_border = rgb(m.border).into();
