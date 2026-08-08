@@ -400,6 +400,18 @@ pub(crate) fn material_active(backdrop: WindowBackdrop, blur: bool) -> bool {
         )
 }
 
+/// The window's background alpha when neither the config nor the theme sets
+/// an explicit opacity: translucent enough to show an active material,
+/// fully opaque otherwise. Single source of truth for `apply_theme` and the
+/// settings slider, so the two can never drift apart.
+pub(crate) fn default_window_opacity(backdrop: WindowBackdrop, blur: bool) -> f32 {
+    if material_active(backdrop, blur) {
+        SYSTEM_MATERIAL_OPACITY
+    } else {
+        1.0
+    }
+}
+
 pub(crate) fn background_appearance(cx: &App) -> WindowBackgroundAppearance {
     let config = cx.global::<Config>();
     let theme = presets::by_id(cx, &effective_preset_id(cx));
@@ -431,12 +443,10 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // opacity override it defaults to SYSTEM_MATERIAL_OPACITY instead of
     // 1.0. Derived from the *resolved* appearance so old builds where
     // Blur/Acrylic fall back to plain transparency stay opaque by default.
+    // Computed up front as plain bools so the config borrow ends before the
+    // mutable cx borrows below (the sidebar compensation reuses it later).
     let material_opacity = material_active(config.window_backdrop, blur);
-    let default_opacity = if material_opacity {
-        SYSTEM_MATERIAL_OPACITY
-    } else {
-        1.0
-    };
+    let default_opacity = default_window_opacity(config.window_backdrop, blur);
     let opacity = config
         .window_opacity
         .or(theme.opacity)

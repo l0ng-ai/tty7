@@ -1482,11 +1482,7 @@ impl Tty7App {
         let theme = crate::ui::presets::by_id(cx, &crate::ui::theme::effective_preset_id(cx));
         let blur = config.window_blur.unwrap_or(theme.blur);
         config.window_opacity.or(theme.opacity).unwrap_or_else(|| {
-            if crate::ui::theme::material_active(config.window_backdrop, blur) {
-                crate::ui::theme::SYSTEM_MATERIAL_OPACITY
-            } else {
-                1.0
-            }
+            crate::ui::theme::default_window_opacity(config.window_backdrop, blur)
         })
     }
 
