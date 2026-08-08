@@ -108,6 +108,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Appearance,
+            title: SettingsLegiblePalette,
+            keywords: SettingsSearchLegiblePaletteKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
             title: SettingsCustomThemes,
             keywords: SettingsSearchCustomThemesKeywords,
         },
@@ -4151,12 +4156,26 @@ impl Tty7App {
                 this.set_theme_follow_system(*on, window, cx)
             }))
             .into_any_element();
-        let root = v_flex().child(self.settings_row(
-            t(L10nKey::SettingsSyncWithSystem),
-            t(L10nKey::SettingsSyncWithSystemDesc),
-            follow_switch,
-            cx,
-        ));
+        let legible = cx.global::<Config>().theme_legible_palette;
+        let legible_switch = crate::ui::theme::switch("theme-legible-palette", cx)
+            .checked(legible)
+            .on_click(cx.listener(|this, on: &bool, window, cx| {
+                this.set_theme_legible_palette(*on, window, cx)
+            }))
+            .into_any_element();
+        let root = v_flex()
+            .child(self.settings_row(
+                t(L10nKey::SettingsSyncWithSystem),
+                t(L10nKey::SettingsSyncWithSystemDesc),
+                follow_switch,
+                cx,
+            ))
+            .child(self.settings_row(
+                t(L10nKey::SettingsLegiblePalette),
+                t(L10nKey::SettingsLegiblePaletteDesc),
+                legible_switch,
+                cx,
+            ));
         if follow {
             root.child(self.render_theme_card(ThemeSlot::Light, cx))
                 .child(self.render_theme_card(ThemeSlot::Dark, cx))

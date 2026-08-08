@@ -235,7 +235,7 @@ impl Theme {
         }
     }
 
-    pub fn active_palette(&self) -> ActivePalette {
+    pub fn active_palette(&self, legible: bool) -> ActivePalette {
         let bg = self.background_color();
         let fg = legible_foreground(bg, self.foreground);
         let mut ansi16 = [Rgb { r: 0, g: 0, b: 0 }; 16];
@@ -248,8 +248,10 @@ impl Theme {
             // until it can — the same rescue `sidebar_fg` uses. Dark themes
             // tend to author it as a muted grey (invisible), light themes as a
             // pale grey (invisible the other way); both are lifted here, while
-            // already-legible slots render byte-for-byte as authored.
-            ansi16[i] = rgb_bytes(if i >= 8 {
+            // already-legible slots render byte-for-byte as authored. The
+            // `legible` flag mirrors Settings → Appearance: off renders the
+            // palette exactly as authored.
+            ansi16[i] = rgb_bytes(if legible && i >= 8 {
                 at_least(ink, fg, bg, TEXT_FLOOR)
             } else {
                 ink
@@ -1121,7 +1123,7 @@ mod tests {
         // PSReadLine paints parameters/operators/members with.
         for t in builtins() {
             let bg = t.background_color();
-            let ap = t.active_palette();
+            let ap = t.active_palette(true);
             for (i, c) in ap.ansi16.iter().enumerate().skip(8) {
                 let ink = (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32;
                 assert!(
@@ -1140,7 +1142,7 @@ mod tests {
         // clears the floor must come out of `active_palette` untouched.
         for t in builtins() {
             let bg = t.background_color();
-            let ap = t.active_palette();
+            let ap = t.active_palette(true);
             for (i, (r, g, b)) in t.ansi16.iter().enumerate().skip(8) {
                 let authored = (*r as u32) << 16 | (*g as u32) << 8 | *b as u32;
                 let rendered = (ap.ansi16[i].r as u32) << 16
@@ -1158,6 +1160,26 @@ mod tests {
     }
 
     #[test]
+    fn palette_renders_as_authored_when_legibility_is_off() {
+        // The Settings → Appearance switch turns the rescue off entirely: the
+        // renderer then sees every slot byte-for-byte as authored.
+        for t in builtins() {
+            let ap = t.active_palette(false);
+            for (i, (r, g, b)) in t.ansi16.iter().enumerate() {
+                let rendered = (ap.ansi16[i].r as u32) << 16
+                    | (ap.ansi16[i].g as u32) << 8
+                    | ap.ansi16[i].b as u32;
+                assert_eq!(
+                    rendered,
+                    (*r as u32) << 16 | (*g as u32) << 8 | *b as u32,
+                    "{}/ansi16[{i}]: palette changed with legibility off",
+                    t.id
+                );
+            }
+        }
+    }
+
+    #[test]
     fn dark_bright_black_is_lifted_past_the_floor() {
         // The reported bug: PSReadLine paints parameters/operators/members
         // with DarkGray (SGR 90 → bright black), and the dark builtins author
@@ -1170,7 +1192,7 @@ mod tests {
             ("rose_pine", 0x6e6a86),
         ] {
             let t = builtins().into_iter().find(|t| t.id == id).unwrap();
-            let c = t.active_palette().ansi16[8];
+            let c = t.active_palette(true).ansi16[8];
             let rendered = (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32;
             assert_ne!(rendered, authored, "{id}: brightBlack was left as authored");
             assert!(
@@ -1185,7 +1207,7 @@ mod tests {
             .into_iter()
             .find(|t| t.id == "catppuccin_latte")
             .unwrap();
-        let c = latte.active_palette().ansi16[8];
+        let c = latte.active_palette(true).ansi16[8];
         let rendered = (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32;
         assert_ne!(
             rendered, 0xacb0be,
@@ -1201,7 +1223,7 @@ mod tests {
     #[test]
     fn selection_surface_stays_on_the_background_side() {
         for t in builtins() {
-            let ap = t.active_palette();
+            let ap = t.active_palette(true);
             let sel = (ap.sel_bg.r as u32) << 16 | (ap.sel_bg.g as u32) << 8 | ap.sel_bg.b as u32;
             let to_bg = contrast(sel, t.background_color());
             let to_fg = contrast(sel, t.foreground);

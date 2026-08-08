@@ -1341,6 +1341,16 @@ impl Tty7App {
         }
     }
 
+    pub(crate) fn set_theme_legible_palette(
+        &mut self,
+        on: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.global_mut::<Config>().theme_legible_palette = on;
+        self.after_theme_change(window, cx);
+    }
+
     fn after_theme_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         apply_theme(Some(window), cx);
         set_menus(cx);
