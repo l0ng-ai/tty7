@@ -362,17 +362,23 @@ pub(crate) fn resolved_background_appearance(
                 }
             }
             // "Off" must mean off on every platform: a config synced from a
-            // Windows machine (where Off forces plain transparency) must not
-            // quietly keep the blur enabled here because window_blur is true.
+            // Windows machine must not quietly keep the blur enabled here.
             WindowBackdrop::Off => WindowBackgroundAppearance::Transparent,
-            // Blur and the Windows-only materials have no native equivalent
-            // here; the closest appearance is the legacy blurred one, so an
-            // explicit choice still means something instead of silently
-            // following the legacy toggle.
-            WindowBackdrop::Blur
-            | WindowBackdrop::Mica
-            | WindowBackdrop::MicaAlt
-            | WindowBackdrop::Acrylic => WindowBackgroundAppearance::Blurred,
+            // Blur is meaningful everywhere (vibrancy on macOS), so an
+            // explicit choice pins the blurred appearance.
+            WindowBackdrop::Blur => WindowBackgroundAppearance::Blurred,
+            // The Windows-only materials have no equivalent here; they fall
+            // back to the legacy toggle instead of pinning the appearance —
+            // otherwise a synced "mica"/"acrylic" would make the platform's
+            // own blur switch stop working, with no UI on this platform to
+            // clear the field again.
+            WindowBackdrop::Mica | WindowBackdrop::MicaAlt | WindowBackdrop::Acrylic => {
+                if blur {
+                    WindowBackgroundAppearance::Blurred
+                } else {
+                    WindowBackgroundAppearance::Transparent
+                }
+            }
         }
     }
 }
