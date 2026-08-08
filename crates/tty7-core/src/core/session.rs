@@ -162,6 +162,20 @@ impl RemoteTarget {
         }
     }
 
+    /// Whether the far end is served by a tty7 daemon this computer installed
+    /// and can therefore restart. SSH machines and WSL distros both are; a
+    /// `--stdio` program is whatever the user named, and stopping it is its
+    /// workspace's business.
+    pub fn hosts_our_server(&self) -> bool {
+        match self {
+            RemoteTarget::Profile { .. }
+            | RemoteTarget::Alias { .. }
+            | RemoteTarget::Direct { .. }
+            | RemoteTarget::Wsl { .. } => true,
+            RemoteTarget::LocalStdio { .. } => false,
+        }
+    }
+
     pub fn host_id(&self) -> crate::host::HostId {
         crate::host::HostId::from_connection_key(&self.connection_key())
     }
@@ -491,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn only_ssh_machines_have_a_server_to_restart() {
+    fn only_ssh_machines_are_reached_over_ssh() {
         assert!(
             RemoteTarget::Profile {
                 id: uuid::Uuid::nil()
@@ -510,7 +524,7 @@ mod tests {
                 distro: "Ubuntu".into()
             }
             .is_ssh(),
-            "a distribution's server is started by this client"
+            "a distribution is reached through wsl.exe, not a connection"
         );
         assert!(
             !RemoteTarget::LocalStdio {
@@ -519,6 +533,38 @@ mod tests {
             }
             .is_ssh(),
             "a stdio machine is a child process per connection"
+        );
+    }
+
+    #[test]
+    fn every_machine_but_a_stdio_one_has_a_server_to_restart() {
+        assert!(
+            RemoteTarget::Profile {
+                id: uuid::Uuid::nil()
+            }
+            .hosts_our_server()
+        );
+        assert!(
+            RemoteTarget::Alias {
+                alias: "devbox".into()
+            }
+            .hosts_our_server()
+        );
+        assert!(RemoteTarget::direct("me", "box.local", 22).hosts_our_server());
+        assert!(
+            RemoteTarget::Wsl {
+                distro: "Ubuntu".into()
+            }
+            .hosts_our_server(),
+            "a distribution's server is installed and launched from here, like an SSH one"
+        );
+        assert!(
+            !RemoteTarget::LocalStdio {
+                program: "tty7-server".into(),
+                args: vec!["--stdio".into()],
+            }
+            .hosts_our_server(),
+            "a stdio program is whatever the user named, not a daemon of ours"
         );
     }
 
