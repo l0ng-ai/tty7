@@ -130,22 +130,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Maximizing a pane mid-burst no longer garbles it** — the client reflowed
-  its grid the instant the window changed, then went on parsing whatever the
-  daemon still had queued for it, and that backlog (up to the 16 MiB the
-  output gate allows) was produced at the old width. Old-width bytes laid
-  out on a new-width grid, topped by ConPTY's own post-resize repaint, left
-  command output interleaved with prompts and the cursor stranded
-  mid-screen. Reattach never had this bug: its replay tags every ring
-  segment with the geometry it was recorded at. A live resize now works the
-  same way — the daemon echoes a `Size` frame to the controller at the
-  exact stream position where the PTY changed geometry, and the client
-  defers its reflow to that marker, so every queued byte still parses into
-  the grid it was rendered for. Observers, which already got live `Size`
-  frames but only ever applied them after a replay snapshot, now follow the
-  controller's resizes at the right moment too. A client facing an older
-  daemon that never echoes keeps the reflow-at-request-time behavior (new
-  `resize-echo` feature probe).
+- **Maximizing a Windows pane no longer shreds it** — two separate resize
+  disagreements stacked up here, and the visible one was the second.
+
+  ConPTY emits no repaint after a resize; conhost silently re-anchors its
+  own layout and keeps painting with absolute cursor addresses computed
+  against it. Measured against a live ConPTY: growing the window keeps
+  rows and cursor pinned and opens blank rows at the bottom — nothing is
+  restored from scrollback — and shrinking scrolls the last *written* row
+  (PSReadLine parks a continuation hint below the prompt) to the new
+  bottom. The grid resized the alacritty way instead: growing pulled
+  scrollback back into view and pushed the cursor down by that many rows.
+  After a maximize the two layouts disagreed by exactly the pulled row
+  count, so every later absolute-CUP paint — PSReadLine redraws the prompt
+  that way per keystroke — landed mid-screen inside the old output. The
+  vendored `alacritty_terminal` now has a `conpty_resize` mode that
+  mirrors conhost's model for the primary screen (the alternate screen
+  keeps stock behavior; its application repaints itself), and every pane
+  on Windows opts in — a shell, `wsl.exe`, and `ssh.exe` are all presented
+  through conhost alike. The cost is Windows-Terminal-standard behavior:
+  maximizing no longer reveals extra scrollback below the fold.
+
+  Separately, a resize during a burst of output reflowed the grid ahead of
+  the backlog: the daemon can hold up to 16 MiB of queued old-width bytes,
+  and the client parsed them into the already-resized grid. The daemon now
+  echoes a `Size` frame to the controller at the exact stream position
+  where the PTY changed geometry — the same geometry-tagging the reattach
+  replay has always used — and the client defers its reflow to that
+  marker, so every queued byte parses into the grid it was rendered for.
+  Observers, which already received live `Size` frames but only applied
+  them after a replay snapshot, follow the controller's resizes at the
+  right moment too. The client keeps the reflow-at-request-time path
+  against an older daemon that never echoes (new `resize-echo` feature
+  probe), and on remote routes, where only the local daemon's features are
+  known — a current remote daemon's echo lands there as a harmless
+  same-size no-op, and probing per connection is the follow-up that
+  extends deferral to remote panes.
 
 - **Pasting a screenshot into a remote pane works on macOS too** — the
   clipboard-image paste that stages a file and hands the agent its path was

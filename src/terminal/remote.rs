@@ -1018,8 +1018,16 @@ impl RemoteTerminal {
     /// backlog still queued between daemon and client was produced at the old
     /// geometry, and reflowing before it drains parses old-width bytes into a
     /// new-width grid (maximize during a burst of output garbled the pane).
-    /// Non-local routes and older daemons never send the echo, so those keep
-    /// the reflow-at-request-time behavior.
+    ///
+    /// Older daemons never echo, so those keep the reflow-at-request-time
+    /// behavior. Non-local routes keep it too, for a weaker reason: only the
+    /// local daemon's feature set is probed, so the client cannot *rely* on an
+    /// echo arriving. A current remote daemon does send one — the router
+    /// forwards frames it does not parse, and the reader applies it as a
+    /// same-size no-op after the eager reflow — but deferral can't hang on a
+    /// maybe. Follow-up: carry the remote daemon's advertised features on the
+    /// route handshake and consult them here; remote panes then get the
+    /// deferred path for free.
     fn resize_echoed(&self) -> bool {
         #[cfg(test)]
         if self.force_resize_echo {

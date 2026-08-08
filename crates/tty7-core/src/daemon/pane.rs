@@ -624,6 +624,15 @@ fn notify(st: &mut PaneState, msg: DaemonMsg) {
 /// the channel can hold megabytes of old-width output (the pane gate allows
 /// 16 MiB), and reflowing ahead of it parsed old-width bytes into a new-width
 /// grid, garbling the pane on maximize during a burst of output.
+///
+/// The marker is deliberately not airtight. Old-width bytes the reader thread
+/// has read but not yet fanned out — and bytes still sitting in the kernel
+/// pipe, which conhost keeps producing until it processes the resize — land
+/// after the echo and parse at the new width. That residue is bounded by one
+/// 64 KiB read plus the pipe, cannot be attributed to a geometry from here
+/// (the bytes carry no tags and ConPTY emits no sync marker of its own), and
+/// is the same ambiguity every ConPTY terminal accepts on a mid-output
+/// resize. The echo exists to close the 16 MiB window, not that one.
 fn resize_state(st: &mut PaneState, size: WinSize) {
     st.ring.resize(size);
     if let Some(sub) = &st.subscriber {
