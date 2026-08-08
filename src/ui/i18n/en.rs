@@ -114,6 +114,19 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsBlur => "Blur",
         L10nKey::SettingsBlurDesc => "Blur whatever is behind a translucent window (macOS).",
+        L10nKey::SettingsBackdrop => "Background material",
+        L10nKey::SettingsBackdropDesc => {
+            "Native Windows backdrop behind a translucent window. Mica needs Windows 11 22H2, Acrylic needs 1809; older builds fall back automatically."
+        }
+        L10nKey::SettingsSearchBackdropKeywords => {
+            "material backdrop mica acrylic blur frosted window background"
+        }
+        L10nKey::SettingsBackdropAuto => "Auto",
+        L10nKey::SettingsBackdropBlur => "Blur",
+        L10nKey::SettingsBackdropMica => "Mica",
+        L10nKey::SettingsBackdropMicaAlt => "Mica Alt",
+        L10nKey::SettingsBackdropAcrylic => "Acrylic",
+        L10nKey::SettingsBackdropOff => "Off",
         L10nKey::FollowTheme => "Follow theme",
         L10nKey::SettingsDimInactivePanes => "Dim inactive panes",
         L10nKey::SettingsDimInactivePanesDesc => {

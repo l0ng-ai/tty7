@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::core::actions::*;
 use crate::core::config::{
     Config, CursorStyle as ConfigCursorStyle, NewTabPosition, RightPanelTab, ShellConfig,
-    TabBarPosition,
+    TabBarPosition, WindowBackdrop,
 };
 use crate::core::session::{
     Session, SessionAxis, SessionPane, SessionTab, WorkspaceId, WorkspaceStore,
@@ -445,6 +445,38 @@ pub(crate) struct TabAgentSession {
 impl TabAgentSession {
     pub(crate) fn forkable(&self) -> bool {
         self.fork_label.is_some() && self.session_id.is_some() && !self.remote
+    }
+}
+
+/// Maps a backdrop onto the settings dropdown. The dropdown only lists the
+/// presets the current Windows build actually supports (see
+/// `theme::supported_backdrops`), so an unsupported value (e.g. a hand-edited
+/// config on an older build) falls back to index 0 (Auto).
+#[cfg(target_os = "windows")]
+fn window_backdrop_index(backdrop: WindowBackdrop) -> usize {
+    crate::ui::theme::supported_backdrops()
+        .iter()
+        .position(|candidate| *candidate == backdrop)
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "windows")]
+fn window_backdrop_from_index(idx: usize) -> WindowBackdrop {
+    crate::ui::theme::supported_backdrops()
+        .get(idx)
+        .copied()
+        .unwrap_or(WindowBackdrop::Auto)
+}
+
+#[cfg(target_os = "windows")]
+fn window_backdrop_label_key(backdrop: WindowBackdrop) -> L10nKey {
+    match backdrop {
+        WindowBackdrop::Auto => L10nKey::SettingsBackdropAuto,
+        WindowBackdrop::Blur => L10nKey::SettingsBackdropBlur,
+        WindowBackdrop::Mica => L10nKey::SettingsBackdropMica,
+        WindowBackdrop::MicaAlt => L10nKey::SettingsBackdropMicaAlt,
+        WindowBackdrop::Acrylic => L10nKey::SettingsBackdropAcrylic,
+        WindowBackdrop::Off => L10nKey::SettingsBackdropOff,
     }
 }
 
@@ -1448,7 +1480,13 @@ impl Tty7App {
     pub(crate) fn effective_window_opacity(cx: &App) -> f32 {
         let config = cx.global::<Config>();
         let theme = crate::ui::presets::by_id(cx, &crate::ui::theme::effective_preset_id(cx));
-        config.window_opacity.or(theme.opacity).unwrap_or(1.0)
+        config.window_opacity.or(theme.opacity).unwrap_or_else(|| {
+            if cfg!(target_os = "windows") && config.window_backdrop.is_material() {
+                crate::ui::theme::SYSTEM_MATERIAL_OPACITY
+            } else {
+                1.0
+            }
+        })
     }
 
     pub(crate) fn set_window_opacity(
@@ -1463,6 +1501,7 @@ impl Tty7App {
         cx.notify();
     }
 
+    #[cfg(not(target_os = "windows"))]
     pub(crate) fn set_window_blur(
         &mut self,
         on: bool,
@@ -1475,15 +1514,30 @@ impl Tty7App {
         cx.notify();
     }
 
+    pub(crate) fn set_window_backdrop(
+        &mut self,
+        backdrop: WindowBackdrop,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.global_mut::<Config>().window_backdrop = backdrop;
+        apply_theme(Some(window), cx);
+        cx.global::<Config>().save();
+        cx.notify();
+    }
+
     pub(crate) fn reset_window_overrides(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         {
             let config = cx.global_mut::<Config>();
             config.window_opacity = None;
             config.window_blur = None;
+            config.window_backdrop = WindowBackdrop::Auto;
         }
         apply_theme(Some(window), cx);
         cx.global::<Config>().save();
         self.sync_window_opacity_slider(window, cx);
+        #[cfg(target_os = "windows")]
+        self.sync_window_backdrop_select(window, cx);
         cx.notify();
     }
 
@@ -1498,6 +1552,23 @@ impl Tty7App {
             .map(|s| s.window_opacity_slider.clone())
         {
             slider.update(cx, |s, cx| s.set_value(eff, window, cx));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn sync_window_backdrop_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(select) = self
+            .active_settings()
+            .map(|s| s.window_backdrop_select.clone())
+        {
+            let selected = window_backdrop_index(cx.global::<Config>().window_backdrop);
+            select.update(cx, |state, cx| {
+                state.set_selected_index(Some(IndexPath::default().row(selected)), window, cx);
+            });
         }
     }
 
@@ -3629,6 +3700,8 @@ impl Tty7App {
         let (font_select, font_bold_select, font_italic_select) =
             self.build_font_selects(&mut subs, window, cx);
         let language_select = self.build_language_select(&mut subs, window, cx);
+        #[cfg(target_os = "windows")]
+        let window_backdrop_select = self.build_window_backdrop_select(&mut subs, window, cx);
         let (shell_program_input, shell_args_input, wd_path_input) =
             self.build_shell_inputs(&mut subs, window, cx);
         let link_file_command_input = self.build_link_file_command_input(&mut subs, window, cx);
@@ -3687,6 +3760,8 @@ impl Tty7App {
             font_bold_select,
             font_italic_select,
             language_select,
+            #[cfg(target_os = "windows")]
+            window_backdrop_select,
             shell_program_input,
             shell_args_input,
             wd_path_input,
@@ -3859,6 +3934,47 @@ impl Tty7App {
             .unwrap_or_else(crate::ui::i18n::default_language_code)
     }
 
+    /// The backdrop dropdown only lists the presets this Windows build
+    /// supports, in the order of `theme::supported_backdrops`; the select
+    /// resolves the picked label back through that same list.
+    #[cfg(target_os = "windows")]
+    fn build_window_backdrop_select(
+        &mut self,
+        subs: &mut Vec<Subscription>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SelectState<SearchableVec<String>>> {
+        let labels = || {
+            crate::ui::theme::supported_backdrops()
+                .iter()
+                .map(|backdrop| t(window_backdrop_label_key(*backdrop)).to_string())
+                .collect::<Vec<_>>()
+        };
+        let rows = labels();
+        let selected = window_backdrop_index(cx.global::<Config>().window_backdrop);
+        let select = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(rows),
+                Some(IndexPath::default().row(selected)),
+                window,
+                cx,
+            )
+        });
+        subs.push(cx.subscribe_in(
+            &select,
+            window,
+            move |this, _select, ev: &SelectEvent<SearchableVec<String>>, window, cx| {
+                if let SelectEvent::Confirm(Some(label)) = ev {
+                    let rows = labels();
+                    if let Some(idx) = rows.iter().position(|row| row == label) {
+                        this.set_window_backdrop(window_backdrop_from_index(idx), window, cx);
+                    }
+                }
+            },
+        ));
+        select
+    }
+
     pub(crate) fn set_gui_language(
         &mut self,
         code: &'static str,
@@ -3897,6 +4013,14 @@ impl Tty7App {
                     .position(|lang| lang.code == code)
                     .unwrap_or(0);
                 state.set_selected_index(Some(IndexPath::default().row(selected)), window, cx);
+            });
+            #[cfg(target_os = "windows")]
+            s.window_backdrop_select.update(cx, |state, cx| {
+                let rows = crate::ui::theme::supported_backdrops()
+                    .iter()
+                    .map(|backdrop| t(window_backdrop_label_key(*backdrop)).to_string())
+                    .collect::<Vec<_>>();
+                state.set_items(SearchableVec::new(rows), window, cx);
             });
             s.search.update(cx, |state, cx| {
                 state.set_placeholder(t(L10nKey::SearchSettings), window, cx)
@@ -5335,7 +5459,10 @@ impl Render for Tty7App {
                 .absolute()
                 .inset_0()
                 .occlude()
-                .bg(window_bg)
+                // Opaque on purpose: the settings panel must never let the
+                // workspace translucency (window opacity / backdrop material)
+                // show through, even at window edges during a resize.
+                .bg(cx.theme().background.alpha(1.0))
                 .child(self.render_settings(window, cx))
         });
 

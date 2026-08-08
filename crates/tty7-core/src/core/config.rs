@@ -129,6 +129,8 @@ pub struct Config {
     pub theme_legible_palette: bool,
     pub window_opacity: Option<f32>,
     pub window_blur: Option<bool>,
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub window_backdrop: WindowBackdrop,
     #[serde(default = "default_true")]
     pub dim_inactive_panes: bool,
     pub keybindings: HashMap<String, String>,
@@ -334,6 +336,33 @@ pub enum TabBarPosition {
     Left,
 }
 
+/// Native window backdrop material for the Windows GUI. `Auto` keeps the
+/// legacy behavior (theme blur decides between blurred and plain translucent),
+/// `Blur` explicitly requests the blurred appearance (classic WCA acrylic on
+/// Windows, vibrancy on macOS), the material variants fall back to acrylic or
+/// plain translucency on older builds inside `src/ui/theme.rs`, and `Off`
+/// never requests a material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowBackdrop {
+    #[default]
+    Auto,
+    Blur,
+    Mica,
+    MicaAlt,
+    Acrylic,
+    Off,
+}
+
+impl WindowBackdrop {
+    pub fn is_material(self) -> bool {
+        matches!(
+            self,
+            Self::Blur | Self::Mica | Self::MicaAlt | Self::Acrylic
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SidebarGrouping {
@@ -439,6 +468,7 @@ impl Default for Config {
             theme_legible_palette: true,
             window_opacity: None,
             window_blur: None,
+            window_backdrop: WindowBackdrop::default(),
             dim_inactive_panes: true,
             keybindings: HashMap::new(),
             keybinding_preset: default_preset(),
@@ -1101,6 +1131,35 @@ mod tests {
         assert_eq!(clamp(Some(0.0)), Some(0.2));
         assert_eq!(clamp(Some(2.0)), Some(1.0));
         assert_eq!(clamp(Some(f32::NAN)), None);
+    }
+
+    #[test]
+    fn window_backdrop_defaults_and_round_trips_leniently() {
+        assert!(WindowBackdrop::Blur.is_material());
+        assert!(WindowBackdrop::Mica.is_material());
+        assert!(WindowBackdrop::Acrylic.is_material());
+        assert!(!WindowBackdrop::Auto.is_material());
+        assert!(!WindowBackdrop::Off.is_material());
+
+        let cfg = Config::default();
+        assert_eq!(cfg.window_backdrop, WindowBackdrop::Auto);
+
+        let text = serde_json::to_string(&Config {
+            window_backdrop: WindowBackdrop::MicaAlt,
+            ..Config::default()
+        })
+        .unwrap();
+        assert!(text.contains("\"window_backdrop\":\"mica-alt\""));
+
+        let restored: Config = serde_json::from_str(&text).unwrap();
+        assert_eq!(restored.window_backdrop, WindowBackdrop::MicaAlt);
+
+        let blur: Config = serde_json::from_str(r#"{"window_backdrop":"blur"}"#).unwrap();
+        assert_eq!(blur.window_backdrop, WindowBackdrop::Blur);
+
+        // Unknown values fall back to Auto instead of rejecting the whole config.
+        let lenient: Config = serde_json::from_str(r#"{"window_backdrop":"nope"}"#).unwrap();
+        assert_eq!(lenient.window_backdrop, WindowBackdrop::Auto);
     }
 
     #[test]

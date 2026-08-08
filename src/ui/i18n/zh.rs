@@ -104,6 +104,19 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsBlur => "模糊",
         L10nKey::SettingsBlurDesc => "模糊半透明窗口背后的内容（macOS）。",
+        L10nKey::SettingsBackdrop => "背景材质",
+        L10nKey::SettingsBackdropDesc => {
+            "半透明窗口背后的原生 Windows 背景材质。云母需要 Windows 11 22H2，亚克力需要 1809；更旧的系统会自动回退。"
+        }
+        L10nKey::SettingsSearchBackdropKeywords => {
+            "材质 背景 云母 亚克力 模糊 毛玻璃 窗口 material backdrop mica acrylic blur frosted window background"
+        }
+        L10nKey::SettingsBackdropAuto => "自动",
+        L10nKey::SettingsBackdropBlur => "模糊",
+        L10nKey::SettingsBackdropMica => "云母",
+        L10nKey::SettingsBackdropMicaAlt => "云母 Alt",
+        L10nKey::SettingsBackdropAcrylic => "亚克力",
+        L10nKey::SettingsBackdropOff => "关闭",
         L10nKey::FollowTheme => "跟随主题",
         L10nKey::SettingsDimInactivePanes => "调暗非活动窗格",
         L10nKey::SettingsDimInactivePanesDesc => "在分屏中淡化未聚焦的窗格，让活动窗格更突出。",

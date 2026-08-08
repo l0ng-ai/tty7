@@ -118,6 +118,19 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsBlur => "背景のぼかし",
         L10nKey::SettingsBlurDesc => "半透明ウィンドウの背後にあるものをぼかす（macOS）",
+        L10nKey::SettingsBackdrop => "背景マテリアル",
+        L10nKey::SettingsBackdropDesc => {
+            "半透明ウィンドウの背後にあるネイティブ Windows 背景マテリアル。Mica には Windows 11 22H2、Acrylic には 1809 が必要です。古いビルドでは自動的にフォールバックします"
+        }
+        L10nKey::SettingsSearchBackdropKeywords => {
+            "背景 マテリアル ぼかし すりガラス material backdrop mica acrylic blur frosted window background"
+        }
+        L10nKey::SettingsBackdropAuto => "自動",
+        L10nKey::SettingsBackdropBlur => "ぼかし",
+        L10nKey::SettingsBackdropMica => "Mica",
+        L10nKey::SettingsBackdropMicaAlt => "Mica Alt",
+        L10nKey::SettingsBackdropAcrylic => "Acrylic",
+        L10nKey::SettingsBackdropOff => "オフ",
         L10nKey::FollowTheme => "テーマに従う",
         L10nKey::SettingsDimInactivePanes => "非アクティブなペインを暗くする",
         L10nKey::SettingsDimInactivePanesDesc => {

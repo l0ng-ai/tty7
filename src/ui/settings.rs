@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::core::config::{
     BellMode, Config, CursorStyle, NewTabPosition, NotifyMode, TabBarPosition, UpdateChannel,
+    WindowBackdrop,
 };
 use crate::core::keychain::CredentialRef;
 use crate::core::ssh_profile::{
@@ -125,6 +126,12 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             section: Appearance,
             title: SettingsBlur,
             keywords: SettingsSearchBlurKeywords,
+        },
+        #[cfg(target_os = "windows")]
+        SearchEntry {
+            section: Appearance,
+            title: SettingsBackdrop,
+            keywords: SettingsSearchBackdropKeywords,
         },
         SearchEntry {
             section: Appearance,
@@ -437,6 +444,8 @@ pub(crate) struct SettingsState {
     pub(crate) font_bold_select: Entity<SelectState<SearchableVec<String>>>,
     pub(crate) font_italic_select: Entity<SelectState<SearchableVec<String>>>,
     pub(crate) language_select: Entity<SelectState<SearchableVec<String>>>,
+    #[cfg(target_os = "windows")]
+    pub(crate) window_backdrop_select: Entity<SelectState<SearchableVec<String>>>,
     pub(crate) shell_program_input: Entity<InputState>,
     pub(crate) shell_args_input: Entity<InputState>,
     pub(crate) wd_path_input: Entity<InputState>,
@@ -737,8 +746,12 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme();
-        let (background, foreground, header_muted) =
-            (theme.background, theme.foreground, theme.muted_foreground);
+        // The settings panel covers the whole window. Paint it on an opaque
+        // surface so the workspace translucency (window opacity / backdrop
+        // material) never shows through the settings UI. `alpha` assigns the
+        // channel — `opacity` would multiply it and stay translucent.
+        let background = theme.background.alpha(1.0);
+        let (foreground, header_muted) = (theme.foreground, theme.muted_foreground);
 
         let (focus_handle, section, theme_panel_open, search) = match self.active_settings() {
             Some(s) => (
@@ -1332,11 +1345,11 @@ impl Tty7App {
             return div().into_any_element();
         };
         let config = cx.global::<Config>();
-        let overridden = config.window_opacity.is_some() || config.window_blur.is_some();
+        let overridden = config.window_opacity.is_some()
+            || config.window_blur.is_some()
+            || config.window_backdrop != WindowBackdrop::Auto;
         let dim_inactive_panes = config.dim_inactive_panes;
-        let theme = presets::by_id(cx, &crate::ui::theme::effective_preset_id(cx));
         let opacity = Tty7App::effective_window_opacity(cx);
-        let blur = cx.global::<Config>().window_blur.unwrap_or(theme.blur);
 
         let opacity_control = h_flex()
             .items_center()
@@ -1354,12 +1367,35 @@ impl Tty7App {
                     .child(format!("{:.0}%", opacity * 100.)),
             )
             .into_any_element();
-        let blur_switch = crate::ui::theme::switch("window-blur", cx)
-            .checked(blur)
-            .on_click(
-                cx.listener(|this, on: &bool, window, cx| this.set_window_blur(*on, window, cx)),
-            )
-            .into_any_element();
+        // Windows exposes the native backdrop materials directly; macOS keeps
+        // the simple blur toggle, which drives its vibrancy.
+        #[cfg(target_os = "windows")]
+        let blur_control = {
+            let Some(select) = self
+                .active_settings()
+                .map(|s| s.window_backdrop_select.clone())
+            else {
+                return div().into_any_element();
+            };
+            Select::new(&select)
+                .small()
+                .w(px(180.))
+                .h(px(24.))
+                .menu_max_h(px(224.))
+                .into_any_element()
+        };
+        #[cfg(not(target_os = "windows"))]
+        let blur_control =
+            {
+                let theme = presets::by_id(cx, &crate::ui::theme::effective_preset_id(cx));
+                let blur = config.window_blur.unwrap_or(theme.blur);
+                crate::ui::theme::switch("window-blur", cx)
+                    .checked(blur)
+                    .on_click(cx.listener(|this, on: &bool, window, cx| {
+                        this.set_window_blur(*on, window, cx)
+                    }))
+                    .into_any_element()
+            };
         let dim_switch = crate::ui::theme::switch("dim-inactive-panes", cx)
             .checked(dim_inactive_panes)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_dim_inactive_panes(*on, cx)))
@@ -1374,9 +1410,17 @@ impl Tty7App {
                 cx,
             ))
             .child(self.settings_row(
-                t(L10nKey::SettingsBlur),
-                t(L10nKey::SettingsBlurDesc),
-                blur_switch,
+                t(if cfg!(target_os = "windows") {
+                    L10nKey::SettingsBackdrop
+                } else {
+                    L10nKey::SettingsBlur
+                }),
+                t(if cfg!(target_os = "windows") {
+                    L10nKey::SettingsBackdropDesc
+                } else {
+                    L10nKey::SettingsBlurDesc
+                }),
+                blur_control,
                 cx,
             ))
             .when(overridden, |this| {
@@ -5164,7 +5208,7 @@ mod tests {
     #[test]
     fn previously_unsearchable_settings_are_findable() {
         use SettingsSection::*;
-        let cases: &[(&str, SettingsSection)] = &[
+        let mut cases: Vec<(&str, SettingsSection)> = vec![
             ("opacity", Appearance),
             ("blur", Appearance),
             ("completion", Input),
@@ -5179,6 +5223,12 @@ mod tests {
             ("claude", Agents),
             ("symlink", Agents),
         ];
+        #[cfg(target_os = "windows")]
+        cases.extend([
+            ("material", Appearance),
+            ("mica", Appearance),
+            ("acrylic", Appearance),
+        ]);
         for (query, expected) in cases {
             assert_eq!(
                 best_matching_section(query).map(|s| s.profile_label()),
