@@ -324,7 +324,13 @@ pub(crate) fn windows_build_number() -> u32 {
     static BUILD: OnceLock<u32> = OnceLock::new();
     *BUILD.get_or_init(|| {
         use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
-        let mut info = unsafe { std::mem::zeroed() };
+        use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
+        let mut info: OSVERSIONINFOW = unsafe { std::mem::zeroed() };
+        // RtlGetVersion is not subject to the app-compat version lying that
+        // GetVersionEx is, and unlike GetVersionEx it does not require
+        // dwOSVersionInfoSize to be pre-filled; set it anyway so the call
+        // matches the documented contract.
+        info.dwOSVersionInfoSize = std::mem::size_of_val(&info) as u32;
         let status = unsafe { RtlGetVersion(&mut info) };
         if status == 0 {
             info.dwBuildNumber
@@ -346,10 +352,27 @@ pub(crate) fn resolved_background_appearance(
     }
     #[cfg(not(target_os = "windows"))]
     {
-        if backdrop == WindowBackdrop::Blur || blur {
-            WindowBackgroundAppearance::Blurred
-        } else {
-            WindowBackgroundAppearance::Transparent
+        match backdrop {
+            // Legacy behavior: the theme blur toggle decides.
+            WindowBackdrop::Auto => {
+                if blur {
+                    WindowBackgroundAppearance::Blurred
+                } else {
+                    WindowBackgroundAppearance::Transparent
+                }
+            }
+            // "Off" must mean off on every platform: a config synced from a
+            // Windows machine (where Off forces plain transparency) must not
+            // quietly keep the blur enabled here because window_blur is true.
+            WindowBackdrop::Off => WindowBackgroundAppearance::Transparent,
+            // Blur and the Windows-only materials have no native equivalent
+            // here; the closest appearance is the legacy blurred one, so an
+            // explicit choice still means something instead of silently
+            // following the legacy toggle.
+            WindowBackdrop::Blur
+            | WindowBackdrop::Mica
+            | WindowBackdrop::MicaAlt
+            | WindowBackdrop::Acrylic => WindowBackgroundAppearance::Blurred,
         }
     }
 }
