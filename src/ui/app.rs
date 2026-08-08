@@ -1523,6 +1523,9 @@ impl Tty7App {
         cx.global_mut::<Config>().window_backdrop = backdrop;
         apply_theme(Some(window), cx);
         cx.global::<Config>().save();
+        // A material changes the default opacity (SYSTEM_MATERIAL_OPACITY
+        // vs 1.0), so the slider must track the new effective value.
+        self.sync_window_opacity_slider(window, cx);
         cx.notify();
     }
 

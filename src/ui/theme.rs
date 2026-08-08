@@ -563,18 +563,24 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
 
     t.radius = px(8.);
 
-    let sidebar_bg = rgb(m.sidebar);
+    let mut sidebar_bg = Hsla::from(rgb(m.sidebar));
     let sidebar_sel = rgb(surfaces.sidebar.selected);
     // Large workspace surfaces (file sidebar, right panel) stay as
     // translucent as the window background so the backdrop material shows
     // through them too; row-level accents stay opaque for readability.
     //
-    // The sidebar paints on top of the already-translucent window
-    // background, so its own alpha stacks (src-over) and the material
-    // would otherwise show through far less than behind the terminal. A
-    // constant 0.15 keeps the backdrop ratio at ~85% of the terminal's at
-    // every opacity setting.
-    let sidebar_bg = Hsla::from(sidebar_bg).alpha(0.15);
+    // While a material is active, the sidebar paints on top of the
+    // already-alpha window background, so its own alpha stacks (src-over)
+    // and the material would show through far less than behind the
+    // terminal. A constant 0.15 keeps the backdrop ratio at ~85% of the
+    // terminal's at every opacity setting. Without a material — or with
+    // an explicitly opaque window — the sidebar keeps its own surface
+    // color: the compensation only makes sense over a translucent
+    // window, and diluting the sidebar shade everywhere would wash out
+    // the visual separation on macOS, Linux and non-material Windows.
+    if material_opacity && base.a < 1.0 {
+        sidebar_bg = sidebar_bg.alpha(0.15);
+    }
     t.sidebar = sidebar_bg.into();
     t.tokens.sidebar = sidebar_bg.into();
     t.sidebar_border = rgb(m.border).into();
