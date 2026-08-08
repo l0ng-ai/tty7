@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Native Windows backdrop materials** — Settings → Appearance now offers a
+  **Background material** picker on Windows (**Auto / Blur / Mica / Mica Alt /
+  Acrylic / Off**) that maps onto the OS backdrop APIs: Mica and Mica Alt via
+  `DWMWA_SYSTEMBACKDROP_TYPE`, Acrylic via the native
+  `DWMSBT_TRANSIENTWINDOW` material on Windows 11 22H2+ (classic acrylic
+  before that), and Blur via `ACCENT_ENABLE_ACRYLICBLURBEHIND`. The dropdown
+  only lists the presets the current Windows build supports, the file
+  sidebar and right detail panel follow the window opacity so the material
+  shows through the whole workspace, and the settings panel stays opaque.
+  macOS and Linux keep the existing blur toggle.
+
 - **Update tty7 without leaving the app** — the launch check and
   **Settings → About → Check Now** now offer **Update and Relaunch** for
   packaged macOS installs instead of sending the user to GitHub Releases. A
