@@ -155,7 +155,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSecurityIntro => "主机可以在自己的高级选项中覆盖这些设置。",
         L10nKey::SettingsVerifyHostKeys => "校验主机密钥",
         L10nKey::SettingsVerifyHostKeysDesc => {
-            "在连接前对照 known_hosts 检查每台 server 的密钥，并确认未知或已更改的密钥。关闭后连接不做检查，被仿冒的 server 也不会被察觉。"
+            "在连接前对照 known_hosts 检查每台服务器的密钥，并确认未知或已更改的密钥。关闭后连接不做检查，被仿冒的服务器也不会被察觉。"
         }
         L10nKey::WarnBeforeClosing => "关闭前警告",
         L10nKey::SettingsWarnBeforeClosingDesc => {
@@ -225,7 +225,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsLoginScripts => "登录脚本",
         L10nKey::SettingsLoginScriptsDesc => "shell 打开后发送的命令，每行一个。",
         L10nKey::SettingsSkipBanner => "跳过横幅",
-        L10nKey::SettingsSkipBannerDesc => "抑制 server 登录横幅。",
+        L10nKey::SettingsSkipBannerDesc => "抑制服务器登录横幅。",
         L10nKey::SettingsDefaultFollowsDefaults => "默认跟随默认设置，当前为 {value}。",
         L10nKey::SettingsValueOn => "开",
         L10nKey::SettingsValueOff => "关",
