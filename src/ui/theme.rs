@@ -363,33 +363,18 @@ pub(crate) fn resolved_background_appearance(
     }
     #[cfg(not(target_os = "windows"))]
     {
-        match backdrop {
-            // Legacy behavior: the theme blur toggle decides.
-            WindowBackdrop::Auto => {
-                if blur {
-                    WindowBackgroundAppearance::Blurred
-                } else {
-                    WindowBackgroundAppearance::Transparent
-                }
-            }
-            // "Off" must mean off on every platform: a config synced from a
-            // Windows machine must not quietly keep the blur enabled here.
-            WindowBackdrop::Off => WindowBackgroundAppearance::Transparent,
-            // Blur is meaningful everywhere (vibrancy on macOS), so an
-            // explicit choice pins the blurred appearance.
-            WindowBackdrop::Blur => WindowBackgroundAppearance::Blurred,
-            // The Windows-only materials have no equivalent here; they fall
-            // back to the legacy toggle instead of pinning the appearance —
-            // otherwise a synced "mica"/"acrylic" would make the platform's
-            // own blur switch stop working, with no UI on this platform to
-            // clear the field again.
-            WindowBackdrop::Mica | WindowBackdrop::MicaAlt | WindowBackdrop::Acrylic => {
-                if blur {
-                    WindowBackgroundAppearance::Blurred
-                } else {
-                    WindowBackgroundAppearance::Transparent
-                }
-            }
+        // `window_backdrop` is a Windows-only setting and this platform has
+        // no UI to change or clear it (only "Reset window overrides", which
+        // also clobbers opacity). If any variant pinned the appearance
+        // here, the local blur switch would silently show a checked state
+        // that isn't rendered — so every variant, including Off and Blur,
+        // defers to the legacy toggle. (A Windows-synced "off" therefore
+        // does not force transparency on macOS/Linux; the local blur switch
+        // stays authoritative.)
+        if blur {
+            WindowBackgroundAppearance::Blurred
+        } else {
+            WindowBackgroundAppearance::Transparent
         }
     }
 }
@@ -852,6 +837,35 @@ mod tests {
             a(WindowBackdrop::Off, true, 26_000),
             WindowBackgroundAppearance::Transparent
         );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn non_windows_backdrop_defers_to_the_local_blur_toggle() {
+        use crate::core::config::WindowBackdrop;
+        // On non-Windows, `window_backdrop` is a Windows-only setting with
+        // no local UI to clear it; every variant must defer to the local
+        // blur toggle so the switch's checked state always matches what is
+        // actually rendered.
+        for backdrop in [
+            WindowBackdrop::Auto,
+            WindowBackdrop::Blur,
+            WindowBackdrop::Mica,
+            WindowBackdrop::MicaAlt,
+            WindowBackdrop::Acrylic,
+            WindowBackdrop::Off,
+        ] {
+            assert_eq!(
+                resolved_background_appearance(backdrop, true),
+                WindowBackgroundAppearance::Blurred,
+                "{backdrop:?} with blur on should resolve to Blurred"
+            );
+            assert_eq!(
+                resolved_background_appearance(backdrop, false),
+                WindowBackgroundAppearance::Transparent,
+                "{backdrop:?} with blur off should resolve to Transparent"
+            );
+        }
     }
 
     #[test]
