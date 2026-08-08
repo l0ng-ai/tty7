@@ -135,21 +135,29 @@ pub(crate) fn wait_for_exit(pid: u32, timeout: std::time::Duration) -> bool {
     }
 }
 
+/// Terminates every pid in order and waits for each to release its image,
+/// all bounded by the one `deadline` — never a fresh timeout per process.
+/// Callers pass parents after children when a parent could respawn one.
+pub(crate) fn terminate_and_wait_all(pids: &[u32], deadline: std::time::Instant) {
+    for &pid in pids {
+        terminate(pid);
+    }
+    for &pid in pids {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if !wait_for_exit(pid, left) {
+            log::warn!("process {pid} did not exit in time");
+        }
+    }
+}
+
 /// Terminates every descendant of `root` and waits for them to release their
 /// images, bounded by `timeout` overall. Deepest-first, like the per-pane
 /// kill, so a parent never respawns a child we already visited.
 pub(crate) fn reap_descendants_of(root: u32, timeout: std::time::Duration) {
-    let deadline = std::time::Instant::now() + timeout;
-    let targets = descendants(&snapshot(), root);
-    for &pid in &targets {
-        terminate(pid);
-    }
-    for pid in targets {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if !wait_for_exit(pid, left) {
-            log::warn!("descendant process {pid} did not exit in time");
-        }
-    }
+    terminate_and_wait_all(
+        &descendants(&snapshot(), root),
+        std::time::Instant::now() + timeout,
+    );
 }
 
 /// Pids (other than the caller's own) whose executable image lives under

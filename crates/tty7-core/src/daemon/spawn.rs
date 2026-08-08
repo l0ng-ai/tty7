@@ -419,12 +419,12 @@ fn reap_recorded_daemon() {
         .is_some_and(|entry| is_reapable_daemon_name(&entry.name));
     if matches {
         log::warn!("reaping unreachable daemon (pid {pid}); its sessions will be hung up");
-        for descendant in winproc::descendants(&procs, pid) {
-            winproc::terminate(descendant);
-            winproc::wait_for_exit(descendant, REAP_WAIT_TIMEOUT);
-        }
-        winproc::terminate(pid);
-        winproc::wait_for_exit(pid, REAP_WAIT_TIMEOUT);
+        // One deadline across the whole tree: this runs synchronously before
+        // the first window exists, and a crash that left many hosts behind
+        // must not multiply the wait by their count.
+        let mut targets = winproc::descendants(&procs, pid);
+        targets.push(pid);
+        winproc::terminate_and_wait_all(&targets, Instant::now() + REAP_WAIT_TIMEOUT);
     }
     pidfile::remove();
 }
@@ -455,12 +455,8 @@ pub fn stop_for_update(install_dir: &Path) -> Result<(), String> {
             "terminating pid {pid} still running from {}",
             install_dir.display()
         );
-        winproc::terminate(pid);
     }
-    for pid in holdouts {
-        let left = deadline.saturating_duration_since(Instant::now());
-        winproc::wait_for_exit(pid, left);
-    }
+    winproc::terminate_and_wait_all(&holdouts, deadline);
 
     wait_until_images_unlocked(install_dir, deadline)
 }
@@ -491,8 +487,11 @@ fn wait_until_images_unlocked(dir: &Path, deadline: Instant) -> Result<(), Strin
                 })
         })
         .filter(|path| {
-            own.as_deref()
-                .is_none_or(|own| std::fs::canonicalize(path).is_ok_and(|path| path != own))
+            // Excluding takes a positive identification: a candidate that
+            // cannot be canonicalized (delete-pending, held by a scanner) is
+            // a lock to wait out, not ours to skip.
+            !own.as_deref()
+                .is_some_and(|own| std::fs::canonicalize(path).is_ok_and(|path| path == own))
         })
         .collect();
 
