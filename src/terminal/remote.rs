@@ -185,6 +185,14 @@ pub struct RemoteTerminal {
     route: PaneRoute,
     proxy: EventProxy,
     reader_thread: Option<JoinHandle<()>>,
+    /// Tells the *current* reader thread to bow out. Teardown must never wait
+    /// for the reader: on Windows, `shutdown()` does not wake a thread parked
+    /// in a blocking `read()` on the same socket, so joining it from the UI
+    /// thread hangs the whole window whenever the peer has gone silent (the
+    /// exact state a zombie SSH leg leaves behind). The reader re-checks this
+    /// flag under the term lock before every grid mutation, so once it is set
+    /// the abandoned thread can only exit, never write.
+    reader_quit: Arc<AtomicBool>,
 }
 
 /// The workspace id a spawn carries, so the pane's shell gets `$TTY7_WS` and a
@@ -345,12 +353,7 @@ impl RemoteTerminal {
         cell_w: u16,
         cell_h: u16,
     ) -> anyhow::Result<()> {
-        if let Ok(writer) = self.writer.lock() {
-            let _ = writer.shutdown(std::net::Shutdown::Both);
-        }
-        if let Some(handle) = self.reader_thread.take() {
-            let _ = handle.join();
-        }
+        self.stop_reader();
         while self.events.try_recv().is_ok() {}
 
         let read_half = stream.try_clone()?;
@@ -367,11 +370,13 @@ impl RemoteTerminal {
         // browser redraws on its next transmit (see issue #213's reattach note).
         self.images.clear();
 
+        let quit = Arc::new(AtomicBool::new(false));
         let reader = Self::spawn_reader(
             self.term.clone(),
             self.proxy.clone(),
             read_half,
             Vec::new(),
+            quit.clone(),
             ReaderSignals {
                 cwd: self.cwd.clone(),
                 shell: self.shell_state.clone(),
@@ -392,6 +397,7 @@ impl RemoteTerminal {
             *writer = stream;
         }
         self.reader_thread = Some(reader);
+        self.reader_quit = quit;
         self.route = route.clone();
         self.synced_size = false;
         self.resize(size, cell_w, cell_h);
@@ -436,11 +442,13 @@ impl RemoteTerminal {
         let marks = crate::terminal::marks::Marks::new();
         let images = crate::terminal::images::ImageStore::new();
 
+        let reader_quit = Arc::new(AtomicBool::new(false));
         let reader_thread = Self::spawn_reader(
             term.clone(),
             proxy.clone(),
             read_half,
             buffered,
+            reader_quit.clone(),
             ReaderSignals {
                 cwd: cwd.clone(),
                 shell: shell_state.clone(),
@@ -485,18 +493,32 @@ impl RemoteTerminal {
             route: PaneRoute::Local,
             proxy,
             reader_thread: Some(reader_thread),
+            reader_quit,
         })
     }
 
     pub fn detach_link(&mut self) {
         if let Ok(mut writer) = self.writer.lock() {
             let _ = ClientMsg::Detach.encode(&mut *writer);
+        }
+        self.stop_reader();
+        self.poll_exited();
+    }
+
+    /// Retires the current reader thread without waiting for it. Joining is
+    /// not an option here: the callers run on the UI thread, and on Windows
+    /// `shutdown()` does not wake a reader parked in a blocking `read()`, so
+    /// against a silent peer the join would hang the whole window (the reader
+    /// only unblocks when the peer eventually closes — which a zombie SSH leg
+    /// never does). Instead the reader is told to quit and abandoned; it wakes
+    /// within one read-timeout tick, sees the flag, and exits without ever
+    /// touching the grid again.
+    fn stop_reader(&mut self) {
+        self.reader_quit.store(true, Ordering::SeqCst);
+        if let Ok(writer) = self.writer.lock() {
             let _ = writer.shutdown(std::net::Shutdown::Both);
         }
-        if let Some(handle) = self.reader_thread.take() {
-            let _ = handle.join();
-        }
-        self.poll_exited();
+        drop(self.reader_thread.take());
     }
 
     pub fn apply_user_config(&self, user_config: &crate::core::config::Config) {
@@ -509,6 +531,7 @@ impl RemoteTerminal {
         proxy: EventProxy,
         read_half: Stream,
         buffered: Vec<u8>,
+        quit: Arc<AtomicBool>,
         signals: ReaderSignals,
     ) -> JoinHandle<()> {
         std::thread::Builder::new()
@@ -565,6 +588,12 @@ impl RemoteTerminal {
                 let mut tr_frames: u32 = 0;
 
                 let teardown = || {
+                    // A retired reader exits silently: the pane is being
+                    // relinked or released, not dying — marking it exited
+                    // would wrongly kill the freshly adopted link.
+                    if quit.load(Ordering::SeqCst) {
+                        return;
+                    }
                     term.lock().exit();
                     exited_flag.store(true, Ordering::SeqCst);
                     proxy.send_event(AlacEvent::Wakeup);
@@ -592,6 +621,9 @@ impl RemoteTerminal {
                                 {
                                     let t0 = trace.then(std::time::Instant::now);
                                     let mut term = term.lock();
+                                    if quit.load(Ordering::SeqCst) {
+                                        return;
+                                    }
                                     let t1 = trace.then(std::time::Instant::now);
                                     if cuts.is_empty() {
                                         processor.advance(&mut *term, &out_batch);
@@ -650,6 +682,9 @@ impl RemoteTerminal {
                         };
                     }
 
+                    if quit.load(Ordering::SeqCst) {
+                        return;
+                    }
                     loop {
                         let frame = match crate::daemon::protocol::take_frame(&mut pending) {
                             Ok(Some(frame)) => frame,
@@ -678,6 +713,9 @@ impl RemoteTerminal {
                                 proxy.replaying.store(true, Ordering::Relaxed);
                                 {
                                     let mut term = term.lock();
+                                    if quit.load(Ordering::SeqCst) {
+                                        return;
+                                    }
                                     if let Some(ws) = pending_size.take() {
                                         term.resize(TermSize::new(
                                             ws.cols as usize,
@@ -727,6 +765,9 @@ impl RemoteTerminal {
                                     let (anchor_row, anchor_col) = {
                                         use alacritty_terminal::grid::Dimensions as _;
                                         let term = term.lock();
+                                        if quit.load(Ordering::SeqCst) {
+                                            return;
+                                        }
                                         let grid = term.grid();
                                         let row = grid.history_size() as i64
                                             - grid.display_offset() as i64
@@ -783,6 +824,9 @@ impl RemoteTerminal {
                                 }
                                 if active && at_prompt {
                                     let mut term = term.lock();
+                                    if quit.load(Ordering::SeqCst) {
+                                        return;
+                                    }
                                     let resets = stale_mode_resets(*term.mode());
                                     if !resets.is_empty() {
                                         processor.advance(&mut *term, &resets);
@@ -838,22 +882,29 @@ impl RemoteTerminal {
                     }
                     flush_batch!();
 
+                    // The read always times out within QUIT_POLL so a reader
+                    // parked on a silent link still notices `quit` promptly —
+                    // on Windows, `shutdown()` alone would never wake it.
+                    const QUIT_POLL: std::time::Duration = std::time::Duration::from_millis(500);
                     let timeout = match processor.sync_timeout().sync_timeout() {
                         Some(deadline) => {
                             let left =
                                 deadline.saturating_duration_since(std::time::Instant::now());
                             if left.is_zero() {
                                 let mut term = term.lock();
+                                if quit.load(Ordering::SeqCst) {
+                                    return;
+                                }
                                 processor.stop_sync(&mut *term);
                                 drop(term);
                                 proxy.send_event(AlacEvent::Wakeup);
                                 continue;
                             }
-                            Some(left)
+                            left.min(QUIT_POLL)
                         }
-                        None => None,
+                        None => QUIT_POLL,
                     };
-                    let _ = stream.set_read_timeout(timeout);
+                    let _ = stream.set_read_timeout(Some(timeout));
                     if trace && tr_last.elapsed() >= std::time::Duration::from_secs(1) {
                         eprintln!(
                             "[trace client] {:.1} MB/s | {} reads ({} B/read) {} frames | read wait {:?} lock wait {:?} advance {:?}",
@@ -1516,11 +1567,8 @@ impl Drop for RemoteTerminal {
     fn drop(&mut self) {
         if let Ok(mut writer) = self.writer.lock() {
             let _ = ClientMsg::Detach.encode(&mut *writer);
-            let _ = writer.shutdown(std::net::Shutdown::Both);
         }
-        if let Some(handle) = self.reader_thread.take() {
-            let _ = handle.join();
-        }
+        self.stop_reader();
     }
 }
 
@@ -1985,6 +2033,93 @@ fn win_size(size: TermSize, cell_w: u16, cell_h: u16) -> WinSize {
         rows: size.rows as u16,
         cell_w,
         cell_h,
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_teardown_tests {
+    use super::*;
+
+    fn tcp_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client_side = std::net::TcpStream::connect(addr).unwrap();
+        let (daemon_side, _) = listener.accept().unwrap();
+        (client_side, daemon_side)
+    }
+
+    /// On Windows, `shutdown()` does not wake a thread parked in a blocking
+    /// `read` on the same socket (it does on unix). `detach_link`,
+    /// `adopt_relink`, and `Drop` all shut the writer down and then `join()`
+    /// the reader thread, counting on that wake-up — so when the peer stays
+    /// silent (a routed pane whose SSH leg went zombie: nothing arrives, no
+    /// FIN ever comes), the join blocks its caller, which in production is
+    /// the UI thread. This is the whole-window "not responding" hang right
+    /// after a remote workspace reconnects.
+    #[test]
+    fn detach_link_returns_promptly_when_the_peer_stays_silent() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, daemon_side) = tcp_pair();
+        let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        // Let the reader thread park in read() before tearing down.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            term.detach_link();
+            let _ = tx.send(());
+        });
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(3));
+        drop(daemon_side);
+        assert!(
+            outcome.is_ok(),
+            "detach_link blocked for over 3s against a silent peer: shutdown() \
+             did not unblock the reader, so join() hangs the calling thread"
+        );
+    }
+
+    /// The reconnect path: `relink_panes` calls this on the UI thread right
+    /// after a remote workspace re-attaches, with the old link still parked
+    /// on a zombie route. It must swap links promptly, and the adopted link
+    /// must actually work.
+    #[test]
+    fn adopt_relink_swaps_links_promptly_when_the_old_peer_stays_silent() {
+        crate::core::config::pin_test_config_dir();
+        let (old_client, _old_daemon) = tcp_pair();
+        let (new_client, mut new_daemon) = tcp_pair();
+        let term = RemoteTerminal::from_stream(old_client, TermSize::new(80, 24)).unwrap();
+        // Let the old reader park in read() on the silent link.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut term = term;
+            term.adopt_relink(new_client, &PaneRoute::Local, TermSize::new(80, 24), 8, 16)
+                .unwrap();
+            let _ = tx.send(term);
+        });
+        let term = rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("adopt_relink blocked for over 3s against a silent old peer");
+
+        DaemonMsg::Output(b"hi".to_vec())
+            .encode(&mut new_daemon)
+            .unwrap();
+        let mut first = ' ';
+        for _ in 0..200 {
+            first = term.term.lock().grid()[alacritty_terminal::index::Line(0)]
+                [alacritty_terminal::index::Column(0)]
+            .c;
+            if first == 'h' {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(first, 'h', "output on the adopted link must reach the grid");
+        assert!(
+            !term.exited_flag.load(Ordering::SeqCst),
+            "retiring the old reader must not mark the pane as exited"
+        );
     }
 }
 
