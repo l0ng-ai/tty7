@@ -198,6 +198,18 @@ pub fn ensure_running() -> anyhow::Result<()> {
         }
     }
 
+    // While an updater is replacing the installation, spawning a daemon would
+    // relock the very images the installer is clearing — the update would fail
+    // with "files in use" caused by us. Connecting to a live daemon above is
+    // fine; only creating a new one waits.
+    #[cfg(windows)]
+    if crate::daemon::update_guard::held() {
+        anyhow::bail!(
+            "a tty7 update is being installed right now; the daemon will return \
+             when the updater relaunches the app"
+        );
+    }
+
     spawn_detached()?;
 
     let deadline = Instant::now() + STARTUP_TIMEOUT;

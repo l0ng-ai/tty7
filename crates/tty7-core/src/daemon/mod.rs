@@ -20,6 +20,12 @@ pub(crate) mod shell_integration;
 #[cfg(windows)]
 pub(crate) mod winproc;
 
+/// Windows-only like the updater flow that holds it: the macOS updater swaps
+/// the bundle by rename and never stops the daemon, so it has no window in
+/// which a fresh daemon could relock anything.
+#[cfg(windows)]
+pub mod update_guard;
+
 /// The Windows environment refresh new panes get (#333). Only the registry
 /// reader and the spawn wiring are Windows-only; the merge itself is a pure
 /// function, so `cfg(test)` keeps the module compiling everywhere and its
