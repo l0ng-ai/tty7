@@ -378,6 +378,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSyncWithSystemDesc => {
             "Follow the OS appearance with separate light and dark themes."
         }
+        L10nKey::SettingsLegiblePalette => "Legible bright colors",
+        L10nKey::SettingsLegiblePaletteDesc => {
+            "Automatically brighten or darken bright ANSI colors that would be unreadable on the theme background."
+        }
         L10nKey::SettingsChangeTheme => "Change theme",
         L10nKey::SettingsThemes => "Themes",
         L10nKey::SettingsThemePanelManual => "Change your current theme.",
@@ -675,6 +679,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchSyncWithSystemKeywords => {
             "theme dark light auto follow os appearance mode"
+        }
+        L10nKey::SettingsSearchLegiblePaletteKeywords => {
+            "legible contrast bright palette psreadline parameter readable"
         }
         L10nKey::SettingsSearchTabBarPositionKeywords => {
             "tabs vertical sidebar left top layout rail"

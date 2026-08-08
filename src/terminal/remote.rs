@@ -275,6 +275,7 @@ impl RemoteTerminal {
         let win = win_size(size, cell_w, cell_h);
 
         let workspace = spawn_workspace(owner.as_deref(), route);
+        let spawned_in = cwd.clone();
 
         let owner = owner.filter(|_| {
             route.is_local()
@@ -305,7 +306,22 @@ impl RemoteTerminal {
 
         let mut term = Self::from_stream(stream, size)?;
         term.route = route.clone();
+        term.seed_cwd(spawned_in);
         Ok((term, pane_id))
+    }
+
+    /// Remember the directory the daemon was asked to spawn in, so everything
+    /// that keys off a pane's cwd — the sidebar's repo grouping above all —
+    /// has an answer before the shell gets far enough to report its own via
+    /// OSC 7. The reader thread is already running, so a report that beat us
+    /// here wins: it describes where the shell actually landed, which is not
+    /// always where we asked (a missing directory sends the daemon home, an
+    /// rc file may `cd` on its own).
+    fn seed_cwd(&self, cwd: Option<PathBuf>) {
+        let Some(cwd) = cwd else { return };
+        if let Ok(mut guard) = self.cwd.lock() {
+            guard.get_or_insert(cwd);
+        }
     }
 
     pub fn attach(size: TermSize, cell_w: u16, cell_h: u16, pane_id: u64) -> anyhow::Result<Self> {
@@ -3208,6 +3224,65 @@ mod tests {
             .unwrap();
         daemon_side.flush().unwrap();
         assert!(poll(&|s| s.is_none()), "a None report clears the session");
+    }
+
+    #[test]
+    fn the_spawn_directory_answers_until_the_shell_reports_its_own() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        let poll = |want: Option<&str>| {
+            let want = want.map(PathBuf::from);
+            for _ in 0..200 {
+                if term.foreground_cwd() == want {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            false
+        };
+
+        assert_eq!(term.foreground_cwd(), None, "nothing known before the seed");
+        term.seed_cwd(Some(PathBuf::from("/repo/tty7")));
+        assert_eq!(
+            term.foreground_cwd(),
+            Some(PathBuf::from("/repo/tty7")),
+            "the sidebar can group this pane without waiting for the shell"
+        );
+
+        DaemonMsg::Cwd(PathBuf::from("/repo/tty7/crates"))
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+        assert!(
+            poll(Some("/repo/tty7/crates")),
+            "the shell's own report replaces the seed"
+        );
+    }
+
+    #[test]
+    fn a_shell_report_that_beat_the_seed_wins() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        DaemonMsg::Cwd(PathBuf::from("/somewhere/else"))
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+        for _ in 0..200 {
+            if term.foreground_cwd().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        term.seed_cwd(Some(PathBuf::from("/repo/tty7")));
+        assert_eq!(
+            term.foreground_cwd(),
+            Some(PathBuf::from("/somewhere/else")),
+            "where the shell actually landed beats where we asked it to"
+        );
     }
 
     #[test]

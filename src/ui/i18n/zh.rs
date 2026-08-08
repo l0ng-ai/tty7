@@ -331,6 +331,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSyncWithSystem => "跟随系统",
         L10nKey::SettingsSyncWithSystemDesc => "跟随操作系统外观，并分别使用浅色与深色主题。",
+        L10nKey::SettingsLegiblePalette => "低对比度颜色纠偏",
+        L10nKey::SettingsLegiblePaletteDesc => "自动把主题背景上对比度不足的颜色调整到可读级别。",
         L10nKey::SettingsChangeTheme => "更换主题",
         L10nKey::SettingsThemes => "主题",
         L10nKey::SettingsThemePanelManual => "更改当前主题。",
@@ -650,6 +652,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchSyncWithSystemKeywords => {
             "主题 跟随系统 自动 深色 浅色 外观 模式 theme dark light auto follow system"
+        }
+        L10nKey::SettingsSearchLegiblePaletteKeywords => {
+            "颜色 低对比度 可读 纠偏 调色板 修正 contrast legible palette parameter"
         }
         L10nKey::SettingsSearchTabBarPositionKeywords => {
             "标签栏位置 标签栏 侧边栏 左侧 顶部 布局 tab bar position tabs sidebar left top"

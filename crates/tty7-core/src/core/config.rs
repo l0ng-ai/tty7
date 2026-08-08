@@ -125,6 +125,8 @@ pub struct Config {
     pub theme_follow_system: bool,
     pub theme_preset_light: String,
     pub theme_preset_dark: String,
+    #[serde(default = "default_true")]
+    pub theme_legible_palette: bool,
     pub window_opacity: Option<f32>,
     pub window_blur: Option<bool>,
     #[serde(default = "default_true")]
@@ -434,6 +436,7 @@ impl Default for Config {
             theme_follow_system: false,
             theme_preset_light: "light".to_string(),
             theme_preset_dark: "dark".to_string(),
+            theme_legible_palette: true,
             window_opacity: None,
             window_blur: None,
             dim_inactive_panes: true,
@@ -877,6 +880,8 @@ mod tests {
         assert_eq!(cfg.theme_preset_light, "light");
         assert_eq!(cfg.theme_preset_dark, "dark");
         assert_eq!(cfg.theme_preset, "dracula");
+        // The palette rescue defaults on, and survives a round trip either way.
+        assert!(cfg.theme_legible_palette);
 
         let mut cfg = Config::default();
         cfg.theme_follow_system = true;
@@ -887,6 +892,12 @@ mod tests {
         assert!(back.theme_follow_system);
         assert_eq!(back.theme_preset_light, "one_light");
         assert_eq!(back.theme_preset_dark, "dracula");
+
+        let off: Config = serde_json::from_str(r#"{"theme_legible_palette":false}"#).unwrap();
+        assert!(!off.theme_legible_palette);
+        let json = serde_json::to_string(&off).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert!(!back.theme_legible_palette);
     }
 
     #[test]
