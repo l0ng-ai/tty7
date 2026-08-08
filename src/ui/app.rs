@@ -4028,6 +4028,15 @@ impl Tty7App {
                     .map(|backdrop| t(window_backdrop_label_key(*backdrop)).to_string())
                     .collect::<Vec<_>>();
                 state.set_items(SearchableVec::new(rows), window, cx);
+                // `set_items` does not preserve the selection; restore the
+                // index of the stored value so a locale refresh (which
+                // re-translates the labels) cannot leave the dropdown
+                // showing no — or the wrong — selection.
+                state.set_selected_index(
+                    Some(IndexPath::default().row(window_backdrop_index(current))),
+                    window,
+                    cx,
+                );
             });
             s.search.update(cx, |state, cx| {
                 state.set_placeholder(t(L10nKey::SearchSettings), window, cx)
