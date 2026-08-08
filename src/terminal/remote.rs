@@ -1055,6 +1055,12 @@ impl RemoteTerminal {
         self.agent_session.lock().ok().and_then(|g| g.clone())
     }
 
+    pub fn set_agent_session(&self, state: AgentSessionState) {
+        if let Ok(mut guard) = self.agent_session.lock() {
+            *guard = Some(state);
+        }
+    }
+
     pub fn zle_reading(&self) -> bool {
         self.zle_reading.load(Ordering::Relaxed)
     }

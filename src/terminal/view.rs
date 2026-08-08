@@ -1185,6 +1185,10 @@ impl TerminalView {
         self.terminal.agent_session()
     }
 
+    pub fn set_agent_session(&self, state: crate::core::cli_agent::AgentSessionState) {
+        self.terminal.set_agent_session(state);
+    }
+
     pub fn agent_result_unread(&self) -> bool {
         self.agent_result_unread
     }

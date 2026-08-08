@@ -2251,6 +2251,14 @@ impl Tty7App {
         if let Some(cmd) = resume {
             view.read(cx).run_command_line(&cmd);
         }
+        if let Some(session_id) = pending.read(cx).spawn.agent_session_id.clone() {
+            let state = crate::core::cli_agent::AgentSessionState {
+                rich: true,
+                session_id: Some(session_id),
+                ..Default::default()
+            };
+            view.read(cx).set_agent_session(state);
+        }
         let slot = PaneSlot::Ready(view.clone());
         self.tabs
             .iter_mut()

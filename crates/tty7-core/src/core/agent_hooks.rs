@@ -817,10 +817,9 @@ fn antigravity_hooks_json(target: &HookTarget) -> Option<String> {
     let root = serde_json::json!({
         "tty7": {
             "PreInvocation": [handler("prompt-submit", 5)],
-            "PostToolUse": [{
-                "matcher": "*",
-                "hooks": [handler("tool-complete", 5)],
-            }],
+            "PostToolUse": [
+                { "matcher": "*", "hooks": [handler("tool-complete", 5)] }
+            ],
             "Stop": [handler("stop", 10)],
         }
     });
@@ -932,7 +931,13 @@ fn opencode_plugin_js(target: &HookTarget) -> Option<String> {
 export const Tty7Presence = async ({{ $ }}) => {{
   if (!process.env["TTY7"]) return {{}}
   const cmd = {prefix}
-  const emit = (event) => $`sh -c ${{cmd + event}}`.quiet().nothrow()
+  const emit = (event, sessionID) => {{
+    if (sessionID) {{
+      const payload = new Response(JSON.stringify({{ session_id: sessionID }}))
+      return $`sh -c ${{cmd + event}} < ${{payload}}`.quiet().nothrow()
+    }}
+    return $`sh -c ${{cmd + event}}`.quiet().nothrow()
+  }}
 
   // Plugin load = the agent is running in this pane.
   await emit("session-start")
@@ -949,7 +954,7 @@ export const Tty7Presence = async ({{ $ }}) => {{
     }},
     event: async ({{ event }}) => {{
       if (event.type === "session.idle") {{
-        await emit("stop")
+        await emit("stop", event.properties?.sessionID)
       }} else if (event.type === "permission.replied") {{
         await emit("prompt-submit")
       }}
@@ -1407,6 +1412,8 @@ mod tests {
         assert!(opencode.contains("agent-hook opencode"));
         assert!(opencode.contains(hook_exe));
         assert!(opencode.contains(r#"process.env["TTY7"]"#));
+        assert!(opencode.contains("sessionID"));
+        assert!(opencode.contains("session_id"));
 
         for (agent, slug, package) in [
             (HookAgent::Pi, "pi", "@mariozechner/pi-coding-agent"),
