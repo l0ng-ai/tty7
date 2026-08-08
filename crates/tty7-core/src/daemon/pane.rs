@@ -146,7 +146,13 @@ fn wsl_remote_context(shell: Option<&ChosenShell>) -> Option<RemoteContext> {
     Some(RemoteContext {
         kind: RemoteKind::Wsl,
         argv: Vec::new(),
-        target: shell_integration::wsl_distro(&chosen.args).unwrap_or_default(),
+        // No `--distribution` means wsl.exe launches the default distro —
+        // name it here, so every consumer of the context (the `\\wsl$`
+        // completion route, paste-path rewriting, host labels) gets a real
+        // distro instead of an empty placeholder.
+        target: shell_integration::wsl_distro(&chosen.args)
+            .or_else(crate::core::shells::default_wsl_distro)
+            .unwrap_or_default(),
     })
 }
 
@@ -2479,7 +2485,8 @@ mod tests {
             wsl_remote_context(Some(&spec("wsl.exe", vec![])))
                 .expect("default distro is still WSL")
                 .target,
-            ""
+            crate::core::shells::default_wsl_distro().unwrap_or_default(),
+            "no --distribution resolves to the machine's default distro"
         );
         assert_eq!(
             wsl_remote_context(Some(&spec("wsl.exe", vec!["--distribution=Arch"])))

@@ -592,6 +592,27 @@ fn wsl_path(windows: &str) -> Option<String> {
     ))
 }
 
+/// The Windows spelling of a WSL pane's POSIX cwd — [`wsl_path`]'s inverse,
+/// for reading rather than writing: the distro's `\\wsl$` share is how a
+/// local `read_dir` can list a directory this process cannot reach natively.
+///
+/// Everything stays on the share, `/mnt/<drive>` included. Mapping the
+/// automount back to the drive letter would list faster, but an absolute
+/// word completes against its *cwd's* path prefix (`resolve_dir` keeps the
+/// prefix when a rooted word lands on it) — so a drive-spelled cwd would send
+/// `ls /etc<Tab>` to `C:\etc` instead of the distro's `/etc`. One prefix,
+/// one meaning. A distro name with a path separator cannot name a share.
+fn wsl_share_path(distro: &str, posix: &str) -> Option<std::path::PathBuf> {
+    if distro.is_empty() || distro.contains(['\\', '/']) {
+        return None;
+    }
+    let rest = posix.strip_prefix('/')?;
+    Some(std::path::PathBuf::from(format!(
+        r"\\wsl$\{distro}\{}",
+        rest.replace('/', "\\")
+    )))
+}
+
 /// The staged image's path as the pane's own filesystem spells it.
 ///
 /// A WSL pane shares this machine's disk but not its path syntax: an agent in
@@ -3522,16 +3543,21 @@ impl TerminalView {
             .paths_are_local()
             .then(|| self.local_cwd().or_else(|| std::env::current_dir().ok()))
             .flatten();
+        let share_cwd = if cwd.is_none() { self.wsl_share_cwd() } else { None };
         let line = self.cmd.text();
         let cursor = self.cmd.cursor();
-        let Some(comp) = super::completion::complete(&line, cursor, cwd.as_deref()) else {
+        let comp = match &share_cwd {
+            Some(share) => super::completion::complete_foreign(&line, cursor, share),
+            None => super::completion::complete(&line, cursor, cwd.as_deref()),
+        };
+        let Some(comp) = comp else {
             if self.spawn_remote_path_completion(&line, cursor, forward, cx) {
                 return;
             }
             log::debug!(
                 target: "tty7::completion",
                 "handing the line to the shell: no candidates for {line:?} at {cursor} \
-                 (local cwd {cwd:?}, remote cwd {:?})",
+                 (local cwd {cwd:?}, share cwd {share_cwd:?}, remote cwd {:?})",
                 self.remote_ssh_cwd(),
             );
             self.handoff_tab_to_shell(!forward, cx);
@@ -3608,10 +3634,31 @@ impl TerminalView {
         Some(generation)
     }
 
+    /// The cwd to list over the distro's `\\wsl$` share, for a pane whose
+    /// filesystem is a WSL distro's: the local wsl.exe pane (tagged by its
+    /// remote context) and the WSL-workspace pane (tagged by its workspace
+    /// target) both report a POSIX cwd this process cannot read natively.
+    fn wsl_share_cwd(&self) -> Option<std::path::PathBuf> {
+        let distro = match self.terminal.remote_context() {
+            Some(remote) => (remote.kind == crate::daemon::protocol::RemoteKind::Wsl)
+                .then_some(remote.target)?,
+            None => match &self.workspace.as_ref()?.target {
+                crate::core::session::RemoteTarget::Wsl { distro } => distro.clone(),
+                _ => return None,
+            },
+        };
+        let cwd = self.cwd()?;
+        wsl_share_path(&distro, &cwd.to_string_lossy())
+    }
+
     fn remote_ssh_cwd(&self) -> Option<String> {
         let owned = match self.terminal.remote_context() {
             Some(remote) => remote.kind == crate::daemon::protocol::RemoteKind::NativeSsh,
-            None => self.workspace.is_some(),
+            // A WSL workspace carries no SSH spec: there is no connection to
+            // list over, and its panes complete through the `\\wsl$` share
+            // instead — so only a spec-carrying (SSH) workspace claims the
+            // remote-listing path.
+            None => self.workspace.as_ref().is_some_and(|w| w.spec.is_some()),
         };
         if !owned {
             return None;
@@ -5619,7 +5666,7 @@ mod tests {
     };
     use super::{
         remote_paste_spec, staged_path_for_pane, stages_clipboard_image, staging_cache,
-        staging_dir_is_safe, wsl_path,
+        staging_dir_is_safe, wsl_path, wsl_share_path,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
@@ -5969,6 +6016,34 @@ mod tests {
             staged_path_for_pane(r"C:\Temp\paste-1.png", false),
             r"C:\Temp\paste-1.png"
         );
+    }
+
+    #[test]
+    fn a_wsl_cwd_gets_a_windows_spelling_the_completion_engine_can_list() {
+        let share = |posix: &str| wsl_share_path("Ubuntu-24.04", posix);
+
+        // A distro-native path goes through the share.
+        assert_eq!(
+            share("/home/me/repo"),
+            Some(PathBuf::from(r"\\wsl$\Ubuntu-24.04\home\me\repo"))
+        );
+        assert_eq!(share("/"), Some(PathBuf::from(r"\\wsl$\Ubuntu-24.04\")));
+
+        // The automount stays on the share too: a drive-spelled cwd would
+        // send an absolute word (`ls /etc<Tab>`) to `C:\etc` instead of the
+        // distro's /etc, because a rooted word completes against its cwd's
+        // path prefix.
+        assert_eq!(
+            share("/mnt/c/Users/me"),
+            Some(PathBuf::from(r"\\wsl$\Ubuntu-24.04\mnt\c\Users\me"))
+        );
+
+        // No absolute POSIX path, no translation — and a distro name that
+        // could break out of the share is refused outright.
+        assert_eq!(share("relative/path"), None);
+        assert_eq!(wsl_share_path("", "/home/me"), None);
+        assert_eq!(wsl_share_path(r"evil\distro", "/home/me"), None);
+        assert_eq!(wsl_share_path("evil/distro", "/home/me"), None);
     }
 
     #[test]
