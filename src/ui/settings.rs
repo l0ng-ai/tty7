@@ -1,7 +1,7 @@
 use gpui::{
-    AnyElement, App, Context, Div, Entity, FontWeight, Image, ImageFormat, KeyDownEvent,
-    MouseButton, SharedString, Stateful, Subscription, Window, div, img, prelude::*, px, relative,
-    rgb,
+    AnyElement, App, Background, Context, Div, Entity, FontWeight, Image, ImageFormat,
+    KeyDownEvent, MouseButton, SharedString, Stateful, Subscription, Window, div, img, prelude::*,
+    px, relative, rgb,
 };
 use gpui_component::InteractiveElementExt as _;
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -748,9 +748,13 @@ impl Tty7App {
         let theme = cx.theme();
         // The settings panel covers the whole window. Paint it on an opaque
         // surface so the workspace translucency (window opacity / backdrop
-        // material) never shows through the settings UI. `alpha` assigns the
-        // channel — `opacity` would multiply it and stay translucent.
-        let background = theme.background.alpha(1.0);
+        // material) never shows through the settings UI — while keeping the
+        // preset's gradient fill instead of collapsing to a flat color.
+        // `alpha(1.0)` assigns the channel; `opacity` would multiply.
+        let background: Background = match cx.try_global::<presets::ActiveBackground>() {
+            Some(bg) => crate::ui::theme::window_background_opaque(bg),
+            None => theme.background.alpha(1.0).into(),
+        };
         let (foreground, header_muted) = (theme.foreground, theme.muted_foreground);
 
         let (focus_handle, section, theme_panel_open, search) = match self.active_settings() {
@@ -1371,18 +1375,23 @@ impl Tty7App {
         // the simple blur toggle, which drives its vibrancy.
         #[cfg(target_os = "windows")]
         let blur_control = {
-            let Some(select) = self
+            // Both selects come from the same SettingsState resolved at the
+            // top of this function (window_opacity_slider), so the None arm
+            // is unreachable today; fall back to an empty control rather
+            // than returning from the whole section — a missing select must
+            // never silently drop the opacity slider and the rest.
+            match self
                 .active_settings()
                 .map(|s| s.window_backdrop_select.clone())
-            else {
-                return div().into_any_element();
-            };
-            Select::new(&select)
-                .small()
-                .w(px(180.))
-                .h(px(24.))
-                .menu_max_h(px(224.))
-                .into_any_element()
+            {
+                Some(select) => Select::new(&select)
+                    .small()
+                    .w(px(180.))
+                    .h(px(24.))
+                    .menu_max_h(px(224.))
+                    .into_any_element(),
+                None => div().into_any_element(),
+            }
         };
         #[cfg(not(target_os = "windows"))]
         let blur_control =

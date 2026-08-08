@@ -166,7 +166,18 @@ fn window_menu_items(cx: &App) -> Vec<MenuItem> {
 }
 
 pub(crate) fn window_background(bg: &presets::ActiveBackground) -> Background {
-    let alpha = bg.opacity.unwrap_or(1.0);
+    window_background_with_alpha(bg, bg.opacity.unwrap_or(1.0))
+}
+
+/// The same preset fill with the alpha channel forced to 1 — used by the
+/// settings overlay, which must stay opaque (workspace translucency must
+/// never show through it) while still rendering the preset's gradient
+/// design instead of collapsing to a flat solid color.
+pub(crate) fn window_background_opaque(bg: &presets::ActiveBackground) -> Background {
+    window_background_with_alpha(bg, 1.0)
+}
+
+fn window_background_with_alpha(bg: &presets::ActiveBackground, alpha: f32) -> Background {
     let stop = |c: u32| -> Hsla {
         let mut h: Hsla = rgb(c).into();
         h.a = alpha;

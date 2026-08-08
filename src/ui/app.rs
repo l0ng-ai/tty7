@@ -5450,10 +5450,19 @@ impl Render for Tty7App {
             })
             .into_any_element();
 
-        let (window_bg, bg_image) = match cx.try_global::<crate::ui::presets::ActiveBackground>() {
-            Some(bg) => (window_background(bg), bg.image.clone()),
-            None => (cx.theme().background.into(), None),
-        };
+        let (window_bg, bg_image, settings_bg) =
+            match cx.try_global::<crate::ui::presets::ActiveBackground>() {
+                Some(bg) => (
+                    window_background(bg),
+                    bg.image.clone(),
+                    crate::ui::theme::window_background_opaque(bg),
+                ),
+                None => (
+                    cx.theme().background.into(),
+                    None,
+                    cx.theme().background.alpha(1.0).into(),
+                ),
+            };
 
         let settings_overlay = self.settings.is_some().then(|| {
             div()
@@ -5462,8 +5471,9 @@ impl Render for Tty7App {
                 .occlude()
                 // Opaque on purpose: the settings panel must never let the
                 // workspace translucency (window opacity / backdrop material)
-                // show through, even at window edges during a resize.
-                .bg(cx.theme().background.alpha(1.0))
+                // show through, even at window edges during a resize. The
+                // preset's gradient fill is preserved, just with alpha 1.
+                .bg(settings_bg)
                 .child(self.render_settings(window, cx))
         });
 
