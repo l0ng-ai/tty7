@@ -142,6 +142,7 @@ impl CLIAgent {
             CLIAgent::Grok => Some(format!("grok{flags} --resume {session_id}")),
             CLIAgent::Pi => Some(format!("pi{flags} --session {session_id}")),
             CLIAgent::OhMyPi => Some(format!("omp{flags} --resume {session_id}")),
+            CLIAgent::Antigravity => Some(format!("agy{flags} --conversation {session_id}")),
             _ => None,
         }
     }
@@ -340,11 +341,11 @@ impl CLIAgent {
             CLIAgent::Grok => "icons/agents/grok.svg",
             CLIAgent::Pi => "icons/agents/pi.svg",
             CLIAgent::OhMyPi => "icons/agents/omp.svg",
+            CLIAgent::Antigravity => "icons/agents/antigravity.svg",
             CLIAgent::Aider
             | CLIAgent::Auggie
             | CLIAgent::Hermes
             | CLIAgent::Vibe
-            | CLIAgent::Antigravity
             | CLIAgent::Qwen => "icons/bot.svg",
         }
     }
@@ -746,7 +747,7 @@ mod tests {
             .collect();
         assert_eq!(
             fallback,
-            ["aider", "auggie", "hermes", "vibe", "antigravity", "qwen"]
+            ["aider", "auggie", "hermes", "vibe", "qwen"]
         );
         assert!(
             !fallback.contains(&"omp"),
@@ -1063,6 +1064,10 @@ mod tests {
                 .resume_command("0199c3f2-1b0e-7c3a-9f21-6d4b8e2a5c17", None)
                 .as_deref(),
             Some("pi --session 0199c3f2-1b0e-7c3a-9f21-6d4b8e2a5c17")
+        );
+        assert_eq!(
+            CLIAgent::Antigravity.resume_command("abc-123", None).as_deref(),
+            Some("agy --conversation abc-123")
         );
         assert_eq!(CLIAgent::Aider.resume_command("abc", None), None);
         assert_eq!(CLIAgent::Claude.resume_command("abc; rm -rf /", None), None);

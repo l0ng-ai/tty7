@@ -61,6 +61,7 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
     });
     for (key, alias) in [
         ("session_id", "sessionId"),
+        ("session_id", "conversationId"),
         ("message", "message"),
         ("cwd", "cwd"),
     ] {
@@ -214,10 +215,11 @@ pub enum HookAgent {
     Pi,
     Grok,
     OhMyPi,
+    Antigravity,
 }
 
 impl HookAgent {
-    pub const ALL: [HookAgent; 7] = [
+    pub const ALL: [HookAgent; 8] = [
         HookAgent::Claude,
         HookAgent::Codex,
         HookAgent::Copilot,
@@ -225,6 +227,7 @@ impl HookAgent {
         HookAgent::Pi,
         HookAgent::Grok,
         HookAgent::OhMyPi,
+        HookAgent::Antigravity,
     ];
 
     /// The hooks behind a detected agent process, if it has any.
@@ -241,6 +244,7 @@ impl HookAgent {
             CLIAgent::Pi => Some(HookAgent::Pi),
             CLIAgent::Grok => Some(HookAgent::Grok),
             CLIAgent::OhMyPi => Some(HookAgent::OhMyPi),
+            CLIAgent::Antigravity => Some(HookAgent::Antigravity),
             CLIAgent::Gemini
             | CLIAgent::Aider
             | CLIAgent::Amp
@@ -250,7 +254,6 @@ impl HookAgent {
             | CLIAgent::Auggie
             | CLIAgent::Hermes
             | CLIAgent::Vibe
-            | CLIAgent::Antigravity
             | CLIAgent::Qwen => None,
         }
     }
@@ -264,6 +267,7 @@ impl HookAgent {
             HookAgent::Pi => "pi",
             HookAgent::Grok => "grok",
             HookAgent::OhMyPi => "omp",
+            HookAgent::Antigravity => "antigravity",
         }
     }
 
@@ -276,6 +280,7 @@ impl HookAgent {
             HookAgent::Pi => "Pi",
             HookAgent::Grok => "Grok Build",
             HookAgent::OhMyPi => "Oh My Pi",
+            HookAgent::Antigravity => "Antigravity",
         }
     }
 
@@ -297,6 +302,7 @@ impl HookAgent {
             HookAgent::OhMyPi => {
                 target.under_home(&[".omp", "agent", "extensions", "tty7", "index.ts"])
             }
+            HookAgent::Antigravity => target.under_home(&[".gemini", "config", "hooks.json"]),
         }
     }
 
@@ -456,7 +462,8 @@ pub fn hooks_state(target: &HookTarget, agent: HookAgent) -> HooksState {
         | HookAgent::OpenCode
         | HookAgent::Pi
         | HookAgent::Grok
-        | HookAgent::OhMyPi => {
+        | HookAgent::OhMyPi
+        | HookAgent::Antigravity => {
             let Some(expected) = owned_file_content(target, agent) else {
                 return HooksState::NotInstalled;
             };
@@ -491,7 +498,8 @@ pub fn install_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<St
         | HookAgent::OpenCode
         | HookAgent::Pi
         | HookAgent::Grok
-        | HookAgent::OhMyPi => {
+        | HookAgent::OhMyPi
+        | HookAgent::Antigravity => {
             let content = owned_file_content(target, agent)
                 .ok_or_else(|| anyhow::anyhow!("{agent:?} has no owned file"))?;
             owned_file_install(target, &path, &content, &agent.marker())?;
@@ -508,7 +516,8 @@ pub fn uninstall_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<
         | HookAgent::OpenCode
         | HookAgent::Pi
         | HookAgent::Grok
-        | HookAgent::OhMyPi => owned_file_uninstall(target, &path, &agent.marker()),
+        | HookAgent::OhMyPi
+        | HookAgent::Antigravity => owned_file_uninstall(target, &path, &agent.marker()),
     }
 }
 
@@ -792,8 +801,30 @@ fn owned_file_content(target: &HookTarget, agent: HookAgent) -> Option<String> {
         HookAgent::OpenCode => opencode_plugin_js(target),
         HookAgent::Pi | HookAgent::OhMyPi => pi_extension_ts(target, agent),
         HookAgent::Grok => grok_hooks_json(target),
+        HookAgent::Antigravity => antigravity_hooks_json(target),
         HookAgent::Claude | HookAgent::Codex => None,
     }
+}
+
+fn antigravity_hooks_json(target: &HookTarget) -> Option<String> {
+    let handler = |event: &str, timeout: u32| {
+        serde_json::json!({
+            "type": "command",
+            "command": target.hook_command(HookAgent::Antigravity, event),
+            "timeout": timeout,
+        })
+    };
+    let root = serde_json::json!({
+        "tty7": {
+            "PreInvocation": [handler("prompt-submit", 5)],
+            "PostToolUse": [{
+                "matcher": "*",
+                "hooks": [handler("tool-complete", 5)],
+            }],
+            "Stop": [handler("stop", 10)],
+        }
+    });
+    serde_json::to_string_pretty(&root).ok()
 }
 
 fn owned_file_state(target: &HookTarget, path: &Path, expected: &str, marker: &str) -> HooksState {
@@ -1051,6 +1082,17 @@ mod tests {
         assert_eq!(ev.agent, Some(CLIAgent::Grok));
         assert_eq!(ev.session_id.as_deref(), Some("g-42"));
         assert_eq!(ev.cwd.as_deref(), Some(std::path::Path::new("/w")));
+
+        let seq = build_hook_sequence(
+            "antigravity",
+            "prompt-submit",
+            r#"{"conversationId":"ag-9"}"#,
+        );
+        let ev = parse_agent_event(&seq[2..seq.len() - 1])
+            .expect("daemon parses the antigravity event");
+        assert_eq!(ev.agent, Some(CLIAgent::Antigravity));
+        assert_eq!(ev.kind, AgentEventKind::PromptSubmit);
+        assert_eq!(ev.session_id.as_deref(), Some("ag-9"));
     }
 
     #[test]
@@ -1263,6 +1305,7 @@ mod tests {
                 HookAgent::OhMyPi,
                 "/home/me/.omp/agent/extensions/tty7/index.ts",
             ),
+            (HookAgent::Antigravity, "/home/me/.gemini/config/hooks.json"),
         ] {
             assert_eq!(
                 agent.target_path(&target),
@@ -1414,6 +1457,53 @@ mod tests {
             );
         }
         assert!(grok.contains(hook_exe));
+
+        let antigravity = antigravity_hooks_json(&target).expect("antigravity content builds");
+        let parsed_ag: serde_json::Value = serde_json::from_str(&antigravity).expect("valid JSON");
+        assert!(
+            parsed_ag.get("_marker").is_none(),
+            "Antigravity rejects a top-level _marker string"
+        );
+        let spec = &parsed_ag["tty7"];
+        assert_eq!(
+            spec["PostToolUse"][0]["matcher"].as_str(),
+            Some("*"),
+            "PostToolUse matches every tool"
+        );
+        let command_of = |event: &str| {
+            spec[event][0]["command"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{event} carries a command"))
+                .to_string()
+        };
+        assert_eq!(
+            command_of("PreInvocation"),
+            target.hook_command(HookAgent::Antigravity, "prompt-submit")
+        );
+        assert_eq!(
+            command_of("Stop"),
+            target.hook_command(HookAgent::Antigravity, "stop")
+        );
+        assert_eq!(
+            spec["PostToolUse"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap(),
+            target.hook_command(HookAgent::Antigravity, "tool-complete")
+        );
+        let allowed_events = [
+            "PreToolUse",
+            "PostToolUse",
+            "PreInvocation",
+            "PostInvocation",
+            "Stop",
+        ];
+        for key in spec.as_object().unwrap().keys() {
+            assert!(
+                allowed_events.contains(&key.as_str()),
+                "unexpected Antigravity event {key}"
+            );
+        }
+        assert!(antigravity.contains(hook_exe));
     }
 
     #[test]

@@ -540,6 +540,9 @@ impl Tty7App {
                 return trimmed.to_string();
             }
         }
+        if let Some(agent) = tab.agent(cx) {
+            return agent.display_name().to_string();
+        }
         let raw = tab.leaf_title(window, cx);
         let label = short_title(&raw);
         if label.trim().is_empty() {
