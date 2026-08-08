@@ -13,7 +13,6 @@ mod hold;
 pub(crate) mod images;
 pub mod input;
 mod loopback;
-pub(crate) mod marks;
 pub mod palette;
 pub(crate) mod pane_liveness;
 pub(crate) mod parked_cursor;

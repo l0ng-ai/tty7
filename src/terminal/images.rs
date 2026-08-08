@@ -9,16 +9,14 @@
 //!
 //! # Why anchor by absolute row
 //!
-//! Like a command [`mark`](crate::terminal::marks), an image's position has to
-//! survive scrolling. A kitty image is placed at the cursor cell as it stood when
-//! its command appeared in the stream; once recorded, the grid keeps scrolling
-//! under it. We store the row as an absolute index from the top of scrollback
-//! (`history_size - display_offset + cursor_line`, the exact formula
-//! [`record_mark`](crate::terminal::remote) uses) and convert back to a screen
-//! row at paint time (`anchor_row - history_size + display_offset`, the inverse
-//! conversion). Below the scrollback limit — where a pane spends most of its life —
-//! this is exact; past it the anchor drifts by the (unobservable) discard count,
-//! the same caveat marks carry, and a browser that redraws every frame corrects
+//! An image's position has to survive scrolling. A kitty image is placed at the
+//! cursor cell as it stood when its command appeared in the stream; once recorded,
+//! the grid keeps scrolling under it. We store the row as an absolute index from
+//! the top of scrollback (`history_size - display_offset + cursor_line`) and
+//! convert back to a screen row at paint time (`anchor_row - history_size +
+//! display_offset`, the inverse conversion). Below the scrollback limit — where a
+//! pane spends most of its life — this is exact; past it the anchor drifts by the
+//! (unobservable) discard count, and a browser that redraws every frame corrects
 //! it on the next transmit anyway.
 //!
 //! GPUI's sprite atlas expects **BGRA** pixels (it swaps R↔B when caching an
@@ -66,7 +64,7 @@ pub struct PlacedImage {
 
 /// A pane's placed images plus the retired render images awaiting atlas
 /// eviction, shared between the reader thread (writer) and the paint path
-/// (reader), exactly like [`Marks`](crate::terminal::marks::Marks).
+/// (reader).
 ///
 /// `retired` is the other half of the fix for a browser that repaints at 60fps:
 /// each transmitted frame becomes a fresh [`RenderImage`] with a new atlas id,
@@ -81,7 +79,7 @@ struct StoreInner {
 }
 
 /// A pane's placed images, shared between the reader thread (writer) and the
-/// paint path (reader), exactly like [`Marks`](crate::terminal::marks::Marks).
+/// paint path (reader).
 #[derive(Clone, Default)]
 pub struct ImageStore(Arc<Mutex<StoreInner>>);
 

@@ -36,10 +36,9 @@ pub enum CursorCut {
     Shown { parked: bool },
 }
 
-/// Byte scanner over the pty stream, reporting cursor hide/shows in the same
-/// shape [`crate::terminal::marks::MarkScanner`] reports prompt marks: an
-/// offset one past the sequence, so the reader can advance the emulator to
-/// exactly there and act on the state the sequence left behind.
+/// Byte scanner over the pty stream, reporting cursor hide/shows as an offset
+/// one past the sequence, so the reader can advance the emulator to exactly
+/// there and act on the state the sequence left behind.
 #[derive(Default)]
 pub struct ParkedCursorScanner {
     state: State,

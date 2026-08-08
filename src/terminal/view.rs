@@ -2500,7 +2500,6 @@ impl TerminalView {
         self.cancel_scroll_anim();
         self.terminal.term.lock().grid_mut().clear_history();
         self.scroll_frac = 0.;
-        self.terminal.marks().clear();
         self.terminal.write(vec![0x0c_u8]);
         cx.notify();
     }

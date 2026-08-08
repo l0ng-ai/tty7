@@ -12,7 +12,6 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{self, CursorShape, CursorStyle};
 
-use crate::terminal::marks::{MarkEvent, MarkScanner};
 use crate::terminal::parked_cursor::{CursorCut, ParkedCursorRepair, ParkedCursorScanner};
 
 use std::collections::VecDeque;
@@ -77,7 +76,6 @@ struct ReaderSignals {
     shell_vi_mode: Arc<AtomicBool>,
     auth: Arc<Mutex<VecDeque<(u64, AuthPromptKind)>>>,
     phase: Arc<Mutex<Option<SshPhase>>>,
-    marks: crate::terminal::marks::Marks,
     /// Kitty-graphics images the daemon lifted out of the stream (issue #213),
     /// anchored to the grid for the paint path to blit. Shared with the reader,
     /// which places/deletes them as `DaemonMsg::Image`/`DeleteImage` frames land.
@@ -176,11 +174,10 @@ pub struct RemoteTerminal {
     auto_supplied_password: bool,
     agent: Arc<Mutex<Option<CLIAgent>>>,
     agent_session: Arc<Mutex<Option<AgentSessionState>>>,
-    marks: crate::terminal::marks::Marks,
     /// Kitty-graphics images placed on this pane's grid (issue #213).
     /// Written by the reader thread from out-of-band `Image`/`DeleteImage`
-    /// frames, read by the paint path — same shared-handle discipline as
-    /// `marks`, since only the client holds the grid the anchors are relative to.
+    /// frames, read by the paint path — only the client holds the grid the
+    /// anchors are relative to, so the store lives here rather than in the daemon.
     images: crate::terminal::images::ImageStore,
     route: PaneRoute,
     proxy: EventProxy,
@@ -384,7 +381,6 @@ impl RemoteTerminal {
                 shell_vi_mode: self.shell_vi_mode.clone(),
                 auth: self.auth_prompts.clone(),
                 phase: self.ssh_phase.clone(),
-                marks: self.marks.clone(),
                 images: self.images.clone(),
             },
         );
@@ -433,7 +429,6 @@ impl RemoteTerminal {
         let auth_prompts: Arc<Mutex<VecDeque<(u64, AuthPromptKind)>>> =
             Arc::new(Mutex::new(VecDeque::new()));
         let ssh_phase: Arc<Mutex<Option<SshPhase>>> = Arc::new(Mutex::new(None));
-        let marks = crate::terminal::marks::Marks::new();
         let images = crate::terminal::images::ImageStore::new();
 
         let reader_thread = Self::spawn_reader(
@@ -453,7 +448,6 @@ impl RemoteTerminal {
                 shell_vi_mode: shell_vi_mode.clone(),
                 auth: auth_prompts.clone(),
                 phase: ssh_phase.clone(),
-                marks: marks.clone(),
                 images: images.clone(),
             },
         );
@@ -480,7 +474,6 @@ impl RemoteTerminal {
             auto_supplied_password: false,
             agent,
             agent_session,
-            marks,
             images,
             route: PaneRoute::Local,
             proxy,
@@ -526,7 +519,6 @@ impl RemoteTerminal {
                     shell_vi_mode,
                     auth,
                     phase,
-                    marks,
                     images,
                 } = signals;
                 crate::core::threads::promote_to_user_interactive();
@@ -535,7 +527,6 @@ impl RemoteTerminal {
                 let mut osc = OscNotifyScanner::default();
                 let mut mode_tok = OscTokenizer::new(&[b"133"]);
                 let mut zle_tok = OscTokenizer::new(&[b"133"]);
-                let mut mark_scan = MarkScanner::new();
                 let mut cursor_scan = ParkedCursorScanner::new();
                 let mut parked_cursor = ParkedCursorRepair::default();
                 let mut pending: Vec<u8> = buffered;
@@ -577,18 +568,14 @@ impl RemoteTerminal {
                     macro_rules! flush_batch {
                         () => {
                             if !out_batch.is_empty() {
-                                // Both scanners report an offset one past the
-                                // sequence they matched, so the batch splits at
-                                // each of them: advance the emulator to the cut,
-                                // act on the state that sequence left behind,
-                                // carry on. In offset order, since a frame can
-                                // carry marks and cursor shows both.
+                                // The scanner reports an offset one past the
+                                // sequence it matched, in ascending order, so the
+                                // batch splits at each of them: advance the
+                                // emulator to the cut, act on the state that
+                                // sequence left behind, carry on.
                                 let mut cuts: Vec<(usize, Cut)> = Vec::new();
-                                mark_scan
-                                    .feed(&out_batch, |off, ev| cuts.push((off, Cut::Mark(ev))));
                                 cursor_scan
                                     .feed(&out_batch, |off, c| cuts.push((off, Cut::Cursor(c))));
-                                cuts.sort_by_key(|(off, _)| *off);
                                 {
                                     let t0 = trace.then(std::time::Instant::now);
                                     let mut term = term.lock();
@@ -601,7 +588,6 @@ impl RemoteTerminal {
                                             processor.advance(&mut *term, &out_batch[at..off]);
                                             at = off;
                                             match cut {
-                                                Cut::Mark(ev) => record_mark(&term, &marks, ev),
                                                 Cut::Cursor(vis) => {
                                                     parked_cursor.apply(&mut term, vis);
                                                 }
@@ -710,8 +696,9 @@ impl RemoteTerminal {
                             // around it. Flush the pending text first so the grid
                             // cursor sits where the sender drew the image, then
                             // anchor the placement to that cell in scroll-stable
-                            // absolute-row coordinates (the same formula
-                            // `record_mark` uses), so it tracks scrolling.
+                            // absolute-row coordinates (`history_size -
+                            // display_offset + cursor_line`), so it tracks
+                            // scrolling.
                             DaemonMsg::Image(frame) => {
                                 flush_batch!();
                                 if let Some(img) =
@@ -981,10 +968,6 @@ impl RemoteTerminal {
 
     pub fn foreground_agent(&self) -> Option<CLIAgent> {
         self.agent.lock().ok().and_then(|g| *g)
-    }
-
-    pub fn marks(&self) -> crate::terminal::marks::Marks {
-        self.marks.clone()
     }
 
     /// The kitty-graphics image store for this pane. Cheap handle clone — the
@@ -1390,22 +1373,7 @@ impl RemoteTerminal {
 /// Something in the pty stream the reader has to act on at the byte where it
 /// appeared, rather than after the whole batch has been parsed.
 enum Cut {
-    Mark(MarkEvent),
     Cursor(CursorCut),
-}
-
-fn record_mark(term: &Term<EventProxy>, marks: &crate::terminal::marks::Marks, event: MarkEvent) {
-    use alacritty_terminal::grid::Dimensions as _;
-    match event {
-        MarkEvent::Prompt => {
-            let grid = term.grid();
-            let row = grid.history_size() as i64 - grid.display_offset() as i64
-                + i64::from(grid.cursor.point.line.0);
-            marks.begin(row, String::new());
-        }
-        MarkEvent::Command(cmd) => marks.set_text(cmd),
-        MarkEvent::Done(exit) => marks.finish(exit),
-    }
 }
 
 fn daemon_not_listening(err: &anyhow::Error) -> bool {
@@ -3051,47 +3019,6 @@ mod tests {
             .unwrap();
         daemon_side.flush().unwrap();
         assert!(poll(&|s| s.is_none()), "a None report clears the session");
-    }
-
-    #[test]
-    fn marks_record_the_row_each_one_landed_on() {
-        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
-        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
-        let poll = |want: usize| {
-            for _ in 0..200 {
-                if term.marks().list().len() == want {
-                    return true;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            false
-        };
-
-        let mut stream = Vec::new();
-        stream.extend_from_slice(b"\x1b]133;A\x07");
-        stream.extend_from_slice(b"\x1b]133;C;echo one\x07");
-        stream.extend_from_slice(b"one\r\n");
-        stream.extend_from_slice(b"\x1b]133;D;0\x07");
-        stream.extend_from_slice(b"\x1b]133;A\x07");
-        stream.extend_from_slice(b"\x1b]133;C;false\x07");
-        stream.extend_from_slice(b"\r\n");
-        stream.extend_from_slice(b"\x1b]133;D;1\x07");
-        DaemonMsg::Output(stream).encode(&mut daemon_side).unwrap();
-        daemon_side.flush().unwrap();
-
-        assert!(poll(2), "both commands recorded");
-        let marks = term.marks().list();
-        assert_eq!(marks[0].text, "echo one");
-        assert_eq!(marks[0].exit, Some(0));
-        assert_eq!(marks[1].text, "false");
-        assert_eq!(marks[1].exit, Some(1), "a failure keeps its exit code");
-        assert!(
-            marks[1].row > marks[0].row,
-            "the second prompt is further down the scrollback ({} vs {}) — equal rows \
-             would mean the advance wasn't split at the marks",
-            marks[0].row,
-            marks[1].row
-        );
     }
 
     #[test]
