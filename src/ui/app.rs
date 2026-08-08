@@ -999,7 +999,7 @@ impl Tty7App {
             pane_ws.as_ref(),
             self.workspace,
             &st.pane,
-            &alive,
+            alive.as_ref(),
             self.font_size,
             window,
             cx,
@@ -5697,24 +5697,47 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
     }
 }
 
+/// The daemon's account of which panes are alive, or `None` when it could not
+/// be asked at all.
+///
+/// The distinction is the point: a pane absent from a *successful* listing is
+/// genuinely gone and may be respawned, while a failed `List` says nothing
+/// about any pane. Flattening the failure into an empty map made one transient
+/// RPC error read as "every pane is dead", and the restore then spawned fresh
+/// shells over all of them — the same destruction-by-inference this file's
+/// restore path is built to avoid.
 pub(crate) fn alive_panes_on(
     route: &crate::terminal::PaneRoute,
-) -> std::collections::HashMap<u64, Option<String>> {
+) -> Option<std::collections::HashMap<u64, Option<String>>> {
     if !matches!(route, crate::terminal::PaneRoute::Local) {
-        return std::collections::HashMap::new();
+        return Some(std::collections::HashMap::new());
     }
-    crate::terminal::RemoteTerminal::list_panes_on(route)
-        .into_iter()
-        .filter(|p| p.alive)
-        .map(|p| (p.pane_id, p.owner))
-        .collect()
+    match crate::terminal::RemoteTerminal::try_list_panes_on(route) {
+        Ok(list) => Some(
+            list.into_iter()
+                .filter(|p| p.alive)
+                .map(|p| (p.pane_id, p.owner))
+                .collect(),
+        ),
+        Err(e) => {
+            log::warn!("could not list panes ({e}); leaving each attach to decide");
+            None
+        }
+    }
 }
 
 fn pane_attachable(
-    alive: &std::collections::HashMap<u64, Option<String>>,
+    alive: Option<&std::collections::HashMap<u64, Option<String>>>,
     id: u64,
     owner: crate::core::session::WorkspaceId,
 ) -> bool {
+    let Some(alive) = alive else {
+        // No listing to consult. Attaching is the safe guess in both
+        // directions: if the daemon is really unreachable the attach fails and
+        // the pane falls to the fresh-spawn path anyway, while spawning fresh
+        // on a hunch destroys a session that was merely hard to reach.
+        return true;
+    };
     match alive.get(&id) {
         None => false,
         Some(None) => true,
@@ -5745,8 +5768,15 @@ fn tabs_from_session(
     let alive = alive_panes_on(&crate::terminal::PaneRoute::for_workspace(workspace));
     let mut tabs: Vec<Tab> = Vec::with_capacity(session.tabs.len());
     for st in &session.tabs {
-        let Some(pane) = session_to_pane(workspace, owner, &st.pane, &alive, font_size, window, cx)
-        else {
+        let Some(pane) = session_to_pane(
+            workspace,
+            owner,
+            &st.pane,
+            alive.as_ref(),
+            font_size,
+            window,
+            cx,
+        ) else {
             log::error!("dropping a restored tab: no pane in it could be started");
             continue;
         };
@@ -5777,7 +5807,7 @@ fn session_to_pane(
     workspace: Option<&crate::terminal::PaneWorkspace>,
     owner: WorkspaceId,
     sp: &SessionPane,
-    alive: &std::collections::HashMap<u64, Option<String>>,
+    alive: Option<&std::collections::HashMap<u64, Option<String>>>,
     font_size: f32,
     window: &mut Window,
     cx: &mut Context<Tty7App>,
@@ -6448,18 +6478,26 @@ mod tests {
         .into_iter()
         .collect();
 
-        assert!(pane_attachable(&alive, 1, ours), "our own pane attaches");
         assert!(
-            !pane_attachable(&alive, 2, ours),
+            pane_attachable(Some(&alive), 1, ours),
+            "our own pane attaches"
+        );
+        assert!(
+            !pane_attachable(Some(&alive), 2, ours),
             "another workspace's pane must spawn fresh instead"
         );
         assert!(
-            pane_attachable(&alive, 3, ours),
+            pane_attachable(Some(&alive), 3, ours),
             "an unowned pane is legacy"
         );
         assert!(
-            !pane_attachable(&alive, 4, ours),
+            !pane_attachable(Some(&alive), 4, ours),
             "a dead id never attaches"
+        );
+        assert!(
+            pane_attachable(None, 4, ours),
+            "a failed List says nothing about pane 4; the attach itself must decide, \
+             because respawning on a transient RPC error destroys a live session"
         );
     }
 

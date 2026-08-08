@@ -221,10 +221,6 @@ pub fn control_services() -> crate::host::server::Services {
     }
 }
 
-pub fn run() -> anyhow::Result<()> {
-    run_with(Arc::new(Registry::new()))
-}
-
 /// Say which pseudoconsole this daemon's panes will run on.
 ///
 /// `portable-pty` loads a sideloaded `conpty.dll` if one sits beside the

@@ -33,13 +33,6 @@ use std::path::PathBuf;
 #[derive(Debug)]
 pub struct Singleton {
     _file: File,
-    path: PathBuf,
-}
-
-impl Singleton {
-    pub fn path(&self) -> &std::path::Path {
-        &self.path
-    }
 }
 
 /// The outcome of asking to be the server.
@@ -68,7 +61,7 @@ pub fn claim() -> Claim {
         let _ = std::fs::create_dir_all(parent);
     }
     match open_exclusive(&path) {
-        Ok(Some(file)) => Claim::Held(Singleton { _file: file, path }),
+        Ok(Some(file)) => Claim::Held(Singleton { _file: file }),
         Ok(None) => Claim::Taken,
         Err(e) => Claim::Unavailable(format!("{} could not be locked: {e}", path.display())),
     }
