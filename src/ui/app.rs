@@ -480,6 +480,14 @@ fn window_backdrop_label_key(backdrop: WindowBackdrop) -> L10nKey {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn window_backdrop_labels(backdrop: WindowBackdrop) -> Vec<String> {
+    crate::ui::theme::backdrop_options(backdrop)
+        .iter()
+        .map(|backdrop| t(window_backdrop_label_key(*backdrop)).to_string())
+        .collect()
+}
+
 impl Tty7App {
     pub fn for_workspace(
         id: Option<WorkspaceId>,
@@ -1524,6 +1532,11 @@ impl Tty7App {
         // A material changes the default opacity (SYSTEM_MATERIAL_OPACITY
         // vs 1.0), so the slider must track the new effective value.
         self.sync_window_opacity_slider(window, cx);
+        // Rebuild the rows as well as the selected index. The previous value
+        // may have been an unsupported preset retained only for cross-machine
+        // config sync, and must disappear after the user selects a supported
+        // preset on this machine.
+        self.sync_window_backdrop_select(window, cx);
         cx.notify();
     }
 
@@ -1566,8 +1579,13 @@ impl Tty7App {
             .active_settings()
             .map(|s| s.window_backdrop_select.clone())
         {
-            let selected = window_backdrop_index(cx.global::<Config>().window_backdrop);
+            let current = cx.global::<Config>().window_backdrop;
+            let rows = window_backdrop_labels(current);
+            let selected = window_backdrop_index(current);
             select.update(cx, |state, cx| {
+                state.set_items(SearchableVec::new(rows), window, cx);
+                // Replacing the delegate clears its selection snapshot, so
+                // restore the stored value after installing the new rows.
                 state.set_selected_index(Some(IndexPath::default().row(selected)), window, cx);
             });
         }
@@ -3945,13 +3963,7 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<SelectState<SearchableVec<String>>> {
-        let labels = |current: WindowBackdrop| {
-            crate::ui::theme::backdrop_options(current)
-                .iter()
-                .map(|backdrop| t(window_backdrop_label_key(*backdrop)).to_string())
-                .collect::<Vec<_>>()
-        };
-        let rows = labels(cx.global::<Config>().window_backdrop);
+        let rows = window_backdrop_labels(cx.global::<Config>().window_backdrop);
         let selected = window_backdrop_index(cx.global::<Config>().window_backdrop);
         let select = cx.new(|cx| {
             SelectState::new(
@@ -3967,7 +3979,7 @@ impl Tty7App {
             move |this, _select, ev: &SelectEvent<SearchableVec<String>>, window, cx| {
                 if let SelectEvent::Confirm(Some(label)) = ev {
                     let current = cx.global::<Config>().window_backdrop;
-                    let rows = labels(current);
+                    let rows = window_backdrop_labels(current);
                     if let Some(idx) = rows.iter().position(|row| row == label) {
                         this.set_window_backdrop(
                             window_backdrop_from_index(idx, current),
@@ -4023,10 +4035,7 @@ impl Tty7App {
             #[cfg(target_os = "windows")]
             s.window_backdrop_select.update(cx, |state, cx| {
                 let current = cx.global::<Config>().window_backdrop;
-                let rows = crate::ui::theme::backdrop_options(current)
-                    .iter()
-                    .map(|backdrop| t(window_backdrop_label_key(*backdrop)).to_string())
-                    .collect::<Vec<_>>();
+                let rows = window_backdrop_labels(current);
                 state.set_items(SearchableVec::new(rows), window, cx);
                 // `set_items` does not preserve the selection; restore the
                 // index of the stored value so a locale refresh (which
