@@ -2738,7 +2738,12 @@ impl TerminalView {
                 .background_spawn(async move {
                     let files = shell_files
                         .into_iter()
-                        .filter_map(|(host, path)| host.read_file(&path, MAX_HISTORY_BYTES).ok())
+                        .filter_map(|(host, path)| {
+                            // The name comes along: it is what tells the loader
+                            // which shell's format the bytes are in.
+                            let name = path.file_name()?.to_string_lossy().into_owned();
+                            Some((name, host.read_file(&path, MAX_HISTORY_BYTES).ok()?))
+                        })
                         .collect();
                     super::history::load_with_shell_files(&loading, files)
                 })
