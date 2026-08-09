@@ -386,6 +386,14 @@ fn run_adopting(inheritance: crate::daemon::handoff::Inheritance) -> anyhow::Res
             }
             startup_note!("tty7-server: adopted {kept} pane(s) from the previous build");
         }
+        // The blob is a file this process wrote and unlinked moments ago, so
+        // this is a bug rather than an accident. The shells are the cost: their
+        // ptys are still open here, held by descriptors nothing can now name,
+        // which leaves them running with no reader — #42's stranded sessions,
+        // arrived at from the other direction. They are released when this
+        // daemon exits, so a restart clears it; there is nothing safe to close
+        // in the meantime, because which descriptors they were is exactly what
+        // was lost.
         None => startup_note!(
             "tty7-server: the handoff blob was unreadable; the previous build's panes are lost"
         ),
@@ -750,6 +758,11 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
 
         ClientMsg::Shutdown => {
             log::info!("daemon shutting down on client request");
+            // This is the path a restart takes, so it is the one that decides
+            // whether panes come back showing anything. Ahead of the kill:
+            // `drain_and_kill` hangs up every pty, and a pane whose shell has
+            // been reaped has nothing left to photograph.
+            store_scrollback_now(&registry);
             registry.drain_and_kill();
             // The ConPTY hosts (OpenConsole.exe) are this process's children,
             // not the shells', so the per-pane kill never reaches them — and
