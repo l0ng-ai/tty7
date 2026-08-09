@@ -16,6 +16,7 @@ pub mod local_link;
 pub mod machine_mirror;
 pub mod palette;
 pub mod pane;
+pub mod pane_drag;
 pub mod pending_pane;
 pub mod perf;
 pub mod prefill;

@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Rearrange splits by dragging a pane** — hovering a pane now floats a small
+  grip along its top edge; dragging it moves that pane elsewhere in the tab.
+  A drop on a pane's **edge** splits that pane and takes the side dropped on, a
+  drop on its **middle** trades the two panes' places, and a drop in the band
+  along the **outside of the tab** puts the pane beside everything else as a
+  full-width or full-height band — so a pane in the middle of a 2×2 becomes a
+  full-height column in a single drag. The landing is highlighted while the
+  drag is in flight, and is only offered when the drop would actually change
+  the layout. A rearranged tab is now reconciled with the machine tree as one
+  `PaneMove` instead of a close-and-rebuild.
+
 - **Native Windows backdrop materials** — Settings → Appearance now offers a
   **Background material** picker on Windows (**Auto / Blur / Mica / Mica Alt /
   Acrylic / Off**) that maps onto the OS backdrop APIs: Mica and Mica Alt via

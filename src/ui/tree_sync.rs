@@ -450,6 +450,7 @@ fn reconcile_tab(
 
     let done = match (added.as_slice(), removed.as_slice()) {
         ([new], []) => try_single_split(workspace, mirror, at, want, &desired_root, *new, ops),
+        ([], []) => try_single_move(workspace, mirror, at, &desired_root, ops),
         ([], gone) if !gone.is_empty() => {
             for pane in gone {
                 mirror.tabs[at].root.remove_leaf(*pane);
@@ -542,6 +543,51 @@ fn try_single_split(
         first,
     });
     true
+}
+
+/// Reshapes a tab that still holds exactly the panes it did, when one pane
+/// changing places accounts for the whole difference.
+///
+/// That is what dragging a pane across the layout is, and it is worth spotting:
+/// the fallback for a reshape is to close the tab and build it again, which
+/// tells every other reader of the machine that a tab went away and came back
+/// when all that happened was a pane sliding sideways.
+///
+/// A swap of two panes that are not each other's siblings is not one move, and
+/// still takes the fallback.
+fn try_single_move(
+    workspace: WorkspaceId,
+    mirror: &mut WsMirror,
+    at: usize,
+    desired_root: &PaneNode,
+    ops: &mut Vec<ControlRequest>,
+) -> bool {
+    for pane in mirror.tabs[at].root.pane_ids() {
+        let Some((to, axis, _, first)) = split_site(desired_root, pane) else {
+            continue;
+        };
+        let mut predicted = mirror.tabs[at].root.clone();
+        if predicted.remove_leaf(pane) != Some(true) {
+            continue;
+        }
+        // The daemon re-splits at a half whatever the wanted ratio is, so the
+        // mirror has to predict that half; `fix_ratios` settles the rest.
+        if !predicted.split_leaf(to, pane, axis, 0.5, first)
+            || !same_shape_and_panes(&predicted, desired_root)
+        {
+            continue;
+        }
+        mirror.tabs[at].root = predicted;
+        ops.push(ControlRequest::PaneMove {
+            workspace,
+            pane,
+            to,
+            axis,
+            first,
+        });
+        return true;
+    }
+    false
 }
 
 fn split_site(node: &PaneNode, new: u64) -> Option<(u64, TreeAxis, f32, bool)> {
@@ -2354,6 +2400,123 @@ mod tests {
     }
 
     #[test]
+    fn dragging_a_pane_across_the_layout_emits_one_pane_move() {
+        let ws = WorkspaceId::new();
+        let id = TabId::new();
+        let mut mirror = WsMirror::default();
+        // 1 | 2
+        // ——+——
+        //   3
+        let grid = |a: DesiredNode, b: DesiredNode| split(TreeAxis::Vertical, 0.5, a, b);
+        let before = vec![tab(
+            id,
+            grid(split(TreeAxis::Horizontal, 0.5, leaf(1), leaf(2)), leaf(3)),
+        )];
+        diff(ws, &mut mirror, &before, Some(id), SyncScope::Full, &[]);
+
+        // 1 dropped below 3, which leaves 2 holding the top row alone.
+        let after = vec![tab(
+            id,
+            grid(leaf(2), split(TreeAxis::Vertical, 0.5, leaf(3), leaf(1))),
+        )];
+        let ops = diff(ws, &mut mirror, &after, Some(id), SyncScope::Full, &[]);
+        assert_eq!(
+            ops,
+            vec![ControlRequest::PaneMove {
+                workspace: ws,
+                pane: 1,
+                to: 3,
+                axis: TreeAxis::Vertical,
+                first: false,
+            }],
+            "the tab is reshaped in place, not closed and rebuilt"
+        );
+        assert_converged(&mirror, &after);
+    }
+
+    #[test]
+    fn a_move_that_lands_on_a_new_ratio_settles_it_after_the_move() {
+        let ws = WorkspaceId::new();
+        let id = TabId::new();
+        let mut mirror = WsMirror::default();
+        let before = vec![tab(
+            id,
+            split(
+                TreeAxis::Vertical,
+                0.5,
+                split(TreeAxis::Horizontal, 0.5, leaf(1), leaf(2)),
+                leaf(3),
+            ),
+        )];
+        diff(ws, &mut mirror, &before, Some(id), SyncScope::Full, &[]);
+
+        let after = vec![tab(
+            id,
+            split(
+                TreeAxis::Vertical,
+                0.5,
+                leaf(2),
+                split(TreeAxis::Vertical, 0.25, leaf(3), leaf(1)),
+            ),
+        )];
+        let ops = diff(ws, &mut mirror, &after, Some(id), SyncScope::Full, &[]);
+        assert_eq!(
+            ops,
+            vec![
+                ControlRequest::PaneMove {
+                    workspace: ws,
+                    pane: 1,
+                    to: 3,
+                    axis: TreeAxis::Vertical,
+                    first: false,
+                },
+                ControlRequest::PaneSetRatio {
+                    workspace: ws,
+                    tab: id,
+                    path: vec![Side::B],
+                    ratio: 0.25,
+                },
+            ],
+            "a move splits at a half, so a wanted ratio needs its own op"
+        );
+        assert_converged(&mirror, &after);
+    }
+
+    #[test]
+    fn a_swap_no_single_op_expresses_rebuilds_the_tab_whole() {
+        let ws = WorkspaceId::new();
+        let id = TabId::new();
+        let mut mirror = WsMirror::default();
+        let before = vec![tab(
+            id,
+            split(
+                TreeAxis::Vertical,
+                0.5,
+                split(TreeAxis::Horizontal, 0.5, leaf(1), leaf(2)),
+                split(TreeAxis::Horizontal, 0.5, leaf(3), leaf(4)),
+            ),
+        )];
+        diff(ws, &mut mirror, &before, Some(id), SyncScope::Full, &[]);
+
+        // 1 and 4 trade corners: two panes moved, which no one op describes.
+        let after = vec![tab(
+            id,
+            split(
+                TreeAxis::Vertical,
+                0.5,
+                split(TreeAxis::Horizontal, 0.5, leaf(4), leaf(2)),
+                split(TreeAxis::Horizontal, 0.5, leaf(3), leaf(1)),
+            ),
+        )];
+        let ops = diff(ws, &mut mirror, &after, Some(id), SyncScope::Full, &[]);
+        assert!(
+            matches!(ops.first(), Some(ControlRequest::TabClose { .. })),
+            "expected the rebuild fallback, got {ops:?}"
+        );
+        assert_converged(&mirror, &after);
+    }
+
+    #[test]
     fn a_revived_leaf_emits_pane_replace_with_the_successors_seed() {
         let ws = WorkspaceId::new();
         let id = TabId::new();
@@ -2519,48 +2682,6 @@ mod tests {
             }]
         );
         assert_eq!(mirror.active, Some(a));
-    }
-
-    #[test]
-    fn a_swap_no_single_op_expresses_rebuilds_the_tab_whole() {
-        let ws = WorkspaceId::new();
-        let id = TabId::new();
-        let mut mirror = WsMirror::default();
-        diff(
-            ws,
-            &mut mirror,
-            &[tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)))],
-            Some(id),
-            SyncScope::Full,
-            &[],
-        );
-
-        let want = vec![tab(id, split(TreeAxis::Vertical, 0.5, leaf(2), leaf(1)))];
-        let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full, &[]);
-        assert_eq!(
-            ops,
-            vec![
-                ControlRequest::TabClose {
-                    workspace: ws,
-                    tab: id
-                },
-                ControlRequest::TabCreate {
-                    workspace: ws,
-                    at: Some(0),
-                    pane: seed(2),
-                    tab: Some(id),
-                },
-                ControlRequest::PaneSplit {
-                    workspace: ws,
-                    pane: 2,
-                    axis: TreeAxis::Vertical,
-                    ratio: 0.5,
-                    new: seed(1),
-                    first: false,
-                },
-            ]
-        );
-        assert_converged(&mirror, &want);
     }
 
     #[test]

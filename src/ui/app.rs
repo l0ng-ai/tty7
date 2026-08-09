@@ -450,6 +450,12 @@ pub struct Tty7App {
     pub(crate) sidebar_collapsed: bool,
     pub(crate) sidebar_scroll: gpui::ScrollHandle,
     pub(crate) reorder: Rc<RefCell<Option<crate::ui::reorder::Reorder>>>,
+    /// The pane the pointer is over, so only that one offers its drag handle.
+    pub(crate) pane_hover: Rc<Cell<Option<gpui::EntityId>>>,
+    pub(crate) pane_drag: crate::ui::pane_drag::PaneDragState,
+    /// Where the active tab's panes were last drawn, which is the frame of
+    /// reference a drag's landing is worked out in.
+    pub(crate) pane_area: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) sidebar_search: Entity<InputState>,
     pub(crate) file_search: Entity<InputState>,
     _sidebar_search_sub: Subscription,
@@ -974,6 +980,9 @@ impl Tty7App {
             sidebar_collapsed,
             sidebar_scroll: gpui::ScrollHandle::new(),
             reorder: Rc::new(RefCell::new(None)),
+            pane_hover: Rc::new(Cell::new(None)),
+            pane_drag: Rc::new(RefCell::new(None)),
+            pane_area: Rc::new(Cell::new(None)),
             sidebar_search,
             _sidebar_search_sub: sidebar_search_sub,
             file_search,
@@ -2984,6 +2993,67 @@ impl Tty7App {
                 cx.notify();
             }
         }
+    }
+
+    /// The patch of the layout a pane being dragged would land on, lit up.
+    ///
+    /// Also records that landing as the one a drop would take, so the drop and
+    /// the highlight can never disagree: a zone the tree refuses to carry out
+    /// is neither drawn nor remembered, and releasing over it does nothing.
+    fn pane_landing(&self, window: &Window, cx: &App) -> Option<gpui::AnyElement> {
+        use crate::ui::pane_drag;
+
+        let from = pane_drag::lifted(&self.pane_drag)?;
+        let area = self.pane_area.get()?;
+        let tab = self.tabs.get(self.active)?;
+        let leaves = tab.pane.leaves();
+        let bounds = pane_drag::leaf_bounds(&tab.pane, area);
+        let zone = pane_drag::zone_at(area, &bounds, window.mouse_position())?;
+        if !pane_drag::apply(&mut tab.pane.clone(), from, &leaves, zone) {
+            return None;
+        }
+        let rect = pane_drag::landing_rect(area, &bounds, zone)?;
+        pane_drag::set_landing(&self.pane_drag, zone);
+
+        let accent = cx.theme().drag_border;
+        Some(
+            div()
+                .absolute()
+                .left(rect.origin.x - area.origin.x)
+                .top(rect.origin.y - area.origin.y)
+                .w(rect.size.width)
+                .h(rect.size.height)
+                .rounded(px(6.))
+                .border_2()
+                .border_color(accent)
+                .bg(accent.opacity(0.15))
+                .into_any_element(),
+        )
+    }
+
+    /// Puts a dragged pane down where the last painted frame said it would go.
+    fn drop_pane(
+        &mut self,
+        from: gpui::EntityId,
+        zone: crate::ui::pane_drag::DropZone,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pane_hover.set(None);
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let leaves = tab.pane.leaves();
+        if !crate::ui::pane_drag::apply(&mut tab.pane, from, &leaves, zone) {
+            return;
+        }
+        let moved = leaves.into_iter().find(|l| l.entity_id() == from);
+        self.maximized = None;
+        if let Some(leaf) = moved {
+            self.focus_leaf(&leaf, window, cx);
+        }
+        self.save_session(cx);
+        cx.notify();
     }
 
     /// Activates the tab carrying `id`. A workspace this window just switched
@@ -5770,10 +5840,16 @@ impl Render for Tty7App {
         self.touch_active_tab();
         if cx.has_active_drag() {
             crate::ui::reorder::clear_pending(&self.reorder);
-        } else if let Some(order) = crate::ui::reorder::take_pending(&self.reorder) {
-            self.apply_tab_order(&order, cx);
+            crate::ui::pane_drag::clear_landing(&self.pane_drag);
+        } else {
+            if let Some(order) = crate::ui::reorder::take_pending(&self.reorder) {
+                self.apply_tab_order(&order, cx);
+            }
+            if let Some((from, zone)) = crate::ui::pane_drag::take_landing(&self.pane_drag) {
+                self.drop_pane(from, zone, window, cx);
+            }
         }
-        if self.reorder.borrow().is_some()
+        if (self.reorder.borrow().is_some() || self.pane_drag.borrow().is_some())
             && cx.active_drag_cursor_style() != Some(gpui::CursorStyle::ClosedHand)
         {
             cx.set_active_drag_cursor_style(gpui::CursorStyle::ClosedHand, window);
@@ -5805,9 +5881,15 @@ impl Render for Tty7App {
                         .child(leaf.clone())
                         .into_any_element(),
                     None => {
-                        let dim_inactive = active_tab.pane.leaves().len() > 1
-                            && cx.global::<Config>().dim_inactive_panes;
-                        active_tab.pane.render(dim_inactive, window, cx)
+                        let several = active_tab.pane.leaves().len() > 1;
+                        let chrome = crate::ui::pane::PaneChrome {
+                            dim_inactive: several && cx.global::<Config>().dim_inactive_panes,
+                            rearrangeable: several,
+                            hovered: self.pane_hover.clone(),
+                            lifted: crate::ui::pane_drag::lifted(&self.pane_drag),
+                            drag: self.pane_drag.clone(),
+                        };
+                        active_tab.pane.render(&chrome, window, cx)
                     }
                 }
             }
@@ -5822,7 +5904,19 @@ impl Render for Tty7App {
             .flex_1()
             .relative()
             .overflow_hidden()
+            .child(
+                gpui::canvas(
+                    {
+                        let area = self.pane_area.clone();
+                        move |bounds, _window, _cx| area.set(Some(bounds))
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
             .child(body)
+            .when_some(self.pane_landing(window, cx), |this, el| this.child(el))
             .when_some(self.render_ssh_prompt_overlay(window, cx), |this, el| {
                 this.child(el)
             })

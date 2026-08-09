@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{App, Bounds, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Window, canvas, div};
-use gpui::{Axis, Entity, prelude::*, px};
+use gpui::{Axis, Entity, InteractiveElement as _, prelude::*, px};
 use gpui_component::ActiveTheme as _;
 
 use crate::terminal::view::TerminalView;
@@ -16,6 +16,15 @@ const DIVIDER_THICKNESS: f32 = 5.;
 pub enum PaneSlot {
     Ready(Entity<TerminalView>),
     Connecting(Entity<PendingPane>),
+}
+
+/// Two slots are the same pane when they hold the same view. The payload is a
+/// handle, so identity is all there is to compare — and it is what the layout
+/// operations below need in order to tell "this changed nothing" from a move.
+impl PartialEq for PaneSlot {
+    fn eq(&self, other: &Self) -> bool {
+        self.entity_id() == other.entity_id()
+    }
 }
 
 impl PaneSlot {
@@ -48,6 +57,11 @@ impl PaneSlot {
     }
 }
 
+/// A clone shares its splits' ratio cells with the original rather than
+/// copying them, which is what the layout edits below want: they build the
+/// next shape on a clone and only install it once it is known to be a real
+/// change, and a surviving split must keep the size the user dragged it to.
+#[derive(Clone)]
 pub enum Pane<L = PaneSlot> {
     Leaf(L),
     Split {
@@ -69,16 +83,38 @@ pub enum Dir {
 }
 
 impl Dir {
-    fn axis(self) -> Axis {
+    pub fn axis(self) -> Axis {
         match self {
             Dir::Left | Dir::Right => Axis::Horizontal,
             Dir::Up | Dir::Down => Axis::Vertical,
         }
     }
 
+    /// Whether a pane placed on this side lands in the `a` child of the split
+    /// that holds it — the side the layout draws first.
+    pub fn leads(self) -> bool {
+        matches!(self, Dir::Left | Dir::Up)
+    }
+
     fn grows(self) -> bool {
         matches!(self, Dir::Right | Dir::Down)
     }
+}
+
+/// What a tab wants drawn around its panes this frame.
+pub(crate) struct PaneChrome {
+    /// Fade every pane but the focused one.
+    pub dim_inactive: bool,
+    /// Whether a pane can be picked up and put somewhere else. False for a tab
+    /// holding one pane: there is nowhere to move it to.
+    pub rearrangeable: bool,
+    /// The pane the pointer is over. The leaves write it as the pointer crosses
+    /// them and the same frame's siblings read it, so only the pane under the
+    /// pointer offers its drag handle.
+    pub hovered: Rc<Cell<Option<gpui::EntityId>>>,
+    /// The pane being dragged, drawn faded where it came from.
+    pub lifted: Option<gpui::EntityId>,
+    pub drag: crate::ui::pane_drag::PaneDragState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -233,6 +269,115 @@ impl<L: Clone> Pane<L> {
             }
             Pane::Empty => CloseOutcome::NotFound,
         }
+    }
+
+    /// Lifts a leaf out of the tree, collapsing the split that held it.
+    ///
+    /// Answers `None` for the last pane in the tab: there is nowhere to put it
+    /// back that is not where it already is, and a tree with no leaves is not a
+    /// state this type is allowed to be in.
+    fn take_leaf_where(&mut self, is_target: &impl Fn(&L) -> bool) -> Option<L> {
+        let taken = self.leaves().into_iter().find(|l| is_target(l))?;
+        match self.close_leaf_where(is_target) {
+            CloseOutcome::Collapsed => Some(taken),
+            CloseOutcome::RemoveSelf | CloseOutcome::NotFound => None,
+        }
+    }
+
+    /// Whether two trees put the same panes in the same places. Ratios are not
+    /// part of it: what this answers is "did the drag change anything".
+    fn same_layout(&self, other: &Self) -> bool
+    where
+        L: PartialEq,
+    {
+        match (self, other) {
+            (Pane::Leaf(a), Pane::Leaf(b)) => a == b,
+            (
+                Pane::Split {
+                    axis: ax,
+                    a: aa,
+                    b: ab,
+                    ..
+                },
+                Pane::Split {
+                    axis: bx,
+                    a: ba,
+                    b: bb,
+                    ..
+                },
+            ) => ax == bx && aa.same_layout(ba) && ab.same_layout(bb),
+            (Pane::Empty, Pane::Empty) => true,
+            _ => false,
+        }
+    }
+
+    /// Moves one leaf to `dir` of another, splitting the destination.
+    ///
+    /// The source is lifted out first, so the destination is the tree as it
+    /// stands *after* the collapse — dropping a pane next to its own sibling
+    /// therefore lands where the eye expects rather than nesting a split that
+    /// is about to disappear. A move that would redraw the same layout is
+    /// refused, so an idle drag does not churn the session file.
+    fn move_leaf_where(
+        &mut self,
+        is_src: &impl Fn(&L) -> bool,
+        is_dst: &impl Fn(&L) -> bool,
+        dir: Dir,
+    ) -> bool
+    where
+        L: PartialEq,
+    {
+        let mut next = self.clone();
+        let Some(moved) = next.take_leaf_where(is_src) else {
+            return false;
+        };
+        if !next.split_leaf_where(is_dst, dir.axis(), dir.leads(), moved) {
+            return false;
+        }
+        if next.same_layout(self) {
+            return false;
+        }
+        *self = next;
+        true
+    }
+
+    /// Moves one leaf against an outer edge of the whole tab, as a full-width
+    /// or full-height band beside everything that is left.
+    fn move_leaf_to_edge_where(&mut self, is_src: &impl Fn(&L) -> bool, dir: Dir) -> bool
+    where
+        L: PartialEq,
+    {
+        let mut next = self.clone();
+        let Some(moved) = next.take_leaf_where(is_src) else {
+            return false;
+        };
+        let rest = std::mem::replace(&mut next, Pane::Empty);
+        let (a, b) = if dir.leads() {
+            (Pane::Leaf(moved), rest)
+        } else {
+            (rest, Pane::Leaf(moved))
+        };
+        let next = Pane::split_node(dir.axis(), 0.5, a, b);
+        if next.same_layout(self) {
+            return false;
+        }
+        *self = next;
+        true
+    }
+
+    fn swap_leaves_where(
+        &mut self,
+        is_a: &impl Fn(&L) -> bool,
+        is_b: &impl Fn(&L) -> bool,
+    ) -> bool {
+        let leaves = self.leaves();
+        let Some(i) = leaves.iter().position(|l| is_a(l)) else {
+            return false;
+        };
+        let Some(j) = leaves.iter().position(|l| is_b(l)) else {
+            return false;
+        };
+        self.swap_leaf_indices(i, j)
     }
 
     fn collect_leaves_mut<'a>(&'a mut self, out: &mut Vec<&'a mut L>) {
@@ -451,6 +596,22 @@ impl Pane<PaneSlot> {
         self.replace_leaf_where(&|v| v.entity_id() == target, new)
     }
 
+    /// Drops `src` on the `dir` side of `dst`, splitting `dst` to make room.
+    pub fn move_leaf(&mut self, src: gpui::EntityId, dst: gpui::EntityId, dir: Dir) -> bool {
+        src != dst
+            && self.move_leaf_where(&|v| v.entity_id() == src, &|v| v.entity_id() == dst, dir)
+    }
+
+    /// Drops `src` against the `dir` edge of the tab, beside every other pane.
+    pub fn move_leaf_to_edge(&mut self, src: gpui::EntityId, dir: Dir) -> bool {
+        self.move_leaf_to_edge_where(&|v| v.entity_id() == src, dir)
+    }
+
+    /// Trades two panes' places, each keeping the other's size.
+    pub fn swap_leaves(&mut self, a: gpui::EntityId, b: gpui::EntityId) -> bool {
+        a != b && self.swap_leaves_where(&|v| v.entity_id() == a, &|v| v.entity_id() == b)
+    }
+
     pub fn close_focused(&mut self, window: &Window, cx: &App) -> CloseOutcome {
         self.close_leaf_where(&|v| v.contains_focused(window, cx))
     }
@@ -459,24 +620,53 @@ impl Pane<PaneSlot> {
         self.close_leaf_where(&|v| v.entity_id() == target)
     }
 
-    pub fn render(
+    pub(crate) fn render(
         &self,
-        dim_inactive: bool,
+        chrome: &PaneChrome,
         window: &mut Window,
         cx: &mut App,
     ) -> gpui::AnyElement {
         match self {
             Pane::Empty => div().into_any_element(),
             Pane::Leaf(v) => {
+                let id = v.entity_id();
                 let focused = v.contains_focused(window, cx);
+                let lifted = chrome.lifted == Some(id);
+                let handle = chrome.rearrangeable
+                    && chrome.lifted.is_none()
+                    && chrome.hovered.get() == Some(id);
                 div()
+                    // An id only so the pane can hear the pointer arrive and
+                    // leave; it adds no listener of its own, so everything the
+                    // terminal below reacts to still reaches it.
+                    .id(("pane-leaf", id.as_u64() as usize))
                     .size_full()
                     .relative()
                     .overflow_hidden()
-                    .when(dim_inactive && !focused, |d| d.opacity(0.55))
+                    .when(chrome.dim_inactive && !focused, |d| d.opacity(0.55))
+                    .when(lifted, |d| d.opacity(0.45))
+                    .when(chrome.rearrangeable, |d| {
+                        d.on_hover({
+                            let hovered = chrome.hovered.clone();
+                            move |over, window, _cx| {
+                                let next = match (*over, hovered.get() == Some(id)) {
+                                    (true, _) => Some(id),
+                                    (false, true) => None,
+                                    // Left a pane the pointer had already left:
+                                    // the enter of its neighbour got here first.
+                                    (false, false) => return,
+                                };
+                                hovered.set(next);
+                                window.refresh();
+                            }
+                        })
+                    })
                     .map(|d| match v {
                         PaneSlot::Ready(t) => d.child(t.clone()),
                         PaneSlot::Connecting(p) => d.child(p.clone()),
+                    })
+                    .when(handle, |d| {
+                        d.child(crate::ui::pane_drag::handle(id, &chrome.drag, cx))
                     })
                     .into_any_element()
             }
@@ -613,7 +803,7 @@ impl Pane<PaneSlot> {
                             .flex_basis(px(0.))
                             .min_w_0()
                             .min_h_0()
-                            .child(a.render(dim_inactive, window, cx)),
+                            .child(a.render(chrome, window, cx)),
                     )
                     .child(divider)
                     .child(
@@ -623,7 +813,7 @@ impl Pane<PaneSlot> {
                             .flex_basis(px(0.))
                             .min_w_0()
                             .min_h_0()
-                            .child(b.render(dim_inactive, window, cx)),
+                            .child(b.render(chrome, window, cx)),
                     )
                     .into_any_element()
             }
@@ -1118,6 +1308,134 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    fn grid() -> TestPane {
+        // 0 1
+        // 2 3
+        TestPane::split_node(
+            Axis::Vertical,
+            0.5,
+            TestPane::split_node(Axis::Horizontal, 0.5, Pane::Leaf(0), Pane::Leaf(1)),
+            TestPane::split_node(Axis::Horizontal, 0.5, Pane::Leaf(2), Pane::Leaf(3)),
+        )
+    }
+
+    fn moved(pane: &mut TestPane, src: u32, dst: u32, dir: Dir) -> bool {
+        pane.move_leaf_where(&is(src), &is(dst), dir)
+    }
+
+    #[test]
+    fn moving_a_pane_splits_the_destination_on_the_named_side() {
+        let mut pane = grid();
+        assert!(moved(&mut pane, 0, 3, Dir::Down));
+        assert_eq!(pane.leaves(), vec![1, 2, 3, 0]);
+        match &pane {
+            Pane::Split { a, b, .. } => {
+                assert!(matches!(**a, Pane::Leaf(1)), "1 was promoted by the lift");
+                match &**b {
+                    Pane::Split { a, b, .. } => {
+                        assert!(matches!(**a, Pane::Leaf(2)));
+                        match &**b {
+                            Pane::Split { axis, a, b, .. } => {
+                                assert!(matches!(axis, Axis::Vertical));
+                                assert!(matches!(**a, Pane::Leaf(3)));
+                                assert!(matches!(**b, Pane::Leaf(0)), "0 landed below 3");
+                            }
+                            _ => panic!("3 should have become a split"),
+                        }
+                    }
+                    _ => panic!("the right column should have survived"),
+                }
+            }
+            _ => panic!("the root should still be a split"),
+        }
+        assert_well_formed(&pane);
+    }
+
+    #[test]
+    fn moving_a_pane_before_the_destination_puts_it_first() {
+        let mut pane = grid();
+        assert!(moved(&mut pane, 3, 0, Dir::Left));
+        assert_eq!(pane.leaves(), vec![3, 0, 1, 2]);
+        assert_well_formed(&pane);
+    }
+
+    #[test]
+    fn a_move_that_would_redraw_the_same_layout_is_refused() {
+        let mut pane = TestPane::leaf(0);
+        split(&mut pane, 0, Axis::Horizontal, 1);
+        assert!(
+            !moved(&mut pane, 1, 0, Dir::Right),
+            "1 is already right of 0"
+        );
+        assert!(!moved(&mut pane, 0, 1, Dir::Left), "0 is already left of 1");
+        assert_eq!(pane.leaves(), vec![0, 1]);
+
+        assert!(
+            moved(&mut pane, 1, 0, Dir::Down),
+            "the same neighbours on a new axis is a real move"
+        );
+        assert_eq!(pane.leaves(), vec![0, 1]);
+        assert!(matches!(
+            &pane,
+            Pane::Split {
+                axis: Axis::Vertical,
+                ..
+            }
+        ));
+        assert_well_formed(&pane);
+    }
+
+    #[test]
+    fn a_move_onto_a_missing_or_only_pane_changes_nothing() {
+        let mut pane = TestPane::leaf(0);
+        assert!(!moved(&mut pane, 0, 0, Dir::Right), "nowhere else to go");
+        split(&mut pane, 0, Axis::Horizontal, 1);
+        assert!(!moved(&mut pane, 99, 0, Dir::Right));
+        assert!(!moved(&mut pane, 0, 99, Dir::Right));
+        assert_eq!(pane.leaves(), vec![0, 1]);
+        assert_well_formed(&pane);
+    }
+
+    #[test]
+    fn moving_to_an_edge_makes_a_band_beside_everything_else() {
+        let mut pane = grid();
+        assert!(pane.move_leaf_to_edge_where(&is(1), Dir::Right));
+        assert_eq!(pane.leaves(), vec![0, 2, 3, 1]);
+        match &pane {
+            Pane::Split { axis, a, b, .. } => {
+                assert!(
+                    matches!(axis, Axis::Horizontal),
+                    "the band sits beside the rest, not above it"
+                );
+                assert!(matches!(**b, Pane::Leaf(1)), "1 is the whole right band");
+                assert_eq!(a.leaves(), vec![0, 2, 3]);
+            }
+            _ => panic!("the root should be the new split"),
+        }
+        assert_well_formed(&pane);
+    }
+
+    #[test]
+    fn an_edge_move_that_changes_nothing_is_refused() {
+        let mut pane = TestPane::leaf(0);
+        split(&mut pane, 0, Axis::Horizontal, 1);
+        assert!(!pane.move_leaf_to_edge_where(&is(1), Dir::Right));
+        assert!(!pane.move_leaf_to_edge_where(&is(0), Dir::Left));
+        assert!(!TestPane::leaf(7).move_leaf_to_edge_where(&is(7), Dir::Up));
+        assert!(pane.move_leaf_to_edge_where(&is(1), Dir::Up));
+        assert_eq!(pane.leaves(), vec![1, 0]);
+        assert_well_formed(&pane);
+    }
+
+    #[test]
+    fn swapping_two_leaves_trades_their_places_by_identity() {
+        let mut pane = grid();
+        assert!(pane.swap_leaves_where(&is(0), &is(3)));
+        assert_eq!(pane.leaves(), vec![3, 1, 2, 0]);
+        assert!(!pane.swap_leaves_where(&is(0), &is(99)));
+        assert_well_formed(&pane);
     }
 
     #[test]

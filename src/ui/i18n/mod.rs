@@ -1025,6 +1025,7 @@ l10n_keys! {
     AppSshConnectionFailed,
     AppSshReconnectFailed,
     AppSplitPaneFailed,
+    PaneDragHandleTooltip,
     AppWorktreeRemoved,
     AppWorktreeRemoveFailed,
     AppForkStillConnecting,
