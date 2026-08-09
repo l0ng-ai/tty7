@@ -539,11 +539,17 @@ fn run_with(registry: Arc<Registry>) -> anyhow::Result<()> {
     // so everything on disk belongs to panes the machine tree either still
     // names — those are the ones a window is about to ask to restore — or has
     // forgotten, and the latter are nobody's to restore any more.
+    let restorable = restorable_pane_ids(&registry);
     if crate::daemon::scrollback::enabled() {
-        crate::daemon::scrollback::sweep(&restorable_pane_ids(&registry));
+        crate::daemon::scrollback::sweep(&restorable);
     } else {
         crate::daemon::scrollback::sweep(&std::collections::HashSet::new());
     }
+    // A daemon that was killed outright never retired anything, so the files of
+    // panes that died with it are still here. Their commands cannot be
+    // recovered — the mark saying which were new belongs to a shell that is
+    // gone — so what is left is not to hoard them.
+    crate::daemon::history::sweep(&restorable);
     spawn_scrollback_writer(registry.clone());
 
     for stream in listener.incoming() {
@@ -636,6 +642,12 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             restore,
         } => {
             let id = registry.alloc_id();
+            if let Some(dead) = restore.as_ref().map(|r| r.pane_id) {
+                // Before the spawn, because the spawn is what hands the shell
+                // the name of its history file — and this is what puts the
+                // predecessor's commands behind that name.
+                crate::daemon::history::carry(dead, id);
+            }
             let restore = restore.and_then(restored_screen);
             let on_dead = {
                 let registry = registry.clone();

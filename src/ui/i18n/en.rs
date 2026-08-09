@@ -1355,6 +1355,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PaneRestoredScreenBanner => {
             "restored screen — this shell is new, nothing above it is still running"
         }
+        L10nKey::SettingsPerPaneHistory => "Give each pane its own shell history",
+        L10nKey::SettingsPerPaneHistoryDescription => {
+            "Up walks through what you ran in this pane, instead of an interleaving of every \
+             pane. A new pane starts from your existing history rather than blank, and what it \
+             adds is written back when it closes, so nothing is lost. Applies to bash and zsh \
+             panes that tty7 can set up; a shell started with your own arguments is left alone."
+        }
         L10nKey::SettingsPersistScrollback => "Keep pane output on disk",
         L10nKey::SettingsPersistScrollbackDescription => {
             "If the background service dies without warning — a crash, or a reboot — panes come \

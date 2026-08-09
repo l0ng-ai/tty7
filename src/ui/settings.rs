@@ -4438,6 +4438,7 @@ impl Tty7App {
         let option_as_alt = cfg.macos_option_as_alt;
         let tab_completion = cfg.tab_completion;
         let history_search = cfg.history_search;
+        let per_pane_history = cfg.per_pane_history;
         let smart_select = cfg.smart_select;
         let copy_on_select = cfg.copy_on_select;
         let clip_trim = cfg.clipboard_trim_trailing_spaces;
@@ -4449,6 +4450,10 @@ impl Tty7App {
         let history_search_switch = crate::ui::theme::switch("term-history-search", cx)
             .checked(history_search)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_history_search(*on, cx)))
+            .into_any_element();
+        let per_pane_history_switch = crate::ui::theme::switch("term-per-pane-history", cx)
+            .checked(per_pane_history)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_per_pane_history(*on, cx)))
             .into_any_element();
         let smart_select_switch = crate::ui::theme::switch("term-smart-select", cx)
             .checked(smart_select)
@@ -4493,6 +4498,12 @@ impl Tty7App {
                 t(L10nKey::SettingsHistorySearch),
                 t(L10nKey::SettingsHistorySearchDesc),
                 history_search_switch,
+                cx,
+            ))
+            .child(self.settings_row(
+                t(L10nKey::SettingsPerPaneHistory),
+                t(L10nKey::SettingsPerPaneHistoryDescription),
+                per_pane_history_switch,
                 cx,
             ))
             .child(self.section_rule(cx))

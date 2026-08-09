@@ -6,6 +6,32 @@ const ZSH_INTEGRATION: &str = r#"
 if [[ -o interactive ]] && [[ -z "$TTY7_SHELL_INTEGRATION" ]]; then
   export TTY7_SHELL_INTEGRATION=1
 
+  # Per-pane history, when the app asked for it. This runs after the user's
+  # .zshrc, which is the only reason it can work at all: $HISTFILE is theirs to
+  # set, wherever they like, and nothing outside this shell knew where it
+  # points until now. Seed once from there so the pane does not start blank,
+  # write down how much was seeded — everything past that mark is what this
+  # pane adds, and is what goes home when it closes — and only then repoint.
+  # zsh loads the history file after .zshrc, so the switch lands before the
+  # first line is read.
+  if [[ -n "$TTY7_HISTFILE" ]]; then
+    if [[ ! -e "$TTY7_HISTFILE" ]]; then
+      # The origin is recorded even when there is nothing to copy from it yet:
+      # a first-ever shell has no history file, and it is exactly that user
+      # whose commands would otherwise have nowhere to go when the pane closes.
+      if [[ -n "$HISTFILE" ]]; then
+        builtin printf '%s\n' "$HISTFILE" > "$TTY7_HISTFILE.origin" 2>/dev/null
+        if [[ -r "$HISTFILE" ]]; then
+          command tail -n 5000 "$HISTFILE" > "$TTY7_HISTFILE" 2>/dev/null
+        fi
+      fi
+      [[ -e "$TTY7_HISTFILE" ]] || : > "$TTY7_HISTFILE" 2>/dev/null
+      command wc -c < "$TTY7_HISTFILE" 2>/dev/null | command tr -d ' \n' \
+        > "$TTY7_HISTFILE.seed" 2>/dev/null
+    fi
+    HISTFILE="$TTY7_HISTFILE"
+  fi
+
   __tty7_osc() { builtin printf '\e]%s\a' "$1"; }
 
   # Vi mode links the `main` keymap to `viins` (`bindkey -A viins main`);
@@ -170,6 +196,28 @@ const BASH_INTEGRATION: &str = r#"
 # --- tty7 shell integration (bash) ---
 if [[ $- == *i* ]] && [[ -z "$TTY7_SHELL_INTEGRATION" ]]; then
   export TTY7_SHELL_INTEGRATION=1
+
+  # Per-pane history — see the zsh block for why this can only be done here,
+  # after the user's rc has decided where their history lives. bash loads the
+  # file after the startup files too, so repointing here still precedes the
+  # load.
+  if [[ -n "$TTY7_HISTFILE" ]]; then
+    if [[ ! -e "$TTY7_HISTFILE" ]]; then
+      # The origin is recorded even when there is nothing to copy from it yet:
+      # a first-ever shell has no history file, and it is exactly that user
+      # whose commands would otherwise have nowhere to go when the pane closes.
+      if [[ -n "$HISTFILE" ]]; then
+        builtin printf '%s\n' "$HISTFILE" > "$TTY7_HISTFILE.origin" 2>/dev/null
+        if [[ -r "$HISTFILE" ]]; then
+          command tail -n 5000 "$HISTFILE" > "$TTY7_HISTFILE" 2>/dev/null
+        fi
+      fi
+      [[ -e "$TTY7_HISTFILE" ]] || : > "$TTY7_HISTFILE" 2>/dev/null
+      command wc -c < "$TTY7_HISTFILE" 2>/dev/null | command tr -d ' \n' \
+        > "$TTY7_HISTFILE.seed" 2>/dev/null
+    fi
+    HISTFILE="$TTY7_HISTFILE"
+  fi
 
   __tty7_osc() { builtin printf '\e]%s\a' "$1"; }
   # `bind -v` reports readline's actual editing mode; `[[ -o vi ]]` misses

@@ -2523,6 +2523,12 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.persist_scrollback = on);
     }
 
+    /// Takes effect on the next pane: a shell is told where its history lives
+    /// when it starts, and nothing can move it afterwards.
+    pub(crate) fn set_per_pane_history(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.per_pane_history = on);
+    }
+
     pub(crate) fn set_show_tray_icon(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.show_tray_icon = on);
     }

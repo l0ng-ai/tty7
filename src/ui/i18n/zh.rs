@@ -1286,6 +1286,12 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaneRestoredScreenBanner => {
             "已恢复的画面 —— 下面是新的 shell，上面的内容都已不在运行"
         }
+        L10nKey::SettingsPerPaneHistory => "每个面板用自己的 shell 历史",
+        L10nKey::SettingsPerPaneHistoryDescription => {
+            "上方向键翻的是这个面板里跑过的命令，而不是所有面板混在一起的结果。\
+             新面板会从你已有的历史开始，而不是一片空白；面板关闭时，它新增的部分会写回原来的历史文件，不会丢。\
+             只对 tty7 能接管的 bash 和 zsh 面板生效；用你自己参数启动的 shell 不受影响。"
+        }
         L10nKey::SettingsPersistScrollback => "把面板输出留在磁盘上",
         L10nKey::SettingsPersistScrollbackDescription => {
             "后台服务如果没来得及交接就没了（崩溃、重启机器），面板回来时会显示原先的内容，而不是一片空白。\

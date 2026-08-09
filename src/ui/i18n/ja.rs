@@ -1402,6 +1402,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaneRestoredScreenBanner => {
             "復元された画面 — 以下は新しいシェルで、これより上のものは動いていません"
         }
+        L10nKey::SettingsPerPaneHistory => "ペインごとに独自のシェル履歴を持たせる",
+        L10nKey::SettingsPerPaneHistoryDescription => {
+            "上キーでたどるのは、すべてのペインが混ざったものではなく、このペインで実行したコマンドです。\
+             新しいペインは空ではなく既存の履歴から始まり、追加された分はペインを閉じるときに書き戻されるので失われません。\
+             tty7 が設定できる bash と zsh のペインが対象で、独自の引数で起動したシェルはそのままです"
+        }
         L10nKey::SettingsPersistScrollback => "ペインの出力をディスクに残す",
         L10nKey::SettingsPersistScrollbackDescription => {
             "バックグラウンドサービスが引き継ぎの間もなく落ちた場合（クラッシュや再起動）、\

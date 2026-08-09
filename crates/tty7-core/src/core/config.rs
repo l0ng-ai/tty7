@@ -279,6 +279,16 @@ pub struct Config {
     /// also its entire cost, so it is the user who decides to pay it.
     #[serde(default)]
     pub persist_scrollback: bool,
+    /// Give each pane its own shell history instead of one file every pane
+    /// appends to and reads back.
+    ///
+    /// Seeded from the shell's real history file, so a new pane is not blank,
+    /// and merged back into it when the pane closes, so nothing typed is lost.
+    /// Off by default because shared history is what a terminal has always
+    /// done, and someone who has not asked for the change would experience it
+    /// as their history mysteriously forgetting the other window.
+    #[serde(default)]
+    pub per_pane_history: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -536,6 +546,7 @@ impl Default for Config {
             agent_commands: HashMap::new(),
             restore_agent_sessions: true,
             persist_scrollback: false,
+            per_pane_history: false,
         }
     }
 }
