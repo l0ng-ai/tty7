@@ -16,6 +16,7 @@ pub mod session;
 pub mod shells;
 #[allow(dead_code)]
 pub mod ssh_profile;
+pub mod tab_view;
 pub mod threads;
 pub mod window_state;
 pub mod worktree;

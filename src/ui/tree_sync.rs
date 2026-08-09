@@ -1365,12 +1365,13 @@ fn finish_hydration(
     };
     let host = WorkspaceStore::host_of(cx, client_ws);
     crate::ui::machine_mirror::MachineMirrors::install(cx, host, machine);
+    let machine_was_empty = mirror.tabs.is_empty();
     let was_dirty = {
         let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
             return;
         };
         let dirty = matches!(state.sync, SyncPhase::Unprimed { dirty: true, .. });
-        state.informed |= mirror.tabs.is_empty();
+        state.informed |= machine_was_empty;
         state.sync = SyncPhase::Primed(mirror);
         // The machine answered, so the explanation has been overtaken by events
         // and a later outage deserves its own.
@@ -1383,7 +1384,10 @@ fn finish_hydration(
         return;
     };
     if adopt == Adopt::IfEmpty && !app.read(cx).tabs.is_empty() {
-        if was_dirty {
+        // A full window over an empty tree has to write itself back, whether
+        // or not an edit was waiting: the machine is missing tabs this window
+        // is showing, and nothing else would ever put them there.
+        if was_dirty || machine_was_empty {
             app.update(cx, |app, cx| sync_window(app, cx));
         }
         return;
@@ -1435,6 +1439,34 @@ fn finish_hydration(
     }
 }
 
+/// Someone else removed this workspace from its machine — `tty7 ws rm`, or
+/// another client.
+///
+/// With no window on it, it stops existing here too. Left in the store it
+/// would keep its row in the switcher and open onto nothing, which is how a
+/// workspace deleted from the CLI used to haunt the panel until a restart.
+///
+/// With a window on it, the window stays: `ws rm` leaves every pane running,
+/// and closing the window would strand them with no way back. Pulling the
+/// layout again is what makes that honest — finding the workspace gone is
+/// exactly the case `pull_workspace` puts back under the same id, and the
+/// window writes its tabs to it on the way out of the hydration.
+fn on_workspace_deleted(cx: &mut App, client_ws: WorkspaceId) {
+    if crate::ui::windows::WindowRegistry::window_for(cx, client_ws).is_none() {
+        log::info!("workspace {client_ws} was deleted on its machine; forgetting it here too");
+        forget(cx, client_ws);
+        crate::core::session::WorkspaceStore::remove(cx, client_ws);
+        crate::ui::windows::refresh_menu(cx);
+        cx.refresh_windows();
+        return;
+    }
+    log::info!(
+        "workspace {client_ws} was deleted on its machine while a window still had it open; \
+         putting it back under the same id"
+    );
+    hydrate(cx, client_ws, Adopt::IfEmpty);
+}
+
 pub(crate) fn on_layout_delta(cx: &mut App, host: HostId, key: &str, delta: LayoutDelta) {
     crate::ui::machine_mirror::MachineMirrors::apply_delta(cx, host, key, &delta);
     let client_ws = if host.is_local() {
@@ -1456,6 +1488,11 @@ pub(crate) fn on_layout_delta(cx: &mut App, host: HostId, key: &str, delta: Layo
 
     if crate::ui::remote_workspace::workspace_is_preempted(cx, client_ws) {
         on_preempted(cx, client_ws);
+        return;
+    }
+
+    if matches!(delta, LayoutDelta::WorkspaceDeleted) {
+        on_workspace_deleted(cx, client_ws);
         return;
     }
 
@@ -1580,13 +1617,11 @@ impl Tty7App {
             | LayoutDelta::WorkspaceTouched { .. }
             | LayoutDelta::WorkspaceRenamed { .. }
             | LayoutDelta::PaneFacts { .. } => true,
-            LayoutDelta::WorkspaceDeleted => {
-                log::info!(
-                    "workspace {} was deleted on its machine; keeping the window",
-                    self.workspace
-                );
-                true
-            }
+            // Handled before the window is ever reached — a deletion is about
+            // whether this workspace still exists here at all, which is not a
+            // question one window's tab list can answer. See
+            // `on_workspace_deleted`.
+            LayoutDelta::WorkspaceDeleted => true,
             LayoutDelta::ActiveTabChanged { tab } => {
                 if let Some(index) = index_of(&self.tabs, *tab) {
                     self.activate_from_delta(index, window, cx);

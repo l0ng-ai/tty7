@@ -469,7 +469,13 @@ impl Tty7App {
         let is_remote = WorkspaceStore::all(cx)
             .get(workspace)
             .is_some_and(|w| w.is_remote());
-        let hydrate = known && (restore || is_remote);
+        // Tabs that exist on the machine are shown whatever the restore
+        // setting says: that setting decides whether a window comes back at
+        // launch, not whether an open one shows what is really in it. The
+        // `else` arm below saves this window's session, and saving an empty
+        // one over a live tree would erase it.
+        let on_machine = id.is_some_and(|id| crate::ui::machine_mirror::machine_holds_tabs(cx, id));
+        let hydrate = on_machine || (known && (restore || is_remote));
         let session = hydrate.then(Session::default);
         let app = Self::with_session_at(Some(workspace), session, initial_cwd, window, cx);
         if hydrate {

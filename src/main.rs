@@ -230,7 +230,10 @@ fn forward_open_path(open_path: Option<&std::path::Path>) -> bool {
             "this computer",
         );
         let client = ControlClient::connect(&hello)?;
-        let reply = client.request(ControlRequest::GuiOpen { path: Some(path) });
+        let reply = client.request(ControlRequest::GuiOpen {
+            path: Some(path),
+            workspace: None,
+        });
         client.close();
         reply
     })

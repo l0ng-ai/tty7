@@ -177,6 +177,13 @@ pub enum ControlRequest {
 
     GuiOpen {
         path: Option<String>,
+        /// A workspace that already exists on this machine, for the GUI to
+        /// open a window onto. Without it the GUI picks its own — which is
+        /// what `tty7 [PATH]` wants, and what a workspace the CLI just made
+        /// does not: that one has an id, and any other window would be the
+        /// wrong one.
+        #[serde(default)]
+        workspace: Option<WorkspaceId>,
     },
 
     MachineGet,
@@ -497,6 +504,8 @@ pub enum ControlEvent {
     },
     GuiOpen {
         path: Option<String>,
+        #[serde(default)]
+        workspace: Option<WorkspaceId>,
     },
     Layout {
         workspace: String,
@@ -1442,6 +1451,7 @@ mod tests {
             ControlRequest::WatchClose { id: 7 },
             ControlRequest::GuiOpen {
                 path: Some("/home/me/proj".into()),
+                workspace: None,
             },
             ControlRequest::AgentStates,
             ControlRequest::Routes,
@@ -1569,6 +1579,7 @@ mod tests {
             },
             ControlEvent::GuiOpen {
                 path: Some("/home/me/proj".into()),
+                workspace: Some(WorkspaceId::new()),
             },
         ]
     }
@@ -2165,7 +2176,13 @@ mod tests {
                 },
                 s(20),
             ),
-            (R::GuiOpen { path: None }, s(5)),
+            (
+                R::GuiOpen {
+                    path: None,
+                    workspace: None,
+                },
+                s(5),
+            ),
             (R::AgentStates, s(5)),
             (R::Routes, s(5)),
             (R::Status, s(5)),

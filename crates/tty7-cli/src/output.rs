@@ -2,10 +2,38 @@ use unicode_width::UnicodeWidthStr;
 
 use tty7_core::core::machine::{Machine, PaneNode, Workspace};
 use tty7_core::core::session::WorkspaceId;
+use tty7_core::core::tab_view::{TabLabel, TabView, tab_views_of};
 use tty7_core::daemon::control::{PaneAgentState, RouteInfo, ServerStatus};
 use tty7_core::daemon::protocol::{PaneInfo, PaneProcs};
 
 use crate::resolve;
+
+/// What to call a tab in a table or a tree. Almost no tab carries a name —
+/// the GUI's strip reads OSC titles the machine tree never sees — so a column
+/// printing `tab.name` alone comes out empty for a window full of work. The
+/// evidence ranking is shared with the GUI; only the rendering is ours.
+pub fn tab_label(view: &TabView) -> String {
+    match view.label() {
+        TabLabel::Named(name) => name.to_string(),
+        TabLabel::Agent(agent) => agent.display_name().to_string(),
+        // The tree prints every pane's full cwd right underneath, and a table
+        // has no room for one anyway: the leaf is what tells tabs apart.
+        TabLabel::Cwd(cwd) => path_leaf(cwd).to_string(),
+        TabLabel::Process(title) => title.to_string(),
+        TabLabel::Unknown => "-".to_string(),
+    }
+}
+
+/// The last segment of a path, for columns that have room for a word and not
+/// for a path. Both separators: the same server answers a Windows client, and
+/// `C:\proj` has to lose its head too.
+pub fn path_leaf(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    match trimmed.rsplit(['/', '\\']).next() {
+        Some(leaf) if !leaf.is_empty() => leaf,
+        _ => path,
+    }
+}
 
 /// Display columns, not bytes: a CJK path is two columns per char and three
 /// bytes, so padding by `len()` would push every later column out of line.
@@ -138,11 +166,11 @@ pub fn workspace_tree(ws: &Workspace, machine: &Machine) -> String {
         ws.name.as_deref().unwrap_or("-"),
         resolve::short_id(&ws.id)
     );
-    for tab in &ws.tabs {
+    for (tab, view) in ws.tabs.iter().zip(tab_views_of(ws, &machine.panes)) {
         let ordinal = resolve::ordinal_of(machine, tab.id).unwrap_or(0);
-        match &tab.name {
-            Some(name) => out.push_str(&format!("  @{ordinal}  {name}\n")),
-            None => out.push_str(&format!("  @{ordinal}\n")),
+        match view.label() {
+            TabLabel::Unknown => out.push_str(&format!("  @{ordinal}\n")),
+            _ => out.push_str(&format!("  @{ordinal}  {}\n", tab_label(&view))),
         }
         render_node(&mut out, &tab.root, machine, 2);
     }
@@ -347,11 +375,53 @@ mod tests {
     fn the_tree_shows_tabs_splits_and_cwds_by_indentation() {
         let m = two_workspace_machine();
         let rendered = workspace_tree(&m.workspaces[0], &m);
+        // @1 was named; @2 was not, so it borrows the leaf of its cwd rather
+        // than printing nothing at all.
         let expected = format!(
-            "api ({})\n  @1  build\n    %1  C:\\proj\n  @2\n    h 50%\n      %2  C:\\proj\n      %3  C:\\proj\\sub\n",
+            "api ({})\n  @1  build\n    %1  C:\\proj\n  @2  proj\n    h 50%\n      %2  C:\\proj\n      %3  C:\\proj\\sub\n",
             crate::resolve::short_id(&m.workspaces[0].id)
         );
         assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn an_unnamed_tab_borrows_an_agent_then_a_place_then_its_process() {
+        let view = |f: &dyn Fn(&mut TabView)| {
+            let mut v = TabView {
+                id: tty7_core::core::machine::TabId::new(),
+                name: None,
+                title: String::new(),
+                cwd: None,
+                agent: None,
+                status: None,
+                live: true,
+                panes: 1,
+            };
+            f(&mut v);
+            v
+        };
+        assert_eq!(
+            tab_label(&view(&|v| v.name = Some("deploy".into()))),
+            "deploy"
+        );
+        assert_eq!(
+            tab_label(&view(
+                &|v| v.agent = Some(tty7_core::core::cli_agent::CLIAgent::Claude)
+            )),
+            "Claude Code"
+        );
+        assert_eq!(
+            tab_label(&view(&|v| v.cwd = Some("/Users/me/repo/tty7".into()))),
+            "tty7"
+        );
+        assert_eq!(
+            tab_label(&view(&|v| v.cwd = Some("C:\\proj\\sub\\".into()))),
+            "sub",
+            "a Windows path loses its head and its trailing separator"
+        );
+        assert_eq!(tab_label(&view(&|v| v.cwd = Some("/".into()))), "/");
+        assert_eq!(tab_label(&view(&|v| v.title = "zsh".into())), "zsh");
+        assert_eq!(tab_label(&view(&|_| {})), "-");
     }
 
     #[test]
