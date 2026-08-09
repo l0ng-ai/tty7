@@ -42,6 +42,15 @@ fn settings_row_id(label: &str, _desc: &str) -> SharedString {
     SharedString::from(format!("settings-row-{label}"))
 }
 
+/// Whether the reset control has any effective override to clear on this
+/// platform. A synchronized Windows backdrop remains stored elsewhere but is
+/// inert here, so only platforms that expose it locally may count it.
+fn window_overrides_active(config: &Config, backdrop_is_local: bool) -> bool {
+    config.window_opacity.is_some()
+        || config.window_blur.is_some()
+        || (backdrop_is_local && config.window_backdrop != WindowBackdrop::Auto)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsSection {
     Appearance,
@@ -1349,9 +1358,7 @@ impl Tty7App {
             return div().into_any_element();
         };
         let config = cx.global::<Config>();
-        let overridden = config.window_opacity.is_some()
-            || config.window_blur.is_some()
-            || config.window_backdrop != WindowBackdrop::Auto;
+        let overridden = window_overrides_active(config, cfg!(target_os = "windows"));
         let dim_inactive_panes = config.dim_inactive_panes;
         let opacity = Tty7App::effective_window_opacity(cx);
 
@@ -5180,6 +5187,28 @@ mod tests {
             settings_row_id("Claude Code", "Installed"),
             settings_row_id("Codex", "Installed")
         );
+    }
+
+    #[test]
+    fn synced_windows_backdrop_is_only_a_local_override_on_windows() {
+        let mut config = Config::default();
+        config.window_backdrop = WindowBackdrop::MicaAlt;
+
+        assert!(window_overrides_active(&config, true));
+        assert!(!window_overrides_active(&config, false));
+    }
+
+    #[test]
+    fn opacity_and_blur_are_local_overrides_on_every_platform() {
+        let mut opacity = Config::default();
+        opacity.window_opacity = Some(0.8);
+        opacity.window_backdrop = WindowBackdrop::Mica;
+        let mut blur = Config::default();
+        blur.window_blur = Some(true);
+        blur.window_backdrop = WindowBackdrop::Acrylic;
+
+        assert!(window_overrides_active(&opacity, false));
+        assert!(window_overrides_active(&blur, false));
     }
 
     #[test]

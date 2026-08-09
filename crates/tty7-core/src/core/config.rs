@@ -336,12 +336,12 @@ pub enum TabBarPosition {
     Left,
 }
 
-/// Native window backdrop material for the Windows GUI. `Auto` keeps the
-/// legacy behavior (theme blur decides between blurred and plain translucent),
-/// `Blur` explicitly requests the blurred appearance (classic WCA acrylic on
-/// Windows, vibrancy on macOS), the material variants fall back to acrylic or
-/// plain translucency on older builds inside `src/ui/theme.rs`, and `Off`
-/// never requests a material.
+/// Native window backdrop material for the Windows GUI. Other platforms retain
+/// the value for config synchronization but do not use it for rendering.
+/// `Auto` keeps the legacy behavior where theme blur decides between blurred
+/// and plain translucent, `Blur` explicitly requests classic WCA acrylic, the
+/// material variants fall back to acrylic or plain translucency on older builds
+/// inside `src/ui/theme.rs`, and `Off` never requests a material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WindowBackdrop {
@@ -352,15 +352,6 @@ pub enum WindowBackdrop {
     MicaAlt,
     Acrylic,
     Off,
-}
-
-impl WindowBackdrop {
-    pub fn is_material(self) -> bool {
-        matches!(
-            self,
-            Self::Blur | Self::Mica | Self::MicaAlt | Self::Acrylic
-        )
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -1135,12 +1126,6 @@ mod tests {
 
     #[test]
     fn window_backdrop_defaults_and_round_trips_leniently() {
-        assert!(WindowBackdrop::Blur.is_material());
-        assert!(WindowBackdrop::Mica.is_material());
-        assert!(WindowBackdrop::Acrylic.is_material());
-        assert!(!WindowBackdrop::Auto.is_material());
-        assert!(!WindowBackdrop::Off.is_material());
-
         let cfg = Config::default();
         assert_eq!(cfg.window_backdrop, WindowBackdrop::Auto);
 
