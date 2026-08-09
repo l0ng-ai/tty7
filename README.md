@@ -19,7 +19,7 @@
 
 <br />
 
-<img src="assets/screenshot.webp" alt="tty7 window showing panes, agent status, and the sidebar" width="100%" />
+<img src="assets/screenshot.png" alt="tty7 window showing panes, agent status, and the sidebar" width="100%" />
 
 </div>
 

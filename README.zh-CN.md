@@ -19,7 +19,7 @@
 
 <br />
 
-<img src="assets/screenshot.webp" alt="tty7 窗口，展示 pane、agent 状态与侧边栏" width="100%" />
+<img src="assets/screenshot.png" alt="tty7 窗口，展示 pane、agent 状态与侧边栏" width="100%" />
 
 </div>
 
