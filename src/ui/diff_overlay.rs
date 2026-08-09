@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, FocusHandle, FontWeight, KeyDownEvent, Pixels, Window, div, prelude::*, px,
+    AnyElement, Background, FocusHandle, FontWeight, Hsla, KeyDownEvent, Pixels, Window, div,
+    prelude::*, px,
 };
 use gpui_component::button::Button;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
@@ -31,6 +32,19 @@ pub(crate) struct DiffOverlayState {
     pub(crate) loading: bool,
     pub(crate) expanded: HashMap<String, bool>,
     pub(crate) focus: Option<String>,
+}
+
+/// Paints the full-window diff surface without inheriting workspace opacity.
+/// The preset's solid or gradient design remains intact, but neither it nor
+/// the plain theme fallback may reveal the OS backdrop through diff text.
+fn diff_overlay_background(
+    active: Option<&crate::ui::presets::ActiveBackground>,
+    fallback: Hsla,
+) -> Background {
+    match active {
+        Some(bg) => crate::ui::theme::window_background_opaque(bg),
+        None => fallback.alpha(1.0).into(),
+    }
 }
 
 impl Tty7App {
@@ -262,12 +276,12 @@ impl Tty7App {
                 .absolute()
                 .inset_0()
                 .occlude()
-                .bg(
-                    match cx.try_global::<crate::ui::presets::ActiveBackground>() {
-                        Some(bg) => crate::ui::theme::window_background(bg),
-                        None => cx.theme().background.into(),
-                    },
-                )
+                // Opaque on purpose: this overlay covers the entire workspace,
+                // so window translucency and backdrop material must stop here.
+                .bg(diff_overlay_background(
+                    cx.try_global::<crate::ui::presets::ActiveBackground>(),
+                    cx.theme().background,
+                ))
                 .text_color(cx.theme().foreground)
                 .track_focus(&overlay.focus_handle)
                 .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
@@ -940,6 +954,30 @@ mod tests {
     use super::*;
     use crate::terminal::git_diff::{DiffLine, LineKind};
     use crate::ui::i18n::set_locale;
+
+    #[test]
+    fn full_window_diff_background_is_opaque_with_or_without_a_preset() {
+        let active = crate::ui::presets::ActiveBackground {
+            fill: crate::ui::presets::Fill::Solid(0x12_34_56),
+            opacity: Some(0.2),
+            image: None,
+        };
+        let mut fallback: Hsla = gpui::rgb(0x65_43_21).into();
+        fallback.a = 0.3;
+        let mut opaque_fallback = fallback;
+        opaque_fallback.a = 1.0;
+
+        assert_eq!(
+            diff_overlay_background(Some(&active), fallback),
+            crate::ui::theme::window_background_opaque(&active),
+            "the active preset must keep its fill while discarding workspace translucency"
+        );
+        assert_eq!(
+            diff_overlay_background(None, fallback),
+            opaque_fallback.into(),
+            "the theme fallback must also block the window material"
+        );
+    }
 
     fn line(kind: LineKind, old: Option<u32>, new: Option<u32>, text: &str) -> DiffLine {
         DiffLine {
