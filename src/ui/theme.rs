@@ -177,12 +177,21 @@ pub(crate) fn window_background_opaque(bg: &presets::ActiveBackground) -> Backgr
     window_background_with_alpha(bg, 1.0)
 }
 
+/// The workspace's own fill: the preset at whatever alpha the window opacity
+/// and backdrop material asked for.
+pub(crate) fn workspace_background(cx: &App) -> Background {
+    match cx.try_global::<presets::ActiveBackground>() {
+        Some(bg) => window_background(bg),
+        None => cx.theme().background.into(),
+    }
+}
+
 /// The fill for a full-window overlay (settings, the opened file, the diff
 /// view). Always opaque: the overlay covers the whole workspace, so window
 /// translucency and the backdrop material must stop at it instead of showing
 /// desktop through its text. Overlays pair this with
-/// `app::window_background_image_layer`, because their own opaque fill hides
-/// the theme background image the workspace root paints beneath them.
+/// `app::overlay_surface_layers`, because their own opaque fill hides the
+/// theme background image the workspace root paints beneath them.
 pub(crate) fn overlay_background(cx: &App) -> Background {
     match cx.try_global::<presets::ActiveBackground>() {
         Some(bg) => window_background_opaque(bg),

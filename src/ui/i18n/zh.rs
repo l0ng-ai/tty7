@@ -104,6 +104,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsBlur => "模糊",
         L10nKey::SettingsBlurDesc => "模糊半透明窗口背后的内容（macOS）。",
+        L10nKey::SettingsBlurAutoDesc => {
+            "模糊半透明窗口背后的内容。仅在「背景材质」为「自动」时生效。"
+        }
         L10nKey::SettingsBackdrop => "背景材质",
         L10nKey::SettingsBackdropDesc => {
             "半透明窗口背后的原生 Windows 背景材质。云母需要 Windows 11 22H2，亚克力需要 1809；更旧的系统会自动回退。"

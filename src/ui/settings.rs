@@ -761,9 +761,11 @@ impl Tty7App {
         // preset's gradient fill instead of collapsing to a flat color.
         let background: Background = crate::ui::theme::overlay_background(cx);
         // That opaque fill also covers the theme background image the
-        // workspace root paints, so the panel carries its own copy; without
-        // it the wallpaper would blink out for as long as settings is open.
-        let background_image = crate::ui::app::window_background_image_layer(cx);
+        // workspace root paints, so the panel carries its own copy (dimmed by
+        // the workspace fill, or the settings text would sit straight on the
+        // wallpaper); without it the image would blink out for as long as
+        // settings is open.
+        let background_layers = crate::ui::app::overlay_surface_layers(cx);
         let (foreground, header_muted) = (theme.foreground, theme.muted_foreground);
 
         let (focus_handle, section, theme_panel_open, search) = match self.active_settings() {
@@ -934,7 +936,7 @@ impl Tty7App {
                     this.close_settings(window, cx);
                 }
             }))
-            .children(background_image)
+            .children(background_layers)
             .child(sidebar)
             .child(content_pane)
             .child(
@@ -1433,7 +1435,10 @@ impl Tty7App {
                     .into_any_element();
             self.settings_row(
                 t(L10nKey::SettingsBlur),
-                t(L10nKey::SettingsBlurDesc),
+                // Not `SettingsBlurDesc` — that one says "(macOS)", which is
+                // exactly wrong here. This row explains the flag's one
+                // remaining job on Windows: feeding the `Auto` material.
+                t(L10nKey::SettingsBlurAutoDesc),
                 control,
                 cx,
             )

@@ -118,6 +118,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsBlur => "背景のぼかし",
         L10nKey::SettingsBlurDesc => "半透明ウィンドウの背後にあるものをぼかす（macOS）",
+        L10nKey::SettingsBlurAutoDesc => {
+            "半透明ウィンドウの背後にあるものをぼかす。背景マテリアルが「自動」のときのみ有効です"
+        }
         L10nKey::SettingsBackdrop => "背景マテリアル",
         L10nKey::SettingsBackdropDesc => {
             "半透明ウィンドウの背後にあるネイティブ Windows 背景マテリアル。Mica には Windows 11 22H2、Acrylic には 1809 が必要です。古いビルドでは自動的にフォールバックします"

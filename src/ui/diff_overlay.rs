@@ -290,8 +290,10 @@ impl Tty7App {
                     }
                 }))
                 // The opaque fill above covers the theme background image the
-                // workspace root paints, so the overlay carries its own copy.
-                .children(crate::ui::app::window_background_image_layer(cx))
+                // workspace root paints, so the overlay carries its own copy,
+                // dimmed back to the strength it had when this overlay was
+                // itself translucent.
+                .children(crate::ui::app::overlay_surface_layers(cx))
                 .child(header)
                 .child(content)
                 .into_any_element(),

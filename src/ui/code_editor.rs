@@ -931,7 +931,7 @@ impl Tty7App {
                         this.toggle_code_panel(window, cx);
                     }
                 }))
-                .children(crate::ui::app::window_background_image_layer(cx))
+                .children(crate::ui::app::overlay_surface_layers(cx))
                 .child(h_flex().flex_1().min_h_0().w_full().child(editor_col))
                 .child(self.render_code_status_bar(window, cx))
                 .into_any_element(),

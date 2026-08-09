@@ -37,7 +37,7 @@ use crate::ui::presets::Fill;
 use crate::ui::settings::{
     Recording, SettingsSection, SettingsState, ThemeEditor, humanize_action,
 };
-use crate::ui::theme::{apply_theme, set_menus, window_background};
+use crate::ui::theme::{apply_theme, set_menus};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ThemeEdit {
@@ -488,14 +488,33 @@ fn window_backdrop_labels(backdrop: WindowBackdrop) -> Vec<String> {
         .collect()
 }
 
-/// The theme's background image as a full-bleed layer.
+/// What a full-window overlay (settings, the opened file, the diff view)
+/// paints between its own fill and its content.
 ///
-/// The workspace root paints one behind the panes. The full-window overlays
-/// (settings, the opened file, the diff view) fill opaquely on purpose, so
-/// the OS backdrop cannot show through their text — but that same fill sits
-/// on top of the root's image and would erase it for as long as an overlay
-/// is open. They paint their own copy instead, above their fill and below
-/// their content.
+/// Those overlays fill opaquely on purpose, so the OS backdrop cannot show
+/// through their text — but that fill also sits on top of the background
+/// image the workspace root paints, and would erase it for as long as an
+/// overlay is open. So each one repaints the image, then the workspace's own
+/// translucent fill over it. That second layer is what keeps the overlay
+/// readable: it dims the image to exactly the strength it had when these
+/// overlays were themselves translucent, before they were made opaque.
+///
+/// Empty when the theme has no image — then the opaque fill alone is already
+/// what the overlay wants, and a second pass of the same paint buys nothing.
+pub(crate) fn overlay_surface_layers(cx: &App) -> Vec<gpui::Div> {
+    match window_background_image_layer(cx) {
+        Some(image) => vec![
+            image,
+            div()
+                .absolute()
+                .inset_0()
+                .bg(crate::ui::theme::workspace_background(cx)),
+        ],
+        None => Vec::new(),
+    }
+}
+
+/// The theme's background image as a full-bleed layer.
 pub(crate) fn window_background_image_layer(cx: &App) -> Option<gpui::Div> {
     let image = cx
         .try_global::<crate::ui::presets::ActiveBackground>()?
@@ -5522,10 +5541,7 @@ impl Render for Tty7App {
             })
             .into_any_element();
 
-        let window_bg = match cx.try_global::<crate::ui::presets::ActiveBackground>() {
-            Some(bg) => window_background(bg),
-            None => cx.theme().background.into(),
-        };
+        let window_bg = crate::ui::theme::workspace_background(cx);
         let bg_image = window_background_image_layer(cx);
         let settings_bg = crate::ui::theme::overlay_background(cx);
 
