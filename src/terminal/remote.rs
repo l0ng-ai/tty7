@@ -22,9 +22,9 @@ use crate::core::osc::OscTokenizer;
 use crate::daemon::protocol::{
     AuthPromptKind, AuthResponse, ClientMsg, DaemonMsg, KnownHostEntry, KnownHostId,
     LoopbackForward, LoopbackForwardId, LoopbackForwardInfo, LoopbackForwardRequest,
-    ManagedForward, NativeSshSpec, PaneProcs, RemoteContext, SftpEntry, SftpJobProgress, SftpOp,
-    SftpOpResult, SftpTransferSpec, ShellSpec, SshForwardRule, SshPhase, WinSize, WorkspaceOp,
-    WorkspaceRequest,
+    ManagedForward, NativeSshSpec, PaneProcs, RemoteContext, RestoreFrom, SftpEntry,
+    SftpJobProgress, SftpOp, SftpOpResult, SftpTransferSpec, ShellSpec, SshForwardRule, SshPhase,
+    WinSize, WorkspaceOp, WorkspaceRequest,
 };
 use crate::daemon::transport::{self, Stream};
 use gpui::EntityId;
@@ -223,7 +223,16 @@ impl RemoteTerminal {
         cwd: Option<PathBuf>,
         shell: Option<ShellSpec>,
     ) -> anyhow::Result<(Self, u64)> {
-        Self::spawn_on(&PaneRoute::Local, size, cell_w, cell_h, cwd, shell, None)
+        Self::spawn_on(
+            &PaneRoute::Local,
+            size,
+            cell_w,
+            cell_h,
+            cwd,
+            shell,
+            None,
+            None,
+        )
     }
 
     pub fn spawn_on(
@@ -234,11 +243,13 @@ impl RemoteTerminal {
         cwd: Option<PathBuf>,
         shell: Option<ShellSpec>,
         owner: Option<String>,
+        restore: Option<RestoreFrom>,
     ) -> anyhow::Result<(Self, u64)> {
         let retry_cwd = cwd.clone();
         let retry_shell = shell.clone();
         let retry_owner = owner.clone();
-        match Self::spawn_once(route, size, cell_w, cell_h, cwd, shell, owner) {
+        let retry_restore = restore.clone();
+        match Self::spawn_once(route, size, cell_w, cell_h, cwd, shell, owner, restore) {
             Ok(term) => Ok(term),
             Err(first_err) if daemon_not_listening(&first_err) => {
                 if let Err(start_err) = crate::daemon::spawn::ensure_running() {
@@ -246,7 +257,7 @@ impl RemoteTerminal {
                         "daemon not running ({first_err}); starting one failed: {start_err}"
                     ));
                 }
-                Self::spawn_once(route, size, cell_w, cell_h, retry_cwd, retry_shell, retry_owner)
+                Self::spawn_once(route, size, cell_w, cell_h, retry_cwd, retry_shell, retry_owner, retry_restore)
                     .map_err(|second_err| {
                         anyhow::anyhow!(
                             "daemon not running ({first_err}); started one but Spawn still failed: {second_err}"
@@ -261,7 +272,7 @@ impl RemoteTerminal {
                         "daemon disconnected before Spawn reply ({first_err}); restart failed: {restart_err}"
                     ));
                 }
-                Self::spawn_once(route, size, cell_w, cell_h, retry_cwd, retry_shell, retry_owner).map_err(|second_err| {
+                Self::spawn_once(route, size, cell_w, cell_h, retry_cwd, retry_shell, retry_owner, retry_restore).map_err(|second_err| {
                     anyhow::anyhow!(
                         "daemon disconnected before Spawn reply ({first_err}); restarted daemon but Spawn still failed: {second_err}"
                     )
@@ -271,6 +282,7 @@ impl RemoteTerminal {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_once(
         route: &PaneRoute,
         size: TermSize,
@@ -279,6 +291,7 @@ impl RemoteTerminal {
         cwd: Option<PathBuf>,
         shell: Option<ShellSpec>,
         owner: Option<String>,
+        restore: Option<RestoreFrom>,
     ) -> anyhow::Result<(Self, u64)> {
         let mut stream = connect_routed(route)?;
         let win = win_size(size, cell_w, cell_h);
@@ -293,12 +306,25 @@ impl RemoteTerminal {
                 )
         });
 
+        // Only the local daemon's feature list is known here; a routed spawn
+        // reaches a server whose build we have not asked about, and one that
+        // predates the field would silently drop it. Sending it anyway would
+        // cost nothing but would make the log claim a restore that never
+        // happened, so the local case is the only one that asks.
+        let restore = restore.filter(|_| {
+            route.is_local()
+                && crate::daemon::spawn::local_daemon_supports(
+                    crate::daemon::protocol::FEATURE_RESTORE_SCROLLBACK,
+                )
+        });
+
         ClientMsg::Spawn {
             cwd,
             size: win,
             shell,
             owner,
             workspace,
+            restore,
         }
         .encode(&mut stream)?;
         let pane_id = match DaemonMsg::read(&mut stream)? {

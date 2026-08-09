@@ -4732,6 +4732,7 @@ impl Tty7App {
             NewTabPosition::End => 1,
         };
         let restore_session = cfg.restore_session;
+        let persist_scrollback = cfg.persist_scrollback;
         let remember_window_size = cfg.remember_window_size;
         let show_tray_icon = cfg.show_tray_icon;
         let tab_bar_idx = match cfg.tab_bar_position {
@@ -4791,6 +4792,10 @@ impl Tty7App {
         let restore_switch = crate::ui::theme::switch("wt-restore-session", cx)
             .checked(restore_session)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_restore_session(*on, cx)))
+            .into_any_element();
+        let persist_scrollback_switch = crate::ui::theme::switch("wt-persist-scrollback", cx)
+            .checked(persist_scrollback)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_persist_scrollback(*on, cx)))
             .into_any_element();
         let remember_window_switch = crate::ui::theme::switch("wt-remember-window", cx)
             .checked(remember_window_size)
@@ -4883,6 +4888,12 @@ impl Tty7App {
                 t(L10nKey::SettingsRestoreLastLayout),
                 t(L10nKey::SettingsRestoreLastLayoutDesc),
                 restore_switch,
+                cx,
+            ))
+            .child(self.settings_row(
+                t(L10nKey::SettingsPersistScrollback),
+                t(L10nKey::SettingsPersistScrollbackDescription),
+                persist_scrollback_switch,
                 cx,
             ))
             .child(self.settings_row(

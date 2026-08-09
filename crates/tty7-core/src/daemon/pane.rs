@@ -921,6 +921,41 @@ fn push_image_frame(frames: &mut Vec<GraphicsFrame>, frame: Vec<u8>) {
     }
 }
 
+/// The screen a restored pane opens with.
+///
+/// `segments` is what some earlier pane — the one this one replaces after a
+/// daemon died without handing off — last had on it. `banner` is the sentence
+/// that says so, supplied by the client because the daemon has no locale of its
+/// own. Both are decoration over a shell that is unambiguously new: nothing
+/// here revives a process.
+pub struct Restore {
+    pub segments: Vec<crate::daemon::scrollback::Segment>,
+    pub banner: Option<String>,
+}
+
+/// The bytes that separate restored output from the new shell's own.
+///
+/// The resets are not cosmetic. A snapshot is trimmed at the front, so it can
+/// begin in the middle of anything: an SGR run whose reset was cut, a hidden
+/// cursor, a disabled autowrap, an alternate screen whose `?1049h` survived but
+/// whose `?1049l` never came because the daemon died while `vim` was open.
+/// Replaying that leaves the emulator in a state the incoming shell did not ask
+/// for and cannot see. Leaving the alternate screen also does the useful thing
+/// in the common case: the primary buffer still holds the pre-`vim` scrollback
+/// from earlier in the same snapshot.
+fn restore_preamble(banner: Option<&str>) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"\x1b[?1049l\x1b[?25h\x1b[?7h\x1b[0m");
+    if let Some(banner) = banner.map(str::trim).filter(|b| !b.is_empty()) {
+        out.extend_from_slice(b"\r\n\x1b[2m\xe2\x94\x80\xe2\x94\x80 ");
+        // A newline inside the banner would be a client writing multiple lines
+        // through a one-line hole; the rest of the sequence assumes one line.
+        out.extend_from_slice(banner.replace(['\r', '\n'], " ").as_bytes());
+        out.extend_from_slice(b" \xe2\x94\x80\xe2\x94\x80\x1b[0m\r\n");
+    }
+    out
+}
+
 impl DaemonPane {
     pub fn spawn(
         id: u64,
@@ -929,6 +964,7 @@ impl DaemonPane {
         shell: Option<ShellSpec>,
         owner: Option<String>,
         workspace: Option<String>,
+        restore: Option<Restore>,
         on_dead: impl FnOnce() + Send + 'static,
     ) -> anyhow::Result<Arc<Self>> {
         let pty_size = pty_size(size);
@@ -945,9 +981,18 @@ impl DaemonPane {
         let reader_handle = pair.master.try_clone_reader()?;
         let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
 
+        let ring = match restore {
+            Some(restore) => {
+                let mut ring = ReplayRing::seeded(restore.segments, size);
+                ring.append(&restore_preamble(restore.banner.as_deref()));
+                ring
+            }
+            None => ReplayRing::new(size),
+        };
+
         let state = Arc::new(Mutex::new(PaneState {
             id,
-            ring: ReplayRing::new(size),
+            ring,
             subscriber: None,
             subscriber_epoch: 0,
             observers: Vec::new(),
@@ -1485,6 +1530,21 @@ impl DaemonPane {
         cached.or_else(|| self.foreground_remote_context())
     }
 
+    /// The pane's screen, capped for storage, with the mark that says how much
+    /// output it had produced when the copy was taken.
+    ///
+    /// Both come from one acquisition of the state lock. Reading them apart
+    /// would let output land in between, and the writer would then record a
+    /// mark that claims to cover bytes its snapshot does not have — a pane
+    /// that stopped producing at that moment would keep the stale copy for
+    /// good, because its mark would never move again.
+    pub fn scrollback_snapshot(&self) -> (Vec<crate::daemon::scrollback::Segment>, u64) {
+        let st = self.state.lock().unwrap();
+        let mut segments = st.ring.snapshot();
+        crate::daemon::scrollback::trim_to(&mut segments, crate::daemon::scrollback::SNAPSHOT_CAP);
+        (segments, st.ring.appended)
+    }
+
     pub fn kill(&self) {
         self.hangup();
     }
@@ -1671,6 +1731,12 @@ fn pty_size(size: WinSize) -> PtySize {
 struct ReplayRing {
     segments: VecDeque<RingSegment>,
     len: usize,
+    /// Bytes ever appended, never reset — the mark the scrollback writer uses to
+    /// tell a ring that has moved from one that has not. Comparing lengths would
+    /// not do it: a ring at its cap stays exactly `RING_CAP` long no matter how
+    /// much output flows through it, which is precisely the busy pane whose
+    /// snapshot is most stale.
+    appended: u64,
 }
 
 struct RingSegment {
@@ -1700,7 +1766,47 @@ impl ReplayRing {
         Self {
             segments: VecDeque::from([RingSegment::empty(size)]),
             len: 0,
+            appended: 0,
         }
+    }
+
+    /// A ring that starts with output some earlier pane produced.
+    ///
+    /// Used when a pane is restored from disk: the saved segments go in ahead
+    /// of anything the new shell writes, so a client attaching sees the screen
+    /// it lost and then the new prompt below it. The seeded bytes are counted
+    /// into `len` — they are subject to the same cap as live output, and the
+    /// cap is far above what a snapshot can hold — but not into `appended`,
+    /// which exists to answer "has this pane produced anything since the last
+    /// snapshot?" and would otherwise answer yes for a pane that never ran.
+    fn seeded(segments: Vec<crate::daemon::scrollback::Segment>, size: WinSize) -> Self {
+        let mut ring = Self::new(size);
+        if segments.is_empty() {
+            return ring;
+        }
+        ring.segments.clear();
+        for seg in segments {
+            ring.len += seg.bytes.len();
+            ring.segments.push_back(RingSegment {
+                size: seg.size,
+                bytes: seg.bytes.into(),
+            });
+        }
+        // Whatever the shell writes from here was written at *this* pane's
+        // size, which is not necessarily the size the snapshot was taken at.
+        ring.resize(size);
+        ring
+    }
+
+    fn snapshot(&self) -> Vec<crate::daemon::scrollback::Segment> {
+        self.segments
+            .iter()
+            .filter(|seg| !seg.bytes.is_empty())
+            .map(|seg| crate::daemon::scrollback::Segment {
+                size: seg.size,
+                bytes: seg.to_vec(),
+            })
+            .collect()
     }
 
     fn tail(&mut self) -> &mut RingSegment {
@@ -1727,6 +1833,7 @@ impl ReplayRing {
     }
 
     fn append(&mut self, bytes: &[u8]) {
+        self.appended = self.appended.saturating_add(bytes.len() as u64);
         if bytes.len() >= RING_CAP {
             let size = self.tail().size;
             self.segments.clear();
@@ -2446,6 +2553,7 @@ mod tests {
             }),
             None,
             None,
+            None,
             || {},
         )
         .expect("spawn pane");
@@ -2817,6 +2925,107 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(s)) if s == ws(80, 24)));
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(b)) if b == b"narrow bytes"));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_seeded_ring_replays_the_old_screen_at_the_size_it_was_written() {
+        use crate::daemon::scrollback::Segment;
+
+        let mut ring = ReplayRing::seeded(
+            vec![Segment {
+                size: ws(100, 24),
+                bytes: b"what the dead pane had on it".to_vec(),
+            }],
+            ws(80, 30),
+        );
+        ring.append(b"the new shell's prompt");
+
+        let (tx, rx) = mpsc::channel();
+        ring.replay(&tx);
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(s)) if s == ws(100, 24)));
+        assert!(
+            matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(b)) if b == b"what the dead pane had on it"),
+            "restored output has to be replayed at the width it was produced at, or the client \
+             rewraps it to whatever the window happens to be now"
+        );
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(s)) if s == ws(80, 30)));
+        assert!(
+            matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(b)) if b == b"the new shell's prompt")
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn seeding_does_not_make_an_untouched_pane_look_like_it_produced_output() {
+        use crate::daemon::scrollback::Segment;
+
+        let ring = ReplayRing::seeded(
+            vec![Segment {
+                size: ws(80, 24),
+                bytes: b"restored".to_vec(),
+            }],
+            ws(80, 24),
+        );
+        assert_eq!(
+            ring.appended, 0,
+            "the mark answers 'has this pane written anything since the last snapshot', and \
+             bytes it was handed at birth are not an answer of yes"
+        );
+    }
+
+    #[test]
+    fn an_empty_seed_leaves_an_ordinary_ring() {
+        let mut ring = ReplayRing::seeded(Vec::new(), ws(80, 24));
+        ring.append(b"output");
+        assert_eq!(
+            ring.segments.len(),
+            1,
+            "the ring always has exactly one tail"
+        );
+        assert_eq!(ring.flatten(), b"output");
+    }
+
+    #[test]
+    fn the_restore_preamble_hands_the_new_shell_a_terminal_it_can_use() {
+        let bytes = restore_preamble(Some("this shell is new"));
+        let text = String::from_utf8(bytes).expect("the preamble is text");
+        // A snapshot is cut at the front, so it can begin inside anything: an
+        // unterminated SGR run, a hidden cursor, an alternate screen whose exit
+        // never came because the daemon died while a full-screen app was up.
+        assert!(text.contains("\x1b[?1049l"), "leave any alternate screen");
+        assert!(text.contains("\x1b[?25h"), "give the cursor back");
+        assert!(text.contains("\x1b[?7h"), "put autowrap back");
+        assert!(text.contains("\x1b[0m"), "drop any colour left mid-run");
+        assert!(text.contains("this shell is new"));
+    }
+
+    #[test]
+    fn a_banner_cannot_smuggle_extra_lines_into_the_pane() {
+        let text = String::from_utf8(restore_preamble(Some("first\r\nsecond"))).unwrap();
+        assert!(
+            text.contains("first  second"),
+            "the rule is drawn as one line, so the words placed in it stay on one line"
+        );
+        assert_eq!(
+            text.matches("\r\n").count(),
+            2,
+            "one break before the rule and one after it, and no others"
+        );
+    }
+
+    #[test]
+    fn a_pane_with_nothing_to_say_still_gets_the_resets() {
+        for banner in [None, Some(""), Some("   ")] {
+            let text = String::from_utf8(restore_preamble(banner)).unwrap();
+            assert!(
+                text.starts_with("\x1b[?1049l"),
+                "the terminal still has to be handed back in a usable state"
+            );
+            assert!(
+                !text.contains('\n'),
+                "with no words there is no rule to draw, so no line is spent on one"
+            );
+        }
     }
 
     #[test]

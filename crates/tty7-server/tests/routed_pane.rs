@@ -110,6 +110,7 @@ fn a_routed_pane_spawns_takes_input_and_survives_a_reconnect() {
         shell: Some(plain_shell()),
         owner: None,
         workspace: None,
+        restore: None,
     }
     .encode(&mut sock)
     .unwrap();
@@ -178,6 +179,7 @@ fn a_routed_kill_reaches_the_pane_it_names() {
         shell: Some(plain_shell()),
         owner: None,
         workspace: None,
+        restore: None,
     }
     .encode(&mut sock)
     .unwrap();

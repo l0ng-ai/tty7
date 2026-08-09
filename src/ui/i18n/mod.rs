@@ -1107,6 +1107,9 @@ l10n_keys! {
     SftpReplaceBody,
     Replace,
     SftpErrorInvalidOctalMode,
+    PaneRestoredScreenBanner,
+    SettingsPersistScrollback,
+    SettingsPersistScrollbackDescription,
 }
 
 pub fn set_locale(gui_language: &str) {

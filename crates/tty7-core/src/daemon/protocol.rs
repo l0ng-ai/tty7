@@ -16,6 +16,13 @@ pub const FEATURE_PANE_OWNER: &str = "pane-owner";
 /// older daemon it must keep reflowing locally at request time.
 pub const FEATURE_RESIZE_ECHO: &str = "resize-echo";
 
+/// The daemon can seed a new pane with the screen a dead one left behind, named
+/// by `ClientMsg::Spawn`'s `restore` field. A client that does not see this
+/// feature leaves the field out: an older daemon would ignore it and spawn a
+/// blank pane, which is the same outcome, but sending it would make the wire
+/// claim a restore that never happened.
+pub const FEATURE_RESTORE_SCROLLBACK: &str = "restore-scrollback";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonVersion {
     pub protocol: u32,
@@ -35,6 +42,7 @@ impl DaemonVersion {
             features: vec![
                 FEATURE_PANE_OWNER.to_string(),
                 FEATURE_RESIZE_ECHO.to_string(),
+                FEATURE_RESTORE_SCROLLBACK.to_string(),
             ],
             instance: process_instance().to_string(),
         }
@@ -584,6 +592,7 @@ pub enum ClientMsg {
         shell: Option<ShellSpec>,
         owner: Option<String>,
         workspace: Option<String>,
+        restore: Option<RestoreFrom>,
     },
     Attach {
         pane_id: u64,
@@ -855,6 +864,29 @@ struct OwnedSpawn {
     owner: Option<String>,
     #[serde(default)]
     workspace: Option<String>,
+    #[serde(default)]
+    restore: Option<RestoreFrom>,
+}
+
+/// "This pane replaces one that died with the daemon."
+///
+/// Carried on a spawn rather than an attach because there is nothing to attach
+/// to: the process is gone. The daemon looks up what pane `pane_id` last had on
+/// its screen and seeds the new pane's ring with it, so the window shows the
+/// output it lost under a shell that is plainly new.
+///
+/// `banner` is the line drawn between the two, and it comes from the client
+/// because the daemon has no locale — it serves a GUI that might be running in
+/// any language, and a CLI whose output is always English. A client that has
+/// nothing to say can leave it out; the reset sequence is emitted either way.
+///
+/// Old daemons decode this frame without the field and simply spawn a blank
+/// pane, which is what they did before it existed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoreFrom {
+    pub pane_id: u64,
+    #[serde(default)]
+    pub banner: Option<String>,
 }
 
 impl ClientMsg {
@@ -866,6 +898,7 @@ impl ClientMsg {
                 shell: None,
                 owner: None,
                 workspace: None,
+                restore: None,
             } => write_frame(w, kind::SPAWN, &to_json(&(cwd, size))?),
             ClientMsg::Spawn {
                 cwd,
@@ -873,6 +906,7 @@ impl ClientMsg {
                 shell: shell @ Some(_),
                 owner: None,
                 workspace: None,
+                restore: None,
             } => write_frame(w, kind::SPAWN_SHELL, &to_json(&(cwd, size, shell))?),
             ClientMsg::Spawn {
                 cwd,
@@ -880,6 +914,7 @@ impl ClientMsg {
                 shell,
                 owner,
                 workspace,
+                restore,
             } => write_frame(
                 w,
                 kind::SPAWN_OWNED,
@@ -889,6 +924,7 @@ impl ClientMsg {
                     shell: shell.clone(),
                     owner: owner.clone(),
                     workspace: workspace.clone(),
+                    restore: restore.clone(),
                 })?,
             ),
             ClientMsg::Attach { pane_id, size } => {
@@ -967,6 +1003,7 @@ impl ClientMsg {
                     shell: None,
                     owner: None,
                     workspace: None,
+                    restore: None,
                 }
             }
             kind::SPAWN_SHELL => {
@@ -977,6 +1014,7 @@ impl ClientMsg {
                     shell,
                     owner: None,
                     workspace: None,
+                    restore: None,
                 }
             }
             kind::SPAWN_OWNED => {
@@ -986,6 +1024,7 @@ impl ClientMsg {
                     shell,
                     owner,
                     workspace,
+                    restore,
                 } = from_json(&payload)?;
                 ClientMsg::Spawn {
                     cwd,
@@ -993,6 +1032,7 @@ impl ClientMsg {
                     shell,
                     owner,
                     workspace,
+                    restore,
                 }
             }
             kind::ATTACH => {
@@ -1226,6 +1266,7 @@ mod tests {
                 shell: None,
                 owner: None,
                 workspace: None,
+                restore: None,
             },
             ClientMsg::Resize(SIZE),
             ClientMsg::Input(vec![b'l', b's', b'\r']),
@@ -1280,6 +1321,7 @@ mod tests {
                 shell: None,
                 owner: None,
                 workspace: None,
+                restore: None,
             },
             ClientMsg::Spawn {
                 cwd: None,
@@ -1287,6 +1329,7 @@ mod tests {
                 shell: None,
                 owner: None,
                 workspace: None,
+                restore: None,
             },
             ClientMsg::Spawn {
                 cwd: Some(PathBuf::from("/tmp/x")),
@@ -1298,6 +1341,7 @@ mod tests {
                 }),
                 owner: None,
                 workspace: None,
+                restore: None,
             },
             ClientMsg::Spawn {
                 cwd: Some(PathBuf::from("/tmp/x")),
@@ -1305,6 +1349,7 @@ mod tests {
                 shell: None,
                 owner: Some("bda10e44-02de-44a0-8412-ec1cda2b5f5b".into()),
                 workspace: None,
+                restore: None,
             },
             ClientMsg::Spawn {
                 cwd: Some(PathBuf::from("/tmp/x")),
@@ -1312,6 +1357,7 @@ mod tests {
                 shell: None,
                 owner: None,
                 workspace: Some("ws-main".into()),
+                restore: None,
             },
             ClientMsg::Observe {
                 pane_id: 42,
@@ -1615,6 +1661,7 @@ mod tests {
             shell: None,
             owner: None,
             workspace: None,
+            restore: None,
         };
         let mut buf = Vec::new();
         msg.encode(&mut buf).unwrap();
@@ -1634,6 +1681,7 @@ mod tests {
                 shell: None,
                 owner: None,
                 workspace: None,
+                restore: None,
             }
         );
     }
@@ -1651,6 +1699,7 @@ mod tests {
             shell: Some(shell.clone()),
             owner: None,
             workspace: None,
+            restore: None,
         };
         let mut buf = Vec::new();
         msg.encode(&mut buf).unwrap();
@@ -1665,6 +1714,7 @@ mod tests {
                 shell: Some(shell),
                 owner: None,
                 workspace: None,
+                restore: None,
             }
         );
     }
@@ -1681,6 +1731,7 @@ mod tests {
             }),
             owner: Some("bda10e44-02de-44a0-8412-ec1cda2b5f5b".into()),
             workspace: Some("ws-7".into()),
+            restore: None,
         };
         let mut buf = Vec::new();
         msg.encode(&mut buf).unwrap();
@@ -1710,6 +1761,7 @@ mod tests {
                 shell: None,
                 owner: None,
                 workspace: None,
+                restore: None,
             }
         );
     }
@@ -1722,6 +1774,7 @@ mod tests {
             shell: None,
             owner: None,
             workspace: Some("ws-main".into()),
+            restore: None,
         };
         let mut buf = Vec::new();
         msg.encode(&mut buf).unwrap();

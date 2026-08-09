@@ -1387,6 +1387,17 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::Replace => "置き換える",
         L10nKey::SftpErrorInvalidOctalMode => "無効な 8 進数モードです",
+        L10nKey::PaneRestoredScreenBanner => {
+            "復元された画面 — 以下は新しいシェルで、これより上のものは動いていません"
+        }
+        L10nKey::SettingsPersistScrollback => "ペインの出力をディスクに残す",
+        L10nKey::SettingsPersistScrollbackDescription => {
+            "バックグラウンドサービスが引き継ぎの間もなく落ちた場合（クラッシュや再起動）、\
+             ペインは空ではなく、そこにあった内容を表示して戻ります。プロセスはいずれにせよ失われ、\
+             ここで戻るのは画面だけです。各ペインの出力の末尾を上限つきでディスクに書き込みます。\
+             そこに表示されたもの（トークン、`env` の出力、エージェントの記録）も含みます。\
+             オフなら、その出力はメモリ上にしか存在しません。"
+        }
         L10nKey::PanelMoreChangedFiles => {
             "… さらに変更されたファイル {count} 個 — 表示するには `git diff` を実行してください"
         }

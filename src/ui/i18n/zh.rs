@@ -1273,6 +1273,15 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpReplaceBody => "{names} 在这个文件夹里已经存在，上传会覆盖它们。",
         L10nKey::Replace => "覆盖",
         L10nKey::SftpErrorInvalidOctalMode => "无效的八进制模式",
+        L10nKey::PaneRestoredScreenBanner => {
+            "已恢复的画面 —— 下面是新的 shell，上面的内容都已不在运行"
+        }
+        L10nKey::SettingsPersistScrollback => "把面板输出留在磁盘上",
+        L10nKey::SettingsPersistScrollbackDescription => {
+            "后台服务如果没来得及交接就没了（崩溃、重启机器），面板回来时会显示原先的内容，而不是一片空白。\
+             进程无论如何都救不回来，这里恢复的只是画面。它会把每个面板输出的末尾（有上限）写到磁盘上，\
+             包括那里打印过的一切：token、`env` 的输出、agent 的对话记录。关掉则这些输出只存在于内存里。"
+        }
         L10nKey::PanelMoreChangedFiles => "…还有 {count} 个变更文件——运行 git diff 查看。",
         L10nKey::PanelUntracked => "{count} 个未跟踪文件",
         L10nKey::AppMenuAbout => "关于 tty7",

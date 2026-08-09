@@ -856,6 +856,18 @@ impl TerminalView {
         let (terminal, pane_id, shell_spec) = match attached {
             Some(parts) => parts,
             None => {
+                // The pane this one stands in for is gone, but its screen may
+                // not be: if the daemon kept a copy, the new pane opens showing
+                // it, under a line saying the shell below is new. Asking costs
+                // nothing when there is no copy — the daemon answers by
+                // spawning the blank pane it would have spawned anyway.
+                let restore = restore_pane.map(|pane_id| crate::daemon::protocol::RestoreFrom {
+                    pane_id,
+                    banner: Some(
+                        crate::ui::i18n::t(crate::ui::i18n::L10nKey::PaneRestoredScreenBanner)
+                            .to_string(),
+                    ),
+                });
                 let (terminal, id) = RemoteTerminal::spawn_on(
                     &route,
                     TermSize::new(80, 24),
@@ -864,6 +876,7 @@ impl TerminalView {
                     working_directory,
                     shell.clone(),
                     owner.map(|id| id.to_string()),
+                    restore,
                 )?;
                 (terminal, id, shell)
             }

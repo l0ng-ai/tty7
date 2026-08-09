@@ -160,6 +160,10 @@ impl PaneSession {
             shell,
             owner,
             workspace,
+            // Restoring a dead pane's screen is a window concern: it exists to
+            // put a workspace back the way its user left it. Nothing that
+            // scripts panes through this library has a screen to put back.
+            restore: None,
         }
         .encode(&mut stream)?;
         let mut session = PaneSession::over(stream, 0)?;

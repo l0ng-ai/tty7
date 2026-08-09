@@ -268,6 +268,17 @@ pub struct Config {
     pub agent_commands: HashMap<String, String>,
     #[serde(default = "default_true")]
     pub restore_agent_sessions: bool,
+    /// Keep a capped tail of each pane's output on disk, so a daemon that dies
+    /// without getting to hand off — a crash, a `kill -9`, a reboot — comes
+    /// back to panes that still show what was in them.
+    ///
+    /// Off by default, and the default is the interesting part. What the ring
+    /// holds is whatever the pane printed, which routinely includes secrets:
+    /// an echoed token, the output of `env`, an agent's transcript. In memory
+    /// they die with the daemon. Writing them down is the entire feature and
+    /// also its entire cost, so it is the user who decides to pay it.
+    #[serde(default)]
+    pub persist_scrollback: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -524,6 +535,7 @@ impl Default for Config {
             command_frecency: HashMap::new(),
             agent_commands: HashMap::new(),
             restore_agent_sessions: true,
+            persist_scrollback: false,
         }
     }
 }

@@ -69,6 +69,10 @@ impl Registry {
         }
     }
 
+    fn all(&self) -> Vec<Arc<DaemonPane>> {
+        self.panes.lock().unwrap().values().cloned().collect()
+    }
+
     fn list(&self) -> Vec<crate::daemon::protocol::PaneInfo> {
         self.panes
             .lock()
@@ -133,6 +137,128 @@ fn spawn_orphan_sweep(registry: Arc<Registry>) {
     if let Err(e) = spawned {
         log::warn!("could not start the orphan-pane sweep: {e}");
     }
+}
+
+/// Pane ids that something can still ask to see again: every pane a workspace
+/// tree names, plus every pane this daemon is running.
+///
+/// The registry half matters for a pane spawned since the tree was last
+/// written — without it a sweep landing in that window would delete the
+/// snapshot of a pane that is very much alive, and the writer would put it
+/// back seconds later.
+fn restorable_pane_ids(registry: &Registry) -> std::collections::HashSet<u64> {
+    let mut ids: std::collections::HashSet<u64> =
+        registry.list().into_iter().map(|p| p.pane_id).collect();
+    if let Some(store) = crate::core::machine::observed_store() {
+        ids.extend(
+            store
+                .machine()
+                .workspaces
+                .iter()
+                .flat_map(|w| w.tabs.iter())
+                .flat_map(|t| t.root.pane_ids()),
+        );
+    }
+    ids
+}
+
+/// Keep each pane's stored screen roughly current.
+///
+/// Only panes whose ring has moved are written, so an idle machine does no IO
+/// at all, and the busy pane that most needs a fresh copy is the one that gets
+/// it. Turning the setting off mid-run is honoured here too: the next tick
+/// clears the directory rather than leaving terminal output on disk that the
+/// user has just said they do not want stored.
+fn spawn_scrollback_writer(registry: Arc<Registry>) {
+    let spawned = std::thread::Builder::new()
+        .name("tty7-scrollback".into())
+        .spawn(move || {
+            let mut marks: HashMap<u64, u64> = HashMap::new();
+            let mut storing = crate::daemon::scrollback::enabled();
+            loop {
+                std::thread::sleep(crate::daemon::scrollback::SNAPSHOT_INTERVAL);
+                let enabled = crate::daemon::scrollback::enabled();
+                if !enabled {
+                    if storing {
+                        log::info!("scrollback persistence turned off; dropping what was stored");
+                        crate::daemon::scrollback::sweep(&std::collections::HashSet::new());
+                        marks.clear();
+                        storing = false;
+                    }
+                    continue;
+                }
+                storing = true;
+                for pane in registry.all() {
+                    let (segments, mark) = pane.scrollback_snapshot();
+                    if marks.get(&pane.id) == Some(&mark) {
+                        continue;
+                    }
+                    crate::daemon::scrollback::save(pane.id, &segments);
+                    marks.insert(pane.id, mark);
+                }
+                crate::daemon::scrollback::sweep(&restorable_pane_ids(&registry));
+                marks.retain(|id, _| registry.get(*id).is_some());
+            }
+        });
+    if let Err(e) = spawned {
+        log::warn!("could not start the scrollback writer: {e}");
+    }
+}
+
+/// Write every pane's screen one last time, on the way out of a shutdown this
+/// process was told about.
+///
+/// The periodic writer covers the deaths nobody gets to prepare for; this
+/// covers the ones we do, and makes the copy exact rather than up to
+/// [`SNAPSHOT_INTERVAL`](crate::daemon::scrollback::SNAPSHOT_INTERVAL) stale.
+fn store_scrollback_now(registry: &Registry) {
+    if !crate::daemon::scrollback::enabled() {
+        return;
+    }
+    for pane in registry.all() {
+        let (segments, _) = pane.scrollback_snapshot();
+        crate::daemon::scrollback::save(pane.id, &segments);
+    }
+}
+
+/// Turn a client's restore request into the screen its new pane opens with.
+///
+/// The snapshot is dropped as it is handed out. It has been folded into a live
+/// pane's ring, which is where it will be persisted from now on — under that
+/// pane's own id — and a copy left behind could only ever be used to restore
+/// the same screen into a second pane.
+fn restored_screen(
+    request: crate::daemon::protocol::RestoreFrom,
+) -> Option<crate::daemon::pane::Restore> {
+    if !crate::daemon::scrollback::enabled() {
+        return None;
+    }
+    let segments = crate::daemon::scrollback::load(request.pane_id)?;
+    crate::daemon::scrollback::forget(request.pane_id);
+    if segments.is_empty() {
+        return None;
+    }
+    log::info!(
+        "pane {} is gone; its last screen is restored into a fresh pane",
+        request.pane_id
+    );
+    Some(crate::daemon::pane::Restore {
+        segments,
+        banner: request.banner,
+    })
+}
+
+/// Close a pane for good: stop it, drop it from the registry, and drop the copy
+/// of its screen.
+///
+/// A stored screen exists so a pane can survive a death nobody chose. A pane
+/// the user closed is not that; keeping its output on disk afterwards would
+/// only be a way for it to turn up in some later restore.
+fn kill_pane(registry: &Registry, pane_id: u64) {
+    if let Some(pane) = registry.remove(pane_id) {
+        pane.kill();
+    }
+    crate::daemon::scrollback::forget(pane_id);
 }
 
 fn ssh_connection_for(
@@ -280,6 +406,16 @@ fn run_with(registry: Arc<Registry>) -> anyhow::Result<()> {
     }
 
     spawn_orphan_sweep(registry.clone());
+    // Before the writer starts: a daemon that has just come up owns no panes,
+    // so everything on disk belongs to panes the machine tree either still
+    // names — those are the ones a window is about to ask to restore — or has
+    // forgotten, and the latter are nobody's to restore any more.
+    if crate::daemon::scrollback::enabled() {
+        crate::daemon::scrollback::sweep(&restorable_pane_ids(&registry));
+    } else {
+        crate::daemon::scrollback::sweep(&std::collections::HashSet::new());
+    }
+    spawn_scrollback_writer(registry.clone());
 
     for stream in listener.incoming() {
         match stream {
@@ -321,6 +457,10 @@ fn serve_sigterm(registry: Arc<Registry>) {
             let mut sig: libc::c_int = 0;
             if unsafe { libc::sigwait(&set, &mut sig) } == 0 {
                 log::info!("daemon shutting down on SIGTERM");
+                // Ahead of the kill: `drain_and_kill` hangs up every pty, and a
+                // pane whose shell has already been reaped has nothing left to
+                // photograph.
+                store_scrollback_now(&registry);
                 registry.drain_and_kill();
                 on_shutdown();
                 std::process::exit(0);
@@ -364,8 +504,10 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             shell,
             owner,
             workspace,
+            restore,
         } => {
             let id = registry.alloc_id();
+            let restore = restore.and_then(restored_screen);
             let on_dead = {
                 let registry = registry.clone();
                 move || {
@@ -377,17 +519,18 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                         .ok();
                 }
             };
-            let pane = match DaemonPane::spawn(id, cwd, size, shell, owner, workspace, on_dead) {
-                Ok(p) => p,
-                Err(e) => {
-                    let mut w = write_stream;
-                    // The daemon's own error is already a sentence; a second
-                    // "spawn failed:" in front of it only pads the one the
-                    // window ends up showing.
-                    let _ = DaemonMsg::Error(format!("{e}")).encode(&mut w);
-                    return Err(e);
-                }
-            };
+            let pane =
+                match DaemonPane::spawn(id, cwd, size, shell, owner, workspace, restore, on_dead) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let mut w = write_stream;
+                        // The daemon's own error is already a sentence; a second
+                        // "spawn failed:" in front of it only pads the one the
+                        // window ends up showing.
+                        let _ = DaemonMsg::Error(format!("{e}")).encode(&mut w);
+                        return Err(e);
+                    }
+                };
             registry.insert(pane.clone());
 
             {
@@ -484,9 +627,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
         }
 
         ClientMsg::Kill { pane_id } => {
-            if let Some(pane) = registry.remove(pane_id) {
-                pane.kill();
-            }
+            kill_pane(&registry, pane_id);
             Ok(())
         }
 
@@ -797,9 +938,8 @@ fn run_stream(
                     if pane_id == id {
                         killed = true;
                         break 'conn;
-                    } else if let Some(other) = registry.remove(pane_id) {
-                        other.kill();
                     }
+                    kill_pane(&registry, pane_id);
                 }
                 _ => {}
             }
@@ -822,9 +962,7 @@ fn run_stream(
     let _ = writer.join();
 
     if killed {
-        if let Some(p) = registry.remove(id) {
-            p.kill();
-        }
+        kill_pane(&registry, id);
     } else if reclaimable {
         registry.remove(id);
     }

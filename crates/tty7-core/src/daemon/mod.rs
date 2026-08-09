@@ -8,6 +8,7 @@ pub mod protocol;
 pub(crate) mod remote;
 pub mod remote_link;
 pub mod router;
+pub mod scrollback;
 pub mod server;
 pub mod singleton;
 pub mod spawn;
