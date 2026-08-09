@@ -136,19 +136,32 @@ pub fn pane_table(machine: &Machine, only: Option<WorkspaceId>) -> String {
 /// The server's registry rather than the machine tree, so orphans appear. `held`
 /// answers which workspace holds a pane, if any; a pane with no holder is shown
 /// as `-` under WS, which is the whole point of the listing.
+///
+/// OWNER names the workspace allowed to attach to the pane, and for a pane in
+/// its own workspace's tree that is the WS beside it — so the column only
+/// speaks when the two disagree, which is the case worth reading: an orphan
+/// still remembering where it belongs, or a pane the holder cannot attach to.
 pub fn registry_table(panes: &[PaneInfo], held: &dyn Fn(u64) -> Option<String>) -> String {
     if panes.is_empty() {
         return "no panes\n".to_string();
     }
+    let short = |id: &str| -> String { id.chars().take(8).collect() };
     let rows: Vec<Vec<String>> = panes
         .iter()
         .map(|info| {
+            let holder = held(info.pane_id);
+            let owner = match (&info.owner, &holder) {
+                (None, _) => "-".to_string(),
+                (Some(owner), Some(holder)) if owner == holder => "-".to_string(),
+                (Some(owner), _) => short(owner),
+            };
             vec![
                 format!("%{}", info.pane_id),
-                held(info.pane_id)
-                    .map(|ws| ws.chars().take(8).collect())
+                holder
+                    .as_deref()
+                    .map(short)
                     .unwrap_or_else(|| "-".to_string()),
-                info.owner.clone().unwrap_or_else(|| "-".to_string()),
+                owner,
                 info.cwd
                     .as_ref()
                     .map(|p| p.display().to_string())
@@ -304,6 +317,55 @@ mod tests {
         assert!(
             rendered.lines().all(|l| l == l.trim_end()),
             "trailing spaces break naive downstream parsing"
+        );
+    }
+
+    #[test]
+    fn owner_speaks_only_when_it_disagrees_with_the_workspace_holding_the_pane() {
+        let held = "9fd8072f-465c-4016-9a81-8143bff1240c";
+        let elsewhere = "76698a44-3f13-4961-8fed-90d0b3defff1";
+        let pane = |id: u64, owner: Option<&str>| PaneInfo {
+            pane_id: id,
+            cwd: None,
+            title: "zsh".into(),
+            alive: true,
+            owner: owner.map(str::to_string),
+        };
+        let rendered = registry_table(
+            &[
+                pane(1, Some(held)),
+                pane(2, Some(elsewhere)),
+                pane(3, None),
+                pane(4, Some(elsewhere)),
+            ],
+            &|id| (id != 4).then(|| held.to_string()),
+        );
+
+        let owner_of = |pane: &str| -> String {
+            rendered
+                .lines()
+                .find(|line| line.starts_with(pane))
+                .unwrap_or_else(|| panic!("{pane} is listed: {rendered}"))
+                .split_whitespace()
+                .nth(2)
+                .expect("PANE WS OWNER")
+                .to_string()
+        };
+        assert_eq!(
+            owner_of("%1"),
+            "-",
+            "repeating the WS beside it says nothing"
+        );
+        assert_eq!(
+            owner_of("%2"),
+            "76698a44",
+            "a holder that may not attach is the whole reason to look"
+        );
+        assert_eq!(owner_of("%3"), "-", "nobody claims it");
+        assert_eq!(
+            owner_of("%4"),
+            "76698a44",
+            "an orphan still remembers where it belongs"
         );
     }
 
