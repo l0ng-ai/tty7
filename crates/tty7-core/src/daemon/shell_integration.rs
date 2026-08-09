@@ -829,7 +829,10 @@ fn setup_wsl(args: &[String]) -> Option<Injection> {
         argv.push("--cd".to_string());
         argv.push(cd);
     }
-    argv.push("--".to_string());
+    // `--` forwards the command through the distro's default shell, which makes
+    // shells such as fish parse the POSIX bootstrap before `sh` can receive it.
+    // `--exec` bypasses that shell and executes the bootstrap interpreter itself.
+    argv.push("--exec".to_string());
     argv.push("sh".to_string());
     argv.push("-c".to_string());
     argv.push(WSL_EXEC_SCRIPT.to_string());
@@ -1259,7 +1262,10 @@ mod tests {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
-            if String::from_utf8_lossy(&out).contains("133;D") {
+            // Fish can emit an initial OSC 133 D while drawing its first prompt.
+            // Wait for the failing command's status so the prompt cycle under test
+            // has actually completed instead of accepting that startup marker.
+            if String::from_utf8_lossy(&out).contains("133;D;1") {
                 break;
             }
         }
@@ -1377,7 +1383,11 @@ mod tests {
         let inj = setup(Some("wsl.exe"), &args, false)
             .expect("setup must not depend on reaching the distro");
 
-        let sep = inj.args.iter().position(|a| a == "--").expect("`--`");
+        let sep = inj
+            .args
+            .iter()
+            .position(|a| a == "--exec")
+            .expect("`--exec`");
         assert_eq!(
             &inj.args[..sep],
             &[
