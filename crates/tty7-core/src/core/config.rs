@@ -125,6 +125,8 @@ pub struct Config {
     pub theme_follow_system: bool,
     pub theme_preset_light: String,
     pub theme_preset_dark: String,
+    #[serde(default = "default_true")]
+    pub theme_legible_palette: bool,
     pub window_opacity: Option<f32>,
     pub window_blur: Option<bool>,
     #[serde(default = "default_true")]
@@ -434,6 +436,7 @@ impl Default for Config {
             theme_follow_system: false,
             theme_preset_light: "light".to_string(),
             theme_preset_dark: "dark".to_string(),
+            theme_legible_palette: true,
             window_opacity: None,
             window_blur: None,
             dim_inactive_panes: true,
@@ -620,6 +623,39 @@ pub fn config_path(file: &str) -> Option<PathBuf> {
 
 pub fn strip_bom(text: &str) -> &str {
     text.strip_prefix('\u{FEFF}').unwrap_or(text)
+}
+
+/// Sets a corrupt state file aside (copied, the original left in place) so the
+/// caller can fall back to defaults without silently destroying what was there.
+pub(crate) fn quarantine(path: &std::path::Path) {
+    let aside = quarantine_path(path);
+    match std::fs::copy(path, &aside) {
+        Ok(_) => log::warn!("the previous contents were kept at {}", aside.display()),
+        Err(e) => log::warn!("could not keep a copy at {}: {e}", aside.display()),
+    }
+}
+
+/// Like [`quarantine`], but moves the file out of the way — for files that
+/// cannot even be read, where copying would fail too.
+pub(crate) fn quarantine_by_rename(path: &std::path::Path) {
+    let aside = quarantine_path(path);
+    match std::fs::rename(path, &aside) {
+        Ok(()) => log::warn!("the previous contents were moved to {}", aside.display()),
+        Err(e) => log::warn!("could not move the file to {}: {e}", aside.display()),
+    }
+}
+
+fn quarantine_path(path: &std::path::Path) -> PathBuf {
+    const MAX_QUARANTINED: u32 = 8;
+
+    let base = path.with_extension("json.corrupt");
+    if !base.exists() {
+        return base;
+    }
+    (1..MAX_QUARANTINED)
+        .map(|n| path.with_extension(format!("json.corrupt.{n}")))
+        .find(|candidate| !candidate.exists())
+        .unwrap_or(base)
 }
 
 pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -844,6 +880,8 @@ mod tests {
         assert_eq!(cfg.theme_preset_light, "light");
         assert_eq!(cfg.theme_preset_dark, "dark");
         assert_eq!(cfg.theme_preset, "dracula");
+        // The palette rescue defaults on, and survives a round trip either way.
+        assert!(cfg.theme_legible_palette);
 
         let mut cfg = Config::default();
         cfg.theme_follow_system = true;
@@ -854,6 +892,12 @@ mod tests {
         assert!(back.theme_follow_system);
         assert_eq!(back.theme_preset_light, "one_light");
         assert_eq!(back.theme_preset_dark, "dracula");
+
+        let off: Config = serde_json::from_str(r#"{"theme_legible_palette":false}"#).unwrap();
+        assert!(!off.theme_legible_palette);
+        let json = serde_json::to_string(&off).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert!(!back.theme_legible_palette);
     }
 
     #[test]

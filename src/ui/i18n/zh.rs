@@ -24,7 +24,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::HomeSplitRight => "向右分屏",
         L10nKey::HomeSplitDown => "向下分屏",
         L10nKey::HomeSettings => "设置…",
-        L10nKey::TrayQuitStopServer => "退出并停止服务器…",
+        L10nKey::TrayQuitStopServer => "退出并停止 server…",
         L10nKey::Reconnect => "重新连接",
         L10nKey::None => "无。",
         L10nKey::TryAgain => "重试",
@@ -47,9 +47,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RememberKeychain => "记住（钥匙串）",
         L10nKey::Cancel => "取消",
         L10nKey::Close => "关闭",
-        L10nKey::QuitStopServerTitle => "退出并停止服务器？",
+        L10nKey::QuitStopServerTitle => "退出并停止 server？",
         L10nKey::QuitStopServerBody => {
-            "这会退出 tty7 并停止后台服务器，所有仍在运行的 shell 都会被终止。你的标签页和布局会被保留，下次启动时以全新的 shell 重新打开。（普通退出会保持 shell 运行。）"
+            "这会退出 tty7 并停止后台 server，所有仍在运行的 shell 都会被终止。你的标签页和布局会被保留，下次启动时以全新的 shell 重新打开。（普通退出会保持 shell 运行。）"
         }
         L10nKey::QuitAndStop => "退出并停止",
         L10nKey::CloseSshConnectionTitle => "关闭这个 SSH 连接？",
@@ -331,6 +331,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSyncWithSystem => "跟随系统",
         L10nKey::SettingsSyncWithSystemDesc => "跟随操作系统外观，并分别使用浅色与深色主题。",
+        L10nKey::SettingsLegiblePalette => "低对比度颜色纠偏",
+        L10nKey::SettingsLegiblePaletteDesc => "自动把主题背景上对比度不足的颜色调整到可读级别。",
         L10nKey::SettingsChangeTheme => "更换主题",
         L10nKey::SettingsThemes => "主题",
         L10nKey::SettingsThemePanelManual => "更改当前主题。",
@@ -433,14 +435,17 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsUpdateChannelStable => "Stable",
         L10nKey::SettingsUpdateChannelNightly => "Nightly",
-        L10nKey::SettingsDaemonStale => "后台服务仍运行在 {build}。",
+        L10nKey::SettingsDaemonStale => "后台 server 仍运行在 {build}。",
         L10nKey::SettingsDaemonStaleDesc => {
-            "tty7 是原地升级的，界面已经是新版本，但各个 pane 仍由旧版本的后台服务托管。重启服务才能用上新版本，代价是 pane 里正在跑的进程全部结束——shell、agent、SSH 会话都算。不急，挑个 pane 空闲的时候再重启。"
+            "tty7 是原地升级的，界面已经是新版本，但各个 pane 仍由旧版本的后台 server 托管。重启 server 才能用上新版本，代价是 pane 里正在跑的进程全部结束——shell、agent、SSH 会话都算。不急，挑个 pane 空闲的时候再重启。"
         }
-        L10nKey::SettingsDaemonStaleRestart => "重启服务",
+        L10nKey::SettingsDaemonStaleRestart => "重启 server",
         L10nKey::UpdateDialogTitle => "有可用更新",
         L10nKey::UpdateDialogDetail => {
-            "tty7 {version} 已发布，你现在是 {current}。安装会重启应用；后台服务不动，pane 里开着的东西都还在。"
+            "tty7 {version} 已发布，你现在是 {current}。安装会重启应用；后台 server 不动，pane 里开着的东西都还在。"
+        }
+        L10nKey::UpdateDialogDetailWindows => {
+            "tty7 {version} 已发布，你现在是 {current}。安装会重启应用和后台 server：pane 里正在运行的进程会被结束，标签页和布局会以全新的 shell 恢复。"
         }
         L10nKey::UpdateDialogDetailManual => "tty7 {version} 已发布，你现在是 {current}。{hint}",
         L10nKey::UpdateDialogCannotSelfUpdate => "这份安装无法自行更新。",
@@ -479,11 +484,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "启动时将自带的 `tty7` 命令加入 PATH，让脚本和编码 agent 可在任意终端驱动 tty7。在 tty7 窗格内两种情况都可用。如果你自己构建或安装了 `tty7` 且不希望被遮蔽，请关闭此选项。下次启动时生效。"
         }
         L10nKey::SettingsInstallCliOnPath => "将 `tty7` 命令安装到 PATH",
-        L10nKey::SettingsServer => "服务器",
+        L10nKey::SettingsServer => "Server",
         L10nKey::SettingsServerDesc => {
-            "重启在后台维持 shell 运行的服务器。这会结束这台计算机上所有正在运行的 shell；你的标签页和布局会以全新的 shell 重新打开。"
+            "重启在后台维持 shell 运行的 server。这会结束这台计算机上所有正在运行的 shell；你的标签页和布局会以全新的 shell 重新打开。"
         }
-        L10nKey::SettingsRestartServer => "重启服务器…",
+        L10nKey::SettingsRestartServer => "重启 server…",
         L10nKey::SettingsAppHttpProxy => "更新代理",
         L10nKey::SettingsAppHttpProxyDesc => {
             "仅用于 tty7 自身的更新检查和下载，不影响面板中运行的程序。留空则跟随系统代理。"
@@ -495,6 +500,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentOpencode => "OpenCode",
         L10nKey::SettingsAgentPi => "Pi",
         L10nKey::SettingsAgentGrokBuild => "Grok Build",
+        L10nKey::SettingsAgentOhMyPi => "Oh My Pi",
         L10nKey::SettingsSearchAboutKeywords => {
             "关于 版本 许可证 致谢 构建 更新 检查 github about version license credits update"
         }
@@ -605,6 +611,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchOptionAsMetaKeywords => {
             "Option作为Meta 修饰键 alt option meta 转义 escape macos keyboard modifier"
         }
+        L10nKey::SettingsSearchOhMyPiKeywords => {
+            "Oh My Pi agent 集成 扩展 安装 omp oh my pi agent integration extension install"
+        }
         L10nKey::SettingsSearchPiKeywords => {
             "Pi agent 集成 扩展 安装 pi agent integration extension install"
         }
@@ -644,6 +653,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchSyncWithSystemKeywords => {
             "主题 跟随系统 自动 深色 浅色 外观 模式 theme dark light auto follow system"
         }
+        L10nKey::SettingsSearchLegiblePaletteKeywords => {
+            "颜色 低对比度 可读 纠偏 调色板 修正 contrast legible palette parameter"
+        }
         L10nKey::SettingsSearchTabBarPositionKeywords => {
             "标签栏位置 标签栏 侧边栏 左侧 顶部 布局 tab bar position tabs sidebar left top"
         }
@@ -671,7 +683,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherNoMatch => "没有匹配的工作区或机器。",
         L10nKey::AddSshHost => "添加 SSH 主机…",
         L10nKey::ClickForNewWindow => "点击打开新窗口",
-        L10nKey::RestartServer => "重启服务器",
+        L10nKey::RestartServer => "重启 server",
         L10nKey::OtherMachines => "其他机器",
         L10nKey::Ok => "确定",
         L10nKey::SftpNoTransfers => "还没有传输任务。",
@@ -845,26 +857,26 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
              请检查其 SSH 主机配置或 ~/.ssh/config 条目是否仍然存在。"
         }
         L10nKey::RemoteThisComputer => "本机",
-        L10nKey::RemoteRestartTitle => "重启 \"{machine}\" 上的 tty7 服务器？",
+        L10nKey::RemoteRestartTitle => "重启 \"{machine}\" 上的 tty7 server？",
         L10nKey::RemoteRestartBody => {
             "这将停止 {machine} 上的所有 shell——其中仍在运行的任何内容都会被终止，\
              包括此窗口未显示的 shell。工作区和布局会被保留，并以全新的 shell 恢复。"
         }
         L10nKey::RemoteReplaceBody => {
-            "tty7 会在 {machine} 上安装匹配的服务器端并启动它。\n\
+            "tty7 会在 {machine} 上安装匹配的 server 并启动它。\n\
              \n\
              {machine} 上运行的所有会话都会结束，包括此窗口未连接的会话。"
         }
-        L10nKey::RemoteRestartFailedTitle => "\"{machine}\" 上的 tty7 服务器未被重启",
+        L10nKey::RemoteRestartFailedTitle => "\"{machine}\" 上的 tty7 server 未被重启",
         L10nKey::RemoteRestartFailedBody => {
             "{error}\n\
              \n\
-             那里仍在运行的会话用的还是旧版本。如果它们已经结束，重新连接就会启动此版本的服务器。"
+             那里仍在运行的会话用的还是旧版本。如果它们已经结束，重新连接就会启动此版本的 server。"
         }
         L10nKey::RemoteHostUnreachable => "无法连接到 {machine}：{error}",
-        L10nKey::RemoteInstallTitle => "在 \"{machine}\" 上安装 tty7 服务器？",
+        L10nKey::RemoteInstallTitle => "在 \"{machine}\" 上安装 tty7 server？",
         L10nKey::RemoteInstallDetail => {
-            "tty7 会将其服务器二进制文件写入 {machine}，以便本机可以在那里托管\
+            "tty7 会将其 server 二进制文件写入 {machine}，以便本机可以在那里托管\
              工作区。{machine} 上的其他内容不会被修改，也不会使用 sudo。\n\
              \n\
              {path_label}\u{2003}{path}\n\
@@ -882,50 +894,50 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteInstallShaLabel => "SHA-256",
         L10nKey::RemoteInstallSilentUpgrades => "此后在该机器上的升级将静默安装。",
         L10nKey::RemoteInstallBytes => "字节",
-        L10nKey::RemoteMismatchTitle => "更新 \"{machine}\" 上的 tty7 服务器端？",
+        L10nKey::RemoteMismatchTitle => "更新 \"{machine}\" 上的 tty7 server？",
         L10nKey::RemoteMismatchDetail => {
             "{machine} 正在使用 {running} 提供 tty7 会话，该版本使用的协议无法被\
-             此客户端（{wanted}）识别。tty7 已在那里安装了匹配的服务器端，\
+             此客户端（{wanted}）识别。tty7 已在那里安装了匹配的 server，\
              但正在运行的是你当前会话所在的版本。\n\
              \n\
              {replace_server}\u{2003}会将其替换为 {wanted} 并结束其托管的所有会话。\n\
              {cancel}\u{2003}会保持 {machine} 现状不变。此窗口将不会连接。"
         }
-        L10nKey::RemoteMismatchReplaceServer => "更新服务器端",
+        L10nKey::RemoteMismatchReplaceServer => "更新 server",
         L10nKey::RemoteMismatchUnknownBuild => "未知构建",
         L10nKey::RemoteMismatchUnknownBuildFromExe => "未知构建（来自 {exe}）",
         L10nKey::RemoteServerOutdated => {
-            "{machine} 上的 tty7 服务器端太旧（{build}），当前这份 tty7 连不上它。\
+            "{machine} 上的 tty7 server 太旧（{build}），当前这份 tty7 连不上它。\
              更新它才能连接。"
         }
         L10nKey::RemoteServerTooNew => {
-            "{machine} 上的 tty7 服务器端（{build}）比当前这份 tty7 还新。\
-             请更新本机的 tty7，或把那边的服务器端替换成匹配的版本。"
+            "{machine} 上的 tty7 server（{build}）比当前这份 tty7 还新。\
+             请更新本机的 tty7，或把那边的 server 替换成匹配的版本。"
         }
-        L10nKey::RemoteDaemonStartFailed => "无法启动 tty7 本地服务器：{error}",
-        L10nKey::RemoteDaemonUnreachable => "无法连接到 tty7 本地服务器：{error}",
+        L10nKey::RemoteDaemonStartFailed => "无法启动 tty7 本地 server：{error}",
+        L10nKey::RemoteDaemonUnreachable => "无法连接到 tty7 本地 server：{error}",
         L10nKey::RemoteDaemonTooOld => {
-            "此机器上的 tty7 守护进程版本较旧，无法重启 {machine} 上的服务器。\
+            "此机器上的 tty7 守护进程版本较旧，无法重启 {machine} 上的 server。\
              请退出 tty7（这会停止守护进程）并重新打开，然后重试。"
         }
         L10nKey::RemoteProfileMissing => "该已保存的 SSH 主机配置已不存在",
         L10nKey::RemoteAliasMissing => "`{alias}` 已不再位于 ~/.ssh/config 中",
         L10nKey::RemoteWslNoSsh => "WSL 工作区没有 SSH 连接",
         L10nKey::RemoteLocalStdioNoSsh => "本地 --stdio 工作区没有 SSH 连接",
-        L10nKey::RemoteHostNotTty7 => "{machine} 已响应，但并非作为 tty7 服务器：{error}",
+        L10nKey::RemoteHostNotTty7 => "{machine} 已响应，但并非作为 tty7 server：{error}",
         L10nKey::RemoteWorkspaceListFailed => "已连接到 {machine}，但其工作区列表获取失败：{error}",
-        L10nKey::RemoteServerRestartFailed => "无法重启 {machine} 上的 tty7 服务器：{error}",
+        L10nKey::RemoteServerRestartFailed => "无法重启 {machine} 上的 tty7 server：{error}",
         L10nKey::RemoteNoRouteToHost => "tty7 已无法到达 {machine}",
-        L10nKey::RemoteMachineTreeUnexpectedReply => "服务器用 {reply} 回复了机器树请求",
+        L10nKey::RemoteMachineTreeUnexpectedReply => "server 用 {reply} 回复了机器树请求",
         L10nKey::RemoteMismatchVersionFromExe => "{version}（来自 {exe}）",
         L10nKey::AppNoRunningCodingAgent => {
             "未找到运行中的编码 agent——请先在某个窗格中启动一个（claude、codex 等）。"
         }
         L10nKey::SwitcherThisComputer => "本机",
-        L10nKey::SwitcherRestartingServer => "正在重启 tty7 服务器…",
-        L10nKey::SwitcherDownloadingServerWithTotal => "正在下载 tty7 服务器… {done} / {total}",
-        L10nKey::SwitcherDownloadingServerNoTotal => "正在下载 tty7 服务器… {done}",
-        L10nKey::SwitcherCopyingServer => "正在复制 tty7 服务器… {done} / {total}",
+        L10nKey::SwitcherRestartingServer => "正在重启 tty7 server…",
+        L10nKey::SwitcherDownloadingServerWithTotal => "正在下载 tty7 server… {done} / {total}",
+        L10nKey::SwitcherDownloadingServerNoTotal => "正在下载 tty7 server… {done}",
+        L10nKey::SwitcherCopyingServer => "正在复制 tty7 server… {done} / {total}",
         L10nKey::SwitcherThisWindow => "当前窗口",
         L10nKey::SwitcherOpen => "已打开",
         L10nKey::SwitcherDisconnect => "断开连接",
@@ -949,7 +961,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SshPromptSubmit => "提交",
         L10nKey::HostOpsError => "{context}：{error}",
         L10nKey::TreeWindowOpenedEmpty => {
-            "这个窗口的服务器没有交出标签页，所以窗口是空的。什么都没丢，它一响应就会回来。如果一直不回来，在命令面板里执行「重启服务器」。"
+            "这个窗口的 server 没有交出标签页，所以窗口是空的。什么都没丢，它一响应就会回来。如果一直不回来，在命令面板里执行「重启 server」。"
         }
         L10nKey::CmdGroupTabsPanes => "标签页与窗格",
         L10nKey::CmdGroupWorkspaces => "工作区",
@@ -1034,29 +1046,29 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdDocumentation => "文档",
         L10nKey::CmdJoinDiscord => "加入 Discord",
         L10nKey::CmdReportIssue => "报告问题…",
-        L10nKey::CmdRestartServer => "重启服务器…",
+        L10nKey::CmdRestartServer => "重启 server…",
         L10nKey::CmdRestartServerSubtitle => "结束所有运行中的 shell；保留布局",
         L10nKey::CmdQuitTty7 => "退出 tty7",
         L10nKey::CmdQuitTty7Subtitle => "shell 保持运行",
         L10nKey::CmdQuickConnect => "连接到 \"{target}\"",
         L10nKey::CmdQuickConnectSaveProfile => "将 \"{target}\" 保存为主机配置…",
         L10nKey::CmdRecent => "最近使用",
-        L10nKey::AppRestartServerTitle => "重启服务器？",
+        L10nKey::AppRestartServerTitle => "重启 server？",
         L10nKey::AppRestartServerMismatchDetail => {
-            "服务器是 v{build}，协议 {protocol}；此应用使用 {ours}。两者无法对话，标签页取不出来。\n\n退出：什么都不变，服务器和 shell 继续运行。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
+            "server 是 v{build}，协议 {protocol}；此应用使用 {ours}。两者无法对话，标签页取不出来。\n\n退出：什么都不变，server 和 shell 继续运行。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
         }
         L10nKey::AppRestartServerDialectDetail => {
-            "服务器是 v{build}：control 方言 v{dialect}，而此应用使用 v{ours}。它交不出标签页，所以每个窗口都开成空的。\n\n退出：什么都不变，服务器和 shell 继续运行。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
+            "server 是 v{build}：control 方言 v{dialect}，而此应用使用 v{ours}。它交不出标签页，所以每个窗口都开成空的。\n\n退出：什么都不变，server 和 shell 继续运行。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
         }
         L10nKey::AppRestartServerDialectNewerDetail => {
-            "服务器是 v{build}：control 方言 v{dialect}，而此应用使用 v{ours}。它交不出标签页，所以每个窗口都开成空的。\n\n退出并装上更新的构建：真正的解法，shell 全都还在。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
+            "server 是 v{build}：control 方言 v{dialect}，而此应用使用 v{ours}。它交不出标签页，所以每个窗口都开成空的。\n\n退出并装上更新的构建：真正的解法，shell 全都还在。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
         }
         L10nKey::AppRestartServerOldDetail => {
-            "服务器早于版本握手，此应用无从得知它说的是什么。\n\n退出：什么都不变，服务器和 shell 继续运行。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
+            "server 早于版本握手，此应用无从得知它说的是什么。\n\n退出：什么都不变，server 和 shell 继续运行。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
         }
         L10nKey::AppRestart => "重启",
-        L10nKey::AppRestartServerNotSsh => {
-            "tty7 只能重启通过 SSH 连接的机器上的服务器。{label} 由本机提供服务——请改为停止其工作区。"
+        L10nKey::AppRestartServerNoServer => {
+            "{label} 上没有 tty7 自己的 server 可重启——它是本机通过 --stdio 运行的程序。请改为停止其工作区。"
         }
         L10nKey::AppRestartServerBody => {
             "这会停止本机上所有正在运行的 shell——其中仍在运行的任何内容都会被终止。你的标签页和布局会被保留，并以全新的 shell 重新打开。"
@@ -1114,7 +1126,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppKeybindingDisplacedNote => {
             "{action} 占用了原属于 {previous} 的快捷键，{previous} 现在没有快捷键了。"
         }
-        L10nKey::AppLocalServerName => "本地服务器",
+        L10nKey::AppLocalServerName => "本地 server",
         L10nKey::AppSshParseUnbalancedQuotes => "SSH 命令中的引号不匹配",
         L10nKey::AppSshParseNoRemoteCommands => "此处不支持远程命令",
         L10nKey::AppSshParseFlagNeedsValue => "-{flag} 需要一个值",
@@ -1194,7 +1206,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuKeyboardShortcuts => "键盘快捷键",
         L10nKey::AppMenuJoinDiscord => "加入 Discord",
         L10nKey::AppMenuReportIssue => "报告问题…",
-        L10nKey::AppMenuRestartServer => "重启服务器…",
+        L10nKey::AppMenuRestartServer => "重启 server…",
         L10nKey::WindowUntitled => "未命名",
         L10nKey::TrayShowTty7 => "显示 tty7",
         L10nKey::TrayNotifications => "通知",

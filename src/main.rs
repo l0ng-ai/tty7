@@ -143,6 +143,21 @@ fn open_path_from(
     None
 }
 
+/// The directory an installer is about to replace, from
+/// `--stop-daemon --update-install-dir <dir>`. Meaningful only next to
+/// `--stop-daemon`; the caller checks that flag first.
+#[cfg(windows)]
+fn update_install_dir_from(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    while let Some(arg) = args.next() {
+        if arg == std::ffi::OsStr::new("--update-install-dir") {
+            return args.next().map(Into::into);
+        }
+    }
+    None
+}
+
 /// `Some(true)` to register the Explorer verbs, `Some(false)` to remove them.
 fn explorer_menu_action_from(args: &[std::ffi::OsString]) -> Option<bool> {
     args.iter().find_map(|arg| match arg.as_os_str() {
@@ -343,6 +358,28 @@ fn main() {
         .iter()
         .any(|arg| arg == std::ffi::OsStr::new("--stop-daemon"))
     {
+        // An installer about to replace `dir` says so, and gets more than a
+        // stop: orphaned ConPTY hosts and anything else still running from
+        // that directory are terminated, and the call does not return until
+        // the images there are actually replaceable (or says why they are
+        // not). Invoked by the Inno PrepareToInstall step and the updater.
+        #[cfg(windows)]
+        if let Some(dir) = update_install_dir_from(args.iter().cloned()) {
+            // Held in the *parent's* name: this helper returns in seconds,
+            // but the Setup (or uninstaller) that invoked it keeps replacing
+            // files in `dir` until it exits — and a daemon spawned in that
+            // window would relock them. The guard needs no clearing; it goes
+            // stale the moment that parent is gone.
+            tty7_core::daemon::update_guard::hold_for_parent();
+            if let Err(error) = crate::daemon::spawn::stop_for_update(&dir) {
+                log::error!(
+                    "preparing {} for replacement failed: {error}",
+                    dir.display()
+                );
+                std::process::exit(1);
+            }
+            return;
+        }
         crate::daemon::spawn::stop();
         return;
     }

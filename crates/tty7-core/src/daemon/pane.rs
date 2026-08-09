@@ -146,7 +146,13 @@ fn wsl_remote_context(shell: Option<&ChosenShell>) -> Option<RemoteContext> {
     Some(RemoteContext {
         kind: RemoteKind::Wsl,
         argv: Vec::new(),
-        target: shell_integration::wsl_distro(&chosen.args).unwrap_or_default(),
+        // No `--distribution` means wsl.exe launches the default distro —
+        // name it here, so every consumer of the context (the `\\wsl$`
+        // completion route, paste-path rewriting, host labels) gets a real
+        // distro instead of an empty placeholder.
+        target: shell_integration::wsl_distro(&chosen.args)
+            .or_else(crate::core::shells::default_wsl_distro)
+            .unwrap_or_default(),
     })
 }
 
@@ -604,6 +610,36 @@ fn notify(st: &mut PaneState, msg: DaemonMsg) {
     st.observers.retain(|obs| {
         obs.gate.queued_bytes() < OBSERVER_BUDGET && obs.tx.send(msg.clone()).is_ok()
     });
+}
+
+/// Apply a resize to the pane's shared state: seal the replay ring's segment
+/// and tell every connected client the new geometry.
+///
+/// The controller's `Size` echo has to be sent while the state lock is held —
+/// output is fanned out under the same lock, so the frame lands in the stream
+/// after every byte produced at the old size and before the repaint the PTY
+/// emits once it is actually resized (which happens after the lock is
+/// released). A client that speaks `FEATURE_RESIZE_ECHO` defers its grid
+/// reflow to this marker instead of reflowing the moment its window changed:
+/// the channel can hold megabytes of old-width output (the pane gate allows
+/// 16 MiB), and reflowing ahead of it parsed old-width bytes into a new-width
+/// grid, garbling the pane on maximize during a burst of output.
+///
+/// The marker is deliberately not airtight. Old-width bytes the reader thread
+/// has read but not yet fanned out — and bytes still sitting in the kernel
+/// pipe, which conhost keeps producing until it processes the resize — land
+/// after the echo and parse at the new width. That residue is bounded by one
+/// 64 KiB read plus the pipe, cannot be attributed to a geometry from here
+/// (the bytes carry no tags and ConPTY emits no sync marker of its own), and
+/// is the same ambiguity every ConPTY terminal accepts on a mid-output
+/// resize. The echo exists to close the 16 MiB window, not that one.
+fn resize_state(st: &mut PaneState, size: WinSize) {
+    st.ring.resize(size);
+    if let Some(sub) = &st.subscriber {
+        let _ = sub.send(DaemonMsg::Size(size));
+    }
+    st.observers
+        .retain(|obs| obs.tx.send(DaemonMsg::Size(size)).is_ok());
 }
 
 /// One gated message to the controller and to every observer.
@@ -1379,12 +1415,7 @@ impl DaemonPane {
     }
 
     pub fn resize(&self, size: WinSize) {
-        {
-            let mut st = self.state.lock().unwrap();
-            st.ring.resize(size);
-            st.observers
-                .retain(|obs| obs.tx.send(DaemonMsg::Size(size)).is_ok());
-        }
+        resize_state(&mut self.state.lock().unwrap(), size);
         match &self.backend {
             PaneBackend::Pty(p) => {
                 if let Ok(master) = p.master.lock() {
@@ -1819,8 +1850,7 @@ fn apply_signals(st: &mut PaneState, signals: SniffSignals) {
         if shell_mark_capture_changed(&st.shell, &shell) {
             apply_agent(
                 st,
-                agent_from_shell_mark(&shell, crate::core::config::agent_commands_cached())
-                    .map(|agent| (agent, Vec::new())),
+                agent_from_shell_mark(&shell, crate::core::config::agent_commands_cached()),
             );
         }
         st.shell = shell.clone();
@@ -1845,11 +1875,10 @@ fn shell_mark_capture_changed(prev: &ShellState, next: &ShellState) -> bool {
 fn agent_from_shell_mark(
     shell: &ShellState,
     custom: &std::collections::HashMap<String, String>,
-) -> Option<crate::core::cli_agent::CLIAgent> {
-    shell
-        .command
-        .as_deref()
-        .and_then(|cmd| crate::core::cli_agent::CLIAgent::detect_from_command_with(cmd, custom))
+) -> Option<(crate::core::cli_agent::CLIAgent, Vec<String>)> {
+    let cmd = shell.command.as_deref()?;
+    let agent = crate::core::cli_agent::CLIAgent::detect_from_command_with(cmd, custom)?;
+    Some((agent, crate::core::cli_agent::command_argv(cmd)))
 }
 
 fn apply_agent_signals(
@@ -2479,7 +2508,8 @@ mod tests {
             wsl_remote_context(Some(&spec("wsl.exe", vec![])))
                 .expect("default distro is still WSL")
                 .target,
-            ""
+            crate::core::shells::default_wsl_distro().unwrap_or_default(),
+            "no --distribution resolves to the machine's default distro"
         );
         assert_eq!(
             wsl_remote_context(Some(&spec("wsl.exe", vec!["--distribution=Arch"])))
@@ -2827,7 +2857,10 @@ mod tests {
         assert_eq!(shell.command.as_deref(), Some("claude --help"));
         assert_eq!(
             agent_from_shell_mark(shell, &custom),
-            Some(crate::core::cli_agent::CLIAgent::Claude)
+            Some((
+                crate::core::cli_agent::CLIAgent::Claude,
+                vec!["claude".to_string(), "--help".to_string()],
+            ))
         );
 
         let d = s.feed(b"\x1b]133;D;0\x07");
@@ -2857,6 +2890,41 @@ mod tests {
 
         let c = s.feed(b"\x1b]133;C;%20%20\x07");
         assert_eq!(c.shell.last().unwrap().command, None);
+    }
+
+    #[test]
+    fn shell_mark_agent_detection_keeps_launch_argv_for_resume() {
+        let custom = std::collections::HashMap::new();
+        let mut s = OscSniffer::new();
+
+        let c = s.feed(b"\x1b]133;C;claude%20--dangerously-skip-permissions\x07");
+        let (agent, argv) = agent_from_shell_mark(c.shell.last().unwrap(), &custom).unwrap();
+        assert_eq!(agent, crate::core::cli_agent::CLIAgent::Claude);
+        assert_eq!(
+            agent.resume_command("abc-123", Some(&argv)).as_deref(),
+            Some("claude --dangerously-skip-permissions --resume abc-123")
+        );
+
+        // Case must survive capture: a lowercased path or model name would
+        // replay the wrong flags.
+        let c = s.feed(b"\x1b]133;C;claude%20--model%20Opus\x07");
+        let (agent, argv) = agent_from_shell_mark(c.shell.last().unwrap(), &custom).unwrap();
+        assert_eq!(argv, ["claude", "--model", "Opus"]);
+        assert_eq!(
+            agent.resume_command("abc", Some(&argv)).as_deref(),
+            Some("claude --model Opus --resume abc")
+        );
+
+        // PowerShell call-operator launches keep working end to end.
+        let c = s.feed(b"\x1b]133;C;%26%20%22C%3A%5Ctools%5Cclaude.exe%22%20--continue\x07");
+        let (agent, argv) = agent_from_shell_mark(c.shell.last().unwrap(), &custom).unwrap();
+        assert_eq!(agent, crate::core::cli_agent::CLIAgent::Claude);
+        assert_eq!(argv, [r"C:\tools\claude.exe", "--continue"]);
+        assert_eq!(
+            agent.resume_command("abc", Some(&argv)).as_deref(),
+            Some("claude --resume abc"),
+            "stale session flags are dropped, not replayed"
+        );
     }
 
     #[test]
@@ -3603,6 +3671,32 @@ mod tests {
             "an observer that keeps draining must stay subscribed"
         );
         assert_eq!(got, sends * chunk.len(), "and must miss no bytes");
+    }
+
+    #[test]
+    fn resize_echoes_size_to_the_controller_between_old_and_new_output() {
+        let mut st = test_state(true);
+        let (controller_tx, controller_rx) = mpsc::channel();
+        attach_subscriber(&mut st, controller_tx);
+        drain(&controller_rx);
+
+        let pane_gate = OutputGate::new();
+        fan_out_output(&mut st, b"old-width bytes", Vec::new(), &pane_gate);
+        resize_state(&mut st, ws(120, 30));
+        fan_out_output(&mut st, b"new-width bytes", Vec::new(), &pane_gate);
+
+        match controller_rx.try_recv().unwrap() {
+            DaemonMsg::Output(b) => assert_eq!(b, b"old-width bytes"),
+            other => panic!("expected the pre-resize Output first, got {other:?}"),
+        }
+        match controller_rx.try_recv().unwrap() {
+            DaemonMsg::Size(size) => assert_eq!((size.cols, size.rows), (120, 30)),
+            other => panic!("expected the Size echo in stream order, got {other:?}"),
+        }
+        match controller_rx.try_recv().unwrap() {
+            DaemonMsg::Output(b) => assert_eq!(b, b"new-width bytes"),
+            other => panic!("expected the post-resize Output last, got {other:?}"),
+        }
     }
 
     #[test]

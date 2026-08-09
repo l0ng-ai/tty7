@@ -15,6 +15,10 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(6);
+/// How long after the endpoint disappears the daemon process itself gets to
+/// finish exiting. Under a graceful shutdown this is milliseconds; the margin
+/// covers the Windows descendant reap that runs before `exit`.
+const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const REAP_TERM_TIMEOUT: Duration = Duration::from_secs(6);
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -194,6 +198,28 @@ pub fn ensure_running() -> anyhow::Result<()> {
         }
     }
 
+    // While an installer is replacing the installation, spawning a daemon
+    // would relock the very images it is clearing — the update would fail
+    // with "files in use" caused by us. Connecting to a live daemon above is
+    // fine; only creating a new one waits. The short patience first is for
+    // the guard's holder being a Setup that is exiting right now — the
+    // post-install "Launch tty7" click — where the launch deserves its
+    // daemon, not an error.
+    #[cfg(windows)]
+    {
+        const UPDATE_GUARD_PATIENCE: Duration = Duration::from_secs(5);
+        let deadline = Instant::now() + UPDATE_GUARD_PATIENCE;
+        while crate::daemon::update_guard::held() {
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "a tty7 update is being installed right now; the daemon will return \
+                     when the installer relaunches the app"
+                );
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+
     spawn_detached()?;
 
     let deadline = Instant::now() + STARTUP_TIMEOUT;
@@ -296,6 +322,12 @@ pub fn restart() -> anyhow::Result<()> {
 pub fn stop() {
     use std::io::Write as _;
 
+    // Read the pid before asking the daemon to die: a clean shutdown removes
+    // the pidfile, and the endpoint disappearing is not the same event as the
+    // process releasing its image — the gap between them is exactly where an
+    // installer starts replacing files that are still locked.
+    let recorded = pidfile::read().filter(|&pid| pid > 4 && pid != std::process::id());
+
     if let Ok(mut stream) = transport::connect() {
         if ClientMsg::Shutdown.encode(&mut stream).is_ok() {
             let _ = stream.flush();
@@ -306,11 +338,42 @@ pub fn stop() {
         }
     }
 
+    if let Some(pid) = recorded
+        && !wait_for_recorded_exit(pid, PROCESS_EXIT_TIMEOUT)
+    {
+        log::warn!("daemon pid {pid} released its endpoint but has not exited yet");
+    }
+
     reap_recorded_daemon();
 
     if transport::endpoint_exists() {
         transport::remove_stale_endpoint();
     }
+}
+
+/// Whether the recorded daemon process actually exited within `timeout`. The
+/// endpoint file only says the daemon stopped listening; this is what says its
+/// executable image is no longer mapped.
+#[cfg(windows)]
+fn wait_for_recorded_exit(pid: u32, timeout: Duration) -> bool {
+    crate::daemon::winproc::wait_for_exit(pid, timeout)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn wait_for_recorded_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while process_alive(pid as libc::pid_t) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    true
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn wait_for_recorded_exit(_pid: u32, _timeout: Duration) -> bool {
+    true
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -347,14 +410,7 @@ fn reap_process(pid: libc::pid_t) {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn signal_and_await_exit(pid: libc::pid_t, sig: libc::c_int, timeout: Duration) -> bool {
     unsafe { libc::kill(pid, sig) };
-    let deadline = Instant::now() + timeout;
-    while process_alive(pid) {
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
-    true
+    wait_for_recorded_exit(pid as u32, timeout)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -378,12 +434,102 @@ fn reap_recorded_daemon() {
         .is_some_and(|entry| is_reapable_daemon_name(&entry.name));
     if matches {
         log::warn!("reaping unreachable daemon (pid {pid}); its sessions will be hung up");
-        for descendant in winproc::descendants(&procs, pid) {
-            winproc::terminate(descendant);
-        }
-        winproc::terminate(pid);
+        // One deadline across the whole tree: this runs synchronously before
+        // the first window exists, and a crash that left many hosts behind
+        // must not multiply the wait by their count.
+        let mut targets = winproc::descendants(&procs, pid);
+        targets.push(pid);
+        winproc::terminate_and_wait_all(&targets, Instant::now() + REAP_WAIT_TIMEOUT);
     }
     pidfile::remove();
+}
+
+#[cfg(windows)]
+const REAP_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Stops the daemon and then makes the installation directory actually
+/// replaceable, which is more than `stop` alone can promise: a daemon that
+/// died without cleaning up leaves its ConPTY hosts (OpenConsole.exe) running,
+/// orphaned, each holding the installed image open — invisible to the pidfile
+/// and fatal to any installer's `DeleteFile`.
+///
+/// Terminates every process whose executable lives under `install_dir`
+/// (except the caller), then waits until the replaceable images there can be
+/// opened for writing. An error names what is still locked, so the update log
+/// finally says *why* an upgrade could not replace its files.
+#[cfg(windows)]
+pub fn stop_for_update(install_dir: &Path) -> Result<(), String> {
+    use crate::daemon::winproc;
+
+    stop();
+
+    let deadline = Instant::now() + UPDATE_CLEAR_TIMEOUT;
+    let holdouts = winproc::processes_running_from(install_dir);
+    for &pid in &holdouts {
+        log::warn!(
+            "terminating pid {pid} still running from {}",
+            install_dir.display()
+        );
+    }
+    winproc::terminate_and_wait_all(&holdouts, deadline);
+
+    wait_until_images_unlocked(install_dir, deadline)
+}
+
+#[cfg(windows)]
+const UPDATE_CLEAR_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Waits until every .exe and .dll directly in `dir` can be opened for
+/// writing — the same access an installer needs to replace it. Only the top
+/// level: that is where the locked images (tty7-app.exe, OpenConsole.exe,
+/// conpty.dll) live, and a recursive sweep would stall on unrelated content.
+#[cfg(windows)]
+fn wait_until_images_unlocked(dir: &Path, deadline: Instant) -> Result<(), String> {
+    // Never probe our own image: the legitimate callers run from a staged
+    // copy outside `dir`, but if someone invokes the *installed* binary with
+    // this flag, its own image can never open for writing and the wait would
+    // only ever time out.
+    let own = std::env::current_exe().and_then(std::fs::canonicalize).ok();
+    let images: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|error| format!("reading {}: {error}", dir.display()))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("exe") || ext.eq_ignore_ascii_case("dll")
+                })
+        })
+        .filter(|path| {
+            // Excluding takes a positive identification: a candidate that
+            // cannot be canonicalized (delete-pending, held by a scanner) is
+            // a lock to wait out, not ours to skip.
+            !own.as_deref()
+                .is_some_and(|own| std::fs::canonicalize(path).is_ok_and(|path| path == own))
+        })
+        .collect();
+
+    let mut locked: Vec<&PathBuf> = images.iter().collect();
+    loop {
+        locked.retain(|path| std::fs::OpenOptions::new().write(true).open(path).is_err());
+        if locked.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let names: Vec<String> = locked
+                .iter()
+                .filter_map(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .collect();
+            return Err(format!(
+                "these files in {} are still in use by another process: {}",
+                dir.display(),
+                names.join(", ")
+            ));
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]

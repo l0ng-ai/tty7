@@ -5,20 +5,56 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [26.8.2] - 2026-08-09
 
 ### Added
 
 - **Update tty7 without leaving the app** — the launch check and
-  **Settings → About → Check Now** now offer **Update and Relaunch** for
-  packaged macOS installs instead of sending the user to GitHub Releases. A
-  dedicated `tty7-updater` helper verifies the release checksum, bundle
-  version, and code-signing requirement before replacing the app, and restores
-  the previous bundle if relaunch fails. The new GUI reuses a running local
-  server when its wire protocol is compatible, preserving shells; an
-  incompatible server keeps its shells too and raises the existing explicit
-  keep-or-restart prompt. Other platforms and unsupported layouts retain the
-  release-page fallback, and Nightly remains unchanged for the first version.
+  **Settings → About → Check Now** now offer **Update and Relaunch** instead of
+  sending the user to GitHub Releases. A dedicated `tty7-updater` helper
+  verifies the release checksum, the bundle version, and — on macOS — the
+  code-signing requirement before replacing the installation, and restores the
+  previous copy if the relaunch fails. The update is fetched and verified while
+  the prompt is up, so installing it is a restart; declining defers it rather
+  than retiring it.
+
+  On macOS the new GUI reuses a running local server when its wire protocol is
+  compatible, preserving shells; an incompatible server keeps its shells too and
+  raises the existing explicit keep-or-restart prompt. Windows cannot replace a
+  running daemon's image, so its install path stops the service and the dialog
+  says so. Layouts that cannot be updated in place — notably an all-users
+  `C:\Program Files` install, where running Setup as the signed-in user would
+  either install a second copy beside the real one or put a bare UAC prompt in
+  front of a user whose GUI just vanished — keep the release-page fallback.
+  (by @ayamir in #309, by @ArnoChenFx in #330)
+
+- **Stable and Nightly are separate update channels** — the channel is a
+  property of the installation rather than something inferred from how version
+  numbers sort, so a Nightly build follows Nightly instead of being walked back
+  onto Stable by an update it never asked for. Stable reads `/releases/latest`,
+  which excludes prereleases; Nightly reads `/releases/tags/nightly`. Neither
+  feed can hand the other an update, so an installation only changes channel
+  when the user changes it in Settings.
+
+  The nightly release cannot state its version in its tag — `nightly` is
+  force-moved every night, so `tag_name` is the literal string — so it now
+  publishes `nightly.json` beside the packages, falling back to parsing asset
+  filenames for builds that predate the manifest. Prereleases are ordered by
+  every numeric identifier in the stamp, and the stamp goes to the minute so two
+  builds in one day are distinguishable; a stable release still outranks every
+  dated build of its core version, which is how switching back to Stable
+  graduates rather than downgrades. Switching channel invalidates what the old
+  feed produced: the staged package, the deferred prompt, and any transfer still
+  in flight. Skipping a version is retired along with its state and its Settings
+  row. (#386)
+
+- **A proxy for tty7's own network traffic** — update checks, release downloads
+  and remote-server installs now resolve an HTTP/SOCKS proxy from, in order, a
+  new `http_proxy` config field, the platform system proxy (Windows registry,
+  macOS `SCDynamicStore`), and `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`.
+  Programs running in a pane are deliberately unaffected — they inherit their
+  proxy from their own environment, as in any other terminal.
+  (by @shihuaidexianyu in #367, reported in #365)
 
 - **`tty7 wait` — the primitive an agent team was missing** — block until a
   pane's agent needs input, finishes its turn, or dies:
@@ -47,7 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stateless question composes into scripts (`tty7 wait %3 && tty7 capture %3
   --plain`), survives a server restart mid-wait, and needs no cursor. The
   cost is one aggregate request per tick — the same one `tty7 agents` makes
-  once. (#248)
+  once. (by @yetone in #248)
 
 - **An orchestration skill for Claude Code** — a switch under
   **Settings → Agents** installs `~/.claude/skills/tty7-orchestration`, a
@@ -112,30 +148,339 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arriving mid-scroll shifts the grid without dragging the animation somewhere
   else. Everything that moves the view on its own — jumping to a prompt,
   dragging a selection past the edge, clearing the scrollback, the keyboard and
-  mouse-reporting paths — cancels what is in flight first.
+  mouse-reporting paths — cancels what is in flight first. (#382)
+
+- **The GUI speaks English, Simplified Chinese and Japanese** — every string in
+  the interface now goes through a locale table, selected by **Settings →
+  General → Language**. The menu bar, command palette, switcher, settings,
+  SFTP panel, file tree, diff overlay, toasts, SSH prompts and confirmations are
+  all translated, with plural- and select-aware helpers where a count or a
+  gender-free choice is involved. The `zh` and `ja` key tables are exhaustive,
+  so adding an `L10nKey` fails the build until it is translated rather than
+  silently rendering English.
+
+  Two things stay in English on purpose. A theme's name is data, not chrome —
+  it is written into the theme YAML and matched back by suffix, so translating
+  it forked "Nord" into a Chinese name that then stacked a second suffix on the
+  next fork and stayed Chinese after switching the GUI back. And the words
+  Chinese developers read and speak in English anyway — hook, agent, worktree,
+  diff, fork, shell, pane, server — are left alone; translating them lost more
+  than it gained. Language names in the picker stay endonyms (English /
+  简体中文 / 日本語) in every locale.
+  (by @shihuaidexianyu in #303, by @cwatanab in #372)
+
+- **Oh My Pi (`omp`) is a first-class agent** — the eighteenth CLI tty7
+  recognizes in a pane, with the full set: brand avatar, status dot, session
+  resume (`omp --resume <id>`), and **Fork Session** (`omp --fork <id>`).
+  **Settings → Agents** installs its hooks like the others.
+
+  Oh My Pi is a fork of Pi, but it is its own binary with its own
+  `~/.omp` config directory, so it gets its own entry rather than sharing
+  Pi's — a pane running `omp` was previously not detected at all, and
+  aliasing it onto Pi would have written the bridge to `~/.pi` and offered
+  `pi --session <id>` to a binary that spells it `--resume`. The status
+  bridge is the Pi extension the fork inherited (same default-exported
+  factory, same four lifecycle events), so one template now serves both,
+  landing at `~/.omp/agent/extensions/tty7/index.ts`.
+  (#405, reported by @Hanser0521 in #376)
+
+- **The switcher is two columns, and Ctrl+Tab raises it** — it listed
+  workspaces only, so reaching a tab inside one meant opening the workspace
+  first. Now workspaces sit on the left and the tabs of whichever one the cursor
+  is on sit to the right, and Ctrl+Tab raises the panel as a most-recently-used
+  tab switcher that commits when the modifier comes up, the way IDEA does it.
+
+  Picking a workspace or a tab switches this window in place; a second window is
+  something you ask for, with the platform modifier or **Open in New Window**,
+  rather than what happens by default. New workspaces also get a codename
+  ("amber-yak") instead of inheriting whatever directory their first shell
+  started in. (#380)
+
+- **Every shell tty7 can find is in the new-terminal menu, plus one you name** —
+  the menu lists the shells detected on this machine (Nushell included, on every
+  platform) and a configurable custom entry with its own arguments, which
+  survive across shell-inventory rescans. (by @ArnoChenFx in #311)
+
+- **Windows Explorer context menus** — an optional **Open in tty7** verb for a
+  directory background and for a folder, registered from the installer rather
+  than from Settings: writing shell verbs is an install-time decision, which is
+  where VS Code and Git for Windows put theirs. A task checkbox drives new
+  `--register-explorer-menu` / `--unregister-explorer-menu` flags, so the key
+  layout stays in `core::explorer_context_menu` instead of being copied into the
+  `.iss`. The uninstaller unregisters unconditionally, so an install that
+  registered once and was later upgraded without the box ticked does not leave
+  keys pointing at a deleted exe. (by @ArnoChenFx in #310, #350)
+
+- **`tty7` opens directories in new tabs** — the CLI accepts one or more
+  directories and opens a tab per directory in the running GUI, restoring a
+  window if none is open. Paths that do not round-trip through UTF-8 are
+  rejected rather than opened somewhere else. (by @ArnoChenFx in #308)
+
+- **A bell that both flashes and rings** — `BellMode` gained a `Both` variant
+  alongside `None`, `Visual` and `Audible`, exposed as a fourth option under
+  **Settings → Terminal → Bell**. Existing `none` / `visual` / `audible` config
+  values are unchanged. (by @shihuaidexianyu in #357)
+
+- **Desktop notifications you can click** — a notification now carries the pane
+  it came from, and clicking it reveals that pane's window, tab and split.
+  Windows shows a WinRT toast with an `Activated` handler, macOS uses
+  mac-notification-sys' click response, and both route through the existing tray
+  dispatch channel; Linux keeps the plain notify-rust path. Titles gained
+  context — an agent name or the machine, then the workspace — and bodies name
+  the command or agent alongside the duration, all of it translated. Notification
+  text is sanitized on every path: it comes off the terminal, and a stray
+  control byte used to make the Windows toast XML fail to parse and lose the
+  notification outright. (by @shihuaidexianyu in #373)
+
+- **The bright half of the ANSI palette is rescued when a theme makes it
+  illegible** — bright colors that fall under the contrast floor on the theme
+  background are lifted to it, behind a setting so a theme that means it can opt
+  out. (by @ArnoChenFx in #413)
+
+### Changed
+
+- **The About page is about the app again** — it had grown three sections that
+  change system state and that nobody looks for under "About": a PATH install, a
+  registry write, and a daemon restart. The `tty7` CLI toggle moves to
+  **Agents**, which already describes tty7 ↔ agent integration in the other
+  direction (hooks reporting session status). The Windows Explorer context menu
+  moves to the installer. Server restart stays — it is about the app itself.
+
+  What is left is trimmed to what it is for: the marketing paragraph goes, the
+  update and server explanations drop from multi-sentence accounts of internals
+  to one line each, the tech credits move to the bottom, and the update toggle
+  renders with `settings_row` like every other switch. Eight strings the page
+  had skipped are now localized. (#350, #358)
+
+- **The close-confirmation setting is gone** — closing a window with live panes
+  always confirms. (#383)
+
+- **The Outline right panel is gone** — with all of its wiring: the tab, the
+  action, the palette command, the keymap arm and four i18n keys. An existing
+  config value of `outline` falls back to the default Info tab, and a user
+  keybinding naming `ShowRightPanelOutline` degrades to a logged warning rather
+  than breaking the keymap. (#375, requested by @shihuaidexianyu in #374)
+
+- **Chinese terminology, corrected throughout** — the worst one collided two
+  concepts: a git worktree was translated as 工作区, the same word tty7 uses for
+  a workspace, so "Remove Worktree" read as "delete this workspace" inside a
+  destructive confirmation. Worktree is 工作树 now and workspace keeps 工作区 to
+  itself. Also: Forget password means "clear the stored password", not password
+  recovery; the SSH auth mode **Agent** was 代理, the same word as the proxy
+  fields beside it; an SSH profile is a saved host (主机配置), not a file on
+  disk; scrollback was 回滚, which means rollback — the opposite direction; and
+  tty7's own server is now written `server`, the way `shell`, `pane` and `agent`
+  already were, while 服务器 stays where it means the SSH host being connected
+  to. (#334, #350, #417)
+
+- **Kitty graphics frames cost one copy less** — a re-transmitting sender like
+  terminal-browser sends a fresh full-window frame per rendered frame, ~26 MiB
+  of RGBA at Retina resolution, and the client copied that buffer twice on the
+  way to the atlas. The decode now consumes the frame `Vec` the reader already
+  owns off the socket and drains the header off the front, and the uncompressed
+  fast path moves the pixel buffer out so the R↔B swap happens in place. On a
+  3216×2160 frame the decode-and-normalize step drops from ~1.78 ms to ~0.89 ms
+  — about 53 ms/s at 60fps. (by @ayamir in #388)
+
+- **Powerline separators are drawn with more curve segments**, so the
+  half-circle caps read as circles at large font sizes.
+  (by @cwatanab in #335, by @ArnoChenFx in #341)
+
+- **macOS declares its privacy intents** — tty7 shipped no
+  `NS*UsageDescription` keys, so macOS denied a pane's child process access to a
+  protected folder (Containers, Mail, Messages, Calendar) with a repeated prompt
+  instead of a single clear grant. The bundle now declares the folder, volume
+  and device usage strings its peers declare, kitty-style, and the Full Disk
+  Access manual grant is documented in the feature notes. No entitlement is
+  added: the hardened-runtime automation check runs against the process actually
+  sending an Apple event, which is the pane's child carrying its own signature,
+  so granting one would only have widened what injected code could reach.
+  (by @Gabyran in #323)
 
 ### Fixed
 
-- **Pasting a screenshot into a remote pane works on macOS too** — the
-  clipboard-image paste that stages a file and hands the agent its path was
-  built off macOS only, because a local macOS agent reads the system
-  clipboard itself when it sees Ctrl+V and that carries the image at full
-  fidelity. The reasoning stops at the pane boundary: an agent in an SSH
-  pane or a remote workspace reads the clipboard of the host *it* runs on,
-  which never holds this machine's screenshot, so SYN was a no-op and the
-  paste did nothing at all. Remote panes now stage and upload on every
-  platform, while a local macOS pane keeps SYN untouched. macOS screenshots
-  arrive as TIFF, which agent vision rejects the same way it rejects a
-  Windows BMP, so those transcode to PNG on the way out. (#338)
+- **The ConPTY resize fix now actually engages** — the one-line opt-in that
+  switches Windows panes onto conhost's resize model was lost from the
+  working tree between verification and commit, and nothing caught it: the
+  field defaults to off in the vendored `alacritty_terminal`, so the build,
+  the test suite, and CI all stayed green while the previous nightly
+  shipped with the semantics half of the fix disabled and the maximize
+  garbling intact. The flag is back, and a regression test now pins the
+  wiring itself so the flag can't silently drop again. (#419)
 
-- **A WSL pane is handed a path it can actually open** — the same paste
-  staged its file on the Windows side and pasted the Windows name for it, so
-  an agent in WSL got `C:\Users\…\paste-1.png` and found nothing there. A
-  WSL pane shares this machine's disk but not its path syntax, so there is
-  nothing to upload and only a name to rewrite: the paste now carries the
-  automount view, `/mnt/c/Users/…`. A path with no mapping — a UNC temp
-  directory — keeps the Windows name, which at least says where the file
-  went. (#338)
+- **Maximizing a Windows pane no longer shreds it** — two separate resize
+  disagreements stacked up here, and the visible one was the second.
+
+  ConPTY emits no repaint after a resize; conhost silently re-anchors its
+  own layout and keeps painting with absolute cursor addresses computed
+  against it. Measured against a live ConPTY: growing the window keeps
+  rows and cursor pinned and opens blank rows at the bottom — nothing is
+  restored from scrollback — and shrinking scrolls the last *written* row
+  (PSReadLine parks a continuation hint below the prompt) to the new
+  bottom. The grid resized the alacritty way instead: growing pulled
+  scrollback back into view and pushed the cursor down by that many rows.
+  After a maximize the two layouts disagreed by exactly the pulled row
+  count, so every later absolute-CUP paint — PSReadLine redraws the prompt
+  that way per keystroke — landed mid-screen inside the old output. The
+  vendored `alacritty_terminal` now has a `conpty_resize` mode that
+  mirrors conhost's model for the primary screen (the alternate screen
+  keeps stock behavior; its application repaints itself), and every pane
+  on Windows opts in — a shell, `wsl.exe`, and `ssh.exe` are all presented
+  through conhost alike. The cost is Windows-Terminal-standard behavior:
+  maximizing no longer reveals extra scrollback below the fold.
+
+  Separately, a resize during a burst of output reflowed the grid ahead of
+  the backlog: the daemon can hold up to 16 MiB of queued old-width bytes,
+  and the client parsed them into the already-resized grid. The daemon now
+  echoes a `Size` frame to the controller at the exact stream position
+  where the PTY changed geometry — the same geometry-tagging the reattach
+  replay has always used — and the client defers its reflow to that
+  marker, so every queued byte parses into the grid it was rendered for.
+  Observers, which already received live `Size` frames but only applied
+  them after a replay snapshot, follow the controller's resizes at the
+  right moment too. The client keeps the reflow-at-request-time path
+  against an older daemon that never echoes (new `resize-echo` feature
+  probe), and on remote routes, where only the local daemon's features are
+  known — a current remote daemon's echo lands there as a harmless
+  same-size no-op, and probing per connection is the follow-up that
+  extends deferral to remote panes. (#415)
+
+- **The whole window no longer hangs after a remote workspace reconnects** — on
+  Windows, `shutdown()` does not wake a thread parked in a blocking `read()` on
+  the same socket the way it does on unix, and pane teardown shut the writer
+  down and then *joined* the reader, counting on that wake-up. When the peer
+  stayed silent — a routed pane whose SSH leg went zombie: nothing arrives, no
+  FIN ever comes — the join blocked its caller, which was the UI thread. That is
+  the "not responding" freeze right after a reconnect.
+
+  Teardown now sets a per-reader quit flag and abandons the thread instead of
+  joining it. The reader's read always times out within 500 ms so a parked
+  reader notices the flag promptly, and it checks the flag once per frame, so a
+  retired reader processes nothing at all — without that, a buffered `Exited`
+  arriving down an abandoned link could close the pane that had just adopted its
+  replacement. The reader teardown had no Windows test coverage at all before
+  this; the new tests block for over three seconds against the old code. (#407)
+
+- **A Windows update that reported success and left the old build** — the
+  updater stopped the daemon and started the Inno installer the moment the
+  daemon's endpoint disappeared, but the endpoint going away is not the same
+  event as the images being released. The ConPTY hosts (`OpenConsole.exe`) are
+  the daemon's children, not the shells', so the per-pane kill never reached
+  them, and the daemon's `exit(0)` skipped every destructor that would have
+  closed them: they kept the installed `OpenConsole.exe` open for seconds after
+  `--stop-daemon` returned. Silent Setup then hit the lock, took the suppressed
+  dialog's default (Abort), and the recovery relaunched the old build. A daemon
+  that died without cleaning up made it permanent — its orphaned hosts survive
+  indefinitely, which is the `DeleteFile` code 5 users hit even after "closing
+  everything".
+
+  Both shapes were reproduced in isolation first: with a pane open,
+  `--stop-daemon` returned about a second in while `OpenConsole.exe` stayed
+  locked for another 1.4 s; after killing the daemon outright, the orphaned host
+  held the lock forever. The shutdown now finishes what it starts at every layer
+  that can be the last one standing — the daemon reaps its descendants and waits
+  for them while the endpoint is still up, `stop()` waits for the recorded pid to
+  actually exit rather than merely stop listening, and
+  `--stop-daemon --update-install-dir` also terminates anything still running
+  from the installation directory and only returns once the `.exe`/`.dll` images
+  there open for writing, naming the holdouts if they never do. The updater runs
+  that clearing itself before invoking Setup, so a directory that cannot be
+  cleared fails with a cause in `update.log` instead of Inno's bare
+  "DeleteFile failed; code 5".
+
+  Three smaller holes closed with it: the macOS updater waits for its parent by
+  watching `getppid()` reparent to launchd rather than polling `kill(pid, 0)`,
+  which a recycled pid could satisfy forever; a Windows update guard makes
+  `ensure_running` refuse to spawn a daemon mid-install, so a `tty7` CLI call
+  cannot relock the images Setup is replacing; and a Windows portable backup
+  carries an incomplete marker from the first file move until the replacement
+  lands, so an interrupted update is reported at the next launch instead of
+  leaving a silently mixed installation. (#403)
+
+- **A newly installed command works in the next pane** — Windows hands every
+  process a private copy of the environment block at `CreateProcess` time and
+  never updates it, so a daemon that had been up since before an installer
+  edited `HKCU\Environment` gave a brand-new pane its startup `PATH` and the
+  freshly installed command was unresolvable until tty7 restarted. Windows
+  Terminal launched from Explorer found it, because Explorer rebuilds its own
+  block when it sees `WM_SETTINGCHANGE`.
+
+  Rather than chase broadcast messages, the daemon re-reads the two hives
+  Windows itself composes an environment from — machine
+  `Session Manager\Environment` and `HKCU\Environment` — at the moment a pane is
+  spawned. The merge is a pure function over (machine, user, process, configured
+  overrides), so the semantics are unit-testable without a registry: names are
+  keyed case-insensitively so `Path` and `PATH` collapse into one variable;
+  `PATH` and `PSModulePath` are *combined*, machine first, which is what Windows
+  does and what keeps a per-user install from shadowing the system half;
+  `REG_EXPAND_SZ` values are expanded against the merged map with a depth bound;
+  the machine hive's `USERNAME=SYSTEM` is dropped as Windows drops it; and
+  directories the daemon's own `PATH` held that neither hive lists stay
+  reachable, appended behind the registry entries — freshening `PATH` should
+  only ever add resolvable commands. (#349, reported by @yhzhu99 in #333)
+
+- **Windows panes can answer a background-color query** — the in-box conhost
+  swallows a pane process's OSC 11 query, so it never reached tty7's emulator
+  and no reply was written back: applications that pick a light or dark UI from
+  the terminal background rendered a dark UI under a light theme. tty7 already
+  answers OSC 10/11/12 from the live theme, so nothing was missing but a
+  pseudoconsole that forwards the question. Microsoft ships one as a
+  redistributable and `portable-pty` already prefers a sideloaded `conpty.dll`
+  over kernel32's, so this is packaging rather than code: the pair goes beside
+  `tty7-app.exe`.
+
+  Measured on Windows 11 26200, same binary, only the pair added beside it: with
+  the in-box host the client times out with no reply; with the bundled ConPTY a
+  real pane reads back `rgb:efef/f1f1/f5f5` under `catppuccin_latte`, which is
+  that preset's exact background. The two files are one supported unit, so the
+  release verifier fails a package carrying only one, a mismatched pair, or a
+  DLL without its MIT notice, and `build.rs` stages them beside cargo's output
+  so a development build does not quietly run on the in-box host.
+  (#360, reported by @yhzhu99 in #345)
+
+- **A second cursor no longer blinks in the wrong place on Windows** —
+  conhost's VT renderer brackets every frame it paints with `?25l` … `?25h` so
+  the cursor does not flicker across the repaint, and it moves the cursor
+  explicitly just before the show only on the frames where it painted the
+  cursor. On the others the show commits wherever the last erase or write left
+  it, and the cursor blinks there until conhost's next frame moves it back. tty7
+  repaints when a batch of pty output lands, so it draws that cursor for a frame
+  — and a TUI that repaints on a spinner produces one every tick.
+
+  Measured on Windows 11 26200 from a raw ConPTY capture of a Codex session at
+  110×30: 295 ms of cursor-visible dwell across 42 frames parked at the end of
+  the status line, each stray corrected 7–15 ms later by the following frame.
+  A scanner now pairs each hide with its show and marks the show as *parked*
+  when the run in between moved the cursor around to paint but did not end on a
+  move — nothing chose the cell it is about to appear on — and restores the cell
+  the cursor stood on when it went invisible, which is where the correcting
+  frame would have put it anyway. A hide and a show more than 100 ms apart are
+  an application keeping the cursor off for the length of some work, not a
+  renderer bracketing one frame, and are left alone. This is inert where the
+  bundled ConPTY redistributable is in play; it earns its keep on hosts without
+  it, notably a remote Windows server. (#362)
+
+- **Windows toasts are tty7's, not PowerShell's** — notifications showed the
+  PowerShell icon and name because tty7 had no AUMID of its own registered. It
+  now brands the process and refreshes the single per-user `tty7.lnk` Inno's
+  default install owns — but only when that shortcut is not already ours, never
+  from a cargo build directory, and never as a second per-user copy beside an
+  all-users install, all three of which the first cut got wrong on a real
+  machine. The shell indexes a new `.lnk` asynchronously and `Toast::show()`
+  reports success while dropping the toast for an AUMID it has not seen yet, so
+  toasts keep the PowerShell identity for half a minute after tty7 writes one:
+  ugly beats invisible. (by @shihuaidexianyu in #340, reported in #339)
+
+- **Windows panes are told whether the window is light or dark** — the daemon
+  needs to know when it spawns a pane, because ConPTY drops the child's OSC 11
+  query before tty7's emulator can answer it. It was reading that from a dead
+  `Config::theme` field, which meant the GUI had to rewrite the user's
+  `config.json` every time the effective preset changed sides. The hint moves to
+  its own `appearance.json` in the data dir: derived state, written by the
+  process that paints the window and read by the one that has to describe it.
+  Absent, unreadable and unparsable all read as light — what the default preset
+  is — so a daemon that starts before the GUI has ever applied a theme describes
+  the default window instead of guessing. (by @yhzhu99 in #332)
 
 - **Scoop shims work again when tty7 is launched from a hardened Windows
   shell broker** — some brokers enforce `ProcessRedirectionTrustPolicy` on
@@ -153,7 +498,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mitigation policy. Everything else about the spawn is unchanged, and the
   ordinary path still runs whenever the policy is absent — or whenever the
   desktop shell cannot be borrowed, in which case tty7 logs a warning and
-  starts degraded rather than not starting at all. (#292)
+  starts degraded rather than not starting at all. Note the daemon's token on
+  the clean-parent path derives from Explorer, so an elevated tty7 starts a
+  medium-integrity daemon. (by @ArnoChenFx in #292)
 
 - **A pane's last line of output no longer loses the race with its exit on
   Windows** — the process-exit monitor could observe a short-lived shell
@@ -163,7 +510,353 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only after it has forwarded everything up to EOF, announce the death. A
   bounded window behind it still covers the case where EOF never arrives —
   a grandchild holding the ConPTY output pipe open keeps the shell's own
-  exit from ever closing it. (#292)
+  exit from ever closing it. (by @ArnoChenFx in #292)
+
+- **A resumed agent keeps the flags it was launched with, on Windows** — on
+  macOS and Linux the daemon reads the foreground process's real argv, so
+  `resume_command` can replay a launch flag like
+  `--dangerously-skip-permissions`. The Windows path detects the agent from the
+  OSC 133;C command capture but threw the command line away, stamping an empty
+  argv, so every resumed agent came back bare. The captured command is now
+  tokenized (case preserved, quotes trimmed, the PowerShell call operator
+  dropped) and stamped as the pane's launch argv; fork commands share that
+  source and are fixed by the same change. (#406)
+
+- **Codex hook commands work under PowerShell on Windows** — the installed hook
+  command is written as a PATH-resolvable bare name rather than a path
+  PowerShell would not run. (by @shihuaidexianyu in #298)
+
+- **Switching workspaces no longer destroys live sessions** — it rebuilt every
+  pane it was asked to restore, and a window that rebuilt nothing then deleted
+  the workspace outright, tree and store both. Three separate guesses, each one
+  authorizing an irreversible act.
+
+  `session_from_tree` erased a pane's id when the tree said `live: false`. That
+  flag is a cached observation from another process, reloaded as false on every
+  server start, so a quiet pane read as dead while its shell was running: the
+  restore had nothing to attach to and spawned a fresh shell over it. Two
+  servers could also start against one config dir — `run_with` decided another
+  server was dead by failing to connect once, then unlinked its socket and bound
+  its own, and the loser kept `control.sock` with an empty pane registry, so
+  `MachineGet` reported every pane dead and nothing logged an error. And
+  `finish_hydration` marked a window informed before the rebuild and without
+  looking at the result, while `tabs_from_session` drops any tab whose panes all
+  fail to start — which is every tab when the pane socket is unreachable —
+  leaving a window that was empty and authoritative at once, so the next switch
+  deleted a workspace with ten live tabs.
+
+  Each is now settled by whoever holds the truth: attaching decides whether a
+  pane is there, an advisory lock decides which process is the server, and a
+  deletion needs the machine's own mirror to agree that the workspace is empty.
+  A corrupt `views.json` is quarantined the way `machine.json` already was,
+  rather than logged and overwritten by the next save. (#410)
+
+- **Tab in a WSL pane completes paths again** — the pane's filesystem is
+  foreign, so the completion engine had no cwd to list and handed every Tab back
+  to bash. A WSL pane's POSIX cwd (OSC 7) is now translated to the distro's
+  `\\wsl$` share, which this process can read like any directory, while
+  everything that would consult *this* machine stays switched off: no `PATH`
+  binaries in the command position, no generator scripts, and `~` is left to the
+  shell, since it names the distro's home. Absolute words stay inside the share,
+  so `ls /etc<Tab>` lists the distro's `/etc` and not `C:\etc`. A `wsl.exe` pane
+  spawned without `--distribution` resolves the default distro from the registry
+  rather than carrying an empty placeholder.
+
+  The follow-up fixed the gate that had made this unreachable for the case it
+  was written for: a pane in a WSL *workspace* is served by the daemon inside
+  the distro, so its host id is never `LOCAL`, and an early locality check threw
+  those panes away. The check belongs only to the `wsl.exe`-in-a-local-workspace
+  branch — a remote host's WSL pane must not read a same-named share here —
+  while a WSL workspace is this computer's distro by construction. (#408, #418)
+
+- **A WSL machine can restart and replace its server** — the machine menu
+  offered "restart server" only when the target was SSH, so a distro's row had
+  just "new workspace" and "disconnect", and the router refused the action for
+  anything else even though `restart_wsl_daemon` had been sitting unused since it
+  was written. A distro's server is installed and launched from this computer
+  exactly like an SSH one; only the transport differs. Both actions now have WSL
+  arms, so the mismatch dialog's **Update Server** is no longer a dead end
+  there. A `--stdio` workspace still has nothing to restart: it is whatever
+  program the user named. (#417)
+
+- **The mismatch dialog replaces the server binary instead of just restarting
+  it** — the old **Restart Server** button restarted the same incompatible
+  daemon, leaving the user on the same mismatch afterwards. It now replaces the
+  binary and then restarts, and says so: **Update Server**.
+  (by @shihuaidexianyu in #352, reported in #351)
+
+- **A version-mismatched remote server is described as old, not as
+  not-tty7** — a handshake refused on the control dialect was shown with the
+  protocol layer's own wording: "java answered, but not as a tty7 server:
+  control peer (build …) speaks control v4, this build speaks v5". The far end
+  *is* tty7; it is a build on the other side of a dialect bump, and the reader
+  cannot act on the dialect numbers either way. The message now states which
+  side is behind, and the button names the action. The failure that followed was
+  also invisible: the switcher paints a failed `connect` in preference to stored
+  host errors, and restarting or replacing a server cleared only the latter, so
+  whatever went wrong during the install was covered by the complaint that
+  started it. (#384)
+
+- **Remote server errors appear under the machine they came from** — restart and
+  replace failures were reported through a global modal, which mixed errors from
+  different machines together and blocked the UI. They are now stored per host
+  and surfaced in that host's switcher group, which expands to show them, with a
+  Dismiss button scoped to its own host and a clear on the next connect so a
+  later success does not leave a stale failure on screen. A failure raised where
+  there is no switcher to put it in — the window menu's restart command, or a
+  mismatch hit mid-connect — still falls back to the modal.
+  (by @shihuaidexianyu in #354)
+
+- **An SSH remote install uses the bundled server before reaching for the
+  network** — it only ever checked the release download path and ignored the
+  server binary already shipped beside the Windows executable, which WSL was
+  using. The bundled binary is now auto-discovered and the GitHub release
+  download is the fallback for when no matching local asset exists. The explicit
+  path keeps its strict no-fallback behavior, and WSL remains bundled-only.
+  (by @shihuaidexianyu in #344)
+
+- **A server that is only a control dialect behind is noticed at launch** — the
+  pane protocol and the control dialect are versioned apart and the launch check
+  only compared the first, so a server from before the v4-to-v5 control bump
+  answered the pane handshake with this build's own number and was waved through
+  as ours while every machine-tree call was refused: the window opened with no
+  tabs and the only trace was a log line the default config does not write
+  anywhere. The control socket is asked too now, and the restart prompt says
+  which version disagrees and picks its wording by which side is ahead, rather
+  than calling a newer server old. A window that still opens empty says why —
+  once per window, latched, since a failed pull is retried from every
+  fifteen-second sync. (#387)
+
+- **"Keep Shells" is no longer offered beside a mismatched server** — both
+  handshakes compare their version for equality and hang up on anything else, so
+  a server whose number disagrees cannot be talked round, and that button
+  offered a state that does not work: panes still spawn while every machine-tree
+  call is refused, which is how a window opens with no tabs and saves none of
+  the ones you make. The choice is now restart or quit. Quit goes first, because
+  it destroys nothing — the server and every shell under it keep running — and
+  because this prompt arrives unasked at launch, the moment a stray Return is
+  likeliest. A prompt dismissed without an answer re-arms instead of falling
+  through. (#389)
+
+- **Pasting a screenshot into a remote pane works** — the clipboard-image paste
+  that stages a file and hands the agent its path was built off macOS only,
+  because a local macOS agent reads the system clipboard itself when it sees
+  Ctrl+V and that carries the image at full fidelity. The reasoning stops at the
+  pane boundary: an agent in an SSH pane or a remote workspace reads the
+  clipboard of the host *it* runs on, which never holds this machine's
+  screenshot, so the paste did nothing at all. Remote panes now stage and upload
+  on every platform, while a local macOS pane keeps its direct path untouched.
+  macOS screenshots arrive as TIFF, which agent vision rejects the same way it
+  rejects a Windows BMP, so those transcode to PNG on the way out.
+
+  Staging is hardened on the remote side. `/tmp/tty7-clipboard-<user>` is a
+  predictable name in a world-writable directory: any local account on the
+  remote host could pre-create it, and the `Mkdir` result was discarded, so tty7
+  would have uploaded into a directory someone else owned — readable by them,
+  and swappable for another image before the pane's agent opened the path.
+  Images now stage in `$HOME/.cache/tty7/clipboard` resolved from the session's
+  own `realpath .`, and the directory is verified before anything goes into it:
+  a symlink is refused outright, a `chmod 0700` the daemon watched succeed is
+  the ownership proof, and a following `stat` must report exactly `0700`. Any
+  doubt is a hard failure that falls back to pasting the local path. The whole
+  path also moves off the UI thread, which is what lets a failed upload notify
+  once, naming the host and the reason, instead of leaving a dangling remote
+  path in the line and saying nothing.
+  (by @shihuaidexianyu in #338, reported in #337; #399)
+
+- **A WSL pane is handed a path it can actually open** — the same paste staged
+  its file on the Windows side and pasted the Windows name for it, so an agent in
+  WSL got `C:\Users\…\paste-1.png` and found nothing there. A WSL pane shares
+  this machine's disk but not its path syntax, so there is nothing to upload and
+  only a name to rewrite: the paste now carries the automount view,
+  `/mnt/c/Users/…`. A path with no mapping — a UNC temp directory — keeps the
+  Windows name, which at least says where the file went. (#399)
+
+- **Arrow keys reach ncurses applications in the form they asked for** — Arrow,
+  Home and End were always sent as their CSI form, no matter what the foreground
+  program had requested. Programs that turn on DECCKM via `smkx` — which is
+  every ncurses full-screen app — expect the SS3 form, because that is what
+  `xterm-256color` spells `kcuu1` and friends as, and ncurses matches terminfo
+  byte for byte. htop was the report: ncurses failed to match `\E[A`, handed the
+  bytes to htop one at a time, and htop binds `[` to "lower priority", so every
+  Up or Down bumped the selected process's nice value instead of moving the
+  selection. The same breakage hit ncdu, mc, dialog, menuconfig and nmtui;
+  shells were unaffected because readline and zle bind both forms.
+
+  Named keys now also carry their modifiers the way terminfo declares them
+  (`kLFT=\E[1;2D`, `kUP5=\E[1;5A`, `kDC3=\E[3;3~`) instead of dropping
+  Shift/Ctrl entirely and prefixing Alt with a bare ESC. Cmd stays out of the
+  modifier parameter — xterm has no encoding for it.
+  (#366, reported by @hak0 in #361)
+
+- **A right-click goes to the application when mouse reporting is on** — a TUI
+  that turns mouse reporting on (vim with `set mouse=a`, lazygit, tmux) draws its
+  own right-button menus, and tty7 was delivering one right-click to both
+  consumers: the press was forwarded to the application *and* tty7's own context
+  menu popped over the top of it. One pure predicate now decides, called from
+  both sides, so one click can only ever feed one consumer; Shift stays the
+  escape hatch that reaches tty7, the same override it already provides for
+  selection and for the wheel. (#347)
+
+- **`$SHELL` names the shell the pane actually runs** — a pane configured to run
+  fish still advertised the login shell, because the pane environment injected
+  `TERM`, the `TTY7_*` markers and `TERM_PROGRAM` but never touched `SHELL`, so
+  the pane inherited the GUI session's login-time snapshot. Everything that
+  spawns "the user's shell" read that: tmux's `default-shell` started zsh inside
+  a fish pane, and so did `sudo -s`, an editor's shell escape, and any coding
+  agent picking a quoting dialect from `$SHELL`. The failure is silent — fish
+  rejects the bash line, the agent's sentinel file never appears, and the
+  rejected text stays in the line editor to concatenate onto the next send.
+
+  `SHELL` is now injected alongside the other markers, set to the absolute path
+  of the program the pane is about to exec, read off argv rather than off the
+  shell tty7 resolved — an argv-replacing integration injection and the
+  parent-shell override both rewrite argv. Only an absolute path is ever
+  written: a configured command may be bare so `PATH` decides which install
+  wins, so a bare name is resolved against the `PATH` the pane will inherit and
+  skipped when that finds nothing. An explicit `SHELL` in the user's env block
+  still wins. Windows is deliberately left out — neither cmd nor PowerShell reads
+  `SHELL`, and the POSIX emulations that do want a POSIX path.
+  (#348, reported by @nohzafk in #342)
+
+- **The login shell is read from passwd, not from a stale `$SHELL`** — `$SHELL`
+  is a snapshot the session inherits at login, so `chsh` never moves it: a GUI
+  launch kept reporting the shell that was current when the user logged in, and
+  the window's shell menu marked the wrong entry "default" for that whole
+  stretch. The passwd entry is read instead, via the reentrant `getpwuid_r`,
+  with `$SHELL` as the fallback. The same change fixes who wins a name in the
+  menu: `$PATH` is probed before `/etc/shells`, so on a machine with a Homebrew
+  bash the menu's "bash" is the binary typing `bash` would reach rather than
+  macOS's 3.2 from 2007. (#278)
+
+- **A forwarding `.bash_profile` no longer sources `.bashrc` twice** — the
+  rcfile tty7 hands bash replays the login-shell startup chain, but then sourced
+  `~/.bashrc` unconditionally afterwards. A login shell never does that on its
+  own: `~/.bashrc` arrives only because the profile that won the chain forwarded
+  to it, which is how nearly every `~/.bash_profile` is written. The result was
+  the user's whole `~/.bashrc` running twice per pane — banners printed twice,
+  completions sourced twice, appends to `PROMPT_COMMAND` stacking up.
+  `~/.bashrc` joins the same first-match-wins chain, which keeps the fallback
+  for a `$HOME` with no profile at all. (#279)
+
+- **The macOS locale fallback sets `LANG`, not `LC_CTYPE`** — when a pane
+  inherits no locale at all, the usual case for a GUI-launched process on macOS,
+  tty7 derives an installed UTF-8 locale and injects it — but as `LC_CTYPE`,
+  which backs only character handling. Collation, time and numbers stayed at C,
+  and bash warned `setlocale: LC_COLLATE: cannot change locale ()` once per
+  category on every launch; zsh and fish swallowed the failure and merely looked
+  fine while being just as half-configured. `LANG` backs every category and
+  still loses to any `LC_*` the user's own rc files set afterwards, which is
+  what a fallback should do. (#280)
+
+- **Three defects in the inline completion menu** — a candidate was inserted
+  verbatim, so a directory named `My Documents` completed to `cd My Documents/`,
+  which the shell resplits into two arguments; candidates are escaped now, with
+  a leading `~/` left alone since that prefix is the user's own text and escaping
+  it would stop the home expansion it was typed for. The same escape decides
+  whether a common-prefix step is safe to write — the prefix shared by
+  `My Documents` and `My Music` is `My `, and writing it raw both broke the line
+  and closed the menu on the next keystroke — so a prefix that needs escaping
+  steps through the candidates instead. A menu fed only by generators stayed
+  armed forever when nothing matched, swallowing every later Tab instead of
+  handing the line to the shell; sessions now count their generators and the
+  last one to answer closes a menu that still has nothing in it. And command
+  completion scanned *this* machine's `PATH` in a remote pane, so
+  `system_prof<Tab>` over SSH to Linux offered macOS's `system_profiler` —
+  builtins are true on any POSIX shell and still go out, the `PATH` scan is now
+  local-only. (#276)
+
+- **macOS editing shortcuts reach a foreground TUI** — Cmd+Backspace and the
+  rest of the line-editing chord set are forwarded to the application instead of
+  being swallowed. (by @loscoy in #304)
+
+- **Ctrl-E accepts a ghost suggestion on the first try** — it accepts a visible
+  inline history suggestion while keeping end-of-line behavior when none is
+  shown. (by @vkingw in #329, reported in #315)
+
+- **No stray `^U` after interrupting an agent** — typeahead captured across an
+  alt-screen boundary was replayed into the line editor after the interrupt.
+  (by @shihuaidexianyu in #312, reported by @fuchen in #305)
+
+- **The editor is restored after an interrupted tab handoff.** (#290)
+
+- **ANSI dim text and text decorations render** — underline, double underline,
+  curly, dotted, dashed, overline and strikethrough, and SGR 2 dim.
+  (#288, #289)
+
+- **Powerline separators have no seam between them** — adjacent separators left
+  a hairline of background between the two glyphs. A cover quad closes it, and
+  is skipped when the glyph is dim: the cover and the anti-aliased path overlap
+  on the closing edge's device pixel, which is a no-op for an opaque foreground
+  but pushes a dim cell's alpha to 0.884 and tints the neighboring cell's
+  background. (by @ArnoChenFx in #336)
+
+- **Tokens that bypassed the contrast machinery now have a floor** — sidebar
+  text, the caret and hairlines were flat blends with no floor, sitting one line
+  away from tokens that are bisected to hit a target exactly, and semantic inks
+  were floored against the window background but painted on popovers and sidebar
+  rows, which sit a step toward the foreground. `sidebar_fg` is floored at 4.5:1
+  on the sidebar fill it is actually painted on — four builtins landed at
+  3.35–3.92:1 — the caret is conditioned to 3:1, where the default Light theme
+  shipped an orange caret on pure white at 2.07:1, `border` keeps its blend but
+  gains a 1.5:1 floor so a divider is worth the same in every theme, and
+  semantic inks clear their floor on background, sidebar and popover alike.
+  Themes that already cleared a floor are untouched. (#400)
+
+- **Smooth scroll steps are aligned with presented frames**, and a queued scroll
+  animation wakes the window. (by @ArnoChenFx in #414)
+
+- **Kitty graphics frames cannot pile up faster than they decode** — the
+  unbounded decode channel becomes a bounded latest-frame inbox, so a
+  full-window sender cannot queue frames faster than they are consumed, and
+  superseded frames are discarded before being decoded. Only images that reached
+  the sprite atlas are retired, and remaining atlas entries are evicted when a
+  pane closes, which keeps hidden terminal-browser tabs and repeated pane
+  lifecycles from retaining one decoded frame per repaint.
+
+- **The terminal's own context menu and search bar are translated** — the
+  context menu was the last surface still speaking hardcoded English in a
+  three-locale app, 14 literals of it, and the search bar had three more with
+  its Previous / Next / Close buttons icon-only and untooltipped. It also spoke
+  a fourth vocabulary for one action: "Maximize Pane" for what the menu bar, the
+  palette and Keybindings all call "Zoom Pane", and "Close Pane" for what is
+  "Close Pane / Tab" everywhere else — which is the accurate name, since the
+  action closes the tab when the pane is the last one. (#401)
+
+- **A new tab lands in its repo group on the first frame** instead of appearing
+  ungrouped for one paint. (by @ArnoChenFx in #411)
+
+- **Settings hover highlights respond immediately**, with a stable row identity
+  so the highlight does not jump between rows. (by @ArnoChenFx in #313)
+
+- **Overlay scrollbars are softer.** (#293)
+
+- **`tty7 send` submits its Enter outside a paste burst**, so an agent does not
+  read the newline as part of pasted text. (#322)
+
+- **Closing a tab from the CLI terminates its panes.** (#319)
+
+- **`tty7` diagnoses an unavailable agent hook** instead of failing silently.
+  (#321)
+
+- **tty7 no longer panics on launch under Wayland on a slow VM** — the
+  xdg-desktop-portal event source notified windows of the initial color-scheme
+  and button-layout replies while still holding `client.borrow_mut()`, and those
+  callbacks re-enter GPUI and reach the same `RefCell`. Whether it fires depends
+  on whether the portal reply beats window creation, so a VMware Ubuntu guest
+  lost that race every time. Fixed in the gpui fork for both the Wayland and X11
+  clients by collecting the window pointers and dropping the borrow before
+  notifying.
+
+- **The Windows package verifier can read the Inno payload again** — the bundle
+  script deleted the staging directory as its last act, and the verifier reads
+  that directory to check what lands in `{app}`, since a compiled `setup.exe`
+  cannot be read back without innoextract. Every Windows build had failed the
+  check since it arrived, taking nightly red for two nights, and a stable
+  release would have failed the same way. Both workflows already expected the
+  directory to survive — their upload steps name it among the intermediates the
+  asset globs deliberately skip — so the removal goes rather than the check.
+  (#368)
 
 ## [26.8.1] - 2026-08-01
 

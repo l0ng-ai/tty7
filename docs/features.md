@@ -53,15 +53,15 @@ one that advances 0.5em (Sarasa Mono SC, say) makes two columns exactly 1.0em.
 ## Coding agents
 
 tty7 recognizes third-party coding agents running in a pane (Claude Code,
-Codex, Gemini CLI, Aider, Amp, OpenCode, and ~10 more) and adds around them —
+Codex, Gemini CLI, Aider, Amp, OpenCode, and ~12 more) and adds around them —
 it never wraps or replaces the agent.
 
 - **Brand avatars** — the tab chip / sidebar row shows which agent runs where; custom wrappers map in via `agent_commands` in `config.json`
-- **Status dot** — working (blue) / needs your input (amber) / done (green), driven by agent-reported events over an OSC channel; Settings → Agents installs the hooks that feed it (Claude Code, Codex, Copilot CLI, OpenCode, Pi, Grok Build)
+- **Status dot** — working (blue) / needs your input (amber) / done (green), driven by agent-reported events over an OSC channel; Settings → Agents installs the hooks that feed it (Claude Code, Codex, Copilot CLI, OpenCode, Pi, Grok Build, Oh My Pi)
 - **Notifications** — "needs your permission…" the moment an agent blocks on you, and "finished after Ns" per turn, honoring your notification policy
 - **Branch at a glance** — each sidebar row shows its pane's git branch and working-tree diff (`+N −M`), refreshed on `cd` and when a command finishes; clicking the counts opens the diff overlay, and turning that off (Settings → Window & Tabs, or `sidebar_diff_preview: false` in `config.json`) keeps the readout while making it non-clickable
 - **Session resume** — panes lost to a reboot re-launch their agent conversation on restore, carrying the original launch flags (`claude --dangerously-skip-permissions --resume …`) (`restore_agent_sessions`, on by default)
-- **Fork session** — branch a live agent conversation into a second, independent one by shelling the agent's own fork command (`codex fork <id>`, `claude --resume <id> --fork-session`, also OpenCode and Grok Build); the original is untouched and both continue separately. Right-click a pane to pick a split placement, or right-click the tab / sidebar row to open the fork in a new tab. Needs the agent's hooks installed, since the fork targets the session id they report; a remote pane can't fork, because the command would run against the local agent — and note a fork copies the whole transcript, so repeated forking costs real disk in the agent's own session store
+- **Fork session** — branch a live agent conversation into a second, independent one by shelling the agent's own fork command (`codex fork <id>`, `claude --resume <id> --fork-session`, also OpenCode, Grok Build, and Oh My Pi); the original is untouched and both continue separately. Right-click a pane to pick a split placement, or right-click the tab / sidebar row to open the fork in a new tab. Needs the agent's hooks installed, since the fork targets the session id they report; a remote pane can't fork, because the command would run against the local agent — and note a fork copies the whole transcript, so repeated forking costs real disk in the agent's own session store
 - **Copy Session ID** — put the agent's native session id on the clipboard, beside *Copy Working Directory*, for pasting into `codex resume`, a bug report, or another tool
 - **Context feed** — palette commands send the current selection or the repo's `git diff` to the running agent as a ready-made prompt
 - **Tray icon** — a system tray / menu bar item that flips to an attention state the moment any agent needs your input; its menu lists every agent pane (brand avatar + status dot, click to reveal), switches the notification policy, and offers *Quit and Stop Daemon* alongside the plain session-keeping quit (`show_tray_icon`, on by default)

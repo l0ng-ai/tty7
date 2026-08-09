@@ -82,6 +82,26 @@ fn current_command(chars: &[char], word_start: usize) -> Option<String> {
 }
 
 pub fn complete(line: &str, cursor: usize, cwd: Option<&Path>) -> Option<Completion> {
+    complete_inner(line, cursor, cwd, cwd.is_some())
+}
+
+/// Completion for a pane whose filesystem this process can only reach through
+/// a translated Windows path — a WSL pane's `\\wsl$` share. Paths complete
+/// against `cwd` exactly like a local pane's, but everything that would
+/// consult *this machine* instead of the share stays off: the command
+/// position offers no PATH binaries (this process's PATH names the wrong
+/// machine's commands) and generator scripts do not run (they would launch
+/// Windows tools against a Linux checkout).
+pub fn complete_foreign(line: &str, cursor: usize, cwd: &Path) -> Option<Completion> {
+    complete_inner(line, cursor, Some(cwd), false)
+}
+
+fn complete_inner(
+    line: &str,
+    cursor: usize,
+    cwd: Option<&Path>,
+    this_machine: bool,
+) -> Option<Completion> {
     let chars: Vec<char> = line.chars().collect();
     let cursor = cursor.min(chars.len());
     let word_start = shell_word_start(&chars, cursor);
@@ -89,12 +109,23 @@ pub fn complete(line: &str, cursor: usize, cwd: Option<&Path>) -> Option<Complet
 
     let is_command = chars[..word_start].iter().all(|c| c.is_whitespace());
     let (word_cands, pending) = if is_command && !word.contains('/') {
-        (complete_command(&word, cwd.is_some()), Vec::new())
+        (complete_command(&word, this_machine), Vec::new())
     } else {
         match complete_signature(&chars, word_start, &word, cwd) {
-            Some(sig) => (sig.cands, sig.pending),
+            Some(sig) => (
+                sig.cands,
+                if this_machine {
+                    sig.pending
+                } else {
+                    Vec::new()
+                },
+            ),
             None => match cwd {
                 None => (Vec::new(), Vec::new()),
+                // `~` is the *shell's* home; on a foreign pane resolve_dir
+                // would expand it to this machine's, so leave the word to the
+                // shell instead of listing the wrong home.
+                Some(_) if !this_machine && word.starts_with('~') => (Vec::new(), Vec::new()),
                 Some(cwd) => {
                     let dirs_only = current_command(&chars, word_start)
                         .is_some_and(|c| DIR_ONLY_COMMANDS.contains(&c.as_str()));
@@ -1058,6 +1089,58 @@ mod tests {
             );
             assert!(!remote.iter().any(|n| n == "ls"));
         }
+    }
+
+    /// A WSL pane's completion: paths list like a local pane's (the cwd is a
+    /// translated `\\wsl$` spelling std::fs can read), but the command
+    /// position and generator scripts stay off this machine.
+    #[test]
+    fn a_foreign_pane_lists_paths_but_never_runs_this_machine() {
+        let dir = temp_tree("foreign", &[("apple.txt", false), ("apricot", true)]);
+        let line = "cat ap";
+        let c = complete_foreign(line, line.chars().count(), dir.as_path())
+            .expect("the share lists like any directory");
+        let names: Vec<&str> = c.candidates.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(names, vec!["apricot", "apple.txt"]);
+
+        let commands: Vec<String> = complete_foreign("l", 1, dir.as_path())
+            .map(|c| c.candidates.into_iter().map(|c| c.text).collect())
+            .unwrap_or_default();
+        assert!(
+            commands.iter().all(|n| BUILTINS.contains(&n.as_str())),
+            "this process's PATH names the wrong machine's commands: {commands:?}"
+        );
+
+        let line = "git checkout ";
+        if let Some(c) = complete_foreign(line, line.chars().count(), dir.as_path()) {
+            assert!(
+                c.pending.is_empty(),
+                "a generator would run Windows tools against a Linux checkout: {:?}",
+                c.pending
+            );
+        }
+
+        // `~` is the distro's home, not this machine's — leave it to the shell.
+        assert!(complete_foreign("cat ~/ap", 8, dir.as_path()).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_absolute_word_stays_inside_the_wsl_share() {
+        // The share spelling is a UNC prefix, and Windows `join` semantics
+        // keep the prefix when a rooted path lands on it — which is exactly
+        // what makes `ls /etc/<Tab>` list the *distro's* /etc instead of the
+        // local drive's. This pins the std behaviour the WSL completion
+        // route relies on.
+        let share = Path::new(r"\\wsl$\Ubuntu-24.04\home\me");
+        assert_eq!(
+            resolve_dir("/etc/", share),
+            PathBuf::from(r"\\wsl$\Ubuntu-24.04\etc")
+        );
+        assert_eq!(
+            resolve_dir("sub/", share),
+            PathBuf::from(r"\\wsl$\Ubuntu-24.04\home\me\sub")
+        );
     }
 
     #[test]

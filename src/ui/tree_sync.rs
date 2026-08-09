@@ -770,10 +770,27 @@ fn take_rehydrate(cx: &mut App, client_ws: WorkspaceId, window_is_empty: bool) -
     (window_is_empty || adopt == Adopt::IfEmpty).then_some(adopt)
 }
 
-pub(crate) fn window_is_informed(cx: &App, client_ws: WorkspaceId) -> bool {
-    cx.try_global::<TreeSync>()
+/// Whether a window with no tabs may delete `client_ws` outright — from the
+/// machine's tree and from the store both.
+///
+/// Two independent things have to agree, because the window's own emptiness
+/// cannot tell them apart: a workspace is empty when it genuinely holds
+/// nothing, and equally when its layout failed to rebuild. Only the first is a
+/// reason to delete anything, and the second has already cost a workspace with
+/// ten live tabs in it.
+///
+/// So the window must be informed (it pulled a layout and put it up), *and* the
+/// mirror — the machine's own account, which no local failure can empty — must
+/// agree there is nothing there. An unprimed mirror knows nothing and answers
+/// no: "I don't know" may never authorize a deletion.
+pub(crate) fn workspace_is_disposable(cx: &App, client_ws: WorkspaceId) -> bool {
+    let Some(state) = cx
+        .try_global::<TreeSync>()
         .and_then(|t| t.windows.get(&client_ws))
-        .is_some_and(|s| s.informed)
+    else {
+        return false;
+    };
+    state.informed && matches!(&state.sync, SyncPhase::Primed(mirror) if mirror.tabs.is_empty())
 }
 
 pub(crate) fn mark_window_informed(cx: &mut App, client_ws: WorkspaceId) {
@@ -1122,7 +1139,6 @@ fn session_pane_from_node(node: &PaneNode, panes: &[PaneRecord]) -> SessionPane 
     match node {
         PaneNode::Leaf { pane } => {
             let record = panes.iter().find(|p| p.id == *pane);
-            let live = record.is_some_and(|r| r.live);
             let (cwd, ssh_spec, agent) = match record {
                 Some(r) => (
                     r.cwd.clone().map(std::path::PathBuf::from),
@@ -1133,7 +1149,21 @@ fn session_pane_from_node(node: &PaneNode, panes: &[PaneRecord]) -> SessionPane 
             };
             SessionPane::Leaf {
                 cwd,
-                pane_id: live.then_some(*pane),
+                // The id goes down whatever `live` says. That flag is a cached
+                // fact about another process, written by whoever last observed
+                // the pane and reloaded from disk as `false` on every server
+                // start — so a quiet pane that nobody has observed since reads
+                // as dead while its shell is very much alive. Believing it here
+                // is what threw away live sessions on a workspace switch: the
+                // id was erased, and the restore below had nothing to attach
+                // to, so it spawned a fresh shell over a running one.
+                //
+                // Attaching is the thing that actually knows. `spawn_shell_
+                // terminal_in` attaches when the pane is there and spawns fresh
+                // when it is not, which is the same answer this filter was
+                // trying to guess — except it is right. `live` stays a hint for
+                // what to show, never the judge of what to destroy.
+                pane_id: Some(*pane),
                 ssh_spec,
                 agent: agent.as_ref().map(|a| a.agent),
                 agent_session_id: agent.as_ref().and_then(|a| a.session_id.clone()),
@@ -1370,16 +1400,39 @@ fn finish_hydration(
     let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, client_ws) else {
         return;
     };
-    log::info!(
-        "rebuilding {} tab(s) of workspace {client_ws} from its machine's tree",
-        session.tabs.len()
-    );
-    mark_window_informed(cx, client_ws);
+    let wanted = session.tabs.len();
+    log::info!("rebuilding {wanted} tab(s) of workspace {client_ws} from its machine's tree");
     let _ = handle.update(cx, move |_, window, cx| {
         app.update(cx, |app, cx| {
             app.adopt_workspace(client_ws, session, window, cx)
         });
     });
+
+    // Informed *after* the rebuild, and only if the rebuild produced something.
+    //
+    // The licence means "this window knows what belongs in this workspace", and
+    // `switch_workspace` / `detach_workspace` read it as permission to delete a
+    // workspace that has no tabs — from the machine tree and from the store
+    // both. Granting it before the rebuild handed that permission to a window
+    // whose rebuild had not happened yet, and a rebuild can produce nothing:
+    // `tabs_from_session` drops any tab whose panes all fail to start, which is
+    // what every tab does when the pane socket is unreachable. The window then
+    // sat there, empty and authoritative, and the next switch deleted a
+    // workspace with ten live tabs in it.
+    //
+    // Emptiness that came from a failure has to stay indistinguishable from not
+    // knowing, because that is what it is.
+    let rebuilt = crate::ui::windows::WindowRegistry::app_for(cx, client_ws)
+        .and_then(|app| app.upgrade())
+        .is_some_and(|app| !app.read(cx).tabs.is_empty());
+    if rebuilt || wanted == 0 {
+        mark_window_informed(cx, client_ws);
+    } else {
+        log::warn!(
+            "workspace {client_ws}: none of its {wanted} tab(s) could be rebuilt; leaving the \
+             window uninformed so the layout is not mistaken for an empty workspace"
+        );
+    }
 }
 
 pub(crate) fn on_layout_delta(cx: &mut App, host: HostId, key: &str, delta: LayoutDelta) {
@@ -1820,6 +1873,72 @@ mod tests {
             assert!(
                 !state.informed,
                 "the licence to prune must not survive a takeover"
+            );
+        });
+    }
+
+    /// The rule that stops a failed rebuild from being read as "empty".
+    ///
+    /// A window with no tabs may delete its workspace outright — tree and store
+    /// both — so the two ways of having no tabs must not look alike. Genuinely
+    /// empty is a reason; "the panes would not start" is not, and it is what
+    /// every tab looks like when the pane socket has gone away.
+    #[gpui::test]
+    fn only_a_mirror_that_agrees_lets_an_empty_window_delete_its_workspace(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let ws = WorkspaceId::new();
+            let set = |cx: &mut App, informed: bool, sync: SyncPhase| {
+                let state = cx
+                    .default_global::<TreeSync>()
+                    .windows
+                    .entry(ws)
+                    .or_default();
+                state.informed = informed;
+                state.sync = sync;
+            };
+            let unprimed = || SyncPhase::Unprimed {
+                dirty: false,
+                priming: false,
+            };
+            let primed_with =
+                |tabs: Vec<TreeTab>| SyncPhase::Primed(WsMirror { tabs, active: None });
+            let a_tab = || TreeTab {
+                id: TabId::new(),
+                name: None,
+                sidebar_group: None,
+                root: PaneNode::Leaf { pane: 1 },
+            };
+
+            assert!(
+                !workspace_is_disposable(cx, WorkspaceId::new()),
+                "a workspace nothing is tracking is not a workspace to delete"
+            );
+
+            set(cx, true, unprimed());
+            assert!(
+                !workspace_is_disposable(cx, ws),
+                "an unpulled mirror knows nothing, and not knowing must never authorize this"
+            );
+
+            set(cx, true, primed_with(vec![a_tab()]));
+            assert!(
+                !workspace_is_disposable(cx, ws),
+                "this is the regression: the window came up empty because the rebuild failed, \
+                 while the machine still held the tabs. Deleting here destroyed them."
+            );
+
+            set(cx, false, primed_with(vec![]));
+            assert!(
+                !workspace_is_disposable(cx, ws),
+                "a window that never put up a layout does not get to say what belongs here"
+            );
+
+            set(cx, true, primed_with(vec![]));
+            assert!(
+                workspace_is_disposable(cx, ws),
+                "informed, and the machine agrees it holds nothing — the one case that is"
             );
         });
     }
@@ -2550,7 +2669,7 @@ mod tests {
     }
 
     #[test]
-    fn a_live_leaf_keeps_its_pane_id_and_a_dead_one_lowers_to_a_revival_leaf() {
+    fn a_lowered_leaf_carries_its_pane_id_and_its_agent_whatever_live_says() {
         use tty7_core::core::cli_agent::CLIAgent;
         let tab_id = TabId::new();
         let ws = tty7_core::core::machine::Workspace {
@@ -2619,13 +2738,58 @@ mod tests {
                 ..
             } => {
                 assert_eq!(
-                    *pane_id, None,
-                    "a dead pane's leaf takes the fresh-spawn path — that is the revival"
+                    *pane_id,
+                    Some(2),
+                    "a pane the tree calls dead still goes down by its id: the flag is a \
+                     cached observation from another process — reloaded as false on every \
+                     server start — and attaching is what settles it. Believing the flag \
+                     here spawned fresh shells over running sessions."
                 );
                 assert_eq!(cwd.as_deref(), Some(std::path::Path::new("/work/api")));
                 assert_eq!(*agent, Some(CLIAgent::Claude));
                 assert_eq!(agent_session_id.as_deref(), Some("sid"));
             }
+            _ => panic!("leaf"),
+        }
+    }
+
+    /// The regression behind "switching workspaces threw away every session".
+    ///
+    /// Two servers had started against one config dir — one holding the control
+    /// socket with an empty pane registry, the other holding the panes — so
+    /// `MachineGet` answered with every `live` still `false`, the value
+    /// `load_machine` stamps on a cold read. Erasing the id on that made the
+    /// restore spawn a fresh shell over each running one, and nineteen live
+    /// agent sessions went out with it.
+    ///
+    /// The id has to survive a `live: false`, because nothing here is entitled
+    /// to declare a pane dead. Attaching is.
+    #[test]
+    fn a_pane_the_tree_calls_dead_still_goes_down_by_its_id() {
+        let tab_id = TabId::new();
+        let ws = tty7_core::core::machine::Workspace {
+            tabs: vec![TreeTab {
+                id: tab_id,
+                name: None,
+                sidebar_group: None,
+                root: PaneNode::Leaf { pane: 7 },
+            }],
+            active_tab: Some(tab_id),
+            ..Default::default()
+        };
+        let panes = vec![PaneRecord {
+            id: 7,
+            cwd: Some("/work".into()),
+            live: false,
+            ..PaneRecord::new(7)
+        }];
+
+        match &session_from_tree(&ws, &panes).tabs[0].pane {
+            SessionPane::Leaf { pane_id, .. } => assert_eq!(
+                *pane_id,
+                Some(7),
+                "the attach decides whether pane 7 is still there; this must not pre-empt it"
+            ),
             _ => panic!("leaf"),
         }
     }

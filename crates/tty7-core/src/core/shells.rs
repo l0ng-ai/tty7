@@ -447,8 +447,91 @@ pub fn git_bash_path() -> Option<PathBuf> {
     find_git_bash()
 }
 
+#[cfg(all(windows, test))]
+mod wsl_tests {
+    #[test]
+    fn the_default_distro_is_one_of_the_installed_ones() {
+        let installed = super::wsl_distros();
+        if installed.is_empty() {
+            eprintln!("skipping: no WSL distributions installed");
+            return;
+        }
+        let default = super::default_wsl_distro()
+            .expect("a machine with installed distros names a default in Lxss");
+        assert!(
+            installed.contains(&default),
+            "registry default {default:?} not in {installed:?}"
+        );
+    }
+}
+
 pub fn wsl_distros() -> Vec<String> {
     wsl_distros_probed().unwrap_or_default()
+}
+
+/// The distro `wsl.exe` launches when no `--distribution` is given, read from
+/// the registry (`Lxss\DefaultDistribution` names the per-distro key that
+/// carries `DistributionName`). The registry rather than `wsl -l`: this runs
+/// on the pane-spawn path, where a microsecond read beats a subprocess.
+#[cfg(windows)]
+pub fn default_wsl_distro() -> Option<String> {
+    const LXSS: &str = r"Software\Microsoft\Windows\CurrentVersion\Lxss";
+    let guid = registry_user_string(LXSS, "DefaultDistribution")?;
+    let name = registry_user_string(&format!(r"{LXSS}\{guid}"), "DistributionName")?;
+    (!name.is_empty()).then_some(name)
+}
+
+#[cfg(not(windows))]
+pub fn default_wsl_distro() -> Option<String> {
+    None
+}
+
+#[cfg(windows)]
+fn registry_user_string(subkey: &str, value: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW};
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+    let subkey = wide(subkey);
+    let value = wide(value);
+    let mut bytes: u32 = 0;
+    // SAFETY: a null data pointer makes this a pure sizing call; the key and
+    // value names are NUL-terminated UTF-16 owned right above.
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut bytes,
+        )
+    };
+    if rc != 0 || bytes == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; (bytes as usize).div_ceil(2)];
+    let mut size = bytes;
+    // SAFETY: `buf` is `size` bytes as the sizing call reported;
+    // RegGetValueW writes at most that many and NUL-terminates REG_SZ data.
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&u| u == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..len]))
 }
 
 pub fn wsl_distros_probed() -> Option<Vec<String>> {

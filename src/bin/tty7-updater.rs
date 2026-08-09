@@ -283,13 +283,28 @@ mod macos {
     }
 
     fn wait_for_exit(pid: u32) {
+        // The updater is spawned directly by the app it waits for, so while
+        // that app lives it *is* this process's parent, and the kernel
+        // reparents us to launchd the moment it exits. Watching getppid() is
+        // therefore immune to pid reuse, which `kill(pid, 0)` is not: a
+        // recycled pid keeps answering 0 forever. (Windows solves the same
+        // race by holding a process handle — see the windows module.)
+        let pid = pid as libc::pid_t;
+        if unsafe { libc::getppid() } == pid {
+            while unsafe { libc::getppid() } == pid {
+                thread::sleep(PARENT_POLL);
+            }
+            return;
+        }
+        // Not our parent — a hand-run updater. The polling fallback keeps
+        // that invocation working, pid-reuse caveat and all.
         while process_alive(pid) {
             thread::sleep(PARENT_POLL);
         }
     }
 
-    fn process_alive(pid: u32) -> bool {
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    fn process_alive(pid: libc::pid_t) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
     }
 
     fn remove_path(path: &Path) -> Result<(), String> {
@@ -486,6 +501,14 @@ mod windows {
     const PORTABLE_PAYLOAD_DIR: &str = "portable-payload";
     const PORTABLE_MARKER: &str = ".tty7-portable";
     const PORTABLE_MARKER_CONTENT: &[u8] = b"portable-v1";
+    /// Lives inside a portable-update backup from before the first installed
+    /// file moves until the replacement is fully in place. A backup found
+    /// later still carrying it names a replacement that was cut short —
+    /// power loss, a kill — and an installation that may mix two versions;
+    /// one without it is a finished update whose backup deletion lost to an
+    /// antivirus scan. The app reads it at launch: duplicated in
+    /// src/core/update.rs, like the portable marker above.
+    const PORTABLE_BACKUP_INCOMPLETE: &str = ".tty7-replace-incomplete";
     const MAX_PORTABLE_ENTRIES: usize = 4096;
     const MAX_PORTABLE_EXPANDED_BYTES: u64 = 1024 * 1024 * 1024;
     // Everything the release package owns: an entry outside this list is
@@ -668,6 +691,22 @@ mod windows {
             return recover_from_failed_update(&plan, error);
         }
 
+        // Setup's own PrepareToInstall repeats this, but doing it here first
+        // means a directory that cannot be cleared fails with a named cause in
+        // this log instead of Inno's bare "DeleteFile failed; code 5" — and the
+        // previous app is relaunched instead of being left half-replaced.
+        log_line(
+            &plan.log,
+            "stopping the tty7 daemon and clearing installed-file locks",
+        );
+        // From here until the relaunch, a `tty7` CLI call or a manual launch
+        // must not spawn a daemon that relocks the files Setup is replacing.
+        // launch_app releases the guard on every path out of this function.
+        tty7_core::daemon::update_guard::hold();
+        if let Err(error) = tty7_core::daemon::spawn::stop_for_update(&plan.install_dir) {
+            return recover_from_failed_update(&plan, error);
+        }
+
         log_line(&plan.log, "running the tty7 Windows installer");
         let status = match run_installer(&plan.installer, &plan.log) {
             Ok(status) => status,
@@ -726,7 +765,11 @@ mod windows {
             &plan.log,
             "stopping the tty7 daemon before replacing portable files",
         );
-        if let Err(error) = stop_daemon_from_payload(&payload) {
+        // Held for the whole replacement, exactly as in `install`; the pid it
+        // records must be this process's — the payload child below exits
+        // immediately, and a guard naming a dead writer holds nothing.
+        tty7_core::daemon::update_guard::hold();
+        if let Err(error) = stop_daemon_from_payload(&payload, &plan.install_dir) {
             return recover_without_replacement(&plan.log, &plan.install_dir, &plan.stage, error);
         }
 
@@ -1097,10 +1140,12 @@ mod windows {
             .map_err(|error| format!("starting {}: {error}", installer.display()))
     }
 
-    fn stop_daemon_from_payload(payload: &Path) -> Result<(), String> {
+    fn stop_daemon_from_payload(payload: &Path, install_dir: &Path) -> Result<(), String> {
         let executable = payload.join("tty7-app.exe");
         let status = Command::new(&executable)
             .arg("--stop-daemon")
+            .arg("--update-install-dir")
+            .arg(install_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1144,6 +1189,15 @@ mod windows {
                 return Err(with_relaunch_failure(cause, relaunch_previous(install_dir)));
             }
         };
+        // Marked incomplete before any installed file moves. Nothing here
+        // removes the marker on rollback: a rollback that succeeds removes
+        // the whole backup, and one that fails leaves an installation whose
+        // state really is suspect.
+        if let Err(error) = fs::write(backup.join(PORTABLE_BACKUP_INCOMPLETE), b"") {
+            let cause = format!("marking the update backup {}: {error}", backup.display());
+            let _ = remove_path(&backup);
+            return Err(with_relaunch_failure(cause, relaunch_previous(install_dir)));
+        }
 
         let mut moved = Vec::new();
         for root in PORTABLE_MANAGED_ROOTS {
@@ -1183,6 +1237,9 @@ mod windows {
         // The replacement survived its launch grace period. Old managed files
         // are no longer needed; an antivirus-held backup is harmless and can be
         // removed manually rather than turning a successful update into rollback.
+        // The marker leaves first: a backup that outlives this process without
+        // it is finished business the next launch may discard on its own.
+        let _ = fs::remove_file(backup.join(PORTABLE_BACKUP_INCOMPLETE));
         let _ = remove_path(&backup);
         Ok(())
     }
@@ -1324,6 +1381,10 @@ mod windows {
     }
 
     fn launch_app(install_dir: &Path) -> Result<(), String> {
+        // Every relaunch — success, failure recovery, rollback — is a point
+        // where the installation is no longer being replaced, so the daemon
+        // spawn guard ends here, before the app comes up and asks for one.
+        tty7_core::daemon::update_guard::clear();
         let executable = install_dir.join("tty7-app.exe");
         let mut child = Command::new(&executable)
             .stdin(Stdio::null())
@@ -1844,6 +1905,51 @@ mod windows {
             assert_eq!(
                 fs::read(install.path().join("my-script.ps1")).unwrap(),
                 b"user file"
+            );
+        }
+
+        #[test]
+        fn a_backup_carries_the_incomplete_marker_exactly_while_files_move() {
+            let install = tempfile::tempdir().unwrap();
+            let payload = tempfile::tempdir().unwrap();
+            fs::write(install.path().join("tty7-app.exe"), b"old app").unwrap();
+            fs::write(payload.path().join("tty7-app.exe"), b"new app").unwrap();
+            let install_dir = install.path().to_path_buf();
+
+            replace_portable_and_relaunch(
+                install.path(),
+                payload.path(),
+                move |_| {
+                    let backups: Vec<_> = fs::read_dir(&install_dir)
+                        .unwrap()
+                        .flatten()
+                        .map(|entry| entry.path())
+                        .filter(|path| {
+                            path.file_name()
+                                .and_then(|name| name.to_str())
+                                .is_some_and(|name| name.starts_with(".tty7-update-backup-"))
+                        })
+                        .collect();
+                    assert_eq!(backups.len(), 1, "one backup during the replacement");
+                    assert!(
+                        backups[0].join(PORTABLE_BACKUP_INCOMPLETE).is_file(),
+                        "the marker is present while files are moving"
+                    );
+                    Ok(())
+                },
+                |_| panic!("the previous version must not relaunch after success"),
+            )
+            .unwrap();
+
+            let leftovers: Vec<_> = fs::read_dir(install.path())
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name())
+                .collect();
+            assert_eq!(
+                leftovers,
+                vec![std::ffi::OsString::from("tty7-app.exe")],
+                "no backup and no marker survive a completed replacement"
             );
         }
 

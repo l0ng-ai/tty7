@@ -6,7 +6,7 @@ use alacritty_terminal::term::TermMode;
 use gpui::{
     App, ClipboardEntry, ClipboardItem, Context, ExternalPaths, FocusHandle, Focusable, Font,
     KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, Pixels, ScrollDelta, ScrollWheelEvent,
-    Window, actions, div, prelude::*, px,
+    WeakEntity, Window, actions, div, prelude::*, px,
 };
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
@@ -97,7 +97,9 @@ struct ScrollAnim {
 
 /// Fraction of the remaining distance consumed per [`SCROLL_ANIM_FRAME`].
 const SCROLL_ANIM_SMOOTH: f32 = 0.4;
-/// The frame `SCROLL_ANIM_SMOOTH` is calibrated against, and the tick interval.
+/// The frame `SCROLL_ANIM_SMOOTH` is calibrated against: one nominal 60 Hz
+/// frame. Decay is scaled by real elapsed time, so the same feel holds at any
+/// refresh rate.
 const SCROLL_ANIM_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 /// Below this much left to travel, land instead of asymptoting toward it. A
 /// twentieth of a line is around a pixel — the tail of an exponential decay is
@@ -590,6 +592,53 @@ fn wsl_path(windows: &str) -> Option<String> {
         "/mnt/{drive}/{}",
         chars.as_str().replace('\\', "/")
     ))
+}
+
+/// The Windows spelling of a WSL pane's POSIX cwd — [`wsl_path`]'s inverse,
+/// for reading rather than writing: the distro's `\\wsl$` share is how a
+/// local `read_dir` can list a directory this process cannot reach natively.
+///
+/// Everything stays on the share, `/mnt/<drive>` included. Mapping the
+/// automount back to the drive letter would list faster, but an absolute
+/// word completes against its *cwd's* path prefix (`resolve_dir` keeps the
+/// prefix when a rooted word lands on it) — so a drive-spelled cwd would send
+/// `ls /etc<Tab>` to `C:\etc` instead of the distro's `/etc`. One prefix,
+/// one meaning. A distro name with a path separator cannot name a share.
+fn wsl_share_path(distro: &str, posix: &str) -> Option<std::path::PathBuf> {
+    if distro.is_empty() || distro.contains(['\\', '/']) {
+        return None;
+    }
+    let rest = posix.strip_prefix('/')?;
+    Some(std::path::PathBuf::from(format!(
+        r"\\wsl$\{distro}\{}",
+        rest.replace('/', "\\")
+    )))
+}
+
+/// The distro whose `\\wsl$` share holds a pane's filesystem, or `None` when
+/// the pane is not a WSL one and Tab belongs to the shell.
+///
+/// The two kinds of WSL pane are told apart by who reports the distro. A pane
+/// that runs `wsl.exe` is tagged by its remote context, and it reaches the
+/// distro of whichever machine *hosts* it — so only this machine's panes may
+/// take the share; a remote host's same-named distro would list the wrong
+/// files. A pane in a WSL workspace is tagged by its workspace target instead,
+/// and needs no such check: tty7 reaches those distros by running `wsl.exe`
+/// here, so the share is this machine's by construction — even though the
+/// pane's host, being the distro's own server, is not `HostId::LOCAL`.
+fn wsl_share_distro(
+    remote: Option<&crate::daemon::protocol::RemoteContext>,
+    workspace: Option<&crate::terminal::PaneWorkspace>,
+    host_is_local: bool,
+) -> Option<String> {
+    match remote {
+        Some(remote) => (remote.kind == crate::daemon::protocol::RemoteKind::Wsl && host_is_local)
+            .then(|| remote.target.clone()),
+        None => match &workspace?.target {
+            crate::core::session::RemoteTarget::Wsl { distro } => Some(distro.clone()),
+            _ => None,
+        },
+    }
 }
 
 /// The staged image's path as the pane's own filesystem spells it.
@@ -2688,7 +2737,12 @@ impl TerminalView {
                 .background_spawn(async move {
                     let files = shell_files
                         .into_iter()
-                        .filter_map(|(host, path)| host.read_file(&path, MAX_HISTORY_BYTES).ok())
+                        .filter_map(|(host, path)| {
+                            // The name comes along: it is what tells the loader
+                            // which shell's format the bytes are in.
+                            let name = path.file_name()?.to_string_lossy().into_owned();
+                            Some((name, host.read_file(&path, MAX_HISTORY_BYTES).ok()?))
+                        })
                         .collect();
                     super::history::load_with_shell_files(&loading, files)
                 })
@@ -3521,16 +3575,25 @@ impl TerminalView {
             .paths_are_local()
             .then(|| self.local_cwd().or_else(|| std::env::current_dir().ok()))
             .flatten();
+        let share_cwd = if cwd.is_none() {
+            self.wsl_share_cwd()
+        } else {
+            None
+        };
         let line = self.cmd.text();
         let cursor = self.cmd.cursor();
-        let Some(comp) = super::completion::complete(&line, cursor, cwd.as_deref()) else {
+        let comp = match &share_cwd {
+            Some(share) => super::completion::complete_foreign(&line, cursor, share),
+            None => super::completion::complete(&line, cursor, cwd.as_deref()),
+        };
+        let Some(comp) = comp else {
             if self.spawn_remote_path_completion(&line, cursor, forward, cx) {
                 return;
             }
             log::debug!(
                 target: "tty7::completion",
                 "handing the line to the shell: no candidates for {line:?} at {cursor} \
-                 (local cwd {cwd:?}, remote cwd {:?})",
+                 (local cwd {cwd:?}, share cwd {share_cwd:?}, remote cwd {:?})",
                 self.remote_ssh_cwd(),
             );
             self.handoff_tab_to_shell(!forward, cx);
@@ -3607,10 +3670,28 @@ impl TerminalView {
         Some(generation)
     }
 
+    /// The cwd to list over the distro's `\\wsl$` share, for a pane whose
+    /// filesystem is a WSL distro's: the local wsl.exe pane (tagged by its
+    /// remote context) and the WSL-workspace pane (tagged by its workspace
+    /// target) both report a POSIX cwd this process cannot read natively.
+    fn wsl_share_cwd(&self) -> Option<std::path::PathBuf> {
+        let distro = wsl_share_distro(
+            self.terminal.remote_context().as_ref(),
+            self.workspace.as_ref(),
+            self.host_id.is_local(),
+        )?;
+        let cwd = self.cwd()?;
+        wsl_share_path(&distro, &cwd.to_string_lossy())
+    }
+
     fn remote_ssh_cwd(&self) -> Option<String> {
         let owned = match self.terminal.remote_context() {
             Some(remote) => remote.kind == crate::daemon::protocol::RemoteKind::NativeSsh,
-            None => self.workspace.is_some(),
+            // A WSL workspace carries no SSH spec: there is no connection to
+            // list over, and its panes complete through the `\\wsl$` share
+            // instead — so only a spec-carrying (SSH) workspace claims the
+            // remote-listing path.
+            None => self.workspace.as_ref().is_some_and(|w| w.spec.is_some()),
         };
         if !owned {
             return None;
@@ -4059,7 +4140,7 @@ impl TerminalView {
         }
     }
 
-    fn on_scroll(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_scroll(&mut self, ev: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         let mult = cx.global::<Config>().mouse_scroll_multiplier;
         let raw = match ev.delta {
             ScrollDelta::Lines(p) => p.y,
@@ -4087,7 +4168,7 @@ impl TerminalView {
         }
 
         if self.should_animate_scroll(delta, gesturing, cx) {
-            self.queue_scroll_anim(delta, cx);
+            self.queue_scroll_anim(delta, window, cx);
         } else {
             self.cancel_scroll_anim();
             self.smooth_scroll(delta, cx);
@@ -4127,7 +4208,7 @@ impl TerminalView {
     /// Add `delta` to the in-flight animation, starting the frame loop if it is
     /// idle. Successive notches accumulate rather than restart, so spinning the
     /// wheel fast still lands exactly where the notches asked for.
-    fn queue_scroll_anim(&mut self, delta: f32, cx: &mut Context<Self>) {
+    fn queue_scroll_anim(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(anim) = self.scroll_anim.as_mut() {
             anim.remaining += delta;
             return;
@@ -4138,18 +4219,13 @@ impl TerminalView {
         });
         self.scroll_anim_epoch += 1;
         let epoch = self.scroll_anim_epoch;
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(SCROLL_ANIM_FRAME).await;
-                if !matches!(
-                    this.update(cx, |view, cx| view.scroll_anim_tick(epoch, cx)),
-                    Ok(true)
-                ) {
-                    break;
-                }
-            }
-        })
-        .detach();
+        schedule_scroll_anim_frame(cx.weak_entity(), epoch, window);
+        // Ask for a frame right away: the callback chain's first step then
+        // fires on the next display refresh even on a backend that only draws
+        // when the window is dirty, and the callback keeps it dirty from then
+        // on. Without this, a wheel notch queued on an idle, unfocused pane
+        // could sit dormant instead of spreading over frames.
+        cx.notify();
     }
 
     /// Drop whatever is left to travel. Every other way the display offset moves
@@ -4162,7 +4238,12 @@ impl TerminalView {
         }
     }
 
-    fn scroll_anim_tick(&mut self, epoch: u64, cx: &mut Context<Self>) -> bool {
+    /// Advance the in-flight animation by the ground it covered since the
+    /// previous frame. Runs at frame time — right before the next frame is
+    /// drawn — so every presented frame shows exactly one decay step and no
+    /// step is ever skipped or doubled against the monitor's cadence. Returns
+    /// whether the animation is still going.
+    fn scroll_anim_frame(&mut self, epoch: u64, cx: &mut Context<Self>) -> bool {
         if epoch != self.scroll_anim_epoch {
             return false;
         }
@@ -5579,6 +5660,28 @@ fn smooth_scroll_step(offset: usize, frac: f32, delta: f32, max: usize) -> (i32,
     (new_offset as i32 - offset as i32, pos - new_offset)
 }
 
+/// Advance the in-flight scroll animation once per presented frame.
+///
+/// Registered from [`TerminalView::queue_scroll_anim`]: gpui runs the callback
+/// immediately before the next frame is drawn, and it re-registers itself as
+/// long as the animation lives. Stepping at frame time instead of on a
+/// free-running timer keeps the decay steps locked to the monitor's vblank
+/// cadence — a 16 ms timer drifting against a 16.67 ms vblank makes some
+/// presented frames show twice the movement of their neighbours and others
+/// none, which reads as stutter. Frame-aligned stepping shows every frame
+/// exactly the ground it covered. The weak handle and the epoch guard make the
+/// chain die quietly when the pane is closed or the animation is cancelled.
+fn schedule_scroll_anim_frame(view: WeakEntity<TerminalView>, epoch: u64, window: &mut Window) {
+    window.on_next_frame(move |window, cx| {
+        let Some(view) = view.upgrade() else {
+            return;
+        };
+        if view.update(cx, |view, cx| view.scroll_anim_frame(epoch, cx)) {
+            schedule_scroll_anim_frame(view.downgrade(), epoch, window);
+        }
+    });
+}
+
 /// How much of `remaining` to consume this frame, and whether this is the last
 /// one. Decay is scaled by the real elapsed time so a dropped frame covers the
 /// ground it missed instead of stretching the animation out.
@@ -5618,7 +5721,7 @@ mod tests {
     };
     use super::{
         remote_paste_spec, staged_path_for_pane, stages_clipboard_image, staging_cache,
-        staging_dir_is_safe, wsl_path,
+        staging_dir_is_safe, wsl_path, wsl_share_distro, wsl_share_path,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
@@ -5868,6 +5971,55 @@ mod tests {
         assert_eq!(remote_paste_user(None, Some(&spec)), Some("me"));
     }
 
+    fn wsl_context(distro: &str) -> crate::daemon::protocol::RemoteContext {
+        crate::daemon::protocol::RemoteContext {
+            kind: RemoteKind::Wsl,
+            argv: Vec::new(),
+            target: distro.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_wsl_exe_pane_on_this_machine_completes_over_its_own_share() {
+        assert_eq!(
+            wsl_share_distro(Some(&wsl_context("Ubuntu-24.04")), None, true),
+            Some("Ubuntu-24.04".to_string())
+        );
+    }
+
+    /// The same pane on a remote machine reaches that machine's distro, which
+    /// no share here can list.
+    #[test]
+    fn a_remote_hosts_wsl_exe_pane_leaves_tab_to_the_shell() {
+        assert_eq!(
+            wsl_share_distro(Some(&wsl_context("Ubuntu-24.04")), None, false),
+            None
+        );
+    }
+
+    /// A WSL workspace's panes are served by the daemon inside the distro, so
+    /// their host is never `LOCAL` — and the distro is still on this machine.
+    #[test]
+    fn a_wsl_workspace_pane_completes_over_the_share_its_target_names() {
+        let w = ws(
+            RemoteTarget::Wsl {
+                distro: "Ubuntu-24.04".into(),
+            },
+            false,
+        );
+        assert_eq!(
+            wsl_share_distro(None, Some(&w), false),
+            Some("Ubuntu-24.04".to_string())
+        );
+    }
+
+    #[test]
+    fn panes_with_no_distro_of_their_own_have_no_share() {
+        let ssh = ws(RemoteTarget::direct("me", "dev.box", 22), true);
+        assert_eq!(wsl_share_distro(None, Some(&ssh), false), None);
+        assert_eq!(wsl_share_distro(None, None, true), None);
+    }
+
     #[test]
     fn wsl_and_specless_workspaces_keep_the_local_image_path() {
         let wsl = ws(
@@ -5968,6 +6120,34 @@ mod tests {
             staged_path_for_pane(r"C:\Temp\paste-1.png", false),
             r"C:\Temp\paste-1.png"
         );
+    }
+
+    #[test]
+    fn a_wsl_cwd_gets_a_windows_spelling_the_completion_engine_can_list() {
+        let share = |posix: &str| wsl_share_path("Ubuntu-24.04", posix);
+
+        // A distro-native path goes through the share.
+        assert_eq!(
+            share("/home/me/repo"),
+            Some(PathBuf::from(r"\\wsl$\Ubuntu-24.04\home\me\repo"))
+        );
+        assert_eq!(share("/"), Some(PathBuf::from(r"\\wsl$\Ubuntu-24.04\")));
+
+        // The automount stays on the share too: a drive-spelled cwd would
+        // send an absolute word (`ls /etc<Tab>`) to `C:\etc` instead of the
+        // distro's /etc, because a rooted word completes against its cwd's
+        // path prefix.
+        assert_eq!(
+            share("/mnt/c/Users/me"),
+            Some(PathBuf::from(r"\\wsl$\Ubuntu-24.04\mnt\c\Users\me"))
+        );
+
+        // No absolute POSIX path, no translation — and a distro name that
+        // could break out of the share is refused outright.
+        assert_eq!(share("relative/path"), None);
+        assert_eq!(wsl_share_path("", "/home/me"), None);
+        assert_eq!(wsl_share_path(r"evil\distro", "/home/me"), None);
+        assert_eq!(wsl_share_path("evil/distro", "/home/me"), None);
     }
 
     #[test]
@@ -8435,6 +8615,28 @@ mod gpui_tests {
                     "the animation outlived the jump"
                 );
                 assert_eq!(display_offset(view), 0);
+            })
+            .unwrap();
+    }
+
+    /// A frame callback that was already queued when the animation was
+    /// cancelled must not walk the viewport on its stale epoch.
+    #[gpui::test]
+    fn a_stale_frame_after_cancellation_does_not_walk(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, w, cx| {
+                scroll_into_history(view, 10);
+                let ev = notch(view, -4.9);
+                view.on_scroll(&ev, w, cx);
+                let epoch = view.scroll_anim_epoch;
+                view.cancel_scroll_anim();
+
+                assert!(
+                    !view.scroll_anim_frame(epoch, cx),
+                    "a stale frame callback kept the animation alive"
+                );
+                assert_eq!(display_offset(view), 10, "the stale frame moved");
             })
             .unwrap();
     }

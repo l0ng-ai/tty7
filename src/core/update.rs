@@ -89,6 +89,14 @@ const WINDOWS_INNO_INSTALL_MARKER: &str = ".tty7-inno-install";
 const WINDOWS_PORTABLE_MARKER: &str = ".tty7-portable";
 #[cfg(target_os = "windows")]
 const WINDOWS_PORTABLE_MARKER_CONTENT: &[u8] = b"portable-v1";
+/// What the updater names the directory it moves the old portable files into.
+#[cfg(target_os = "windows")]
+const WINDOWS_PORTABLE_BACKUP_PREFIX: &str = ".tty7-update-backup-";
+/// Present inside that backup from before the first installed file moves
+/// until the replacement is complete — see `PORTABLE_BACKUP_INCOMPLETE` in
+/// src/bin/tty7-updater.rs, which this duplicates like the markers above.
+#[cfg(target_os = "windows")]
+const WINDOWS_PORTABLE_BACKUP_INCOMPLETE: &str = ".tty7-replace-incomplete";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AvailableUpdate {
@@ -188,6 +196,15 @@ pub struct UpdateStatus {
 impl Global for UpdateStatus {}
 
 pub fn spawn_check(cx: &mut App) {
+    // Before hydration and before the config gate: an interrupted portable
+    // replacement has to surface whether or not checking is on, and it is
+    // recorded as a failure so `hydrate_from_disk` below carries it into the
+    // UI. The scan itself is one `read_dir`; the deletions it hands back ride
+    // the background sweep.
+    #[cfg(target_os = "windows")]
+    let finished_backups = reconcile_portable_backups();
+    #[cfg(not(target_os = "windows"))]
+    let finished_backups: Vec<PathBuf> = Vec::new();
     // Before the config gate: a package staged by an earlier run, or a failure
     // from one, has to reach Settings whether or not checking is still on.
     hydrate_from_disk(cx);
@@ -195,7 +212,16 @@ pub fn spawn_check(cx: &mut App) {
     // waits on the result.
     let keep = UpdateState::load().pending.map(|pending| pending.stage);
     cx.background_executor()
-        .spawn(async move { sweep_orphaned_stages(keep) })
+        .spawn(async move {
+            for backup in finished_backups {
+                log::info!(
+                    "removing a completed update's leftover backup at {}",
+                    backup.display()
+                );
+                let _ = std::fs::remove_dir_all(&backup);
+            }
+            sweep_orphaned_stages(keep)
+        })
         .detach();
     if !cx.global::<Config>().check_for_updates {
         return;
@@ -406,8 +432,16 @@ fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
         .as_ref()
         .map(localized_update_install_hint);
     let detail = if update.installable {
+        // Windows cannot replace a running daemon's image, so its install path
+        // stops the background service — the promise that panes survive is
+        // only true where the daemon really does keep running (macOS).
+        let detail_key = if cfg!(target_os = "windows") {
+            L10nKey::UpdateDialogDetailWindows
+        } else {
+            L10nKey::UpdateDialogDetail
+        };
         let base = t_fmt(
-            L10nKey::UpdateDialogDetail,
+            detail_key,
             &[
                 ("version", update.version.as_str()),
                 ("current", current_version()),
@@ -961,6 +995,80 @@ fn stage_roots() -> Vec<PathBuf> {
 /// `tempfile`.
 fn is_stage_name(name: &str) -> bool {
     name.starts_with(".tty7-update-") || name.starts_with("tty7-update-")
+}
+
+/// Deals with `.tty7-update-backup-*` directories a previous portable update
+/// left in the installation.
+///
+/// One still carrying the incomplete marker means the replacement was cut
+/// short — power loss, a kill — and the installed files may mix two versions.
+/// That is recorded as an update failure so Settings shows it (and shows it
+/// again at every launch until the user restores or deletes the backup: the
+/// warning describes a condition, not an event). The backup itself is kept —
+/// it holds the only copy of the previous files.
+///
+/// One without the marker is a completed update whose backup deletion lost to
+/// an antivirus scan; those are returned for the background sweep to remove.
+#[cfg(target_os = "windows")]
+fn reconcile_portable_backups() -> Vec<PathBuf> {
+    let Some(WindowsUpdateLayout::Portable(dir)) = current_windows_update_layout() else {
+        return Vec::new();
+    };
+    let (interrupted, finished) = scan_portable_backups(&dir);
+    if !interrupted.is_empty() {
+        // All of them, not the first: two interrupted attempts in a row leave
+        // two backups, and one the user never hears about is one they delete
+        // blind or keep forever.
+        let preserved = interrupted
+            .iter()
+            .map(|backup| backup.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let detail = format!(
+            "a previous update was interrupted while replacing the installed files, so {} may \
+             mix two versions; the files from before are preserved at {preserved} — restore \
+             them or reinstall, then delete the backup",
+            dir.display()
+        );
+        log::warn!("{detail}");
+        let mut state = UpdateState::load();
+        if state.last_failure.as_ref().map(|failure| &failure.detail) != Some(&detail) {
+            state.last_failure = Some(FailureRecord {
+                version: current_version().to_string(),
+                detail,
+            });
+            state.save();
+        }
+    }
+    finished
+}
+
+/// Splits the backups under `dir` into (interrupted, finished) by the
+/// incomplete marker. Pure directory inspection, so the policy above stays
+/// testable without a real installation.
+#[cfg(target_os = "windows")]
+fn scan_portable_backups(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut interrupted = Vec::new();
+    let mut finished = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (interrupted, finished);
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let named = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(WINDOWS_PORTABLE_BACKUP_PREFIX));
+        if !named || !path.is_dir() {
+            continue;
+        }
+        if path.join(WINDOWS_PORTABLE_BACKUP_INCOMPLETE).is_file() {
+            interrupted.push(path);
+        } else {
+            finished.push(path);
+        }
+    }
+    (interrupted, finished)
 }
 
 pub(crate) fn localized_update_phase(phase: &UpdatePhase) -> Option<String> {
@@ -2029,6 +2137,24 @@ mod tests {
                 "tty7-27.1.0-macos-arm64.zip".to_string()
             ))
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn portable_backup_scan_separates_interrupted_from_finished() {
+        let root = tempfile::tempdir().unwrap();
+        let interrupted = root.path().join(".tty7-update-backup-cut");
+        std::fs::create_dir(&interrupted).unwrap();
+        std::fs::write(interrupted.join(WINDOWS_PORTABLE_BACKUP_INCOMPLETE), b"").unwrap();
+        let finished = root.path().join(".tty7-update-backup-done");
+        std::fs::create_dir(&finished).unwrap();
+        // Neither a user's directory nor a stray file may be touched.
+        std::fs::create_dir(root.path().join("completions")).unwrap();
+        std::fs::write(root.path().join(".tty7-update-backup-not-a-dir"), b"file").unwrap();
+
+        let (got_interrupted, got_finished) = scan_portable_backups(root.path());
+        assert_eq!(got_interrupted, vec![interrupted]);
+        assert_eq!(got_finished, vec![finished]);
     }
 
     #[test]

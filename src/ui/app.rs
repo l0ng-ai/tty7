@@ -838,7 +838,7 @@ impl Tty7App {
         let answered = WorkspaceStore::machine_is_connected(cx, self.workspace);
         if self.tabs.is_empty()
             && answered
-            && crate::ui::tree_sync::window_is_informed(cx, self.workspace)
+            && crate::ui::tree_sync::workspace_is_disposable(cx, self.workspace)
         {
             crate::ui::tree_sync::fire_workspace_op(cx, self.workspace, |ws| {
                 tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
@@ -939,7 +939,7 @@ impl Tty7App {
         }
         // Anything parked for the workspace we are leaving is now meaningless.
         self.pending_tab = None;
-        if self.tabs.is_empty() && crate::ui::tree_sync::window_is_informed(cx, previous) {
+        if self.tabs.is_empty() && crate::ui::tree_sync::workspace_is_disposable(cx, previous) {
             crate::ui::tree_sync::fire_workspace_op(cx, previous, |ws| {
                 tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
             });
@@ -999,7 +999,7 @@ impl Tty7App {
             pane_ws.as_ref(),
             self.workspace,
             &st.pane,
-            &alive,
+            alive.as_ref(),
             self.font_size,
             window,
             cx,
@@ -1160,9 +1160,9 @@ impl Tty7App {
         };
         let target = remote.target.clone();
         let label = crate::ui::remote_connect::label_for(&target, cx);
-        if !target.is_ssh() {
+        if !target.hosts_our_server() {
             window.push_notification(
-                t_fmt(L10nKey::AppRestartServerNotSsh, &[("label", &label)]),
+                t_fmt(L10nKey::AppRestartServerNoServer, &[("label", &label)]),
                 cx,
             );
             return;
@@ -1339,6 +1339,16 @@ impl Tty7App {
         if let Some(s) = self.active_settings_mut() {
             s.theme_panel_slot = slot;
         }
+    }
+
+    pub(crate) fn set_theme_legible_palette(
+        &mut self,
+        on: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.global_mut::<Config>().theme_legible_palette = on;
+        self.after_theme_change(window, cx);
     }
 
     fn after_theme_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2312,9 +2322,9 @@ impl Tty7App {
         if !self.guard_local_spawn(window, cx) {
             return;
         }
-        let pane_ws = self.window_workspace(cx);
+        let group = self.spawn_group(cwd.as_deref(), cx);
         let tab = match new_terminal(
-            pane_ws,
+            self.window_workspace(cx),
             Some(self.workspace),
             self.font_size,
             cwd,
@@ -2336,7 +2346,11 @@ impl Tty7App {
         self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
-        self.tabs.insert(insert_at, Tab::new(Pane::leaf(tab)));
+        let new_tab = Tab::new(Pane::leaf(tab));
+        if let Some(group) = group {
+            *new_tab.sidebar_group.borrow_mut() = group;
+        }
+        self.tabs.insert(insert_at, new_tab);
         self.active = insert_at;
         self.focus_active(window, cx);
         self.save_session(cx);
@@ -2968,6 +2982,7 @@ impl Tty7App {
             let view = source.read(cx);
             (view.local_cwd(), view.shell_spec())
         };
+        let group = self.spawn_group(cwd.as_deref(), cx);
         let new = match new_terminal(
             self.window_workspace(cx),
             Some(self.workspace),
@@ -3000,7 +3015,11 @@ impl Tty7App {
                 self.remember_active_pane(window, cx);
                 self.maximized = None;
                 let insert_at = self.new_tab_insert_at(cx);
-                self.tabs.insert(insert_at, Tab::new(Pane::leaf(new)));
+                let tab = Tab::new(Pane::leaf(new));
+                if let Some(group) = group {
+                    *tab.sidebar_group.borrow_mut() = group;
+                }
+                self.tabs.insert(insert_at, tab);
                 self.active = insert_at;
                 self.focus_active(window, cx);
             }
@@ -5697,24 +5716,47 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
     }
 }
 
+/// The daemon's account of which panes are alive, or `None` when it could not
+/// be asked at all.
+///
+/// The distinction is the point: a pane absent from a *successful* listing is
+/// genuinely gone and may be respawned, while a failed `List` says nothing
+/// about any pane. Flattening the failure into an empty map made one transient
+/// RPC error read as "every pane is dead", and the restore then spawned fresh
+/// shells over all of them — the same destruction-by-inference this file's
+/// restore path is built to avoid.
 pub(crate) fn alive_panes_on(
     route: &crate::terminal::PaneRoute,
-) -> std::collections::HashMap<u64, Option<String>> {
+) -> Option<std::collections::HashMap<u64, Option<String>>> {
     if !matches!(route, crate::terminal::PaneRoute::Local) {
-        return std::collections::HashMap::new();
+        return Some(std::collections::HashMap::new());
     }
-    crate::terminal::RemoteTerminal::list_panes_on(route)
-        .into_iter()
-        .filter(|p| p.alive)
-        .map(|p| (p.pane_id, p.owner))
-        .collect()
+    match crate::terminal::RemoteTerminal::try_list_panes_on(route) {
+        Ok(list) => Some(
+            list.into_iter()
+                .filter(|p| p.alive)
+                .map(|p| (p.pane_id, p.owner))
+                .collect(),
+        ),
+        Err(e) => {
+            log::warn!("could not list panes ({e}); leaving each attach to decide");
+            None
+        }
+    }
 }
 
 fn pane_attachable(
-    alive: &std::collections::HashMap<u64, Option<String>>,
+    alive: Option<&std::collections::HashMap<u64, Option<String>>>,
     id: u64,
     owner: crate::core::session::WorkspaceId,
 ) -> bool {
+    let Some(alive) = alive else {
+        // No listing to consult. Attaching is the safe guess in both
+        // directions: if the daemon is really unreachable the attach fails and
+        // the pane falls to the fresh-spawn path anyway, while spawning fresh
+        // on a hunch destroys a session that was merely hard to reach.
+        return true;
+    };
     match alive.get(&id) {
         None => false,
         Some(None) => true,
@@ -5745,8 +5787,15 @@ fn tabs_from_session(
     let alive = alive_panes_on(&crate::terminal::PaneRoute::for_workspace(workspace));
     let mut tabs: Vec<Tab> = Vec::with_capacity(session.tabs.len());
     for st in &session.tabs {
-        let Some(pane) = session_to_pane(workspace, owner, &st.pane, &alive, font_size, window, cx)
-        else {
+        let Some(pane) = session_to_pane(
+            workspace,
+            owner,
+            &st.pane,
+            alive.as_ref(),
+            font_size,
+            window,
+            cx,
+        ) else {
             log::error!("dropping a restored tab: no pane in it could be started");
             continue;
         };
@@ -5777,7 +5826,7 @@ fn session_to_pane(
     workspace: Option<&crate::terminal::PaneWorkspace>,
     owner: WorkspaceId,
     sp: &SessionPane,
-    alive: &std::collections::HashMap<u64, Option<String>>,
+    alive: Option<&std::collections::HashMap<u64, Option<String>>>,
     font_size: f32,
     window: &mut Window,
     cx: &mut Context<Tty7App>,
@@ -6448,18 +6497,26 @@ mod tests {
         .into_iter()
         .collect();
 
-        assert!(pane_attachable(&alive, 1, ours), "our own pane attaches");
         assert!(
-            !pane_attachable(&alive, 2, ours),
+            pane_attachable(Some(&alive), 1, ours),
+            "our own pane attaches"
+        );
+        assert!(
+            !pane_attachable(Some(&alive), 2, ours),
             "another workspace's pane must spawn fresh instead"
         );
         assert!(
-            pane_attachable(&alive, 3, ours),
+            pane_attachable(Some(&alive), 3, ours),
             "an unowned pane is legacy"
         );
         assert!(
-            !pane_attachable(&alive, 4, ours),
+            !pane_attachable(Some(&alive), 4, ours),
             "a dead id never attaches"
+        );
+        assert!(
+            pane_attachable(None, 4, ours),
+            "a failed List says nothing about pane 4; the attach itself must decide, \
+             because respawning on a transient RPC error destroys a live session"
         );
     }
 

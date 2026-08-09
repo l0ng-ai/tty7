@@ -746,6 +746,28 @@ impl Tty7App {
             self.activate(i, window, cx);
         }
     }
+
+    /// Which group a tab about to be spawned in `cwd` belongs to, when the
+    /// repo probe for that directory has already landed. `Some(None)` means
+    /// the cache knows it is not a repo; a bare `None` means it never looked.
+    ///
+    /// A tab's group otherwise starts empty and only fills in once its shell
+    /// has started and reported a cwd, which parks every new tab in the
+    /// scratch group at the bottom of the sidebar until then. A tab spawned
+    /// from one already sitting in a repo inherits a warm cache, so seeding
+    /// it here lands the tab in its group on the first frame.
+    pub(crate) fn spawn_group(
+        &self,
+        cwd: Option<&Path>,
+        cx: &gpui::App,
+    ) -> Option<Option<PathBuf>> {
+        let host = self
+            .window_workspace(cx)
+            .as_ref()
+            .map_or(crate::ui::host_ops::HostId::LOCAL, |ws| ws.target.host_id());
+        cx.try_global::<GitStatusCache>()?
+            .known_repo_for(host, cwd?)
+    }
 }
 
 #[derive(Debug, PartialEq)]

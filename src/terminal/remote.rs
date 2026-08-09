@@ -182,6 +182,18 @@ pub struct RemoteTerminal {
     route: PaneRoute,
     proxy: EventProxy,
     reader_thread: Option<JoinHandle<()>>,
+    /// Tells the *current* reader thread to bow out. Teardown must never wait
+    /// for the reader: on Windows, `shutdown()` does not wake a thread parked
+    /// in a blocking `read()` on the same socket, so joining it from the UI
+    /// thread hangs the whole window whenever the peer has gone silent (the
+    /// exact state a zombie SSH leg leaves behind). The reader re-checks this
+    /// flag under the term lock before every grid mutation, so once it is set
+    /// the abandoned thread can only exit, never write.
+    reader_quit: Arc<AtomicBool>,
+    /// Test hook: pretend the daemon advertised `FEATURE_RESIZE_ECHO`.
+    /// Production code probes the real daemon per call in [`Self::resize`].
+    #[cfg(test)]
+    force_resize_echo: bool,
 }
 
 /// The workspace id a spawn carries, so the pane's shell gets `$TTY7_WS` and a
@@ -264,6 +276,7 @@ impl RemoteTerminal {
         let win = win_size(size, cell_w, cell_h);
 
         let workspace = spawn_workspace(owner.as_deref(), route);
+        let spawned_in = cwd.clone();
 
         let owner = owner.filter(|_| {
             route.is_local()
@@ -294,7 +307,22 @@ impl RemoteTerminal {
 
         let mut term = Self::from_stream(stream, size)?;
         term.route = route.clone();
+        term.seed_cwd(spawned_in);
         Ok((term, pane_id))
+    }
+
+    /// Remember the directory the daemon was asked to spawn in, so everything
+    /// that keys off a pane's cwd — the sidebar's repo grouping above all —
+    /// has an answer before the shell gets far enough to report its own via
+    /// OSC 7. The reader thread is already running, so a report that beat us
+    /// here wins: it describes where the shell actually landed, which is not
+    /// always where we asked (a missing directory sends the daemon home, an
+    /// rc file may `cd` on its own).
+    fn seed_cwd(&self, cwd: Option<PathBuf>) {
+        let Some(cwd) = cwd else { return };
+        if let Ok(mut guard) = self.cwd.lock() {
+            guard.get_or_insert(cwd);
+        }
     }
 
     pub fn attach(size: TermSize, cell_w: u16, cell_h: u16, pane_id: u64) -> anyhow::Result<Self> {
@@ -342,12 +370,7 @@ impl RemoteTerminal {
         cell_w: u16,
         cell_h: u16,
     ) -> anyhow::Result<()> {
-        if let Ok(writer) = self.writer.lock() {
-            let _ = writer.shutdown(std::net::Shutdown::Both);
-        }
-        if let Some(handle) = self.reader_thread.take() {
-            let _ = handle.join();
-        }
+        self.stop_reader();
         while self.events.try_recv().is_ok() {}
 
         let read_half = stream.try_clone()?;
@@ -364,11 +387,13 @@ impl RemoteTerminal {
         // browser redraws on its next transmit (see issue #213's reattach note).
         self.images.clear();
 
+        let quit = Arc::new(AtomicBool::new(false));
         let reader = Self::spawn_reader(
             self.term.clone(),
             self.proxy.clone(),
             read_half,
             Vec::new(),
+            quit.clone(),
             ReaderSignals {
                 cwd: self.cwd.clone(),
                 shell: self.shell_state.clone(),
@@ -388,6 +413,7 @@ impl RemoteTerminal {
             *writer = stream;
         }
         self.reader_thread = Some(reader);
+        self.reader_quit = quit;
         self.route = route.clone();
         self.synced_size = false;
         self.resize(size, cell_w, cell_h);
@@ -431,11 +457,13 @@ impl RemoteTerminal {
         let ssh_phase: Arc<Mutex<Option<SshPhase>>> = Arc::new(Mutex::new(None));
         let images = crate::terminal::images::ImageStore::new();
 
+        let reader_quit = Arc::new(AtomicBool::new(false));
         let reader_thread = Self::spawn_reader(
             term.clone(),
             proxy.clone(),
             read_half,
             buffered,
+            reader_quit.clone(),
             ReaderSignals {
                 cwd: cwd.clone(),
                 shell: shell_state.clone(),
@@ -478,18 +506,34 @@ impl RemoteTerminal {
             route: PaneRoute::Local,
             proxy,
             reader_thread: Some(reader_thread),
+            reader_quit,
+            #[cfg(test)]
+            force_resize_echo: false,
         })
     }
 
     pub fn detach_link(&mut self) {
         if let Ok(mut writer) = self.writer.lock() {
             let _ = ClientMsg::Detach.encode(&mut *writer);
+        }
+        self.stop_reader();
+        self.poll_exited();
+    }
+
+    /// Retires the current reader thread without waiting for it. Joining is
+    /// not an option here: the callers run on the UI thread, and on Windows
+    /// `shutdown()` does not wake a reader parked in a blocking `read()`, so
+    /// against a silent peer the join would hang the whole window (the reader
+    /// only unblocks when the peer eventually closes — which a zombie SSH leg
+    /// never does). Instead the reader is told to quit and abandoned; it wakes
+    /// within one read-timeout tick, sees the flag, and exits without ever
+    /// touching the grid again.
+    fn stop_reader(&mut self) {
+        self.reader_quit.store(true, Ordering::SeqCst);
+        if let Ok(writer) = self.writer.lock() {
             let _ = writer.shutdown(std::net::Shutdown::Both);
         }
-        if let Some(handle) = self.reader_thread.take() {
-            let _ = handle.join();
-        }
-        self.poll_exited();
+        drop(self.reader_thread.take());
     }
 
     pub fn apply_user_config(&self, user_config: &crate::core::config::Config) {
@@ -502,6 +546,7 @@ impl RemoteTerminal {
         proxy: EventProxy,
         read_half: Stream,
         buffered: Vec<u8>,
+        quit: Arc<AtomicBool>,
         signals: ReaderSignals,
     ) -> JoinHandle<()> {
         std::thread::Builder::new()
@@ -530,7 +575,6 @@ impl RemoteTerminal {
                 let mut cursor_scan = ParkedCursorScanner::new();
                 let mut parked_cursor = ParkedCursorRepair::default();
                 let mut pending: Vec<u8> = buffered;
-                let mut pending_size: Option<WinSize> = None;
                 // Kitty-graphics decode runs on its own thread with newest-frame
                 // coalescing (issue #213): inflating a full-window browser frame
                 // is ~42 ms, and doing it inline here would block PTY output and
@@ -556,6 +600,12 @@ impl RemoteTerminal {
                 let mut tr_frames: u32 = 0;
 
                 let teardown = || {
+                    // A retired reader exits silently: the pane is being
+                    // relinked or released, not dying — marking it exited
+                    // would wrongly kill the freshly adopted link.
+                    if quit.load(Ordering::SeqCst) {
+                        return;
+                    }
                     term.lock().exit();
                     exited_flag.store(true, Ordering::SeqCst);
                     proxy.send_event(AlacEvent::Wakeup);
@@ -579,6 +629,9 @@ impl RemoteTerminal {
                                 {
                                     let t0 = trace.then(std::time::Instant::now);
                                     let mut term = term.lock();
+                                    if quit.load(Ordering::SeqCst) {
+                                        return;
+                                    }
                                     let t1 = trace.then(std::time::Instant::now);
                                     if cuts.is_empty() {
                                         processor.advance(&mut *term, &out_batch);
@@ -637,6 +690,15 @@ impl RemoteTerminal {
                     }
 
                     loop {
+                        // Checked per frame, not just per read: a retired
+                        // reader may still hold complete frames in `pending`,
+                        // and every arm below writes shared state that
+                        // outlives a relink (cwd, prompt, agent — and
+                        // `Exited`, which would close the freshly adopted
+                        // pane via `child_exited`).
+                        if quit.load(Ordering::SeqCst) {
+                            return;
+                        }
                         let frame = match crate::daemon::protocol::take_frame(&mut pending) {
                             Ok(Some(frame)) => frame,
                             Ok(None) => break,
@@ -653,9 +715,26 @@ impl RemoteTerminal {
                             }
                         };
                         match msg {
+                            // Geometry, applied at this exact stream position.
+                            // During replay each ring segment is preceded by
+                            // its Size; live, the daemon echoes one when it
+                            // applies our Resize (FEATURE_RESIZE_ECHO), which
+                            // is the point in the stream where the bytes stop
+                            // being old-width — everything still queued before
+                            // this frame must be parsed into the old grid.
                             DaemonMsg::Size(ws) => {
                                 flush_batch!();
-                                pending_size = Some(ws);
+                                {
+                                    let mut term = term.lock();
+                                    if quit.load(Ordering::SeqCst) {
+                                        return;
+                                    }
+                                    term.resize(TermSize::new(
+                                        ws.cols as usize,
+                                        ws.rows as usize,
+                                    ));
+                                }
+                                proxy.send_event(AlacEvent::Wakeup);
                             }
                             DaemonMsg::Snapshot(bytes) => {
                                 flush_batch!();
@@ -664,11 +743,8 @@ impl RemoteTerminal {
                                 proxy.replaying.store(true, Ordering::Relaxed);
                                 {
                                     let mut term = term.lock();
-                                    if let Some(ws) = pending_size.take() {
-                                        term.resize(TermSize::new(
-                                            ws.cols as usize,
-                                            ws.rows as usize,
-                                        ));
+                                    if quit.load(Ordering::SeqCst) {
+                                        return;
                                     }
                                     processor.advance(&mut *term, &bytes);
                                     if processor.sync_timeout().sync_timeout().is_some() {
@@ -714,6 +790,9 @@ impl RemoteTerminal {
                                     let (anchor_row, anchor_col) = {
                                         use alacritty_terminal::grid::Dimensions as _;
                                         let term = term.lock();
+                                        if quit.load(Ordering::SeqCst) {
+                                            return;
+                                        }
                                         let grid = term.grid();
                                         let row = grid.history_size() as i64
                                             - grid.display_offset() as i64
@@ -770,6 +849,9 @@ impl RemoteTerminal {
                                 }
                                 if active && at_prompt {
                                     let mut term = term.lock();
+                                    if quit.load(Ordering::SeqCst) {
+                                        return;
+                                    }
                                     let resets = stale_mode_resets(*term.mode());
                                     if !resets.is_empty() {
                                         processor.advance(&mut *term, &resets);
@@ -825,22 +907,29 @@ impl RemoteTerminal {
                     }
                     flush_batch!();
 
+                    // The read always times out within QUIT_POLL so a reader
+                    // parked on a silent link still notices `quit` promptly —
+                    // on Windows, `shutdown()` alone would never wake it.
+                    const QUIT_POLL: std::time::Duration = std::time::Duration::from_millis(500);
                     let timeout = match processor.sync_timeout().sync_timeout() {
                         Some(deadline) => {
                             let left =
                                 deadline.saturating_duration_since(std::time::Instant::now());
                             if left.is_zero() {
                                 let mut term = term.lock();
+                                if quit.load(Ordering::SeqCst) {
+                                    return;
+                                }
                                 processor.stop_sync(&mut *term);
                                 drop(term);
                                 proxy.send_event(AlacEvent::Wakeup);
                                 continue;
                             }
-                            Some(left)
+                            left.min(QUIT_POLL)
                         }
-                        None => None,
+                        None => QUIT_POLL,
                     };
-                    let _ = stream.set_read_timeout(timeout);
+                    let _ = stream.set_read_timeout(Some(timeout));
                     if trace && tr_last.elapsed() >= std::time::Duration::from_secs(1) {
                         eprintln!(
                             "[trace client] {:.1} MB/s | {} reads ({} B/read) {} frames | read wait {:?} lock wait {:?} advance {:?}",
@@ -910,7 +999,35 @@ impl RemoteTerminal {
         }
     }
 
+    /// Whether the daemon behind this pane echoes a `DaemonMsg::Size` into the
+    /// output stream when it applies our `ClientMsg::Resize`. When it does, the
+    /// local grid reflow is deferred to that echo on the reader thread: any
+    /// backlog still queued between daemon and client was produced at the old
+    /// geometry, and reflowing before it drains parses old-width bytes into a
+    /// new-width grid (maximize during a burst of output garbled the pane).
+    ///
+    /// Older daemons never echo, so those keep the reflow-at-request-time
+    /// behavior. Non-local routes keep it too, for a weaker reason: only the
+    /// local daemon's feature set is probed, so the client cannot *rely* on an
+    /// echo arriving. A current remote daemon does send one — the router
+    /// forwards frames it does not parse, and the reader applies it as a
+    /// same-size no-op after the eager reflow — but deferral can't hang on a
+    /// maybe. Follow-up: carry the remote daemon's advertised features on the
+    /// route handshake and consult them here; remote panes then get the
+    /// deferred path for free.
+    fn resize_echoed(&self) -> bool {
+        #[cfg(test)]
+        if self.force_resize_echo {
+            return true;
+        }
+        self.route.is_local()
+            && crate::daemon::spawn::local_daemon_supports(
+                crate::daemon::protocol::FEATURE_RESIZE_ECHO,
+            )
+    }
+
     pub fn resize(&mut self, size: TermSize, cell_w: u16, cell_h: u16) {
+        let echoed = self.resize_echoed();
         // The cell size has to be part of the early-out, not just cols/rows: it
         // is reported in *device* pixels, so moving the window between a 2x and
         // a 1x display changes `ws_xpixel`/`ws_ypixel` while the grid stays
@@ -918,6 +1035,12 @@ impl RemoteTerminal {
         // and leave a pixel-aware child rendering for the old framebuffer.
         let cell = (cell_w, cell_h);
         if self.synced_size && size == self.size && cell == self.synced_cell {
+            if echoed {
+                // The grid follows the daemon's Size echoes; disagreement here
+                // just means an echo is still in flight (or a replay segment is
+                // mid-apply), not that the request needs re-sending.
+                return;
+            }
             use alacritty_terminal::grid::Dimensions as _;
             let term = self.term.lock();
             if term.columns() == size.cols && term.screen_lines() == size.rows {
@@ -927,7 +1050,9 @@ impl RemoteTerminal {
         self.synced_size = true;
         self.size = size;
         self.synced_cell = cell;
-        self.term.lock().resize(size);
+        if !echoed {
+            self.term.lock().resize(size);
+        }
 
         let win = win_size(size, cell_w, cell_h);
         if let Ok(mut writer) = self.writer.lock() {
@@ -1484,11 +1609,8 @@ impl Drop for RemoteTerminal {
     fn drop(&mut self) {
         if let Ok(mut writer) = self.writer.lock() {
             let _ = ClientMsg::Detach.encode(&mut *writer);
-            let _ = writer.shutdown(std::net::Shutdown::Both);
         }
-        if let Some(handle) = self.reader_thread.take() {
-            let _ = handle.join();
-        }
+        self.stop_reader();
     }
 }
 
@@ -1931,7 +2053,33 @@ fn terminal_config_from_user(user_config: &crate::core::config::Config) -> Confi
         default_cursor_style: alacritty_cursor_style(user_config.cursor_style),
         semantic_escape_chars: user_config.word_separators.clone(),
         kitty_keyboard: true,
+        // Every pane on Windows is presented through ConPTY (a shell, wsl.exe,
+        // ssh.exe — conhost mediates them all), which repaints nothing after a
+        // resize and keeps addressing the screen against its own re-anchored
+        // layout: grow keeps rows/cursor pinned and opens blank rows below,
+        // shrink scrolls the last written row to the new bottom. The grid must
+        // resize the same way or every later absolute-CUP paint (PSReadLine
+        // redraws its prompt that way per keystroke) lands rows off, shredding
+        // the screen the first time a maximized pane draws anything.
+        conpty_resize: cfg!(windows),
         ..Config::default()
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    /// The whole conhost-semantics fix hangs on this one field: it defaults to
+    /// off in `alacritty_terminal`, so dropping the line compiles clean, passes
+    /// every other test, and quietly resurrects the maximize garbling — which
+    /// is exactly how it shipped disabled once (#415 follow-up).
+    #[test]
+    fn windows_panes_opt_into_conpty_resize_semantics() {
+        let config = terminal_config_from_user(&crate::core::config::Config::default());
+        assert_eq!(config.conpty_resize, cfg!(windows));
+        #[cfg(windows)]
+        assert!(config.conpty_resize);
     }
 }
 
@@ -1953,6 +2101,109 @@ fn win_size(size: TermSize, cell_w: u16, cell_h: u16) -> WinSize {
         rows: size.rows as u16,
         cell_w,
         cell_h,
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_teardown_tests {
+    use super::*;
+
+    fn tcp_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client_side = std::net::TcpStream::connect(addr).unwrap();
+        let (daemon_side, _) = listener.accept().unwrap();
+        (client_side, daemon_side)
+    }
+
+    /// On Windows, `shutdown()` does not wake a thread parked in a blocking
+    /// `read` on the same socket (it does on unix). `detach_link`,
+    /// `adopt_relink`, and `Drop` all shut the writer down and then `join()`
+    /// the reader thread, counting on that wake-up — so when the peer stays
+    /// silent (a routed pane whose SSH leg went zombie: nothing arrives, no
+    /// FIN ever comes), the join blocks its caller, which in production is
+    /// the UI thread. This is the whole-window "not responding" hang right
+    /// after a remote workspace reconnects.
+    #[test]
+    fn detach_link_returns_promptly_when_the_peer_stays_silent() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, daemon_side) = tcp_pair();
+        let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        // Let the reader thread park in read() before tearing down.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            term.detach_link();
+            let _ = tx.send(());
+        });
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(3));
+        drop(daemon_side);
+        assert!(
+            outcome.is_ok(),
+            "detach_link blocked for over 3s against a silent peer: shutdown() \
+             did not unblock the reader, so join() hangs the calling thread"
+        );
+    }
+
+    /// The reconnect path: `relink_panes` calls this on the UI thread right
+    /// after a remote workspace re-attaches, with the old link still parked
+    /// on a zombie route. It must swap links promptly, and the adopted link
+    /// must actually work.
+    #[test]
+    fn adopt_relink_swaps_links_promptly_when_the_old_peer_stays_silent() {
+        crate::core::config::pin_test_config_dir();
+        let (old_client, mut _old_daemon) = tcp_pair();
+        let (new_client, mut new_daemon) = tcp_pair();
+        let term = RemoteTerminal::from_stream(old_client, TermSize::new(80, 24)).unwrap();
+        // Let the old reader park in read() on the silent link.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut term = term;
+            term.adopt_relink(new_client, &PaneRoute::Local, TermSize::new(80, 24), 8, 16)
+                .unwrap();
+            let _ = tx.send(term);
+        });
+        let term = rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("adopt_relink blocked for over 3s against a silent old peer");
+
+        DaemonMsg::Output(b"hi".to_vec())
+            .encode(&mut new_daemon)
+            .unwrap();
+        let mut first = ' ';
+        for _ in 0..200 {
+            first = term.term.lock().grid()[alacritty_terminal::index::Line(0)]
+                [alacritty_terminal::index::Column(0)]
+            .c;
+            if first == 'h' {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(first, 'h', "output on the adopted link must reach the grid");
+        assert!(
+            !term.exited_flag.load(Ordering::SeqCst),
+            "retiring the old reader must not mark the pane as exited"
+        );
+
+        // Late traffic on the abandoned link must be ignored wholesale: an
+        // Exited frame processed by the retired reader would flip
+        // `child_exited` and close the freshly adopted pane from under the
+        // user. Give the retired reader a full quit-poll tick to (mis)handle
+        // it before checking.
+        let _ = DaemonMsg::Exited { code: Some(0) }.encode(&mut _old_daemon);
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        assert!(
+            !term.child_exited(),
+            "an Exited frame on the abandoned link must not close the pane"
+        );
+        assert!(
+            !term.exited_flag.load(Ordering::SeqCst),
+            "the abandoned link must not tear the adopted pane down"
+        );
     }
 }
 
@@ -2889,6 +3140,68 @@ mod tests {
     }
 
     #[test]
+    fn echoed_resize_defers_the_grid_reflow_to_the_daemons_size_frame() {
+        use alacritty_terminal::grid::Dimensions as _;
+        use alacritty_terminal::index::{Column, Line};
+
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        term.force_resize_echo = true;
+
+        term.resize(TermSize::new(120, 30), 8, 17);
+        assert!(matches!(
+            ClientMsg::read(&mut daemon_side).unwrap(),
+            ClientMsg::Resize(ws) if ws.cols == 120 && ws.rows == 30
+        ));
+        assert_eq!(
+            term.term.lock().columns(),
+            80,
+            "the grid keeps the old geometry until the daemon's echo arrives"
+        );
+
+        // Old-width bytes still in flight ahead of the echo: a CUP to column
+        // 100 must clamp on the 80-col grid. The same addressing after the
+        // echo reaches the real column on the 120-col grid.
+        DaemonMsg::Output(b"\x1b[1;100HA".to_vec())
+            .encode(&mut daemon_side)
+            .unwrap();
+        DaemonMsg::Size(WinSize {
+            cols: 120,
+            rows: 30,
+            cell_w: 8,
+            cell_h: 17,
+        })
+        .encode(&mut daemon_side)
+        .unwrap();
+        DaemonMsg::Output(b"\x1b[2;100HB".to_vec())
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+
+        for _ in 0..400 {
+            {
+                let t = term.term.lock();
+                if t.columns() == 120 && t.grid()[Line(1)][Column(99)].c == 'B' {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let t = term.term.lock();
+        let grid = t.grid();
+        assert_eq!(
+            grid[Line(0)][Column(79)].c,
+            'A',
+            "bytes queued before the echo parse at the old width"
+        );
+        assert_eq!(
+            grid[Line(1)][Column(99)].c,
+            'B',
+            "bytes after the echo parse at the new width"
+        );
+    }
+
+    #[test]
     fn at_prompt_stays_false_while_shell_integration_is_inactive() {
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
         let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
@@ -3019,6 +3332,65 @@ mod tests {
             .unwrap();
         daemon_side.flush().unwrap();
         assert!(poll(&|s| s.is_none()), "a None report clears the session");
+    }
+
+    #[test]
+    fn the_spawn_directory_answers_until_the_shell_reports_its_own() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        let poll = |want: Option<&str>| {
+            let want = want.map(PathBuf::from);
+            for _ in 0..200 {
+                if term.foreground_cwd() == want {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            false
+        };
+
+        assert_eq!(term.foreground_cwd(), None, "nothing known before the seed");
+        term.seed_cwd(Some(PathBuf::from("/repo/tty7")));
+        assert_eq!(
+            term.foreground_cwd(),
+            Some(PathBuf::from("/repo/tty7")),
+            "the sidebar can group this pane without waiting for the shell"
+        );
+
+        DaemonMsg::Cwd(PathBuf::from("/repo/tty7/crates"))
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+        assert!(
+            poll(Some("/repo/tty7/crates")),
+            "the shell's own report replaces the seed"
+        );
+    }
+
+    #[test]
+    fn a_shell_report_that_beat_the_seed_wins() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        DaemonMsg::Cwd(PathBuf::from("/somewhere/else"))
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+        for _ in 0..200 {
+            if term.foreground_cwd().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        term.seed_cwd(Some(PathBuf::from("/repo/tty7")));
+        assert_eq!(
+            term.foreground_cwd(),
+            Some(PathBuf::from("/somewhere/else")),
+            "where the shell actually landed beats where we asked it to"
+        );
     }
 
     #[test]

@@ -378,6 +378,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSyncWithSystemDesc => {
             "Follow the OS appearance with separate light and dark themes."
         }
+        L10nKey::SettingsLegiblePalette => "Legible bright colors",
+        L10nKey::SettingsLegiblePaletteDesc => {
+            "Automatically brighten or darken bright ANSI colors that would be unreadable on the theme background."
+        }
         L10nKey::SettingsChangeTheme => "Change theme",
         L10nKey::SettingsThemes => "Themes",
         L10nKey::SettingsThemePanelManual => "Change your current theme.",
@@ -499,6 +503,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::UpdateDialogDetail => {
             "tty7 {version} is available — you're on {current}. Installing restarts the app; the background service keeps running, so whatever is open in your panes survives."
         }
+        L10nKey::UpdateDialogDetailWindows => {
+            "tty7 {version} is available — you're on {current}. Installing restarts the app and the background service: processes running in your panes are ended, and your tabs and layout come back with fresh shells."
+        }
         L10nKey::UpdateDialogDetailManual => {
             "tty7 {version} is available — you're on {current}. {hint}"
         }
@@ -560,6 +567,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAgentOpencode => "OpenCode",
         L10nKey::SettingsAgentPi => "Pi",
         L10nKey::SettingsAgentGrokBuild => "Grok Build",
+        L10nKey::SettingsAgentOhMyPi => "Oh My Pi",
         L10nKey::SettingsSearchAboutKeywords => "version license credits build update check github",
         L10nKey::SettingsSearchAppHttpProxyKeywords => {
             "proxy http https socks socks5 clash v2ray network download update"
@@ -638,6 +646,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchOptionAsMetaKeywords => {
             "alt keyboard modifier escape macos option meta option acts as meta"
         }
+        L10nKey::SettingsSearchOhMyPiKeywords => "agent integration extension install omp oh my pi",
         L10nKey::SettingsSearchPiKeywords => "agent integration extension install pi",
         L10nKey::SettingsSearchPortForwardingKeywords => {
             "ssh tunnel local remote dynamic socks forward rule"
@@ -670,6 +679,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchSyncWithSystemKeywords => {
             "theme dark light auto follow os appearance mode"
+        }
+        L10nKey::SettingsSearchLegiblePaletteKeywords => {
+            "legible contrast bright palette psreadline parameter readable"
         }
         L10nKey::SettingsSearchTabBarPositionKeywords => {
             "tabs vertical sidebar left top layout rail"
@@ -1108,8 +1120,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "The server holding your shells predates the version handshake, so this app can't tell what it speaks.\n\nQuit: nothing changes — the server and your shells keep running.\nRestart: tabs come back with fresh shells, and anything running now is killed."
         }
         L10nKey::AppRestart => "Restart",
-        L10nKey::AppRestartServerNotSsh => {
-            "tty7 can only restart the server on machines it reaches over SSH. {label} is served from this computer — stop its workspace instead."
+        L10nKey::AppRestartServerNoServer => {
+            "tty7 has no server of its own to restart on {label} — it is a program this computer runs over --stdio. Stop its workspace instead."
         }
         L10nKey::AppRestartServerBody => {
             "This stops every running shell on this computer — anything still running in them will be terminated. Your tabs and layout are kept and reopened with fresh shells."

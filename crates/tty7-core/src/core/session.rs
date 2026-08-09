@@ -162,6 +162,20 @@ impl RemoteTarget {
         }
     }
 
+    /// Whether the far end is served by a tty7 daemon this computer installed
+    /// and can therefore restart. SSH machines and WSL distros both are; a
+    /// `--stdio` program is whatever the user named, and stopping it is its
+    /// workspace's business.
+    pub fn hosts_our_server(&self) -> bool {
+        match self {
+            RemoteTarget::Profile { .. }
+            | RemoteTarget::Alias { .. }
+            | RemoteTarget::Direct { .. }
+            | RemoteTarget::Wsl { .. } => true,
+            RemoteTarget::LocalStdio { .. } => false,
+        }
+    }
+
     pub fn host_id(&self) -> crate::host::HostId {
         crate::host::HostId::from_connection_key(&self.connection_key())
     }
@@ -285,7 +299,14 @@ impl WindowViews {
         match serde_json::from_str(crate::core::config::strip_bom(&text)) {
             Ok(loaded) => Some(loaded),
             Err(e) => {
-                log::warn!("failed to parse views at {}: {e}; ignoring", path.display());
+                // The next `save` overwrites this file wholesale, so ignoring a
+                // corrupt one quietly discards whatever it held. Keep a copy
+                // aside first, the way `load_machine` does.
+                log::warn!(
+                    "failed to parse views at {}: {e}; quarantining it",
+                    path.display()
+                );
+                crate::core::config::quarantine(&path);
                 None
             }
         }
@@ -419,6 +440,30 @@ mod tests {
     }
 
     #[test]
+    fn a_corrupt_views_file_is_kept_aside_before_being_ignored() {
+        let _file = lock_session_file();
+        let dir = pin_config_dir();
+        let path = dir.join("views.json");
+        let aside = dir.join("views.json.corrupt");
+        std::fs::remove_file(&aside).ok();
+        std::fs::write(&path, "{ not json").unwrap();
+
+        assert!(
+            WindowViews::load().is_none(),
+            "a corrupt file yields nothing rather than a guess"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&aside).as_deref().ok(),
+            Some("{ not json"),
+            "the next save overwrites views.json wholesale, so the old contents \
+             must already be parked beside it"
+        );
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&aside).ok();
+    }
+
+    #[test]
     fn an_empty_or_partial_file_decodes_to_defaults() {
         let empty: WindowViews = serde_json::from_str("{}").unwrap();
         assert!(empty.views.is_empty());
@@ -460,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn only_ssh_machines_have_a_server_to_restart() {
+    fn only_ssh_machines_are_reached_over_ssh() {
         assert!(
             RemoteTarget::Profile {
                 id: uuid::Uuid::nil()
@@ -479,7 +524,7 @@ mod tests {
                 distro: "Ubuntu".into()
             }
             .is_ssh(),
-            "a distribution's server is started by this client"
+            "a distribution is reached through wsl.exe, not a connection"
         );
         assert!(
             !RemoteTarget::LocalStdio {
@@ -488,6 +533,38 @@ mod tests {
             }
             .is_ssh(),
             "a stdio machine is a child process per connection"
+        );
+    }
+
+    #[test]
+    fn every_machine_but_a_stdio_one_has_a_server_to_restart() {
+        assert!(
+            RemoteTarget::Profile {
+                id: uuid::Uuid::nil()
+            }
+            .hosts_our_server()
+        );
+        assert!(
+            RemoteTarget::Alias {
+                alias: "devbox".into()
+            }
+            .hosts_our_server()
+        );
+        assert!(RemoteTarget::direct("me", "box.local", 22).hosts_our_server());
+        assert!(
+            RemoteTarget::Wsl {
+                distro: "Ubuntu".into()
+            }
+            .hosts_our_server(),
+            "a distribution's server is installed and launched from here, like an SSH one"
+        );
+        assert!(
+            !RemoteTarget::LocalStdio {
+                program: "tty7-server".into(),
+                args: vec!["--stdio".into()],
+            }
+            .hosts_our_server(),
+            "a stdio program is whatever the user named, not a daemon of ours"
         );
     }
 

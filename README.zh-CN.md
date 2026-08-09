@@ -45,7 +45,7 @@
 |---|---|
 | **编辑器级输入** | 历史影子建议 · 带说明的 Tab 补全 · 语法高亮 · 多行编辑 · 点击定位光标 · <kbd>⌃ R</kbd> 模糊历史搜索 |
 | **窗口** | 标签页与分屏 · <kbd>⌘ P</kbd> 命令面板 · <kbd>⌘ F</kbd> 回滚搜索 · 9 套主题 · 输入法 |
-| **Agent-aware** | 按 pane 识别约 17 个 CLI agent：状态点 · 通知 · 分支 + diff · 重启后续上会话 · 托盘图标提醒需要输入 |
+| **Agent-aware** | 按 pane 识别约 18 个 CLI agent：状态点 · 通知 · 分支 + diff · 重启后续上会话 · 托盘图标提醒需要输入 |
 | **远程工作区** | 远端文件、仓库、Changes、diff、worktree、标签页和 pane · 任意客户端重连后原地继续 |
 | **CLI + Skills** | 安装包自带 `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · pane/工作区控制 · 真实 PTY 命令 · 输出、进程、端口和 agent 状态 |
 | **SSH** | 原生 russh 栈：profile 凭据进 keychain · SFTP 面板 · 端口转发 · 跳板机 · 一次无 sudo 安装 `tty7-server` |

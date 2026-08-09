@@ -213,16 +213,18 @@ pub enum HookAgent {
     OpenCode,
     Pi,
     Grok,
+    OhMyPi,
 }
 
 impl HookAgent {
-    pub const ALL: [HookAgent; 6] = [
+    pub const ALL: [HookAgent; 7] = [
         HookAgent::Claude,
         HookAgent::Codex,
         HookAgent::Copilot,
         HookAgent::OpenCode,
         HookAgent::Pi,
         HookAgent::Grok,
+        HookAgent::OhMyPi,
     ];
 
     /// The hooks behind a detected agent process, if it has any.
@@ -238,6 +240,7 @@ impl HookAgent {
             CLIAgent::OpenCode => Some(HookAgent::OpenCode),
             CLIAgent::Pi => Some(HookAgent::Pi),
             CLIAgent::Grok => Some(HookAgent::Grok),
+            CLIAgent::OhMyPi => Some(HookAgent::OhMyPi),
             CLIAgent::Gemini
             | CLIAgent::Aider
             | CLIAgent::Amp
@@ -260,6 +263,7 @@ impl HookAgent {
             HookAgent::OpenCode => "opencode",
             HookAgent::Pi => "pi",
             HookAgent::Grok => "grok",
+            HookAgent::OhMyPi => "omp",
         }
     }
 
@@ -271,6 +275,7 @@ impl HookAgent {
             HookAgent::OpenCode => "OpenCode",
             HookAgent::Pi => "Pi",
             HookAgent::Grok => "Grok Build",
+            HookAgent::OhMyPi => "Oh My Pi",
         }
     }
 
@@ -289,6 +294,9 @@ impl HookAgent {
             ),
             HookAgent::Pi => target.under_home(&[".pi", "agent", "extensions", "tty7", "index.ts"]),
             HookAgent::Grok => target.under_home(&[".grok", "hooks", OWNED_FILE_STEM_JSON]),
+            HookAgent::OhMyPi => {
+                target.under_home(&[".omp", "agent", "extensions", "tty7", "index.ts"])
+            }
         }
     }
 
@@ -444,7 +452,11 @@ pub fn hooks_state(target: &HookTarget, agent: HookAgent) -> HooksState {
     match agent {
         HookAgent::Claude => hook_map_state(target, &path, agent, CLAUDE_HOOK_EVENTS),
         HookAgent::Codex => hook_map_state(target, &path, agent, CODEX_HOOK_EVENTS),
-        HookAgent::Copilot | HookAgent::OpenCode | HookAgent::Pi | HookAgent::Grok => {
+        HookAgent::Copilot
+        | HookAgent::OpenCode
+        | HookAgent::Pi
+        | HookAgent::Grok
+        | HookAgent::OhMyPi => {
             let Some(expected) = owned_file_content(target, agent) else {
                 return HooksState::NotInstalled;
             };
@@ -475,7 +487,11 @@ pub fn install_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<St
                 ),
             })
         }
-        HookAgent::Copilot | HookAgent::OpenCode | HookAgent::Pi | HookAgent::Grok => {
+        HookAgent::Copilot
+        | HookAgent::OpenCode
+        | HookAgent::Pi
+        | HookAgent::Grok
+        | HookAgent::OhMyPi => {
             let content = owned_file_content(target, agent)
                 .ok_or_else(|| anyhow::anyhow!("{agent:?} has no owned file"))?;
             owned_file_install(target, &path, &content, &agent.marker())?;
@@ -488,9 +504,11 @@ pub fn uninstall_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<
     let path = agent.target_path(target);
     match agent {
         HookAgent::Claude | HookAgent::Codex => hook_map_uninstall(target, &path, agent),
-        HookAgent::Copilot | HookAgent::OpenCode | HookAgent::Pi | HookAgent::Grok => {
-            owned_file_uninstall(target, &path, &agent.marker())
-        }
+        HookAgent::Copilot
+        | HookAgent::OpenCode
+        | HookAgent::Pi
+        | HookAgent::Grok
+        | HookAgent::OhMyPi => owned_file_uninstall(target, &path, &agent.marker()),
     }
 }
 
@@ -772,7 +790,7 @@ fn owned_file_content(target: &HookTarget, agent: HookAgent) -> Option<String> {
     match agent {
         HookAgent::Copilot => copilot_hooks_json(target),
         HookAgent::OpenCode => opencode_plugin_js(target),
-        HookAgent::Pi => pi_extension_ts(target),
+        HookAgent::Pi | HookAgent::OhMyPi => pi_extension_ts(target, agent),
         HookAgent::Grok => grok_hooks_json(target),
         HookAgent::Claude | HookAgent::Codex => None,
     }
@@ -911,11 +929,23 @@ export const Tty7Presence = async ({{ $ }}) => {{
     ))
 }
 
-fn pi_extension_ts(target: &HookTarget) -> Option<String> {
+/// The Pi extension bridge, shared with Oh My Pi.
+///
+/// Oh My Pi is a fork of Pi and kept the extension contract intact — same
+/// default-exported factory, same four lifecycle events, same
+/// `ctx.sessionManager.getSessionId()`. Only the package it is imported from
+/// and the slug the emitter is called with differ, so one template serves both
+/// rather than two copies drifting apart.
+fn pi_extension_ts(target: &HookTarget, agent: HookAgent) -> Option<String> {
+    let (slug, package) = match agent {
+        HookAgent::Pi => ("pi", "@mariozechner/pi-coding-agent"),
+        HookAgent::OhMyPi => ("omp", "@oh-my-pi/pi-coding-agent"),
+        _ => return None,
+    };
     let exe = serde_json::to_string(&target.exe.display().to_string()).ok()?;
     Some(format!(
-        r#"/* tty7 agent-hook pi bridge — generated by tty7, do not edit. */
-import type {{ ExtensionAPI }} from "@mariozechner/pi-coding-agent";
+        r#"/* tty7 agent-hook {slug} bridge — generated by tty7, do not edit. */
+import type {{ ExtensionAPI }} from "{package}";
 import {{ spawnSync }} from "node:child_process";
 
 const EXE = {exe};
@@ -931,7 +961,7 @@ function emit(event: string, ctx?: SessionCtx): void {{
       const id = ctx?.sessionManager?.getSessionId?.();
       if (id) payload = JSON.stringify({{ session_id: id }});
     }} catch {{}}
-    const args = ["agent-hook", "pi", event];
+    const args = ["agent-hook", "{slug}", event];
     // Nothing to send → leave stdin closed rather than handing the emitter a
     // pipe it has to read to EOF.
     if (payload) {{
@@ -1229,6 +1259,10 @@ mod tests {
             ),
             (HookAgent::Pi, "/home/me/.pi/agent/extensions/tty7/index.ts"),
             (HookAgent::Grok, "/home/me/.grok/hooks/tty7.json"),
+            (
+                HookAgent::OhMyPi,
+                "/home/me/.omp/agent/extensions/tty7/index.ts",
+            ),
         ] {
             assert_eq!(
                 agent.target_path(&target),
@@ -1274,7 +1308,7 @@ mod tests {
         let host = FakeRemote::shared();
         let target = HookTarget::remote(&*host, dir.clone());
 
-        for agent in [HookAgent::Claude, HookAgent::Grok] {
+        for agent in [HookAgent::Claude, HookAgent::Grok, HookAgent::OhMyPi] {
             assert_eq!(hooks_state(&target, agent), HooksState::NotInstalled);
             install_hooks(&target, agent).expect("install succeeds");
             assert_eq!(hooks_state(&target, agent), HooksState::Installed);
@@ -1331,14 +1365,36 @@ mod tests {
         assert!(opencode.contains(hook_exe));
         assert!(opencode.contains(r#"process.env["TTY7"]"#));
 
-        let pi = pi_extension_ts(&target).expect("pi content builds");
-        assert!(pi.contains("agent-hook pi"));
-        assert!(pi.contains(&exe));
-        assert!(pi.contains(r#"process.env["TTY7"]"#));
-        assert!(pi.contains("getSessionId"));
-        assert!(pi.contains("session_id"));
-        assert!(pi.contains(r#"stdio: ["pipe", "ignore", "ignore"]"#));
-        assert!(pi.contains(r#"pi.on("session_start""#));
+        for (agent, slug, package) in [
+            (HookAgent::Pi, "pi", "@mariozechner/pi-coding-agent"),
+            (HookAgent::OhMyPi, "omp", "@oh-my-pi/pi-coding-agent"),
+        ] {
+            let bridge =
+                pi_extension_ts(&target, agent).unwrap_or_else(|| panic!("{slug} content builds"));
+            assert!(bridge.contains(&format!("agent-hook {slug}")));
+            assert!(bridge.contains(&format!(r#"["agent-hook", "{slug}", event]"#)));
+            assert!(bridge.contains(&format!(r#"from "{package}""#)));
+            assert!(bridge.contains(&exe));
+            assert!(bridge.contains(r#"process.env["TTY7"]"#));
+            assert!(bridge.contains("getSessionId"));
+            assert!(bridge.contains("session_id"));
+            assert!(bridge.contains(r#"stdio: ["pipe", "ignore", "ignore"]"#));
+            for event in [
+                "session_start",
+                "agent_start",
+                "agent_end",
+                "session_shutdown",
+            ] {
+                assert!(
+                    bridge.contains(&format!(r#"pi.on("{event}""#)),
+                    "{slug} bridge subscribes to {event}"
+                );
+            }
+        }
+        assert!(
+            pi_extension_ts(&target, HookAgent::Claude).is_none(),
+            "only the two Pi-shaped agents get this bridge"
+        );
 
         let grok = grok_hooks_json(&target).expect("grok content builds");
         let parsed: serde_json::Value = serde_json::from_str(&grok).expect("valid JSON");

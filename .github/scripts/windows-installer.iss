@@ -130,12 +130,16 @@ Filename: "{app}\tty7-app.exe"; Description: "{cm:LaunchProgram,tty7}"; Flags: n
 
 [UninstallRun]
 ; Stop the daemon before the uninstaller deletes tty7-app.exe — the running daemon
-; is the locked image of that file, so removing it fails otherwise. This runs at
-; the start of uninstallation, before any files are removed. The installed binary
-; is this version, which understands the flag; runhidden suppresses any flash and
-; the call returns without opening a window. RunOnceId keys the entry so a repeated
-; uninstall doesn't run it twice.
-Filename: "{app}\tty7-app.exe"; Parameters: "--stop-daemon"; Flags: runhidden waituntilterminated; RunOnceId: "StopDaemon"
+; is the locked image of that file, so removing it fails otherwise. Naming {app}
+; widens the stop the same way PrepareToInstall's does: ConPTY hosts orphaned by
+; a daemon that never got to shut down keep the installed images open, and their
+; DeleteFile fails an uninstall exactly as it fails an upgrade. (The stop excludes
+; the calling process itself, so the binary running this step is safe.) This runs
+; at the start of uninstallation, before any files are removed. The installed
+; binary is this version, which understands the flags; runhidden suppresses any
+; flash and the call returns without opening a window. RunOnceId keys the entry
+; so a repeated uninstall doesn't run it twice.
+Filename: "{app}\tty7-app.exe"; Parameters: "--stop-daemon --update-install-dir ""{app}"""; Flags: runhidden waituntilterminated; RunOnceId: "StopDaemon"
 ; Unconditional, and deliberately not gated on the task: an install that had the
 ; menu registered and was later upgraded without the box ticked still holds the
 ; keys, and verbs pointing at a deleted exe are worse than a no-op. Removing keys
@@ -148,14 +152,20 @@ Filename: "{app}\tty7-app.exe"; Parameters: "--unregister-explorer-menu"; Flags:
   understand --stop-daemon and would launch the GUI instead — so we extract the
   *new* tty7-app.exe to {tmp} and run that. It connects to the running daemon, hangs
   up every shell, waits for it to exit (releasing the file lock), then returns
-  without opening a window. Best effort: any failure falls through to the Restart
-  Manager backstop, and a fresh install simply has no daemon to stop. *)
+  without opening a window. Naming {app} widens the stop into "make this directory
+  replaceable": ConPTY hosts (OpenConsole.exe) orphaned by a daemon that never got
+  to shut down keep the installed images open — invisible to the daemon stop, fatal
+  to the DeleteFile below — so anything still running from {app} is terminated and
+  the call waits until the images there actually open for writing. Best effort: any
+  failure falls through to the Restart Manager backstop, and a fresh install simply
+  has nothing to stop. *)
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
 begin
   ExtractTemporaryFile('tty7-app.exe');
-  Exec(ExpandConstant('{tmp}\tty7-app.exe'), '--stop-daemon', '',
+  Exec(ExpandConstant('{tmp}\tty7-app.exe'),
+       '--stop-daemon --update-install-dir "' + ExpandConstant('{app}') + '"', '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := '';
 end;

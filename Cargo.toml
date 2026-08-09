@@ -251,7 +251,7 @@ edition = "2024"
 # they must never drift apart. This is the line a release bump edits (and the
 # one nightly's `awk '/^version = /'` stamps: it is the first such line in the
 # file, since the package entries above are all `version.workspace = true`).
-version = "26.8.1"
+version = "26.8.2"
 
 [workspace.dependencies]
 # Our fork's `tty7` branch carries the local customizations tty7 relies on:
@@ -299,7 +299,7 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee3
 #
 # Each patch has a guard test in `src/terminal/remote.rs`; drop this fork once
 # both land upstream.
-alacritty_terminal = { git = "https://github.com/l0ng-ai/alacritty", rev = "b79e70484b13308ce766a763531ac25a8302c012" }
+alacritty_terminal = { git = "https://github.com/l0ng-ai/alacritty", rev = "1276f128fbaa8832cbc66210675cbe8aeb570499" }
 
 anyhow = "1"
 log = "0.4"

@@ -262,7 +262,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     let m = theme.neutrals();
     let surfaces = theme.surfaces();
     let sem = theme.semantics();
-    let active = theme.active_palette();
+    let active = theme.active_palette(config.theme_legible_palette);
     let auto_hide_scrollbars = cx.should_auto_hide_scrollbars();
 
     if let Some(window) = window.as_deref_mut() {

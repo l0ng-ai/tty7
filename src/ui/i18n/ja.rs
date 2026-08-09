@@ -378,6 +378,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSyncWithSystemDesc => {
             "OS の外観に従い、ライトとダークのテーマを別々に使用する"
         }
+        L10nKey::SettingsLegiblePalette => "明色の可読性",
+        L10nKey::SettingsLegiblePaletteDesc => {
+            "テーマ背景でコントラスト不足の明色を自動調整して、可読性を確保します。"
+        }
         L10nKey::SettingsChangeTheme => "テーマを変更",
         L10nKey::SettingsThemes => "テーマ一覧",
         L10nKey::SettingsThemePanelManual => "現在のテーマを変更",
@@ -499,6 +503,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::UpdateDialogDetail => {
             "tty7 {version} が利用できます（現在 {current}）。インストールするとアプリが再起動します。バックグラウンドサービスは動いたままなので、ペインで開いているものはそのまま残ります。"
         }
+        L10nKey::UpdateDialogDetailWindows => {
+            "tty7 {version} が利用できます（現在 {current}）。インストールするとアプリとバックグラウンドサービスが再起動します。ペインで実行中のプロセスは終了し、タブとレイアウトは新しいシェルで復元されます。"
+        }
         L10nKey::UpdateDialogDetailManual => {
             "tty7 {version} が利用できます（現在 {current}）。{hint}"
         }
@@ -560,6 +567,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentOpencode => "OpenCode",
         L10nKey::SettingsAgentPi => "Pi",
         L10nKey::SettingsAgentGrokBuild => "Grok Build",
+        L10nKey::SettingsAgentOhMyPi => "Oh My Pi",
         L10nKey::SettingsSearchAboutKeywords => {
             "バージョン ライセンス クレジット ビルド 更新 確認 github about version license credits update check"
         }
@@ -672,6 +680,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchOptionAsMetaKeywords => {
             "alt キーボード 修飾キー エスケープ macos option meta option acts as meta keyboard modifier"
         }
+        L10nKey::SettingsSearchOhMyPiKeywords => {
+            "エージェント 統合 拡張 インストール omp oh my pi agent integration extension install"
+        }
         L10nKey::SettingsSearchPiKeywords => {
             "エージェント 統合 拡張 インストール pi agent integration extension install"
         }
@@ -710,6 +721,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchSyncWithSystemKeywords => {
             "テーマ ダーク ライト 自動 os 外観 モード sync with system theme dark light auto follow appearance"
+        }
+        L10nKey::SettingsSearchLegiblePaletteKeywords => {
+            "可読 コントラスト 明色 パレット パラメーター 修正 legible bright contrast palette parameter"
         }
         L10nKey::SettingsSearchTabBarPositionKeywords => {
             "タブ 垂直 サイドバー 左 上 レイアウト レール tab bar position tabs vertical sidebar left top rail"
@@ -1141,8 +1155,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "サーバーはバージョン照合より前のもので、何を話すか分かりません。\n\n終了：何も変わりません。サーバーもシェルも動き続けます。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
         }
         L10nKey::AppRestart => "再起動",
-        L10nKey::AppRestartServerNotSsh => {
-            "tty7 は SSH で到達できるマシン上のサーバーしか再起動できません。{label} はこのコンピュータで実行されています。代わりにそのワークスペースを止めてください"
+        L10nKey::AppRestartServerNoServer => {
+            "{label} には再起動できる tty7 自身のサーバーがありません。これはこのコンピュータが --stdio で実行しているプログラムです。代わりにそのワークスペースを止めてください"
         }
         L10nKey::AppRestartServerBody => {
             "このコンピュータで実行中のすべてのシェルが停止します。タブとレイアウトは保持され、新しいシェルで開きます"

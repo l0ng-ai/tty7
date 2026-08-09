@@ -718,8 +718,25 @@ async fn restart_server(
                 .restart_remote_server(spec, setup)
                 .await
         }
+        // A distro's server is installed and launched from here too, so both
+        // moves mean the same thing they do over SSH — only the transport is
+        // different.
+        (RouteTarget::Wsl { distro }, RouteAction::ReplaceServer) => {
+            let distro = distro.clone();
+            setup
+                .blocking(move || crate::daemon::install::wsl::replace_wsl_server(&distro))
+                .await??;
+            Ok(())
+        }
+        (RouteTarget::Wsl { distro }, _) => {
+            let distro = distro.clone();
+            setup
+                .blocking(move || crate::daemon::install::wsl::restart_wsl_daemon(&distro))
+                .await??;
+            Ok(())
+        }
         _ => Err(anyhow::anyhow!(
-            "restarting tty7's server is only supported for SSH machines, not {}",
+            "restarting tty7's server is only supported for machines it serves, not {}",
             header.describe()
         )),
     }
@@ -1233,19 +1250,22 @@ mod tests {
         assert!(forwarded.performed(RouteAction::Forward));
     }
 
+    /// SSH and WSL machines both run a daemon this side installed, so both can
+    /// be restarted. A `--stdio` program is whatever the user named — there is
+    /// no daemon of ours behind it to stop.
     #[tokio::test]
     async fn a_restart_is_refused_for_a_machine_that_has_no_remote_daemon() {
-        for header in [
-            RouteHeader::local_stdio("cat", &[]).restart_server(),
-            RouteHeader::wsl("Ubuntu-22.04").restart_server(),
-        ] {
-            let describe = header.describe();
-            let setup = RouteSetup::unattended(header.channel);
-            let Err(err) = perform(&header, &setup).await else {
-                panic!("a restart must be refused for {describe}");
-            };
-            assert!(err.to_string().contains("only supported for SSH"), "{err}");
-        }
+        let header = RouteHeader::local_stdio("cat", &[]).restart_server();
+        let describe = header.describe();
+        let setup = RouteSetup::unattended(header.channel);
+        let Err(err) = perform(&header, &setup).await else {
+            panic!("a restart must be refused for {describe}");
+        };
+        assert!(
+            err.to_string()
+                .contains("only supported for machines it serves"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1259,7 +1279,11 @@ mod tests {
 
         let mut client = client;
         let err = RouteAck::read(&mut client).expect_err("a `cat` has no daemon to restart");
-        assert!(err.to_string().contains("only supported for SSH"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("only supported for machines it serves"),
+            "{err}"
+        );
         assert!(routed.join().unwrap().is_err());
     }
 

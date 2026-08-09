@@ -165,6 +165,27 @@ macro_rules! startup_note {
 }
 
 pub fn run_daemon() -> anyhow::Result<()> {
+    // Before either endpoint, and before the machine tree is opened. Whoever
+    // holds this is the server; everyone else stands down while it lives.
+    //
+    // The endpoints cannot decide this between themselves. They are bound in
+    // sequence, so a second server can take one of them in the window before
+    // the first takes the other, and the two then serve half a machine each —
+    // panes on one socket, an empty pane registry answering the machine tree on
+    // the other. That is how a workspace switch came to rebuild live sessions:
+    // no error anywhere, just every pane reading as dead. See `singleton`.
+    let _seat = match crate::daemon::singleton::claim() {
+        crate::daemon::singleton::Claim::Held(seat) => Some(seat),
+        crate::daemon::singleton::Claim::Taken => {
+            startup_note!("tty7-server: another server already serves this config dir; exiting");
+            return Ok(());
+        }
+        crate::daemon::singleton::Claim::Unavailable(why) => {
+            startup_note!("tty7-server: starting without the single-server lock ({why})");
+            None
+        }
+    };
+
     let registry = Arc::new(Registry::new());
 
     #[cfg(any(unix, windows))]
@@ -198,10 +219,6 @@ pub fn control_services() -> crate::host::server::Services {
             crate::host::server::Services::none()
         }
     }
-}
-
-pub fn run() -> anyhow::Result<()> {
-    run_with(Arc::new(Registry::new()))
 }
 
 /// Say which pseudoconsole this daemon's panes will run on.
@@ -447,6 +464,18 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
         ClientMsg::Shutdown => {
             log::info!("daemon shutting down on client request");
             registry.drain_and_kill();
+            // The ConPTY hosts (OpenConsole.exe) are this process's children,
+            // not the shells', so the per-pane kill never reaches them — and
+            // exiting right away would leave them holding the installed
+            // OpenConsole.exe image open while an updater tries to replace it.
+            // Reap everything still below us and wait for the images to be
+            // released before the endpoint disappears, because the endpoint
+            // going away is what tells `spawn::stop` the shutdown is complete.
+            #[cfg(windows)]
+            crate::daemon::winproc::reap_descendants_of(
+                std::process::id(),
+                std::time::Duration::from_secs(3),
+            );
             on_shutdown();
             std::process::exit(0);
         }
