@@ -5,7 +5,7 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [26.8.2] - 2026-08-09
+## [Unreleased]
 
 ### Added
 
@@ -14,14 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A drop on a pane's **side** goes in beside it: facing a neighbour in the same
   row or column it joins that row and takes an equal share of it, and only
   facing across the layout — where there is no row to join — does it split that
-  pane in half. A drop on its **middle** trades the two panes' places, and a drop in the band
-  past a pane's **outer side** — the one facing the window rather than another
-  pane — puts it beside everything else as a full-width or full-height band,
-  sized to an even share of what that side already holds — so a pane in the middle of a 2×2 becomes a full-height
-  *third* column in a single drag rather than taking half the window. The landing is highlighted while the
-  drag is in flight, and is only offered when the drop would actually change
-  the layout. A rearranged tab is now reconciled with the machine tree as one
-  `PaneMove` instead of a close-and-rebuild.
+  pane in half. A drop on its **middle** trades the two panes' places, and a
+  drop in the band past a pane's **outer side** — the one facing the window
+  rather than another pane — puts it beside everything else as a full-width or
+  full-height band, sized to an even share of what that side already holds — so
+  a pane in the middle of a 2×2 becomes a full-height *third* column in a
+  single drag rather than taking half the window. The landing is highlighted
+  while the drag is in flight, and is only offered when the drop would actually
+  change the layout. A pane dropped beside another is now reconciled with the
+  machine tree as one `PaneMove` instead of a close-and-rebuild; a drop that
+  lands beside a whole group of panes rather than beside a single one still
+  takes the rebuild, which is all `PaneMove` can name.
 
 - **Native Windows backdrop materials** — Settings → Appearance now offers a
   **Background material** picker on Windows (**Auto / Blur / Mica / Mica Alt /
@@ -33,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sidebar and right detail panel follow the window opacity so the material
   shows through the whole workspace, and the settings panel stays opaque.
   macOS and Linux keep the existing blur toggle.
+
+## [26.8.2] - 2026-08-09
+
+### Added
 
 - **Update tty7 without leaving the app** — the launch check and
   **Settings → About → Check Now** now offer **Update and Relaunch** instead of

@@ -3010,8 +3010,14 @@ impl Tty7App {
         let slot = leaves.iter().find(|l| l.entity_id() == from)?;
         let bounds = pane_drag::leaf_bounds(&tab.pane, area);
         let zone = pane_drag::zone_at(area, &bounds, window.mouse_position())?;
-        let rect = pane_drag::landing(&tab.pane, slot, zone, area)?;
-        pane_drag::set_landing(&self.pane_drag, zone);
+        // The zone comes back naming its target by position, which only means
+        // anything against this frame's leaves. Drawn against the panes here,
+        // and remembered as the panes so the drop that reads it back a frame
+        // later is looking for the same ones.
+        let here = zone.map(|i| leaves.get(i).cloned())?;
+        let pinned = zone.map(|i| leaves.get(i).map(|l| l.entity_id()))?;
+        let rect = pane_drag::landing(&tab.pane, slot, here, area)?;
+        pane_drag::set_landing(&self.pane_drag, pinned);
 
         let accent = cx.theme().drag_border;
         Some(
@@ -3030,10 +3036,14 @@ impl Tty7App {
     }
 
     /// Puts a dragged pane down where the last painted frame said it would go.
+    ///
+    /// Both ends of the drop are named by pane rather than by position, so a
+    /// pane that closed between the frame that offered the landing and this one
+    /// leaves the drop with nothing to land against, and it is refused.
     fn drop_pane(
         &mut self,
         from: gpui::EntityId,
-        zone: crate::ui::pane_drag::DropZone,
+        zone: crate::ui::pane_drag::DropZone<gpui::EntityId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3042,17 +3052,15 @@ impl Tty7App {
             return;
         };
         let leaves = tab.pane.leaves();
-        let Some(moved) = leaves.into_iter().find(|l| l.entity_id() == from) else {
+        let here = |id| leaves.iter().find(|l| l.entity_id() == id).cloned();
+        let (Some(moved), Some(zone)) = (here(from), zone.map(here)) else {
             return;
         };
         if !crate::ui::pane_drag::apply(&mut tab.pane, &moved, zone) {
             return;
         }
-        let moved = Some(moved);
         self.maximized = None;
-        if let Some(leaf) = moved {
-            self.focus_leaf(&leaf, window, cx);
-        }
+        self.focus_leaf(&moved, window, cx);
         self.save_session(cx);
         cx.notify();
     }

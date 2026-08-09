@@ -81,15 +81,32 @@ const BAND_MAX: f32 = 120.;
 const SWAP_CORE: f32 = 0.34;
 
 /// Where a dragged pane would land.
+///
+/// The target pane is named by `T`, which is a position in the tab's leaf
+/// order as the geometry reads it off and the pane itself thereafter. The
+/// change of name matters: the zone is read on one frame and carried out on
+/// the next, and a pane that closed in between shifts every index after it.
+/// Pinned to the pane, a drop whose target has gone is refused rather than
+/// quietly redirected onto its neighbour.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum DropZone {
+pub(crate) enum DropZone<T = usize> {
     /// Against an outer edge of the tab, beside every other pane.
     Edge(Dir),
-    /// On one side of a pane, splitting it. The pane is named by its index in
-    /// the tab's leaf order.
-    Side(usize, Dir),
+    /// On one side of a pane, splitting it.
+    Side(T, Dir),
     /// Trading places with a pane.
-    Swap(usize),
+    Swap(T),
+}
+
+impl<T> DropZone<T> {
+    /// Renames the zone's target, dropping the zone when `f` cannot find it.
+    pub(crate) fn map<U>(self, f: impl FnOnce(T) -> Option<U>) -> Option<DropZone<U>> {
+        Some(match self {
+            DropZone::Edge(dir) => DropZone::Edge(dir),
+            DropZone::Side(target, dir) => DropZone::Side(f(target)?, dir),
+            DropZone::Swap(target) => DropZone::Swap(f(target)?),
+        })
+    }
 }
 
 /// gpui's payload for the drag. It renders nothing: the feedback that matters
@@ -161,7 +178,7 @@ pub(crate) fn handle(pane: EntityId, state: &PaneDragState, cx: &App) -> gpui::A
 /// A pane drag in flight, and the landing the last painted frame offered.
 pub(crate) struct PaneDrag {
     from: EntityId,
-    landing: Cell<Option<DropZone>>,
+    landing: Cell<Option<DropZone<EntityId>>>,
 }
 
 pub(crate) type PaneDragState = Rc<RefCell<Option<PaneDrag>>>;
@@ -188,34 +205,24 @@ pub(crate) fn clear_landing(state: &PaneDragState) {
     }
 }
 
-pub(crate) fn set_landing(state: &PaneDragState, zone: DropZone) {
+pub(crate) fn set_landing(state: &PaneDragState, zone: DropZone<EntityId>) {
     if let Some(drag) = state.borrow().as_ref() {
         drag.landing.set(Some(zone));
     }
 }
 
 /// Ends the drag, answering the landing it was over when it ended.
-pub(crate) fn take_landing(state: &PaneDragState) -> Option<(EntityId, DropZone)> {
+pub(crate) fn take_landing(state: &PaneDragState) -> Option<(EntityId, DropZone<EntityId>)> {
     let drag = state.borrow_mut().take()?;
     Some((drag.from, drag.landing.get()?))
 }
 
 /// Rearranges `pane` the way `zone` says, answering whether anything moved.
-///
-/// A zone names its target by position in the tab's leaf order, which is the
-/// order the drop zones were read off in the first place.
-pub(crate) fn apply<L: Clone + PartialEq>(pane: &mut Pane<L>, from: &L, zone: DropZone) -> bool {
-    let leaves = pane.leaves();
+pub(crate) fn apply<L: Clone + PartialEq>(pane: &mut Pane<L>, from: &L, zone: DropZone<L>) -> bool {
     match zone {
         DropZone::Edge(dir) => pane.move_leaf_to_edge(from, dir),
-        DropZone::Side(index, dir) => match leaves.get(index) {
-            Some(dst) => pane.move_leaf_beside(from, dst, dir),
-            None => false,
-        },
-        DropZone::Swap(index) => match leaves.get(index) {
-            Some(dst) => pane.swap_leaves(from, dst),
-            None => false,
-        },
+        DropZone::Side(dst, dir) => pane.move_leaf_beside(from, &dst, dir),
+        DropZone::Swap(dst) => pane.swap_leaves(from, &dst),
     }
 }
 
@@ -229,7 +236,7 @@ pub(crate) fn apply<L: Clone + PartialEq>(pane: &mut Pane<L>, from: &L, zone: Dr
 pub(crate) fn landing<L: Clone + PartialEq>(
     pane: &Pane<L>,
     from: &L,
-    zone: DropZone,
+    zone: DropZone<L>,
     area: Bounds<Pixels>,
 ) -> Option<Bounds<Pixels>> {
     let mut trial = pane.deep_clone();
@@ -506,7 +513,11 @@ mod tests {
             None,
             "2 already sits right of 1: nothing to draw and nothing to drop"
         );
-        assert_eq!(at(DropZone::Swap(9)), None);
+        assert_eq!(
+            at(DropZone::Swap(9)),
+            None,
+            "a zone naming a pane that is not in this tab lands nothing"
+        );
     }
 
     #[test]

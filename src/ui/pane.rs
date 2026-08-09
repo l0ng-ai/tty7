@@ -57,11 +57,10 @@ impl PaneSlot {
     }
 }
 
-/// A clone shares its splits' ratio cells with the original rather than
-/// copying them, which is what the layout edits below want: they build the
-/// next shape on a clone and only install it once it is known to be a real
-/// change, and a surviving split must keep the size the user dragged it to.
-#[derive(Clone)]
+/// Deliberately not `Clone`: the two copies a tree can be asked for differ in
+/// whether they share their splits' sizes, and that is not a difference to
+/// leave to whichever one `.clone()` happens to mean. See
+/// [`Pane::shallow_clone`] and [`Pane::deep_clone`].
 pub enum Pane<L = PaneSlot> {
     Leaf(L),
     Split {
@@ -284,12 +283,36 @@ impl<L: Clone> Pane<L> {
         }
     }
 
+    /// A copy that shares its splits' sizes with the original.
+    ///
+    /// What the layout edits below want: they build the next shape on one of
+    /// these and install it only once it is known to be a real change, and a
+    /// split that survives the edit must keep the size the user dragged it to.
+    fn shallow_clone(&self) -> Self {
+        match self {
+            Pane::Leaf(v) => Pane::Leaf(v.clone()),
+            Pane::Empty => Pane::Empty,
+            Pane::Split {
+                axis,
+                a,
+                b,
+                ratio,
+                dragging,
+            } => Pane::Split {
+                axis: *axis,
+                a: Box::new(a.shallow_clone()),
+                b: Box::new(b.shallow_clone()),
+                ratio: ratio.clone(),
+                dragging: dragging.clone(),
+            },
+        }
+    }
+
     /// A copy with sizes of its own, safe to try a rearrangement out on.
     ///
-    /// The derived clone shares its ratio cells with the original, which is
-    /// what the edits below want when they are about to install the result —
-    /// but not what a hover wants, where resizing the tried-out tree would
-    /// resize the one still on screen.
+    /// The shared-size copy above is what an edit about to be installed wants,
+    /// but not what a hover wants: resizing the tried-out tree would resize the
+    /// one still on screen.
     pub fn deep_clone(&self) -> Self {
         match self {
             Pane::Leaf(v) => Pane::Leaf(v.clone()),
@@ -460,7 +483,7 @@ impl<L: Clone> Pane<L> {
     where
         L: PartialEq,
     {
-        let mut next = self.clone();
+        let mut next = self.shallow_clone();
         let Some(moved) = next.take_leaf_where(is_src) else {
             return false;
         };
@@ -500,8 +523,8 @@ impl<L: Clone> Pane<L> {
     /// as a band along `dir`: one more band than the layout already has, each
     /// of them the same width. A tab already cut into two columns therefore
     /// receives a third column, not a half.
-    fn edge_landing(&self, is_src: &impl Fn(&L) -> bool, dir: Dir) -> Option<(Pane<L>, f32)> {
-        let mut rest = self.clone();
+    fn edge_landing(&self, is_src: &impl Fn(&L) -> bool, dir: Dir) -> Option<Pane<L>> {
+        let mut rest = self.shallow_clone();
         let moved = rest.take_leaf_where(is_src)?;
         let slices = rest.slices_along(dir.axis()).max(1);
         let share = 1. / (slices + 1) as f32;
@@ -511,7 +534,7 @@ impl<L: Clone> Pane<L> {
             (rest, Pane::Leaf(moved))
         };
         let ratio = if dir.leads() { share } else { 1. - share };
-        Some((Pane::split_node(dir.axis(), ratio, a, b), share))
+        Some(Pane::split_node(dir.axis(), ratio, a, b))
     }
 
     /// Moves one leaf against an outer edge of the whole tab, as a full-width
@@ -520,7 +543,7 @@ impl<L: Clone> Pane<L> {
     where
         L: PartialEq,
     {
-        let Some((next, _)) = self.edge_landing(is_src, dir) else {
+        let Some(next) = self.edge_landing(is_src, dir) else {
             return false;
         };
         if next.same_layout(self) {
@@ -562,10 +585,10 @@ impl<L: Clone> Pane<L> {
         is_b: &impl Fn(&L) -> bool,
     ) -> bool {
         let leaves = self.leaves();
-        let Some(i) = leaves.iter().position(|l| is_a(l)) else {
+        let Some(i) = leaves.iter().position(is_a) else {
             return false;
         };
-        let Some(j) = leaves.iter().position(|l| is_b(l)) else {
+        let Some(j) = leaves.iter().position(is_b) else {
             return false;
         };
         self.swap_leaf_indices(i, j)
@@ -787,7 +810,6 @@ impl Pane<PaneSlot> {
         self.replace_leaf_where(&|v| v.entity_id() == target, new)
     }
 
-    /// Drops `src` on the `dir` side of `dst`, splitting `dst` to make room.
     pub fn close_focused(&mut self, window: &Window, cx: &App) -> CloseOutcome {
         self.close_leaf_where(&|v| v.contains_focused(window, cx))
     }
@@ -1667,25 +1689,39 @@ mod tests {
 
     #[test]
     fn a_band_takes_one_share_of_the_bands_the_axis_ends_up_with() {
-        let share =
-            |pane: &TestPane, id: u32, dir: Dir| pane.edge_landing(&is(id), dir).map(|(_, s)| s);
+        // What the band ended up taking, read off the split the landing put it
+        // in — the same number the drop lands, rather than one carried out of
+        // the tree alongside it for the test's benefit.
+        let share = |pane: &TestPane, id: u32, dir: Dir| {
+            pane.edge_landing(&is(id), dir).map(|landed| match landed {
+                Pane::Split { ratio, .. } => {
+                    let taken = if dir.leads() {
+                        ratio.get()
+                    } else {
+                        1. - ratio.get()
+                    };
+                    (taken * 1000.).round() / 1000.
+                }
+                _ => panic!("an edge landing is always a split"),
+            })
+        };
 
         // Two columns receive a third column, not a half.
         let mut two = TestPane::leaf(0);
         split(&mut two, 0, Axis::Horizontal, 1);
         split(&mut two, 1, Axis::Horizontal, 2);
-        assert_eq!(share(&two, 2, Dir::Right), Some(1. / 3.));
+        assert_eq!(share(&two, 2, Dir::Right), Some(0.333));
 
         // A 2×2 reads as two columns even though no one node cuts it in two,
         // and lifting a pane out of it leaves those two columns standing.
         assert_eq!(grid().slices_along(Axis::Horizontal), 2);
-        assert_eq!(share(&grid(), 1, Dir::Right), Some(1. / 3.));
-        assert_eq!(share(&grid(), 1, Dir::Up), Some(1. / 3.));
+        assert_eq!(share(&grid(), 1, Dir::Right), Some(0.333));
+        assert_eq!(share(&grid(), 1, Dir::Up), Some(0.333));
 
         // Two rows have one column between them, so a column is a half.
         let mut rows = TestPane::leaf(0);
         split(&mut rows, 0, Axis::Vertical, 1);
-        assert_eq!(share(&rows, 1, Dir::Left), Some(1. / 2.));
+        assert_eq!(share(&rows, 1, Dir::Left), Some(0.5));
 
         assert_eq!(
             share(&TestPane::leaf(0), 0, Dir::Left),
@@ -1734,6 +1770,25 @@ mod tests {
         assert!(pane.move_leaf_to_edge_where(&is(1), Dir::Up));
         assert_eq!(pane.leaves(), vec![1, 0]);
         assert_well_formed(&pane);
+    }
+
+    /// A drop zone is read off the rectangles and carried out against the
+    /// leaves, so the two have to be the same panes in the same order.
+    #[test]
+    fn leaf_rects_come_back_in_the_order_the_leaves_do() {
+        let pane = TestPane::split_node(
+            Axis::Horizontal,
+            0.25,
+            TestPane::split_node(Axis::Vertical, 0.5, Pane::Leaf(0), Pane::Leaf(1)),
+            TestPane::split_node(
+                Axis::Horizontal,
+                0.5,
+                Pane::Leaf(2),
+                TestPane::split_node(Axis::Vertical, 0.5, Pane::Leaf(3), Pane::Leaf(4)),
+            ),
+        );
+        let ordered: Vec<u32> = pane.leaf_rects().into_iter().map(|(v, _)| v).collect();
+        assert_eq!(ordered, pane.leaves());
     }
 
     #[test]
