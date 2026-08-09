@@ -16,10 +16,13 @@ use crate::core::config::{Config, SidebarGrouping};
 use crate::terminal::git_status::GitStatusCache;
 use crate::ui::app::{TITLE_BAR_HEIGHT, Tty7App};
 use crate::ui::hints::tab_badge_label;
-use crate::ui::i18n::{L10nKey, t};
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::reorder::{self, Reorder, Surface};
 use crate::ui::right_panel::RESIZE_HANDLE_WIDTH;
-use crate::ui::tab_strip::{DragTab, REORDER_SLIDE_MS};
+use crate::ui::tab_strip::{
+    DragTab, REORDER_SLIDE_MS, abbreviate_home, elide_keep_edges, elide_path_keep_tail,
+    measure_text, strip_host_prefix,
+};
 
 const MIN_SIDEBAR_WIDTH: f32 = 180.;
 
@@ -28,6 +31,14 @@ const MAX_SIDEBAR_WIDTH_RATIO: f32 = 0.5;
 
 const ROW_GAP: f32 = 2.;
 
+/// What a sidebar row actually rendered, so the hover card can tell which
+/// details the row had to hide.
+struct SidebarRowShown {
+    title: SharedString,
+    branch: Option<SharedString>,
+    cwd: Option<SharedString>,
+}
+
 #[derive(Clone)]
 pub(crate) struct DragGroup;
 
@@ -35,6 +46,21 @@ impl Render for DragGroup {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
     }
+}
+
+/// Every detail a sidebar row could not fit, collected so the hover card can
+/// be rendered from cloneable data (an `AnyElement` cannot be cloned, but the
+/// tooltip closure has to rebuild its content on every hover).
+#[derive(Clone)]
+struct SidebarInfo {
+    /// Full path, when the row's title was elided.
+    title: Option<SharedString>,
+    /// Full branch plus diff counts, when the row's branch was elided.
+    branch: Option<(SharedString, u32, u32)>,
+    /// Full working directory, when the row's second line was elided.
+    cwd: Option<SharedString>,
+    /// Remote host, when the avatar only shows a dot for it.
+    host: Option<SharedString>,
 }
 
 impl Tty7App {
@@ -106,6 +132,17 @@ impl Tty7App {
             .collect();
 
         let pointer = window.mouse_position();
+        // The row text is measured against real glyphs before it is elided:
+        // `text_sm` is 0.875rem and `text_xs` 0.75rem, resolved here so the
+        // measurement and the render use the same sizes and family.
+        let font = gpui::Font {
+            family: cx.theme().font_family.clone(),
+            features: Default::default(),
+            fallbacks: None,
+            weight: Default::default(),
+            style: Default::default(),
+        };
+        let rem = window.rem_size().as_f32();
         let rendered = |ix: &usize| !visible_by_section[*ix].is_empty();
         let repo_slots: Vec<usize> = (0..sections.len())
             .filter(|&ix| sections[ix].key.is_some())
@@ -156,7 +193,7 @@ impl Tty7App {
                 visible.len(),
                 pointer,
             );
-            for (slot, (i, label)) in visible.into_iter().enumerate() {
+            for (slot, (i, _label)) in visible.into_iter().enumerate() {
                 let badge_pos = badge_pos[i];
                 let tab = &self.tabs[i];
                 let is_active = i == active;
@@ -172,6 +209,55 @@ impl Tty7App {
                         Some((view.host_id(), cwd))
                     }),
                 );
+                let badge_extra = if show_badges && badge_pos < 9 {
+                    28.
+                } else {
+                    0.
+                };
+                // What the row can spend on text: the sidebar width minus the
+                // border, the row padding, the avatar and its gap, and the
+                // badge when one is shown. Elision is measured against this
+                // budget so the label and branch never wrap or overflow.
+                let label_avail = (width - 1. - 16. - 22. - 8. - badge_extra).max(48.);
+                let title_size = 0.875 * rem;
+                let meta_size = 0.75 * rem;
+                // Title: elide the *full* path against the row budget, so a
+                // wide sidebar shows the whole path and a narrow one keeps
+                // the tail — the file or directory the user is actually
+                // working on — while dropping segments from the front. A
+                // fixed segment cap (`short_title`) would elide even when
+                // the row has room, so only the width may decide here.
+                let shown_title =
+                    if let Some(name) = tab.name.as_ref().filter(|n| !n.trim().is_empty()) {
+                        // A user-renamed tab shows its name; short names are a
+                        // no-op for the elision, long ones get the same tail.
+                        elide_path_keep_tail(
+                            &window.text_system(),
+                            &font,
+                            title_size,
+                            name.trim(),
+                            label_avail,
+                        )
+                    } else {
+                        let raw_title = tab.leaf_title(Some(window), cx);
+                        let raw = abbreviate_home(strip_host_prefix(raw_title.trim()));
+                        if raw.trim().is_empty() {
+                            SharedString::from(t_fmt(
+                                L10nKey::TabUnnamedShell,
+                                &[("n", &((i + 1).to_string()))],
+                            ))
+                        } else {
+                            elide_path_keep_tail(
+                                &window.text_system(),
+                                &font,
+                                title_size,
+                                &raw,
+                                label_avail,
+                            )
+                        }
+                    };
+                let mut branch_shown: Option<SharedString> = None;
+                let mut cwd_shown: Option<SharedString> = None;
                 let git_line = tab.git_status(Some(window), cx).map(|g| {
                     let mut line = h_flex()
                         .id(("sidebar-git", i))
@@ -186,8 +272,33 @@ impl Tty7App {
                                 .flex_shrink_0()
                                 .size(px(11.))
                                 .text_color(cx.theme().muted_foreground),
-                        )
-                        .child(div().flex_1().min_w_0().truncate().child(g.branch.clone()));
+                        );
+                    // The diff counts are measured against real glyphs so the
+                    // branch can be elided to exactly the space they leave;
+                    // the counts themselves never wrap or shrink.
+                    let counts_txt = match (g.added > 0, g.removed > 0) {
+                        (true, true) => format!("+{} −{}", g.added, g.removed),
+                        (true, false) => format!("+{}", g.added),
+                        (false, true) => format!("−{}", g.removed),
+                        (false, false) => String::new(),
+                    };
+                    let counts_w = if counts_txt.is_empty() {
+                        0.
+                    } else {
+                        measure_text(&window.text_system(), &font, meta_size, &counts_txt) + 6.
+                    };
+                    // Branch: keep both ends (`window-trans…backdrop`) so its
+                    // identifying tail survives a narrow sidebar.
+                    let branch_avail = (label_avail - 11. - 6. - counts_w).max(0.);
+                    let shown = elide_keep_edges(
+                        &window.text_system(),
+                        &font,
+                        meta_size,
+                        &g.branch,
+                        branch_avail,
+                    );
+                    branch_shown = Some(shown.clone());
+                    line = line.child(div().flex_1().min_w_0().truncate().child(shown));
                     if g.added > 0 || g.removed > 0 {
                         let mut counts = h_flex()
                             .id(("sidebar-diff", i))
@@ -229,11 +340,51 @@ impl Tty7App {
                     }
                     line
                 });
+                // Outside a repo there is no branch line; the second line then
+                // carries the compressed cwd with its root marker, so a tab
+                // whose title is just a shell name still says where it lives.
+                if git_line.is_none() {
+                    cwd_shown = tab
+                        .pane
+                        .focused_or_first(window, cx)
+                        .and_then(|leaf| {
+                            let view = leaf.read(cx);
+                            view.git_status_cwd()
+                                .map(|p| p.to_path_buf())
+                                .or_else(|| view.cwd())
+                        })
+                        .map(|cwd| {
+                            let cwd_full = cwd.display().to_string();
+                            let full = abbreviate_home(&cwd_full);
+                            elide_path_keep_tail(
+                                &window.text_system(),
+                                &font,
+                                meta_size,
+                                &full,
+                                label_avail,
+                            )
+                        })
+                        // The title already carries the whole path; a second
+                        // copy adds noise, not information.
+                        .filter(|s| s.as_ref() != shown_title.as_ref());
+                }
                 let rename_input = self
                     .renaming
                     .as_ref()
                     .filter(|r| r.index == i)
                     .map(|r| r.input.clone());
+
+                let shown = SidebarRowShown {
+                    title: shown_title.clone(),
+                    branch: branch_shown.clone(),
+                    cwd: cwd_shown.clone(),
+                };
+                let info = self.sidebar_info(tab, window, cx, &shown);
+                // Colors are captured by value so the tooltip builder (which
+                // borrows no app state) can style the card on its own.
+                let muted = cx.theme().muted_foreground;
+                let success = cx.theme().success;
+                let danger = cx.theme().danger;
 
                 let label_region = match rename_input {
                     Some(input) => div()
@@ -248,24 +399,111 @@ impl Tty7App {
                         .flex_1()
                         .min_w_0()
                         .gap(px(2.))
-                        .when_some(
-                            self.tab_title_tooltip(tab, i, Some(window), cx),
-                            |col, title| {
-                                col.tooltip(move |window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(title.clone())
-                                        .build(window, cx)
+                        .when_some(info, |col, info| {
+                            col.tooltip(move |window, cx| {
+                                // `Tooltip::element` rebuilds its content on
+                                // every hover, so the captured info is cloned
+                                // per call instead of being moved out.
+                                let info = info.clone();
+                                gpui_component::tooltip::Tooltip::element(move |_window, _cx| {
+                                    let card = v_flex()
+                                        .gap_1()
+                                        .when_some(info.title.clone(), |c, title| {
+                                            c.child(
+                                                div()
+                                                    .max_w(px(420.))
+                                                    .truncate()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .child(title),
+                                            )
+                                        })
+                                        .when_some(
+                                            info.branch.clone(),
+                                            |c, (branch, added, removed)| {
+                                                let mut line = h_flex()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(
+                                                        gpui::svg()
+                                                            .path("icons/git-branch.svg")
+                                                            .flex_shrink_0()
+                                                            .size(px(11.))
+                                                            .text_color(muted),
+                                                    )
+                                                    .child(div().truncate().child(branch));
+                                                if added > 0 {
+                                                    line = line.child(
+                                                        div()
+                                                            .text_color(success)
+                                                            .child(format!("+{added}")),
+                                                    );
+                                                }
+                                                if removed > 0 {
+                                                    line = line.child(
+                                                        div()
+                                                            .text_color(danger)
+                                                            .child(format!("−{removed}")),
+                                                    );
+                                                }
+                                                c.child(line)
+                                            },
+                                        )
+                                        .when_some(info.cwd.clone(), |c, cwd| {
+                                            c.child(
+                                                div()
+                                                    .max_w(px(420.))
+                                                    .truncate()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(cwd),
+                                            )
+                                        })
+                                        .when_some(info.host.clone(), |c, host| {
+                                            c.child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(
+                                                        gpui::svg()
+                                                            .path("icons/machine-remote.svg")
+                                                            .flex_shrink_0()
+                                                            .size(px(11.))
+                                                            .text_color(muted),
+                                                    )
+                                                    .child(div().truncate().child(host)),
+                                            )
+                                        });
+                                    card
                                 })
-                            },
-                        )
+                                .build(window, cx)
+                            })
+                        })
                         .child(
                             div()
                                 .w_full()
                                 .truncate()
                                 .text_sm()
                                 .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
-                                .child(label),
+                                .child(shown_title),
                         )
                         .children(git_line)
+                        .when_some(cwd_shown, |col, cwd| {
+                            col.child(
+                                h_flex()
+                                    .id(("sidebar-cwd", i))
+                                    .w_full()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground.opacity(0.8))
+                                    .child(div().flex_1().min_w_0().truncate().child(cwd)),
+                            )
+                        })
                         .into_any_element(),
                 };
 
@@ -773,6 +1011,67 @@ impl Tty7App {
                     )),
             )
             .child(handle)
+    }
+
+    /// What the sidebar row hid: the full path, the full branch and diff
+    /// counts, the working directory, and the remote host the avatar only
+    /// dots. `None` when the row showed everything — a card would add noise,
+    /// not information. The host is included even for an untruncated row,
+    /// because `short_title` strips the `user@host:` prefix the avatar
+    /// cannot spell out.
+    fn sidebar_info(
+        &self,
+        tab: &crate::ui::app::Tab,
+        window: &mut Window,
+        cx: &gpui::App,
+        shown: &SidebarRowShown,
+    ) -> Option<SidebarInfo> {
+        let mut info = SidebarInfo {
+            title: None,
+            branch: None,
+            cwd: None,
+            host: None,
+        };
+        let raw_title = tab.leaf_title(Some(window), cx);
+        let raw = abbreviate_home(strip_host_prefix(raw_title.trim()));
+        // A user-renamed tab already shows its name in full; the card does
+        // not shadow it with the underlying path.
+        if tab.name.as_ref().is_none_or(|n| n.trim().is_empty())
+            && raw.as_ref() != shown.title.as_ref()
+        {
+            info.title = Some(SharedString::from(raw.as_ref()));
+        }
+        if let Some(g) = tab.git_status(Some(window), cx)
+            && shown.branch.as_deref() != Some(g.branch.as_str())
+        {
+            info.branch = Some((SharedString::from(g.branch.clone()), g.added, g.removed));
+        }
+        let cwd = tab.pane.focused_or_first(window, cx).and_then(|leaf| {
+            let view = leaf.read(cx);
+            view.git_status_cwd()
+                .map(|p| p.to_path_buf())
+                .or_else(|| view.cwd())
+        });
+        // The cwd row only earns a card line when it was rendered *and*
+        // elided: a repo row already shows the full path as its title, so
+        // repeating the cwd under it would be noise, not information.
+        if let Some(cwd) = cwd
+            && let cwd_full = cwd.display().to_string()
+            && let full = abbreviate_home(&cwd_full)
+            && shown.cwd.as_deref().is_some_and(|s| s != full.as_ref())
+        {
+            info.cwd = Some(SharedString::from(full.as_ref()));
+        }
+        if let Some(target) = tab.pane.first_leaf().and_then(|leaf| {
+            leaf.terminal()?
+                .read(cx)
+                .remote_context()
+                .map(|r| r.target.clone())
+        }) {
+            info.host = Some(SharedString::from(target));
+        }
+        (info.title.is_some() || info.branch.is_some() || info.cwd.is_some() || info.host.is_some())
+            .then_some(info)
     }
 
     fn sidebar_group_keys(&self, cx: &gpui::App) -> Vec<Option<PathBuf>> {
