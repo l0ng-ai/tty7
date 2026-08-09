@@ -106,8 +106,12 @@ pub fn load_with_shell_files(scope: &Scope, shell_files: Vec<Vec<u8>>) -> Histor
     normalize(raw)
 }
 
-pub fn shell_history_names() -> [&'static str; 2] {
-    [".zsh_history", ".bash_history"]
+pub fn shell_history_names() -> [&'static str; 3] {
+    [
+        ".zsh_history",
+        ".bash_history",
+        ".local/share/fish/fish_history",
+    ]
 }
 
 fn looks_absolute(p: &str) -> bool {
@@ -298,6 +302,13 @@ fn load_shell_history() -> Vec<Raw> {
         add(home.join(".zsh_history"));
         add(home.join(".bash_history"));
     }
+    // XDG_DATA_HOME is independent of HOME (and the only reliable signal on
+    // Windows runners, where HOME may be unset); fall back to ~/.local/share.
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME").filter(|d| !d.is_empty()) {
+        add(PathBuf::from(xdg).join("fish/fish_history"));
+    } else if let Some(home) = std::env::var_os("HOME") {
+        add(PathBuf::from(home).join(".local/share/fish/fish_history"));
+    }
     files.sort_by_key(|p| {
         std::fs::metadata(p)
             .and_then(|m| m.modified())
@@ -307,10 +318,65 @@ fn load_shell_history() -> Vec<Raw> {
     let mut out = Vec::new();
     for path in files {
         if let Ok(bytes) = std::fs::read(&path) {
-            parse_shell_history(&String::from_utf8_lossy(&bytes), &mut out);
+            let content = String::from_utf8_lossy(&bytes);
+            if path.file_name().is_some_and(|n| n == "fish_history") {
+                parse_fish_history(&content, &mut out);
+            } else {
+                parse_shell_history(&content, &mut out);
+            }
         }
     }
     out
+}
+
+#[derive(serde::Deserialize)]
+struct FishEntry {
+    #[serde(default)]
+    cmd: String,
+    #[serde(default)]
+    when: Option<serde_yaml::Value>,
+}
+
+/// fish's `fish_history` is a YAML list of `- cmd: <text>` / `when: <epoch>`
+/// pairs. `when` is an integer epoch; tolerate strings and missing values.
+///
+/// The file grows across fish versions (3.x and 4.x writers differ) and a
+/// single malformed record must not sink the whole file — parse record by
+/// record, skipping the bad ones.
+fn parse_fish_history(content: &str, out: &mut Vec<Raw>) {
+    let mut start = 0;
+    while let Some(rel) = content[start..].find("\n- cmd:") {
+        let end = start + rel;
+        parse_fish_record(&content[start..end], out);
+        start = end + 1;
+    }
+    parse_fish_record(&content[start..], out);
+}
+
+fn parse_fish_record(block: &str, out: &mut Vec<Raw>) {
+    // A record is a YAML sequence item (`- cmd: …`); it only parses as a
+    // one-element sequence, not as a bare mapping.
+    let Ok(entries) = serde_yaml::from_str::<Vec<FishEntry>>(block.trim()) else {
+        return;
+    };
+    let Some(entry) = entries.into_iter().next() else {
+        return;
+    };
+    let cmd = entry.cmd.trim();
+    if cmd.is_empty() {
+        return;
+    }
+    let ts = entry.when.as_ref().and_then(|w| match w {
+        serde_yaml::Value::Number(n) => n.as_u64(),
+        serde_yaml::Value::String(s) => s.parse().ok(),
+        _ => None,
+    });
+    out.push(Raw {
+        cmd: cmd.to_string(),
+        cwd: None,
+        ts,
+        exit: None,
+    });
 }
 
 fn parse_shell_history(content: &str, out: &mut Vec<Raw>) {
@@ -376,6 +442,102 @@ mod tests {
         let mut out = Vec::new();
         parse_shell_history(content, &mut out);
         out.into_iter().map(|r| (r.cmd, r.ts)).collect()
+    }
+
+    fn parse_fish(content: &str) -> Vec<(String, Option<u64>)> {
+        let mut out = Vec::new();
+        parse_fish_history(content, &mut out);
+        out.into_iter().map(|r| (r.cmd, r.ts)).collect()
+    }
+
+    // Serializes tests that mutate process-wide env (XDG_DATA_HOME).
+    static HISTORY_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn fish_history_entries_carry_cmd_and_timestamp() {
+        let content =
+            "- cmd: git status\n  when: 1700000000\n- cmd: cargo build\n  when: 1700000005\n";
+        assert_eq!(
+            parse_fish(content),
+            [
+                ("git status".to_string(), Some(1_700_000_000)),
+                ("cargo build".to_string(), Some(1_700_000_005)),
+            ]
+        );
+    }
+
+    #[test]
+    fn fish_history_multiline_cmd_is_joined_with_newlines() {
+        // fish writes multiline commands with YAML double-quote escapes
+        let content = r#"- cmd: "for f in *; do\necho $f\ndone"
+  when: 1700000000
+"#;
+        assert_eq!(
+            parse_fish(content),
+            [(
+                "for f in *; do\necho $f\ndone".to_string(),
+                Some(1_700_000_000)
+            )]
+        );
+    }
+
+    #[test]
+    fn fish_history_missing_or_string_when_is_tolerated() {
+        let content = "- cmd: ls\n- cmd: pwd\n  when: '1700000000'\n";
+        assert_eq!(
+            parse_fish(content),
+            [
+                ("ls".to_string(), None),
+                ("pwd".to_string(), Some(1_700_000_000)),
+            ]
+        );
+    }
+
+    #[test]
+    fn fish_history_garbage_is_skipped() {
+        assert_eq!(parse_fish("not yaml at all\n- cmd:\n"), []);
+        assert_eq!(parse_fish(""), []);
+    }
+
+    #[test]
+    fn a_bad_fish_record_does_not_sink_the_rest_of_the_file() {
+        // Real fish_history files accumulate records across fish versions;
+        // a malformed one (e.g. an unquoted `: ` inside a bare cmd) must not
+        // discard every other record.
+        let content = "- cmd: ok one\n  when: 1700000000\n- cmd: this: is: broken\n- cmd: ok two\n  when: 1700000001\n";
+        assert_eq!(
+            parse_fish(content),
+            [
+                ("ok one".to_string(), Some(1_700_000_000)),
+                ("ok two".to_string(), Some(1_700_000_001)),
+            ]
+        );
+    }
+
+    #[test]
+    fn load_shell_history_includes_fish() {
+        let _guard = HISTORY_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        crate::core::config::pin_test_config_dir();
+
+        let tmp = std::env::temp_dir().join(format!("tty7-fish-{}", std::process::id()));
+        let fish_dir = tmp.join("fish");
+        std::fs::create_dir_all(&fish_dir).unwrap();
+        let marker = format!("tty7_fish_marker_{}", std::process::id());
+        std::fs::write(
+            fish_dir.join("fish_history"),
+            format!("- cmd: {marker}\n  when: 1700000000\n"),
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("XDG_DATA_HOME", &tmp) };
+        let raw = load_shell_history();
+        unsafe { std::env::remove_var("XDG_DATA_HOME") };
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(
+            raw.iter().any(|r| r.cmd == marker),
+            "fish_history should be merged into local history"
+        );
     }
 
     #[test]
