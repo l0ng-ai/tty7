@@ -1047,7 +1047,11 @@ pub(crate) fn drain_events(cx: &mut gpui::App) {
                     crate::ui::tree_sync::resync_window_from_tree(cx, workspace);
                 }
             }
-            ControlEvent::GuiOpen { path } if host.is_local() => {
+            ControlEvent::GuiOpen { workspace, .. } if host.is_local() && workspace.is_some() => {
+                let workspace = workspace.expect("guarded above");
+                crate::ui::windows::open_named_workspace_from_cli(cx, workspace);
+            }
+            ControlEvent::GuiOpen { path, .. } if host.is_local() => {
                 crate::ui::windows::open_from_cli(cx, path.map(std::path::PathBuf::from));
             }
             other => log::debug!("unhandled control event from {host:?}: {other:?}"),

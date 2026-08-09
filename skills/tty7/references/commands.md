@@ -63,6 +63,10 @@ from a stand-in.
 Same as `ws ls`. Table: `WORKSPACE NAME TABS PANES ATTACHED`.
 JSON: `{"workspaces":[{"id","name","tabs","panes","attached"}]}`.
 
+ATTACHED names the host holding the workspace — a GUI window, or another
+client — and is `-` when nobody is. It is the hostname only; the token that
+proves the hold never leaves the connection that owns it.
+
 ### `tty7 run [--keep] [--cwd DIR] [--ws WORKSPACE] -- CMD...`
 Spawns a pane running `CMD`, streams its output to stdout, waits, and exits
 with its code. The command must come after `--`; anything after `--` belongs to
@@ -77,9 +81,13 @@ the child, so `tty7 run -- cargo test --keep` passes `--keep` to cargo.
 JSON: `{"pane","exit","exit_code_known","kept"}`, printed **after** the streamed
 output. The combined stream is not valid JSON; read the last line.
 
-### `tty7 new [PATH]`
+### `tty7 new [PATH] [--open]`
 Creates a workspace plus its first tab and shell, at `PATH` if given. Prints
-the workspace id. JSON: `{"id","pane"}`.
+the workspace id. JSON: `{"id","pane","opened"}`.
+
+`--open` also puts a window on it, if a GUI is running on this machine — say
+so when you make a workspace for someone to look at. Without it the workspace
+is still listed in the GUI's switcher; it just waits there to be opened.
 
 ### `tty7 split [%PANE] (--v|--h) [--ratio R]`
 Alias of `pane split`. Splits `%PANE` (default `$TTY7_PANE`), spawning a shell
@@ -192,11 +200,23 @@ resolve it immediately before use. A full tab UUID also works: `@<uuid>`.
 
 | Command | Effect | JSON |
 |---|---|---|
-| `tab ls [WORKSPACE]` | tabs of a workspace | `{"workspace","tabs":[{"ordinal","id","name","panes":[..]}]}` |
+| `tab ls [WORKSPACE]` | tabs of a workspace | `{"workspace","tabs":[{"ordinal","id","name","label","agent","group","panes":[..]}]}` |
 | `tab new [WORKSPACE] [--cwd DIR]` | add a tab with a fresh shell | `{"tab","pane"}` |
 | `tab close @TAB` | close the tab and every pane in it | `{"closed"}` |
 | `tab rename @TAB NAME` | name or rename | `{"tab","name"}` |
 | `tab move @TAB INDEX` | reposition within its workspace | `{"tab","to"}` |
+
+GROUP is the heading the GUI's sidebar files the tab under, shown by its last
+segment (`group` in the JSON is the whole value). Read-only from here: with the
+default repo grouping the GUI recomputes it from the tab's working directory,
+so anything written from outside would be overwritten on the next render.
+
+Almost no tab has a `name`: the GUI's tab strip reads OSC titles, which the
+machine tree never sees. So the NAME column — and `label` in the JSON — falls
+back through the best evidence there is: the name if someone set one, else the
+agent running in the tab ("Claude Code"), else the last segment of its cwd,
+else the foreground process. `name` in the JSON stays literal, so a script can
+still tell a real name from a stand-in.
 
 ## `pane` — panes
 

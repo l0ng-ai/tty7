@@ -236,6 +236,17 @@ pub fn open_at(
     refresh_menu(cx);
 }
 
+/// A named workspace is the one that gets the window: the CLI made it, knows
+/// its id, and no other window would do. Everything else is `tty7 [PATH]`,
+/// where the CLI has no opinion and this process picks.
+pub fn open_named_workspace_from_cli(cx: &mut App, workspace: WorkspaceId) {
+    cx.activate(true);
+    open(cx, Some(workspace));
+    if let Some(handle) = WindowRegistry::window_for(cx, workspace) {
+        let _ = handle.update(cx, |_, window, _| window.activate_window());
+    }
+}
+
 pub fn open_from_cli(cx: &mut App, path: Option<std::path::PathBuf>) {
     // Only the GUI process knows which of its windows was focused most recently.
     // The daemon deliberately routes to a process, then leaves window selection

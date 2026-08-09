@@ -58,6 +58,11 @@ pub enum Command {
     New {
         #[arg(value_name = "PATH")]
         path: Option<String>,
+        #[arg(
+            long,
+            help = "Also open a window on it, if a GUI is running on this machine"
+        )]
+        open: bool,
     },
 
     #[command(about = "Split a pane (= tty7 pane split)")]
@@ -495,11 +500,11 @@ mod tests {
         assert!(matches!(parse(&["tty7", "ls"]).command, Some(Command::Ls)));
         assert!(matches!(
             parse(&["tty7", "new"]).command,
-            Some(Command::New { path: None })
+            Some(Command::New { path: None, .. })
         ));
         assert!(matches!(
             parse(&["tty7", "new", "C:\\proj"]).command,
-            Some(Command::New { path: Some(p) }) if p == "C:\\proj"
+            Some(Command::New { path: Some(p), .. }) if p == "C:\\proj"
         ));
         assert!(matches!(
             parse(&["tty7", "agents"]).command,

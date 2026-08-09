@@ -10,7 +10,7 @@ use crate::daemon::control::{
     CONTROL_VERSION, ControlClientMsg, ControlEvent, ControlHello, ControlHelloOk, ControlReply,
     ControlRequest, ControlServerMsg, GIT_STREAM_CHUNK, GIT_STREAM_CHUNK_MAX, LinkShutdown,
     MAX_CONCURRENT_GIT_STREAMS, PaneAgentState, ReplyOk, ServerStatus, WATCH_BURST_CAP, WireError,
-    WireErrorKind, feature, server_started,
+    WireErrorKind, WorkspaceId, feature, server_started,
 };
 use crate::daemon::duplex::{Duplex, Halves};
 use crate::daemon::protocol::PaneInfo;
@@ -113,7 +113,7 @@ impl AttachRegistry {
             .retain(|gui| gui.conn != conn);
     }
 
-    fn open_gui(&self, path: Option<String>) -> bool {
+    fn open_gui(&self, path: Option<String>, workspace: Option<WorkspaceId>) -> bool {
         // The newest GUI connection belongs to the most recently started app
         // process. Window recency is resolved inside that process, where GPUI
         // owns the authoritative focus state.
@@ -127,7 +127,10 @@ impl AttachRegistry {
             let Some((conn, sink)) = target else {
                 return false;
             };
-            let event = ControlServerMsg::Event(ControlEvent::GuiOpen { path: path.clone() });
+            let event = ControlServerMsg::Event(ControlEvent::GuiOpen {
+                path: path.clone(),
+                workspace,
+            });
             if sink.send(&event).is_ok() {
                 return true;
             }
@@ -661,9 +664,10 @@ fn run_request(
             detach_workspace(conn, &id)?;
             (ReplyOk::Unit, Vec::new())
         }
-        ControlRequest::GuiOpen { path } => {
-            (ReplyOk::Bool(conn.attachments.open_gui(path)), Vec::new())
-        }
+        ControlRequest::GuiOpen { path, workspace } => (
+            ReplyOk::Bool(conn.attachments.open_gui(path, workspace)),
+            Vec::new(),
+        ),
 
         ControlRequest::MachineGet => (
             ReplyOk::MachineTree(Box::new(machine_with_live_panes(conn)?)),
@@ -1900,23 +1904,45 @@ mod gui_registry_tests {
     #[test]
     fn gui_open_is_delivered_only_while_a_gui_is_registered() {
         let registry = AttachRegistry::default();
-        assert!(!registry.open_gui(Some("/work".into())));
+        assert!(!registry.open_gui(Some("/work".into()), None));
 
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::new(Sink::new(SharedWriter(Arc::clone(&bytes))));
         registry.register_gui(7, sink);
-        assert!(registry.open_gui(Some("/work".into())));
+        assert!(registry.open_gui(Some("/work".into()), None));
 
         let frame = bytes.lock().unwrap().clone();
         assert_eq!(
             ControlServerMsg::read(&mut Cursor::new(frame)).unwrap(),
             ControlServerMsg::Event(ControlEvent::GuiOpen {
-                path: Some("/work".into())
+                path: Some("/work".into()),
+                workspace: None,
             })
         );
 
         registry.unregister_gui(7);
-        assert!(!registry.open_gui(None));
+        assert!(!registry.open_gui(None, None));
+    }
+
+    #[test]
+    fn gui_open_carries_the_workspace_the_caller_named() {
+        let registry = AttachRegistry::default();
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::new(Sink::new(SharedWriter(Arc::clone(&bytes))));
+        registry.register_gui(7, sink);
+
+        let made = WorkspaceId::new();
+        assert!(registry.open_gui(None, Some(made)));
+
+        let frame = bytes.lock().unwrap().clone();
+        assert_eq!(
+            ControlServerMsg::read(&mut Cursor::new(frame)).unwrap(),
+            ControlServerMsg::Event(ControlEvent::GuiOpen {
+                path: None,
+                workspace: Some(made),
+            }),
+            "the GUI has to be told which workspace, not left to guess a window"
+        );
     }
 }
 

@@ -88,13 +88,16 @@ pub fn load(scope: &Scope) -> History {
     load_with_shell_files(scope, Vec::new())
 }
 
-pub fn load_with_shell_files(scope: &Scope, shell_files: Vec<Vec<u8>>) -> History {
+/// `shell_files` are the far end's own history files, each paired with the file
+/// name it was read from — the name is what picks the reader, so fetching a
+/// file the bash reader cannot parse is not enough to corrupt the list.
+pub fn load_with_shell_files(scope: &Scope, shell_files: Vec<(String, Vec<u8>)>) -> History {
     let mut raw: Vec<Raw> = if scope.is_local() {
         load_shell_history()
     } else {
         let mut out = Vec::new();
-        for bytes in &shell_files {
-            parse_shell_history(&String::from_utf8_lossy(bytes), &mut out);
+        for (name, bytes) in &shell_files {
+            parse_history_file(name, &String::from_utf8_lossy(bytes), &mut out);
         }
         out
     };
@@ -106,8 +109,19 @@ pub fn load_with_shell_files(scope: &Scope, shell_files: Vec<Vec<u8>>) -> Histor
     normalize(raw)
 }
 
-pub fn shell_history_names() -> [&'static str; 2] {
-    [".zsh_history", ".bash_history"]
+const FISH_HISTORY_FILE: &str = "fish_history";
+
+/// fish's history relative to the XDG data dir, and relative to `$HOME` when
+/// that dir is the default `~/.local/share`. `shell_history_names` returns the
+/// second, so a test pins the two spellings to each other.
+const FISH_HISTORY_UNDER_DATA_DIR: &str = "fish/fish_history";
+const FISH_HISTORY_UNDER_HOME: &str = ".local/share/fish/fish_history";
+
+/// History files worth fetching from a remote host, relative to its home dir.
+/// `load_with_shell_files` reads the file name back off these to pick a parser,
+/// so a name added here needs a reader in `parse_history_file`.
+pub fn shell_history_names() -> [&'static str; 3] {
+    [".zsh_history", ".bash_history", FISH_HISTORY_UNDER_HOME]
 }
 
 fn looks_absolute(p: &str) -> bool {
@@ -298,6 +312,13 @@ fn load_shell_history() -> Vec<Raw> {
         add(home.join(".zsh_history"));
         add(home.join(".bash_history"));
     }
+    // fish keeps its history under the XDG data dir, which is set independently
+    // of HOME, so ~/.local/share is only the fallback.
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME").filter(|d| !d.is_empty()) {
+        add(PathBuf::from(xdg).join(FISH_HISTORY_UNDER_DATA_DIR));
+    } else if let Some(home) = std::env::var_os("HOME") {
+        add(PathBuf::from(home).join(FISH_HISTORY_UNDER_HOME));
+    }
     files.sort_by_key(|p| {
         std::fs::metadata(p)
             .and_then(|m| m.modified())
@@ -307,9 +328,95 @@ fn load_shell_history() -> Vec<Raw> {
     let mut out = Vec::new();
     for path in files {
         if let Ok(bytes) = std::fs::read(&path) {
-            parse_shell_history(&String::from_utf8_lossy(&bytes), &mut out);
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            parse_history_file(&name, &String::from_utf8_lossy(&bytes), &mut out);
         }
     }
+    out
+}
+
+/// Which reader a history file gets, by file name. The remote side has only
+/// bytes and a name, so the choice has to hang off the name in both paths.
+fn parse_history_file(name: &str, content: &str, out: &mut Vec<Raw>) {
+    if name == FISH_HISTORY_FILE {
+        parse_fish_history(content, out);
+    } else {
+        parse_shell_history(content, out);
+    }
+}
+
+/// `fish_history` looks like YAML and is not.
+///
+/// fish writes a command with exactly two characters escaped — a literal
+/// backslash becomes `\\` and a newline becomes `\n` — and nothing else. It
+/// does not quote, so `git commit -m "fix: crash"` goes to disk verbatim, and
+/// a YAML parser rejects that record outright ("mapping values are not allowed
+/// here"). `echo a: b`, any `[ ... ]` test, and any command with a ` #` in it
+/// fail or truncate the same way, silently, because a record that fails to
+/// parse is a record that vanishes from history search.
+///
+/// So read it the way fish's own reader does: a record starts at `- cmd:` in
+/// column 0, its keys are indented under it, and everything after `- cmd:` on
+/// that line is the command.
+fn parse_fish_history(content: &str, out: &mut Vec<Raw>) {
+    let mut pending: Option<Raw> = None;
+    for raw in content.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if let Some(cmd) = line.strip_prefix("- cmd:") {
+            out.extend(pending.take());
+            let cmd = unescape_fish(cmd.trim());
+            // Everything downstream treats an entry as one line: `append`
+            // refuses embedded newlines, handing a line off to the shell bails
+            // on them, and the reverse-search menu draws one row per entry. A
+            // multiline command is skipped rather than half-supported — the
+            // same place bash and zsh multiline entries already land.
+            if !cmd.is_empty() && !cmd.contains('\n') {
+                pending = Some(Raw::bare(cmd));
+            }
+            continue;
+        }
+        if pending.is_none() {
+            continue;
+        }
+        // Keys are indented under their record; anything else ends it.
+        let Some(key) = line.strip_prefix("  ") else {
+            out.extend(pending.take());
+            continue;
+        };
+        if let Some(when) = key.strip_prefix("when:")
+            && let Ok(ts) = when.trim().trim_matches('\'').parse::<u64>()
+            && let Some(entry) = pending.as_mut()
+        {
+            entry.ts = Some(ts);
+        }
+    }
+    out.extend(pending);
+}
+
+/// Reverse `escape_yaml_fish_2_0`: `\\` is a backslash and `\n` is a newline.
+/// A backslash before anything else is not an escape and stays as written.
+fn unescape_fish(s: &str) -> String {
+    if !s.contains('\\') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.find('\\') {
+        out.push_str(&rest[..at]);
+        let mut tail = rest[at..].chars();
+        tail.next();
+        match tail.next() {
+            Some('\\') => out.push('\\'),
+            Some('n') => out.push('\n'),
+            _ => {
+                out.push('\\');
+                rest = &rest[at + 1..];
+                continue;
+            }
+        }
+        rest = &rest[at + 2..];
+    }
+    out.push_str(rest);
     out
 }
 
@@ -376,6 +483,131 @@ mod tests {
         let mut out = Vec::new();
         parse_shell_history(content, &mut out);
         out.into_iter().map(|r| (r.cmd, r.ts)).collect()
+    }
+
+    fn parse_fish(content: &str) -> Vec<(String, Option<u64>)> {
+        let mut out = Vec::new();
+        parse_fish_history(content, &mut out);
+        out.into_iter().map(|r| (r.cmd, r.ts)).collect()
+    }
+
+    #[test]
+    fn fish_history_entries_carry_cmd_and_timestamp() {
+        let content =
+            "- cmd: git status\n  when: 1700000000\n- cmd: cargo build\n  when: 1700000005\n";
+        assert_eq!(
+            parse_fish(content),
+            [
+                ("git status".to_string(), Some(1_700_000_000)),
+                ("cargo build".to_string(), Some(1_700_000_005)),
+            ]
+        );
+    }
+
+    #[test]
+    fn fish_writes_commands_unquoted_so_yaml_punctuation_is_just_text() {
+        // Every one of these is what fish actually puts on disk, and every one
+        // of them is a YAML parse error. Read as YAML they vanish from history
+        // search without a trace; read as fish reads them they are commands.
+        let content = concat!(
+            "- cmd: git commit -m \"fix: crash on start\"\n  when: 1700000000\n",
+            "- cmd: echo foo: bar\n  when: 1700000001\n",
+            "- cmd: [ -f x ]; and echo y\n  when: 1700000002\n",
+            "- cmd: rg --files # every file\n  when: 1700000003\n",
+            "- cmd: this: is: not: broken\n  when: 1700000004\n",
+        );
+        assert_eq!(
+            parse_fish(content),
+            [
+                (
+                    "git commit -m \"fix: crash on start\"".to_string(),
+                    Some(1_700_000_000)
+                ),
+                ("echo foo: bar".to_string(), Some(1_700_000_001)),
+                ("[ -f x ]; and echo y".to_string(), Some(1_700_000_002)),
+                // A YAML reader drops everything from ` #` on; fish has no
+                // comments in its history file.
+                ("rg --files # every file".to_string(), Some(1_700_000_003)),
+                ("this: is: not: broken".to_string(), Some(1_700_000_004)),
+            ]
+        );
+    }
+
+    #[test]
+    fn fish_escapes_only_backslash_and_newline() {
+        // `escape_yaml_fish_2_0` doubles a backslash and turns a newline into
+        // `\n`. Leaving that undone hands back a command the user never ran.
+        assert_eq!(
+            parse_fish("- cmd: grep \"a\\\\b\" f\n  when: 1700000000\n"),
+            [("grep \"a\\b\" f".to_string(), Some(1_700_000_000))]
+        );
+        // `\t` is not an escape fish writes, so it stays two characters.
+        assert_eq!(
+            parse_fish("- cmd: printf 'a\\tb'\n"),
+            [("printf 'a\\tb'".to_string(), None)]
+        );
+    }
+
+    #[test]
+    fn a_multiline_fish_command_is_skipped_not_half_recalled() {
+        // fish stores this as one line with an escaped newline. Every consumer
+        // here is single-line — `append` refuses embedded newlines — so the
+        // entry is dropped rather than offered as something that cannot be run.
+        let content = "- cmd: for f in *\\necho $f\\nend\n  when: 1700000000\n- cmd: ls\n  when: 1700000001\n";
+        assert_eq!(
+            parse_fish(content),
+            [("ls".to_string(), Some(1_700_000_001))]
+        );
+    }
+
+    #[test]
+    fn fish_history_missing_or_quoted_when_is_tolerated() {
+        let content = "- cmd: ls\n- cmd: pwd\n  when: '1700000000'\n";
+        assert_eq!(
+            parse_fish(content),
+            [
+                ("ls".to_string(), None),
+                ("pwd".to_string(), Some(1_700_000_000)),
+            ]
+        );
+    }
+
+    #[test]
+    fn fish_paths_and_stray_lines_never_become_commands() {
+        // fish 3.x writes a `paths:` block under a record; nothing in it is a
+        // command, and a truncated tail must not resurrect the record either.
+        let content = concat!(
+            "- cmd: vim src/main.rs\n",
+            "  when: 1700000000\n",
+            "  paths:\n",
+            "    - src/main.rs\n",
+            "\n",
+            "  when: 9999999999\n",
+        );
+        assert_eq!(
+            parse_fish(content),
+            [("vim src/main.rs".to_string(), Some(1_700_000_000))]
+        );
+    }
+
+    #[test]
+    fn fish_history_garbage_is_skipped() {
+        assert_eq!(parse_fish("not a record at all\n- cmd:\n"), []);
+        assert_eq!(parse_fish(""), []);
+    }
+
+    #[test]
+    fn the_fish_history_path_is_spelled_the_same_way_everywhere() {
+        assert_eq!(
+            FISH_HISTORY_UNDER_HOME,
+            format!(".local/share/{FISH_HISTORY_UNDER_DATA_DIR}"),
+            "the XDG-relative and HOME-relative spellings have drifted apart"
+        );
+        assert!(FISH_HISTORY_UNDER_HOME.ends_with(FISH_HISTORY_FILE));
+        assert!(
+            shell_history_names().contains(&FISH_HISTORY_UNDER_HOME),
+            "a remote host must be asked for the same file the local side reads"
+        );
     }
 
     #[test]
@@ -753,7 +985,13 @@ mod tests {
         let scope = Scope::remote("me@readfile");
         let zsh = b": 1700000000:0;systemctl status nginx\n".to_vec();
         let bash = b"journalctl -u nginx\n".to_vec();
-        let loaded = load_with_shell_files(&scope, vec![zsh, bash]);
+        let loaded = load_with_shell_files(
+            &scope,
+            vec![
+                (".zsh_history".to_string(), zsh),
+                (".bash_history".to_string(), bash),
+            ],
+        );
 
         assert!(
             loaded.entries.iter().any(|e| e == "systemctl status nginx"),
@@ -767,6 +1005,41 @@ mod tests {
                 exit: None,
             }),
             "zsh's second field is elapsed seconds, not an exit code"
+        );
+    }
+
+    #[test]
+    fn a_remote_fish_history_is_read_as_fish_not_as_bash_lines() {
+        crate::core::config::pin_test_config_dir();
+
+        let scope = Scope::remote("me@fishbox");
+        let fish = b"- cmd: systemctl restart nginx\n  when: 1700000000\n".to_vec();
+        let loaded = load_with_shell_files(&scope, vec![(FISH_HISTORY_FILE.to_string(), fish)]);
+
+        assert!(
+            loaded
+                .entries
+                .iter()
+                .any(|e| e == "systemctl restart nginx"),
+            "the far end's fish history should be searchable: {:?}",
+            loaded.entries
+        );
+        assert!(
+            !loaded.entries.iter().any(|e| e.starts_with("- cmd:")),
+            "fish records must not reach the menu as raw file lines: {:?}",
+            loaded.entries
+        );
+        assert!(
+            !loaded.entries.iter().any(|e| e.starts_with("when:")),
+            "a record's keys are not commands: {:?}",
+            loaded.entries
+        );
+        assert_eq!(
+            loaded.meta.get("systemctl restart nginx"),
+            Some(&EntryMeta {
+                ts: Some(1_700_000_000),
+                exit: None,
+            })
         );
     }
 

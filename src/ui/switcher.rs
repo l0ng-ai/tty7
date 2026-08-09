@@ -478,6 +478,45 @@ impl Tty7App {
             );
         }
 
+        // Workspaces this machine holds that the store has never heard of: the
+        // CLI makes them too, and one that never appears here looks to the
+        // person who ran `tty7 new` like nothing happened at all. They open
+        // like any other row — the id in the tree is the id a window claims.
+        if let Some(slot) = groups.iter().position(|g| g.key.is_empty()) {
+            // Measured against the rows already listed rather than against the
+            // store, which is what put them there: the block above lists this
+            // window's own workspace before the store has caught up with it,
+            // and two rows under one id would be two ways into one window.
+            let listed: Vec<WorkspaceId> = groups
+                .iter()
+                .flat_map(|g| g.rows.iter().map(|r| r.id))
+                .collect();
+            let app: &App = cx;
+            let rows: Vec<Row> = crate::ui::machine_mirror::unclaimed_local_workspaces(app)
+                .into_iter()
+                .filter(|ws| !listed.contains(&ws.id))
+                .map(|ws| Row {
+                    id: ws.id,
+                    name: ws.name,
+                    path: ws
+                        .path
+                        .map(|p| crate::ui::home::display_path(std::path::Path::new(&p)))
+                        .unwrap_or_default(),
+                    when: crate::ui::home::relative_time(now, ws.last_active),
+                    live: match ws.live {
+                        true => Liveness::Alive,
+                        false => Liveness::Stopped,
+                    },
+                    open: false,
+                    current: false,
+                    adopt: None,
+                    remote_id: None,
+                    tabs: self.tab_rows_for(ws.id, app),
+                })
+                .collect();
+            groups[slot].rows.extend(rows);
+        }
+
         for group in &mut groups {
             group.rows.sort_by(|a, b| {
                 b.current
@@ -2124,34 +2163,29 @@ impl TabRow {
 /// neither: `PaneRecord::title` is the *foreground process name* ("zsh"), so
 /// the cwd and the agent stand in for it here.
 fn tab_view_label(view: &crate::ui::machine_mirror::TabView, index: usize) -> String {
-    if let Some(name) = view
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|n| !n.is_empty())
-    {
-        return name.to_string();
+    let unnamed = || {
+        t_fmt(
+            L10nKey::TabUnnamedShell,
+            &[("n", &((index + 1).to_string()))],
+        )
+    };
+    match view.label() {
+        crate::ui::machine_mirror::TabLabel::Named(name) => name.to_string(),
+        crate::ui::machine_mirror::TabLabel::Agent(agent) => agent.display_name().to_string(),
+        // A cwd can shorten away to nothing (a bare "user@host:"), and the
+        // process name is still worth more than a number.
+        crate::ui::machine_mirror::TabLabel::Cwd(cwd) => {
+            match crate::ui::tab_strip::short_title(cwd) {
+                shortened if !shortened.trim().is_empty() => shortened,
+                _ => match view.title.trim() {
+                    "" => unnamed(),
+                    title => title.to_string(),
+                },
+            }
+        }
+        crate::ui::machine_mirror::TabLabel::Process(title) => title.to_string(),
+        crate::ui::machine_mirror::TabLabel::Unknown => unnamed(),
     }
-    if let Some(agent) = view.agent {
-        return agent.display_name().to_string();
-    }
-    let from_cwd = view
-        .cwd
-        .as_deref()
-        .map(crate::ui::tab_strip::short_title)
-        .unwrap_or_default();
-    if !from_cwd.trim().is_empty() {
-        return from_cwd;
-    }
-    // Last resort: the bare process name, which at least says something.
-    let title = view.title.trim();
-    if !title.is_empty() {
-        return title.to_string();
-    }
-    t_fmt(
-        L10nKey::TabUnnamedShell,
-        &[("n", &((index + 1).to_string()))],
-    )
 }
 
 impl Group {
