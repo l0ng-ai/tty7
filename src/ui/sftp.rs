@@ -1333,7 +1333,6 @@ impl Tty7App {
         let danger = cx.theme().danger;
         let accent = cx.theme().accent;
         let border = cx.theme().border;
-        let sidebar = crate::ui::theme::workspace_surface_color(cx);
         let hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().sidebar.hover);
         let expanded = self.sftp_panel.tray_expanded || history;
 
@@ -1452,11 +1451,14 @@ impl Tty7App {
         });
 
         Some(
+            // No fill: the tray is a child of the right panel, which already
+            // paints `workspace_surface_color`. Painting it again stacked a
+            // second src-over pass of the same translucent surface and left a
+            // visibly darker band with a hard seam under a backdrop material.
             v_flex()
                 .flex_none()
                 .border_t_1()
                 .border_color(border)
-                .bg(sidebar)
                 .child(head)
                 .when(running > 0 && !expanded, |this| this.child(underline))
                 .children(body)

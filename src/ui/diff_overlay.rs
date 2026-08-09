@@ -289,6 +289,9 @@ impl Tty7App {
                         this.close_diff_overlay(window, cx);
                     }
                 }))
+                // The opaque fill above covers the theme background image the
+                // workspace root paints, so the overlay carries its own copy.
+                .children(crate::ui::app::window_background_image_layer(cx))
                 .child(header)
                 .child(content)
                 .into_any_element(),

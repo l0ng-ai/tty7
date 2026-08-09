@@ -488,6 +488,33 @@ fn window_backdrop_labels(backdrop: WindowBackdrop) -> Vec<String> {
         .collect()
 }
 
+/// The theme's background image as a full-bleed layer.
+///
+/// The workspace root paints one behind the panes. The full-window overlays
+/// (settings, the opened file, the diff view) fill opaquely on purpose, so
+/// the OS backdrop cannot show through their text — but that same fill sits
+/// on top of the root's image and would erase it for as long as an overlay
+/// is open. They paint their own copy instead, above their fill and below
+/// their content.
+pub(crate) fn window_background_image_layer(cx: &App) -> Option<gpui::Div> {
+    let image = cx
+        .try_global::<crate::ui::presets::ActiveBackground>()?
+        .image
+        .clone()?;
+    Some(
+        div()
+            .absolute()
+            .inset_0()
+            .overflow_hidden()
+            .opacity(image.opacity)
+            .child(
+                img(image.path)
+                    .size_full()
+                    .object_fit(gpui::ObjectFit::Cover),
+            ),
+    )
+}
+
 /// Clears the window overrides that are effective on the current platform.
 /// `backdrop_is_local` models whether the Windows-only backdrop participates
 /// in this platform's rendering and therefore belongs to its reset operation.
@@ -1517,7 +1544,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    #[cfg(not(target_os = "windows"))]
     pub(crate) fn set_window_blur(
         &mut self,
         on: bool,
@@ -4392,6 +4418,13 @@ impl Tty7App {
     fn reload_from_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         apply_theme(Some(window), cx);
         self.sync_window_opacity_slider(window, cx);
+        // Another window — or a hand edit / config sync picked up by the
+        // `Config` watcher — can change the backdrop while this window's
+        // settings panel is open. The window itself already switched
+        // material above, so the dropdown has to follow or it contradicts
+        // what it describes.
+        #[cfg(target_os = "windows")]
+        self.sync_window_backdrop_select(window, cx);
         let config = cx.global::<Config>().clone();
         if config.cursor_style != self.terminal_cursor_style
             || config.scrollback_limit != self.terminal_scrollback_limit
@@ -5483,19 +5516,12 @@ impl Render for Tty7App {
             })
             .into_any_element();
 
-        let (window_bg, bg_image, settings_bg) =
-            match cx.try_global::<crate::ui::presets::ActiveBackground>() {
-                Some(bg) => (
-                    window_background(bg),
-                    bg.image.clone(),
-                    crate::ui::theme::window_background_opaque(bg),
-                ),
-                None => (
-                    cx.theme().background.into(),
-                    None,
-                    cx.theme().background.alpha(1.0).into(),
-                ),
-            };
+        let window_bg = match cx.try_global::<crate::ui::presets::ActiveBackground>() {
+            Some(bg) => window_background(bg),
+            None => cx.theme().background.into(),
+        };
+        let bg_image = window_background_image_layer(cx);
+        let settings_bg = crate::ui::theme::overlay_background(cx);
 
         let settings_overlay = self.settings.is_some().then(|| {
             div()
@@ -5505,7 +5531,8 @@ impl Render for Tty7App {
                 // Opaque on purpose: the settings panel must never let the
                 // workspace translucency (window opacity / backdrop material)
                 // show through, even at window edges during a resize. The
-                // preset's gradient fill is preserved, just with alpha 1.
+                // preset's gradient fill is preserved, just with alpha 1;
+                // `render_settings` repaints the theme image over it.
                 .bg(settings_bg)
                 .child(self.render_settings(window, cx))
         });
@@ -5771,20 +5798,7 @@ impl Render for Tty7App {
                 )
                 .on_action(cx.listener(|_, _: &OpenDiscord, _window, cx| cx.open_url(DISCORD_URL)))
                 .on_action(cx.listener(|_, _: &ReportIssue, _window, cx| cx.open_url(ISSUES_URL)))
-                .when_some(bg_image, |this, image| {
-                    this.child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .overflow_hidden()
-                            .opacity(image.opacity)
-                            .child(
-                                img(image.path)
-                                    .size_full()
-                                    .object_fit(gpui::ObjectFit::Cover),
-                            ),
-                    )
-                })
+                .children(bg_image)
                 .child(main_layout)
                 .when_some(settings_overlay, |this, overlay| this.child(overlay))
                 .children(self.render_switcher(cx))

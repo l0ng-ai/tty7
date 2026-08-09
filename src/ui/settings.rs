@@ -759,11 +759,11 @@ impl Tty7App {
         // surface so the workspace translucency (window opacity / backdrop
         // material) never shows through the settings UI — while keeping the
         // preset's gradient fill instead of collapsing to a flat color.
-        // `alpha(1.0)` assigns the channel; `opacity` would multiply.
-        let background: Background = match cx.try_global::<presets::ActiveBackground>() {
-            Some(bg) => crate::ui::theme::window_background_opaque(bg),
-            None => theme.background.alpha(1.0).into(),
-        };
+        let background: Background = crate::ui::theme::overlay_background(cx);
+        // That opaque fill also covers the theme background image the
+        // workspace root paints, so the panel carries its own copy; without
+        // it the wallpaper would blink out for as long as settings is open.
+        let background_image = crate::ui::app::window_background_image_layer(cx);
         let (foreground, header_muted) = (theme.foreground, theme.muted_foreground);
 
         let (focus_handle, section, theme_panel_open, search) = match self.active_settings() {
@@ -896,13 +896,15 @@ impl Tty7App {
             SettingsSection::About => self.render_settings_about(cx),
         };
 
+        // No fill of its own: the root already paints the opaque surface and
+        // the background image behind it, and repainting here would hide the
+        // image again in the one pane that fills most of the panel.
         let content_pane = if section == SettingsSection::Ssh {
             v_flex()
                 .id("settings-content")
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                .bg(background)
                 .child(content)
         } else {
             v_flex()
@@ -910,7 +912,6 @@ impl Tty7App {
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                .bg(background)
                 .overflow_y_scroll()
                 .child(
                     div()
@@ -933,6 +934,7 @@ impl Tty7App {
                     this.close_settings(window, cx);
                 }
             }))
+            .children(background_image)
             .child(sidebar)
             .child(content_pane)
             .child(
@@ -1412,6 +1414,32 @@ impl Tty7App {
                     }))
                     .into_any_element()
             };
+        // `Auto` is the one backdrop that still defers to the legacy blur
+        // flag, which is shared with the other platforms' vibrancy switch and
+        // travels with a synced config. Offer that switch here exactly when it
+        // has an effect — otherwise a stored `window_blur: true` would blur
+        // the window with no visible control to clear it, short of the reset
+        // button, which also discards the user's opacity.
+        #[cfg(target_os = "windows")]
+        let auto_blur_row = (config.window_backdrop == WindowBackdrop::Auto).then(|| {
+            let theme = presets::by_id(cx, &crate::ui::theme::effective_preset_id(cx));
+            let blur = config.window_blur.unwrap_or(theme.blur);
+            let control =
+                crate::ui::theme::switch("window-blur", cx)
+                    .checked(blur)
+                    .on_click(cx.listener(|this, on: &bool, window, cx| {
+                        this.set_window_blur(*on, window, cx)
+                    }))
+                    .into_any_element();
+            self.settings_row(
+                t(L10nKey::SettingsBlur),
+                t(L10nKey::SettingsBlurDesc),
+                control,
+                cx,
+            )
+        });
+        #[cfg(not(target_os = "windows"))]
+        let auto_blur_row: Option<Stateful<Div>> = None;
         let dim_switch = crate::ui::theme::switch("dim-inactive-panes", cx)
             .checked(dim_inactive_panes)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_dim_inactive_panes(*on, cx)))
@@ -1439,6 +1467,7 @@ impl Tty7App {
                 blur_control,
                 cx,
             ))
+            .children(auto_blur_row)
             .when(overridden, |this| {
                 this.child(
                     h_flex().mt_2().child(

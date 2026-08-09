@@ -922,18 +922,16 @@ impl Tty7App {
                 // (everything but the detail panel) and an open file must never
                 // let the window translucency / backdrop material show through
                 // it. The preset's gradient fill is preserved, just with
-                // alpha 1 — the same paint the settings overlay uses.
-                .bg(
-                    match cx.try_global::<crate::ui::presets::ActiveBackground>() {
-                        Some(bg) => crate::ui::theme::window_background_opaque(bg),
-                        None => cx.theme().background.alpha(1.0).into(),
-                    },
-                )
+                // alpha 1 — the same paint the settings overlay uses. The
+                // theme background image is repainted on top of it, since the
+                // root's copy now sits below this fill.
+                .bg(crate::ui::theme::overlay_background(cx))
                 .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                     if ev.keystroke.key == "escape" {
                         this.toggle_code_panel(window, cx);
                     }
                 }))
+                .children(crate::ui::app::window_background_image_layer(cx))
                 .child(h_flex().flex_1().min_h_0().w_full().child(editor_col))
                 .child(self.render_code_status_bar(window, cx))
                 .into_any_element(),
