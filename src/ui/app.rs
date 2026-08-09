@@ -488,6 +488,17 @@ fn window_backdrop_labels(backdrop: WindowBackdrop) -> Vec<String> {
         .collect()
 }
 
+/// Clears the window overrides that are effective on the current platform.
+/// `backdrop_is_local` models whether the Windows-only backdrop participates
+/// in this platform's rendering and therefore belongs to its reset operation.
+fn clear_window_override_values(config: &mut Config, backdrop_is_local: bool) {
+    config.window_opacity = None;
+    config.window_blur = None;
+    if backdrop_is_local {
+        config.window_backdrop = WindowBackdrop::Auto;
+    }
+}
+
 impl Tty7App {
     pub fn for_workspace(
         id: Option<WorkspaceId>,
@@ -1543,9 +1554,7 @@ impl Tty7App {
     pub(crate) fn reset_window_overrides(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         {
             let config = cx.global_mut::<Config>();
-            config.window_opacity = None;
-            config.window_blur = None;
-            config.window_backdrop = WindowBackdrop::Auto;
+            clear_window_override_values(config, cfg!(target_os = "windows"));
         }
         apply_theme(Some(window), cx);
         cx.global::<Config>().save();
@@ -6622,9 +6631,40 @@ mod window_drag_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        TabAgentSession, leaf_shares_the_window_daemon, mru_order, pane_attachable,
-        parse_ssh_connect_input, parse_ssh_option_words,
+        TabAgentSession, clear_window_override_values, leaf_shares_the_window_daemon, mru_order,
+        pane_attachable, parse_ssh_connect_input, parse_ssh_option_words,
     };
+
+    #[test]
+    fn non_windows_reset_preserves_the_synced_windows_backdrop() {
+        let mut config = crate::core::config::Config::default();
+        config.window_opacity = Some(0.8);
+        config.window_blur = Some(true);
+        config.window_backdrop = crate::core::config::WindowBackdrop::Mica;
+
+        clear_window_override_values(&mut config, false);
+
+        assert_eq!(config.window_opacity, None);
+        assert_eq!(config.window_blur, None);
+        assert_eq!(
+            config.window_backdrop,
+            crate::core::config::WindowBackdrop::Mica,
+            "an inert synchronized backdrop is not a local override to reset"
+        );
+    }
+
+    #[test]
+    fn windows_reset_clears_the_local_backdrop_override() {
+        let mut config = crate::core::config::Config::default();
+        config.window_backdrop = crate::core::config::WindowBackdrop::Acrylic;
+
+        clear_window_override_values(&mut config, true);
+
+        assert_eq!(
+            config.window_backdrop,
+            crate::core::config::WindowBackdrop::Auto
+        );
+    }
 
     #[test]
     fn mru_puts_the_active_tab_first_and_the_last_one_used_behind_it() {
