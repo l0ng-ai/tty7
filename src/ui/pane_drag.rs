@@ -5,15 +5,25 @@
 //! layout the pointer is asking the pane to go, and whether that is a place
 //! the tree can actually put it.
 //!
-//! Three kinds of landing, in the order they are tested:
+//! Every landing is read against the pane under the pointer, from the middle
+//! outwards:
 //!
-//! * **the tab's own edge** — a band along the outside of the whole pane area,
-//!   meaning "beside everything else", which is how a pane in the middle of a
-//!   grid becomes a full-height column. Nothing else can express that: a drop
-//!   read against a single pane can only ever split *that* pane.
-//! * **a pane's side** — the outer ring of one pane, meaning "split this one
-//!   and take that side of it".
 //! * **a pane's middle** — trade places with it, sizes included.
+//! * **a pane's side** — the ring around that middle. Facing a neighbour in the
+//!   same row or column, it means "go in beside them", and the newcomer takes
+//!   an equal share of that row; facing across it, there is no row to join and
+//!   it means "split this pane and take that side of it".
+//! * **the far part of a side that is also the tab's own edge** — meaning
+//!   "beside everything else", which is how a pane in the middle of a grid
+//!   becomes a full-height column. Nothing else can express that: a drop read
+//!   against a single pane can only ever split *that* pane. The band is sized
+//!   to an even share of the columns (or rows) that side already has, so a
+//!   third column is a third of the tab and not half of it.
+//!
+//! The last one is a share of the pane it is measured in, not a fixed strip
+//! along the window. A strip wide enough to aim at on a 1400px tab is most of
+//! a narrow pane, and one narrow enough to leave a narrow pane alone can only
+//! be hit by accident on a wide one.
 //!
 //! The zone a pointer resolves to is only offered once the tree agrees it
 //! changes something, so the highlight the user sees is never a promise the
@@ -24,21 +34,48 @@ use std::rc::Rc;
 
 use gpui::{
     App, AppContext, Bounds, Context, EntityId, InteractiveElement, IntoElement, ParentElement,
-    Pixels, Point, Render, Size, StatefulInteractiveElement, Styled, Window, div, point, px, size,
+    Pixels, Point, Render, StatefulInteractiveElement, Styled, Window, div, point, px, size,
 };
 use gpui_component::ActiveTheme as _;
 use gpui_component::tooltip::Tooltip;
 
 use crate::ui::i18n::{L10nKey, t};
-use crate::ui::pane::{Dir, Pane, PaneSlot};
+use crate::ui::pane::{Dir, Pane};
 
-/// The width and height of the grip a pane is picked up by.
-const HANDLE: (f32, f32) = (44., 9.);
+/// The grip a pane is picked up by: a target big enough to aim at, holding a
+/// bar small enough to ignore. The bar grows into the target under the pointer,
+/// so the affordance is quiet until it is the thing being reached for.
+const GRIP_TARGET: (f32, f32) = (56., 10.);
+const GRIP_IDLE: (f32, f32) = (22., 3.);
+const GRIP_LIVE: (f32, f32) = (40., 5.);
 
-/// How far from the tab's edge a drop still means "beside everything else".
-/// Capped as a share of that side so the band never swallows a small window.
-const EDGE_BAND: f32 = 26.;
-const EDGE_BAND_SHARE: f32 = 0.12;
+/// The name the bar watches for the pointer under. One name for every pane:
+/// a group resolves to the nearest ancestor that carries it, which is always
+/// the grip the bar is inside.
+const GRIP_GROUP: &str = "pane-grip";
+
+/// The strip a rearrangeable pane keeps clear above its grid for the grip.
+///
+/// Held open for as long as the tab has panes to rearrange, rather than only
+/// while the grip shows: the grid is measured from this box, so opening the
+/// strip on hover would reflow the terminal every time the pointer crossed a
+/// pane. Better to spend it once, when the tab gains its second pane and is
+/// being reflowed anyway — which is also why it is sized to the *bar* and not
+/// to the target around it. The target's last couple of pixels hang over the
+/// top of the grid, where they cost a sliver of one row's clicks and cover
+/// nothing, rather than being paid for in blank space above every pane.
+pub(crate) const HANDLE_STRIP: f32 = GRIP_LIVE.1 + 3.;
+
+/// How much of a pane, in from a side that is also the tab's own edge, still
+/// means "beside everything else" rather than "split this pane".
+///
+/// A share of the pane and not of the window: a fixed strip is either a hair's
+/// breadth on a wide tab or the whole of a narrow pane. The floor keeps it
+/// aimable when a pane is small, the ceiling keeps a huge pane's outer third
+/// from being nothing but band.
+const BAND_SHARE: f32 = 0.15;
+const BAND_MIN: f32 = 32.;
+const BAND_MAX: f32 = 120.;
 
 /// The share of a pane, centred, that means "swap" rather than "split".
 const SWAP_CORE: f32 = 0.34;
@@ -80,25 +117,43 @@ pub(crate) fn handle(pane: EntityId, state: &PaneDragState, cx: &App) -> gpui::A
         .child(
             div()
                 .id(("pane-drag-handle", pane.as_u64() as usize))
-                .mt(px(2.))
-                .w(px(HANDLE.0))
-                .h(px(HANDLE.1))
-                .rounded_full()
-                .bg(cx.theme().border)
-                .hover(|s| s.bg(cx.theme().drag_border))
+                .group(GRIP_GROUP)
+                .w(px(GRIP_TARGET.0))
+                .h(px(GRIP_TARGET.1))
+                .flex()
+                .items_center()
+                .justify_center()
                 .cursor_grab()
                 .tooltip(|window, cx| {
                     Tooltip::new(t(L10nKey::PaneDragHandleTooltip)).build(window, cx)
                 })
-                // The grip sits over the terminal's own grid. Keeping the press
-                // stops the pane underneath from reading a grab as the start of
-                // a text selection.
+                // The grip owns the strip the pane keeps clear for it, but the
+                // press still has to be kept: without it the pane underneath
+                // reads a grab as the start of a text selection.
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_drag(DragPane, move |_, _, _, cx| {
                     cx.stop_propagation();
                     begin(&state, pane);
                     cx.new(|_| DragPane)
-                }),
+                })
+                .child(
+                    // The id is what lets the bar *grow*, not just recolour:
+                    // gpui settles a group-hover size at layout time, and the
+                    // only record of the group being hovered that survives from
+                    // one frame's paint to the next frame's layout is the
+                    // element state an id buys.
+                    div()
+                        .id(("pane-drag-grip", pane.as_u64() as usize))
+                        .w(px(GRIP_IDLE.0))
+                        .h(px(GRIP_IDLE.1))
+                        .rounded_full()
+                        .bg(cx.theme().border.opacity(0.7))
+                        .group_hover(GRIP_GROUP, |s| {
+                            s.w(px(GRIP_LIVE.0))
+                                .h(px(GRIP_LIVE.1))
+                                .bg(cx.theme().drag_border)
+                        }),
+                ),
         )
         .into_any_element()
 }
@@ -147,19 +202,42 @@ pub(crate) fn take_landing(state: &PaneDragState) -> Option<(EntityId, DropZone)
 
 /// Rearranges `pane` the way `zone` says, answering whether anything moved.
 ///
-/// `leaves` is the tab's leaf order, which is what a zone's index refers to.
-pub(crate) fn apply(pane: &mut Pane, from: EntityId, leaves: &[PaneSlot], zone: DropZone) -> bool {
+/// A zone names its target by position in the tab's leaf order, which is the
+/// order the drop zones were read off in the first place.
+pub(crate) fn apply<L: Clone + PartialEq>(pane: &mut Pane<L>, from: &L, zone: DropZone) -> bool {
+    let leaves = pane.leaves();
     match zone {
         DropZone::Edge(dir) => pane.move_leaf_to_edge(from, dir),
         DropZone::Side(index, dir) => match leaves.get(index) {
-            Some(dst) => pane.move_leaf(from, dst.entity_id(), dir),
+            Some(dst) => pane.move_leaf_beside(from, dst, dir),
             None => false,
         },
         DropZone::Swap(index) => match leaves.get(index) {
-            Some(dst) => pane.swap_leaves(from, dst.entity_id()),
+            Some(dst) => pane.swap_leaves(from, dst),
             None => false,
         },
     }
+}
+
+/// Where the dragged pane would end up, as the patch of screen it would fill.
+///
+/// Worked out by carrying the drop out on a copy and measuring where the pane
+/// landed, rather than by drawing what the rule is meant to do. The two can
+/// only disagree if one of them is wrong, and this way the highlight is wrong
+/// exactly when the drop is. `None` when the drop would change nothing, which
+/// is also how the caller knows not to offer it.
+pub(crate) fn landing<L: Clone + PartialEq>(
+    pane: &Pane<L>,
+    from: &L,
+    zone: DropZone,
+    area: Bounds<Pixels>,
+) -> Option<Bounds<Pixels>> {
+    let mut trial = pane.deep_clone();
+    if !apply(&mut trial, from, zone) {
+        return None;
+    }
+    let index = trial.leaves().iter().position(|l| l == from)?;
+    leaf_bounds(&trial, area).into_iter().nth(index)
 }
 
 /// Where the pointer is asking the pane to go, in a tab whose panes tile
@@ -176,24 +254,6 @@ pub(crate) fn zone_at(
     let p = (pointer.x.as_f32(), pointer.y.as_f32());
     if p.0 < a.x || p.0 > a.x + a.w || p.1 < a.y || p.1 > a.y + a.h {
         return None;
-    }
-
-    let bands = (
-        EDGE_BAND.min(a.w * EDGE_BAND_SHARE),
-        EDGE_BAND.min(a.h * EDGE_BAND_SHARE),
-    );
-    let outer = [
-        (Dir::Left, p.0 - a.x, bands.0),
-        (Dir::Right, a.x + a.w - p.0, bands.0),
-        (Dir::Up, p.1 - a.y, bands.1),
-        (Dir::Down, a.y + a.h - p.1, bands.1),
-    ];
-    let nearest_edge = outer
-        .iter()
-        .filter(|(_, gap, band)| gap <= band)
-        .min_by(|(_, l, _), (_, r, _)| l.total_cmp(r));
-    if let Some((dir, _, _)) = nearest_edge {
-        return Some(DropZone::Edge(*dir));
     }
 
     // Panes tile the area, so a pointer on a shared border belongs to whichever
@@ -228,33 +288,22 @@ pub(crate) fn zone_at(
         .iter()
         .min_by(|(_, l), (_, r)| l.total_cmp(r))
         .expect("four sides");
-    Some(DropZone::Side(index, *dir))
-}
+    let dir = *dir;
 
-/// The patch of screen a drop would fill: the half of the tab or of the pane
-/// the dragged pane is about to take, or the whole pane it is about to trade
-/// places with.
-pub(crate) fn landing_rect(
-    area: Bounds<Pixels>,
-    leaves: &[Bounds<Pixels>],
-    zone: DropZone,
-) -> Option<Bounds<Pixels>> {
-    match zone {
-        DropZone::Edge(dir) => Some(half(area, dir)),
-        DropZone::Side(index, dir) => leaves.get(index).map(|b| half(*b, dir)),
-        DropZone::Swap(index) => leaves.get(index).copied(),
-    }
-}
-
-fn half(b: Bounds<Pixels>, dir: Dir) -> Bounds<Pixels> {
-    let (w, h) = (b.size.width, b.size.height);
-    let (o, s): (Point<Pixels>, Size<Pixels>) = match dir {
-        Dir::Left => (b.origin, size(w / 2., h)),
-        Dir::Right => (point(b.origin.x + w / 2., b.origin.y), size(w - w / 2., h)),
-        Dir::Up => (b.origin, size(w, h / 2.)),
-        Dir::Down => (point(b.origin.x, b.origin.y + h / 2.), size(w, h - h / 2.)),
+    // Past the pane and out at the tab's own edge, the drop is about the tab:
+    // the outer part of that side reads as "beside everything else". Measured
+    // against the pane rather than the window, so it is a real target on a
+    // small pane and does not swallow a large one.
+    let (reach, gap) = match dir {
+        Dir::Left => (leaf.w, inside.0 - leaf.x),
+        Dir::Right => (leaf.w, leaf.x + leaf.w - inside.0),
+        Dir::Up => (leaf.h, inside.1 - leaf.y),
+        Dir::Down => (leaf.h, leaf.y + leaf.h - inside.1),
     };
-    Bounds { origin: o, size: s }
+    if leaf.is_flush(&a, dir) && gap <= (reach * BAND_SHARE).clamp(BAND_MIN, BAND_MAX) {
+        return Some(DropZone::Edge(dir));
+    }
+    Some(DropZone::Side(index, dir))
 }
 
 /// Pane rectangles in window pixels, from the unit-square rectangles the tree
@@ -292,6 +341,18 @@ impl Quad {
 
     fn holds(&self, p: (f32, f32)) -> bool {
         p.0 >= self.x && p.0 < self.x + self.w && p.1 >= self.y && p.1 < self.y + self.h
+    }
+
+    /// Whether this rectangle's `dir` side lies on the same side of `outer` —
+    /// that is, whether there is any pane beyond it in that direction.
+    fn is_flush(&self, outer: &Quad, dir: Dir) -> bool {
+        const SLACK: f32 = 1.;
+        match dir {
+            Dir::Left => self.x <= outer.x + SLACK,
+            Dir::Right => self.x + self.w >= outer.x + outer.w - SLACK,
+            Dir::Up => self.y <= outer.y + SLACK,
+            Dir::Down => self.y + self.h >= outer.y + outer.h - SLACK,
+        }
     }
 }
 
@@ -333,41 +394,54 @@ mod tests {
 
     #[test]
     fn the_ring_around_a_pane_names_the_side_to_split_off() {
-        assert_eq!(at(510., 150.), Some(DropZone::Side(1, Dir::Left)));
-        assert_eq!(at(950., 150.), Some(DropZone::Side(1, Dir::Right)));
-        assert_eq!(at(750., 310.), Some(DropZone::Side(3, Dir::Up)));
-        assert_eq!(at(750., 570.), Some(DropZone::Side(3, Dir::Down)));
+        // Sides that face another pane are the pane's own all the way out.
+        assert_eq!(at(502., 150.), Some(DropZone::Side(1, Dir::Left)));
+        assert_eq!(at(750., 302.), Some(DropZone::Side(3, Dir::Up)));
+        // Sides that face the window keep the inner part of the ring.
+        assert_eq!(at(900., 150.), Some(DropZone::Side(1, Dir::Right)));
+        assert_eq!(at(750., 540.), Some(DropZone::Side(3, Dir::Down)));
     }
 
     #[test]
-    fn the_band_along_the_tab_asks_for_a_full_side_and_wins_over_the_pane() {
+    fn the_far_part_of_a_side_facing_the_window_asks_for_a_band() {
+        // 75px of a 500px-wide pane, 45px of a 300px-tall one.
         assert_eq!(at(4., 150.), Some(DropZone::Edge(Dir::Left)));
+        assert_eq!(at(70., 150.), Some(DropZone::Edge(Dir::Left)));
         assert_eq!(at(996., 450.), Some(DropZone::Edge(Dir::Right)));
         assert_eq!(at(250., 3.), Some(DropZone::Edge(Dir::Up)));
         assert_eq!(at(250., 598.), Some(DropZone::Edge(Dir::Down)));
         assert_eq!(
-            at(4., 3.),
-            Some(DropZone::Edge(Dir::Up)),
-            "a corner goes to whichever edge is nearer"
-        );
-        assert_eq!(
-            at(30., 150.),
+            at(100., 150.),
             Some(DropZone::Side(0, Dir::Left)),
             "past the band the drop is about the pane again"
+        );
+        assert_eq!(
+            at(750., 310.),
+            Some(DropZone::Side(3, Dir::Up)),
+            "the top of the bottom-right pane faces pane 1, not the window"
         );
     }
 
     #[test]
-    fn the_band_is_a_share_of_a_small_tab_not_a_fixed_reach() {
-        let narrow = rect(0., 0., 100., 100.);
-        let one = vec![narrow];
-        let zone = |x: f32| zone_at(narrow, &one, point(px(x), px(50.)));
-        assert_eq!(zone(11.), Some(DropZone::Edge(Dir::Left)));
-        assert_eq!(
-            zone(20.),
-            Some(DropZone::Side(0, Dir::Left)),
-            "26px of a 100px tab would be a quarter of it"
-        );
+    fn a_band_is_a_share_of_its_pane_with_a_floor_under_it() {
+        let single = |w: f32, h: f32| {
+            let b = rect(0., 0., w, h);
+            move |x: f32, y: f32| zone_at(b, &[b], point(px(x), px(y)))
+        };
+
+        // 15% of 400px is 60px of band, and the ring runs to 132px.
+        let wide = single(400., 400.);
+        assert_eq!(wide(40., 200.), Some(DropZone::Edge(Dir::Left)));
+        assert_eq!(wide(100., 200.), Some(DropZone::Side(0, Dir::Left)));
+
+        // 15% of 120px would be 18px, which is not a target anyone can hit.
+        let narrow = single(120., 400.);
+        assert_eq!(narrow(25., 200.), Some(DropZone::Edge(Dir::Left)));
+
+        // 15% of 2000px would be 300px, most of the way to the middle.
+        let huge = single(2000., 400.);
+        assert_eq!(huge(110., 200.), Some(DropZone::Edge(Dir::Left)));
+        assert_eq!(huge(200., 200.), Some(DropZone::Side(0, Dir::Left)));
     }
 
     #[test]
@@ -391,21 +465,65 @@ mod tests {
         );
     }
 
+    /// Three columns over a 900-wide tab: 0 across the left half, then 1 and 2
+    /// sharing the right half.
+    fn columns() -> Pane<u32> {
+        Pane::split_node(
+            gpui::Axis::Horizontal,
+            0.5,
+            Pane::leaf(0),
+            Pane::split_node(gpui::Axis::Horizontal, 0.5, Pane::leaf(1), Pane::leaf(2)),
+        )
+    }
+
     #[test]
-    fn a_landing_is_the_patch_of_screen_the_pane_would_fill() {
+    fn a_landing_is_where_the_pane_actually_ends_up() {
+        let tab = rect(0., 0., 900., 600.);
+        let at = |zone| landing(&columns(), &2, zone, tab);
+
         assert_eq!(
-            landing_rect(area(), &grid(), DropZone::Edge(Dir::Right)),
-            Some(rect(500., 0., 500., 600.))
+            at(DropZone::Side(0, Dir::Right)),
+            Some(rect(300., 0., 300., 600.)),
+            "joining a row of columns is an equal share of it, not half of one"
         );
         assert_eq!(
-            landing_rect(area(), &grid(), DropZone::Side(1, Dir::Down)),
-            Some(rect(500., 150., 500., 150.))
+            at(DropZone::Edge(Dir::Left)),
+            Some(rect(0., 0., 300., 600.)),
+            "a band beside two columns is the third of them"
         );
         assert_eq!(
-            landing_rect(area(), &grid(), DropZone::Swap(2)),
-            Some(rect(0., 300., 500., 300.))
+            at(DropZone::Side(0, Dir::Down)),
+            Some(rect(0., 300., 450., 300.)),
+            "across the row there is no run to join, so the pane is halved"
         );
-        assert_eq!(landing_rect(area(), &grid(), DropZone::Swap(9)), None);
+        assert_eq!(
+            at(DropZone::Swap(0)),
+            Some(rect(0., 0., 450., 600.)),
+            "a swap takes the other pane's place, and its size"
+        );
+        assert_eq!(
+            at(DropZone::Side(1, Dir::Right)),
+            None,
+            "2 already sits right of 1: nothing to draw and nothing to drop"
+        );
+        assert_eq!(at(DropZone::Swap(9)), None);
+    }
+
+    #[test]
+    fn a_landing_leaves_the_layout_it_was_measured_on_alone() {
+        let live = columns();
+        let before = live.leaf_rects();
+        let _ = landing(
+            &live,
+            &2,
+            DropZone::Side(0, Dir::Right),
+            rect(0., 0., 900., 600.),
+        );
+        assert_eq!(
+            live.leaf_rects(),
+            before,
+            "trying a drop out must not resize the panes on screen"
+        );
     }
 
     #[test]

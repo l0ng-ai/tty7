@@ -284,6 +284,139 @@ impl<L: Clone> Pane<L> {
         }
     }
 
+    /// A copy with sizes of its own, safe to try a rearrangement out on.
+    ///
+    /// The derived clone shares its ratio cells with the original, which is
+    /// what the edits below want when they are about to install the result —
+    /// but not what a hover wants, where resizing the tried-out tree would
+    /// resize the one still on screen.
+    pub fn deep_clone(&self) -> Self {
+        match self {
+            Pane::Leaf(v) => Pane::Leaf(v.clone()),
+            Pane::Empty => Pane::Empty,
+            Pane::Split {
+                axis, ratio, a, b, ..
+            } => Pane::split_node(*axis, ratio.get(), a.deep_clone(), b.deep_clone()),
+        }
+    }
+
+    fn holds(&self, pred: &impl Fn(&L) -> bool) -> bool {
+        self.leaves().iter().any(pred)
+    }
+
+    /// The node heading the run of `axis` splits that lays out the leaf `pred`
+    /// names — the row it is a cell of, or the column.
+    ///
+    /// `None` when nothing along the way splits on that axis: the leaf is not
+    /// part of a run in that direction, so there is no row to share out.
+    fn run_head_mut(&mut self, axis: Axis, pred: &impl Fn(&L) -> bool) -> Option<&mut Pane<L>> {
+        if !self.holds(pred) {
+            return None;
+        }
+        if matches!(self, Pane::Split { axis: a, .. } if *a == axis) {
+            return Some(self);
+        }
+        match self {
+            Pane::Split { a, b, .. } => {
+                if a.holds(pred) {
+                    a.run_head_mut(axis, pred)
+                } else {
+                    b.run_head_mut(axis, pred)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// What each piece of this run takes of it, in the order they are laid out.
+    fn run_shares(&self, axis: Axis, of: f32, out: &mut Vec<f32>) {
+        match self {
+            Pane::Split {
+                axis: split,
+                ratio,
+                a,
+                b,
+                ..
+            } if *split == axis => {
+                let r = ratio.get().clamp(MIN_RATIO, MAX_RATIO);
+                a.run_shares(axis, of * r, out);
+                b.run_shares(axis, of * (1. - r), out);
+            }
+            _ => out.push(of),
+        }
+    }
+
+    /// Hands the run back its shares, in that same order, answering the total
+    /// it took so each split above can be set from the two sides it holds.
+    fn set_run_shares(&mut self, axis: Axis, shares: &mut impl Iterator<Item = f32>) -> f32 {
+        match self {
+            Pane::Split {
+                axis: split,
+                ratio,
+                a,
+                b,
+                ..
+            } if *split == axis => {
+                let left = a.set_run_shares(axis, shares);
+                let right = b.set_run_shares(axis, shares);
+                let total = left + right;
+                if total > 0. {
+                    ratio.set((left / total).clamp(MIN_RATIO, MAX_RATIO));
+                }
+                total
+            }
+            _ => shares.next().unwrap_or(0.),
+        }
+    }
+
+    /// Which piece of the run is the leaf `pred` names, when it is a piece of
+    /// the run in its own right rather than something nested inside one.
+    fn run_index(&self, axis: Axis, pred: &impl Fn(&L) -> bool, at: &mut usize) -> Option<usize> {
+        match self {
+            Pane::Split {
+                axis: split, a, b, ..
+            } if *split == axis => a
+                .run_index(axis, pred, at)
+                .or_else(|| b.run_index(axis, pred, at)),
+            Pane::Leaf(v) if pred(v) => Some(*at),
+            _ => {
+                *at += 1;
+                None
+            }
+        }
+    }
+
+    /// Shares a newly inserted pane into the run it joined, giving it an even
+    /// piece and taking that piece off the others in proportion.
+    ///
+    /// This is the difference between dropping a pane against its neighbour and
+    /// carving up the neighbour: three equal columns rather than one of them
+    /// quartered. A pane that landed inside a run's piece instead of beside it
+    /// keeps the half of its target it was given — there is no row it joined.
+    fn share_out_run(&mut self, axis: Axis, is_new: &impl Fn(&L) -> bool, leads: bool) {
+        let Some(head) = self.run_head_mut(axis, is_new) else {
+            return;
+        };
+        let mut shares = Vec::new();
+        head.run_shares(axis, 1., &mut shares);
+        let Some(new) = head.run_index(axis, is_new, &mut 0) else {
+            return;
+        };
+        let n = shares.len();
+        // The newcomer went in beside the pane it split, on the side the drop
+        // named, and the two of them are holding that pane's old piece between
+        // them. Everyone else keeps what they had, less the newcomer's share.
+        let split = if leads { new + 1 } else { new.wrapping_sub(1) };
+        let (Some(&mine), Some(&theirs)) = (shares.get(new), shares.get(split)) else {
+            return;
+        };
+        let keep = (n - 1) as f32 / n as f32;
+        let mut want: Vec<f32> = shares.iter().map(|s| s * keep).collect();
+        want[new] = 1. / n as f32;
+        want[split] = (mine + theirs) * keep;
+        head.set_run_shares(axis, &mut want.into_iter());
+    }
+
     /// Whether two trees put the same panes in the same places. Ratios are not
     /// part of it: what this answers is "did the drag change anything".
     fn same_layout(&self, other: &Self) -> bool
@@ -337,8 +470,48 @@ impl<L: Clone> Pane<L> {
         if next.same_layout(self) {
             return false;
         }
+        // Only once the move is going to happen: sharing the run out writes
+        // ratios that this tree's splits hold in common with the one on screen.
+        next.share_out_run(dir.axis(), is_src, dir.leads());
         *self = next;
         true
+    }
+
+    /// How many bands this layout already presents along `axis` — the columns
+    /// you would count across it, or the rows down it.
+    ///
+    /// Splits on that axis add their sides up; splits across it stack, so the
+    /// count is the widest of the two rather than their sum. A 2×2 therefore
+    /// answers two columns even though no single node cuts it into two.
+    fn slices_along(&self, axis: Axis) -> usize {
+        match self {
+            Pane::Leaf(_) => 1,
+            Pane::Empty => 0,
+            Pane::Split {
+                axis: split, a, b, ..
+            } => {
+                let (l, r) = (a.slices_along(axis), b.slices_along(axis));
+                if *split == axis { l + r } else { l.max(r) }
+            }
+        }
+    }
+
+    /// Lifts a leaf out and works out the share of the tab it should take back
+    /// as a band along `dir`: one more band than the layout already has, each
+    /// of them the same width. A tab already cut into two columns therefore
+    /// receives a third column, not a half.
+    fn edge_landing(&self, is_src: &impl Fn(&L) -> bool, dir: Dir) -> Option<(Pane<L>, f32)> {
+        let mut rest = self.clone();
+        let moved = rest.take_leaf_where(is_src)?;
+        let slices = rest.slices_along(dir.axis()).max(1);
+        let share = 1. / (slices + 1) as f32;
+        let (a, b) = if dir.leads() {
+            (Pane::Leaf(moved), rest)
+        } else {
+            (rest, Pane::Leaf(moved))
+        };
+        let ratio = if dir.leads() { share } else { 1. - share };
+        Some((Pane::split_node(dir.axis(), ratio, a, b), share))
     }
 
     /// Moves one leaf against an outer edge of the whole tab, as a full-width
@@ -347,22 +520,40 @@ impl<L: Clone> Pane<L> {
     where
         L: PartialEq,
     {
-        let mut next = self.clone();
-        let Some(moved) = next.take_leaf_where(is_src) else {
+        let Some((next, _)) = self.edge_landing(is_src, dir) else {
             return false;
         };
-        let rest = std::mem::replace(&mut next, Pane::Empty);
-        let (a, b) = if dir.leads() {
-            (Pane::Leaf(moved), rest)
-        } else {
-            (rest, Pane::Leaf(moved))
-        };
-        let next = Pane::split_node(dir.axis(), 0.5, a, b);
         if next.same_layout(self) {
             return false;
         }
         *self = next;
         true
+    }
+
+    /// Drops `src` on the `dir` side of `dst`, splitting `dst` to make room —
+    /// or, when that side faces a neighbour in the same row or column, joining
+    /// them as an equal instead.
+    pub fn move_leaf_beside(&mut self, src: &L, dst: &L, dir: Dir) -> bool
+    where
+        L: PartialEq,
+    {
+        src != dst && self.move_leaf_where(&|v| v == src, &|v| v == dst, dir)
+    }
+
+    /// Drops `src` against the `dir` edge of the tab, beside every other pane.
+    pub fn move_leaf_to_edge(&mut self, src: &L, dir: Dir) -> bool
+    where
+        L: PartialEq,
+    {
+        self.move_leaf_to_edge_where(&|v| v == src, dir)
+    }
+
+    /// Trades two panes' places, each keeping the other's size.
+    pub fn swap_leaves(&mut self, a: &L, b: &L) -> bool
+    where
+        L: PartialEq,
+    {
+        a != b && self.swap_leaves_where(&|v| v == a, &|v| v == b)
     }
 
     fn swap_leaves_where(
@@ -597,21 +788,6 @@ impl Pane<PaneSlot> {
     }
 
     /// Drops `src` on the `dir` side of `dst`, splitting `dst` to make room.
-    pub fn move_leaf(&mut self, src: gpui::EntityId, dst: gpui::EntityId, dir: Dir) -> bool {
-        src != dst
-            && self.move_leaf_where(&|v| v.entity_id() == src, &|v| v.entity_id() == dst, dir)
-    }
-
-    /// Drops `src` against the `dir` edge of the tab, beside every other pane.
-    pub fn move_leaf_to_edge(&mut self, src: gpui::EntityId, dir: Dir) -> bool {
-        self.move_leaf_to_edge_where(&|v| v.entity_id() == src, dir)
-    }
-
-    /// Trades two panes' places, each keeping the other's size.
-    pub fn swap_leaves(&mut self, a: gpui::EntityId, b: gpui::EntityId) -> bool {
-        a != b && self.swap_leaves_where(&|v| v.entity_id() == a, &|v| v.entity_id() == b)
-    }
-
     pub fn close_focused(&mut self, window: &Window, cx: &App) -> CloseOutcome {
         self.close_leaf_where(&|v| v.contains_focused(window, cx))
     }
@@ -646,7 +822,7 @@ impl Pane<PaneSlot> {
                     .when(chrome.dim_inactive && !focused, |d| d.opacity(0.55))
                     .when(lifted, |d| d.opacity(0.45))
                     .when(chrome.rearrangeable, |d| {
-                        d.on_hover({
+                        d.pt(px(crate::ui::pane_drag::HANDLE_STRIP)).on_hover({
                             let hovered = chrome.hovered.clone();
                             move |over, window, _cx| {
                                 let next = match (*over, hovered.get() == Some(id)) {
@@ -1361,6 +1537,78 @@ mod tests {
         assert_well_formed(&pane);
     }
 
+    /// A row of two over a third pane, so there is always a run to join and a
+    /// pane outside it to drag in.
+    fn row_over() -> TestPane {
+        TestPane::split_node(
+            Axis::Vertical,
+            0.5,
+            TestPane::split_node(Axis::Horizontal, 0.5, Pane::Leaf(0), Pane::Leaf(1)),
+            Pane::Leaf(2),
+        )
+    }
+
+    fn widths(pane: &TestPane) -> Vec<f32> {
+        pane.leaf_rects()
+            .iter()
+            .map(|(_, r)| (r.w * 1000.).round() / 1000.)
+            .collect()
+    }
+
+    #[test]
+    fn joining_a_row_takes_an_equal_share_of_it_instead_of_halving_a_neighbour() {
+        let mut pane = row_over();
+        assert!(moved(&mut pane, 2, 0, Dir::Right));
+        assert_eq!(pane.leaves(), vec![0, 2, 1]);
+        assert_eq!(
+            widths(&pane),
+            vec![0.333, 0.333, 0.333],
+            "three columns, not one of them quartered"
+        );
+        assert_well_formed(&pane);
+    }
+
+    #[test]
+    fn joining_a_row_takes_its_share_off_the_others_in_proportion() {
+        let mut pane = TestPane::split_node(
+            Axis::Vertical,
+            0.5,
+            TestPane::split_node(Axis::Horizontal, 0.75, Pane::Leaf(0), Pane::Leaf(1)),
+            Pane::Leaf(2),
+        );
+        assert!(moved(&mut pane, 2, 1, Dir::Right));
+        assert_eq!(pane.leaves(), vec![0, 1, 2]);
+        assert_eq!(
+            widths(&pane),
+            vec![0.5, 0.167, 0.333],
+            "the newcomer takes a third; the other two stay three to one"
+        );
+        assert_well_formed(&pane);
+    }
+
+    #[test]
+    fn a_drop_across_the_run_still_halves_the_pane_it_landed_on() {
+        let mut pane = row_over();
+        assert!(moved(&mut pane, 2, 0, Dir::Down));
+        assert_eq!(pane.leaves(), vec![0, 2, 1]);
+        assert_eq!(
+            widths(&pane),
+            vec![0.5, 0.5, 0.5],
+            "0 and 2 share 0's column, which keeps its width"
+        );
+        match &pane {
+            Pane::Split { a, .. } => match &**a {
+                Pane::Split { axis, ratio, .. } => {
+                    assert!(matches!(axis, Axis::Vertical));
+                    assert_eq!(ratio.get(), 0.5, "there is no row to share out here");
+                }
+                _ => panic!("0 should have become a column of two"),
+            },
+            _ => unreachable!(),
+        }
+        assert_well_formed(&pane);
+    }
+
     #[test]
     fn a_move_that_would_redraw_the_same_layout_is_refused() {
         let mut pane = TestPane::leaf(0);
@@ -1415,6 +1663,65 @@ mod tests {
             _ => panic!("the root should be the new split"),
         }
         assert_well_formed(&pane);
+    }
+
+    #[test]
+    fn a_band_takes_one_share_of_the_bands_the_axis_ends_up_with() {
+        let share =
+            |pane: &TestPane, id: u32, dir: Dir| pane.edge_landing(&is(id), dir).map(|(_, s)| s);
+
+        // Two columns receive a third column, not a half.
+        let mut two = TestPane::leaf(0);
+        split(&mut two, 0, Axis::Horizontal, 1);
+        split(&mut two, 1, Axis::Horizontal, 2);
+        assert_eq!(share(&two, 2, Dir::Right), Some(1. / 3.));
+
+        // A 2×2 reads as two columns even though no one node cuts it in two,
+        // and lifting a pane out of it leaves those two columns standing.
+        assert_eq!(grid().slices_along(Axis::Horizontal), 2);
+        assert_eq!(share(&grid(), 1, Dir::Right), Some(1. / 3.));
+        assert_eq!(share(&grid(), 1, Dir::Up), Some(1. / 3.));
+
+        // Two rows have one column between them, so a column is a half.
+        let mut rows = TestPane::leaf(0);
+        split(&mut rows, 0, Axis::Vertical, 1);
+        assert_eq!(share(&rows, 1, Dir::Left), Some(1. / 2.));
+
+        assert_eq!(
+            share(&TestPane::leaf(0), 0, Dir::Left),
+            None,
+            "the only pane has nowhere to go, so there is no share to draw"
+        );
+    }
+
+    #[test]
+    fn the_band_a_move_lands_is_the_share_it_advertised() {
+        let mut pane = TestPane::leaf(0);
+        split(&mut pane, 0, Axis::Horizontal, 1);
+        split(&mut pane, 1, Axis::Horizontal, 2);
+        assert!(pane.move_leaf_to_edge_where(&is(2), Dir::Right));
+        match &pane {
+            Pane::Split { ratio, b, .. } => {
+                assert!(matches!(**b, Pane::Leaf(2)));
+                assert!(
+                    (ratio.get() - 2. / 3.).abs() < 1e-6,
+                    "the rest keeps two thirds, the new column takes one"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        let mut leading = TestPane::leaf(0);
+        split(&mut leading, 0, Axis::Horizontal, 1);
+        split(&mut leading, 1, Axis::Horizontal, 2);
+        assert!(leading.move_leaf_to_edge_where(&is(2), Dir::Left));
+        match &leading {
+            Pane::Split { ratio, a, .. } => {
+                assert!(matches!(**a, Pane::Leaf(2)));
+                assert!((ratio.get() - 1. / 3.).abs() < 1e-6);
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]

@@ -3007,12 +3007,10 @@ impl Tty7App {
         let area = self.pane_area.get()?;
         let tab = self.tabs.get(self.active)?;
         let leaves = tab.pane.leaves();
+        let slot = leaves.iter().find(|l| l.entity_id() == from)?;
         let bounds = pane_drag::leaf_bounds(&tab.pane, area);
         let zone = pane_drag::zone_at(area, &bounds, window.mouse_position())?;
-        if !pane_drag::apply(&mut tab.pane.clone(), from, &leaves, zone) {
-            return None;
-        }
-        let rect = pane_drag::landing_rect(area, &bounds, zone)?;
+        let rect = pane_drag::landing(&tab.pane, slot, zone, area)?;
         pane_drag::set_landing(&self.pane_drag, zone);
 
         let accent = cx.theme().drag_border;
@@ -3044,10 +3042,13 @@ impl Tty7App {
             return;
         };
         let leaves = tab.pane.leaves();
-        if !crate::ui::pane_drag::apply(&mut tab.pane, from, &leaves, zone) {
+        let Some(moved) = leaves.into_iter().find(|l| l.entity_id() == from) else {
+            return;
+        };
+        if !crate::ui::pane_drag::apply(&mut tab.pane, &moved, zone) {
             return;
         }
-        let moved = leaves.into_iter().find(|l| l.entity_id() == from);
+        let moved = Some(moved);
         self.maximized = None;
         if let Some(leaf) = moved {
             self.focus_leaf(&leaf, window, cx);
