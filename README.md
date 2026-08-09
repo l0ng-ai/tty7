@@ -17,6 +17,10 @@
 
 <sub>English · [简体中文](README.zh-CN.md)</sub>
 
+<br />
+
+<img src="assets/screenshot.webp" alt="tty7 window showing panes, agent status, and the sidebar" width="100%" />
+
 </div>
 
 ## Why

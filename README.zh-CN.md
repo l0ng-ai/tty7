@@ -17,6 +17,10 @@
 
 <sub>[English](README.md) · 简体中文</sub>
 
+<br />
+
+<img src="assets/screenshot.webp" alt="tty7 窗口，展示 pane、agent 状态与侧边栏" width="100%" />
+
 </div>
 
 ## 为什么
