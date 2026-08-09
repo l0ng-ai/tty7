@@ -20,8 +20,8 @@ use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::reorder::{self, Reorder, Surface};
 use crate::ui::right_panel::RESIZE_HANDLE_WIDTH;
 use crate::ui::tab_strip::{
-    DragTab, REORDER_SLIDE_MS, abbreviate_home, elide_keep_edges, elide_path_keep_tail,
-    measure_text, strip_host_prefix,
+    DragTab, REORDER_SLIDE_MS, abbreviate_home, elide_keep_edges, elide_label,
+    elide_path_keep_tail, measure_text, strip_host_prefix,
 };
 
 const MIN_SIDEBAR_WIDTH: f32 = 180.;
@@ -31,12 +31,45 @@ const MAX_SIDEBAR_WIDTH_RATIO: f32 = 0.5;
 
 const ROW_GAP: f32 = 2.;
 
-/// What a sidebar row actually rendered, so the hover card can tell which
-/// details the row had to hide.
+/// The row chrome the text budget has to be measured around. These are the
+/// numbers the layout below is built from, not a second guess at it — a row
+/// that elides against a budget wider than it really has falls back to CSS
+/// truncation, which drops the tail this whole module exists to keep.
+mod row_metrics {
+    /// `border_r_1` on the sidebar itself.
+    pub(super) const BORDER: f32 = 1.;
+    /// `px_1` on the scrolling list that holds the rows.
+    pub(super) const LIST_PAD: f32 = 4.;
+    /// `pl_2` + `pr_2` on the row.
+    pub(super) const ROW_PAD: f32 = 8.;
+    /// The avatar handed to `tab_avatar`.
+    pub(super) const AVATAR: f32 = 22.;
+    /// `gap_2` between the row's children.
+    pub(super) const GAP: f32 = 8.;
+    /// The ⌘N badge, when one is shown.
+    pub(super) const BADGE: f32 = 20.;
+    /// `gap_1p5`, between the branch icon and its text and before the counts.
+    pub(super) const META_GAP: f32 = 6.;
+    /// The branch icon.
+    pub(super) const BRANCH_ICON: f32 = 11.;
+
+    /// What a row can spend on text, before the badge is taken out.
+    pub(super) const fn text_budget(width: f32) -> f32 {
+        width - BORDER - 2. * LIST_PAD - 2. * ROW_PAD - AVATAR - GAP
+    }
+}
+
+/// What a sidebar row rendered, next to what it had to leave out, so the
+/// hover card can be built by comparison instead of deriving the same strings
+/// a second time — the two derivations have to agree, and the shortest way to
+/// guarantee that is to only ever have one.
 struct SidebarRowShown {
-    title: SharedString,
-    branch: Option<SharedString>,
-    cwd: Option<SharedString>,
+    /// The elided title, and the full string it came from. `None` when the
+    /// row is showing a placeholder (`Shell 3`) rather than a real title,
+    /// which nothing can expand.
+    title: Option<(SharedString, SharedString)>,
+    branch: Option<(SharedString, SharedString, u32, u32)>,
+    cwd: Option<(SharedString, SharedString)>,
 }
 
 #[derive(Clone)]
@@ -106,24 +139,28 @@ impl Tty7App {
             pos
         };
 
-        let visible_by_section: Vec<Vec<(usize, String)>> = sections
+        // The row shows an elided title and a branch; the filter used to read
+        // only the elided title, so typing the branch you can see, or the part
+        // of the path the row dropped, matched nothing. The label is built
+        // here only when there is a query to match it against — the rows
+        // themselves elide against measured width and no longer need it.
+        let visible_by_section: Vec<Vec<usize>> = sections
             .iter()
             .map(|s| {
                 s.tabs
                     .iter()
-                    .map(|&i| (i, self.tab_label(&self.tabs[i], i, Some(window), cx)))
-                    // The row shows a truncated title and a branch; the filter
-                    // only ever read the truncated title, so typing the branch
-                    // you can see, or the part of the path the row elided,
-                    // matched nothing.
-                    .filter(|(i, label)| {
+                    .copied()
+                    .filter(|&i| {
                         query.is_empty()
-                            || label.to_lowercase().contains(&query)
-                            || self.tabs[*i]
+                            || self
+                                .tab_label(&self.tabs[i], i, Some(window), cx)
+                                .to_lowercase()
+                                .contains(&query)
+                            || self.tabs[i]
                                 .leaf_title(Some(window), cx)
                                 .to_lowercase()
                                 .contains(&query)
-                            || self.tabs[*i]
+                            || self.tabs[i]
                                 .git_status(Some(window), cx)
                                 .is_some_and(|g| g.branch.to_lowercase().contains(&query))
                     })
@@ -141,6 +178,14 @@ impl Tty7App {
             fallbacks: None,
             weight: Default::default(),
             style: Default::default(),
+        };
+        // The active row renders its title at `FontWeight::MEDIUM`, which is
+        // wider than the regular weight in any proportional face. Measuring
+        // it as regular would let the one row the user is looking at overflow
+        // into the truncation this is here to avoid.
+        let title_font_active = gpui::Font {
+            weight: FontWeight::MEDIUM,
+            ..font.clone()
         };
         let rem = window.rem_size().as_f32();
         let rendered = |ix: &usize| !visible_by_section[*ix].is_empty();
@@ -184,7 +229,7 @@ impl Tty7App {
             let group_key = section.key.clone();
             let mut rows: Vec<ContextMenu<Stateful<Div>>> = Vec::new();
             let visible = visible_by_section[group_ix].clone();
-            let visible_tabs: Vec<usize> = visible.iter().map(|(i, _)| *i).collect();
+            let visible_tabs: Vec<usize> = visible.clone();
             let row_slots: Rc<RefCell<Vec<Bounds<Pixels>>>> =
                 Rc::new(RefCell::new(vec![Bounds::default(); visible.len()]));
             let row_preview = reorder::preview(
@@ -193,7 +238,7 @@ impl Tty7App {
                 visible.len(),
                 pointer,
             );
-            for (slot, (i, _label)) in visible.into_iter().enumerate() {
+            for (slot, i) in visible.into_iter().enumerate() {
                 let badge_pos = badge_pos[i];
                 let tab = &self.tabs[i];
                 let is_active = i == active;
@@ -210,54 +255,64 @@ impl Tty7App {
                     }),
                 );
                 let badge_extra = if show_badges && badge_pos < 9 {
-                    28.
+                    row_metrics::BADGE + row_metrics::GAP
                 } else {
                     0.
                 };
-                // What the row can spend on text: the sidebar width minus the
-                // border, the row padding, the avatar and its gap, and the
-                // badge when one is shown. Elision is measured against this
-                // budget so the label and branch never wrap or overflow.
-                let label_avail = (width - 1. - 16. - 22. - 8. - badge_extra).max(48.);
+                // Elision is measured against this budget so the label and
+                // branch never wrap or overflow into CSS truncation.
+                let label_avail = (row_metrics::text_budget(width) - badge_extra).max(48.);
                 let title_size = 0.875 * rem;
                 let meta_size = 0.75 * rem;
-                // Title: elide the *full* path against the row budget, so a
-                // wide sidebar shows the whole path and a narrow one keeps
-                // the tail — the file or directory the user is actually
-                // working on — while dropping segments from the front. A
-                // fixed segment cap (`short_title`) would elide even when
-                // the row has room, so only the width may decide here.
-                let shown_title =
+                let title_font = if is_active { &title_font_active } else { &font };
+                // Title: elide the *full* label against the row budget, so a
+                // wide sidebar shows the whole thing and a narrow one keeps
+                // whichever end identifies it — the tail for a path, both
+                // edges for anything else. A fixed segment cap
+                // (`short_title`) would elide even when the row has room, so
+                // only the width may decide here.
+                //
+                // `full_title` is the unelided string the card can expand
+                // back to; `None` means the row is showing a placeholder that
+                // no card can improve on.
+                let (shown_title, full_title) =
                     if let Some(name) = tab.name.as_ref().filter(|n| !n.trim().is_empty()) {
-                        // A user-renamed tab shows its name; short names are a
-                        // no-op for the elision, long ones get the same tail.
-                        elide_path_keep_tail(
+                        // A renamed tab is elided like anything else — and so
+                        // the card has to be able to spell the name back out.
+                        let full = SharedString::from(name.trim().to_string());
+                        let shown = elide_label(
                             &window.text_system(),
-                            &font,
+                            title_font,
                             title_size,
-                            name.trim(),
+                            &full,
                             label_avail,
-                        )
+                        );
+                        (shown, Some(full))
                     } else {
                         let raw_title = tab.leaf_title(Some(window), cx);
                         let raw = abbreviate_home(strip_host_prefix(raw_title.trim()));
                         if raw.trim().is_empty() {
-                            SharedString::from(t_fmt(
+                            // Nothing to expand: the row is naming an unnamed
+                            // shell, not hiding a title behind an ellipsis.
+                            let placeholder = SharedString::from(t_fmt(
                                 L10nKey::TabUnnamedShell,
                                 &[("n", &((i + 1).to_string()))],
-                            ))
+                            ));
+                            (placeholder, None)
                         } else {
-                            elide_path_keep_tail(
+                            let full = SharedString::from(raw.as_ref());
+                            let shown = elide_label(
                                 &window.text_system(),
-                                &font,
+                                title_font,
                                 title_size,
-                                &raw,
+                                &full,
                                 label_avail,
-                            )
+                            );
+                            (shown, Some(full))
                         }
                     };
-                let mut branch_shown: Option<SharedString> = None;
-                let mut cwd_shown: Option<SharedString> = None;
+                let mut branch_shown: Option<(SharedString, SharedString, u32, u32)> = None;
+                let mut cwd_shown: Option<(SharedString, SharedString)> = None;
                 let git_line = tab.git_status(Some(window), cx).map(|g| {
                     let mut line = h_flex()
                         .id(("sidebar-git", i))
@@ -270,26 +325,44 @@ impl Tty7App {
                             gpui::svg()
                                 .path("icons/git-branch.svg")
                                 .flex_shrink_0()
-                                .size(px(11.))
+                                .size(px(row_metrics::BRANCH_ICON))
                                 .text_color(cx.theme().muted_foreground),
                         );
                     // The diff counts are measured against real glyphs so the
                     // branch can be elided to exactly the space they leave;
-                    // the counts themselves never wrap or shrink.
-                    let counts_txt = match (g.added > 0, g.removed > 0) {
-                        (true, true) => format!("+{} −{}", g.added, g.removed),
-                        (true, false) => format!("+{}", g.added),
-                        (false, true) => format!("−{}", g.removed),
-                        (false, false) => String::new(),
-                    };
-                    let counts_w = if counts_txt.is_empty() {
-                        0.
-                    } else {
-                        measure_text(&window.text_system(), &font, meta_size, &counts_txt) + 6.
-                    };
-                    // Branch: keep both ends (`window-trans…backdrop`) so its
+                    // the counts themselves never wrap or shrink. They render
+                    // as two children of a `gap_1p5` row, so the gap between
+                    // them is measured rather than a space that stands in for
+                    // it.
+                    let mut counts_w = 0.;
+                    if g.added > 0 {
+                        counts_w += measure_text(
+                            &window.text_system(),
+                            &font,
+                            meta_size,
+                            &format!("+{}", g.added),
+                        );
+                    }
+                    if g.removed > 0 {
+                        counts_w += measure_text(
+                            &window.text_system(),
+                            &font,
+                            meta_size,
+                            &format!("−{}", g.removed),
+                        );
+                    }
+                    if g.added > 0 && g.removed > 0 {
+                        counts_w += row_metrics::META_GAP;
+                    }
+                    if counts_w > 0. {
+                        // The gap between the branch and the counts.
+                        counts_w += row_metrics::META_GAP;
+                    }
+                    // Branch: keep both ends (`window-…backdrop`) so its
                     // identifying tail survives a narrow sidebar.
-                    let branch_avail = (label_avail - 11. - 6. - counts_w).max(0.);
+                    let branch_avail =
+                        (label_avail - row_metrics::BRANCH_ICON - row_metrics::META_GAP - counts_w)
+                            .max(0.);
                     let shown = elide_keep_edges(
                         &window.text_system(),
                         &font,
@@ -297,7 +370,12 @@ impl Tty7App {
                         &g.branch,
                         branch_avail,
                     );
-                    branch_shown = Some(shown.clone());
+                    branch_shown = Some((
+                        shown.clone(),
+                        SharedString::from(g.branch.clone()),
+                        g.added,
+                        g.removed,
+                    ));
                     line = line.child(div().flex_1().min_w_0().truncate().child(shown));
                     if g.added > 0 || g.removed > 0 {
                         let mut counts = h_flex()
@@ -354,19 +432,21 @@ impl Tty7App {
                                 .or_else(|| view.cwd())
                         })
                         .map(|cwd| {
-                            let cwd_full = cwd.display().to_string();
-                            let full = abbreviate_home(&cwd_full);
-                            elide_path_keep_tail(
+                            let full = SharedString::from(
+                                abbreviate_home(&cwd.display().to_string()).into_owned(),
+                            );
+                            let shown = elide_path_keep_tail(
                                 &window.text_system(),
                                 &font,
                                 meta_size,
                                 &full,
                                 label_avail,
-                            )
+                            );
+                            (shown, full)
                         })
                         // The title already carries the whole path; a second
                         // copy adds noise, not information.
-                        .filter(|s| s.as_ref() != shown_title.as_ref());
+                        .filter(|(shown, _)| shown.as_ref() != shown_title.as_ref());
                 }
                 let rename_input = self
                     .renaming
@@ -375,7 +455,7 @@ impl Tty7App {
                     .map(|r| r.input.clone());
 
                 let shown = SidebarRowShown {
-                    title: shown_title.clone(),
+                    title: full_title.map(|full| (shown_title.clone(), full)),
                     branch: branch_shown.clone(),
                     cwd: cwd_shown.clone(),
                 };
@@ -408,11 +488,14 @@ impl Tty7App {
                                 gpui_component::tooltip::Tooltip::element(move |_window, _cx| {
                                     let card = v_flex()
                                         .gap_1()
+                                        // The card is the one place that
+                                        // promised the whole string, so a long
+                                        // path wraps here rather than being
+                                        // truncated a second time.
                                         .when_some(info.title.clone(), |c, title| {
                                             c.child(
                                                 div()
                                                     .max_w(px(420.))
-                                                    .truncate()
                                                     .text_sm()
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .child(title),
@@ -433,7 +516,7 @@ impl Tty7App {
                                                             .size(px(11.))
                                                             .text_color(muted),
                                                     )
-                                                    .child(div().truncate().child(branch));
+                                                    .child(div().child(branch));
                                                 if added > 0 {
                                                     line = line.child(
                                                         div()
@@ -455,7 +538,6 @@ impl Tty7App {
                                             c.child(
                                                 div()
                                                     .max_w(px(420.))
-                                                    .truncate()
                                                     .text_xs()
                                                     .text_color(muted)
                                                     .child(cwd),
@@ -492,7 +574,7 @@ impl Tty7App {
                                 .child(shown_title),
                         )
                         .children(git_line)
-                        .when_some(cwd_shown, |col, cwd| {
+                        .when_some(cwd_shown, |col, (cwd, _)| {
                             col.child(
                                 h_flex()
                                     .id(("sidebar-cwd", i))
@@ -1013,12 +1095,17 @@ impl Tty7App {
             .child(handle)
     }
 
-    /// What the sidebar row hid: the full path, the full branch and diff
+    /// What the sidebar row hid: the full title, the full branch and diff
     /// counts, the working directory, and the remote host the avatar only
     /// dots. `None` when the row showed everything — a card would add noise,
     /// not information. The host is included even for an untruncated row,
-    /// because `short_title` strips the `user@host:` prefix the avatar
-    /// cannot spell out.
+    /// because the title strips the `user@host:` prefix the avatar cannot
+    /// spell out.
+    ///
+    /// Every line is decided by comparing what the row rendered against the
+    /// string it was elided from. Both come from the row itself: deriving
+    /// them here a second time is how a renamed tab ended up with a name the
+    /// row shortened and the card refused to expand.
     fn sidebar_info(
         &self,
         tab: &crate::ui::app::Tab,
@@ -1026,49 +1113,33 @@ impl Tty7App {
         cx: &gpui::App,
         shown: &SidebarRowShown,
     ) -> Option<SidebarInfo> {
+        let elided = |pair: &Option<(SharedString, SharedString)>| {
+            pair.as_ref()
+                .filter(|(shown, full)| shown != full)
+                .map(|(_, full)| full.clone())
+        };
         let mut info = SidebarInfo {
-            title: None,
-            branch: None,
-            cwd: None,
+            title: elided(&shown.title),
+            branch: shown
+                .branch
+                .as_ref()
+                .filter(|(shown, full, _, _)| shown != full)
+                .map(|(_, full, added, removed)| (full.clone(), *added, *removed)),
+            // The cwd only earns a card line when it was rendered *and*
+            // elided: a repo row already shows the full path as its title, so
+            // repeating the cwd under it would be noise, not information.
+            cwd: elided(&shown.cwd),
             host: None,
         };
-        let raw_title = tab.leaf_title(Some(window), cx);
-        let raw = abbreviate_home(strip_host_prefix(raw_title.trim()));
-        // A user-renamed tab already shows its name in full; the card does
-        // not shadow it with the underlying path.
-        if tab.name.as_ref().is_none_or(|n| n.trim().is_empty())
-            && raw.as_ref() != shown.title.as_ref()
-        {
-            info.title = Some(SharedString::from(raw.as_ref()));
-        }
-        if let Some(g) = tab.git_status(Some(window), cx)
-            && shown.branch.as_deref() != Some(g.branch.as_str())
-        {
-            info.branch = Some((SharedString::from(g.branch.clone()), g.added, g.removed));
-        }
-        let cwd = tab.pane.focused_or_first(window, cx).and_then(|leaf| {
-            let view = leaf.read(cx);
-            view.git_status_cwd()
-                .map(|p| p.to_path_buf())
-                .or_else(|| view.cwd())
-        });
-        // The cwd row only earns a card line when it was rendered *and*
-        // elided: a repo row already shows the full path as its title, so
-        // repeating the cwd under it would be noise, not information.
-        if let Some(cwd) = cwd
-            && let cwd_full = cwd.display().to_string()
-            && let full = abbreviate_home(&cwd_full)
-            && shown.cwd.as_deref().is_some_and(|s| s != full.as_ref())
-        {
-            info.cwd = Some(SharedString::from(full.as_ref()));
-        }
-        if let Some(target) = tab.pane.first_leaf().and_then(|leaf| {
-            leaf.terminal()?
-                .read(cx)
+        // The host is read off the same leaf the title and cwd came from; a
+        // split tab whose panes sit on different machines would otherwise
+        // name whichever one happens to be first.
+        if let Some(target) = tab.pane.focused_or_first(window, cx).and_then(|leaf| {
+            leaf.read(cx)
                 .remote_context()
-                .map(|r| r.target.clone())
+                .map(|r| SharedString::from(r.target.clone()))
         }) {
-            info.host = Some(SharedString::from(target));
+            info.host = Some(target);
         }
         (info.title.is_some() || info.branch.is_some() || info.cwd.is_some() || info.host.is_some())
             .then_some(info)

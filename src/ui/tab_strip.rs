@@ -78,6 +78,18 @@ pub(crate) fn abbreviate_home(path: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// The separator a path spells itself with. A path carrying a single `\` is
+/// a Windows path and has to be put back together with `\`: rejoining it with
+/// `/` would make one tab spell its location two ways, `C:\Users\dev\app`
+/// while it fits and `C:/…/app` once it has to be elided.
+fn path_separator(path: &str) -> char {
+    if path.contains('\\') { '\\' } else { '/' }
+}
+
+fn join_segments(segments: &[&str], sep: char) -> String {
+    segments.join(sep.encode_utf8(&mut [0u8; 4]) as &str)
+}
+
 pub(crate) fn short_title(raw: &str) -> String {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -118,15 +130,16 @@ pub(crate) fn short_title(raw: &str) -> String {
         .to_string();
     }
 
+    let sep = path_separator(path);
     let depth = segments.len() + usize::from(matches!(kind, Kind::Home));
     let mut label = if depth > KEEP_SEGMENTS {
         let tail = &segments[segments.len() - KEEP_SEGMENTS..];
-        format!("…/{}", tail.join("/"))
+        format!("…{sep}{}", join_segments(tail, sep))
     } else {
         match kind {
-            Kind::Home => format!("~/{}", segments.join("/")),
-            Kind::Absolute => format!("/{}", segments.join("/")),
-            Kind::Relative => segments.join("/"),
+            Kind::Home => format!("~{sep}{}", join_segments(&segments, sep)),
+            Kind::Absolute => format!("/{}", join_segments(&segments, sep)),
+            Kind::Relative => join_segments(&segments, sep),
         }
     };
     if label.chars().count() > 40 {
@@ -165,10 +178,6 @@ pub(crate) fn measure_text(
         .as_f32()
 }
 
-/// The ellipsis-and-slash prefix path elision prepends once it starts
-/// dropping segments; measured as one unit so callers can budget for it.
-const PATH_ELISION: &str = "…/";
-
 /// Elides a path from the front when it cannot fit `max_width`, keeping the
 /// root marker (drive letter, `~`, or the leading slash) and every trailing
 /// segment that fits.
@@ -189,6 +198,7 @@ pub(crate) fn elide_path_keep_tail(
     if path.is_empty() || measure_text(text_system, font, size, path) <= max_width {
         return SharedString::from(path);
     }
+    let sep = path_separator(path);
     let segments: Vec<&str> = path.split(['/', '\\']).collect();
     // A leading slash splits into an empty first segment; `~` and drive
     // letters (`E:`) carry the same "where this tree lives" weight, and a
@@ -207,22 +217,27 @@ pub(crate) fn elide_path_keep_tail(
         .first()
         .is_some_and(|s| s.is_empty() || *s == "~" || *s == "…" || s.ends_with(':'));
     let prefix = if root.is_empty() {
-        PATH_ELISION.to_string()
-    } else if root.ends_with('/') {
+        format!("…{sep}")
+    } else if root == "/" {
         // The absolute-path root is already the slash itself.
-        format!("{root}{PATH_ELISION}")
+        format!("/…{sep}")
     } else {
-        format!("{root}/{PATH_ELISION}")
+        format!("{root}{sep}…{sep}")
     };
     // Drop whole segments from the front until the remaining tail fits. The
     // width only shrinks as segments leave, so the first fit is the widest
     // one — greedy is optimal here.
-    let mut head = usize::from(root_kept);
-    loop {
+    //
+    // With a root marker, `head = 1` would spell the root, the ellipsis, and
+    // then every remaining segment — strictly wider than the original that
+    // already failed to fit — so that candidate is skipped rather than
+    // measured.
+    let mut head = if root_kept { 2 } else { 0 };
+    while head < segments.len() {
         let candidate = if head == 0 {
-            segments.join("/")
+            join_segments(&segments, sep)
         } else {
-            format!("{prefix}{}", segments[head..].join("/"))
+            format!("{prefix}{}", join_segments(&segments[head..], sep))
         };
         if measure_text(text_system, font, size, &candidate) <= max_width {
             return SharedString::from(candidate);
@@ -243,11 +258,40 @@ pub(crate) fn elide_path_keep_tail(
     )
 }
 
-/// Elides the middle of a single token (a branch name, a shell name) so both
-/// its head and its identifying tail survive: `window-transparency-backdrop`
-/// reads `window-trans…backdrop` in a narrow sidebar instead of losing its
-/// tail to a trailing ellipsis. Falls back to a tail-only elision when even
-/// the head sliver cannot fit.
+/// Characters a token is allowed to break on. Space is in the set because
+/// this also elides labels a human typed — `Backend server logs` — not just
+/// branch names, and a word boundary is the cut a reader forgives.
+const TOKEN_BREAKS: [char; 5] = ['-', '_', '/', '.', ' '];
+
+/// The head this token would rather keep: six glyphs, extended to just past
+/// the next break so the cut lands on a boundary (`window-…` rather than
+/// `window…`). When no break is within reach the plain six is kept — running
+/// on to the cap would spend the whole budget on a prefix and leave the tail,
+/// which is what identifies the token, with nothing.
+fn preferred_head(chars: &[char]) -> usize {
+    let base = chars.len().min(6);
+    let cap = chars.len().min(12);
+    if base >= cap {
+        return base;
+    }
+    match chars[base..cap]
+        .iter()
+        .position(|c| TOKEN_BREAKS.contains(c))
+    {
+        Some(offset) => base + offset + 1,
+        None => base,
+    }
+}
+
+/// Elides the middle of a single token (a branch name, a shell name, a label
+/// the user typed) so both its head and its identifying tail survive:
+/// `window-transparency-backdrop` reads `window-…backdrop` in a narrow
+/// sidebar instead of losing its tail to a trailing ellipsis.
+///
+/// A head that fits but leaves no room for a tail is worse than no head at
+/// all, so the preferred head is given up for a shorter one when that is what
+/// it takes to keep a few trailing glyphs; only when even a three-glyph head
+/// cannot buy a tail does this fall back to a tail-only elision.
 pub(crate) fn elide_keep_edges(
     text_system: &gpui::WindowTextSystem,
     font: &gpui::Font,
@@ -260,50 +304,76 @@ pub(crate) fn elide_keep_edges(
         return SharedString::from(text);
     }
     let chars: Vec<char> = text.chars().collect();
-    // The head is capped so a long token never burns the whole budget on a
-    // prefix; six glyphs keep even a nested branch's first word distinctive.
-    let mut head = chars.len().min(6);
-    // Land the cut on a separator (or just past one) so a branch reads
-    // `window-…backdrop` with its boundary intact instead of `window…ckdrop`.
-    let cap = chars.len().min(12);
-    if head < cap {
-        if matches!(chars[head], '-' | '_' | '/' | '.') {
-            head += 1;
-        } else {
-            while head < cap && !matches!(chars[head], '-' | '_' | '/' | '.') {
-                head += 1;
-            }
-            if head < chars.len() && matches!(chars[head], '-' | '_' | '/' | '.') {
-                head += 1;
-            }
-        }
-    }
     let shaped = |head_n: usize, tail_n: usize| -> f32 {
         let mut s: String = chars[..head_n].iter().collect();
         s.push('…');
         s.extend(chars[chars.len() - tail_n..].iter());
         measure_text(text_system, font, size, &s)
     };
-    if shaped(head, 0) > max_width {
-        // Even `head…` alone is too wide; keep only a tail sliver.
-        return elide_tail_chars(text_system, font, size, text, max_width);
-    }
-    // Grow the tail until the budget is exhausted; width is monotone in the
-    // tail length, so a binary search finds the longest fitting tail.
-    let (mut lo, mut hi) = (0usize, chars.len() - head);
-    while lo < hi {
-        let mid = (lo + hi + 1) / 2;
-        if shaped(head, mid) <= max_width {
-            lo = mid;
-        } else {
-            hi = mid - 1;
+    // Width is monotone in the tail length, so a binary search finds the
+    // longest tail that still fits behind a given head.
+    let longest_tail = |head_n: usize| -> usize {
+        let (mut lo, mut hi) = (0usize, chars.len() - head_n);
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2;
+            if shaped(head_n, mid) <= max_width {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo
+    };
+    /// Enough trailing glyphs to tell two sibling branches apart.
+    const MIN_TAIL: usize = 3;
+    let preferred = preferred_head(&chars);
+    let mut candidates = vec![preferred, 6, 3];
+    candidates.retain(|&h| h > 0 && h <= chars.len());
+    candidates.dedup();
+    let mut best: Option<(usize, usize)> = None;
+    for head_n in candidates {
+        if shaped(head_n, 0) > max_width {
+            continue;
+        }
+        let tail = longest_tail(head_n);
+        if tail >= MIN_TAIL.min(chars.len() - head_n) {
+            best = Some((head_n, tail));
+            break;
+        }
+        if best.is_none_or(|(_, best_tail)| tail > best_tail) {
+            best = Some((head_n, tail));
         }
     }
-    let mut out = String::with_capacity(head + 1 + lo);
+    let Some((head, tail)) = best.filter(|&(_, tail)| tail > 0) else {
+        // No head buys a tail worth showing; a bare tail says more.
+        return elide_tail_chars(text_system, font, size, text, max_width);
+    };
+    let mut out = String::with_capacity(head + 1 + tail);
     out.extend(chars[..head].iter());
     out.push('…');
-    out.extend(chars[chars.len() - lo..].iter());
+    out.extend(chars[chars.len() - tail..].iter());
     SharedString::from(out)
+}
+
+/// Elides a row label. A path keeps its tail — the file or directory being
+/// worked on — while anything else keeps both edges.
+///
+/// A shell title is not always a path: `npm run dev`, `man git-log`, or a name
+/// the user typed into the rename box. Running those through the path rule
+/// drops their head, which is the part that names them, and `… server logs`
+/// says less than the CSS truncation this replaced.
+pub(crate) fn elide_label(
+    text_system: &gpui::WindowTextSystem,
+    font: &gpui::Font,
+    size: f32,
+    text: &str,
+    max_width: f32,
+) -> SharedString {
+    if text.contains('/') || text.contains('\\') {
+        elide_path_keep_tail(text_system, font, size, text, max_width)
+    } else {
+        elide_keep_edges(text_system, font, size, text, max_width)
+    }
 }
 
 /// Keeps the longest tail of `text` that fits after a bare ellipsis. Shared
@@ -1586,9 +1656,12 @@ mod tests {
         assert!(out.ends_with('…'));
     }
 
-    /// Elision is measured against real glyphs, so the exact output depends
-    /// on the test platform's default font; these tests pin the contract —
-    /// what must survive and the width budget — not the pixels.
+    /// `TestAppContext` shapes through gpui's `NoopTextSystem`, where every
+    /// glyph is exactly one em — weight-agnostic and, more to the point,
+    /// CJK-agnostic. That keeps these tests identical on all three CI targets,
+    /// but it also means they cannot speak to the proportional and mixed-script
+    /// widths the elision exists for: what they pin is the contract — which
+    /// parts of a label must survive, and that the result fits its budget.
     fn elide_setup(cx: &mut TestAppContext) -> (gpui::WindowTextSystem, gpui::Font, f32) {
         let size = 14.;
         (
@@ -1641,11 +1714,19 @@ mod tests {
     fn elide_path_keeps_tilde_and_leading_slash(cx: &mut TestAppContext) {
         let (ts, font, size) = elide_setup(cx);
         let home = "~/projects/toolbox/src/ui/tab_sidebar.rs";
+        assert!(
+            measure_text(&ts, &font, size, home) > 200.,
+            "the fixture has to be wider than the budget to exercise elision"
+        );
         let out = elide_path_keep_tail(&ts, &font, size, home, 200.);
         assert!(out.starts_with("~/…/"), "tilde root survives: {out}");
         assert!(out.ends_with("tab_sidebar.rs"));
 
         let abs = "/usr/local/share/man/man1/git.1";
+        assert!(
+            measure_text(&ts, &font, size, abs) > 120.,
+            "the fixture has to be wider than the budget to exercise elision"
+        );
         let out = elide_path_keep_tail(&ts, &font, size, abs, 120.);
         assert!(out.starts_with("/…/"), "absolute root survives: {out}");
         assert!(out.ends_with("git.1"));
@@ -1701,11 +1782,11 @@ mod tests {
     #[gpui::test]
     fn elide_path_cuts_windows_backslash_paths_on_segments(cx: &mut TestAppContext) {
         let (ts, font, size) = elide_setup(cx);
-        let path = "C:\\Users\\dev\\AppData\\Local\\Temp\\verify-build";
+        let path = r"C:\Users\dev\AppData\Local\Temp\verify-build";
         let max = 200.;
         assert!(measure_text(&ts, &font, size, path) > max);
         let out = elide_path_keep_tail(&ts, &font, size, path, max);
-        assert!(out.starts_with("C:/…/"), "drive letter survives: {out}");
+        assert!(out.starts_with(r"C:\…\"), "drive letter survives: {out}");
         assert!(
             out.ends_with("verify-build"),
             "the leaf segment survives: {out}"
@@ -1713,16 +1794,103 @@ mod tests {
         assert!(measure_text(&ts, &font, size, &out) <= max);
     }
 
+    /// One tab must not spell its location two ways depending on how wide the
+    /// sidebar happens to be.
+    #[gpui::test]
+    fn elide_path_keeps_the_separator_the_path_arrived_with(cx: &mut TestAppContext) {
+        let (ts, font, size) = elide_setup(cx);
+        let windows = r"C:\Users\dev\projects\toolbox\src\ui\app.rs";
+        let wide = measure_text(&ts, &font, size, windows) + 1.;
+        assert_eq!(
+            elide_path_keep_tail(&ts, &font, size, windows, wide),
+            windows,
+            "a path that fits is left exactly as it arrived"
+        );
+        let out = elide_path_keep_tail(&ts, &font, size, windows, 120.);
+        assert!(!out.contains('/'), "no forward slash creeps in: {out}");
+
+        let unix = "/home/dev/projects/toolbox/src/ui/app.rs";
+        let out = elide_path_keep_tail(&ts, &font, size, unix, 120.);
+        assert!(!out.contains('\\'), "no backslash creeps in: {out}");
+    }
+
+    /// A branch with no `-`, `_`, `/` or `.` in reach used to lose its head
+    /// entirely, which is the one thing this function promises not to do.
+    #[gpui::test]
+    fn elide_edges_keeps_a_head_on_a_separatorless_token(cx: &mut TestAppContext) {
+        let (ts, font, size) = elide_setup(cx);
+        let branch = "verylongbranchnamewithoutseps";
+        for max in [60., 80., 100., 120.] {
+            let out = elide_keep_edges(&ts, &font, size, branch, max);
+            assert!(
+                out.starts_with('v'),
+                "head survives at {max}px: {out}",
+                max = max
+            );
+            assert!(out.ends_with('s'), "tail survives at {max}px: {out}");
+            assert!(measure_text(&ts, &font, size, &out) <= max);
+        }
+    }
+
+    /// A head that fits but leaves nothing behind the ellipsis says less than
+    /// a shorter head that keeps the identifying tail.
+    #[gpui::test]
+    fn elide_edges_gives_up_head_room_to_keep_a_tail(cx: &mut TestAppContext) {
+        let (ts, font, size) = elide_setup(cx);
+        let branch = "feature/some-really-long-thing";
+        let max = 80.;
+        assert!(measure_text(&ts, &font, size, branch) > max);
+        let out = elide_keep_edges(&ts, &font, size, branch, max);
+        assert!(
+            !out.ends_with('…'),
+            "the tail is never traded away for a longer head: {out}"
+        );
+        assert!(out.ends_with('g'), "the identifying tail survives: {out}");
+        assert!(measure_text(&ts, &font, size, &out) <= max);
+    }
+
+    /// The sidebar title is not always a path. `elide_label` has to notice,
+    /// because the path rule drops the head — and for a command line or a name
+    /// the user typed, the head is the part that names it.
+    #[gpui::test]
+    fn elide_label_keeps_the_head_of_a_non_path(cx: &mut TestAppContext) {
+        let (ts, font, size) = elide_setup(cx);
+        for text in ["Backend server logs", "npm run dev -- --watch"] {
+            let max = 90.;
+            assert!(measure_text(&ts, &font, size, text) > max);
+            let out = elide_label(&ts, &font, size, text, max);
+            let first = text.chars().next().unwrap();
+            assert!(
+                out.starts_with(first),
+                "a non-path keeps its head: {out} (from {text})"
+            );
+            assert!(measure_text(&ts, &font, size, &out) <= max);
+        }
+    }
+
+    /// …while a path still gets the tail-first treatment through the same
+    /// entry point.
+    #[gpui::test]
+    fn elide_label_still_keeps_the_tail_of_a_path(cx: &mut TestAppContext) {
+        let (ts, font, size) = elide_setup(cx);
+        let path = "~/projects/toolbox/src/ui/tab_sidebar.rs";
+        let out = elide_label(&ts, &font, size, path, 200.);
+        assert!(out.starts_with("~/…/"), "root survives: {out}");
+        assert!(out.ends_with("tab_sidebar.rs"), "leaf survives: {out}");
+    }
+
     #[test]
     fn short_title_cuts_windows_paths_on_backslashes() {
         assert_eq!(
             short_title(r"C:\Users\dev\projects\app"),
-            "…/dev/projects/app"
+            r"…\dev\projects\app"
         );
         assert_eq!(
             short_title(r"C:\Users\dev\repo\deep\path\src\ui"),
-            "…/path/src/ui"
+            r"…\path\src\ui"
         );
+        // A shallow Windows path keeps its drive and its backslashes.
+        assert_eq!(short_title(r"C:\Users\app"), r"C:\Users\app");
     }
 
     /// One chip is 100 wide plus a 6 gap, so this is "room for exactly four".
