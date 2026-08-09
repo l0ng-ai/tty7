@@ -1273,6 +1273,16 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpReplaceBody => "{names} 在这个文件夹里已经存在，上传会覆盖它们。",
         L10nKey::Replace => "覆盖",
         L10nKey::SftpErrorInvalidOctalMode => "无效的八进制模式",
+        L10nKey::SettingsDaemonStaleDescInPlace => {
+            "tty7 是原地更新的，所以应用是新的，但你的面板仍由上一个版本在服务。\
+             server 可以在不停止的情况下把自己换成新版本：你的 shell 和里面正在跑的东西会直接延续下来。\
+             用 tty7 内置 SSH 客户端的面板除外——那些连接会断开，需要重新打开。"
+        }
+        L10nKey::AppRestartServerBodyInPlace => {
+            "后台 server 会在不停止的情况下把自己换成当前这个版本。\
+             你的 shell 会继续运行——面板里的命令、agent、`ssh` 会话都不会被打断——窗口稍后会重新连上它们。\
+             用 tty7 内置 SSH 客户端的面板除外：那些连接会断开，需要重新打开。"
+        }
         L10nKey::PaneRestoredScreenBanner => {
             "已恢复的画面 —— 下面是新的 shell，上面的内容都已不在运行"
         }

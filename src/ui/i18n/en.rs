@@ -1340,6 +1340,18 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::Replace => "Replace",
         L10nKey::SftpErrorInvalidOctalMode => "invalid octal mode",
+        L10nKey::SettingsDaemonStaleDescInPlace => {
+            "tty7 was updated in place, so the app is new but your panes are still served by the \
+             previous build. The server can replace itself with the new one without stopping: \
+             your shells and whatever is running in them carry straight over. Panes on tty7's \
+             built-in SSH client are the exception — those connections close and need reopening."
+        }
+        L10nKey::AppRestartServerBodyInPlace => {
+            "The background server replaces itself with this build without stopping. Your shells \
+             keep running — commands, agents and `ssh` sessions in a pane are not interrupted — \
+             and the window reconnects to them a moment later. Panes on tty7's built-in SSH \
+             client are the exception: those connections close and need reopening."
+        }
         L10nKey::PaneRestoredScreenBanner => {
             "restored screen — this shell is new, nothing above it is still running"
         }

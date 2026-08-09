@@ -15,6 +15,13 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(6);
+/// How long to wait for a refusal before assuming a handoff went through.
+///
+/// The daemon either execs — in which case this socket dies and the read fails
+/// at once — or writes back why it did not. Neither takes long; the timeout is
+/// only here so a daemon that hangs mid-handoff does not hang the window with
+/// it.
+const HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long after the endpoint disappears the daemon process itself gets to
 /// finish exiting. Under a graceful shutdown this is milliseconds; the margin
 /// covers the Windows descendant reap that runs before `exit`.
@@ -317,6 +324,76 @@ fn dialect_of<S: io::Read + io::Write>(mut link: S) -> Option<DialectRefusal> {
 pub fn restart() -> anyhow::Result<()> {
     stop();
     ensure_running()
+}
+
+/// Ask the running daemon to become this build without stopping.
+///
+/// It keeps its pid, its ptys and everything running on them; what it loses is
+/// this connection, which its new image has never heard of. So the reply to a
+/// handoff that worked is the socket closing, and an actual message back means
+/// it did not happen.
+///
+/// Callers that only want the daemon to be on the current build should treat a
+/// failure here as "fall back to [`restart`]": every reason this can fail — an
+/// older daemon that does not know the message, a platform with no `execve`, an
+/// exec that was refused — leaves the daemon exactly as it was, still serving.
+pub fn hand_off() -> anyhow::Result<()> {
+    use std::io::Write as _;
+
+    if !local_daemon_supports(crate::daemon::protocol::FEATURE_HANDOFF) {
+        anyhow::bail!("the running daemon cannot replace itself in place");
+    }
+    let exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("could not locate own executable: {e}"))?;
+
+    let mut stream = transport::connect()?;
+    ClientMsg::Handoff { exe: exe.clone() }.encode(&mut stream)?;
+    stream.flush()?;
+
+    let _ = stream.set_read_timeout(Some(HANDOFF_TIMEOUT));
+    match crate::daemon::protocol::DaemonMsg::read(&mut stream) {
+        // The far end is the new image, which never had this socket.
+        Err(_) => {}
+        Ok(crate::daemon::protocol::DaemonMsg::Error(why)) => {
+            anyhow::bail!("the daemon refused to hand over: {why}")
+        }
+        Ok(other) => anyhow::bail!("unexpected daemon reply to Handoff: {other:?}"),
+    }
+    drop(stream);
+
+    // The socket is rebound by the new image a moment after the exec. Until it
+    // is, connecting fails the same way it would against no daemon at all —
+    // which is exactly what `ensure_running` would misread as "start another
+    // one", so the wait belongs here rather than there.
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    loop {
+        if let Ok(mut stream) = transport::connect() {
+            match query_daemon_version(&mut stream) {
+                VersionProbe::Speaks(v) => {
+                    let carried_on = v.build != env!("CARGO_PKG_VERSION");
+                    note_local_daemon(Some(v));
+                    if carried_on {
+                        anyhow::bail!("the daemon is still running its old build");
+                    }
+                    return Ok(());
+                }
+                _ => {
+                    note_local_daemon(None);
+                    anyhow::bail!(
+                        "the daemon that came back does not answer the version handshake"
+                    );
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "the daemon did not start listening again at {} within {:?}",
+                transport::endpoint_display(),
+                STARTUP_TIMEOUT
+            );
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
 }
 
 pub fn stop() {

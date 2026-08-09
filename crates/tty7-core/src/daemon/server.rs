@@ -26,6 +26,15 @@ impl Registry {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Resume naming panes where the previous image left off.
+    ///
+    /// Reusing a number would be worse than skipping one: a client that
+    /// reconnects after a handoff is still holding the old ids, and an `Attach`
+    /// for one of them has to find the pane it means or nothing at all.
+    fn claim_ids_past(&self, next: u64) {
+        self.next_id.fetch_max(next, Ordering::Relaxed);
+    }
+
     fn seed_ids_past(&self, machine: &crate::core::machine::Machine) {
         let max = machine
             .panes
@@ -291,6 +300,11 @@ macro_rules! startup_note {
 }
 
 pub fn run_daemon() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    if let Some(inheritance) = crate::daemon::handoff::requested() {
+        return run_adopting(inheritance);
+    }
+
     // Before either endpoint, and before the machine tree is opened. Whoever
     // holds this is the server; everyone else stands down while it lives.
     //
@@ -330,6 +344,121 @@ pub fn run_daemon() -> anyhow::Result<()> {
     log::info!("no control listener on this platform; serving panes only");
 
     run_with(registry)
+}
+
+/// Come up as the far side of a handoff: the panes are already running, and
+/// this image only has to recognise them.
+///
+/// The seat is adopted rather than claimed — the lock is held by this process,
+/// which is the process that held it before the exec. Claiming would ask the
+/// kernel for a lock our own descriptor already has, be refused, and take the
+/// "another server is already serving" exit, which would leave the machine with
+/// no daemon and a set of orphaned shells nobody can reach.
+#[cfg(unix)]
+fn run_adopting(inheritance: crate::daemon::handoff::Inheritance) -> anyhow::Result<()> {
+    let _seat = inheritance
+        .seat_fd
+        .map(|fd| unsafe { crate::daemon::singleton::adopt(fd) });
+    if _seat.is_none() {
+        startup_note!("tty7-server: handed over without a seat descriptor; serving unprotected");
+    }
+
+    let registry = Arc::new(Registry::new());
+
+    match crate::daemon::handoff::adopt(inheritance.blob_fd) {
+        Some(adopted) => {
+            registry.claim_ids_past(adopted.next_pane_id);
+            let mut kept = 0usize;
+            for carried in adopted.panes {
+                let id = carried.id;
+                let on_dead = reaper(registry.clone(), id);
+                match crate::daemon::pane::DaemonPane::adopt(carried, on_dead) {
+                    Ok(pane) => {
+                        registry.insert(pane);
+                        kept += 1;
+                    }
+                    // The shell is alive and this image cannot speak to its pty.
+                    // Saying so is all that can be done: the descriptor closes
+                    // when this process eventually exits, and the shell gets the
+                    // hangup it would have got from an ordinary restart.
+                    Err(e) => log::error!("pane {id} could not be adopted: {e}"),
+                }
+            }
+            startup_note!("tty7-server: adopted {kept} pane(s) from the previous build");
+        }
+        None => startup_note!(
+            "tty7-server: the handoff blob was unreadable; the previous build's panes are lost"
+        ),
+    }
+
+    {
+        let mut services = control_services();
+        services.panes = Some(registry.clone());
+        match crate::host::server::spawn_control_listener_with(
+            crate::host::local::LocalHost::shared(),
+            services,
+        ) {
+            Ok(path) => startup_note!("tty7-server: control socket at {}", path.display()),
+            Err(e) => startup_note!("tty7-server: control listener unavailable: {e}"),
+        }
+    }
+
+    run_with(registry)
+}
+
+/// Become `exe` in place, keeping every pane that can survive the crossing.
+///
+/// Returns the reason it did not happen; on success there is no return, because
+/// by then this program has been replaced by the one it was asked to become.
+#[cfg(unix)]
+fn hand_over(registry: &Registry, exe: &std::path::Path) -> anyhow::Error {
+    let mut carried = Vec::new();
+    for pane in registry.all() {
+        match pane.carry() {
+            Some(c) => carried.push(c),
+            None => {
+                // A native-SSH pane's session is cipher state in this process's
+                // memory; the socket would cross and nothing able to speak on
+                // it would. Hanging it up here means the far end sees a close
+                // rather than a connection that has stopped answering.
+                log::info!("pane {} cannot cross a handoff; closing it", pane.id);
+                kill_pane(registry, pane.id);
+            }
+        }
+    }
+
+    // The tree is what the window rebuilds itself from when it reconnects, and
+    // the reconnect happens milliseconds from now.
+    if let Some(store) = crate::core::machine::observed_store() {
+        store.flush();
+    }
+
+    crate::daemon::handoff::take_over(
+        exe,
+        carried,
+        registry.alloc_id(),
+        crate::daemon::singleton::held_fd(),
+    )
+}
+
+#[cfg(not(unix))]
+fn hand_over(_registry: &Registry, _exe: &std::path::Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "this platform has no way to replace a running program while keeping its \
+         open consoles, so the daemon has to be stopped and started"
+    )
+}
+
+/// What a pane does to the registry when its shell dies.
+fn reaper(registry: Arc<Registry>, id: u64) -> impl FnOnce() + Send + 'static {
+    move || {
+        std::thread::Builder::new()
+            .name("tty7-daemon-pane-reap".to_string())
+            .spawn(move || {
+                registry.remove(id);
+            })
+            .ok();
+    }
 }
 
 pub fn control_services() -> crate::host::server::Services {
@@ -628,6 +757,16 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
 
         ClientMsg::Kill { pane_id } => {
             kill_pane(&registry, pane_id);
+            Ok(())
+        }
+
+        ClientMsg::Handoff { exe } => {
+            let mut w = write_stream;
+            // Only ever returns having failed: a handoff that works replaces
+            // this program mid-call, and there is nobody left to write a reply.
+            let failure = hand_over(&registry, &exe);
+            log::error!("handoff to {} did not happen: {failure}", exe.display());
+            DaemonMsg::Error(failure.to_string()).encode(&mut w)?;
             Ok(())
         }
 

@@ -1409,10 +1409,21 @@ impl Tty7App {
     }
 
     pub(crate) fn restart_daemon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Two different actions wearing one name. Where the service can rewrite
+        // itself in place, nothing in a pane is interrupted and promising the
+        // user a bloodbath would be a lie that costs them the feature; where it
+        // cannot, every running command really does end, and that is the one
+        // thing they need to be told before they agree.
+        let in_place =
+            crate::daemon::spawn::local_daemon_supports(crate::daemon::protocol::FEATURE_HANDOFF);
         let answer = window.prompt(
             PromptLevel::Warning,
             t(L10nKey::AppRestartServerTitle),
-            Some(t(L10nKey::AppRestartServerBody)),
+            Some(t(if in_place {
+                L10nKey::AppRestartServerBodyInPlace
+            } else {
+                L10nKey::AppRestartServerBody
+            })),
             &crate::ui::confirm_answers(
                 t(L10nKey::AppRestart),
                 t(crate::ui::i18n::L10nKey::Cancel),
@@ -1443,7 +1454,20 @@ impl Tty7App {
                 return;
             }
             let restarted = cx
-                .background_spawn(async move { crate::daemon::spawn::restart() })
+                .background_spawn(async move {
+                    // In place if it can be: the panes and everything running
+                    // in them carry straight over. Every way this fails leaves
+                    // the daemon serving exactly as it was, so falling back to
+                    // stopping and starting it loses nothing that was not
+                    // already going to be lost.
+                    match crate::daemon::spawn::hand_off() {
+                        Ok(()) => Ok(()),
+                        Err(e) => {
+                            log::info!("service could not hand over in place ({e}); restarting it");
+                            crate::daemon::spawn::restart()
+                        }
+                    }
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 match &restarted {

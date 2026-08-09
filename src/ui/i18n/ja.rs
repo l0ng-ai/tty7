@@ -1387,6 +1387,18 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::Replace => "置き換える",
         L10nKey::SftpErrorInvalidOctalMode => "無効な 8 進数モードです",
+        L10nKey::SettingsDaemonStaleDescInPlace => {
+            "tty7 はその場で更新されたため、アプリは新しくても、ペインは前のビルドが提供したままです。\
+             サーバーは停止せずに新しいビルドへ自分自身を置き換えられます。\
+             シェルとその中で動いているものはそのまま引き継がれます。\
+             tty7 内蔵の SSH クライアントを使うペインだけは例外で、その接続は閉じられ、開き直しが必要です"
+        }
+        L10nKey::AppRestartServerBodyInPlace => {
+            "バックグラウンドサーバーは停止せずに、自分自身をこのビルドに置き換えます。\
+             シェルは動いたままで、ペイン内のコマンド・エージェント・`ssh` セッションは中断されません。\
+             ウィンドウはすぐに再接続します。\
+             tty7 内蔵の SSH クライアントを使うペインだけは例外で、その接続は閉じられ、開き直しが必要です"
+        }
         L10nKey::PaneRestoredScreenBanner => {
             "復元された画面 — 以下は新しいシェルで、これより上のものは動いていません"
         }

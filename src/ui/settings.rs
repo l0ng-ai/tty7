@@ -5734,6 +5734,15 @@ impl Tty7App {
         });
         let failure = update_status.failure.clone();
         let stale_daemon = crate::daemon::spawn::local_daemon_stale_build();
+        // Whether picking up the new build costs the user their running panes
+        // decides what this offer is, so it decides what it says.
+        let stale_daemon_note = if crate::daemon::spawn::local_daemon_supports(
+            crate::daemon::protocol::FEATURE_HANDOFF,
+        ) {
+            L10nKey::SettingsDaemonStaleDescInPlace
+        } else {
+            L10nKey::SettingsDaemonStaleDesc
+        };
         let check_for_updates = cx.global::<Config>().check_for_updates;
         let auto_download = cx.global::<Config>().auto_download_updates;
         let channel_idx = match cx.global::<Config>().update_channel {
@@ -6072,7 +6081,7 @@ impl Tty7App {
                                     div()
                                         .text_xs()
                                         .text_color(muted_fg)
-                                        .child(t(L10nKey::SettingsDaemonStaleDesc)),
+                                        .child(t(stale_daemon_note)),
                                 )
                                 .child(
                                     h_flex().child(

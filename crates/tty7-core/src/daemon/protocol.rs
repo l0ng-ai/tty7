@@ -23,6 +23,13 @@ pub const FEATURE_RESIZE_ECHO: &str = "resize-echo";
 /// claim a restore that never happened.
 pub const FEATURE_RESTORE_SCROLLBACK: &str = "restore-scrollback";
 
+/// The daemon can replace its own binary without stopping, keeping every pty
+/// and everything running on one — `ClientMsg::Handoff`. Advertised only where
+/// it can actually be done, which is where `execve` exists, so a client can use
+/// it to choose between offering an upgrade that costs the user nothing and one
+/// that costs them every running command.
+pub const FEATURE_HANDOFF: &str = "handoff";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonVersion {
     pub protocol: u32,
@@ -36,14 +43,18 @@ pub struct DaemonVersion {
 
 impl DaemonVersion {
     pub fn current() -> DaemonVersion {
+        let mut features = vec![
+            FEATURE_PANE_OWNER.to_string(),
+            FEATURE_RESIZE_ECHO.to_string(),
+            FEATURE_RESTORE_SCROLLBACK.to_string(),
+        ];
+        if cfg!(unix) {
+            features.push(FEATURE_HANDOFF.to_string());
+        }
         DaemonVersion {
             protocol: PROTOCOL_VERSION,
             build: env!("CARGO_PKG_VERSION").to_string(),
-            features: vec![
-                FEATURE_PANE_OWNER.to_string(),
-                FEATURE_RESIZE_ECHO.to_string(),
-                FEATURE_RESTORE_SCROLLBACK.to_string(),
-            ],
+            features,
             instance: process_instance().to_string(),
         }
     }
@@ -614,6 +625,16 @@ pub enum ClientMsg {
     },
     List,
     Shutdown,
+    /// Become `exe` without stopping: the daemon rewrites itself in place and
+    /// keeps every pty, shell and pane id it is holding. The connection dies in
+    /// the process — the new image has never heard of it — so this is the last
+    /// thing a client can say on it, and the reply is the socket closing.
+    ///
+    /// Unix only. Elsewhere the daemon answers with an error and the caller
+    /// falls back to stopping and starting it.
+    Handoff {
+        exe: PathBuf,
+    },
     EnsureLoopbackForward(LoopbackForwardRequest),
     ListLoopbackForwards,
     CloseLoopbackForward(LoopbackForwardId),
@@ -750,6 +771,7 @@ mod kind {
     pub const SPAWN_OWNED: u8 = 53;
     pub const OBSERVE: u8 = 54;
     pub const SEND_INPUT: u8 = 55;
+    pub const HANDOFF: u8 = 56;
 
     pub const SPAWNED: u8 = 1;
     pub const SNAPSHOT: u8 = 2;
@@ -942,6 +964,7 @@ impl ClientMsg {
             ClientMsg::Kill { pane_id } => write_frame(w, kind::KILL, &to_json(pane_id)?),
             ClientMsg::List => write_frame(w, kind::LIST, &[]),
             ClientMsg::Shutdown => write_frame(w, kind::SHUTDOWN, &[]),
+            ClientMsg::Handoff { exe } => write_frame(w, kind::HANDOFF, &to_json(exe)?),
             ClientMsg::EnsureLoopbackForward(req) => {
                 write_frame(w, kind::ENSURE_LOOPBACK_FORWARD, &to_json(req)?)
             }
@@ -1055,6 +1078,9 @@ impl ClientMsg {
             },
             kind::LIST => ClientMsg::List,
             kind::SHUTDOWN => ClientMsg::Shutdown,
+            kind::HANDOFF => ClientMsg::Handoff {
+                exe: from_json(&payload)?,
+            },
             kind::ENSURE_LOOPBACK_FORWARD => ClientMsg::EnsureLoopbackForward(from_json(&payload)?),
             kind::LIST_LOOPBACK_FORWARDS => ClientMsg::ListLoopbackForwards,
             kind::CLOSE_LOOPBACK_FORWARD => ClientMsg::CloseLoopbackForward(from_json(&payload)?),

@@ -1108,6 +1108,8 @@ l10n_keys! {
     Replace,
     SftpErrorInvalidOctalMode,
     PaneRestoredScreenBanner,
+    AppRestartServerBodyInPlace,
+    SettingsDaemonStaleDescInPlace,
     SettingsPersistScrollback,
     SettingsPersistScrollbackDescription,
 }

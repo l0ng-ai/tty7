@@ -760,6 +760,17 @@ struct PtyBackend {
     integration_dir: Option<PathBuf>,
 }
 
+/// The pty half of a pane, before it is wired up: opened and spawned into by
+/// [`DaemonPane::spawn`], inherited across an `exec` by [`DaemonPane::adopt`].
+struct PtyParts {
+    master: Box<dyn MasterPty + Send>,
+    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    shell_pid: Option<u32>,
+    integration_dir: Option<PathBuf>,
+    reader_handle: Box<dyn Read + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+}
+
 struct NativeSshBackend {
     handle: Arc<crate::daemon::ssh::SshSessionHandle>,
     connection: crate::daemon::ssh::SharedConnection,
@@ -921,6 +932,235 @@ fn push_image_frame(frames: &mut Vec<GraphicsFrame>, frame: Vec<u8>) {
     }
 }
 
+/// A live pane, reduced to what survives an `exec` plus what has to be written
+/// down because it does not.
+///
+/// The descriptor number and the child pid are the half the kernel keeps for
+/// us. Everything else here was in memory, and memory is exactly what `exec`
+/// replaces — so a pane's screen, its cwd, its prompt state and its agent are
+/// carried across by hand or not at all. See `daemon::handoff`.
+#[cfg(unix)]
+pub struct Carried {
+    pub id: u64,
+    pub owner: Option<String>,
+    pub master_fd: std::os::fd::RawFd,
+    pub child_pid: u32,
+    pub integration_dir: Option<PathBuf>,
+    pub size: WinSize,
+    pub ring: Vec<crate::daemon::scrollback::Segment>,
+    pub cwd: Option<PathBuf>,
+    pub shell_active: bool,
+    pub at_prompt: bool,
+    pub last_exit: Option<i32>,
+    pub remote: Option<RemoteContext>,
+    pub agent: Option<crate::core::cli_agent::CLIAgent>,
+    pub agent_argv: Option<Vec<String>>,
+    pub agent_session: Option<crate::core::cli_agent::AgentSessionState>,
+}
+
+/// A pty master this process inherited from its own previous image.
+///
+/// `portable-pty` can only hand out a master it opened, and after an `exec`
+/// there is nothing left of the one it opened except the descriptor number. The
+/// operations a pane actually performs on a master are few enough — resize, ask
+/// the size, clone a reader, take a writer, ask which process group is in the
+/// foreground — and all of them are ioctls on that descriptor.
+#[cfg(unix)]
+struct AdoptedMaster {
+    fd: std::os::fd::OwnedFd,
+}
+
+#[cfg(unix)]
+impl AdoptedMaster {
+    fn from_fd(fd: std::os::fd::RawFd) -> anyhow::Result<Self> {
+        use std::os::fd::FromRawFd as _;
+
+        // A descriptor that no longer refers to a terminal is one the previous
+        // image did not really hold — a number reused after a close, or a blob
+        // that named the wrong one. Adopting it would produce a pane whose
+        // every ioctl fails in a different way; refusing produces a pane that
+        // is simply gone, which is a thing the client already handles.
+        if unsafe { libc::isatty(fd) } != 1 {
+            anyhow::bail!("descriptor {fd} is not a terminal");
+        }
+        Ok(Self {
+            fd: unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) },
+        })
+    }
+
+    fn dup(&self) -> std::io::Result<std::fs::File> {
+        Ok(std::fs::File::from(self.fd.try_clone()?))
+    }
+}
+
+#[cfg(unix)]
+impl MasterPty for AdoptedMaster {
+    fn resize(&self, size: PtySize) -> anyhow::Result<()> {
+        use std::os::fd::AsRawFd as _;
+
+        let ws = libc::winsize {
+            ws_row: size.rows,
+            ws_col: size.cols,
+            ws_xpixel: size.pixel_width,
+            ws_ypixel: size.pixel_height,
+        };
+        if unsafe { libc::ioctl(self.fd.as_raw_fd(), libc::TIOCSWINSZ, &ws as *const _) } != 0 {
+            anyhow::bail!("TIOCSWINSZ failed: {}", std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn get_size(&self) -> anyhow::Result<PtySize> {
+        use std::os::fd::AsRawFd as _;
+
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        if unsafe { libc::ioctl(self.fd.as_raw_fd(), libc::TIOCGWINSZ, &mut ws as *mut _) } != 0 {
+            anyhow::bail!("TIOCGWINSZ failed: {}", std::io::Error::last_os_error());
+        }
+        Ok(PtySize {
+            rows: ws.ws_row,
+            cols: ws.ws_col,
+            pixel_width: ws.ws_xpixel,
+            pixel_height: ws.ws_ypixel,
+        })
+    }
+
+    fn try_clone_reader(&self) -> anyhow::Result<Box<dyn Read + Send>> {
+        Ok(Box::new(self.dup()?))
+    }
+
+    /// Deliberately a plain `File`, unlike the writer `portable-pty` hands out:
+    /// that one sends EOF to the shell when it is dropped. Correct for a pty
+    /// whose pane is being closed, wrong for one whose pane is only changing
+    /// which program serves it.
+    fn take_writer(&self) -> anyhow::Result<Box<dyn Write + Send>> {
+        Ok(Box::new(self.dup()?))
+    }
+
+    fn as_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd as _;
+        Some(self.fd.as_raw_fd())
+    }
+
+    fn process_group_leader(&self) -> Option<libc::pid_t> {
+        use std::os::fd::AsRawFd as _;
+        match unsafe { libc::tcgetpgrp(self.fd.as_raw_fd()) } {
+            pid if pid > 0 => Some(pid),
+            _ => None,
+        }
+    }
+}
+
+/// A child this process inherited from its own previous image.
+///
+/// Still genuinely our child — `exec` keeps the process, so the kernel's
+/// parent-child bookkeeping is untouched and `waitpid` works. What was lost is
+/// the `Child` value that knew how to ask.
+#[cfg(unix)]
+#[derive(Debug)]
+struct AdoptedChild {
+    pid: libc::pid_t,
+    exited: Option<portable_pty::ExitStatus>,
+}
+
+#[cfg(unix)]
+impl AdoptedChild {
+    fn new(pid: u32) -> Self {
+        Self {
+            pid: pid as libc::pid_t,
+            exited: None,
+        }
+    }
+
+    fn reap(&mut self, flags: libc::c_int) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+        if let Some(status) = &self.exited {
+            return Ok(Some(status.clone()));
+        }
+        let mut raw: libc::c_int = 0;
+        let seen = unsafe { libc::waitpid(self.pid, &mut raw, flags) };
+        if seen == 0 {
+            return Ok(None);
+        }
+        if seen < 0 {
+            let e = std::io::Error::last_os_error();
+            // ECHILD means someone already reaped it, or it was never ours.
+            // Either way there is no status left to collect and no point in
+            // asking again — reporting an exit of zero is what an unknown but
+            // finished child amounts to.
+            if e.raw_os_error() == Some(libc::ECHILD) {
+                let status = portable_pty::ExitStatus::with_exit_code(0);
+                self.exited = Some(status.clone());
+                return Ok(Some(status));
+            }
+            return Err(e);
+        }
+        let code = if libc::WIFEXITED(raw) {
+            libc::WEXITSTATUS(raw) as u32
+        } else if libc::WIFSIGNALED(raw) {
+            128 + libc::WTERMSIG(raw) as u32
+        } else {
+            0
+        };
+        let status = portable_pty::ExitStatus::with_exit_code(code);
+        self.exited = Some(status.clone());
+        Ok(Some(status))
+    }
+}
+
+#[cfg(unix)]
+impl portable_pty::Child for AdoptedChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+        self.reap(libc::WNOHANG)
+    }
+
+    fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+        loop {
+            if let Some(status) = self.reap(0)? {
+                return Ok(status);
+            }
+        }
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        Some(self.pid as u32)
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct AdoptedKiller {
+    pid: libc::pid_t,
+}
+
+#[cfg(unix)]
+impl portable_pty::ChildKiller for AdoptedChild {
+    fn kill(&mut self) -> std::io::Result<()> {
+        AdoptedKiller { pid: self.pid }.kill()
+    }
+
+    fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+        Box::new(AdoptedKiller { pid: self.pid })
+    }
+}
+
+#[cfg(unix)]
+impl portable_pty::ChildKiller for AdoptedKiller {
+    fn kill(&mut self) -> std::io::Result<()> {
+        if unsafe { libc::kill(self.pid, libc::SIGKILL) } != 0 {
+            let e = std::io::Error::last_os_error();
+            // Already gone is the outcome kill was asked for.
+            if e.raw_os_error() != Some(libc::ESRCH) {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+        Box::new(AdoptedKiller { pid: self.pid })
+    }
+}
+
 /// The screen a restored pane opens with.
 ///
 /// `segments` is what some earlier pane — the one this one replaces after a
@@ -990,26 +1230,63 @@ impl DaemonPane {
             None => ReplayRing::new(size),
         };
 
-        let state = Arc::new(Mutex::new(PaneState {
-            id,
-            ring,
-            subscriber: None,
-            subscriber_epoch: 0,
-            observers: Vec::new(),
-            observer_seq: 0,
-            cwd: spawn.initial_cwd,
-            shell: ShellState::default(),
-            remote: spawn.remote.clone(),
-            agent: None,
-            agent_session: None,
-            agent_argv: None,
-            alive: true,
-            exit_code: None,
-        }));
+        Ok(Self::over_pty(
+            PtyParts {
+                master: pair.master,
+                child,
+                shell_pid,
+                integration_dir: spawn.integration_dir,
+                reader_handle,
+                writer,
+            },
+            PaneState {
+                id,
+                ring,
+                subscriber: None,
+                subscriber_epoch: 0,
+                observers: Vec::new(),
+                observer_seq: 0,
+                cwd: spawn.initial_cwd,
+                shell: ShellState::default(),
+                remote: spawn.remote.clone(),
+                agent: None,
+                agent_session: None,
+                agent_argv: None,
+                alive: true,
+                exit_code: None,
+            },
+            owner,
+            on_dead,
+        ))
+    }
+
+    /// Wire a pty, a child and a starting state into a running pane.
+    ///
+    /// Shared by the two ways a pty-backed pane comes to exist — one that opens
+    /// a pty and starts a shell in it, and one that inherits both from the
+    /// image it replaced. Everything below this line is identical for them, and
+    /// it is the part where getting it subtly wrong shows up as a pane that
+    /// never reports its death or never sees its own output.
+    fn over_pty(
+        parts: PtyParts,
+        state: PaneState,
+        owner: Option<String>,
+        on_dead: impl FnOnce() + Send + 'static,
+    ) -> Arc<Self> {
+        let PtyParts {
+            master,
+            child,
+            shell_pid,
+            integration_dir,
+            reader_handle,
+            writer,
+        } = parts;
+
+        let id = state.id;
+        let state = Arc::new(Mutex::new(state));
         let shutting_down = Arc::new(AtomicBool::new(false));
         let gate = Arc::new(OutputGate::new());
-
-        let master = Arc::new(Mutex::new(Some(pair.master)));
+        let master = Arc::new(Mutex::new(Some(master)));
 
         let pane = Arc::new(Self {
             id,
@@ -1018,7 +1295,7 @@ impl DaemonPane {
                 master: master.clone(),
                 child: child.clone(),
                 shell_pid,
-                integration_dir: spawn.integration_dir,
+                integration_dir,
             }),
             writer: writer.clone(),
             shutting_down: shutting_down.clone(),
@@ -1084,7 +1361,118 @@ impl DaemonPane {
         );
         *pane.reader.lock().unwrap() = Some(reader);
 
-        Ok(pane)
+        pane
+    }
+
+    /// Reduce a live pane to what can be handed to another program image.
+    ///
+    /// Nothing is taken: the descriptor number is copied out, not the
+    /// descriptor, and the pane keeps serving exactly as before. That is what
+    /// lets the caller stage a whole handoff and then abandon it — an `exec`
+    /// that fails costs a log line, not a machine's worth of shells.
+    ///
+    /// `None` for a native-SSH pane. Its session lives in this process's
+    /// memory, not in a descriptor, and no amount of copying descriptor numbers
+    /// would let the new image speak on the wire the old one had encrypted.
+    #[cfg(unix)]
+    pub fn carry(&self) -> Option<crate::daemon::pane::Carried> {
+        let PaneBackend::Pty(pty) = &self.backend else {
+            return None;
+        };
+        let master_fd = pty
+            .master
+            .lock()
+            .ok()?
+            .as_ref()
+            .and_then(|master| master.as_raw_fd())?;
+        let st = self.state.lock().unwrap();
+        Some(Carried {
+            id: self.id,
+            owner: self.owner.clone(),
+            master_fd,
+            child_pid: pty.shell_pid?,
+            integration_dir: pty.integration_dir.clone(),
+            size: st.ring.tail_size(),
+            ring: st.ring.snapshot(),
+            cwd: st.cwd.clone(),
+            shell_active: st.shell.active,
+            at_prompt: st.shell.at_prompt,
+            last_exit: st.shell.last_exit_code,
+            remote: st.remote.clone(),
+            agent: st.agent,
+            agent_argv: st.agent_argv.clone(),
+            agent_session: st.agent_session.clone(),
+        })
+    }
+
+    /// Rebuild a pane around a pty this process already holds.
+    ///
+    /// The descriptor and the child pid came through an `exec`, so both are
+    /// still ours in the only sense that matters: the kernel still has us down
+    /// as the pty's owner and the shell's parent. What is gone is everything
+    /// that was in memory, which is why the ring and the pane's status come
+    /// back from the handoff blob rather than from the shell.
+    #[cfg(unix)]
+    pub fn adopt(
+        carried: crate::daemon::pane::Carried,
+        on_dead: impl FnOnce() + Send + 'static,
+    ) -> anyhow::Result<Arc<Self>> {
+        let master = AdoptedMaster::from_fd(carried.master_fd)?;
+        let reader_handle = master.try_clone_reader()?;
+        let writer = Arc::new(Mutex::new(master.take_writer()?));
+        let shell_pid = carried.child_pid;
+        // The size the pty is actually at is the kernel's to answer, and it is
+        // the truth: nobody resized it while we were not running. The carried
+        // size only says where the ring's tail was cut.
+        let size = master
+            .get_size()
+            .map(|s| WinSize {
+                cols: s.cols,
+                rows: s.rows,
+                cell_w: carried.size.cell_w,
+                cell_h: carried.size.cell_h,
+            })
+            .unwrap_or(carried.size);
+
+        let mut ring = ReplayRing::seeded(carried.ring, size);
+        // Not a restore banner: nothing was lost, so there is nothing to
+        // announce and nothing to reset. The shell below these bytes is the
+        // same shell that wrote them.
+        ring.resize(size);
+
+        Ok(Self::over_pty(
+            PtyParts {
+                master: Box::new(master),
+                child: Arc::new(Mutex::new(Box::new(AdoptedChild::new(shell_pid)))),
+                shell_pid: Some(shell_pid),
+                integration_dir: carried.integration_dir,
+                reader_handle,
+                writer,
+            },
+            PaneState {
+                id: carried.id,
+                ring,
+                subscriber: None,
+                subscriber_epoch: 0,
+                observers: Vec::new(),
+                observer_seq: 0,
+                cwd: carried.cwd,
+                shell: ShellState {
+                    active: carried.shell_active,
+                    at_prompt: carried.at_prompt,
+                    last_exit_code: carried.last_exit,
+                    command: None,
+                },
+                remote: carried.remote,
+                agent: carried.agent,
+                agent_session: carried.agent_session,
+                agent_argv: carried.agent_argv,
+                alive: true,
+                exit_code: None,
+            },
+            carried.owner,
+            on_dead,
+        ))
     }
 
     pub fn spawn_native_ssh(
@@ -1796,6 +2184,14 @@ impl ReplayRing {
         // size, which is not necessarily the size the snapshot was taken at.
         ring.resize(size);
         ring
+    }
+
+    /// The geometry new output would be recorded at.
+    fn tail_size(&self) -> WinSize {
+        self.segments
+            .back()
+            .map(|seg| seg.size)
+            .expect("ring always has a tail")
     }
 
     fn snapshot(&self) -> Vec<crate::daemon::scrollback::Segment> {
@@ -2983,6 +3379,25 @@ mod tests {
             "the ring always has exactly one tail"
         );
         assert_eq!(ring.flatten(), b"output");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_descriptor_that_is_not_a_terminal_is_refused_rather_than_adopted() {
+        use std::os::fd::AsRawFd as _;
+
+        let file = std::fs::File::open("/dev/null").expect("open /dev/null");
+        let err = AdoptedMaster::from_fd(file.as_raw_fd())
+            .err()
+            .expect("a plain file is not a pty");
+        assert!(
+            err.to_string().contains("not a terminal"),
+            "the refusal was {err}"
+        );
+        // Refused means not taken: the caller still owns what it passed, and
+        // dropping `file` here is what closes it. Adopting first and failing
+        // later would have closed a descriptor belonging to someone else.
+        drop(file);
     }
 
     #[test]

@@ -52,6 +52,53 @@ fn lock_path() -> Option<PathBuf> {
     crate::core::config::config_path("daemon.lock")
 }
 
+/// The descriptor the seat is held on, for the one caller that needs it after
+/// the fact: a handoff, which has to pass it to the image it is becoming.
+///
+/// Recorded rather than threaded through because the seat is deliberately owned
+/// by `run_daemon`'s stack frame — it is released when the server stops serving,
+/// and that is the property worth keeping. `-1` means no seat is held.
+#[cfg(unix)]
+static HELD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+#[cfg(unix)]
+pub fn held_fd() -> Option<std::os::fd::RawFd> {
+    match HELD.load(std::sync::atomic::Ordering::Relaxed) {
+        -1 => None,
+        fd => Some(fd),
+    }
+}
+
+#[cfg(unix)]
+fn note_held(file: &File) {
+    HELD.store(
+        std::os::fd::AsRawFd::as_raw_fd(file),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+#[cfg(not(unix))]
+fn note_held(_file: &File) {}
+
+/// Take back a seat this process never gave up.
+///
+/// After `execve` the lock is still held — by this process, which is the same
+/// process, wearing a new program. Calling [`claim`] here would open the file a
+/// second time and ask the kernel for a lock the first descriptor still has, be
+/// told `Taken`, and stand down in favour of itself: the one way to end up with
+/// no daemon at all is to be too careful here.
+///
+/// # Safety
+///
+/// `fd` must be an open descriptor on the lock file, inherited across the exec
+/// and not owned by anything else.
+#[cfg(unix)]
+pub unsafe fn adopt(fd: std::os::fd::RawFd) -> Singleton {
+    let file = unsafe { <File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+    note_held(&file);
+    Singleton { _file: file }
+}
+
 /// Claims the right to be this machine's server.
 pub fn claim() -> Claim {
     let Some(path) = lock_path() else {
@@ -61,7 +108,10 @@ pub fn claim() -> Claim {
         let _ = std::fs::create_dir_all(parent);
     }
     match open_exclusive(&path) {
-        Ok(Some(file)) => Claim::Held(Singleton { _file: file }),
+        Ok(Some(file)) => {
+            note_held(&file);
+            Claim::Held(Singleton { _file: file })
+        }
         Ok(None) => Claim::Taken,
         Err(e) => Claim::Unavailable(format!("{} could not be locked: {e}", path.display())),
     }
@@ -79,16 +129,23 @@ fn open_exclusive(path: &std::path::Path) -> std::io::Result<Option<File>> {
         .write(true)
         .truncate(false)
         .open(path)?;
-    // LOCK_NB so a running server answers "taken" instead of parking this
-    // process on a lock it will hold until it exits.
-    let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if locked == 0 {
-        return Ok(Some(file));
-    }
-    let e = std::io::Error::last_os_error();
-    match e.raw_os_error() {
-        Some(libc::EWOULDBLOCK) => Ok(None),
-        _ => Err(e),
+    loop {
+        // LOCK_NB so a running server answers "taken" instead of parking this
+        // process on a lock it will hold until it exits.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(Some(file));
+        }
+        let e = std::io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::EWOULDBLOCK) => return Ok(None),
+            // A signal arriving mid-call says nothing about the lock. Reporting
+            // it as "could not be evaluated" would start a second server beside
+            // the first — the split machine this module exists to prevent —
+            // for no better reason than a `SIGCHLD` landing at the wrong
+            // microsecond.
+            Some(libc::EINTR) => continue,
+            _ => return Err(e),
+        }
     }
 }
 

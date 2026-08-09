@@ -86,6 +86,34 @@ impl PaneClient {
         ClientMsg::Kill { pane_id }.encode(&mut stream)
     }
 
+    /// Ask the daemon to become `exe` without stopping, keeping every pane.
+    ///
+    /// Success is the connection ending: the process that answers this socket
+    /// is replaced mid-call, and its replacement has never heard of the socket.
+    /// Anything actually written back is the reason it did not happen, and in
+    /// that case the daemon is still running, still serving, still on its old
+    /// binary.
+    ///
+    /// Returning does not mean the new image is listening yet — rebinding the
+    /// endpoint takes it a moment. Callers that need to talk to it again should
+    /// wait for its version to answer.
+    pub fn hand_off(&self, exe: &std::path::Path) -> io::Result<()> {
+        use std::io::Write as _;
+
+        let mut stream = self.open()?;
+        ClientMsg::Handoff {
+            exe: exe.to_path_buf(),
+        }
+        .encode(&mut stream)?;
+        stream.flush()?;
+        let _ = stream.set_read_timeout(Some(OPEN_REPLY_WAIT));
+        match DaemonMsg::read(&mut stream) {
+            Err(_) => Ok(()),
+            Ok(DaemonMsg::Error(message)) => Err(io::Error::other(message)),
+            Ok(other) => Err(unexpected_reply("Handoff", &other)),
+        }
+    }
+
     pub fn send_input(&self, pane_id: u64, bytes: &[u8]) -> io::Result<()> {
         let mut stream = self.open()?;
         ClientMsg::SendInput {
