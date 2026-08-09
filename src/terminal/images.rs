@@ -19,6 +19,14 @@
 //! (unobservable) discard count, and a browser that redraws every frame corrects
 //! it on the next transmit anyway.
 //!
+//! The anchor is read off whichever grid is active, and the alt screen has no
+//! history of its own — so an image placed there records a small absolute row
+//! that resolves against the primary grid once the app exits. A sender that
+//! deletes its own images on the way out (the normal case) is unaffected; one
+//! that dies without an `a=d` can leave a frame anchored over the primary
+//! screen. Modelling that properly wants a per-screen store rather than one
+//! keyed on the displayed grid.
+//!
 //! GPUI's sprite atlas expects **BGRA** pixels (it swaps R↔B when caching an
 //! `image` crate `RgbaImage` — see `gpui::img`), so [`decode`] does the swap once
 //! at ingest; the placed [`RenderImage`] is uploaded verbatim thereafter.

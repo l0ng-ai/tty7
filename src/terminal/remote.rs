@@ -623,9 +623,8 @@ impl RemoteTerminal {
                                 // batch splits at each of them: advance the
                                 // emulator to the cut, act on the state that
                                 // sequence left behind, carry on.
-                                let mut cuts: Vec<(usize, Cut)> = Vec::new();
-                                cursor_scan
-                                    .feed(&out_batch, |off, c| cuts.push((off, Cut::Cursor(c))));
+                                let mut cuts: Vec<(usize, CursorCut)> = Vec::new();
+                                cursor_scan.feed(&out_batch, |off, c| cuts.push((off, c)));
                                 {
                                     let t0 = trace.then(std::time::Instant::now);
                                     let mut term = term.lock();
@@ -640,11 +639,7 @@ impl RemoteTerminal {
                                         for (off, cut) in cuts {
                                             processor.advance(&mut *term, &out_batch[at..off]);
                                             at = off;
-                                            match cut {
-                                                Cut::Cursor(vis) => {
-                                                    parked_cursor.apply(&mut term, vis);
-                                                }
-                                            }
+                                            parked_cursor.apply(&mut term, cut);
                                         }
                                         processor.advance(&mut *term, &out_batch[at..]);
                                     }
@@ -1493,12 +1488,6 @@ impl RemoteTerminal {
         }
         query(pane_id).unwrap_or_default()
     }
-}
-
-/// Something in the pty stream the reader has to act on at the byte where it
-/// appeared, rather than after the whole batch has been parsed.
-enum Cut {
-    Cursor(CursorCut),
 }
 
 fn daemon_not_listening(err: &anyhow::Error) -> bool {

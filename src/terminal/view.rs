@@ -2546,8 +2546,20 @@ impl TerminalView {
     }
 
     pub fn clear_scrollback(&mut self, cx: &mut Context<Self>) {
+        use alacritty_terminal::vte::ansi::{ClearMode, Handler as _};
+
         self.cancel_scroll_anim();
-        self.terminal.term.lock().grid_mut().clear_history();
+        // Go through `clear_screen` rather than `grid_mut().clear_history()`:
+        // it drops a selection anchored in the rows we are about to discard and
+        // clamps the vi cursor back into the grid, which purging the history
+        // behind the term's back would leave pointing at rows that no longer
+        // exist.
+        self.terminal.term.lock().clear_screen(ClearMode::Saved);
+        // Image placements are anchored in absolute scrollback rows, so the
+        // rows we just discarded moved every anchor. Drop them; the daemon does
+        // not replay out-of-band image frames, so a browser redraws on its next
+        // transmit (same reasoning as the reattach path in `adopt_relink`).
+        self.terminal.images().clear();
         self.scroll_frac = 0.;
         self.terminal.write(vec![0x0c_u8]);
         cx.notify();
@@ -7115,6 +7127,91 @@ mod gpui_tests {
             1,
             "an unchanged session must not re-save on every poll"
         );
+    }
+
+    /// A 1x1 red placement anchored at an absolute scrollback row, built the way
+    /// the decode worker hands one to the store.
+    fn placed_at(anchor_row: i64) -> crate::terminal::images::PlacedImage {
+        use tty7_core::core::kitty_graphics::{Image, WireFormat};
+
+        let mut img = Image {
+            id: 1,
+            number: 0,
+            placement: 0,
+            width: 1,
+            height: 1,
+            cols: 0,
+            rows: 0,
+            data: vec![0xff, 0x00, 0x00, 0xff],
+            format: WireFormat::Rgba,
+            compressed: false,
+        };
+        let (data, width_px, height_px) = crate::terminal::images::decode(&mut img).unwrap();
+        crate::terminal::images::PlacedImage {
+            data,
+            anchor_row,
+            anchor_col: 0,
+            width_px,
+            height_px,
+            cols: 0,
+            rows: 0,
+            id: 1,
+            placement: 0,
+            painted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    #[gpui::test]
+    fn clearing_the_scrollback_drops_what_was_anchored_in_it(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+
+        // Overflow the 24-row viewport so there is a scrollback to purge.
+        let mut out = Vec::new();
+        for i in 0..60 {
+            out.extend_from_slice(format!("line {i}\r\n").as_bytes());
+        }
+        DaemonMsg::Output(out).encode(&mut daemon).unwrap();
+        for _ in 0..200 {
+            let filled = window
+                .update(cx, |view, _, _| {
+                    view.terminal.term.lock().grid().history_size() > 0
+                })
+                .unwrap();
+            if filled {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, _, cx| {
+                let history = view.terminal.term.lock().grid().history_size();
+                assert!(history > 0, "the test needs a scrollback to clear");
+
+                // Both of these address rows `clear_history` is about to drop:
+                // an image anchored by absolute row, and a selection reaching up
+                // into the history.
+                view.terminal.images().place(placed_at(history as i64));
+                view.terminal.term.lock().selection = Some(Selection::new(
+                    SelectionType::Simple,
+                    Point::new(Line(-1), Column(0)),
+                    Side::Left,
+                ));
+
+                view.clear_scrollback(cx);
+
+                assert!(
+                    view.terminal.images().snapshot().is_empty(),
+                    "a stale anchor blits the frame over live output, or off-screen \
+                     entirely — the daemon never replays the frame to correct it"
+                );
+                assert!(
+                    view.terminal.term.lock().selection.is_none(),
+                    "a selection left pointing at purged rows clamps onto the \
+                     viewport and copies whatever text moved into them"
+                );
+            })
+            .unwrap();
     }
 
     #[gpui::test]

@@ -43,8 +43,9 @@ log.workspace = true
 # Smart double-click selection patterns (URL/email/path). Already in the tree
 # transitively, so pinning it here adds no new native code.
 regex = "1"
-# SIMD byte search for `MarkScanner`'s Text-state fast path (`terminal::marks`),
-# which scans every output batch the client receives — the same skip-ahead the
+# SIMD byte search for `ParkedCursorScanner`'s fast path
+# (`terminal::parked_cursor`), which scans every output batch the client
+# receives — the same skip-ahead the
 # tokenizers in `tty7-core` already use. Already in the tree via `tty7-core`,
 # so this pins no new code.
 memchr = "2"
