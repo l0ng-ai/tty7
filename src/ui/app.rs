@@ -5767,7 +5767,15 @@ fn pane_attachable(
         None => false,
         Some(None) => true,
         Some(Some(recorded)) => {
-            let ours = *recorded == owner.to_string();
+            // Only a workspace id is a claim. Anything else is a client
+            // stamping its own name — `tty7` before this release wrote a
+            // literal "tty7-cli" — and refusing on it strands every pane the
+            // CLI ever made, respawning over a live shell the tree just told
+            // us belongs here.
+            let Ok(recorded) = recorded.parse::<crate::core::session::WorkspaceId>() else {
+                return true;
+            };
+            let ours = recorded == owner;
             if !ours {
                 log::warn!(
                     "restore: pane {id} is owned by workspace {recorded}, not {owner}; \
@@ -6499,6 +6507,7 @@ mod tests {
             (1, Some(ours.to_string())),
             (2, Some(theirs.to_string())),
             (3, None),
+            (5, Some("tty7-cli".to_string())),
         ]
         .into_iter()
         .collect();
@@ -6514,6 +6523,11 @@ mod tests {
         assert!(
             pane_attachable(Some(&alive), 3, ours),
             "an unowned pane is legacy"
+        );
+        assert!(
+            pane_attachable(Some(&alive), 5, ours),
+            "an owner that names no workspace is not a rival's claim: older CLIs \
+             wrote their own name there, and respawning strands the live pane"
         );
         assert!(
             !pane_attachable(Some(&alive), 4, ours),

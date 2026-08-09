@@ -39,6 +39,10 @@ fn main() {
             tab_close_terminates_every_pane_in_the_tab,
         ),
         (
+            "every_pane_the_cli_files_names_its_workspace_as_owner",
+            every_pane_the_cli_files_names_its_workspace_as_owner,
+        ),
+        (
             "run_streams_output_and_passes_the_exit_code",
             run_streams_output_and_passes_the_exit_code,
         ),
@@ -427,6 +431,47 @@ fn tab_close_terminates_every_pane_in_the_tab(daemon: &Daemon) {
             "tab close left one of panes %{first} and %{second} live: {listed}"
         );
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A pane's owner is the workspace allowed to attach to it, and the GUI
+/// respawns over anything else — so every way the CLI makes a pane has to
+/// stamp that id, not a name of its own. It used to write a literal
+/// "tty7-cli", which left a CLI-built workspace rebuilt from scratch the
+/// first time a window opened on it: fresh shells, the live ones orphaned.
+fn every_pane_the_cli_files_names_its_workspace_as_owner(daemon: &Daemon) {
+    let created = daemon.run_json(&["new", &workdir()]);
+    let ws_id = created["id"]
+        .as_str()
+        .expect("new prints the workspace id")
+        .to_string();
+
+    let tab = daemon.run_json(&["tab", "new", &ws_id, "--cwd", &workdir()]);
+    let tabbed = tab["pane"].as_u64().expect("tab new prints the pane id");
+    daemon.run_json(&["split", &format!("%{tabbed}"), "--horizontal"]);
+
+    let listed = daemon.run_json(&["pane", "ls", "--all"]);
+    let panes = listed["panes"]
+        .as_array()
+        .expect("pane ls --all prints the daemon registry");
+    let ours: Vec<&serde_json::Value> = panes
+        .iter()
+        .filter(|p| p["workspace"].as_str() == Some(ws_id.as_str()))
+        .collect();
+    // `run --keep` files a pane the same way, but its command has to exit for
+    // the CLI to return, and the registry drops the pane with it — so the
+    // three that outlive their command are what can be read back here.
+    assert_eq!(
+        ours.len(),
+        3,
+        "new, tab new and split each filed one pane: {listed}"
+    );
+    for pane in ours {
+        assert_eq!(
+            pane["owner"].as_str(),
+            Some(ws_id.as_str()),
+            "a pane its workspace holds must name that workspace as owner: {pane}"
+        );
     }
 }
 

@@ -124,14 +124,15 @@ impl Backend for RealBackend {
     }
 
     fn spawn_shell(&mut self, workspace: WorkspaceId, cwd: Option<String>) -> Result<u64> {
+        let workspace = workspace.to_string();
         let session = self
             .pane_client()?
             .spawn(
                 cwd.map(PathBuf::from),
                 SESSION_SIZE,
                 None,
-                Some("tty7-cli".into()),
-                Some(workspace.to_string()),
+                Some(workspace.clone()),
+                Some(workspace),
             )
             .context("spawning a shell")?;
         let pane = session.pane_id();
@@ -230,14 +231,18 @@ impl Backend for RealBackend {
             args: args.to_vec(),
             args_are_tty7_defaults: false,
         };
+        // A `run` with no workspace is nobody's pane, so it is left unowned
+        // rather than stamped: an owner names the workspace that may attach to
+        // it, and there is none until `--keep` files it into a tab.
+        let workspace = spec.workspace.map(|ws| ws.to_string());
         let session = self
             .pane_client()?
             .spawn(
                 spec.cwd.map(PathBuf::from),
                 SESSION_SIZE,
                 Some(shell),
-                Some("tty7-cli".into()),
-                spec.workspace.map(|ws| ws.to_string()),
+                workspace.clone(),
+                workspace,
             )
             .with_context(|| format!("spawning `{program}`"))?;
         let pane = session.pane_id();
