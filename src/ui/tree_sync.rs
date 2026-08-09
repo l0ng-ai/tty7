@@ -1365,12 +1365,13 @@ fn finish_hydration(
     };
     let host = WorkspaceStore::host_of(cx, client_ws);
     crate::ui::machine_mirror::MachineMirrors::install(cx, host, machine);
+    let machine_was_empty = mirror.tabs.is_empty();
     let was_dirty = {
         let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
             return;
         };
         let dirty = matches!(state.sync, SyncPhase::Unprimed { dirty: true, .. });
-        state.informed |= mirror.tabs.is_empty();
+        state.informed |= machine_was_empty;
         state.sync = SyncPhase::Primed(mirror);
         // The machine answered, so the explanation has been overtaken by events
         // and a later outage deserves its own.
@@ -1383,7 +1384,19 @@ fn finish_hydration(
         return;
     };
     if adopt == Adopt::IfEmpty && !app.read(cx).tabs.is_empty() {
-        if was_dirty {
+        // A full window over an empty tree has to write itself back, whether
+        // or not an edit was waiting: the machine is missing tabs this window
+        // is showing, and nothing else would ever put them there.
+        //
+        // Deliberately not limited to this machine. An empty tree means one of
+        // two things and the answer is the same either way: locally the
+        // workspace was removed under the window (`ws rm`, or another client),
+        // and remotely the far end lost its records — a re-imaged box, a store
+        // that was wiped. Writing the window back is what a reattach is for.
+        // The panes it names may well be dead; the window already draws them
+        // that way, and a tab the user can close beats a tab that silently
+        // stops existing.
+        if was_dirty || machine_was_empty {
             app.update(cx, |app, cx| sync_window(app, cx));
         }
         return;
@@ -1435,6 +1448,34 @@ fn finish_hydration(
     }
 }
 
+/// Someone else removed this workspace from its machine — `tty7 ws rm`, or
+/// another client.
+///
+/// With no window on it, it stops existing here too. Left in the store it
+/// would keep its row in the switcher and open onto nothing, which is how a
+/// workspace deleted from the CLI used to haunt the panel until a restart.
+///
+/// With a window on it, the window stays: `ws rm` leaves every pane running,
+/// and closing the window would strand them with no way back. Pulling the
+/// layout again is what makes that honest — finding the workspace gone is
+/// exactly the case `pull_workspace` puts back under the same id, and the
+/// window writes its tabs to it on the way out of the hydration.
+fn on_workspace_deleted(cx: &mut App, client_ws: WorkspaceId) {
+    if crate::ui::windows::WindowRegistry::window_for(cx, client_ws).is_none() {
+        log::info!("workspace {client_ws} was deleted on its machine; forgetting it here too");
+        forget(cx, client_ws);
+        crate::core::session::WorkspaceStore::remove(cx, client_ws);
+        crate::ui::windows::refresh_menu(cx);
+        cx.refresh_windows();
+        return;
+    }
+    log::info!(
+        "workspace {client_ws} was deleted on its machine while a window still had it open; \
+         putting it back under the same id"
+    );
+    hydrate(cx, client_ws, Adopt::IfEmpty);
+}
+
 pub(crate) fn on_layout_delta(cx: &mut App, host: HostId, key: &str, delta: LayoutDelta) {
     crate::ui::machine_mirror::MachineMirrors::apply_delta(cx, host, key, &delta);
     let client_ws = if host.is_local() {
@@ -1456,6 +1497,11 @@ pub(crate) fn on_layout_delta(cx: &mut App, host: HostId, key: &str, delta: Layo
 
     if crate::ui::remote_workspace::workspace_is_preempted(cx, client_ws) {
         on_preempted(cx, client_ws);
+        return;
+    }
+
+    if matches!(delta, LayoutDelta::WorkspaceDeleted) {
+        on_workspace_deleted(cx, client_ws);
         return;
     }
 
@@ -1494,6 +1540,10 @@ pub(crate) fn on_layout_delta(cx: &mut App, host: HostId, key: &str, delta: Layo
 
 fn apply_to_mirror(mirror: &mut WsMirror, delta: &LayoutDelta) -> bool {
     match delta {
+        // Nothing here is about a workspace's tab list, so the mirror is
+        // already right. `WorkspaceDeleted` never reaches this far —
+        // `on_layout_delta` hands it to `on_workspace_deleted` and returns —
+        // and is listed only so a new delta cannot join this arm by accident.
         LayoutDelta::WorkspaceCreated { .. }
         | LayoutDelta::WorkspaceRenamed { .. }
         | LayoutDelta::WorkspaceTouched { .. }
@@ -1580,13 +1630,11 @@ impl Tty7App {
             | LayoutDelta::WorkspaceTouched { .. }
             | LayoutDelta::WorkspaceRenamed { .. }
             | LayoutDelta::PaneFacts { .. } => true,
-            LayoutDelta::WorkspaceDeleted => {
-                log::info!(
-                    "workspace {} was deleted on its machine; keeping the window",
-                    self.workspace
-                );
-                true
-            }
+            // Unreachable: `on_layout_delta` hands a deletion to
+            // `on_workspace_deleted` and returns before any window is asked. A
+            // deletion is about whether this workspace still exists here at
+            // all, which is not a question one window's tab list can answer.
+            LayoutDelta::WorkspaceDeleted => true,
             LayoutDelta::ActiveTabChanged { tab } => {
                 if let Some(index) = index_of(&self.tabs, *tab) {
                     self.activate_from_delta(index, window, cx);
@@ -1873,6 +1921,64 @@ mod tests {
             assert!(
                 !state.informed,
                 "the licence to prune must not survive a takeover"
+            );
+        });
+    }
+
+    /// The destructive half of a deletion. It erases state only this client
+    /// holds — geometry, the label, a remote binding — so the fence in front of
+    /// it ("no window is showing this workspace") is the whole safety of it.
+    ///
+    /// The other half needs a live `Tty7App` in a real window to reach, so it
+    /// is not tested here; what it does is hydrate, which the hydration tests
+    /// cover, and it touches neither the store nor the registry.
+    #[gpui::test]
+    fn a_deletion_nothing_has_open_forgets_the_workspace_here_too(cx: &mut gpui::TestAppContext) {
+        use crate::core::session::{WindowView, WindowViews};
+
+        cx.update(|cx| {
+            // Removing a workspace saves the views, and a test has no business
+            // writing the real ones.
+            let _ = tty7_core::core::config::set_config_dir(
+                std::env::temp_dir().join(format!("tty7-deleted-test-{}", std::process::id())),
+            );
+            crate::ui::windows::WindowRegistry::init(cx);
+
+            let deleted = WindowView::default();
+            let gone = deleted.id;
+            let untouched = WindowView::default();
+            let survivor = untouched.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![deleted, untouched],
+                    active: Some(gone),
+                },
+            );
+            cx.default_global::<TreeSync>()
+                .windows
+                .entry(gone)
+                .or_default()
+                .sync = SyncPhase::Primed(WsMirror::default());
+
+            on_workspace_deleted(cx, gone);
+
+            assert!(
+                WorkspaceStore::all(cx).get(gone).is_none(),
+                "a row that opens onto nothing is worse than no row at all"
+            );
+            assert_eq!(
+                WorkspaceStore::all(cx).active,
+                None,
+                "the active workspace cannot be one that no longer exists"
+            );
+            assert!(
+                WorkspaceStore::all(cx).get(survivor).is_some(),
+                "a deletion is about one workspace, not about the store"
+            );
+            assert!(
+                !cx.default_global::<TreeSync>().windows.contains_key(&gone),
+                "its sync state has nothing left to be about"
             );
         });
     }

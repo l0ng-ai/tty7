@@ -71,7 +71,13 @@ pub fn validate_distro(name: &str) -> Result<(), DistroNameError> {
 }
 
 pub fn wsl_args(distro: &str, argv: &[&str]) -> Vec<String> {
-    let mut args = vec!["-d".to_string(), distro.to_string(), "--".to_string()];
+    let mut args = vec!["-d".to_string(), distro.to_string()];
+    // `--` hands the rest of the line to the distro's default shell, which
+    // re-parses it before the program ever runs — fish chokes on the POSIX
+    // command lines we send, and every shell re-globs the arguments. `--exec`
+    // runs the argv itself. With no argv there is nothing to exec, and `--`
+    // keeps its other meaning there: start the default shell.
+    args.push(if argv.is_empty() { "--" } else { "--exec" }.to_string());
     args.extend(argv.iter().map(|a| (*a).to_string()));
     args
 }
@@ -672,7 +678,7 @@ mod tests {
     fn the_transport_command_line_is_the_designs() {
         assert_eq!(
             wsl_args("Ubuntu", &["tty7-server", "--stdio"]),
-            vec!["-d", "Ubuntu", "--", "tty7-server", "--stdio"]
+            vec!["-d", "Ubuntu", "--exec", "tty7-server", "--stdio"]
         );
         assert_eq!(
             wsl_args(
@@ -685,7 +691,7 @@ mod tests {
             vec![
                 "-d",
                 "Ubuntu-22.04",
-                "--",
+                "--exec",
                 "/home/me/.local/share/tty7/bin/tty7-server-26.7.5",
                 "--stdio",
             ]
@@ -701,8 +707,29 @@ mod tests {
         let args = wsl_args("Ubuntu", &["sh", "-s"]);
         assert!(
             args.iter().position(|a| a == "Ubuntu").unwrap()
-                < args.iter().position(|a| a == "--").unwrap()
+                < args.iter().position(|a| a == "--exec").unwrap()
         );
+    }
+
+    #[test]
+    fn no_transport_command_is_re_parsed_by_the_distro_s_default_shell() {
+        // A fish (or any non-POSIX) default shell must never see these lines:
+        // it parses them before the program runs. Every argv-carrying form has
+        // to go out under `--exec`, never `--`.
+        for argv in [
+            vec!["tty7-server", "--stdio"],
+            vec!["tty7-server", "--stdio", "--pane"],
+            vec!["sh", "-s"],
+            vec!["tee", "/home/me/.local/share/tty7/bin/tty7-server"],
+            vec!["sh", "-c", "exec my-server --stdio"],
+        ] {
+            let args = wsl_args("Ubuntu", &argv);
+            assert!(
+                !args.iter().any(|a| a == "--"),
+                "{argv:?} still goes through the default shell: {args:?}"
+            );
+            assert_eq!(args[2], "--exec", "{argv:?}");
+        }
     }
 
     #[test]

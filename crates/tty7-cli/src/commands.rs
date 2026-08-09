@@ -4,6 +4,7 @@ use std::time::Duration;
 use tty7_core::core::agent_hooks::{HookAgent, HooksState};
 use tty7_core::core::machine::{Axis, Machine, PaneSeed, Workspace};
 use tty7_core::core::session::WorkspaceId;
+use tty7_core::core::tab_view::tab_views_of;
 use tty7_core::daemon::control::{CONTROL_VERSION, ControlEvent, ControlRequest, ReplyOk};
 use tty7_core::daemon::protocol::PROTOCOL_VERSION;
 
@@ -71,7 +72,7 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
             ws_attach(address::parse_workspace(&ws), backend)
         }
         Some(Command::Ws(WsCmd::Detach { ws })) => ws_detach(&ws, backend),
-        Some(Command::New { path }) => new_workspace(path, backend),
+        Some(Command::New { path, open }) => new_workspace(path, open, backend),
         Some(Command::Run(args)) => run(args, ctx, backend),
         Some(Command::Split(args)) | Some(Command::Pane(PaneCmd::Split(args))) => {
             pane_split(args, ctx, backend)
@@ -165,7 +166,10 @@ fn launch_gui(
         .then_some(None)
         .or_else(|| wire_path.clone().map(Some));
     let delivered = match request_path {
-        Some(path) => match backend.control(ControlRequest::GuiOpen { path }) {
+        Some(path) => match backend.control(ControlRequest::GuiOpen {
+            path,
+            workspace: None,
+        }) {
             Ok(ReplyOk::Bool(delivered)) => delivered,
             Ok(other) => bail!("the server answered GuiOpen with {other:?}"),
             Err(_) => false,
@@ -325,7 +329,7 @@ fn ws_detach(ws: &str, backend: &mut dyn Backend) -> Result<Outcome> {
     report("", json!({ "detached": id.to_string() }))
 }
 
-fn new_workspace(path: Option<String>, backend: &mut dyn Backend) -> Result<Outcome> {
+fn new_workspace(path: Option<String>, open: bool, backend: &mut dyn Backend) -> Result<Outcome> {
     let ws = match backend.control(ControlRequest::WorkspaceCreate {
         name: None,
         workspace: None,
@@ -345,9 +349,39 @@ fn new_workspace(path: Option<String>, backend: &mut dyn Backend) -> Result<Outc
         },
         tab: None,
     })?;
+    // Only when asked: a workspace made from a script has no business
+    // stealing the screen, and the switcher lists it either way.
+    let opened = match open {
+        false => false,
+        true => match backend.control(ControlRequest::GuiOpen {
+            path: None,
+            workspace: Some(ws.id),
+        }) {
+            Ok(ReplyOk::Bool(opened)) => {
+                // The workspace exists by the time we ask, so an unreachable
+                // GUI is worth a word and not an exit code: failing here would
+                // read as "nothing was made".
+                if !opened {
+                    eprintln!(
+                        "tty7: no GUI is running on this machine; \
+                         the workspace was made all the same"
+                    );
+                }
+                opened
+            }
+            Ok(other) => bail!("the server answered GuiOpen with {other:?}"),
+            Err(error) => {
+                eprintln!(
+                    "tty7: could not ask the GUI to open it ({error:#}); \
+                     the workspace was made all the same"
+                );
+                false
+            }
+        },
+    };
     report(
         ws.id.to_string(),
-        json!({ "id": ws.id.to_string(), "pane": pane }),
+        json!({ "id": ws.id.to_string(), "pane": pane, "opened": opened }),
     )
 }
 
@@ -500,13 +534,22 @@ fn tab_ls(explicit: Option<&str>, ctx: &Context, backend: &mut dyn Backend) -> R
         .iter()
         .find(|ws| ws.id == id)
         .expect("resolve_ws returned an id straight out of this machine");
+    let views = tab_views_of(ws, &machine.panes);
     let rows: Vec<Vec<String>> = ws
         .tabs
         .iter()
-        .map(|tab| {
+        .zip(&views)
+        .map(|(tab, view)| {
             vec![
                 format!("@{}", resolve::ordinal_of(&machine, tab.id).unwrap_or(0)),
-                tab.name.clone().unwrap_or_else(|| "-".to_string()),
+                output::tab_label(view),
+                // The GUI files tabs under a directory and shows its last
+                // segment as the heading; the full path would be the widest
+                // column in the table for no gain.
+                tab.sidebar_group
+                    .as_deref()
+                    .map(|g| output::path_leaf(g).to_string())
+                    .unwrap_or_else(|| "-".to_string()),
                 tab.root.pane_ids().len().to_string(),
             ]
         })
@@ -514,17 +557,23 @@ fn tab_ls(explicit: Option<&str>, ctx: &Context, backend: &mut dyn Backend) -> R
     let tabs: Vec<Value> = ws
         .tabs
         .iter()
-        .map(|tab| {
+        .zip(&views)
+        .map(|(tab, view)| {
             json!({
                 "ordinal": resolve::ordinal_of(&machine, tab.id),
                 "id": tab.id.to_string(),
+                // `name` stays what someone actually named the tab — usually
+                // nothing. `label` is what the table prints.
                 "name": tab.name,
+                "label": output::tab_label(view),
+                "agent": view.agent.map(|a| a.display_name()),
+                "group": tab.sidebar_group,
                 "panes": tab.root.pane_ids(),
             })
         })
         .collect();
     report(
-        output::table(&["TAB", "NAME", "PANES"], &rows),
+        output::table(&["TAB", "NAME", "GROUP", "PANES"], &rows),
         json!({ "workspace": id.to_string(), "tabs": tabs }),
     )
 }
@@ -1462,6 +1511,48 @@ mod tests {
     }
 
     #[test]
+    fn tab_ls_names_an_unnamed_tab_and_shows_the_leaf_of_its_group() {
+        let mut backend = mock();
+        backend.machine.workspaces[0].tabs[1].sidebar_group = Some("C:\\proj\\sub".into());
+
+        let out = run_cli(
+            &["tty7", "tab", "ls", "api"],
+            &Context::default(),
+            &mut backend,
+        );
+
+        // @1 was named; @2 was not, so it borrows the leaf of its cwd. The
+        // GROUP column is the heading's last segment, not the whole path.
+        assert_eq!(
+            human(out),
+            "TAB  NAME   GROUP  PANES\n@1   build  -      1\n@2   proj   sub    2\n"
+        );
+    }
+
+    #[test]
+    fn tab_ls_json_keeps_the_literal_name_beside_the_label() {
+        let mut backend = mock();
+        backend.machine.workspaces[0].tabs[1].sidebar_group = Some("C:\\proj\\sub".into());
+
+        let out = run_cli(
+            &["tty7", "tab", "ls", "api"],
+            &Context::default(),
+            &mut backend,
+        );
+
+        let Outcome::Report(report) = out else {
+            panic!("tab ls must report");
+        };
+        let tabs = report.json["tabs"].as_array().expect("tabs").clone();
+        assert_eq!(tabs[1]["name"], Value::Null, "nobody named this tab");
+        assert_eq!(tabs[1]["label"], "proj", "the table's stand-in travels too");
+        assert_eq!(
+            tabs[1]["group"], "C:\\proj\\sub",
+            "the JSON keeps the whole heading the table abbreviates"
+        );
+    }
+
+    #[test]
     fn tab_close_hangs_up_every_pane_the_server_removed() {
         let mut backend = mock();
         backend.replies.push_back(ReplyOk::Panes(vec![2, 3]));
@@ -1963,7 +2054,8 @@ mod tests {
         assert_eq!(
             backend.control_calls,
             vec![ControlRequest::GuiOpen {
-                path: Some(expected.clone())
+                path: Some(expected.clone()),
+                workspace: None,
             }]
         );
         let Outcome::Report(report) = out else {

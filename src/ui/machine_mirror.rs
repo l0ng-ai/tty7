@@ -297,49 +297,66 @@ pub fn display_name_for(cx: &App, client_ws: WorkspaceId) -> Option<String> {
 
 /// One tab of some workspace, flattened down to what a list row needs. The
 /// mirror is the only place that knows about workspaces this window does not
-/// own, so the switcher's tab column reads them from here.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TabView {
-    pub id: TabId,
-    pub name: Option<String>,
-    pub title: String,
-    pub cwd: Option<String>,
-    pub agent: Option<crate::core::cli_agent::CLIAgent>,
-    pub status: Option<crate::core::cli_agent::AgentStatus>,
-    pub live: bool,
-    pub panes: usize,
-}
+/// own, so the switcher's tab column reads them from here — and so does
+/// `tty7 tab ls`, which is why the reading itself lives in the core.
+pub use tty7_core::core::tab_view::{TabLabel, TabView, tab_views_of};
 
 pub fn tab_views_for(cx: &App, client_ws: WorkspaceId) -> Option<(Vec<TabView>, Option<TabId>)> {
-    let entry = crate::core::session::WorkspaceStore::all(cx).get(client_ws)?;
-    let (ws, panes) = view_of(cx, entry)?;
+    let (ws, panes) = match crate::core::session::WorkspaceStore::all(cx).get(client_ws) {
+        Some(entry) => view_of(cx, entry)?,
+        // Not in the store: a workspace some other client made, which this
+        // window has never opened. It can only be on this machine, and its
+        // tree id is the id we were handed.
+        None => local_view_of(cx, client_ws)?,
+    };
     Some((tab_views_of(ws, panes), ws.active_tab))
 }
 
-pub fn tab_views_of(ws: &Workspace, panes: &[PaneRecord]) -> Vec<TabView> {
-    ws.tabs
+fn local_view_of(cx: &App, id: WorkspaceId) -> Option<(&Workspace, &[PaneRecord])> {
+    let machine = MachineMirrors::machine(cx, HostId::LOCAL)?;
+    let ws = machine.workspaces.iter().find(|w| w.id == id)?;
+    Some((ws, &machine.panes))
+}
+
+/// Does this machine hold a workspace by this id, with tabs in it? A window
+/// opening one has to pull those tabs in: starting empty and saving the empty
+/// session back would erase them.
+pub fn machine_holds_tabs(cx: &App, id: WorkspaceId) -> bool {
+    local_view_of(cx, id).is_some_and(|(ws, _)| !ws.tabs.is_empty())
+}
+
+/// A workspace this machine holds that the local store has never heard of.
+pub struct UnclaimedWorkspace {
+    pub id: WorkspaceId,
+    pub name: String,
+    pub path: Option<String>,
+    pub last_active: u64,
+    pub live: bool,
+}
+
+/// Workspaces made by the CLI, or by another client — as real as any other,
+/// the only thing they lack is a window here. The switcher lists them so that
+/// `tty7 new` does not look like it did nothing.
+pub fn unclaimed_local_workspaces(cx: &App) -> Vec<UnclaimedWorkspace> {
+    let Some(machine) = MachineMirrors::machine(cx, HostId::LOCAL) else {
+        return Vec::new();
+    };
+    let views = crate::core::session::WorkspaceStore::all(cx);
+    machine
+        .workspaces
         .iter()
-        .map(|tab| {
-            let ids = tab.root.pane_ids();
-            let records: Vec<&PaneRecord> = ids
+        .filter(|ws| views.get(ws.id).is_none())
+        .map(|ws| UnclaimedWorkspace {
+            id: ws.id,
+            name: display_name_of(ws, &machine.panes),
+            path: subject_path_of(ws, &machine.panes),
+            last_active: ws.last_active,
+            live: ws
+                .tabs
                 .iter()
-                .filter_map(|id| panes.iter().find(|p| p.id == *id))
-                .collect();
-            // The first pane stands in for the tab, the same way the strip shows
-            // its focused leaf — but any pane running an agent wins, since that
-            // is what someone scanning the list is looking for.
-            let head = records.first();
-            let facts = records.iter().find_map(|p| p.agent.as_ref());
-            TabView {
-                id: tab.id,
-                name: tab.name.clone(),
-                title: head.map(|p| p.title.clone()).unwrap_or_default(),
-                cwd: head.and_then(|p| p.cwd.clone()),
-                agent: facts.map(|f| f.agent),
-                status: facts.and_then(|f| f.status),
-                live: records.iter().any(|p| p.live),
-                panes: ids.len(),
-            }
+                .flat_map(|t| t.root.pane_ids())
+                .filter_map(|id| machine.panes.iter().find(|p| p.id == id))
+                .any(|p| p.live),
         })
         .collect()
 }
@@ -427,6 +444,70 @@ mod tests {
                 Some("web"),
                 "which is what the next save stamps"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn a_workspace_the_store_never_saw_is_still_listed_and_still_readable(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::session::{WindowView, WindowViews, WorkspaceStore};
+
+        cx.update(|cx| {
+            let mine = WindowView::default();
+            let known = mine.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![mine],
+                    active: None,
+                },
+            );
+
+            // What `tty7 new` leaves behind: on the machine, named, with a
+            // tab — and no window here has ever heard of it.
+            let theirs = Workspace {
+                name: Some("demo".into()),
+                tabs: vec![leaf_tab(7)],
+                ..Workspace::default()
+            };
+            let cli_made = theirs.id;
+            MachineMirrors::install(
+                cx,
+                HostId::LOCAL,
+                Machine {
+                    workspaces: vec![
+                        Workspace {
+                            id: known,
+                            tabs: vec![leaf_tab(1)],
+                            ..Workspace::default()
+                        },
+                        theirs,
+                    ],
+                    panes: vec![PaneRecord {
+                        cwd: Some("/repo/demo".into()),
+                        live: true,
+                        ..PaneRecord::new(7)
+                    }],
+                },
+            );
+
+            let unclaimed = unclaimed_local_workspaces(cx);
+            assert_eq!(unclaimed.len(), 1, "the store's own workspace is not new");
+            assert_eq!(unclaimed[0].id, cli_made);
+            assert_eq!(unclaimed[0].name, "demo");
+            assert_eq!(unclaimed[0].path.as_deref(), Some("/repo/demo"));
+            assert!(unclaimed[0].live);
+
+            assert!(
+                machine_holds_tabs(cx, cli_made),
+                "opening it has to pull those tabs, not save an empty session over them"
+            );
+            let (tabs, _) = tab_views_for(cx, cli_made).expect("readable without a store entry");
+            assert_eq!(tabs.len(), 1);
+            assert_eq!(tabs[0].cwd.as_deref(), Some("/repo/demo"));
+
+            assert!(!machine_holds_tabs(cx, WorkspaceId::new()));
         });
     }
 

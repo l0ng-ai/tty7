@@ -806,12 +806,33 @@ fn setup_bash() -> Option<Injection> {
 
 const WSL_RCFILE_ENV: &str = "TTY7_RC";
 
-const WSL_EXEC_SCRIPT: &str = concat!(
-    r#"case "${SHELL:-}" in "#,
-    r#"*/bash) exec "$SHELL" --rcfile "$TTY7_RC" -i ;; "#,
-    r#"*) exec "${SHELL:-/bin/sh}" -l ;; "#,
-    "esac"
-);
+/// POSIX single-quoting, for a body some other shell has to re-parse.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// The bootstrap `sh` runs inside the distro. `$SHELL` is the only place the
+/// user's real shell is named, so every arm dispatches on it: bash re-execs
+/// through the rcfile written on the Windows side, fish carries its integration
+/// inline the way `remote::bootstrap_command` does over SSH, and anything else
+/// falls back to a plain login shell.
+///
+/// `sh` parses this script, so the fish body is POSIX-quoted here — unlike the
+/// SSH path, where the far end's own login shell parses the bootstrap and
+/// `remote::fish_bootstrap` has to quote it the way fish reads quotes.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn wsl_exec_script() -> String {
+    format!(
+        concat!(
+            r#"case "${{SHELL:-}}" in "#,
+            r#"*/bash) exec "$SHELL" --rcfile "$TTY7_RC" -i ;; "#,
+            r#"*/fish) exec "$SHELL" -C {} -l ;; "#,
+            r#"*) exec "${{SHELL:-/bin/sh}}" -l ;; "#,
+            "esac"
+        ),
+        shell_quote(FISH_INTEGRATION)
+    )
+}
 
 #[cfg(windows)]
 fn setup_wsl(args: &[String]) -> Option<Injection> {
@@ -829,10 +850,13 @@ fn setup_wsl(args: &[String]) -> Option<Injection> {
         argv.push("--cd".to_string());
         argv.push(cd);
     }
-    argv.push("--".to_string());
+    // `--` forwards the command through the distro's default shell, which makes
+    // shells such as fish parse the POSIX bootstrap before `sh` can receive it.
+    // `--exec` bypasses that shell and executes the bootstrap interpreter itself.
+    argv.push("--exec".to_string());
     argv.push("sh".to_string());
     argv.push("-c".to_string());
-    argv.push(WSL_EXEC_SCRIPT.to_string());
+    argv.push(wsl_exec_script());
 
     let mut env = HashMap::new();
     env.insert(
@@ -891,7 +915,7 @@ pub fn setup(program: Option<&str>, args: &[String], has_custom_args: bool) -> O
 }
 
 pub mod remote {
-    use super::{FISH_INTEGRATION, bash_rcfile, zsh_redirectors};
+    use super::{FISH_INTEGRATION, bash_rcfile, shell_quote, zsh_redirectors};
 
     pub const PROBE_COMMAND: &str = "echo __tty7_shell; echo $SHELL";
 
@@ -936,10 +960,6 @@ pub mod remote {
             RemoteShell::Bash => bash_bootstrap(shell_path),
             RemoteShell::Fish => fish_bootstrap(shell_path),
         }
-    }
-
-    fn shell_quote(s: &str) -> String {
-        format!("'{}'", s.replace('\'', r"'\''"))
     }
 
     fn fish_quote(s: &str) -> String {
@@ -1216,6 +1236,16 @@ mod tests {
         assert!(!is_our_zdotdir("/tmp/not-tty7-zdotdir-1"));
     }
 
+    /// `\e]133;D;1\a` — what a shell reports for the `false` these tests type.
+    ///
+    /// The trailing BEL is the point. `contains("133;D;1")` is a prefix match on
+    /// the exit status, so it also accepts `133;D;127` (the bootstrap exec'd a
+    /// shell that could not find `false`) and `133;D;130` (interrupted) — a
+    /// bootstrap that never ran the command at all would pass every assertion
+    /// below. Matching through the terminator pins the status whole.
+    #[cfg(windows)]
+    const FAILED_COMMAND_MARK: &str = "133;D;1\u{7}";
+
     #[cfg(windows)]
     fn prompt_cycle_over_pty(program: &str, injection: &Injection) -> String {
         use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -1259,7 +1289,11 @@ mod tests {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
-            if String::from_utf8_lossy(&out).contains("133;D") {
+            // Stop only once the typed command's own D report lands. A shell can
+            // emit an unpaired D while drawing its first prompt, and breaking on
+            // that would sample the transcript before the prompt cycle under test
+            // has run at all.
+            if String::from_utf8_lossy(&out).contains(FAILED_COMMAND_MARK) {
                 break;
             }
         }
@@ -1291,10 +1325,10 @@ mod tests {
         let injection = setup(Some(&bash), &[], false).expect("bash integration");
         let text = prompt_cycle_over_pty(&bash, &injection);
 
-        for mark in ["133;A", "133;B", "133;C", "133;D;1"] {
+        for mark in ["133;A", "133;B", "133;C", FAILED_COMMAND_MARK] {
             assert!(
                 text.contains(mark),
-                "Git Bash must report {mark}; got:\n{text}"
+                "Git Bash must report {mark:?}; got:\n{text}"
             );
         }
         let cwd = reported_cwd(&text);
@@ -1321,10 +1355,10 @@ mod tests {
         let injection = setup(Some("wsl.exe"), &args, false).expect("wsl integration");
         let text = prompt_cycle_over_pty("wsl.exe", &injection);
 
-        for mark in ["133;A", "133;B", "133;C", "133;D;1"] {
+        for mark in ["133;A", "133;B", "133;C", FAILED_COMMAND_MARK] {
             assert!(
                 text.contains(mark),
-                "WSL ({distro}) must report {mark}; got:\n{text}"
+                "WSL ({distro}) must report {mark:?}; got:\n{text}"
             );
         }
         let cwd = reported_cwd(&text);
@@ -1377,7 +1411,11 @@ mod tests {
         let inj = setup(Some("wsl.exe"), &args, false)
             .expect("setup must not depend on reaching the distro");
 
-        let sep = inj.args.iter().position(|a| a == "--").expect("`--`");
+        let sep = inj
+            .args
+            .iter()
+            .position(|a| a == "--exec")
+            .expect("`--exec`");
         assert_eq!(
             &inj.args[..sep],
             &[
@@ -1392,6 +1430,52 @@ mod tests {
         assert!(inj.args[sep + 3].contains("$SHELL"));
         assert!(inj.args[sep + 3].contains("--rcfile"));
         assert!(inj.replaces_argv);
+    }
+
+    #[test]
+    fn the_wsl_bootstrap_carries_integration_for_fish_not_just_bash() {
+        let script = wsl_exec_script();
+
+        assert!(script.contains(r#"*/bash) exec "$SHELL" --rcfile "$TTY7_RC" -i ;;"#));
+        assert!(script.contains(&format!(
+            r#"*/fish) exec "$SHELL" -C {} -l ;;"#,
+            shell_quote(FISH_INTEGRATION)
+        )));
+
+        // `sh` parses this script, so the body is POSIX-quoted — backslashes
+        // pass through untouched. `remote::fish_quote`, which the SSH path uses
+        // because the far end's own fish parses the bootstrap there, would
+        // double every one of them and hand fish `\\e]%s\\a`.
+        assert!(script.contains(r"printf '\''\e]%s\a'\'' $argv[1]"));
+    }
+
+    /// The distro runs this through `sh`, so a quoting slip is a pane that
+    /// never opens. CI's Linux and macOS legs have a real `sh` to ask.
+    #[cfg(unix)]
+    #[test]
+    fn the_wsl_bootstrap_is_valid_posix_sh() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("sh")
+            .arg("-n")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sh -n");
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(wsl_exec_script().as_bytes())
+            .expect("write script");
+        let out = child.wait_with_output().expect("wait for sh -n");
+        assert!(
+            out.status.success(),
+            "sh rejected the WSL bootstrap:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]

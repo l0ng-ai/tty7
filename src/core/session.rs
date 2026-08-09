@@ -37,9 +37,21 @@ impl WorkspaceStore {
         let Some(store) = Self::try_store(cx) else {
             return WorkspaceId::new();
         };
-        let id = id.filter(|id| store.views.get(*id).is_some());
         let view = match id {
-            Some(id) => store.views.get_mut(id).expect("filtered above"),
+            // A named workspace keeps its name even when this client has never
+            // opened it: the CLI and other clients make workspaces too, and the
+            // id in the machine's tree is the one a window has to claim. Taking
+            // a fresh id here would have opened an empty stranger instead.
+            Some(id) => match store.views.views.iter().position(|w| w.id == id) {
+                Some(at) => &mut store.views.views[at],
+                None => {
+                    store.views.views.push(WindowView {
+                        id,
+                        ..WindowView::default()
+                    });
+                    store.views.views.last_mut().expect("just pushed")
+                }
+            },
             None => {
                 store.views.views.push(WindowView::default());
                 store.views.views.last_mut().expect("just pushed")
@@ -226,6 +238,37 @@ mod tests {
         assert!(!crosses_machines(b1, b2));
         assert!(crosses_machines(l, b1));
         assert!(crosses_machines(b1, g));
+    }
+
+    #[gpui::test]
+    fn claiming_a_workspace_the_store_never_saw_keeps_the_id_it_was_given(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // `claim` saves, and a test has no business writing the real views.
+        let _ = tty7_core::core::config::set_config_dir(
+            std::env::temp_dir().join(format!("tty7-session-test-{}", std::process::id())),
+        );
+        cx.update(|cx| {
+            WorkspaceStore::install_for_test(cx, WindowViews::default());
+
+            // The id came off the machine tree — the CLI made this one.
+            let on_the_machine = WorkspaceId::new();
+            assert_eq!(
+                WorkspaceStore::claim(cx, Some(on_the_machine)),
+                on_the_machine,
+                "a fresh id here would have opened an empty stranger instead"
+            );
+            assert_eq!(
+                WorkspaceStore::claim(cx, Some(on_the_machine)),
+                on_the_machine,
+                "claiming it twice finds the entry rather than piling up"
+            );
+            assert_eq!(WorkspaceStore::all(cx).views.len(), 1);
+
+            let fresh = WorkspaceStore::claim(cx, None);
+            assert_ne!(fresh, on_the_machine);
+            assert_eq!(WorkspaceStore::all(cx).views.len(), 2);
+        });
     }
 
     #[test]

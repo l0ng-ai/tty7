@@ -397,6 +397,30 @@ fn attachment_rides_the_tree_when_no_record_store_is_served() {
         "the tree's own record says who holds the workspace"
     );
 
+    // And a peer asking for the tree is told the same. `tty7 ls` fills its
+    // ATTACHED column from this answer, so an attachment that lived only in
+    // the server's memory read to everyone else as "nobody is holding it".
+    match desktop
+        .control
+        .call(ControlRequest::MachineGet)
+        .expect("machine tree")
+    {
+        ReplyOk::MachineTree(m) => {
+            let seen = m
+                .workspaces
+                .iter()
+                .find(|w| w.id == ws.id)
+                .expect("the shared workspace");
+            let held = seen.attachment.as_ref().expect("held by the laptop");
+            assert_eq!(held.hostname, "laptop");
+            assert!(
+                held.token.is_empty(),
+                "the holder's token stays on the holder's connection"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+
     match attach(&desktop).expect("takeover") {
         ReplyOk::Attached { took_over_from } => {
             assert_eq!(took_over_from.as_deref(), Some("laptop"));
