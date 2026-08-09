@@ -4612,10 +4612,7 @@ impl TerminalView {
 
         if let Some(rs) = &self.reverse_search {
             let label = format!("(reverse-i-search)`{}': ", rs.query());
-            let matched = rs
-                .selected_line(&self.history)
-                .unwrap_or_default()
-                .to_string();
+            let matched = one_line(rs.selected_line(&self.history).unwrap_or_default());
             return div()
                 .absolute()
                 .left(cx_left)
@@ -4778,7 +4775,7 @@ impl TerminalView {
 
         if let Some(rem) = ghost {
             let last = lines.last_mut().unwrap();
-            for (gi, gc) in rem.chars().enumerate() {
+            for (gi, gc) in rem.chars().map(one_line_char).enumerate() {
                 let caret = gi == 0 && cursor == len && cursor_on;
                 last.push(cell(muted, gc, false, caret, false));
             }
@@ -4973,32 +4970,17 @@ impl TerminalView {
                 theme.muted_foreground
             };
 
-            let mut spans: Vec<gpui::AnyElement> = Vec::new();
-            let mut flush = |run: &mut String, hit: bool| {
-                if run.is_empty() {
-                    return;
-                }
-                spans.push(
+            let spans: Vec<gpui::AnyElement> = highlight_runs(line, &m.positions)
+                .into_iter()
+                .map(|(run, hit)| {
                     div()
                         .flex_none()
                         .whitespace_nowrap()
                         .text_color(if hit { theme.blue } else { base })
-                        .child(std::mem::take(run))
-                        .into_any_element(),
-                );
-            };
-            let mut pos = m.positions.iter().copied().peekable();
-            let mut run = String::new();
-            let mut run_hit = false;
-            for (ci, ch) in line.chars().enumerate() {
-                let hit = pos.next_if_eq(&ci).is_some();
-                if hit != run_hit {
-                    flush(&mut run, run_hit);
-                    run_hit = hit;
-                }
-                run.push(ch);
-            }
-            flush(&mut run, run_hit);
+                        .child(run)
+                        .into_any_element()
+                })
+                .collect();
 
             let meta = self.history_meta.get(line);
             let failed = meta.and_then(|em| em.exit).filter(|&e| e != 0);
@@ -5413,6 +5395,43 @@ fn word_start_of(line: &str, cursor: usize) -> usize {
         start -= 1;
     }
     start
+}
+
+/// A history entry drawn on a one-line row, with its line breaks folded to a
+/// visible stand-in.
+///
+/// gpui breaks text on `\n` whatever `white_space` says, so an entry carrying
+/// one paints its tail over whatever sits below it. Entries do carry them: a
+/// command composed in the inline editor keeps its newlines in the in-session
+/// list, even though `history::append` refuses to write them to disk. Folding
+/// is one char for one char so a fuzzy matcher's positions still address the
+/// same characters.
+fn one_line_char(c: char) -> char {
+    match c {
+        '\n' => '↵',
+        c if c.is_control() => ' ',
+        c => c,
+    }
+}
+
+fn one_line(text: &str) -> String {
+    text.chars().map(one_line_char).collect()
+}
+
+/// Split `line` into consecutive runs of matched / unmatched characters, each
+/// one folded onto a single line by `one_line_char`. `positions` is ascending.
+fn highlight_runs(line: &str, positions: &[usize]) -> Vec<(String, bool)> {
+    let mut runs: Vec<(String, bool)> = Vec::new();
+    let mut pos = positions.iter().copied().peekable();
+    for (ci, ch) in line.chars().enumerate() {
+        let hit = pos.next_if_eq(&ci).is_some();
+        let ch = one_line_char(ch);
+        match runs.last_mut() {
+            Some((run, run_hit)) if *run_hit == hit => run.push(ch),
+            _ => runs.push((ch.to_string(), hit)),
+        }
+    }
+    runs
 }
 
 fn display_width(c: char) -> usize {
@@ -5939,9 +5958,9 @@ mod tests {
     use super::{
         description_budget, drag_scroll_step, elide, encode_mouse, escape_candidate,
         expand_file_command_template, fallback_chain, fig_icon_emoji, fig_icon_glyph,
-        focus_report_bytes, input_overflow_shift, input_overlay_rows, menu_layout, paste_bytes,
-        select_end_copy, shell_escape_path, should_show_context_menu, smooth_scroll_step,
-        submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
+        focus_report_bytes, highlight_runs, input_overflow_shift, input_overlay_rows, menu_layout,
+        paste_bytes, select_end_copy, shell_escape_path, should_show_context_menu,
+        smooth_scroll_step, submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
     use super::{
         remote_paste_spec, staged_path_for_pane, stages_clipboard_image, staging_cache,
@@ -7196,6 +7215,38 @@ mod tests {
         assert_eq!(first, 20);
         assert_eq!(first + visible, 30);
         assert_eq!(menu_layout(40, 0, 30, 3, 10).2, 0);
+    }
+
+    #[test]
+    fn a_multiline_entry_draws_on_one_menu_row() {
+        // A command composed in the inline editor keeps its newlines in the
+        // in-session history. Left alone, gpui breaks the row's text on them
+        // and the tail paints over every row below it.
+        let line = "curl 'http://x' \\\n  -H 'accept: */*' \\\n  -H 'pragma: no-cache'";
+        let runs = highlight_runs(line, &[0, 1, 2, 3]);
+        let drawn: String = runs.iter().map(|(run, _)| run.as_str()).collect();
+        assert!(
+            !drawn.contains('\n'),
+            "no run carries a line break: {drawn}"
+        );
+        assert_eq!(drawn.chars().count(), line.chars().count());
+        assert_eq!(drawn.matches('↵').count(), 2);
+        assert_eq!(
+            runs.first().map(|(r, hit)| (r.as_str(), *hit)),
+            Some(("curl", true))
+        );
+        assert!(runs[1..].iter().all(|(_, hit)| !hit));
+    }
+
+    #[test]
+    fn highlight_runs_alternate_on_the_matched_characters() {
+        let runs = highlight_runs("git status", &[0, 4, 5]);
+        let shape: Vec<(&str, bool)> = runs.iter().map(|(r, h)| (r.as_str(), *h)).collect();
+        assert_eq!(
+            shape,
+            [("g", true), ("it ", false), ("st", true), ("atus", false)]
+        );
+        assert!(highlight_runs("", &[]).is_empty());
     }
 
     #[test]
