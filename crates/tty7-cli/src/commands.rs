@@ -85,7 +85,6 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
         Some(Command::Tab(TabCmd::Close { tab })) => tab_close(&tab, backend),
         Some(Command::Tab(TabCmd::Rename { tab, name })) => tab_rename(&tab, name, backend),
         Some(Command::Tab(TabCmd::Move { tab, index })) => tab_move(&tab, index, backend),
-        Some(Command::Tab(TabCmd::Group { tab, group })) => tab_group(&tab, group, backend),
         Some(Command::Pane(PaneCmd::Ls { ws, all })) => pane_ls(ws.as_deref(), all, backend),
         Some(Command::Pane(PaneCmd::Close { target })) => {
             pane_close(target.as_deref(), ctx, backend)
@@ -352,17 +351,34 @@ fn new_workspace(path: Option<String>, open: bool, backend: &mut dyn Backend) ->
     })?;
     // Only when asked: a workspace made from a script has no business
     // stealing the screen, and the switcher lists it either way.
-    let opened = open
-        && matches!(
-            backend.control(ControlRequest::GuiOpen {
-                path: None,
-                workspace: Some(ws.id),
-            }),
-            Ok(ReplyOk::Bool(true))
-        );
-    if open && !opened {
-        eprintln!("no GUI is running on this machine; the workspace was made all the same");
-    }
+    let opened = match open {
+        false => false,
+        true => match backend.control(ControlRequest::GuiOpen {
+            path: None,
+            workspace: Some(ws.id),
+        }) {
+            Ok(ReplyOk::Bool(opened)) => {
+                // The workspace exists by the time we ask, so an unreachable
+                // GUI is worth a word and not an exit code: failing here would
+                // read as "nothing was made".
+                if !opened {
+                    eprintln!(
+                        "tty7: no GUI is running on this machine; \
+                         the workspace was made all the same"
+                    );
+                }
+                opened
+            }
+            Ok(other) => bail!("the server answered GuiOpen with {other:?}"),
+            Err(error) => {
+                eprintln!(
+                    "tty7: could not ask the GUI to open it ({error:#}); \
+                     the workspace was made all the same"
+                );
+                false
+            }
+        },
+    };
     report(
         ws.id.to_string(),
         json!({ "id": ws.id.to_string(), "pane": pane, "opened": opened }),
@@ -643,24 +659,6 @@ fn tab_move(tab: &str, index: u64, backend: &mut dyn Backend) -> Result<Outcome>
         to: index,
     })?;
     report("", json!({ "tab": tab.to_string(), "to": index }))
-}
-
-/// The GUI files tabs under headings in its sidebar, and that heading is a
-/// field on the tab like any other. Until now only the GUI could write it,
-/// so a tab the CLI made landed in the ungrouped pile with no way out.
-fn tab_group(tab: &str, group: Option<String>, backend: &mut dyn Backend) -> Result<Outcome> {
-    let addr = address::parse_tab(tab)?;
-    let machine = fetch_machine(backend)?;
-    let (workspace, tab) = resolve::tab(&machine, &addr)?;
-    let group = group
-        .map(|g| g.trim().to_string())
-        .filter(|g| !g.is_empty());
-    backend.control(ControlRequest::TabSetGroup {
-        workspace,
-        tab,
-        group: group.clone(),
-    })?;
-    report("", json!({ "tab": tab.to_string(), "group": group }))
 }
 
 fn pane_ls(explicit: Option<&str>, all: bool, backend: &mut dyn Backend) -> Result<Outcome> {
@@ -1510,28 +1508,47 @@ mod tests {
                 to: 0,
             }
         );
+    }
 
-        backend.control_calls.clear();
-        run_cli(&["tty7", "tab", "group", "@1", " scm "], &ctx, &mut backend);
-        assert_eq!(
-            backend.control_calls[1],
-            ControlRequest::TabSetGroup {
-                workspace: api.id,
-                tab: api.tabs[0].id,
-                group: Some("scm".into()),
-            }
+    #[test]
+    fn tab_ls_names_an_unnamed_tab_and_shows_the_leaf_of_its_group() {
+        let mut backend = mock();
+        backend.machine.workspaces[0].tabs[1].sidebar_group = Some("C:\\proj\\sub".into());
+
+        let out = run_cli(
+            &["tty7", "tab", "ls", "api"],
+            &Context::default(),
+            &mut backend,
         );
 
-        backend.control_calls.clear();
-        run_cli(&["tty7", "tab", "group", "@1"], &ctx, &mut backend);
+        // @1 was named; @2 was not, so it borrows the leaf of its cwd. The
+        // GROUP column is the heading's last segment, not the whole path.
         assert_eq!(
-            backend.control_calls[1],
-            ControlRequest::TabSetGroup {
-                workspace: api.id,
-                tab: api.tabs[0].id,
-                group: None,
-            },
-            "no group named means leave the group"
+            human(out),
+            "TAB  NAME   GROUP  PANES\n@1   build  -      1\n@2   proj   sub    2\n"
+        );
+    }
+
+    #[test]
+    fn tab_ls_json_keeps_the_literal_name_beside_the_label() {
+        let mut backend = mock();
+        backend.machine.workspaces[0].tabs[1].sidebar_group = Some("C:\\proj\\sub".into());
+
+        let out = run_cli(
+            &["tty7", "tab", "ls", "api"],
+            &Context::default(),
+            &mut backend,
+        );
+
+        let Outcome::Report(report) = out else {
+            panic!("tab ls must report");
+        };
+        let tabs = report.json["tabs"].as_array().expect("tabs").clone();
+        assert_eq!(tabs[1]["name"], Value::Null, "nobody named this tab");
+        assert_eq!(tabs[1]["label"], "proj", "the table's stand-in travels too");
+        assert_eq!(
+            tabs[1]["group"], "C:\\proj\\sub",
+            "the JSON keeps the whole heading the table abbreviates"
         );
     }
 

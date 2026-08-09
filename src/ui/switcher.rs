@@ -483,9 +483,18 @@ impl Tty7App {
         // person who ran `tty7 new` like nothing happened at all. They open
         // like any other row — the id in the tree is the id a window claims.
         if let Some(slot) = groups.iter().position(|g| g.key.is_empty()) {
+            // Measured against the rows already listed rather than against the
+            // store, which is what put them there: the block above lists this
+            // window's own workspace before the store has caught up with it,
+            // and two rows under one id would be two ways into one window.
+            let listed: Vec<WorkspaceId> = groups
+                .iter()
+                .flat_map(|g| g.rows.iter().map(|r| r.id))
+                .collect();
             let app: &App = cx;
             let rows: Vec<Row> = crate::ui::machine_mirror::unclaimed_local_workspaces(app)
                 .into_iter()
+                .filter(|ws| !listed.contains(&ws.id))
                 .map(|ws| Row {
                     id: ws.id,
                     name: ws.name,

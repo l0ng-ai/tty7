@@ -6,12 +6,13 @@
 //! the machine tree. This is the reading of that tree, kept in one place so
 //! the CLI and the GUI name a tab the same way.
 
-use serde::{Deserialize, Serialize};
-
 use crate::core::cli_agent::{AgentStatus, CLIAgent};
 use crate::core::machine::{PaneRecord, TabId, Workspace};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Deliberately not serialisable: it is a reading of the machine tree, and
+/// both sides that want one have the tree already. Putting it on the wire
+/// would be sending a conclusion where the evidence has already gone.
+#[derive(Debug, Clone, PartialEq)]
 pub struct TabView {
     pub id: TabId,
     pub name: Option<String>,

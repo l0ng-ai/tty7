@@ -391,17 +391,6 @@ pub enum TabCmd {
         #[arg(value_name = "INDEX")]
         index: u64,
     },
-
-    #[command(about = "Put a tab in a sidebar group, or take it out of one")]
-    Group {
-        #[arg(value_name = "@TAB")]
-        tab: String,
-        #[arg(
-            value_name = "GROUP",
-            help = "The group to join; omit to leave whatever group it is in"
-        )]
-        group: Option<String>,
-    },
 }
 
 #[derive(Debug, Subcommand)]

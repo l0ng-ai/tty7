@@ -205,7 +205,11 @@ resolve it immediately before use. A full tab UUID also works: `@<uuid>`.
 | `tab close @TAB` | close the tab and every pane in it | `{"closed"}` |
 | `tab rename @TAB NAME` | name or rename | `{"tab","name"}` |
 | `tab move @TAB INDEX` | reposition within its workspace | `{"tab","to"}` |
-| `tab group @TAB [GROUP]` | file it under a sidebar heading, or with no GROUP take it out of one | `{"tab","group"}` |
+
+GROUP is the heading the GUI's sidebar files the tab under, shown by its last
+segment (`group` in the JSON is the whole value). Read-only from here: with the
+default repo grouping the GUI recomputes it from the tab's working directory,
+so anything written from outside would be overwritten on the next render.
 
 Almost no tab has a `name`: the GUI's tab strip reads OSC titles, which the
 machine tree never sees. So the NAME column — and `label` in the JSON — falls
