@@ -253,7 +253,7 @@ edition = "2024"
 # they must never drift apart. This is the line a release bump edits (and the
 # one nightly's `awk '/^version = /'` stamps: it is the first such line in the
 # file, since the package entries above are all `version.workspace = true`).
-version = "26.8.1"
+version = "26.8.2"
 
 [workspace.dependencies]
 # Our fork's `tty7` branch carries the local customizations tty7 relies on:
