@@ -9805,7 +9805,7 @@ dependencies = [
  "tty7-core",
  "unicode-segmentation",
  "uuid",
- "windows 0.58.0",
+ "windows 0.62.2",
  "windows-sys 0.61.2",
  "winresource",
 ]
