@@ -714,6 +714,11 @@ struct WsState {
     /// from it until the pull is retried — an empty window diffs into
     /// "close every tab" and would wipe the layout off the machine.
     rehydrate: Option<Adopt>,
+    /// How many pulls in a row this window has owed, which paces the retry.
+    ///
+    /// Cleared the moment one lands, so a machine that hiccups once is asked
+    /// again promptly and one that is really gone is not asked in a loop.
+    rehydrate_attempts: u32,
     /// Whether this window has already been told why it opened empty.
     ///
     /// The retry is as quiet as the failure was, so a window whose machine
@@ -736,6 +741,7 @@ impl Default for WsState {
             informed: false,
             epoch: 0,
             rehydrate: None,
+            rehydrate_attempts: 0,
             said_why_empty: false,
         }
     }
@@ -1334,12 +1340,23 @@ fn say_why_the_window_is_empty(cx: &mut App, client_ws: WorkspaceId) {
     });
 }
 
-/// Records that a hydration failed and still owes `client_ws` its layout.
+/// Records that a hydration failed and still owes `client_ws` its layout, and
+/// arms the retry that pays it back.
 ///
 /// Nothing else recovers on its own: the window stays empty, and without this
 /// the next `sync_window` would push that emptiness to the machine as "close
-/// every tab". Instead the pull is retried the next time the window syncs —
-/// which is what a reconnect does through `on_link_up`.
+/// every tab". The debt is settled by the next sync of this window — a
+/// reconnect drives one through `on_link_up`, an edit in the window drives one
+/// through `save_session`, and [`arm_rehydrate_retry`] drives one when neither
+/// happens.
+///
+/// That last driver is the load-bearing one. A pull can fail with the link
+/// perfectly healthy — a `MachineGet` that overran its ten seconds on a slow
+/// link, or a create that lost its race with `start_prime` — and then no link
+/// ever comes back up to notice, and an empty window has nothing to edit. The
+/// window sat empty until the app was restarted, with every tab and every
+/// shell still on the machine: "tty7 lost my session" for a request that
+/// needed asking twice.
 ///
 /// Returns whether the debt was taken on. A superseded attempt gets `false`:
 /// a newer hydration owns the window now, and this one speaks for nothing.
@@ -1354,43 +1371,116 @@ fn owe_rehydration(cx: &mut App, client_ws: WorkspaceId, epoch: u64, adopt: Adop
         *priming = false;
     }
     state.rehydrate = Some(adopt);
-    log::info!("workspace {client_ws}: will pull its layout again once its machine answers");
+    state.rehydrate_attempts = state.rehydrate_attempts.saturating_add(1);
+    let attempts = state.rehydrate_attempts;
+    log::info!(
+        "workspace {client_ws}: will pull its layout again once its machine answers \
+         (attempt {attempts})"
+    );
+    arm_rehydrate_retry(cx, client_ws, epoch, attempts);
     true
+}
+
+/// Whether the debt this retry was armed for is still the window's own.
+///
+/// A newer epoch means another hydration took the window over while the
+/// backoff ran, and this retry speaks for nothing.
+fn still_owed(cx: &App, client_ws: WorkspaceId, epoch: u64) -> bool {
+    cx.try_global::<TreeSync>()
+        .and_then(|t| t.windows.get(&client_ws))
+        .is_some_and(|s| s.rehydrate.is_some() && s.epoch == epoch)
+}
+
+/// The first retry is soon enough to look instant to someone watching an empty
+/// window; the backoff is what keeps a machine that is really unreachable from
+/// being asked on a loop for as long as its window stays open.
+fn rehydrate_backoff(attempts: u32) -> std::time::Duration {
+    const CAP: u64 = 30;
+    std::time::Duration::from_secs(2u64.saturating_pow(attempts.min(5)).min(CAP))
+}
+
+/// Asks `client_ws` to sync once the backoff is up, if it still owes a pull.
+///
+/// Deliberately routed through `sync_window` rather than straight into
+/// `hydrate`: that is where the rules about *whether* a window may still adopt
+/// the machine's layout live — a preempted workspace stays out of it, and a
+/// `Replace` is dropped once the user has filled the window in themselves.
+fn arm_rehydrate_retry(cx: &mut App, client_ws: WorkspaceId, epoch: u64, attempts: u32) {
+    let delay = rehydrate_backoff(attempts);
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(delay).await;
+        let _ = cx.update(|cx| {
+            if !still_owed(cx, client_ws, epoch) {
+                return;
+            }
+            // No window left to fill: the debt stays parked for whoever opens
+            // this workspace next, and asking its machine now would be work
+            // for nobody.
+            let Some(app) = crate::ui::windows::WindowRegistry::app_for(cx, client_ws)
+                .and_then(|app| app.upgrade())
+            else {
+                return;
+            };
+            app.update(cx, |app, cx| sync_window(app, cx));
+        });
+    })
+    .detach();
 }
 
 fn pull_workspace(
     client: &ControlClient,
     machine_ws: WorkspaceId,
 ) -> io::Result<(Machine, WsMirror, Session)> {
-    let machine: Machine = match client.call(ControlRequest::MachineGet)? {
-        ReplyOk::MachineTree(m) => *m,
-        other => return Err(io::Error::other(format!("MachineGet answered {other:?}"))),
+    let machine = match layout_of(machine_get(client)?, machine_ws) {
+        Ok(pulled) => return Ok(pulled),
+        Err(machine) => machine,
     };
-    match machine.workspaces.iter().find(|w| w.id == machine_ws) {
-        Some(ws) => {
-            let mirror = WsMirror {
-                tabs: ws.tabs.clone(),
-                active: ws.active_tab,
-            };
-            let session = session_from_tree(ws, &machine.panes);
-            Ok((machine, mirror, session))
-        }
-        None => {
-            // The whole tree is already in hand, so the taken names can be read
-            // straight off it rather than passed down from the main thread.
-            let taken: Vec<&str> = machine
-                .workspaces
-                .iter()
-                .filter_map(|w| w.name.as_deref())
-                .collect();
-            let name = tty7_core::core::codename::unique(|n| taken.contains(&n));
-            client.call(ControlRequest::WorkspaceCreate {
-                name: Some(name),
-                workspace: Some(machine_ws),
-            })?;
-            Ok((machine, WsMirror::default(), Session::default()))
-        }
+    // The whole tree is already in hand, so the taken names can be read
+    // straight off it rather than passed down from the main thread.
+    let taken: Vec<&str> = machine
+        .workspaces
+        .iter()
+        .filter_map(|w| w.name.as_deref())
+        .collect();
+    let name = tty7_core::core::codename::unique(|n| taken.contains(&n));
+    match client.call(ControlRequest::WorkspaceCreate {
+        name: Some(name),
+        workspace: Some(machine_ws),
+    }) {
+        Ok(_) => Ok((machine, WsMirror::default(), Session::default())),
+        // Losing this create is not a failed hydration. Opening a remote
+        // workspace runs two pulls at once — this one and `start_prime`'s —
+        // and both create when the tree they read did not hold it yet, so the
+        // loser is told it already exists. The workspace the create was for is
+        // on the machine either way, and it may already hold tabs: read the
+        // tree again and hydrate from what is really there. Treating this as a
+        // failure left the window empty over a workspace that was fine.
+        Err(refused) => layout_of(machine_get(client)?, machine_ws).map_err(|_| refused),
     }
+}
+
+fn machine_get(client: &ControlClient) -> io::Result<Machine> {
+    match client.call(ControlRequest::MachineGet)? {
+        ReplyOk::MachineTree(m) => Ok(*m),
+        other => Err(io::Error::other(format!("MachineGet answered {other:?}"))),
+    }
+}
+
+/// This workspace's layout as `machine` has it, or the tree handed back
+/// untouched when the machine does not hold the workspace at all.
+fn layout_of(
+    machine: Machine,
+    machine_ws: WorkspaceId,
+) -> Result<(Machine, WsMirror, Session), Machine> {
+    let Some(ws) = machine.workspaces.iter().find(|w| w.id == machine_ws) else {
+        return Err(machine);
+    };
+    let mirror = WsMirror {
+        tabs: ws.tabs.clone(),
+        active: ws.active_tab,
+    };
+    let session = session_from_tree(ws, &machine.panes);
+    Ok((machine, mirror, session))
 }
 
 fn finish_hydration(
@@ -1427,6 +1517,8 @@ fn finish_hydration(
         let dirty = matches!(state.sync, SyncPhase::Unprimed { dirty: true, .. });
         state.informed |= machine_was_empty;
         state.sync = SyncPhase::Primed(mirror);
+        // The machine answered, so the next failure starts its backoff over.
+        state.rehydrate_attempts = 0;
         // The machine answered, so the explanation has been overtaken by events
         // and a later outage deserves its own.
         state.said_why_empty = false;
@@ -2148,6 +2240,66 @@ mod tests {
                     .is_none()
             );
         });
+    }
+
+    /// The debt an owed pull records is worth nothing without something that
+    /// pays it. A pull can fail with the link up and healthy — a `MachineGet`
+    /// past its deadline on a slow link, a create that lost its race — and
+    /// then no reconnect ever happens to notice, and an empty window has no
+    /// edit in it to drive a sync. The window sat there empty, with every tab
+    /// still on the machine, until the app was restarted.
+    #[gpui::test]
+    fn an_owed_pull_is_retried_until_it_is_paid_or_superseded(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let ws = WorkspaceId::new();
+            let epoch = cx
+                .default_global::<TreeSync>()
+                .windows
+                .entry(ws)
+                .or_default()
+                .epoch;
+            owe_rehydration(cx, ws, epoch, Adopt::IfEmpty);
+            assert!(
+                still_owed(cx, ws, epoch),
+                "the retry armed for this debt must still recognise it"
+            );
+
+            // Paid: the pull landed, so the retry that is still in flight has
+            // to stand down rather than replay the machine over the window.
+            cx.default_global::<TreeSync>()
+                .windows
+                .get_mut(&ws)
+                .expect("owed above")
+                .rehydrate = None;
+            assert!(!still_owed(cx, ws, epoch));
+
+            // Superseded: a newer hydration owns the window now.
+            let state = cx
+                .default_global::<TreeSync>()
+                .windows
+                .get_mut(&ws)
+                .expect("owed above");
+            state.rehydrate = Some(Adopt::IfEmpty);
+            state.epoch += 1;
+            assert!(!still_owed(cx, ws, epoch));
+            assert!(still_owed(cx, ws, epoch + 1));
+        });
+    }
+
+    #[test]
+    fn the_retry_backs_off_and_settles_at_a_cap() {
+        let secs = |n| rehydrate_backoff(n).as_secs();
+        assert_eq!(secs(1), 2, "the first retry is prompt: a window is empty");
+        assert!(
+            secs(1) < secs(2) && secs(2) < secs(3),
+            "a machine that keeps refusing must be asked less often, not more"
+        );
+        assert_eq!(secs(5), 30);
+        assert_eq!(
+            secs(50),
+            30,
+            "a window left open on an unreachable machine settles at the cap"
+        );
     }
 
     #[gpui::test]

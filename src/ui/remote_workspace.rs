@@ -956,6 +956,12 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
                 changed = true;
                 log::info!("link to {target} is attached");
                 crate::ui::machine_mirror::MachineMirrors::refresh(cx, host);
+                // A link this machine's windows never asked for — the switcher
+                // connected it, or `finish_connect` installed it — comes up
+                // without any reconnect attempt finishing, so nothing else
+                // tells the windows on it that their machine can be reached
+                // now. One of them may be sitting empty owing a pull.
+                crate::ui::tree_sync::on_link_up(cx, host);
             }
             continue;
         }
