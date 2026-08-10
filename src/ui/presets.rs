@@ -487,13 +487,38 @@ pub(crate) fn is_lighter(a: u32, b: u32) -> bool {
 
 const ACCENT_FLOOR: f32 = 3.0;
 
-/// How far a search match's wash has to stand off the background it sits on,
-/// and how much further the one you are looking at has to stand off the rest.
+/// What the glyph painted on top of a match wash keeps for itself.
 ///
-/// These are non-text ratios: enough to spot a block at a glance without
-/// drowning the glyph on top of it.
-pub(crate) const MATCH_WASH: f32 = 1.45;
-pub(crate) const CURRENT_MATCH_WASH: f32 = 2.1;
+/// WCAG's non-text ratio, not its text one. A match is a state you read
+/// *through* for a moment, not a surface you set body copy on — and holding the
+/// glyph at 4.5:1 is not a choice this can make anyway: three of the builtins
+/// only give their own text 6.6:1, which caps the wash at 1.46:1. That is a
+/// hairline's worth of shift (a hairline is 1.5:1) spread over a whole cell,
+/// and it is what made a match impossible to find by scanning.
+const GLYPH_FLOOR: f32 = 3.0;
+
+/// The two ends of what a wash is allowed to be, whatever the theme.
+///
+/// The floor buys the weakest palettes a match you can actually see, at the
+/// price of a glyph that dips under `GLYPH_FLOOR` on one. The ceiling stops the
+/// strongest from painting what reads as a solid block rather than a highlight.
+const WASH_FLOOR: f32 = 1.9;
+const WASH_CEILING: f32 = 3.2;
+
+/// How far a search match's wash stands off the background it sits on, and how
+/// much further the one you are looking at stands off the rest. Returned as
+/// `(hit, current)` contrast targets.
+///
+/// Derived from the theme rather than fixed, because the budget being spent is
+/// the theme's: a palette with 21:1 between its text and its background can
+/// afford a wash you cannot miss, and one with 6.6:1 cannot. A single constant
+/// has to be safe for the second, which leaves the first with nothing.
+pub(crate) fn match_wash_targets(bg: u32, fg: u32) -> (f32, f32) {
+    let current = (contrast(fg, bg) / GLYPH_FLOOR).clamp(WASH_FLOOR, WASH_CEILING);
+    // The plain hits are the crowd the current one has to read out of, so they
+    // get a little over half the distance it travels.
+    (1.0 + (current - 1.0) * 0.55, current)
+}
 
 /// The opacity at which `tint` over `surface` first reaches `target` contrast,
 /// as a blended colour.
@@ -1856,13 +1881,14 @@ mod tests {
                 faint(bg, fg)
             );
             let tint = mix(bg, fg, 0.24);
-            let w = wash(bg, tint, MATCH_WASH);
+            let (hit, current) = match_wash_targets(bg, fg);
+            let w = wash(bg, tint, hit);
             assert!(
-                contrast(w, bg) >= MATCH_WASH - 0.02,
+                contrast(w, bg) >= hit - 0.02,
                 "{:.2}:1 on {bg:06x}",
                 contrast(w, bg)
             );
-            let cur = wash(bg, tint, CURRENT_MATCH_WASH);
+            let cur = wash(bg, tint, current);
             assert!(
                 contrast(cur, bg) > contrast(w, bg),
                 "the current match has to stand out from the rest"
@@ -1871,10 +1897,64 @@ mod tests {
     }
 
     #[test]
+    fn a_low_contrast_theme_gets_a_gentler_wash_than_a_high_contrast_one() {
+        let (soft_hit, soft_cur) = match_wash_targets(0x282c34, 0xabb2bf);
+        let (hard_hit, hard_cur) = match_wash_targets(0x000000, 0xffffff);
+        assert!(
+            soft_cur < hard_cur && soft_hit < hard_hit,
+            "the wash spends the theme's own contrast budget, so it has to \
+             scale with it: {soft_cur:.2} vs {hard_cur:.2}"
+        );
+        assert!(
+            soft_hit >= 1.45,
+            "even the gentle end has to beat the flat constant it replaced"
+        );
+        assert!(hard_cur <= WASH_CEILING, "a highlight, not a solid block");
+    }
+
+    #[test]
+    fn a_match_wash_leaves_the_glyph_painted_on_top_of_it_readable() {
+        // The wash is opaque and the text is drawn over it, so every step up in
+        // visibility is a step down in the contrast the glyph has left. This is
+        // the ceiling both targets are chosen against — on every builtin, and
+        // in the accent the terminal actually washes with.
+        for t in builtins() {
+            let n = t.neutrals();
+            let (hit_t, cur_t) = match_wash_targets(n.background, n.foreground);
+            let hit = wash(n.background, n.accent, hit_t);
+            let cur = wash(n.background, n.accent, cur_t);
+            for (label, fill) in [("hit", hit), ("current", cur)] {
+                // `wash` bisects to *at least* its target and 8-bit channels do
+                // not divide evenly, so a fill can sit a hair past where the
+                // target asked for it — and the glyph pays that hair.
+                assert!(
+                    contrast(n.foreground, fill) >= GLYPH_FLOOR - 0.05,
+                    "{}: text on a {label} is {:.2}:1",
+                    t.id,
+                    contrast(n.foreground, fill)
+                );
+            }
+            assert!(
+                contrast(hit, n.background) > 1.5,
+                "{}: a hit only shifts {:.2}:1 off the background — a hairline",
+                t.id,
+                contrast(hit, n.background)
+            );
+            assert!(
+                contrast(cur, hit) >= 1.2,
+                "{}: the current match only reads {:.2}:1 apart from the rest",
+                t.id,
+                contrast(cur, hit)
+            );
+        }
+    }
+
+    #[test]
     fn a_wash_whose_tint_cannot_reach_the_target_still_lands_on_something_legible() {
         // A theme whose selection colour is its background: no alpha gets there.
-        let w = wash(0xffffff, 0xfefefe, MATCH_WASH);
-        assert!(contrast(w, 0xffffff) >= MATCH_WASH - 0.02, "{w:06x}");
+        let (hit, _) = match_wash_targets(0xffffff, 0x111111);
+        let w = wash(0xffffff, 0xfefefe, hit);
+        assert!(contrast(w, 0xffffff) >= hit - 0.02, "{w:06x}");
     }
 
     #[test]

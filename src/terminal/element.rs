@@ -232,6 +232,22 @@ fn active_selection_bg(cx: &gpui::App) -> Rgb {
     }
 }
 
+/// What a search match is washed with.
+///
+/// The theme's accent, not the terminal palette's selection colour. A hit and a
+/// selection are different things, and washing both from the same tint left the
+/// only difference between them a few percent of luminance — on a grid that is
+/// already grey on grey, that reads as "slightly dirty background", not as "the
+/// thing you searched for". The accent is the one colour the terminal surface
+/// has nothing else in, and `legible_accent` has already floored it at 3:1
+/// against the background, so the wash always has somewhere to travel.
+fn match_tint(cx: &gpui::App) -> u32 {
+    match cx.try_global::<crate::ui::presets::ActiveAccent>() {
+        Some(a) => a.0,
+        None => pack_rgb(active_selection_bg(cx)),
+    }
+}
+
 struct PaintColors {
     default_fg: Hsla,
     default_bg: Hsla,
@@ -239,7 +255,6 @@ struct PaintColors {
     selection_bg: Hsla,
     match_bg: Hsla,
     current_match_bg: Hsla,
-    current_match_border: Hsla,
     fg_rgb: Rgb,
     bg_rgb: Rgb,
 }
@@ -254,21 +269,25 @@ impl PaintColors {
             c.a = 0.24;
             c
         };
-        // Opaque, and solved for a fixed contrast against the background
-        // rather than a fixed alpha: the selection tint is only 24% away from
-        // the background to begin with, so a 0.32 alpha landed 7% off it in
-        // every theme — on a white one the matches were all but invisible.
-        let bg_packed = pack_rgb(super::palette::hsla_to_rgb(default_bg));
-        let tint = pack_rgb(active_selection_bg(cx));
+        // Opaque, and solved for a contrast against the background rather than
+        // a fixed alpha: the selection tint is only 24% away from the
+        // background to begin with, so a 0.32 alpha landed 7% off it in every
+        // theme — on a white one the matches were all but invisible. How far
+        // the wash may travel is the theme's to say (`match_wash_targets`),
+        // since the glyph on top of it pays for every step.
+        let fg_rgb = super::palette::hsla_to_rgb(default_fg);
+        let bg_rgb = super::palette::hsla_to_rgb(default_bg);
+        let bg_packed = pack_rgb(bg_rgb);
+        let tint = match_tint(cx);
+        let (hit_target, current_target) =
+            crate::ui::presets::match_wash_targets(bg_packed, pack_rgb(fg_rgb));
         let match_bg = to_hsla(unpack_rgb(crate::ui::presets::wash(
-            bg_packed,
-            tint,
-            crate::ui::presets::MATCH_WASH,
+            bg_packed, tint, hit_target,
         )));
         let current_match_bg = to_hsla(unpack_rgb(crate::ui::presets::wash(
             bg_packed,
             tint,
-            crate::ui::presets::CURRENT_MATCH_WASH,
+            current_target,
         )));
         Self {
             default_fg,
@@ -277,9 +296,8 @@ impl PaintColors {
             selection_bg,
             match_bg,
             current_match_bg,
-            current_match_border: caret,
-            fg_rgb: super::palette::hsla_to_rgb(default_fg),
-            bg_rgb: super::palette::hsla_to_rgb(default_bg),
+            fg_rgb,
+            bg_rgb,
         }
     }
 }
@@ -313,7 +331,6 @@ fn paint_cell_runs(
     geom: &CellGeom,
     buf: &[RenderCell],
     color: Hsla,
-    border: Option<Hsla>,
     mut covered: impl FnMut(&RenderCell) -> bool,
 ) {
     for row in 0..geom.rows {
@@ -332,11 +349,7 @@ fn paint_cell_runs(
                     break;
                 }
             }
-            let rect = geom.cell_rect(row, start, col - start);
-            window.paint_quad(fill(rect, color));
-            if let Some(b) = border {
-                window.paint_quad(outline(rect, b, BorderStyle::Solid));
-            }
+            window.paint_quad(fill(geom.cell_rect(row, start, col - start), color));
         }
     }
 }
@@ -1564,24 +1577,22 @@ impl Element for TerminalElement {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             paint_backgrounds(window, &geom, &buf);
             if snap.any_selected {
-                paint_cell_runs(window, &geom, &buf, colors.selection_bg, None, |c| {
-                    c.selected
-                });
+                paint_cell_runs(window, &geom, &buf, colors.selection_bg, |c| c.selected);
             }
             if snap.any_match {
-                paint_cell_runs(window, &geom, &buf, colors.match_bg, None, |c| {
+                paint_cell_runs(window, &geom, &buf, colors.match_bg, |c| {
                     c.match_hit && !c.match_current
                 });
             }
             if snap.any_current {
-                paint_cell_runs(
-                    window,
-                    &geom,
-                    &buf,
-                    colors.current_match_bg,
-                    Some(colors.current_match_border),
-                    |c| c.match_current,
-                );
+                // Fill only. The current match used to carry a caret-coloured
+                // outline as well, because a wash it could only be 2.1:1 off the
+                // background had no way to say "this one" on its own. Now that
+                // it is the accent at the top of the theme's budget, the outline
+                // is the same colour saying the same thing a second time.
+                paint_cell_runs(window, &geom, &buf, colors.current_match_bg, |c| {
+                    c.match_current
+                });
             }
             paint_glyphs(
                 window,
@@ -1664,7 +1675,7 @@ impl Element for TerminalElement {
                 };
                 paint_backgrounds(window, &sg, row);
                 if snap.any_selected {
-                    paint_cell_runs(window, &sg, row, colors.selection_bg, None, |c| c.selected);
+                    paint_cell_runs(window, &sg, row, colors.selection_bg, |c| c.selected);
                 }
                 paint_glyphs(
                     window,
@@ -1795,7 +1806,6 @@ mod tests {
             selection_bg: Hsla::default(),
             match_bg: Hsla::default(),
             current_match_bg: Hsla::default(),
-            current_match_border: Hsla::default(),
             fg_rgb: Rgb {
                 r: 17,
                 g: 17,
@@ -2565,7 +2575,6 @@ mod tests {
             selection_bg: wash(0.55),
             match_bg: wash(0.32),
             current_match_bg: wash(0.85),
-            current_match_border: to_hsla(fg),
             fg_rgb: fg,
             bg_rgb: bg,
         }
