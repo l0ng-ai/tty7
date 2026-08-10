@@ -210,12 +210,6 @@ if [[ "$PACKAGE_UPDATE_ZIP" != "0" ]]; then
 fi
 
 # Package the (now stapled) bundle as a drag-to-Applications DMG.
-#
-# `hdiutil` needs room for the whole image beside the staged bundle, and the
-# hosted Intel runners stopped having it — three nightlies in a row died right
-# here on 2026-08-10 with "hdiutil: create failed - No space left on device",
-# across two different commits. The arm64 runners have never hit it. So the two
-# steps below give the image somewhere to go rather than assuming there is room.
 DMG="dist/tty7-${VERSION}-macos-${ARCH}.dmg"
 STAGE="dist/dmg-stage"
 rm -rf "$STAGE"
@@ -227,17 +221,22 @@ mkdir "$STAGE"
 # knows about tty7.app as an intermediate to keep out of the upload globs.
 mv "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
-# The build tree is dead weight from here on: every binary it produced is
-# already inside the bundle, and no later step in either workflow reads it.
-# The cost is that rust-cache finds little left to save, so the next macOS
-# build recompiles the dependency graph. That is a slower nightly; the
-# alternative is no nightly at all. `df` first so the next person to look at
-# this has the number that made it necessary.
-df -h . || true
-rm -rf "target/${TARGET}/release/deps" \
-       "target/${TARGET}/release/build" \
-       "target/${TARGET}/release/incremental"
-hdiutil create -volname "tty7" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+# Size the image explicitly. Left to itself, `-srcfolder` measures the bytes it
+# is about to copy and asks for about that much, which does not cover what the
+# filesystem spends carrying them — so the copy runs the *volume* out of room
+# partway through and hdiutil reports "No space left on device". The path in
+# that message is under /Volumes/tty7, not on the host: three nightlies died
+# here on 2026-08-10 with 105 GiB free on the runner. It is a threshold, not a
+# cliff — the x86_64 binaries are the larger pair and crossed it first, while
+# arm64 went on building fine just underneath.
+#
+# Doubling the content and adding 64 MiB is far more slack than the shortfall
+# needs, and it is close to free: the image is compressed on the way out, so
+# measured against a stage of this shape, 127 MiB of empty volume cost 672 KiB
+# in the published DMG.
+STAGE_KB="$(du -sk "$STAGE" | awk '{print $1}')"
+hdiutil create -volname "tty7" -srcfolder "$STAGE" -ov -format UDZO \
+    -size "$(( STAGE_KB * 2 + 65536 ))k" "$DMG"
 rm -rf "$STAGE"
 if [[ -n "$SIGN_ID" && -n "${APPLE_CERTIFICATE:-}" ]]; then
     codesign --force --timestamp --sign "$SIGN_ID" "$DMG"
