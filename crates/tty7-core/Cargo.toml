@@ -166,7 +166,7 @@ windows-sys = { version = "0.59", features = [
 ] }
 # Read the system proxy out of the registry for tty7's own downloads
 # (`daemon::install::proxy`).
-winreg = { version = "0.52", optional = true }
+winreg = { version = "0.56", optional = true }
 
 [dev-dependencies]
 # Sandboxes for the `host::conformance` suite: a fresh empty directory per case,
