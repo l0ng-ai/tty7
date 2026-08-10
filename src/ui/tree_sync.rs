@@ -716,8 +716,16 @@ struct WsState {
     rehydrate: Option<Adopt>,
     /// How many pulls in a row this window has owed, which paces the retry.
     ///
-    /// Cleared the moment one lands, so a machine that hiccups once is asked
-    /// again promptly and one that is really gone is not asked in a loop.
+    /// Counts consecutive failures, so it is cleared by anything that ends the
+    /// run: a pull that lands (`finish_hydration`), a prime that lands
+    /// (`finish_prime` — the machine answered, which is the whole question),
+    /// and a debt abandoned rather than paid (`take_rehydrate` dropping a
+    /// `Replace` the user has overtaken). A machine that hiccups once is then
+    /// asked again promptly, and one that is really gone is not asked in a
+    /// loop.
+    ///
+    /// Leaving it standing after the run ends is what makes a *first* failure
+    /// wait the cap: the count would still be carrying an outage that is over.
     rehydrate_attempts: u32,
     /// Whether this window has already been told why it opened empty.
     ///
@@ -825,7 +833,14 @@ fn take_rehydrate(cx: &mut App, client_ws: WorkspaceId, window_is_empty: bool) -
         .windows
         .get_mut(&client_ws)?;
     let adopt = state.rehydrate.take()?;
-    (window_is_empty || adopt == Adopt::IfEmpty).then_some(adopt)
+    if !window_is_empty && adopt == Adopt::Replace {
+        // Abandoned, not paid — but the run of failures is over either way, and
+        // a count left standing would make the next window's first failure wait
+        // the cap on an outage that has nothing to do with it.
+        state.rehydrate_attempts = 0;
+        return None;
+    }
+    Some(adopt)
 }
 
 /// Whether a window with no tabs may delete `client_ws` outright — from the
@@ -1076,6 +1091,9 @@ fn finish_prime(cx: &mut App, client_ws: WorkspaceId, epoch: u64, outcome: io::R
     let landed = match outcome {
         Ok(mirror) => {
             state.informed |= mirror.tabs.is_empty();
+            // The machine answered, which is the only thing the retry was
+            // waiting to find out, so the next failure starts its backoff over.
+            state.rehydrate_attempts = 0;
             let landed = (mirror.tabs.clone(), mirror.active);
             state.sync = SyncPhase::Primed(mirror);
             landed
@@ -1258,7 +1276,7 @@ enum Adopt {
 fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
     let host = WorkspaceStore::host_of(cx, client_ws);
     let machine_ws = tree_workspace_id(cx, client_ws);
-    let epoch = {
+    let (epoch, failures) = {
         let state = cx
             .default_global::<TreeSync>()
             .windows
@@ -1272,22 +1290,29 @@ fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
         state.epoch += 1;
         // This attempt takes over the debt; it re-records it if it fails too.
         state.rehydrate = None;
-        state.epoch
+        (state.epoch, state.rehydrate_attempts)
     };
+    // How many times in a row this window has already failed, which is what
+    // decides whether another failure is news or the same news again.
+    let level = hydration_log_level(failures, log::Level::Warn);
     cx.spawn(async move |cx| {
         let deadline = std::time::Instant::now() + HYDRATE_LINK_DEADLINE;
         let client = loop {
             match cx.update(|cx| tree_control_for(cx, host)) {
                 TreeLink::Ready(client) => break Some(client),
                 TreeLink::Unserved => {
-                    log::warn!(
+                    log::log!(
+                        level,
                         "workspace {client_ws}: its machine's server does not serve the \
                          machine tree; opening empty"
                     );
                     break None;
                 }
                 TreeLink::Down if std::time::Instant::now() > deadline => {
-                    log::warn!("workspace {client_ws}: no link to its machine; opening empty");
+                    log::log!(
+                        level,
+                        "workspace {client_ws}: no link to its machine; opening empty"
+                    );
                     break None;
                 }
                 TreeLink::Down => cx.background_executor().timer(HYDRATE_LINK_POLL).await,
@@ -1373,7 +1398,10 @@ fn owe_rehydration(cx: &mut App, client_ws: WorkspaceId, epoch: u64, adopt: Adop
     state.rehydrate = Some(adopt);
     state.rehydrate_attempts = state.rehydrate_attempts.saturating_add(1);
     let attempts = state.rehydrate_attempts;
-    log::info!(
+    log::log!(
+        // Once settled this line says the same thing every thirty seconds until
+        // the window closes, which is a fact about the machine and not an event.
+        hydration_log_level(attempts, log::Level::Info),
         "workspace {client_ws}: will pull its layout again once its machine answers \
          (attempt {attempts})"
     );
@@ -1391,12 +1419,36 @@ fn still_owed(cx: &App, client_ws: WorkspaceId, epoch: u64) -> bool {
         .is_some_and(|s| s.rehydrate.is_some() && s.epoch == epoch)
 }
 
+/// The attempt from which the backoff no longer grows.
+///
+/// Also the point where a window stops being a fresh failure and becomes a
+/// standing one, which is what [`hydration_log_level`] keys off.
+const REHYDRATE_SETTLED: u32 = 5;
+const REHYDRATE_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The first retry is soon enough to look instant to someone watching an empty
 /// window; the backoff is what keeps a machine that is really unreachable from
 /// being asked on a loop for as long as its window stays open.
 fn rehydrate_backoff(attempts: u32) -> std::time::Duration {
-    const CAP: u64 = 30;
-    std::time::Duration::from_secs(2u64.saturating_pow(attempts.min(5)).min(CAP))
+    std::time::Duration::from_secs(2u64.saturating_pow(attempts.min(REHYDRATE_SETTLED)))
+        .min(REHYDRATE_BACKOFF_CAP)
+}
+
+/// Steps `fresh` down to `debug` once this window's failures have stopped being
+/// events and become a standing condition.
+///
+/// The first few are news: something that was working stopped. Once the backoff
+/// has settled at its cap the window is in a steady state — a machine that is
+/// simply not there — and the retry will go on failing every thirty seconds for
+/// as long as the window stays open. Repeating that at full volume buries
+/// whatever else is in the log. The retry stays exactly as persistent either
+/// way; only the volume drops.
+fn hydration_log_level(attempts: u32, fresh: log::Level) -> log::Level {
+    if attempts >= REHYDRATE_SETTLED {
+        log::Level::Debug
+    } else {
+        fresh
+    }
 }
 
 /// Asks `client_ws` to sync once the backoff is up, if it still owes a pull.
@@ -1413,9 +1465,11 @@ fn arm_rehydrate_retry(cx: &mut App, client_ws: WorkspaceId, epoch: u64, attempt
             if !still_owed(cx, client_ws, epoch) {
                 return;
             }
-            // No window left to fill: the debt stays parked for whoever opens
-            // this workspace next, and asking its machine now would be work
-            // for nobody.
+            // No window left to fill, so asking its machine now would be work
+            // for nobody. Closing a window drops its whole `WsState` through
+            // `forget`, debt and all, so `still_owed` above normally answers
+            // first; this covers the window that is on its way out and has
+            // already dropped its app.
             let Some(app) = crate::ui::windows::WindowRegistry::app_for(cx, client_ws)
                 .and_then(|app| app.upgrade())
             else {
@@ -1455,7 +1509,22 @@ fn pull_workspace(
         // on the machine either way, and it may already hold tabs: read the
         // tree again and hydrate from what is really there. Treating this as a
         // failure left the window empty over a workspace that was fine.
-        Err(refused) => layout_of(machine_get(client)?, machine_ws).map_err(|_| refused),
+        //
+        // Any refusal is worth the second look, not just "already exists": what
+        // matters is whether the workspace is there now, and the tree answers
+        // that better than the error text does. If it still is not there, the
+        // create's own refusal is the honest error to report — the reread
+        // happened on its behalf and has nothing of its own to say.
+        Err(refused) => {
+            log::debug!(
+                "workspace {machine_ws} could not be created ({refused}); reading the tree \
+                 again in case something else created it first"
+            );
+            match machine_get(client) {
+                Ok(machine) => layout_of(machine, machine_ws).map_err(|_| refused),
+                Err(_) => Err(refused),
+            }
+        }
     }
 }
 
@@ -1502,7 +1571,15 @@ fn finish_hydration(
     let (machine, mirror, session) = match outcome {
         Ok(pulled) => pulled,
         Err(e) => {
-            log::warn!("could not hydrate workspace {client_ws} from its machine: {e}");
+            let failures = cx
+                .default_global::<TreeSync>()
+                .windows
+                .get(&client_ws)
+                .map_or(0, |s| s.rehydrate_attempts);
+            log::log!(
+                hydration_log_level(failures, log::Level::Warn),
+                "could not hydrate workspace {client_ws} from its machine: {e}"
+            );
             let _ = owe_rehydration(cx, client_ws, epoch, adopt);
             return;
         }
@@ -2294,12 +2371,139 @@ mod tests {
             secs(1) < secs(2) && secs(2) < secs(3),
             "a machine that keeps refusing must be asked less often, not more"
         );
-        assert_eq!(secs(5), 30);
+        assert_eq!(secs(REHYDRATE_SETTLED), 30);
         assert_eq!(
             secs(50),
             30,
             "a window left open on an unreachable machine settles at the cap"
         );
+    }
+
+    /// Once the backoff stops growing the same failure repeats every thirty
+    /// seconds for as long as the window stays open. Reporting each one at full
+    /// volume turns one unreachable machine into a log nobody can read past.
+    #[test]
+    fn a_standing_failure_stops_shouting_once_the_backoff_settles() {
+        assert_eq!(
+            hydration_log_level(1, log::Level::Warn),
+            log::Level::Warn,
+            "the first failures are news and must stay news"
+        );
+        assert_eq!(
+            hydration_log_level(REHYDRATE_SETTLED, log::Level::Warn),
+            log::Level::Debug
+        );
+        assert_eq!(
+            hydration_log_level(REHYDRATE_SETTLED, log::Level::Info),
+            log::Level::Debug,
+            "the step down is to debug from wherever it started, not to warn"
+        );
+    }
+
+    /// The count paces the retry, so it has to mean "failures in a row". Left
+    /// standing after the run ends, it makes the next *first* failure wait the
+    /// cap on an outage that was already over.
+    #[gpui::test]
+    fn the_backoff_count_ends_with_the_run_of_failures(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let _ = tty7_core::core::config::set_config_dir(
+                std::env::temp_dir().join(format!("tty7-backoff-count-{}", std::process::id())),
+            );
+            let view = crate::core::session::WindowView::default();
+            let ws = view.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views: vec![view],
+                    active: Some(ws),
+                },
+            );
+            let unprimed = |cx: &mut App| {
+                cx.default_global::<TreeSync>()
+                    .windows
+                    .entry(ws)
+                    .or_default()
+                    .sync = SyncPhase::Unprimed {
+                    dirty: false,
+                    priming: true,
+                };
+            };
+            let attempts =
+                |cx: &mut App| cx.default_global::<TreeSync>().windows[&ws].rehydrate_attempts;
+
+            unprimed(cx);
+            let epoch = cx.default_global::<TreeSync>().windows[&ws].epoch;
+            for expected in 1..=3 {
+                unprimed(cx);
+                owe_rehydration(cx, ws, epoch, Adopt::IfEmpty);
+                assert_eq!(
+                    attempts(cx),
+                    expected,
+                    "each failure in the run paces the next"
+                );
+            }
+
+            // The machine answered. Whatever it was, it is over.
+            unprimed(cx);
+            finish_prime(cx, ws, epoch, Ok(WsMirror::default()));
+            assert_eq!(
+                attempts(cx),
+                0,
+                "a prime landing is the machine answering, which is the whole question"
+            );
+
+            // Abandoned rather than paid: the user filled the window in
+            // themselves, so the `Replace` is dropped — and the run is over too.
+            {
+                let state = cx
+                    .default_global::<TreeSync>()
+                    .windows
+                    .get_mut(&ws)
+                    .unwrap();
+                state.rehydrate = Some(Adopt::Replace);
+                state.rehydrate_attempts = 4;
+            }
+            assert!(take_rehydrate(cx, ws, false).is_none());
+            assert_eq!(
+                attempts(cx),
+                0,
+                "a debt nobody owes any more cannot go on pacing the next one"
+            );
+        });
+    }
+
+    /// The retry fires on a timer, so the window it was armed for can be gone
+    /// by the time it runs. It has to notice and stand down — and leave the
+    /// debt where it is, because a window that is not there is not one that
+    /// has been paid.
+    #[gpui::test]
+    async fn a_retry_that_finds_no_window_stands_down(cx: &mut gpui::TestAppContext) {
+        let ws = cx.update(|cx| {
+            crate::ui::windows::WindowRegistry::init(cx);
+            let ws = WorkspaceId::new();
+            let epoch = cx
+                .default_global::<TreeSync>()
+                .windows
+                .entry(ws)
+                .or_default()
+                .epoch;
+            owe_rehydration(cx, ws, epoch, Adopt::IfEmpty);
+            ws
+        });
+
+        // Well past the first backoff: the armed retry really runs, rather than
+        // the test ending while it is still asleep.
+        cx.executor().advance_clock(rehydrate_backoff(1) * 2);
+        cx.executor().run_until_parked();
+
+        cx.update(|cx| {
+            assert!(
+                cx.default_global::<TreeSync>().windows[&ws]
+                    .rehydrate
+                    .is_some(),
+                "the debt outlives a retry that found nothing to pay it into"
+            );
+        });
     }
 
     #[gpui::test]
