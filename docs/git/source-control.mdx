@@ -1,0 +1,86 @@
+---
+title: "Source control"
+description: "Stage, commit, branch, and push from the panel beside your terminal."
+---
+
+The **Source Control** tab of the [side panel](/window/side-panel) (<kbd>⌘ J</kbd>)
+is a full git client for whichever repository the focused pane is in. It follows
+the pane: `cd` into another repository and the panel switches with you.
+
+<Frame caption="Placeholder — screenshot: the Source Control panel with staged and unstaged groups and a commit box">
+  <img src="/images/placeholder.svg" alt="The tty7 source control panel" />
+</Frame>
+
+## Changes
+
+Files are grouped by what git thinks of them:
+
+| Group | |
+|---|---|
+| **Merge Changes** | Conflicts, with *Resolve Conflict* and *Mark as Resolved* |
+| **Staged Changes** | What the next commit will contain |
+| **Changes** | Modified but not staged |
+| **Untracked** | New files |
+
+Each row has **Stage Changes**, **Unstage Changes**, **Discard Changes**, and
+**Open Changes** — which opens the [diff](/git/diffs). Group-level *Stage All*,
+*Unstage All*, and *Discard All* sit on the headers, and the destructive ones
+confirm first.
+
+## Committing
+
+Write the message in the box at the top and pick a commit action:
+
+| | |
+|---|---|
+| **Commit** | Commit what is staged |
+| **Commit All** | Stage everything, then commit |
+| **Commit (Amend)** | Replace the last commit — confirms first, because anyone who already has it has to reconcile |
+| **Commit & Push** | Commit, then push |
+| **Commit & Sync** | Commit, then pull and push |
+
+<kbd>⌘ ⏎</kbd> commits while the caret is in the message box. **Stash All** is
+there too.
+
+## Branches and remotes
+
+| | |
+|---|---|
+| **Checkout to…** | Switch branches, with a search box; offers **Stash & Switch** when the tree is dirty |
+| **Create Branch…** | From here, or from any commit in the history |
+| **Publish Branch** | For a branch with no upstream yet |
+| **Sync Changes** | Pull, then push |
+| **Push** · **Pull** · **Fetch** | Individually |
+
+All of these are also in the command palette under **Git**, so they are
+bindable.
+
+When a repository is mid-operation — merging, rebasing, cherry-picking,
+reverting, bisecting, applying — the panel says so instead of pretending
+everything is normal.
+
+## History
+
+**Git: Toggle Commit History** (or the *History* section header) opens the
+commit graph: branches drawn as lanes, a filter box, **Current Branch** or
+**All Branches**, and *Load more* at the bottom.
+
+Click a commit for its detail view — message, parents, and the files it touched,
+each openable as a diff. From a commit's menu:
+
+| | |
+|---|---|
+| **Checkout Commit** · **Create Branch Here…** | Move to it |
+| **Cherry Pick** · **Revert Commit** | Apply or undo it here |
+| **Reset (Soft / Mixed / Hard)** | Move the branch to it — Hard confirms, since commits after it fall off the branch and uncommitted changes are discarded |
+| **Copy Commit SHA** | |
+
+The history section starts collapsed and remembers whether you opened it
+(`scm_graph_expanded`).
+
+## In the sidebar
+
+You do not have to open the panel to know where you stand: every
+[sidebar row](/window/sidebar) carries its pane's branch and a `+N −M` count of
+the working tree, refreshed on `cd` and when a command finishes. Clicking the
+counts opens the diff overlay.

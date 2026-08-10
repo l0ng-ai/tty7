@@ -1,0 +1,58 @@
+---
+title: "Command palette"
+description: "One key for every action in the app — including the ones with no shortcut."
+---
+
+<kbd>⌘ P</kbd> opens the command palette. Type to filter, <kbd>↑</kbd>
+<kbd>↓</kbd> to move, <kbd>⏎</kbd> to run.
+
+Every action tty7 can perform is in here, whether or not it has a keybinding —
+which makes it the fastest way to reach the ones that deliberately ship unbound,
+like pane resize and swap.
+
+<Frame caption="Placeholder — screenshot: the command palette open over a terminal, grouped results">
+  <img src="/images/placeholder.svg" alt="The tty7 command palette" />
+</Frame>
+
+## What is in it
+
+Results are grouped, and the groups are the map of the app:
+
+| Group | Examples |
+|---|---|
+| **Tabs & Panes** | New Tab · New Worktree Tab… · Split Right · Zoom Pane · Focus Pane Left · Resize Pane Up · Swap Pane Next · Reopen Closed Tab · Copy Working Directory · Fork Session |
+| **Workspaces** | New Workspace · Switch Workspace… · Rename Workspace… · Stop Workspace… · Delete Workspace… |
+| **View** | Show/Hide Left Sidebar · Show/Hide Right Panel · Show Code Panel · Tab Bar: Move to Top · Right Panel: Info / Changes / Files · Change Theme… · Enter Full Screen · Toggle Unified / Side-by-Side Diff |
+| **Git** | Commit · Stage All Changes · Unstage All · Discard All · Checkout to… · Create Branch… · Sync · Push · Pull · Fetch · Toggle Commit History |
+| **Terminal** | Clear Scrollback · Find in Terminal… · Find Next / Previous · Copy · Cut · Paste · Select All |
+| **SSH** | Add Connection… · Manage Profiles… · Reconnect · Remote Files · Port Forwarding |
+| **Agents** | Send Selection · Send Git Diff for Review · Copy Session ID |
+| **Application** | Settings… · Keyboard Shortcuts · Check for Updates… · Documentation · Join the Discord · Report an Issue… · Restart Server… |
+
+Entries that do something destructive say so under the name — *Delete
+Workspace…* is subtitled "ends its shells and forgets the layout", *Restart
+Server…* is "ends every running shell; layout is kept".
+
+## Connecting from the palette
+
+Type an SSH address and the palette offers to connect to it:
+
+```
+me@devbox
+me@devbox:2222
+[::1]:22
+```
+
+Saved profiles and `~/.ssh/config` aliases show up the same way — start typing
+the name. [SSH →](/remote/ssh)
+
+## Sending context to an agent
+
+Two palette commands hand what is in front of you to the coding agent running in
+the pane, as a ready-made prompt:
+
+- **Agent: Send Selection** — the current selection.
+- **Agent: Send Git Diff for Review** — the repository's `git diff`.
+
+If no agent is running, tty7 says so rather than typing into your shell.
+[Agents →](/agents/overview)

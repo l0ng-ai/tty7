@@ -1,0 +1,62 @@
+---
+title: "Selection and clipboard"
+description: "Smart double-click, copy on select, and the settings around them."
+---
+
+## Selecting
+
+| | |
+|---|---|
+| Drag | Select a range |
+| Double-click | Select the thing under the cursor — see below |
+| Triple-click | Select the line |
+| <kbd>⇧</kbd>-click | Extend the current selection to where you clicked |
+| <kbd>⌘ A</kbd> *(macOS)* | Select all — also in the right-click menu and the command palette on every platform |
+
+### Smart double-click
+
+A double-click does not just grab a word bounded by spaces. It works out what
+you are pointing at:
+
+| Under the cursor | What you get |
+|---|---|
+| A URL | The whole URL — including one the shell wrapped across two lines |
+| A file path | The whole path |
+| An email address | The whole address |
+| A bracket or quote | The matching pair, and everything between them |
+| CJK text | The word, segmented by dictionary rather than by character |
+
+Turn it off with **Settings → Input → Selection & clipboard → Smart selection**.
+With it off, double-click falls back to plain word selection using the
+`word_separators` list from `config.json` — by default:
+
+```
+,│`|:"' ()[]{}<>⇥
+```
+
+## Copying and pasting
+
+| | macOS | Windows / Linux |
+|---|---|---|
+| Copy | <kbd>⌘ C</kbd> | <kbd>Ctrl ⇧ C</kbd> |
+| Paste | <kbd>⌘ V</kbd> | <kbd>Ctrl ⇧ V</kbd> · <kbd>⇧ Insert</kbd> |
+
+Two settings shape what lands where, both under **Settings → Input → Selection
+& clipboard**:
+
+<CardGroup cols={2}>
+  <Card title="Copy on select" icon="clipboard">
+    Selecting with the mouse copies immediately, no <kbd>⌘ C</kbd>. Off by
+    default.
+  </Card>
+  <Card title="Trim trailing spaces on copy" icon="scissors">
+    Strips trailing whitespace from every copied line — useful when copying out
+    of a TUI that pads to the pane width. Off by default.
+  </Card>
+</CardGroup>
+
+<Note>
+  Pasting multiple lines sends them as typed input, exactly as any terminal
+  does. If the shell supports bracketed paste it will treat the block as one
+  paste rather than running each line.
+</Note>

@@ -1,0 +1,183 @@
+---
+title: "config.json"
+description: "Every key tty7 reads, its type, and its default."
+---
+
+| | |
+|---|---|
+| macOS / Linux | `~/.config/tty7/config.json` |
+| Windows | `%APPDATA%\tty7\config.json` |
+| Override the whole directory | `TTY7_CONFIG_DIR` |
+
+Every key is optional — a missing one means its default, so you only write what
+you change. Out-of-range numbers are clamped rather than rejected, and an
+unrecognised enum value falls back to the default with a log line instead of
+failing the file.
+
+```json
+{
+  "font_family": "JetBrains Mono",
+  "font_size": 14,
+  "theme_follow_system": true,
+  "theme_preset_light": "one_light",
+  "theme_preset_dark": "dracula",
+  "macos_option_as_alt": true,
+  "scrollback_limit": 50000
+}
+```
+
+## Typography
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `font_family` | string | `"Hack"` | Primary face. Hack is bundled. |
+| `font_fallbacks` | string[] | platform list | Ordered fallbacks. Stock platform faces are appended to whatever you write. |
+| `font_family_bold` | string | — | A distinct bold face. |
+| `font_family_italic` | string | — | A distinct italic face. |
+| `font_features` | object | — | OpenType tags, e.g. `{"calt": true, "liga": 1}`. Four alphanumeric characters per tag. |
+| `font_size` | number | `15` | Terminal text size in px (4–256). |
+| `line_height` | number | `1.4` | Multiple of the font size (0.5–4). |
+| `ui_font_size` | number | `16` | The interface's root size in px (12–24). |
+
+[More about fonts →](/customization/fonts)
+
+## Theme and window
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `theme_preset` | string | `"light"` | Active theme id. |
+| `theme_follow_system` | bool | `false` | Follow the OS appearance. |
+| `theme_preset_light` | string | `"light"` | Used when following the system. |
+| `theme_preset_dark` | string | `"dark"` | Used when following the system. |
+| `theme_legible_palette` | bool | `true` | Brighten or darken bright ANSI colours that would be unreadable on the background. |
+| `window_opacity` | number | — | 0.2–1.0. Unset means "follow the theme". |
+| `window_blur` | bool | — | Blur behind a translucent window (macOS). Unset means "follow the theme". |
+| `window_backdrop` | enum | `"auto"` | Windows only: `auto`, `blur`, `mica`, `mica-alt`, `acrylic`, `off`. |
+| `dim_inactive_panes` | bool | `true` | Dim panes that are not focused. |
+| `startup_mode` | enum | `"normal"` | `normal`, `maximized`, `fullscreen`. |
+| `remember_window_size` | bool | `true` | Reopen at the last size and position. |
+| `restore_session` | bool | `true` | Reopen the last window's tabs, splits, and directories. |
+| `gui_language` | enum | `"en"` | `en`, `zh-CN`, `ja-JP`. Anything else falls back to `en`. |
+
+Built-in theme ids: `light`, `one_light`, `catppuccin_latte`, `rose_pine_dawn`,
+`dark`, `dracula`, `harbor`, `one_dark_pro`, `rose_pine`. Your own themes take
+their id from the file name. [More about themes →](/customization/themes)
+
+## Tabs, sidebar, panels
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `tab_bar_position` | enum | `"left"` | `left` (sidebar) or `top` (strip). |
+| `new_tab_position` | enum | `"after-current"` | Or `end`. |
+| `sidebar_grouping` | enum | `"repo"` | Or `none` for a flat list. |
+| `sidebar_diff_preview` | bool | `true` | Clicking a row's `+N −M` opens the diff overlay. |
+| `sidebar_width` | number | `220` | Pixels (100–2000). |
+| `sidebar_collapsed` | bool | `false` | |
+| `right_panel_visible` | bool | `false` | |
+| `right_panel_width` | number | `260` | Pixels (100–2000). |
+| `right_panel_tab` | enum | `"info"` | `info`, `changes`, `files`. |
+| `diff_view` | enum | `"split"` | Or `unified`. Global, not per file. |
+| `scm_graph_expanded` | bool | `false` | Whether the history section starts open. |
+| `show_tray_icon` | bool | `true` | The tray / menu bar status item. |
+
+## Terminal
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `shell` | object | — | `{"program": "fish", "args": ["-l"]}`. Unset uses the platform default. |
+| `working_directory` | object | `{"strategy":"inherit"}` | `strategy` is `inherit`, `home`, or `custom`; `path` is used when custom. |
+| `env` | object | `{}` | Extra environment variables for every pane. |
+| `scrollback_limit` | number | `10000` | Lines per pane (100–100,000). New panes only. |
+| `cursor_style` | enum | `"block"` | `block`, `bar`, `underline`. |
+| `cursor_blink` | bool | `true` | |
+| `bell` | enum | `"visual"` | `none`, `visual`, `audible`, `both`. |
+| `per_pane_history` | bool | `false` | Give each pane its own shell history file. |
+
+## Mouse and scrolling
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `mouse_scroll_multiplier` | number | `1.0` | 0.1–10. |
+| `smooth_scroll` | bool | `true` | Ease each wheel notch. Trackpads unaffected. |
+| `mouse_reporting` | bool | `true` | Let full-screen apps handle clicks and scrolling. |
+| `mouse_hide_while_typing` | bool | `true` | |
+| `focus_follows_mouse` | bool | `false` | |
+
+## Input and clipboard
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `tab_completion` | bool | `true` | tty7's completion menu on <kbd>⇥</kbd>. Off hands the key to the shell. |
+| `history_search` | bool | `true` | tty7's fuzzy history on <kbd>⌃ R</kbd>. Off hands the key to the shell. |
+| `smart_select` | bool | `true` | Double-click grabs URLs, paths, bracket pairs, CJK words. |
+| `word_separators` | string | see below | Characters that end a word. Used when smart selection is off. |
+| `copy_on_select` | bool | `false` | |
+| `clipboard_trim_trailing_spaces` | bool | `false` | |
+| `macos_option_as_alt` | bool | `false` | <kbd>⌥</kbd>+key sends the escape chord instead of typing a special character. |
+| `keybindings` | object | `{}` | `{"SplitRight": "cmd-d"}`. [Syntax →](/customization/keybindings) |
+| `keybinding_preset` | string | `"default"` | Or `"tmux"`. |
+| `prefix` | string | `"ctrl-b"` | The tmux preset's prefix. |
+
+The default `word_separators` are a comma, a box-drawing bar, a backtick, a
+pipe, a colon, both quote characters, a space, the six bracket characters, the
+angle brackets, and a tab:
+
+```json
+{ "word_separators": ",│`|:\"' ()[]{}<>\t" }
+```
+
+## Links
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `link_url` | bool | `true` | Underline and open URLs on ⌘/Ctrl-click. |
+| `link_file_command` | string | — | Command for file links. `{path}`, `{line}`, `{column}` are substituted; a flag whose value is missing is dropped. |
+| `ssh_loopback_forward` | bool | `false` | Open `localhost:PORT` links through a temporary forward when the pane is in SSH. |
+
+## Notifications
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `notify_on_command_finish` | enum | `"unfocused"` | `never`, `unfocused`, `always`. |
+| `notify_threshold_secs` | number | `10` | How long a command must run to qualify (1–3600). |
+
+## Agents
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `agent_commands` | object | `{}` | Map a wrapper command to an agent slug: `{"cc": "claude"}`. |
+| `restore_agent_sessions` | bool | `true` | Relaunch an agent conversation when a lost pane is restored. |
+| `install_cli_on_path` | bool | `true` | Put the bundled `tty7` command on PATH at launch. |
+
+[Agent slugs →](/agents/overview#your-own-wrapper)
+
+## SSH
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `ssh_profiles` | array | `[]` | Managed from **Settings → SSH**. Secrets live in the OS keychain, never here. |
+| `verify_host_keys` | bool | `true` | |
+| `ssh_warn_on_close` | bool | `false` | Confirm before closing a live connection. |
+
+## Updates and network
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `check_for_updates` | bool | `true` | |
+| `update_channel` | enum | `"stable"` | Or `nightly`. |
+| `auto_download_updates` | bool | `true` | Fetch and verify in the background so installing is a restart. Packages are ~25–30 MB and a check happens every six hours. |
+| `http_proxy` | string | — | For tty7's *own* traffic only — update checks, downloads, remote-server installs. `http://…` or `socks5://…`. Programs in a pane are unaffected. |
+
+[Updates →](/reference/updates)
+
+## Keys tty7 manages itself
+
+`ssh_profile_frecency` and `command_frecency` record how often and how recently
+you use a profile or command, so the pickers can rank them. They are written by
+the app; there is no reason to edit them.
+
+<Note>
+  If the file cannot be parsed, tty7 starts on defaults, keeps your original at
+  `config.json.corrupt`, and logs the reason. It never silently overwrites what
+  you wrote.
+</Note>

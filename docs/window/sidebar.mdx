@@ -1,0 +1,76 @@
+---
+title: "The sidebar"
+description: "Tabs grouped by repository, with branch, diff counts, and agent status on every row."
+---
+
+The left sidebar is tty7's tab bar, and it is the default because a vertical row
+has room for things a horizontal chip does not: the repository a tab belongs to,
+the branch it is on, how much has changed there, and what a coding agent in it
+is doing.
+
+<kbd>⌘ B</kbd> shows and hides it. Drag its right edge to resize.
+
+<Frame caption="Placeholder — screenshot: the sidebar with two repo groups, agent avatars and status dots, branch and +N −M counts">
+  <img src="/images/placeholder.svg" alt="The tty7 tab sidebar" />
+</Frame>
+
+## Grouped by repository
+
+Rows sit under a header per git repository, with everything else collected in a
+trailing **Scratch** section. The grouping follows the tab's working directory,
+not its history — switching branches or `cd`-ing around inside a repository
+never moves a row out from under its header.
+
+**Settings → Window & Tabs → Sidebar grouping** switches between *By repo* (the
+default) and *Flat*.
+
+## What a row tells you
+
+<CardGroup cols={2}>
+  <Card title="Who is running there" icon="robot">
+    A brand avatar when a coding agent is in the tab, plus a status dot —
+    blue for working, amber for needs-your-input, green for done.
+  </Card>
+  <Card title="Where it is" icon="code-branch">
+    The pane's git branch, refreshed on `cd` and whenever a command finishes.
+  </Card>
+  <Card title="What changed" icon="plus-minus">
+    The working-tree diff as `+N −M`. Click the counts to open the
+    [diff overlay](/git/diffs).
+  </Card>
+  <Card title="Whether you have looked" icon="circle-dot">
+    An unread marker on tabs that produced output while you were elsewhere.
+    *Mark as Unread* is in the right-click menu.
+  </Card>
+</CardGroup>
+
+If you would rather the counts not be clickable, turn off **Settings → Window &
+Tabs → Open diff preview from sidebar counts**. The branch and the numbers stay;
+they simply stop opening the overlay.
+
+## Rearranging
+
+Drag a row to reorder it, or drag a whole group header to move the group.
+Dropping a row into another group moves the tab there.
+
+## Naming
+
+Almost no tab has a name of its own, so the label falls back through the best
+evidence available, in order:
+
+1. a name you set (right-click → **Rename Tab…**)
+2. the coding agent running in the tab — "Claude Code"
+3. the last segment of the working directory
+4. the foreground process
+
+That order is also what `tty7 tab ls` reports as `label`, with `name` left
+literal so a script can tell a real name from a stand-in.
+
+## The switcher
+
+<kbd>⌘ ⇧ O</kbd> opens the workspace switcher: every workspace on every machine
+you are connected to on the left, that workspace's tabs on the right. Type to
+filter both, <kbd>⇥</kbd> to cross into the tab column, <kbd>⏎</kbd> to open.
+
+From here you can also rename a workspace, open one in a new window, stop one,
+or connect to a machine you have a profile for.

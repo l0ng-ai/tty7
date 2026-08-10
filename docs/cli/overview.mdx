@@ -1,0 +1,147 @@
+---
+title: "The tty7 command"
+description: "Driving the workbench from a script, a Makefile, or another agent."
+---
+
+`tty7` is a thin, non-interactive client of the tty7 server. Every verb runs and
+exits; `--json` makes the output machine-readable. **The GUI does not have to be
+running** — the server is what owns the panes.
+
+It ships inside every installer and is put on PATH at launch, so it works from
+any terminal on the machine. [Installation →](/getting-started/installation#the-tty7-command)
+
+## Start with `doctor`
+
+```bash
+tty7 doctor
+```
+
+One table that answers everything you need before doing anything else: whether a
+server is reachable, whether its wire dialect matches this binary, and whether
+`TTY7_CONFIG_DIR` / `TTY7_WS` / `TTY7_PANE` are set — that is, whether you are
+running *inside* a tty7 pane.
+
+Being inside a pane matters because the address-taking verbs (`split`, `send`,
+`capture`, `procs`, `pane close`) default to `$TTY7_PANE`, and `run --keep`
+files its pane into `$TTY7_WS`. Outside one you must name a target, and the
+error says so rather than guessing.
+
+## Addresses
+
+| Shape | Means | Stable? |
+|---|---|---|
+| `%42` | A pane | **Yes** — a pane keeps its id for its whole life |
+| `@7` | A tab, numbered across the whole machine in tree order | **No** — it shifts whenever any workspace or tab appears or disappears |
+| `api` · `76698a44` · a full UUID | A workspace, by name, unique id prefix, or id | Yes |
+
+Re-resolve `@N` immediately before using it. Pane and workspace ids are safe to
+remember.
+
+## Two ways to run something
+
+### Blocking, with a real exit code
+
+```bash
+tty7 run -- cargo test           # streams to stdout, exits with cargo's code
+tty7 run --cwd /path -- make
+tty7 run --keep -- cargo build   # leaves the pane behind as a new tab
+```
+
+The closest thing to running the command yourself — the difference is that it
+gets a real PTY (so colour, progress bars, and TUIs behave), and that you can
+watch it happen in the window.
+
+<Note>
+  Everything after `--` belongs to the child: `tty7 run -- cargo test --keep`
+  passes `--keep` to cargo, not to tty7.
+</Note>
+
+### Non-blocking: a pane you talk to over time
+
+This is the one worth reaching for. Get a pane, give it work, come back.
+
+```bash
+PANE=$(tty7 split --v)                    # or --h; prints "%83"
+tty7 send "$PANE" 'npm run dev' --enter
+# ... later
+tty7 capture "$PANE" --plain
+tty7 pane close "$PANE"
+```
+
+If you are not inside a tty7 pane there is nothing to split, so make your own
+place to work:
+
+```bash
+tty7 new --json /path/to/repo    # {"id": "...", "pane": 83}
+```
+
+## Reading a pane
+
+```bash
+tty7 capture %83 --plain
+```
+
+`capture` returns what the server stored. Without `--plain` that is the raw
+bytes, escapes and all. With `--plain` those bytes are replayed through a real
+terminal grid and you get the text that produced — which is not the same as
+stripping escapes yourself:
+
+- A line the shell wrapped at the pane width comes back as **one** line
+- A progress bar that rewrote itself with `\r` reads as its **final** value
+- Cursor addressing puts text **where the program put it**, so a TUI's screen
+  lands where it was drawn
+
+Use `--plain` whenever a human would want to read the output.
+
+<Warning>
+  A screen is a rectangle. Whatever scrolled off the top is gone, and an exit
+  code was never on it. When you want the *answer* rather than the *view*, have
+  the shell write it somewhere clean:
+
+  ```bash
+  tty7 send "$PANE" 'cargo test > /tmp/t.log 2>&1; echo $? > /tmp/t.rc' --enter
+  ```
+</Warning>
+
+## Knowing when something finished
+
+```bash
+tty7 procs %83
+```
+
+The process tree inside the pane, indented by depth, with `*` on the foreground
+process — plus the ports those processes are listening on. **When the only entry
+left is the depth-0 shell, the command is done.** That is far more reliable than
+grepping the screen for a sentinel that can wrap or echo twice.
+
+For agents specifically, use [`tty7 wait`](/agents/orchestration) instead of
+polling.
+
+## Looking around
+
+```bash
+tty7 ls              # every workspace: tabs, panes, who's attached
+tty7 ws tree api     # one workspace as a tree
+tty7 pane ls --all   # every pane, including orphans no workspace holds
+tty7 agents          # every coding agent and its status
+tty7 status          # server pid, uptime, pane count, build, socket
+tty7 machine ls      # this machine plus any linked remotes
+tty7 events          # stream server events until interrupted
+```
+
+`--json` on any of them, `-q` to suppress success output (errors still print).
+
+## Remote machines
+
+```bash
+tty7 -m devbox ls
+tty7 -m devbox run -- cargo test
+```
+
+`-m` routes over a link the local server already holds. It will not dial a fresh
+connection — connect from the GUI first.
+[Remote workspaces →](/remote/workspaces)
+
+<Card title="Full command reference" icon="book" href="/cli/reference">
+  Every verb, flag, and JSON shape.
+</Card>

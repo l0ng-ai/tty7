@@ -1,0 +1,103 @@
+---
+title: "Orchestrating agents"
+description: "One agent opening a pane for another, waiting on it, and reading the result."
+---
+
+Once an agent's status is a thing a program can ask about, one agent can run
+another. tty7 gives that loop a primitive instead of leaving it to screen
+scraping.
+
+## The loop
+
+```bash
+# 1. give the worker a pane
+PANE=$(tty7 split --v)
+
+# 2. hand it a task
+tty7 send "$PANE" 'claude -p "add tests for the parser"' --enter
+
+# 3. sleep until it needs you or finishes
+tty7 wait "$PANE" --until waiting,done --changed --timeout 600
+
+# 4. read what happened
+tty7 capture "$PANE" --plain
+
+# 5. clean up
+tty7 pane close "$PANE"
+```
+
+That is the whole shape. The interesting step is the third.
+
+## `tty7 wait`
+
+```bash
+tty7 wait [%PANE] [--until STATE,…] [--changed] [--timeout SECS] [--interval MS]
+```
+
+Blocks until the pane's agent reaches one of the states you named.
+
+| Flag | Default | |
+|---|---|---|
+| `--until` | `waiting,done,exit` | Which states end the wait: `idle`, `working`, `waiting`, `done`, `exit` |
+| `--changed` | off | Ignore the state the pane was *already* in — only wake on one it moved into after the wait began |
+| `--timeout` | none | Give up after this many seconds, exiting 124 |
+| `--interval` | 500 ms | How often to poll |
+
+Exit codes are made for scripts:
+
+| Code | Meaning |
+|---|---|
+| `0` | A state you asked for was reached |
+| `124` | Timed out — the `timeout(1)` convention, so "not yet" is distinguishable from "broken" |
+| `1` | The worker died first; the JSON says `"status": "exit"` |
+
+The reply carries the agent's own message and its native session id, so a
+wake-up is directly actionable.
+
+### Why `--changed` matters
+
+The status the server keeps is a **level, not an event**. `done` stands until
+the next turn begins; `waiting` stands until the agent moves again.
+
+So a `wait` issued immediately after a `send` can answer with the *previous*
+turn's state, before the worker has even read the input. `--changed` refuses the
+state the pane was already in, which is what every round after the first needs.
+Without it, the JSON's `stale` flag tells you whether that happened.
+
+## Watching everything at once
+
+```bash
+tty7 agents          # every agent on the machine: pane, agent, status, message
+tty7 agents --json   # the same, parseable
+```
+
+If you are an agent yourself, you are in that list too.
+
+## The Claude Code skill
+
+**Settings → Agents** has a switch that installs
+`~/.claude/skills/tty7-orchestration` — a skill teaching a *primary* Claude Code
+agent this whole delegation loop: open a worker pane, send it one bounded task,
+`wait` on it, answer what it asks, collect the result, close the pane.
+
+It is a skill rather than a global instruction on purpose. Only its one-line
+description rides in context until something reaches for it, and worker agents
+never inherit orchestration authority.
+
+Uninstalling removes the file tty7 wrote and refuses to touch one it did not, so
+a hand-written skill that happens to share the directory name survives.
+
+## Rules of the road
+
+<Warning>
+  The panes on a machine are somebody's real work, and some of them are other
+  agents mid-task. Treat anything you did not create as read-only.
+</Warning>
+
+- **Never `send` into a pane you did not open.** Check `tty7 agents` first.
+- **Never close a pane, tab, or workspace you did not create.**
+- **Never `server stop` or `server restart`.** Every pane on the machine dies
+  with it.
+- **Clean up what you did create** — `tty7 pane close %83` when you are done.
+
+The full agent-facing contract is in [the skill](/cli/agent-skill).

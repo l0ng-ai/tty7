@@ -1,0 +1,57 @@
+---
+title: "History"
+description: "Fuzzy history search, and whether each pane gets its own."
+---
+
+## Fuzzy search with <kbd>⌃ R</kbd>
+
+<kbd>⌃ R</kbd> opens a fuzzy search over what you have actually run. Type any
+fragment — the letters do not have to be adjacent — and the list narrows.
+
+Each row carries the context the plain shell version throws away:
+
+- **where** you ran it, so `npm run dev` from three repositories is three
+  distinct entries
+- **when**, as a relative time
+- **whether it failed**, from the exit code
+
+Ranking mixes frequency with recency, and commands you ran in the *current*
+directory are pushed up — the thing you want is usually the thing you last did
+here.
+
+<Frame caption="Placeholder — screenshot: ⌃R open, matching rows showing directory, time, and a failed exit">
+  <img src="/images/placeholder.svg" alt="Fuzzy history search" />
+</Frame>
+
+<kbd>⏎</kbd> puts the command on the prompt. <kbd>Esc</kbd> closes without
+touching it.
+
+### Handing <kbd>⌃ R</kbd> back
+
+If you already have an fzf, percol, atuin or McFly binding you like, turn off
+**Settings → Input → Prompt → History search** (`history_search: false`).
+<kbd>⌃ R</kbd> then goes to the shell, and whatever you bound there keeps
+working.
+
+## Where the history comes from
+
+Your existing shell history file, as-is. Nothing is imported or converted, there
+is no separate store to warm up, and a history written outside tty7 shows up
+immediately.
+
+## One history, or one per pane
+
+By default every pane shares your shell's history file, which is what a terminal
+has always done: a command typed in one pane is available in the next.
+
+**Settings → Terminal → Give each pane its own shell history**
+(`per_pane_history: true`) changes that. Each pane gets a private history file:
+
+- **seeded** from your real history when the pane opens, so it is not blank
+- **merged back** into your real history when the pane closes, so nothing typed
+  is lost
+
+Useful when several agents or several tasks are running side by side and you do
+not want their commands interleaved in your <kbd>↑</kbd> key. Off by default,
+because someone who has not asked for it would experience the change as their
+history mysteriously forgetting the other window.

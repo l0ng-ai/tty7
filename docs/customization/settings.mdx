@@ -1,0 +1,86 @@
+---
+title: "Settings"
+description: "What lives in each section, and how the settings file works."
+---
+
+<kbd>⌘ ,</kbd> opens Settings. There is a search box at the top that matches
+setting names *and* keywords, which is usually faster than remembering which
+section something is in.
+
+<Frame caption="Placeholder — screenshot: the Settings window with the section list on the left">
+  <img src="/images/placeholder.svg" alt="tty7 Settings" />
+</Frame>
+
+## The eight sections
+
+<CardGroup cols={2}>
+  <Card title="Appearance" icon="palette" href="/customization/themes">
+    Theme, sync with system, typography, cursor, transparency, language.
+  </Card>
+  <Card title="Terminal" icon="terminal">
+    Shell and start directory, scrollback and scrolling, mouse, bell, per-pane
+    history.
+  </Card>
+  <Card title="Input" icon="keyboard">
+    Prompt features, selection & clipboard, keyboard (Option as Meta), links.
+  </Card>
+  <Card title="SSH" icon="server" href="/remote/ssh">
+    Hosts, defaults, security, and every per-profile field.
+  </Card>
+  <Card title="Agents" icon="robot" href="/agents/status">
+    Hook installation per agent and per machine, the orchestration skill, the
+    CLI on PATH.
+  </Card>
+  <Card title="Window & Tabs" icon="window-maximize">
+    Startup window, tab bar position and grouping, notifications, tray icon.
+  </Card>
+  <Card title="Keybindings" icon="command" href="/customization/keybindings">
+    Every shortcut, the tmux preset, the prefix.
+  </Card>
+  <Card title="About" icon="circle-info" href="/reference/updates">
+    Version, update channel, and the updater.
+  </Card>
+</CardGroup>
+
+## The settings file
+
+Everything the Settings window writes goes to one file:
+
+| | |
+|---|---|
+| macOS / Linux | `~/.config/tty7/config.json` |
+| Windows | `%APPDATA%\tty7\config.json` |
+
+Set `TTY7_CONFIG_DIR` to point the whole directory — config, themes, state —
+somewhere else.
+
+You can edit the file by hand; a handful of options exist only there. See the
+[configuration reference](/reference/configuration) for every key, its type, and
+its default.
+
+### How it handles mistakes
+
+The file is written atomically, and read forgivingly:
+
+- **A missing key** means the default — you only have to write what you change.
+- **An out-of-range number** is clamped into its band, not rejected.
+- **An unrecognised enum value** falls back to the default with a log line,
+  rather than failing the whole file.
+- **An unparseable file** is not overwritten. tty7 starts on defaults, keeps a
+  copy at `config.json.corrupt`, and says so in the log.
+
+<Note>
+  A UTF-8 BOM at the start of the file is tolerated, which matters if you edited
+  it in a Windows editor.
+</Note>
+
+## Language
+
+**Settings → Appearance → Language** switches the interface between English,
+简体中文, and 日本語. The choice is explicit — the system language is never
+inferred — and CLI output stays English regardless, so agent and script
+integrations keep a stable surface.
+
+```json
+{ "gui_language": "zh-CN" }
+```

@@ -1,0 +1,108 @@
+---
+title: "Core concepts"
+description: "Workspaces, tabs, panes — and the background server that owns them all."
+---
+
+Four words explain most of tty7. Three of them you can see; the fourth is the
+reason the other three survive a reboot.
+
+## Pane
+
+A **pane** is one terminal: one shell (or one program) attached to one PTY. It
+is the only thing in tty7 that actually runs something.
+
+Panes have stable ids — `%42` — for their whole life. That id is what the
+[CLI](/cli/overview) addresses, and what `$TTY7_PANE` holds inside the pane
+itself.
+
+## Tab
+
+A **tab** is a layout of panes. One pane to start with; split it and the tab
+holds two, arranged in rows and columns you can drag around.
+
+Tabs appear in the sidebar (or the top strip, if you move it there). A tab's
+label is the best evidence tty7 has: a name you set, else the coding agent
+running in it, else the last segment of its working directory.
+
+## Workspace
+
+A **workspace** is a named set of tabs — a project, usually. One window shows
+one workspace at a time, and <kbd>⌘ ⇧ O</kbd> opens the switcher to move between
+them or open a second window on another one.
+
+Workspaces are how tty7 keeps ten repositories from becoming forty
+indistinguishable tabs. They also travel: a workspace on a remote machine is
+still a workspace, opened from the same switcher.
+
+<Frame caption="Placeholder — screenshot: the workspace switcher, workspaces on the left, that workspace's tabs on the right">
+  <img src="/images/placeholder.svg" alt="The tty7 workspace switcher" />
+</Frame>
+
+## The server
+
+Here is the part that matters. **The window does not own your shells — a
+background server does.**
+
+Quitting tty7 closes the window and leaves that server running. Your build keeps
+building, your agent keeps working, your SSH session stays up. Open tty7 again
+and it reattaches to exactly what was there.
+
+This is also why:
+
+- **`tty7` works from any terminal.** The CLI talks to the same server. The GUI
+  does not have to be running at all.
+- **A crash is not a catastrophe.** Panes come back showing what was on them:
+  a capped tail of each pane's output is kept on disk and handed to the pane
+  that reopens on its id.
+- **Stopping is explicit.** *Quit and Stop Server…* in the tray menu is the only
+  ordinary way to end everything, and it warns you first.
+
+<Warning>
+  Restarting the server ends every process in every pane on that machine —
+  shells, agents, and SSH sessions alike. Layouts are kept and come back with
+  fresh shells. Never do it on someone else's behalf without asking.
+</Warning>
+
+### What survives what
+
+| | Close a tab | Quit tty7 | Stop the server | Reboot |
+|---|:--:|:--:|:--:|:--:|
+| The shell keeps running | ✗ | ✓ | ✗ | ✗ |
+| The layout comes back | ✗ | ✓ | ✓ | ✓ |
+| What was on screen comes back | ✗ | ✓ | ✓ | ✓ <sup>1</sup> |
+| A supported agent session resumes | ✗ | ✓ | ✓ | ✓ |
+
+<sub><sup>1</sup> A capped tail of each pane, restored once. See
+[session restore](/reference/troubleshooting#panes-came-back-empty).</sub>
+
+## Machines
+
+Everything above exists per **machine**. Your laptop is one; a dev box you
+connect to over SSH is another, with its own server, its own workspaces, and its
+own panes.
+
+The switcher lists them together, and the CLI reaches them with `-m`:
+
+```bash
+tty7 -m devbox ls
+```
+
+Remote panes run on the remote machine — the files, the repository, the git
+data, and the process tree are all over there.
+[Remote workspaces →](/remote/workspaces)
+
+## The three environment variables
+
+Every pane exports these, and anything you launch from one inherits them:
+
+| Variable | What it holds |
+|---|---|
+| `TTY7_PANE` | This pane's id — the default target of `tty7 split`, `send`, `capture`, `procs`. |
+| `TTY7_WS` | This pane's workspace id. |
+| `TTY7_CONFIG_DIR` | The config directory, which is how the CLI finds the right server. |
+
+`echo $TTY7_PANE` is the fastest way to tell whether you are inside tty7 at all.
+
+<Card title="Drive it from a script" icon="terminal" href="/cli/overview">
+  Those ids are the whole interface. The CLI page starts there.
+</Card>

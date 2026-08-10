@@ -1,0 +1,130 @@
+---
+title: "The prompt"
+description: "Ghost suggestions, tab completion that explains itself, syntax highlighting, and real multi-line editing."
+---
+
+tty7 puts an editor at the shell prompt. Nothing to install, no plugin to source
+— the moment a supported shell starts in a pane, the prompt behaves like this.
+
+<Frame caption="Placeholder — video: typing a command with a ghost suggestion, accepting it, then opening the completion menu">
+  <img src="/images/placeholder.svg" alt="The tty7 prompt" />
+</Frame>
+
+## Ghost suggestions
+
+As you type, the rest of the line is filled in from your history, greyed out
+ahead of the cursor.
+
+| | |
+|---|---|
+| <kbd>→</kbd> | Accept the whole suggestion |
+| Keep typing | The suggestion narrows |
+| <kbd>Esc</kbd> or anything that does not match | It disappears |
+
+Your existing shell history is what feeds it — there is no separate database to
+build up first, and it carries across sessions and reboots.
+
+## Tab completion, with descriptions
+
+<kbd>⇥</kbd> opens a completion menu that knows what it is offering:
+
+- **Commands** from your PATH and your shell's builtins
+- **Files and directories**, with `cd`, `pushd`, `popd`, and `rmdir` offering
+  directories only
+- **Flags and subcommands** with their descriptions, for about 100 common
+  commands — `git`, `cargo`, `docker`, `kubectl`, `npm`, `brew` and the rest
+- **Values** where a flag only takes certain ones
+
+<Frame caption="Placeholder — screenshot: the completion menu on `git c`, each subcommand with its description">
+  <img src="/images/placeholder.svg" alt="Explained tab completion" />
+</Frame>
+
+When tty7 has nothing useful to offer, the <kbd>⇥</kbd> falls through to your
+shell's own completion, so a carefully configured zsh setup is not lost.
+
+To hand <kbd>⇥</kbd> back to the shell entirely, turn off **Settings → Input →
+Prompt → Tab completion** (`tab_completion` in `config.json`).
+
+## Syntax highlighting
+
+The line you are typing is coloured as you type it: the command, its flags, its
+arguments, paths, quoted strings, operators, comments. It is a fast tokenizer,
+not a shell parser — it never changes what gets run.
+
+## Line editing
+
+The prompt behaves like a text field, because it is one:
+
+- **Click to place the caret** anywhere in the line
+- **Select with the mouse**, drag to extend
+- **Word motion** and word delete
+- **Undo**
+
+Everything readline does still works — this sits on top, it does not replace it.
+
+<Tip>
+  On macOS, turn on **Settings → Input → Keyboard → Option (⌥) acts as Meta** if
+  you want <kbd>⌥ B</kbd> / <kbd>⌥ F</kbd> to move by word instead of typing
+  `∫` and `ƒ`.
+</Tip>
+
+## Typing with an IME
+
+Pinyin, Kana, Hangul and the rest work in a pane the way they do in a text
+field: the composition is drawn in place at the cursor and only the committed
+text reaches the program.
+
+Two rules decide who gets a keystroke:
+
+- **A plain printable key goes to the IME.** A key held with <kbd>⌃</kbd>,
+  <kbd>⌘</kbd>, <kbd>fn</kbd>, or <kbd>⌥</kbd> does not — those are chords, not
+  characters.
+- **A program that asks for every key gets every key.** When something turns on
+  the kitty keyboard protocol's report-all-keys mode, the IME steps aside so the
+  program sees raw input.
+
+<Note>
+  On macOS with **Option (⌥) acts as Meta** turned on, <kbd>⌥</kbd> chords
+  bypass the IME entirely, so <kbd>⌥ B</kbd> reaches your shell as meta-b
+  instead of being eaten as a dead key.
+</Note>
+
+Rendering CJK well is a separate question — see
+[fonts and the two-column grid](/customization/fonts#cjk-and-the-two-column-grid).
+
+## Multi-line commands
+
+A command that wraps, or one you deliberately break across lines, edits in
+place. The grid shifts to keep the caret visible instead of scrolling the whole
+screen away.
+
+| | |
+|---|---|
+| <kbd>⇧ ⏎</kbd> · <kbd>⌥ ⏎</kbd> | Insert a newline instead of submitting |
+| <kbd>⏎</kbd> | Submit the whole buffer, however many lines it is |
+
+The newline key is rebindable as `InsertNewline` under **Settings →
+Keybindings**.
+
+## Which shells
+
+The prompt features arrive through tty7's shell integration, which is injected
+automatically — nothing to add to your rc file — for **zsh**, **bash**,
+**fish**, **PowerShell**, and **WSL**. Other shells (nushell, elvish, xonsh, and
+the rest) run perfectly well in a pane; they simply do not get the prompt layer.
+
+The integration is also what reports the working directory, the exit code of
+each command, and where prompts begin — which is what the sidebar's branch
+readout, the "command finished" notification, and `tty7 procs` are built on.
+
+[How shell integration works →](/reference/shell-integration)
+
+## Turning it off
+
+Both prompt features are switches, and turning one off hands its key straight
+back to the shell:
+
+| Setting | Key it releases |
+|---|---|
+| **Settings → Input → Prompt → Tab completion** | <kbd>⇥</kbd> → your shell's completion |
+| **Settings → Input → Prompt → History search** | <kbd>⌃ R</kbd> → your shell's reverse-i-search, or your fzf binding |

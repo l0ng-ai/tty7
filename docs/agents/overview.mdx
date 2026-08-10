@@ -1,0 +1,107 @@
+---
+title: "Coding agents"
+description: "What tty7 does around Claude Code, Codex, and 16 others — without ever wrapping them."
+---
+
+tty7 recognises coding agents running in a pane and builds around them. It does
+not wrap them, proxy them, or replace their interface: the agent you start is
+the agent you get, running in a normal PTY, with its own UI. tty7 adds the
+things a terminal is in a position to add — who is running where, what they
+need, and what changed.
+
+<Frame caption="Placeholder — screenshot: a sidebar of agent sessions across several repos, each with a brand avatar and status dot">
+  <img src="/images/placeholder.svg" alt="Agent sessions in the tty7 sidebar" />
+</Frame>
+
+## Which agents
+
+Eighteen CLIs are recognised on sight, by the command running in the pane:
+
+| Agent | Command |
+|---|---|
+| Claude Code | `claude`, `claude-code` |
+| Codex | `codex`, `codex-cli` |
+| Gemini | `gemini`, `gemini-cli` |
+| Copilot | `copilot` |
+| Cursor | `cursor-agent` |
+| Amp | `amp` |
+| OpenCode | `opencode` |
+| Aider | `aider`, `aider-chat` |
+| Goose | `goose` |
+| Droid | `droid` |
+| Grok | `grok` |
+| Qwen Code | `qwen`, `qwen-code` |
+| Auggie | `auggie` |
+| Hermes | `hermes` |
+| Vibe | `vibe`, `vibe-acp` |
+| Antigravity | `agy`, `antigravity` |
+| Pi | `pi` |
+| Oh My Pi | `omp` |
+
+Detection sees through the usual disguises: a full path, a `.cmd` or `.exe` on
+Windows, leading environment assignments, and an interpreter in front
+(`node .../claude/cli.js`).
+
+### Your own wrapper
+
+If you launch agents through a wrapper script, map its name to an agent in
+`config.json`:
+
+```json
+{
+  "agent_commands": {
+    "cc": "claude",
+    "work": "codex"
+  }
+}
+```
+
+The key is your command's name; the value is one of the slugs above (`claude`,
+`codex`, `gemini`, `aider`, `amp`, `opencode`, `copilot`, `cursor`, `goose`,
+`droid`, `pi`, `auggie`, `hermes`, `vibe`, `antigravity`, `grok`, `qwen`,
+`omp`).
+
+## What you get for free
+
+Just by running an agent in a pane:
+
+<CardGroup cols={2}>
+  <Card title="Brand avatars" icon="id-badge">
+    The tab chip and sidebar row show which agent runs where, so ten tabs stay
+    legible.
+  </Card>
+  <Card title="Git context" icon="code-branch">
+    The branch and working-tree diff on the row, refreshed as the agent works.
+  </Card>
+  <Card title="Session resume" icon="rotate-left">
+    A pane lost to a reboot relaunches the conversation, carrying its original
+    flags. [More →](/agents/sessions)
+  </Card>
+  <Card title="Context feed" icon="paper-plane">
+    Palette commands that hand the current selection or the repo's `git diff` to
+    the running agent as a prompt.
+  </Card>
+</CardGroup>
+
+## What needs a hook
+
+Live status — **working**, **needs your input**, **done** — comes from the agent
+itself, over a channel tty7 installs into that agent's configuration. It powers
+the status dots, the notifications, the tray icon, and `tty7 wait`.
+
+Installing takes one click per agent under **Settings → Agents**.
+[Status and notifications →](/agents/status)
+
+## Where to go next
+
+<CardGroup cols={3}>
+  <Card title="Status and notifications" icon="circle-dot" href="/agents/status">
+    Hooks, status dots, the tray icon.
+  </Card>
+  <Card title="Sessions" icon="code-branch" href="/agents/sessions">
+    Resume, fork, and copying a session id.
+  </Card>
+  <Card title="Orchestration" icon="diagram-project" href="/agents/orchestration">
+    One agent driving another with `tty7 wait`.
+  </Card>
+</CardGroup>

@@ -1,0 +1,60 @@
+---
+title: "Privacy and permissions"
+description: "What macOS asks you, why, and what tty7 itself holds."
+---
+
+## Why macOS asks tty7 for permission
+
+Panes are forked from tty7's own bundled executable, so when a program you run
+asks macOS for a protected resource, macOS attributes the request to **tty7.app**
+— not to the program.
+
+If tty7 declared no usage strings, that request would be **denied outright with
+no prompt at all**, and the program would look broken for no visible reason.
+
+So tty7 declares the matching usage strings, and you get the normal one-time
+prompt:
+
+<CardGroup cols={2}>
+  <Card title="Devices" icon="camera">
+    Camera · microphone · Bluetooth · location · motion
+  </Card>
+  <Card title="Personal data" icon="address-book">
+    Contacts · calendars · reminders · photo library
+  </Card>
+  <Card title="System" icon="gear">
+    Local network · Apple Events · speech recognition · system administration
+  </Card>
+</CardGroup>
+
+<Warning>
+  **Declaring a usage string is not the same as holding the permission.**
+  tty7.app itself is granted none of these. Every prompt you see belongs to
+  whatever you ran in the pane, and you can revoke it under **System Settings →
+  Privacy & Security**.
+</Warning>
+
+### Full Disk Access
+
+Apple defines no usage-string key for it. Reaching `~/Library/Mail`,
+`~/Library/Messages`, `~/Library/Safari`, or `~/Library/Containers` needs a
+manual grant in **System Settings → Privacy & Security → Full Disk Access**.
+
+## What leaves your machine
+
+| | |
+|---|---|
+| **Update checks** | A request to the GitHub releases API every six hours, plus the download when you accept one. Turn it off with `check_for_updates: false`. |
+| **Remote server installs** | Downloading a `tty7-server` binary for a machine you connected to — or, for WSL, copying the one already bundled with your install. |
+| **Everything else** | Nothing. There is no telemetry, no analytics, and no account. |
+
+Both of the above honour `http_proxy`. [Updates →](/reference/updates#proxies)
+
+## What is stored, and where
+
+| | |
+|---|---|
+| Settings, themes, window state | `~/.config/tty7/` (`%APPDATA%\tty7\` on Windows) |
+| SSH passwords and key passphrases | The **OS keychain** — never `config.json`, never plain text on disk |
+| Pane scrollback tails | `<config>/scrollback/*.bin`, mode `0600` on Unix and behind the config directory's ACL on Windows. 256 KiB per pane, kept only until something can no longer ask for it: closing a pane deletes its file at once, a restore consumes it, and a periodic pass collects the rest. |
+| Shell history | Your shell's own file, exactly as before — unless you turned on per-pane history, which merges back into it. |

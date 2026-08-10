@@ -1,0 +1,48 @@
+---
+title: "Diffs"
+description: "The diff overlay: side-by-side or unified, from the sidebar or the panel."
+---
+
+## Opening one
+
+| From | How |
+|---|---|
+| The sidebar | Click a row's `+N −M` counts |
+| Source Control | **Open Changes** on a file, or click the row |
+| History | Click a file inside a commit's detail view |
+
+The overlay covers the window; <kbd>Esc</kbd> closes it.
+
+<Frame caption="Placeholder — screenshot: the diff overlay, side-by-side, several files">
+  <img src="/images/placeholder.svg" alt="The tty7 diff overlay" />
+</Frame>
+
+## Side-by-side or unified
+
+**Toggle Unified / Side-by-Side Diff** in the command palette switches between
+the two. The choice is global — one setting for every diff, the same call VS
+Code's `diffEditor.renderSideBySide` makes — and persists as `diff_view` in
+`config.json`.
+
+## What it shows
+
+- Every changed file, with its status and `+N −M`
+- **Untracked files** as a preview of their contents, up to 4 MB — past that the
+  card says the read failed rather than showing a silently cut-off file
+- A commit's files, when the diff came from the history
+
+Two limits keep a huge diff from becoming a huge wait:
+
+| Limit | Value | What happens |
+|---|---|---|
+| Files rendered | 300 | *"Showing the first 300 of N changes."* |
+| Lines before auto-collapse | 400 per file | Big files start collapsed; expand the ones you care about |
+
+Both are stated in the overlay when they apply — nothing is dropped silently.
+
+## Turning the sidebar shortcut off
+
+If you would rather the sidebar's counts not be clickable, turn off **Settings →
+Window & Tabs → Open diff preview from sidebar counts**
+(`sidebar_diff_preview: false`). The branch and counts stay on the row; they
+just stop opening the overlay.

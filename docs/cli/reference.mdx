@@ -1,0 +1,253 @@
+---
+title: "Command reference"
+description: "Every verb, its flags, and the JSON it emits under --json."
+---
+
+## Global flags
+
+Accepted anywhere on the line, before or after the subcommand.
+
+| Flag | Effect |
+|---|---|
+| `-m, --machine <MACHINE>` | Route to a linked machine over the local server's existing link. Matches the full link key (`me@devbox:22`) or the bare host (`devbox`). SSH links only; a down link, or a jump/proxy chain, is refused with a reason rather than dialled fresh. |
+| `--json` | One JSON object on stdout instead of the human table. |
+| `-q, --quiet` | No output on success. Errors still go to stderr. |
+
+## Environment
+
+Set inside every tty7 pane, inherited by anything launched from one.
+
+| Variable | Meaning |
+|---|---|
+| `TTY7_PANE` | This pane's id, e.g. `71` or `%71` (both accepted). Default target of `split`, `send`, `capture`, `procs`, `pane close`. |
+| `TTY7_WS` | This pane's workspace id. Default for `run --keep`, `tab new`, `ws tree`. |
+| `TTY7_CONFIG_DIR` | The server's config dir — how the CLI finds the right server. You never pass a socket path. |
+
+Outside a tty7 shell, address-taking verbs fail with
+`not inside a tty7 shell — pass an explicit %pane/@tab/workspace`.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | The command failed; one line on stderr, prefixed `tty7:` |
+| `2` | Usage error — unknown verb, missing argument, bad type |
+| `124` | `tty7 wait` timed out (the `timeout(1)` convention) |
+| `141` | Unix only: the reader hung up — piping into `head -1`, say — and SIGPIPE ended it, exactly as it ends `cat`. Not a failure. Windows reports 0 for the same thing, having no signal to imitate. |
+| *other* | Only from `tty7 run`, which passes the child's exit code through |
+
+If `run` cannot learn the child's code it prints a note to stderr and exits 1
+with `"exit_code_known": false` in the JSON — that is how you tell a real 1 from
+a stand-in.
+
+## Top-level verbs
+
+### `tty7 ls`
+
+Same as `ws ls`. Table: `WORKSPACE NAME TABS PANES ATTACHED`.
+JSON: `{"workspaces":[{"id","name","tabs","panes","attached"}]}`.
+
+`ATTACHED` names the host holding the workspace — a GUI window, or another
+client — and is `-` when nobody is.
+
+### `tty7 run [--keep] [--cwd DIR] [--ws WORKSPACE] -- CMD...`
+
+Spawns a pane running `CMD`, streams its output to stdout, waits, and exits with
+its code. The command must come after `--`.
+
+- `--keep` leaves the pane alive as a new tab afterwards. Needs a workspace, so
+  it requires `--ws` or `$TTY7_WS` — without one it is an error, not a silent
+  fallback.
+- `--cwd` sets the working directory. `--ws` also sets the pane's `TTY7_WS`.
+- Interrupting `run` can leave the pane behind as an orphan — see
+  `pane ls --all`.
+
+JSON: `{"pane","exit","exit_code_known","kept"}`, printed **after** the streamed
+output. The combined stream is not valid JSON — read the last line.
+
+### `tty7 new [PATH] [--open]`
+
+Creates a workspace plus its first tab and shell, at `PATH` if given. Prints the
+workspace id. JSON: `{"id","pane","opened"}`.
+
+`--open` also puts a window on it, if a GUI is running on this machine. Without
+it the workspace still appears in the switcher; it just waits to be opened.
+
+### `tty7 split [%PANE] (--v|--h) [--ratio R]`
+
+Alias of `pane split`. Splits `%PANE` (default `$TTY7_PANE`), spawning a shell
+in the same cwd. Exactly one axis is required — `--v`/`--vertical` puts the new
+pane below, `--h`/`--horizontal` to the right. `--ratio` (default `0.5`) is the
+share kept by the *existing* pane. Prints `%NN`. JSON: `{"pane"}`.
+
+### `tty7 send [%PANE] TEXT [--enter]`
+
+Types `TEXT` into the pane as keystrokes; `--enter` appends CR. With one
+argument the text is the argument and the pane comes from `$TTY7_PANE` — but a
+lone `%42` is rejected as a missing-text error rather than typed.
+JSON: `{"pane","sent","enter"}`.
+
+### `tty7 capture [%PANE] [--plain] [--scrollback]`
+
+The pane's replay. Two independent choices:
+
+**How much** — the newest scrollback segment by default, the whole ring with
+`--scrollback`. The ring splits into segments on resize, so for a pane that was
+never resized the two are identical.
+
+**In what form** — without `--plain`, the stored bytes with ANSI escapes intact,
+decoded as UTF-8 (invalid bytes become U+FFFD). With `--plain`, those bytes
+replayed through a terminal grid and printed as the text they produced.
+
+Either way it is a snapshot, not a stream: it collects the replay, settles for
+~300 ms, and returns. Call it again for a newer one.
+JSON: `{"pane","text"}`.
+
+### `tty7 procs [%PANE]`
+
+The process tree inside the pane, indented by depth, `*` on the foreground
+process — then a second table of ports those processes are listening on. Prints
+`nothing running in this pane` when both are empty.
+
+JSON: `{"procs":[{"pid","name","depth","foreground"}],"ports":[{"port","pid","name"}]}`.
+
+### `tty7 agents`
+
+Every pane running a recognised coding agent. Table:
+`PANE AGENT STATUS MESSAGE`, status one of `running` / `waiting` / `idle`.
+JSON: `{"agents":[...]}`.
+
+### `tty7 wait [%PANE] [--until STATE,…] [--changed] [--timeout SECS] [--interval MS]`
+
+Blocks until the pane's agent reaches one of the named states.
+
+| Flag | Default | |
+|---|---|---|
+| `--until` | `waiting,done,exit` | `idle`, `working`, `waiting`, `done`, `exit` |
+| `--changed` | off | Only wake on a state the pane moved into *after* the wait began |
+| `--timeout` | none | Give up after N seconds, exiting `124` |
+| `--interval` | `500` | Poll interval in ms (50–3,600,000) |
+
+The reply carries the agent's message and native session id. The JSON's `stale`
+flag says whether the answer might belong to the previous turn.
+[Orchestration →](/agents/orchestration)
+
+### `tty7 events`
+
+Streams server events until interrupted, one per line — pane exits, agent status
+changes, workspace preemption, layout deltas. `--json` makes it NDJSON. Blocks
+forever; run it with a timeout or in the background.
+
+### `tty7 status`
+
+Same as `server status`: pid, uptime, pane count, dialect versions, build,
+socket path. JSON is the `ServerStatus` object itself (`pid`, `uptime_secs`,
+`panes`, `control_version`, `protocol_version`, `build`, `socket`).
+
+### `tty7 doctor`
+
+The install check: the three environment variables, whether the server answers,
+whether its control and protocol versions match this binary, pid/uptime/panes,
+and how many machine links exist. Adds a note when you are not inside a tty7
+shell.
+
+JSON: `{"context":{"config_dir","workspace","pane"},"server":{"reachable","dialect_ok","build","status","routes"}}`
+— the context fields are booleans, not values.
+
+## `ws` — workspaces
+
+Address a workspace by name, by full id, or by a unique id prefix (the 8-char
+prefix `tty7 ls` prints). An ambiguous name or prefix is an error that lists the
+candidates.
+
+| Command | Effect | JSON |
+|---|---|---|
+| `ws ls` | Every workspace | `{"workspaces":[...]}` |
+| `ws tree [WORKSPACE]` | One workspace as a tree: tabs, split axes and ratios, panes with cwds | The whole workspace object: `{"id","name","last_active","tabs":[{"id","name","sidebar_group","root",…}]}` |
+| `ws new [NAME]` | An empty workspace (no tab, no pane) | `{"id","name"}` |
+| `ws rename WORKSPACE NAME` | Name or rename | `{"id","name"}` |
+| `ws rm WORKSPACE` | Delete the workspace | `{"removed"}` |
+| `ws attach WORKSPACE` | Become its controlling client | `{"attached","took_over_from"}` |
+| `ws detach WORKSPACE` | Let go without interrupting anything | `{"detached"}` |
+
+<Warning>
+  `ws rm` does **not** kill the panes it held — they keep running as orphans
+  with no workspace. Find them with `pane ls --all` and close them one by one.
+</Warning>
+
+Prefer `tty7 new <path>` over `ws new` when you want something usable: `ws new`
+leaves an empty workspace you then have to populate, while `tty7 new --json`
+hands back both ids at once.
+
+The `root` node in `ws tree --json` is externally tagged, so a leaf is
+`{"Leaf":{"pane":31}}` and a split is `{"Split":{"axis","ratio","a","b"}}` with
+`a`/`b` nested the same way.
+
+## `tab` — tabs
+
+`@N` numbers tabs across the **whole machine** in tree order, densely from `@1`.
+The numbering shifts whenever any workspace or tab is created or removed, so
+resolve it immediately before use. A full tab UUID also works: `@<uuid>`.
+
+| Command | Effect | JSON |
+|---|---|---|
+| `tab ls [WORKSPACE]` | Tabs of a workspace | `{"workspace","tabs":[{"ordinal","id","name","label","agent","group","panes":[…]}]}` |
+| `tab new [WORKSPACE] [--cwd DIR]` | Add a tab with a fresh shell | `{"tab","pane"}` |
+| `tab close @TAB` | Close the tab and every pane in it | `{"closed"}` |
+| `tab rename @TAB NAME` | Name or rename | `{"tab","name"}` |
+| `tab move @TAB INDEX` | Reposition within its workspace | `{"tab","to"}` |
+
+`GROUP` is the heading the GUI's sidebar files the tab under, shown by its last
+segment. Read-only from here: with the default repo grouping the GUI recomputes
+it from the tab's working directory.
+
+`label` falls back through the best evidence available — the name if someone set
+one, else the agent running there, else the last segment of the cwd, else the
+foreground process. `name` stays literal, so a script can tell a real name from
+a stand-in.
+
+## `pane` — panes
+
+| Command | Effect | JSON |
+|---|---|---|
+| `pane ls [WORKSPACE]` | Panes with their workspace, tab, cwd, live flag | `{"panes":[…]}` |
+| `pane ls --all` | The server's whole pane registry, including orphans | `{"panes":[…],"orphans":N}` |
+| `pane split …` | Identical to top-level `split` | `{"pane"}` |
+| `pane close [%PANE]` | Close the pane; its shell is hung up | `{"closed"}` |
+
+`--all` is the one that shows leaks. Each entry is
+`{"pane","workspace","orphan","owner","title","cwd","live"}`: `owner` is
+`tty7-cli` for panes this CLI spawned, and `orphan: true` means no workspace
+holds it. An interrupted `run` and a removed workspace both leave orphans here.
+
+`title` is usually the running command — `claude`, `nvim`, `cargo` — which makes
+`pane ls --all --json` a quick way to find "the pane running X".
+
+## `machine` — remotes
+
+`machine ls` lists the local machine plus every link the server holds:
+`MACHINE KIND CONNECTED`. JSON: `{"machines":[{"key","kind","connected"}]}`.
+
+## `server` — the daemon
+
+| Command | Effect |
+|---|---|
+| `server status` | Same as `tty7 status` |
+| `server logs` | Tail the server log; prints the path, and says so when logging was never enabled (`TTY7_LOG=info` before the server starts) |
+| `server start` | Bring up a server on this machine |
+| `server stop` | Stop it — **every pane on the machine dies** |
+| `server restart` | Stop, then start — same consequence |
+
+<Warning>
+  Do not run `start`, `stop`, or `restart` on someone else's behalf. They change
+  or destroy what the user's GUI is attached to.
+</Warning>
+
+## Not implemented yet
+
+These parse and then exit 1 with an explanation:
+
+- `ws stop` — the control dialect has no workspace-stop request yet
+- `machine connect` / `machine disconnect` — use the GUI's connection manager
+- bare `tty7 <path>` (launch or focus the GUI)

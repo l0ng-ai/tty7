@@ -54,7 +54,10 @@
 | **CLI + Skills** | 安装包自带 `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · pane/工作区控制 · 真实 PTY 命令 · 输出、进程、端口和 agent 状态 |
 | **SSH** | 原生 russh 栈：profile 凭据进 keychain · SFTP 面板 · 端口转发 · 跳板机 · 一次无 sudo 安装 `tty7-server` |
 
-终端和快捷键参考：[docs/features.zh-CN.md](docs/features.zh-CN.md)。面向 agent 的 CLI 接口见
+完整文档在 [**`docs/`**](docs/)（英文）——
+[快捷键](docs/reference/keyboard-shortcuts.mdx) ·
+[config.json](docs/reference/configuration.mdx) ·
+[CLI 参考](docs/cli/reference.mdx)。面向 agent 的 CLI 接口另见
 [skills/tty7/SKILL.md](skills/tty7/SKILL.md)。
 
 通过以下命令安装 skill：

@@ -1,0 +1,113 @@
+---
+title: "Themes"
+description: "Nine built-ins, your own YAML themes, iTerm2 imports, and a colour editor."
+---
+
+**Settings → Appearance → Theme** — or **Change Theme…** in the command
+palette — opens the theme picker.
+
+## Built in
+
+| Light | Dark |
+|---|---|
+| Light *(default)* · One Light · Catppuccin Latte · Rosé Pine Dawn | Dark · Dracula · Harbor · One Dark Pro · Rosé Pine |
+
+<Frame caption="Placeholder — screenshot: the theme picker with light and dark sections">
+  <img src="/images/placeholder.svg" alt="The tty7 theme picker" />
+</Frame>
+
+## Following the system
+
+Turn on **Sync with system** and pick a theme for each appearance. tty7 follows
+the OS live — no restart, no reload.
+
+```json
+{
+  "theme_follow_system": true,
+  "theme_preset_light": "one_light",
+  "theme_preset_dark": "dracula"
+}
+```
+
+## Legible bright colours
+
+Some palettes put a bright ANSI colour so close to their own background that it
+disappears. **Legible bright colors** (on by default) brightens or darkens those
+just enough to be readable. Turn it off with `theme_legible_palette: false` if
+you want the palette exactly as authored.
+
+## Transparency
+
+**Settings → Appearance → Transparency**:
+
+| | |
+|---|---|
+| **Opacity** | 0.2–1.0, applied to every theme. *Follow theme* hands the decision back to the theme's own `opacity`. |
+| **Blur** | Blurs whatever is behind a translucent window (macOS). |
+| **Background material** | Windows only: *Auto*, *Blur*, *Mica*, *Mica Alt*, *Acrylic*, *Off*. Only the presets your Windows build supports are listed. |
+
+## Writing your own
+
+**Open themes folder** in Settings takes you to:
+
+| | |
+|---|---|
+| macOS / Linux | `~/.config/tty7/themes/` |
+| Windows | `%APPDATA%\tty7\themes\` |
+
+Drop a `.yaml` file in and it appears in the picker. The file name is the
+theme's id; `name` is what is shown.
+
+```yaml
+name: "Midnight"
+background: "#0d1117"
+foreground: "#c9d1d9"
+accent: "#3fdd8c"
+cursor: "#3fdd8c"
+selection: "#264f78"
+opacity: 0.95
+blur: true
+ansi:
+  normal:  ["#484f58", "#ff7b72", "#3fb950", "#d29922", "#58a6ff", "#bc8cff", "#39c5cf", "#b1bac4"]
+  bright:  ["#6e7681", "#ffa198", "#56d364", "#e3b341", "#79c0ff", "#d2a8ff", "#56d4dd", "#f0f6fc"]
+```
+
+Everything except `background`, `foreground`, `accent`, and `ansi` is optional.
+
+### Gradients and images
+
+`background` also takes two colours:
+
+```yaml
+background: { top: "#0d1117", bottom: "#161b22" }
+# or
+background: { left: "#0d1117", right: "#161b22" }
+```
+
+And a theme can carry an image behind the terminal:
+
+```yaml
+background_image:
+  path: "/Users/me/Pictures/wall.jpg"
+  opacity: 0.25
+```
+
+The Settings panel has a picker for both, so you rarely have to write this by
+hand.
+
+## Editing in the app
+
+Select a built-in theme and hit **Duplicate to edit** — built-ins are read-only,
+so the editor works on your copy. From there you get every colour, including the
+sixteen ANSI slots, plus the background image controls. Changes are written back
+to your themes folder as YAML.
+
+## Importing from iTerm2
+
+Drop an `.itermcolors` file into the themes folder and tty7 reads it directly —
+no conversion step.
+
+<Note>
+  A theme file tty7 could not load is listed in Settings under **Not loaded from
+  the themes folder**, with the reason, rather than silently ignored.
+</Note>

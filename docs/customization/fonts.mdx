@@ -1,0 +1,75 @@
+---
+title: "Fonts"
+description: "The bundled default, fallback chains, ligatures, and why CJK needs a word."
+---
+
+**Settings → Appearance → Typography** covers the everyday choices; the rest is
+`config.json`.
+
+| Setting | Default | |
+|---|---|---|
+| **Font family** | Hack | Picked from fonts installed on your system |
+| **Font size** | 15 px | The terminal grid |
+| **Interface font size** | 16 px | Everything outside the grid (12–24) |
+| **Line height** | 1.4 | A multiple of the font size |
+| **Bold font** / **Italic font** | — | Distinct faces, when you want them |
+| **Font ligatures** | off | Contextual alternates stay off unless you ask |
+
+## Hack is bundled
+
+The default font ships inside the binary. It renders identically on every
+machine without relying on a system install, so a fresh laptop looks like the
+one you set up last year.
+
+## Fallbacks
+
+`font_family` is the primary face; `font_fallbacks` is an ordered list tried in
+turn for anything the primary lacks.
+
+```json
+{
+  "font_family": "JetBrains Mono",
+  "font_fallbacks": ["Maple Mono NF CN", "PingFang SC", "Apple Color Emoji"]
+}
+```
+
+The defaults name faces the host OS actually ships — PingFang SC and Apple Color
+Emoji on macOS, Microsoft YaHei and Segoe UI Emoji on Windows, Noto on Linux.
+Those stock names are appended to whatever list you write, too, so a
+`config.json` copied from another platform still resolves.
+
+## OpenType features
+
+`font_features` passes tags straight through to the shaper:
+
+```json
+{
+  "font_features": { "calt": true, "liga": 1, "ss01": true, "zero": false }
+}
+```
+
+A tag must be four alphanumeric characters; `true`/`false` map to `1`/`0`.
+Anything malformed is skipped with a log line rather than failing the whole
+config.
+
+## CJK and the two-column grid
+
+<Info>
+  A cell is one advance of the primary face, and a wide (CJK) character is
+  pinned to exactly two of them. A CJK fallback sits flush in its slot only if
+  its ideographs advance **twice** the primary's Latin advance.
+</Info>
+
+Bundled Hack advances 0.60205em, so a two-column slot is 1.2041em — while every
+stock CJK face (Microsoft YaHei, PingFang SC, Noto Sans CJK) advances 1.0em.
+Those glyphs get left-aligned in the slot, leaving a ~0.2em gap on the right of
+every character.
+
+[Maple Mono NF CN](https://github.com/subframe7536/maple-font) is tried first on
+every platform for exactly this reason: 0.6em Latin, 1.2em CJK, an exact
+two-cell fit against Hack. It is referenced by name only, never bundled (~20 MB
+per weight) — install it and tty7 picks it up with no config change.
+
+If you want CJK set *tight* rather than merely even, change the **primary** face
+instead. One that advances 0.5em — Sarasa Mono SC, say — makes two columns
+exactly 1.0em.

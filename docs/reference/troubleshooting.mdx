@@ -1,0 +1,137 @@
+---
+title: "Troubleshooting"
+description: "The things that go wrong, and what they actually mean."
+---
+
+## Start here
+
+```bash
+tty7 doctor
+```
+
+One table: whether the server is reachable, whether its wire dialect matches
+your binary, the three environment variables, pid/uptime/panes, and how many
+machine links exist. Most of what follows is a specific answer this gives you.
+
+## `tty7: command not found`
+
+The CLI is put on PATH the first time the app launches. If it is missing:
+
+- Check **Settings → Agents → Install the tty7 command on PATH** is on.
+- On Unix it symlinks into whichever of `/opt/homebrew/bin`, `/usr/local/bin`,
+  `~/.local/bin`, `~/bin`, `~/.cargo/bin` your PATH already covers — if none of
+  those are on your PATH, add one.
+- On Windows the install directory is appended to your user PATH, which needs a
+  new shell to take effect.
+- A `tty7` you installed yourself is never replaced, so an old one earlier in
+  PATH will win.
+
+Inside a tty7 pane it works regardless, since panes inherit the app's
+environment.
+
+## The server is unreachable
+
+`tty7 doctor` says so, and the GUI cannot open panes.
+
+Start it with `tty7 server start`. If you are an agent or a script,
+**do not** — tell the user instead. Starting a server they did not ask for
+changes what their GUI attaches to.
+
+For logs:
+
+```bash
+TTY7_LOG=info   # must be set before the server starts
+tty7 server logs
+```
+
+## Panes came back empty
+
+A crash, a `kill -9`, or a reboot takes the shells with it — that part is
+unavoidable. The *screens* should come back: tty7 keeps a capped tail of each
+pane's output (256 KiB) and hands it to the pane that reopens on that id.
+
+It is consumed once. If a pane was restored, then closed, then reopened, the
+second time there is nothing left to restore — that is by design, not a bug.
+
+## "The background server is still running &lt;build&gt;"
+
+tty7 updated in place, so the app is new and your panes are still served by the
+previous build. Restarting the server picks up the new one and **ends every
+process in every pane**. There is no hurry — do it when your panes are idle.
+[Updates →](/reference/updates)
+
+## A remote machine will not connect
+
+| Message | What it means |
+|---|---|
+| *"running an old tty7 server that this copy cannot talk to"* | The server there predates your client's protocol. Let tty7 update it — this ends every session on that machine. |
+| *"running a newer tty7 server than this copy"* | Update tty7 here instead, or replace the server there. |
+| *"answered, but not as a tty7 server"* | Something else is listening, or the binary is not what tty7 expects. |
+| *"tty7 no longer has a way to reach &lt;machine&gt;"* | The SSH link dropped. Reconnect from the switcher. |
+
+`tty7 -m <machine>` never dials a fresh connection by design — it uses a link
+the local server already holds. Connect from the GUI first.
+
+## <kbd>⇥</kbd> or <kbd>⌃ R</kbd> is not doing what I expect
+
+Both are switches, and turning one off hands the key straight back to your
+shell:
+
+- **Settings → Input → Prompt → Tab completion**
+- **Settings → Input → Prompt → History search**
+
+If they do nothing at all in a particular pane, the shell there probably has no
+[shell integration](/reference/shell-integration) — nushell, elvish, xonsh and
+friends run fine but do not get the prompt layer.
+
+## <kbd>⌥ B</kbd> types `∫` instead of moving a word
+
+That is macOS's default. Turn on **Settings → Input → Keyboard → Option (⌥) acts
+as Meta**.
+
+## CJK characters have a gap on the right
+
+Your CJK fallback advances 1.0em while the primary face advances 0.60205em, so
+the glyph does not fill its two-column slot. Install
+[Maple Mono NF CN](https://github.com/subframe7536/maple-font) — it is already
+first in the fallback chain and fits Hack exactly — or change the primary face.
+[The full explanation →](/customization/fonts#cjk-and-the-two-column-grid)
+
+## A theme in my themes folder is not showing up
+
+Settings lists it under **Not loaded from the themes folder**, with the reason.
+Usually a missing required key: `background`, `foreground`, `accent`, and `ansi`
+(with eight `normal` and eight `bright` entries) are all mandatory.
+
+## My `config.json` edits did nothing
+
+If the file cannot be parsed, tty7 starts on defaults and keeps your original at
+`config.json.corrupt` — check for that file. Otherwise:
+
+- An out-of-range number is **clamped**, not applied literally.
+- An unrecognised enum value falls back to the default with a log line.
+- `scrollback_limit` applies to **new** panes only.
+- An unknown action name in `keybindings` is skipped with a warning.
+
+## Selecting text inside vim / less selects the app's own thing
+
+Hold <kbd>⇧</kbd> while dragging to keep the gesture local, or turn off
+**Settings → Terminal → Mouse → Report mouse to apps**.
+
+## `tty7 capture … | head -1` printed a Rust panic
+
+An old build's behaviour when the reader hangs up. The data you asked for still
+arrived. On such a build, redirect to a file and slice the file instead of
+piping into `head`. Current builds exit `141` on Unix, which is exactly what
+`cat` does.
+
+## Still stuck
+
+<CardGroup cols={2}>
+  <Card title="Discord" icon="discord" href="https://discord.gg/s3dethqz2V">
+    Ask — someone has probably hit it.
+  </Card>
+  <Card title="Report an issue" icon="github" href="https://github.com/l0ng-ai/tty7/issues/new">
+    Include `tty7 doctor` output and your platform.
+  </Card>
+</CardGroup>

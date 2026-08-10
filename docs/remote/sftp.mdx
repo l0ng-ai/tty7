@@ -1,0 +1,48 @@
+---
+title: "SFTP"
+description: "A file browser for the machine on the other end of the connection."
+---
+
+While a pane is in an SSH session, *SSH: Remote Files* (command palette) slides
+a file panel in over it. It is a real SFTP client on the same connection — no
+second login, no second password.
+
+<Frame caption="Placeholder — screenshot: the SFTP panel over a pane, with a transfer in progress">
+  <img src="/images/placeholder.svg" alt="The tty7 SFTP panel" />
+</Frame>
+
+## Browsing
+
+The panel opens on the remote home directory. **Go to Shell Directory** in the
+overflow menu jumps it to wherever the pane's shell currently is, which is
+usually where you actually want to be.
+
+Right-click a row for **Open**, **Follow Symlink**, **Rename**, **chmod…**, and
+delete. The overflow menu adds **New Folder**, **New File**, **Upload…**, and
+**Refresh**.
+
+## Transferring
+
+| Direction | How |
+|---|---|
+| Download | Drag a file out of the panel into Finder or Explorer |
+| Upload | **Upload…**, or drag files into the panel |
+
+Uploads are written under a temporary name and renamed into place at the end, so
+a half-finished file never looks like a finished one. A name that is already
+taken asks before replacing.
+
+**Transfer History** in the overflow menu shows every transfer with its
+progress, and lets you cancel one in flight. The panel header summarises what is
+happening — *"2 transferring · 64%"*.
+
+## Permissions
+
+**chmod…** takes an octal mode (`755`, `600`). The current mode is shown in the
+row's editor before you change it.
+
+<Tip>
+  For files in a [remote workspace](/remote/workspaces) you can often skip SFTP
+  entirely — the Files panel reads and writes across the link directly, and the
+  built-in editor saves back to the remote machine.
+</Tip>

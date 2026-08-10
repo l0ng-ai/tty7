@@ -1,0 +1,50 @@
+---
+title: "Search"
+description: "Finding text in the scrollback, and everything else the search boxes cover."
+---
+
+## In the terminal
+
+<kbd>⌘ F</kbd> opens the find bar over the focused pane and searches its whole
+scrollback, not just the visible screen.
+
+| | |
+|---|---|
+| <kbd>⏎</kbd> · <kbd>⌘ G</kbd> | Next match |
+| <kbd>⇧ ⏎</kbd> · <kbd>⌘ ⇧ G</kbd> | Previous match |
+| <kbd>Esc</kbd> | Close the find bar |
+
+Two toggles sit in the bar:
+
+- **Match case** — off by default, so a lowercase query matches anything.
+- **Use regular expression** — the query becomes a regex. An invalid pattern is
+  shown as an error rather than silently matching nothing.
+
+Matches are highlighted in place and the view scrolls to each one as you step
+through. On Windows and Linux the shortcuts are <kbd>Ctrl ⇧ F</kbd> to open,
+<kbd>F3</kbd> and <kbd>⇧ F3</kbd> to step.
+
+<Frame caption="Placeholder — screenshot: the find bar with matches highlighted in the scrollback">
+  <img src="/images/placeholder.svg" alt="Searching the scrollback" />
+</Frame>
+
+<Tip>
+  How much there is to search is **Settings → Terminal → Scrolling →
+  Scrollback** — 10,000 lines per pane by default, up to 100,000. The change
+  applies to new panes.
+</Tip>
+
+## Everywhere else
+
+tty7 leans on the same pattern in a lot of places. All of them are
+type-to-filter, no button to press:
+
+| Where | What it searches |
+|---|---|
+| <kbd>⌘ P</kbd> | Commands — and SSH addresses you type in full |
+| <kbd>⌘ ⇧ O</kbd> | Workspaces, tabs, and machines |
+| <kbd>⌃ R</kbd> | Your shell history, fuzzily — [see History](/terminal/history) |
+| Settings search box | Every setting, by name and by keyword |
+| Files panel | Files under the workspace root |
+| Theme picker | Built-in and custom themes |
+| Font picker | Fonts installed on your system |

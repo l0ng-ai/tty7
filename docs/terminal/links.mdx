@@ -1,0 +1,51 @@
+---
+title: "Links"
+description: "Opening URLs, files, and localhost ports straight out of the terminal."
+---
+
+Hold <kbd>⌘</kbd> (<kbd>Ctrl</kbd> on Windows and Linux) and links under the
+pointer underline; click to open one.
+
+## URLs
+
+Anything that looks like a URL is detected, including one the shell wrapped
+across two lines — tty7 stitches it back together before opening it.
+
+Turn detection off with **Settings → Input → Links → Detect URLs**
+(`link_url: false`).
+
+## Files
+
+A file path in the output — a compiler error, a test failure, a `grep -n` hit —
+opens in your default application for that file type.
+
+To send it somewhere specific instead, set **Settings → Input → Links → Open
+files with**. The command runs with placeholders substituted:
+
+```
+code --goto {path}:{line}:{column}
+zed {path}:{line}
+herdr edit {path} --line={line}
+```
+
+`{path}`, `{line}`, and `{column}` are filled in from the link. A flag whose
+value is not available is dropped rather than passed empty — so
+`--line={line}` simply disappears when the link had no line number. Leave the
+field blank to go back to the default application.
+
+The same setting is `link_file_command` in `config.json`.
+
+## localhost ports
+
+<kbd>⌘</kbd>-clicking `localhost:3000` opens it in your browser, which is only
+useful if the server is on this machine.
+
+When the pane is inside an SSH session it usually is not. Turn on **Settings →
+Input → Links → Forward SSH loopback links** (`ssh_loopback_forward: true`) and
+tty7 opens a temporary port forward through that connection first, so the link
+reaches the server on the remote machine.
+
+<Tip>
+  For a forward you want to keep, set one up properly instead —
+  [port forwarding](/remote/port-forwarding).
+</Tip>

@@ -1,0 +1,60 @@
+---
+title: "Agent sessions"
+description: "Resuming a conversation after a reboot, forking a live one, and getting at the session id."
+---
+
+Coding agents keep their own conversation history, addressed by a session id.
+Because tty7's hooks learn that id, it can do three things with it.
+
+## Resume after a restart
+
+When the server goes away — a reboot, a crash, a deliberate restart — the shells
+go with it. Panes that were running an agent relaunch the conversation on
+restore instead of coming back to a bare prompt:
+
+```bash
+claude --dangerously-skip-permissions --resume 8f3c…
+```
+
+The original launch flags are replayed, so the pane comes back the way you
+started it, not the way the defaults would.
+
+Supported for Claude Code, Codex, Gemini, OpenCode, Amp, Cursor, Copilot, Grok,
+Pi, and Oh My Pi. Turn it off with `restore_agent_sessions: false`.
+
+<Note>
+  Resume needs the agent's hooks installed, since the session id comes from
+  them. [Installing hooks →](/agents/status)
+</Note>
+
+## Fork a live session
+
+Forking branches a running conversation into a second, independent one. The
+original keeps going untouched; both continue separately from the same history.
+
+Right-click a **pane** to fork into a split — the menu offers a placement —
+or right-click the **tab or sidebar row** to open the fork in a new tab.
+
+| Agent | What tty7 runs |
+|---|---|
+| Claude Code | `claude --resume <id> --fork-session` |
+| Codex | `codex fork <id>` |
+| Grok | `grok --resume <id> --fork-session` |
+| OpenCode | `opencode --session <id> --fork` |
+| Oh My Pi | `omp --fork <id>` |
+
+It is the agent's own fork command, run in a new pane — nothing is copied by
+tty7 itself.
+
+<Warning>
+  A fork duplicates the whole transcript in the agent's session store, so
+  forking repeatedly costs real disk. A pane on a
+  [remote machine](/remote/workspaces) cannot fork, because the command would
+  run against the local agent.
+</Warning>
+
+## Copy the session id
+
+**Copy Session ID** — in the pane's right-click menu, beside *Copy Working
+Directory*, and in the command palette — puts the agent's native id on the
+clipboard. Paste it into `codex resume`, a bug report, or another tool.

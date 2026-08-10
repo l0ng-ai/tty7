@@ -1,0 +1,61 @@
+---
+title: "Port forwarding"
+description: "Local, remote, and dynamic forwards — preconfigured or added mid-session."
+---
+
+## The three kinds
+
+| | What it does |
+|---|---|
+| **Local** (`L`) | A port on this machine reaches a service on the remote side |
+| **Remote** (`R`) | A port on the remote machine reaches a service here |
+| **Dynamic** (`D`) | A SOCKS proxy on this machine, routed through the connection |
+
+## Adding one to a profile
+
+**Settings → SSH →** a profile **→ Port forwarding → + Add rule**. Rules saved
+here open with the connection, every time.
+
+A Local or Remote rule needs a listen port and a target; a Dynamic rule needs
+only the listen port. An incomplete rule tells you so rather than being saved
+half-configured.
+
+Each rule takes an optional description — *"what it's for"* — because six months
+later `8080 → 3000` explains nothing.
+
+## Adding one mid-session
+
+*SSH: Port Forwarding* in the command palette opens the **Forwards** panel for
+the current connection. Add a rule there and it starts immediately; remove it
+and it stops. These live only as long as the session unless you save them into
+the profile.
+
+<Frame caption="Placeholder — screenshot: the Forwards panel with a local and a dynamic rule">
+  <img src="/images/placeholder.svg" alt="The forwards panel" />
+</Frame>
+
+## The one-click shortcut
+
+<kbd>⌘</kbd>-clicking a `localhost:PORT` link inside an SSH pane can open a
+temporary forward for exactly that port and then open the browser — turn on
+**Settings → Input → Links → Forward SSH loopback links**.
+
+That is the right tool for "let me look at this dev server once". For something
+you use every day, put it in the profile.
+
+## Jump hosts and proxies
+
+Multi-hop connections are configured per profile:
+
+- **Jump host** — point at another saved profile, or use a `ProxyJump` chain
+- **ProxyCommand** — an arbitrary transport command, with `%h`, `%p`, `%r`
+  substituted
+- **SOCKS5 proxy** / **HTTP proxy** — `host:port`, under **Advanced → Proxies**
+
+<Note>
+  These proxy settings are for reaching the SSH server. tty7's *own* network
+  traffic — update checks, release downloads, remote-server installs — uses
+  `http_proxy` in `config.json`, the system proxy, or the `HTTP_PROXY` family.
+  Programs running in a pane are unaffected either way; they inherit their proxy
+  from their own environment, as in any terminal.
+</Note>

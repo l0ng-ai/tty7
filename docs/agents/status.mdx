@@ -1,0 +1,83 @@
+---
+title: "Status and notifications"
+description: "Installing the hooks, reading the dots, and being told when an agent needs you."
+---
+
+An agent working for two minutes and an agent that stopped ninety seconds ago
+waiting for permission look identical from outside. tty7 fixes that by letting
+the agent say which one it is.
+
+## Installing the hooks
+
+**Settings → Agents** lists every agent that can report status, with an
+**Install** button beside each:
+
+| Agent | |
+|---|---|
+| Claude Code · Codex · Copilot · OpenCode · Pi · Grok · Oh My Pi | Hooks available |
+| Gemini · Aider · Amp · Cursor · Goose · Droid · Auggie · Hermes · Vibe · Antigravity · Qwen Code | Detected and labelled, but no status channel yet |
+
+Installing writes into that agent's own configuration directory and can be
+undone from the same row — the button becomes **Uninstall**, and reads
+**Outdated** with an **Update** when tty7 ships a newer hook.
+
+<Note>
+  The hooks only do anything inside tty7. Running the same agent in another
+  terminal is unaffected.
+</Note>
+
+Connected [remote machines](/remote/workspaces) get their own row, so an agent
+running on a dev box reports status to the window you are watching it from.
+
+## The status dot
+
+Every tab chip and sidebar row carries a dot:
+
+| Dot | Meaning |
+|---|---|
+| 🔵 **Blue** | Working |
+| 🟠 **Amber** | Needs your input — a permission prompt, a question |
+| 🟢 **Green** | Done with this turn |
+
+<Frame caption="Placeholder — screenshot: three sidebar rows, one working, one waiting, one done">
+  <img src="/images/placeholder.svg" alt="Agent status dots" />
+</Frame>
+
+The same three states are what `tty7 agents` reports as `running` / `waiting` /
+`idle`, and what [`tty7 wait`](/agents/orchestration) blocks on.
+
+## Notifications
+
+Two, both following your **Settings → Window & Tabs → Notifications** policy:
+
+- **"needs your permission…"** the moment an agent blocks on you
+- **"finished after 42s"** at the end of a turn
+
+Which means that by default — *When unfocused* — you are told the instant you
+are the bottleneck, and left alone while you are watching.
+
+## The tray icon
+
+tty7 keeps a status item in the system tray (menu bar on macOS). It flips to an
+attention state the moment *any* agent anywhere needs input, so you can see it
+without the window in front of you.
+
+Its menu lists every agent pane with its brand avatar and status dot — click one
+to reveal it — and also holds the notification policy switch and **Quit and Stop
+Server…**.
+
+Turn it off with **Settings → Window & Tabs → Show tray icon**
+(`show_tray_icon: false`).
+
+## Sending an agent some context
+
+Two command-palette entries hand what is in front of you to the agent running in
+the pane, as a ready-made prompt:
+
+| Command | Sends |
+|---|---|
+| **Agent: Send Selection** | The current terminal selection |
+| **Agent: Send Git Diff for Review** | The repository's `git diff` |
+
+If nothing recognisable is running, tty7 says *"No running coding agent found"*
+rather than typing into your shell.

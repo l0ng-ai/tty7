@@ -1,0 +1,99 @@
+---
+title: "Tabs and splits"
+description: "Opening, arranging, and rearranging the panes in a tab."
+---
+
+<Note>
+  Keys are written in macOS notation. On Windows and Linux, read <kbd>⌘</kbd> as
+  <kbd>Ctrl ⇧</kbd> for most window actions — the exact chords are on the
+  [keyboard shortcuts](/reference/keyboard-shortcuts) page.
+</Note>
+
+## Tabs
+
+| | |
+|---|---|
+| <kbd>⌘ T</kbd> | New tab |
+| <kbd>⌘ W</kbd> | Close the tab (or the focused pane, if the tab has more than one) |
+| <kbd>⌘ ⇧ T</kbd> | Reopen the tab you just closed |
+| <kbd>⌘ 1</kbd> … <kbd>⌘ 9</kbd> | Jump to tab 1–9 |
+| <kbd>⌃ ⇥</kbd> · <kbd>⌃ ⇧ ⇥</kbd> | Hold to walk the switcher forwards or backwards; it commits when you let go |
+
+A new tab always opens in the current pane's directory. Where it lands in the
+list is **Settings → Window & Tabs → New tab position** — *After current* by
+default, or *At end*.
+
+Right-click a tab for the rest: rename, close others, close to the right, copy
+the working directory, mark unread, and — when a coding agent is running there —
+fork its session.
+
+## Splits
+
+| | |
+|---|---|
+| <kbd>⌘ D</kbd> | Split right |
+| <kbd>⌘ ⇧ D</kbd> | Split down |
+| <kbd>⌘ ]</kbd> · <kbd>⌘ [</kbd> | Next pane · previous pane |
+| <kbd>⌘ ⌥ ← → ↑ ↓</kbd> | Focus the pane in that direction |
+| <kbd>⌘ ⇧ ⏎</kbd> | Zoom the focused pane to fill the tab |
+| <kbd>⌘ ⏎</kbd> | Fullscreen the window |
+
+A split inherits the current pane's working directory, so splitting inside a
+repository keeps you in the repository.
+
+Resizing and swapping panes have no default keys — bind them under **Settings →
+Keybindings**, or run them from the command palette (*Resize Pane Left*, *Swap
+Pane Next*, and friends).
+
+Inactive panes are dimmed slightly so the focused one is obvious. Turn that off
+with **Settings → Appearance → Dim inactive panes**.
+
+## Rearranging by dragging
+
+Hover a pane and a small grip appears along its top edge. Drag it to move that
+pane somewhere else in the tab.
+
+<Frame caption="Placeholder — video: dragging a pane by its grip, with the landing highlighted">
+  <img src="/images/placeholder.svg" alt="Dragging a pane to a new position" />
+</Frame>
+
+Where you drop it decides what happens:
+
+<AccordionGroup>
+  <Accordion title="On a pane's side">
+    The pane goes in **beside** that one. If it is facing a neighbour in the
+    same row or column, it joins that row and takes an equal share of it. Only
+    when it faces across the layout — where there is no row to join — does it
+    split that pane in half.
+  </Accordion>
+  <Accordion title="On a pane's middle">
+    The two panes **trade places**.
+  </Accordion>
+  <Accordion title="Past a pane's outer side">
+    The band beyond the outermost edge — the side facing the window rather than
+    another pane — makes the dragged pane a full-width or full-height band
+    beside everything else, sized to an even share of what that side already
+    holds. A pane in the middle of a 2×2 becomes a full-height *third* column in
+    one drag, rather than taking half the window.
+  </Accordion>
+</AccordionGroup>
+
+The landing lights up while you drag, and only ever lights up when the drop
+would actually change the layout.
+
+## Closing something that is busy
+
+Closing a pane or tab with a command still running asks first, and says what is
+running: *"cargo is still running. Closing ends it."* When a coding agent is
+mid-turn it says that instead — *"Claude Code is still working. Closing ends its
+turn."*
+
+## Where the tabs live
+
+**Settings → Window & Tabs → Tab bar position** puts tabs in a vertical sidebar
+on the left (the default) or a horizontal strip on top. The sidebar has room for
+things a strip does not — git branch, diff counts, agent status — so most of
+[its own page](/window/sidebar) is about that.
+
+<kbd>⌘ B</kbd> toggles the sidebar; <kbd>⌘ J</kbd> toggles the
+[side panel](/window/side-panel) on the right.

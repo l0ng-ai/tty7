@@ -1,0 +1,84 @@
+---
+title: "The agent skill"
+description: "Teaching a coding agent to use tty7 properly — including when not to."
+---
+
+The CLI is only half of the story. An agent has to know *when* reaching for a
+pane beats running a command, and — more importantly — which panes it must not
+touch. That is what the skill is for.
+
+## Installing it
+
+```bash
+npx skills add l0ng-ai/tty7
+```
+
+The source lives at
+[`skills/tty7/`](https://github.com/l0ng-ai/tty7/tree/main/skills/tty7) in the
+repository: a `SKILL.md` and a full command reference.
+
+<Note>
+  This is separate from the **orchestration** skill installed from **Settings →
+  Agents**, which teaches a *primary* agent to delegate to worker agents. This
+  one teaches any agent to drive tty7 at all.
+  [Orchestration →](/agents/orchestration)
+</Note>
+
+## What it teaches
+
+### When to use a pane instead of a plain command
+
+The Bash-style tool an agent already has is right for anything that starts, does
+its job, and exits. A pane is right when:
+
+- **It should not block.** A dev server, a watcher, `tail -f`, a long test run.
+- **It is interactive or stateful.** A REPL, `ssh`, a database shell — anything
+  where you send, read, then send again. A pane keeps the session alive between
+  turns; a one-shot call cannot.
+- **It needs a real TTY.** Programs that detect a pipe and change behaviour —
+  colour, progress bars, TUIs, `top`, raw mode.
+- **The user should be able to watch.** Anything in a pane shows up live in
+  their window. That is often the whole point.
+- **You are being asked about something you did not start.** "What's running in
+  that pane?", "why is port 3000 taken?", "what are my agents doing?"
+
+### The safety rules
+
+<Warning>
+  The panes on this machine are the user's real work, and some of them are other
+  coding agents mid-task. Anything the agent did not create is read-only.
+</Warning>
+
+- **Never `send` into a pane you did not open.** Keystrokes land in the middle
+  of whatever is happening there. Check `tty7 agents` first.
+- **Never close a pane, tab, or workspace you did not create.**
+- **Never `server stop` or `server restart`.** Every pane on the machine dies
+  with the server, including yours.
+- **Never `tty7 server start` on your own initiative** when `doctor` says the
+  server is unreachable — starting one the user did not ask for changes what
+  their GUI attaches to. Tell them instead.
+- **Clean up what you did create.** `tty7 pane close %83` when the scratch pane
+  is done with.
+
+### The reliable idioms
+
+Rather than screen-scraping, the skill points agents at the primitives that
+actually answer the question:
+
+```bash
+# is it finished? — when only the depth-0 shell is left, yes
+tty7 procs %83 --json
+
+# the answer, not the view
+tty7 send "$PANE" 'cargo test > /tmp/t.log 2>&1; echo $? > /tmp/t.rc' --enter
+
+# wake up exactly when the other agent needs something
+tty7 wait %3 --until waiting,done --changed --timeout 600
+```
+
+## For humans writing their own tooling
+
+The same material is worth reading even if you are not an agent — it is the
+shortest description of how to use tty7 as a job runner. Start with the
+[CLI overview](/cli/overview), then the
+[command reference](/cli/reference).

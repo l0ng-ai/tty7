@@ -1,0 +1,115 @@
+---
+title: "SSH"
+description: "A native Rust SSH stack: quick connects, saved profiles, keychain credentials, jump hosts."
+---
+
+tty7 speaks SSH itself, over [russh](https://github.com/Eugeny/russh). It never
+shells out to the `ssh` binary, and there is no compatibility mode that does.
+
+That is what makes the rest possible: credentials in the OS keychain,
+[SFTP](/remote/sftp) in a side panel, [port forwards](/remote/port-forwarding)
+you can add mid-session, and authentication prompts drawn as sheets in the pane
+instead of a password echoing into your shell.
+
+<Frame caption="Placeholder — screenshot: an SSH connection sheet asking for a key passphrase inside a pane">
+  <img src="/images/placeholder.svg" alt="Connecting over SSH in tty7" />
+</Frame>
+
+## Four ways to connect
+
+<AccordionGroup>
+  <Accordion title="QuickConnect — type an address">
+    Open the palette (<kbd>⌘ P</kbd>) and type an address. IPv6 works with
+    brackets.
+
+    ```
+    me@devbox
+    me@devbox:2222
+    me@[2001:db8::1]:22
+    ```
+  </Accordion>
+
+  <Accordion title="A saved profile">
+    Profiles live in **Settings → SSH → Hosts**. Start typing the name in the
+    palette, or open the *SSH: Manage Profiles…* command.
+  </Accordion>
+
+  <Accordion title="An alias from ~/.ssh/config">
+    Type an alias you already have and tty7 resolves it natively — common fields,
+    best effort — then connects over russh. **Settings → SSH → Import from
+    ~/.ssh/config** turns aliases into real profiles.
+
+    <Note>
+      `Match`, `canonicalize*`, and GSSAPI directives are not supported, and
+      there is no fallback to the system `ssh` when one appears.
+    </Note>
+  </Accordion>
+
+  <Accordion title="A remote workspace">
+    The same connection can host whole workspaces on the far machine rather than
+    a single shell. [Remote workspaces →](/remote/workspaces)
+  </Accordion>
+</AccordionGroup>
+
+## Profiles
+
+**Settings → SSH → Hosts** holds the full connection config. The basics:
+
+| Field | |
+|---|---|
+| **Name** | A label for this connection |
+| **Host** | Hostname or IP |
+| **User** | Login user — blank resolves at connect time |
+| **Auth** | *Auto* (tries every applicable method), *Password*, *Key*, *Agent*, or *2FA* |
+| **Jump host** | Another profile, or a `ProxyJump` chain |
+| **Port forwarding** | Rules opened with the connection |
+
+**Defaults** at the top of the list is inherited by every host, so a setting you
+want everywhere is set once.
+
+Passwords and key passphrases go in the **OS keychain**, never in
+`config.json` and never on disk in plain text. **Forget Password** in a
+profile's menu removes the stored one.
+
+### Advanced
+
+Behind **Advanced** on a profile, grouped:
+
+| Group | Fields |
+|---|---|
+| **Authentication** | Identity files (one path per line, `%h`/`%r` expand), agent forwarding |
+| **Proxies** | ProxyCommand (`%h`/`%p`/`%r` substituted), SOCKS5 proxy, HTTP proxy |
+| **Algorithms** | KEX algorithms, ciphers, MACs, host-key algorithms, compression |
+| **Connection** | Keepalive interval and count, connect timeout, X11 forwarding |
+| **Session** | Shell integration, login scripts, skip banner |
+
+Everything blank means "the library default", so you only fill in what you
+actually need to override.
+
+## Authentication prompts
+
+Password, key passphrase, and 2FA prompts appear as sheets inside the pane, with
+a **Remember (keychain)** option where it makes sense.
+
+## Host keys
+
+Host keys are verified against `known_hosts` by default. A first connection asks
+you to confirm the fingerprint; a **changed** key is a much louder prompt that
+makes you type `yes` to override, because that is what a changed key deserves.
+
+**Settings → SSH → Security → Verify host keys** turns verification off
+entirely. It is on for a reason.
+
+Also under Security: **Warn before closing** a live connection, off by default.
+
+## Reconnecting
+
+<kbd>⌘ ⇧ R</kbd> — or *SSH: Reconnect* in the palette — restarts the session in
+the current pane. Useful after a laptop sleeps or a network changes.
+
+## What is not supported
+
+- No fallback to the system `ssh` binary
+- No `Match`, `canonicalize*`, or GSSAPI directives from `~/.ssh/config`
+- Kerberos `gssapi-with-mic` is offered by the desktop app for managed
+  connections, but is not part of the `~/.ssh/config` resolution path

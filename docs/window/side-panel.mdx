@@ -1,0 +1,66 @@
+---
+title: "The side panel"
+description: "Info, Source Control, and Files — plus the built-in editor."
+---
+
+<kbd>⌘ J</kbd> opens a panel on the right of the window with three tabs. It is
+hidden by default; whichever tab you leave it on is where it opens next time.
+
+<Frame caption="Placeholder — screenshot: the side panel showing the Info tab beside a terminal">
+  <img src="/images/placeholder.svg" alt="The tty7 side panel" />
+</Frame>
+
+## Info
+
+Everything tty7 knows about the focused pane, in one column:
+
+| Section | What it shows |
+|---|---|
+| **Session** | working directory, shell, SSH connection, git branch, `+N −M` changes, and the coding agent with its status (idle / working / waiting / done) |
+| **Processes** | the process tree inside the pane, with the foreground process marked |
+| **Ports** | every port those processes are listening on |
+
+The working directory row has **Reveal in Finder** / **Open Folder** beside it.
+The ports section is the quickest answer to "what is this pane serving, and
+where" — the same data `tty7 procs` prints.
+
+## Source Control
+
+The git panel for the focused pane's repository: staged changes, unstaged
+changes, untracked files, and merge conflicts, each in its own group. Write a
+message, commit, and push without leaving the window.
+
+[Source control →](/git/source-control)
+
+## Files
+
+A file tree rooted at the pane's working directory, with git status decorations
+on every row and a search box at the top.
+
+- **Click a file** to open it in the built-in editor.
+- **Drag a file out** to Finder or Explorer to copy it there.
+- **Drag files in** from the desktop to copy them into the folder under the
+  cursor. A folder row takes them itself, a file row stands in for the folder
+  holding it, and the empty space below the tree means the top of it. Folders
+  come in whole, the executable bit survives, and a name that is already taken
+  is asked about rather than replaced.
+
+Both directions work over a [remote workspace](/remote/workspaces) too, reading
+on one machine and writing on the other, up to the size one control frame can
+carry — past that the panel tells you to use [SFTP](/remote/sftp).
+
+## The editor
+
+<kbd>⌘ ⇧ E</kbd> toggles the code panel; clicking a file in the Files tab opens
+it there. It is a real editor — syntax highlighting, line and column readout,
+wrap toggle, and a Markdown preview — meant for the edit you would otherwise
+have opened `vim` for.
+
+| | |
+|---|---|
+| <kbd>⌘ S</kbd> | Save |
+| <kbd>Esc</kbd> | Back to the terminal |
+
+Files are watched on disk: a change underneath you is picked up, and closing
+with unsaved edits asks before discarding them. Files over 4 MB and anything
+that looks binary are refused with a note rather than opened badly.

@@ -1,0 +1,73 @@
+---
+title: "Shell integration"
+description: "What tty7 injects into your shell, and what it buys you."
+---
+
+A terminal that only sees bytes cannot tell a prompt from output, or a finished
+command from a hung one. tty7's shell integration closes that gap: the shell
+reports where prompts begin, what was submitted, what it exited with, and where
+it is.
+
+**You do not install it.** It is injected when the pane's shell starts, and
+removes itself from the equation if you run the same shell elsewhere.
+
+## Which shells
+
+| Shell | How it is injected |
+|---|---|
+| **zsh** | A throwaway `ZDOTDIR` whose files source yours first, then tty7's. Your `TTY7_USER_ZDOTDIR` is preserved. |
+| **bash** | An rcfile that sources your own first. |
+| **fish** | A `-C` init command. |
+| **PowerShell** | An encoded init command that wraps your existing `prompt` function and PSReadLine's line reader. |
+| **WSL** *(Windows)* | The distro's shell is bootstrapped with the same scripts. |
+| **Remote panes** | The same three POSIX shells, bootstrapped over the SSH connection. Toggle per profile with **Settings → SSH → Session → Shell integration**. |
+
+`TTY7_SHELL_INTEGRATION` is set once it is active, and guards against a second
+injection when shells nest.
+
+<Note>
+  A shell launched with custom arguments is left alone for bash and PowerShell,
+  because tty7's injection would conflict with the flags you chose.
+</Note>
+
+## What it reports
+
+| Signal | Sequence | Used for |
+|---|---|---|
+| Prompt begins / input begins | `OSC 133;A`, `133;B` | The [prompt layer](/terminal/prompt): suggestions, completion, multi-line editing |
+| Command submitted | `OSC 133;C` | Knowing a command is running; agent detection on Windows, where ConPTY exposes no foreground process group |
+| Command finished, with exit code | `OSC 133;D` | The "finished after 42s" notification, failure marks in [history](/terminal/history) |
+| Working directory | `OSC 7` | New tabs and splits opening in the right place, the sidebar's repo grouping, the git branch readout |
+| Editing mode (vi / emacs) | `OSC 133;V` | Matching tty7's key handling to your shell's mode |
+| Window title | `OSC 0` | Tab labels |
+
+## What turns off without it
+
+Run a shell tty7 does not integrate with, and everything below still works —
+it just falls back to less precise sources:
+
+- Ghost suggestions, the completion menu, and <kbd>⌃ R</kbd>'s fuzzy history
+- "Command finished" notifications and the failure marks in history search
+- Exact working-directory tracking (tty7 falls back to inspecting the process)
+
+Panes, splits, scrollback, search, SSH, and the CLI are unaffected.
+
+## Per-pane history
+
+When `per_pane_history` is on, the integration is also what makes it work. It
+runs *after* your own rc file — which is the only reason it can: `$HISTFILE` is
+yours to set, wherever you like, and nothing outside the shell knew where it
+pointed until then.
+
+The sequence is: seed the pane's private file from your real history so it does
+not start blank, record how much was seeded, repoint `$HISTFILE`, and merge
+everything past that mark back when the pane closes.
+
+[More about history →](/terminal/history#one-history-or-one-per-pane)
+
+## Remote shells
+
+For a remote workspace or an SSH pane, the same scripts are sent over the
+connection at login, so a remote pane reports its cwd, exit codes, and prompt
+marks exactly like a local one. Turn it off for a particular host under that
+profile's **Advanced → Session**.
