@@ -48,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shows through the whole workspace, and the settings panel stays opaque.
   macOS and Linux keep the existing blur toggle.
 
+### Fixed
+
+- **An SFTP upload no longer sits in the browser under its temporary name** —
+  an upload is written as `<name>.tty7-upload-<hex>` and renamed into place at
+  the end, and the browser listed the directory the moment the transfer
+  started, catching exactly that name. Nothing listed again afterwards, so a
+  finished upload read as a file with a hash glued to its name until the
+  directory was navigated by hand. The premature listing is gone and the
+  directory is listed once the upload stops running — finished, failed or
+  cancelled.
+
 ## [26.8.2] - 2026-08-09
 
 ### Added
