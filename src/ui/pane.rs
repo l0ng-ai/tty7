@@ -12,6 +12,15 @@ const MIN_RATIO: f32 = 0.1;
 const MAX_RATIO: f32 = 0.9;
 const DIVIDER_THICKNESS: f32 = 5.;
 
+/// How opaque a dragged (lifted) pane's terminal paints, blended toward the
+/// window background. The terminal reads it through `TerminalView::dim`; kept
+/// here so that field's docs can point at the real numbers instead of
+/// duplicating them.
+pub(crate) const LIFTED_DIM: f32 = 0.45;
+/// How opaque an unfocused pane in a split paints while `dim_inactive_panes`
+/// is on.
+pub(crate) const INACTIVE_DIM: f32 = 0.55;
+
 #[derive(Clone)]
 pub enum PaneSlot {
     Ready(Entity<TerminalView>),
@@ -833,6 +842,18 @@ impl Pane<PaneSlot> {
                 let handle = chrome.rearrangeable
                     && chrome.lifted.is_none()
                     && chrome.hovered.get() == Some(id);
+                // The terminal renders itself at this opacity by blending its
+                // colours toward the window background (`TerminalView::dim`,
+                // whose field docs explain why that beats an element-opacity
+                // style). The connecting screen has no stacked content, so it
+                // keeps the plain opacity style.
+                let dim = if lifted {
+                    LIFTED_DIM
+                } else if chrome.dim_inactive && !focused {
+                    INACTIVE_DIM
+                } else {
+                    1.0
+                };
                 div()
                     // An id only so the pane can hear the pointer arrive and
                     // leave; it adds no listener of its own, so everything the
@@ -841,8 +862,6 @@ impl Pane<PaneSlot> {
                     .size_full()
                     .relative()
                     .overflow_hidden()
-                    .when(chrome.dim_inactive && !focused, |d| d.opacity(0.55))
-                    .when(lifted, |d| d.opacity(0.45))
                     .when(chrome.rearrangeable, |d| {
                         d.pt(px(crate::ui::pane_drag::HANDLE_STRIP)).on_hover({
                             let hovered = chrome.hovered.clone();
@@ -860,11 +879,34 @@ impl Pane<PaneSlot> {
                         })
                     })
                     .map(|d| match v {
-                        PaneSlot::Ready(t) => d.child(t.clone()),
-                        PaneSlot::Connecting(p) => d.child(p.clone()),
+                        PaneSlot::Ready(t) => {
+                            t.update(cx, |v, _cx| v.set_dim(dim));
+                            d.child(t.clone())
+                        }
+                        PaneSlot::Connecting(p) => {
+                            d.when(dim < 1., |d| d.opacity(dim)).child(p.clone())
+                        }
                     })
                     .when(handle, |d| {
-                        d.child(crate::ui::pane_drag::handle(id, &chrome.drag, cx))
+                        // Only the grip is dimmed, and only through a wrapper of
+                        // its own. Element opacity multiplies every painted
+                        // primitive's alpha (`Window::paint_quad`/`paint_path`),
+                        // so on the pane div it would alpha-multiply the
+                        // terminal's layers *again* — the terminal is already
+                        // dimmed by blending its colours toward the window
+                        // background — double-dimming every cell and pushing the
+                        // powerline seam back. The grip is one rounded pill over
+                        // the empty handle strip, so per-primitive alpha on just
+                        // it stays continuous with its surroundings.
+                        d.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .when(dim < 1., |d| d.opacity(dim))
+                                .child(crate::ui::pane_drag::handle(id, &chrome.drag, cx)),
+                        )
                     })
                     .into_any_element()
             }
