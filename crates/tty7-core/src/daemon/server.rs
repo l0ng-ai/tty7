@@ -488,6 +488,7 @@ fn reaper(registry: Arc<Registry>, id: u64) -> impl FnOnce() + Send + 'static {
 
 pub fn control_services() -> crate::host::server::Services {
     use crate::core::machine::MachineStore;
+    crate::core::machine::adopt_legacy_data_dir();
     match MachineStore::shared() {
         Ok(machine) => {
             startup_note!("machine tree at {}", machine.path().display());

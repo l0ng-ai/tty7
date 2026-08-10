@@ -450,6 +450,95 @@ fn attachment_rides_the_tree_when_no_record_store_is_served() {
     );
 }
 
+/// Start a server the way an upgraded install starts, and let it exit.
+///
+/// `HOME` is a scratch directory of the test's own, which is the whole reason
+/// this case can exist: the legacy path is derived from `HOME`, so a test that
+/// borrowed the developer's would be reaching for their real `machine.json`.
+/// stdin is closed, so the link is at EOF before it is read — the startup work
+/// this test is about has already run by then, and the process leaves rather
+/// than serving nothing.
+fn started_once(home: &Path, extra: &[&str]) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tty7-server"))
+        .args(["--stdio", "--serve"])
+        .args(extra)
+        .env("HOME", home)
+        .env_remove("TTY7_DATA_DIR")
+        .env_remove("TTY7_CONFIG_DIR")
+        .env_remove("XDG_DATA_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("could not start tty7-server --stdio --serve");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match child.try_wait().expect("waiting on tty7-server") {
+            Some(_) => return,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("tty7-server kept running with its link at EOF");
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+}
+
+fn seed_legacy_tree(home: &Path) -> PathBuf {
+    let legacy = home.join(".local").join("share").join("tty7");
+    std::fs::create_dir_all(&legacy).unwrap();
+    let file = legacy.join(MACHINE_FILE);
+    std::fs::write(&file, br#"{"workspaces":[],"panes":[]}"#).unwrap();
+    file
+}
+
+/// The upgrade, end to end: the daemon moves the tree the old build left in the
+/// data directory into the config directory before it opens the store, so a
+/// machine's workspaces survive the release that changed where they live.
+#[test]
+fn a_server_started_after_the_upgrade_carries_the_legacy_tree_in() {
+    let home = tempfile::TempDir::new().unwrap();
+    let legacy = seed_legacy_tree(home.path());
+
+    started_once(home.path(), &[]);
+
+    assert!(
+        home.path().join(".config/tty7").join(MACHINE_FILE).exists(),
+        "the tree must arrive beside the rest of the config directory"
+    );
+    assert!(
+        !legacy.exists(),
+        "a move leaves nothing to be adopted twice"
+    );
+}
+
+/// And the half that keeps the upgrade from becoming the bug: a second tty7 on
+/// a config directory of its own must not rename the machine's tree into it.
+/// Whichever instance happened to start first would otherwise decide, and the
+/// primary would come up owning nothing.
+#[test]
+fn a_config_dir_of_its_own_leaves_the_machines_tree_alone() {
+    let home = tempfile::TempDir::new().unwrap();
+    let other = tempfile::TempDir::new().unwrap();
+    let legacy = seed_legacy_tree(home.path());
+
+    started_once(
+        home.path(),
+        &["--config-dir", &other.path().to_string_lossy()],
+    );
+
+    assert!(
+        legacy.exists(),
+        "the machine's tree belongs to the instance running out of its config directory"
+    );
+    assert!(
+        !other.path().join(MACHINE_FILE).exists(),
+        "a second instance starts on an empty tree, not on somebody else's"
+    );
+}
+
 fn bridged(sock: &Path, token: &str) -> Client {
     let hello = ControlHello::host_rpc(token, token);
     let mut child = Command::new(env!("CARGO_BIN_EXE_tty7-server"))

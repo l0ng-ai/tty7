@@ -656,6 +656,19 @@ fn config_dir() -> Option<PathBuf> {
     if let Some(dir) = CONFIG_DIR_OVERRIDE.get() {
         return Some(dir.clone());
     }
+    machine_config_dir()
+}
+
+/// The config directory this machine resolves to when no single invocation
+/// redirects it — `$TTY7_CONFIG_DIR` where the box names one, the default under
+/// `$HOME` otherwise.
+///
+/// [`config_dir`] with the `--config-dir` override left off, which is the
+/// question "is this the machine's tty7 or a second one somebody pointed
+/// elsewhere" (see `machine::adopt_legacy_data_dir`). It cannot be answered by
+/// whether the override is set: `daemon::spawn` passes `--config-dir` to every
+/// daemon it starts, the ordinary install's included.
+pub fn machine_config_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("TTY7_CONFIG_DIR").filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
