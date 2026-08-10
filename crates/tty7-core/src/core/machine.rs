@@ -1293,9 +1293,43 @@ fn write_appearance(path: &Path, appearance: Appearance) -> io::Result<()> {
     crate::core::config::write_atomic_private(path, &bytes)
 }
 
+/// Where the machine tree lives: the config directory, unless a test pins one
+/// with [`DATA_DIR_ENV`].
+///
+/// It used to be the XDG data directory, resolved from `HOME` alone. That made
+/// the tree the one piece of an instance that `--config-dir` did not move, so
+/// two tty7s pointed at different config directories — each holding its own
+/// `daemon.lock`, each certain it was the only server — still co-owned one
+/// `machine.json`. `MachineStore::persist` writes the document whole, so the
+/// second one to flush replaced the first one's workspaces with its own, and
+/// the next daemon to start read the survivor's tree as the machine's. A tree
+/// that comes back empty is not distinguishable from a machine that really has
+/// nothing on it, so the GUI does what an empty tree means (see
+/// `tree_sync::on_workspace_deleted`) and forgets the workspaces for good.
+///
+/// The lock and the thing it protects have to be keyed alike. Everything else
+/// an instance owns — `views.json`, the scrollback, the history, both sockets,
+/// the pidfile, the lock — is already keyed by the config directory; the tree
+/// and the appearance hint were the last two files that were not.
 fn data_dir() -> io::Result<PathBuf> {
     if let Some(explicit) = std::env::var_os(DATA_DIR_ENV).filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(explicit));
+    }
+    crate::core::config::config_dir_path().ok_or_else(|| {
+        io::Error::other(format!(
+            "no config directory to place {MACHINE_FILE} in; set {DATA_DIR_ENV}"
+        ))
+    })
+}
+
+/// Where [`data_dir`] pointed before it followed the config directory.
+///
+/// Deliberately still resolved the old way, `TTY7_DATA_DIR` included: this
+/// answers "where would the build the user just upgraded from have put it",
+/// and that build read the environment, not the config directory.
+fn legacy_data_dir() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os(DATA_DIR_ENV).filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(explicit));
     }
     #[cfg(not(windows))]
     let base = env_dir("XDG_DATA_HOME")
@@ -1304,12 +1338,78 @@ fn data_dir() -> io::Result<PathBuf> {
     let base = env_dir("LOCALAPPDATA")
         .or_else(|| env_dir("USERPROFILE").map(|h| h.join(".local").join("share")));
 
-    base.map(|b| b.join("tty7")).ok_or_else(|| {
-        io::Error::other(format!(
-            "no home directory to place {MACHINE_FILE} in; set {DATA_DIR_ENV}"
-        ))
-    })
+    base.map(|b| b.join("tty7"))
 }
+
+/// Carry an upgrading install's tree and appearance hint over to the config
+/// directory.
+///
+/// Moving the path without this would lose every workspace on the machine at
+/// the moment of upgrade, which is the failure this whole change exists to
+/// stop.
+///
+/// Called by the daemon at startup, before it opens the store, and by nothing
+/// else. The daemon is the tree's only writer, so it is the only process
+/// entitled to move it; and a path getter that touches the disk as a side
+/// effect is one no test can call without putting the developer's own tree at
+/// risk — which is the accident this whole change is about.
+pub fn adopt_legacy_data_dir() {
+    let Ok(current) = data_dir() else { return };
+    let Some(legacy) = legacy_data_dir().filter(|legacy| *legacy != current) else {
+        return;
+    };
+    for file in [MACHINE_FILE, APPEARANCE_FILE] {
+        adopt_legacy_file(&legacy.join(file), &current.join(file));
+    }
+}
+
+/// The destination existing at all is the whole guard. It means some newer run
+/// already owns this file, and the legacy copy beside it is stale — a build
+/// from before this change, started once since the move, writing where it still
+/// believes the tree lives. Overwriting would hand that stale tree back.
+///
+/// Two processes migrating at once is safe for the same reason they cannot both
+/// win: they rename the same source, so the loser's rename fails with the
+/// source already gone and leaves the winner's result alone.
+fn adopt_legacy_file(legacy: &Path, current: &Path) {
+    if current.exists() || !legacy.exists() {
+        return;
+    }
+    if let Some(parent) = current.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        log::warn!(
+            "could not create {} to receive {}: {e}",
+            parent.display(),
+            legacy.display()
+        );
+        return;
+    }
+    match std::fs::rename(legacy, current) {
+        Ok(()) => log::info!(
+            "moved {} to {} ({LEGACY_NOTE})",
+            legacy.display(),
+            current.display()
+        ),
+        // Across filesystems `rename` refuses and a copy is the only way over.
+        // The original stays: it costs a stale file, and losing the tree to a
+        // half-finished move is the one outcome worth ruling out.
+        Err(_) => match std::fs::copy(legacy, current) {
+            Ok(_) => log::info!(
+                "copied {} to {} ({LEGACY_NOTE}); the original was left in place",
+                legacy.display(),
+                current.display()
+            ),
+            Err(e) => log::warn!(
+                "could not move {} to {}: {e}",
+                legacy.display(),
+                current.display()
+            ),
+        },
+    }
+}
+
+const LEGACY_NOTE: &str = "the machine tree now lives beside the rest of the config directory";
 
 fn env_dir(key: &str) -> Option<PathBuf> {
     std::env::var_os(key)
@@ -1980,6 +2080,84 @@ mod tests {
             ),
             Err(e) => assert!(e.to_string().contains(DATA_DIR_ENV)),
         }
+    }
+
+    /// The invariant the whole file rests on: one config directory is one
+    /// instance, tree included.
+    ///
+    /// While the tree resolved from `HOME` alone, `--config-dir` moved the
+    /// lock, both sockets, `views.json` and the scrollback but left the tree
+    /// behind, so two tty7s that each believed they were the only server on
+    /// this machine wrote one `machine.json` between them — whole-document
+    /// writes, last one wins, and the workspaces the loser knew about were
+    /// gone.
+    #[test]
+    fn the_tree_lives_in_the_config_directory() {
+        if std::env::var_os(DATA_DIR_ENV).is_some() {
+            return;
+        }
+        let pinned = crate::core::session::test_support::pin_config_dir();
+        assert_eq!(
+            default_machine_path().unwrap().parent(),
+            Some(pinned.as_path()),
+            "a config directory nobody else names must not share anybody's tree"
+        );
+    }
+
+    #[test]
+    fn an_upgrade_carries_the_legacy_tree_forward() {
+        let old = tempfile::TempDir::new().unwrap();
+        let new = tempfile::TempDir::new().unwrap();
+        let (legacy, current) = (old.path().join(MACHINE_FILE), new.path().join(MACHINE_FILE));
+        std::fs::write(&legacy, br#"{"workspaces":[],"panes":[]}"#).unwrap();
+
+        adopt_legacy_file(&legacy, &current);
+
+        assert!(
+            current.exists(),
+            "moving the path without the tree would lose every workspace at the \
+             moment of upgrade, which is the failure this change exists to stop"
+        );
+        assert!(
+            !legacy.exists(),
+            "a move leaves nothing to be adopted twice"
+        );
+    }
+
+    /// The stale-overwrite case, and the reason the guard is "the destination
+    /// exists" rather than "the source is newer": a build from before the move,
+    /// run once since, rewrites the legacy path with a tree that predates
+    /// everything done since. Adopting that over the live file would hand the
+    /// old tree back — a slower version of the bug, not a fix for it.
+    #[test]
+    fn a_legacy_file_never_overwrites_the_tree_in_use() {
+        let old = tempfile::TempDir::new().unwrap();
+        let new = tempfile::TempDir::new().unwrap();
+        let (legacy, current) = (old.path().join(MACHINE_FILE), new.path().join(MACHINE_FILE));
+        std::fs::write(&legacy, b"stale").unwrap();
+        std::fs::write(&current, b"live").unwrap();
+
+        adopt_legacy_file(&legacy, &current);
+
+        assert_eq!(std::fs::read(&current).unwrap(), b"live");
+        assert!(
+            legacy.exists(),
+            "the one it did not adopt is not the one it may delete"
+        );
+    }
+
+    #[test]
+    fn nothing_to_adopt_creates_nothing() {
+        let old = tempfile::TempDir::new().unwrap();
+        let new = tempfile::TempDir::new().unwrap();
+        let current = new.path().join(MACHINE_FILE);
+
+        adopt_legacy_file(&old.path().join(MACHINE_FILE), &current);
+
+        assert!(
+            !current.exists(),
+            "a fresh install has nothing to carry forward and must not be handed an empty tree"
+        );
     }
 
     #[test]
