@@ -84,6 +84,13 @@ src/terminal/search.rs|.is_absolute()
 # can be handed a path. Always `std::env::temp_dir()` on this machine.
 src/terminal/view.rs|std::fs::create_dir_all
 src/terminal/view.rs|std::fs::write
+
+# The source side of a file drop. What the desktop hands over is by
+# construction a path on the desktop's own machine, so reading it is a local
+# read even when the tree being dropped on is remote — the destination side of
+# that copy goes through `Host`, and the one `std::fs::copy` that touches a
+# destination sits inside a branch already gated on `host.id().is_local()`.
+src/ui/file_copy.rs|std::fs::
 EOF
 )
 
@@ -91,7 +98,12 @@ EOF
 # preserved because only the tail is dropped.
 body_of() {
     local file=$1 cut
+    # `attr` starts unset, which awk reads as 0 — so a file whose *first* line
+    # is `mod something` used to match `attr == NR - 1` and cut the body at
+    # line 0, leaving `head -n -1` to error out and the file to be scanned as
+    # empty. Two files opened that way, and the guard was blind to both.
     cut=$(awk '
+        BEGIN                { attr = -1 }
         /^#\[cfg\(test\)\]$/ { attr = NR }
         /^mod [A-Za-z_]/     { if (attr == NR - 1) { print NR - 1; exit } }
     ' "$file")
