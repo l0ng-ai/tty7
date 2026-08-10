@@ -5960,10 +5960,18 @@ impl Render for Tty7App {
                 self.drop_pane(from, zone, window, cx);
             }
         }
+        // Windows has no closed-hand cursor and gpui answers `ClosedHand` with
+        // the plain arrow there, which would drop the grip's pointing hand the
+        // instant the drag it advertised began.
+        let held = if cfg!(target_os = "windows") {
+            gpui::CursorStyle::PointingHand
+        } else {
+            gpui::CursorStyle::ClosedHand
+        };
         if (self.reorder.borrow().is_some() || self.pane_drag.borrow().is_some())
-            && cx.active_drag_cursor_style() != Some(gpui::CursorStyle::ClosedHand)
+            && cx.active_drag_cursor_style() != Some(held)
         {
-            cx.set_active_drag_cursor_style(gpui::CursorStyle::ClosedHand, window);
+            cx.set_active_drag_cursor_style(held, window);
         }
         let vertical = matches!(cx.global::<Config>().tab_bar_position, TabBarPosition::Left)
             && !self.tabs.is_empty();

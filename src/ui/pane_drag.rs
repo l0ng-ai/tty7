@@ -32,6 +32,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext, Bounds, Context, EntityId, InteractiveElement, IntoElement, ParentElement,
     Pixels, Point, Render, StatefulInteractiveElement, Styled, Window, div, point, px, size,
@@ -140,7 +141,7 @@ pub(crate) fn handle(pane: EntityId, state: &PaneDragState, cx: &App) -> gpui::A
                 .flex()
                 .items_center()
                 .justify_center()
-                .cursor_grab()
+                .map(crate::ui::reorder::cursor_grab)
                 .tooltip(|window, cx| {
                     Tooltip::new(t(L10nKey::PaneDragHandleTooltip)).build(window, cx)
                 })

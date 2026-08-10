@@ -797,12 +797,7 @@ impl Tty7App {
                     .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
                     .when_some(group_slot, |header, slot| {
-                        let header = if cfg!(target_os = "windows") {
-                            header.cursor_pointer()
-                        } else {
-                            header.cursor_grab()
-                        };
-                        header.on_drag(DragGroup, {
+                        crate::ui::reorder::cursor_grab(header).on_drag(DragGroup, {
                             let state = self.reorder.clone();
                             let slots = group_slots.clone();
                             move |_drag, grab, _window, cx| {

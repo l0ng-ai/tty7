@@ -59,6 +59,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory is listed once the upload stops running — finished, failed or
   cancelled.
 
+- **Drag cursors on Windows** — the grip on a pane's top edge, and a sidebar
+  group being dragged, now change the pointer on Windows too. Win32 ships no
+  open- or closed-hand cursor and gpui answers both with the plain arrow, so
+  the grip read as ordinary background and a drag in flight gave the pointer
+  nothing to say; both now use the pointing hand there, and hovering the grip
+  no longer hands the cursor back to the arrow the moment the drag it
+  advertised begins.
+
 ## [26.8.2] - 2026-08-09
 
 ### Added
