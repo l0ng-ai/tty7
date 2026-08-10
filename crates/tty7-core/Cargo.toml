@@ -140,7 +140,7 @@ core-foundation = "0.10"
 # (`daemon::install::proxy`). It pins core-foundation 0.9, so that module goes
 # through this crate's `core_foundation` re-export rather than the 0.10 above —
 # `get_proxies` hands back 0.9 types and the two versions do not interoperate.
-system-configuration = { version = "0.6", optional = true }
+system-configuration = { version = "0.7", optional = true }
 system-configuration-sys = { version = "0.6", optional = true }
 
 # The Windows GUI⇄daemon transport is loopback TCP, which (unlike a Unix socket)
