@@ -232,13 +232,13 @@ fn active_selection_bg(cx: &gpui::App) -> Rgb {
     }
 }
 
-/// Blends a finished cell's colours toward `under` for a dimmed pane. This has
-/// to happen on the *cell*, not on the palette: truecolour cells (the direct
-/// `38;2;…`/`48;2;…` SGR a prompt like starship emits for its segments) carry
-/// their own `Spec` colour that never passes through the palette, and leaving
-/// it untouched would keep the whole prompt at full brightness while indexed
+/// Blends a finished cell's colours toward `under` for a dimmed pane. The
+/// blend has to happen on the *cell*, not on the palette: truecolour cells
+/// (the direct `38;2;…`/`48;2;…` SGR a prompt like starship emits for its
+/// segments) carry their own `Spec` colour that a palette-level dim would
+/// never see, leaving a truecolour prompt at full brightness while indexed
 /// content around it dims.
-fn dim_cell(mut rc: RenderCell, dim: f32, under: Hsla) -> RenderCell {
+fn dim_cell(mut rc: RenderCell, dim: f32, under: Rgba) -> RenderCell {
     rc.fg = blend_toward(rc.fg, dim, under);
     rc.bg = blend_toward(rc.bg, dim, under);
     if let Some(u) = rc.underline_color.as_mut() {
@@ -292,61 +292,81 @@ struct PaintColors {
 /// available target. Cells whose background is not painted (the default
 /// terminal background) intentionally keep showing the un-dimmed window
 /// background through them, so the backdrop material stays visible.
-fn dim_under(cx: &gpui::App) -> Hsla {
+///
+/// Two trade-offs follow from painting opaque, pre-blended colours instead of
+/// the old element-opacity style. On a translucent window the desktop no
+/// longer shows through a dimmed pane's painted cells — the old style left
+/// them at alpha `dim` and let the backdrop contribute; the new style paints
+/// them opaque, blended toward `fill × window_opacity`, which ignores the
+/// backdrop's own contribution. And only the terminal element's cells are
+/// dimmed: the search bar, completion menu and integration notice render
+/// outside the grid and stay at full brightness, where the old style faded
+/// the whole `TerminalView` — the same "the fading is worn by what it holds"
+/// rule the drag grip follows.
+fn dim_under(cx: &gpui::App) -> Rgba {
     // Mirror `workspace_background`: the active preset fill when a preset is
     // installed, the theme token otherwise. The alpha is the window opacity
     // in both arms, so the premultiply is uniform.
-    let (packed, opacity) = match cx.try_global::<crate::ui::presets::ActiveBackground>() {
-        Some(bg) => (
-            match &bg.fill {
-                crate::ui::presets::Fill::Solid(c) => *c,
-                crate::ui::presets::Fill::Vertical { top, bottom } => {
-                    crate::ui::presets::mix(*top, *bottom, 0.5)
-                }
-                crate::ui::presets::Fill::Horizontal { left, right } => {
-                    crate::ui::presets::mix(*left, *right, 0.5)
-                }
-            },
-            bg.opacity.unwrap_or(1.),
-        ),
-        None => {
-            let bg = Rgba::from(cx.theme().background);
-            return Rgba {
-                r: bg.r * bg.a,
-                g: bg.g * bg.a,
-                b: bg.b * bg.a,
-                a: 1.,
-            }
-            .into();
+    match cx.try_global::<crate::ui::presets::ActiveBackground>() {
+        Some(bg) => fill_under(&bg.fill, bg.opacity),
+        None => theme_under(cx.theme().background),
+    }
+}
+
+/// The premultiplied under-colour for an active preset's fill at the window's
+/// own opacity. Solid fills are exact; gradients are approximated by their
+/// midpoint stop (a wallpaper image rides over the fill at low opacity, so
+/// the fill stays the best available target).
+fn fill_under(fill: &crate::ui::presets::Fill, opacity: Option<f32>) -> Rgba {
+    let packed = match fill {
+        crate::ui::presets::Fill::Solid(c) => *c,
+        crate::ui::presets::Fill::Vertical { top, bottom } => {
+            crate::ui::presets::mix(*top, *bottom, 0.5)
+        }
+        crate::ui::presets::Fill::Horizontal { left, right } => {
+            crate::ui::presets::mix(*left, *right, 0.5)
         }
     };
-    premultiplied(packed, opacity)
+    premultiplied(packed, opacity.unwrap_or(1.))
+}
+
+/// The premultiplied under-colour for the theme background token, used when
+/// no preset is installed — the `None` arm of `workspace_background`.
+fn theme_under(bg: Hsla) -> Rgba {
+    let bg = Rgba::from(bg);
+    Rgba {
+        r: bg.r * bg.a,
+        g: bg.g * bg.a,
+        b: bg.b * bg.a,
+        a: 1.,
+    }
 }
 
 /// The premultiplied under-colour for a packed fill colour at the window's
 /// own opacity — exactly the colour a `Solid` workspace fill paints over the
 /// OS backdrop, ignoring the backdrop's own contribution.
-fn premultiplied(packed: u32, opacity: f32) -> Hsla {
+fn premultiplied(packed: u32, opacity: f32) -> Rgba {
     Rgba {
         r: ((packed >> 16) & 0xff) as f32 / 255. * opacity,
         g: ((packed >> 8) & 0xff) as f32 / 255. * opacity,
         b: (packed & 0xff) as f32 / 255. * opacity,
         a: 1.,
     }
-    .into()
 }
 
-/// Blends `c` toward `under` in RGB space, keeping `c`'s own alpha. Linear in
-/// the composited result: painting `blend_toward(a)` over `blend_toward(b)`
+/// Blends `c` toward `under` in RGB space, keeping `c`'s own alpha. `under`
+/// is passed pre-converted to `Rgba` because it is a frame constant: every
+/// cell blends fg, bg and an optional underline colour against it, and the
+/// HSL↔RGB round trip would otherwise run once per colour per cell. Linear
+/// in the composited result: painting `blend_toward(a)` over `blend_toward(b)`
 /// equals `blend_toward(a over b)`, which is exactly what a uniform opacity
 /// of `dim` over the window background would produce.
-fn blend_toward(c: Hsla, dim: f32, under: Hsla) -> Hsla {
+fn blend_toward(c: Hsla, dim: f32, under: Rgba) -> Hsla {
     let c = Rgba::from(c);
-    let u = Rgba::from(under);
     Rgba {
-        r: dim * c.r + (1. - dim) * u.r,
-        g: dim * c.g + (1. - dim) * u.g,
-        b: dim * c.b + (1. - dim) * u.b,
+        r: dim * c.r + (1. - dim) * under.r,
+        g: dim * c.g + (1. - dim) * under.g,
+        b: dim * c.b + (1. - dim) * under.b,
         a: c.a,
     }
     .into()
@@ -403,7 +423,7 @@ impl PaintColors {
     /// for the named foreground/background cells, and those cells get blended
     /// by `dim_cell` like every other cell — blending them here as well would
     /// dim the named colours twice.
-    fn dimmed(&self, dim: f32, under: Hsla) -> Self {
+    fn dimmed(&self, dim: f32, under: Rgba) -> Self {
         Self {
             default_fg: blend_toward(self.default_fg, dim, under),
             default_bg: blend_toward(self.default_bg, dim, under),
@@ -1218,7 +1238,7 @@ impl TerminalElement {
         want_sliver: bool,
         cx: &App,
         dim: f32,
-        under: Hsla,
+        under: Rgba,
     ) -> GridSnapshot {
         buf.clear();
         buf.resize(rows * cols, RenderCell::default());
@@ -1657,7 +1677,8 @@ impl Element for TerminalElement {
         // Blending the palette and paint colours toward the window background is
         // what actually dims the pane; the pane no longer wraps the terminal in
         // an element-opacity style, whose per-primitive alpha multiplication
-        // would leave stacked decorations brighter than the segments below them.
+        // would leave stacked decorations with a seam against the segments
+        // below them.
         let dim = self.view.read(cx).dim.clamp(0., 1.);
         let (colors, dim, under) = if dim < 1. {
             let under = dim_under(cx);
@@ -1666,7 +1687,7 @@ impl Element for TerminalElement {
             // `under` is only read while `dim < 1.` (per-cell in the grid and
             // over bitmaps), so a default keeps the common rest frame from
             // paying for the preset lookup and colour math.
-            (colors, 1., Hsla::default())
+            (colors, 1., Rgba::default())
         };
 
         let mut buf = GRID_BUF.with(|b| std::mem::take(&mut *b.borrow_mut()));
@@ -1813,7 +1834,7 @@ impl Element for TerminalElement {
                 // pre-blended palette; blend the image itself toward the under
                 // the same way the surrounding cells are blended.
                 if dim < 1. {
-                    let mut c = under;
+                    let mut c: Hsla = under.into();
                     c.a = 1. - dim;
                     window.paint_quad(fill(bounds, c));
                 }
@@ -1889,6 +1910,16 @@ impl Element for TerminalElement {
         if let Some(start) = fps_start {
             super::fps::record(start.elapsed());
         }
+
+        // The dim is a per-frame hand-off from the pane leaf to this paint
+        // (see `TerminalView::set_dim`): the pane writes it while rendering,
+        // this paint reads it above. Reset it here so the hand-off is
+        // structural — any frame that ends without a render site having set
+        // the dim paints at full brightness next, instead of carrying a stale
+        // value. A render site that forgets to set it (a maximized pane has
+        // no chrome to set it) therefore degrades to a single stale frame at
+        // worst, never a permanently dimmed terminal.
+        self.view.update(cx, |v, _cx| v.set_dim(1.));
     }
 }
 
@@ -2858,11 +2889,12 @@ mod tests {
 
     #[test]
     fn blend_toward_mixes_in_rgb_space_and_keeps_alpha() {
-        let under = to_hsla(Rgb {
-            r: 16,
-            g: 18,
-            b: 19,
-        });
+        let under = Rgba {
+            r: 16. / 255.,
+            g: 18. / 255.,
+            b: 19. / 255.,
+            a: 1.,
+        };
         let red = to_hsla(Rgb {
             r: 218,
             g: 98,
@@ -2889,14 +2921,16 @@ mod tests {
         // The reported bug: a powerline separator (fill) drawn over its
         // segment (bg) dimmed unevenly because the old pane element-opacity
         // alpha-multiplied each layer, so the separator kept the segment's own
-        // dim visible through its (1 - dim) and landed brighter than the
-        // segment. Blending every colour toward the under first keeps the
-        // composite exactly as dimmed as any single layer.
-        let under = to_hsla(Rgb {
-            r: 16,
-            g: 18,
-            b: 19,
-        });
+        // dim visible through its (1 - dim) and landed with a seam against
+        // the segment (brighter on this palette). Blending every colour
+        // toward the under first keeps the composite exactly as dimmed as any
+        // single layer.
+        let under = Rgba {
+            r: 16. / 255.,
+            g: 18. / 255.,
+            b: 19. / 255.,
+            a: 1.,
+        };
         let segment = to_hsla(Rgb {
             r: 218,
             g: 98,
@@ -2928,7 +2962,7 @@ mod tests {
 
         // Old rendering: the pane opacity turned both layers translucent, so
         // the fill showed the already-dimmed segment underneath and painted
-        // visibly brighter than the segment next to it.
+        // with a seam against the segment next to it.
         let old_fill = Rgba {
             a: dim,
             ..Rgba::from(fill)
@@ -2940,20 +2974,22 @@ mod tests {
         let old_composite = over(old_fill, old_segment);
         assert!(
             old_composite.r > new_composite.r + 0.05,
-            "the old alpha-multiplied separator was visibly brighter than the segment"
+            "on this palette the old alpha-multiplied separator was visibly brighter than the segment"
         );
     }
 
     #[test]
     fn dim_cell_blends_truecolor_cells_toward_the_under() {
         // Starship's prompt paints its segments with direct 38;2;/48;2; SGR
-        // colours that never pass through the palette; the pane dim must reach
-        // those cells too, or the whole prompt would stay at full brightness.
-        let under = to_hsla(Rgb {
-            r: 16,
-            g: 18,
-            b: 19,
-        });
+        // colours that a palette-level dim would never see; the pane dim must
+        // reach those cells too, or the whole prompt would stay at full
+        // brightness while indexed content around it dims.
+        let under = Rgba {
+            r: 16. / 255.,
+            g: 18. / 255.,
+            b: 19. / 255.,
+            a: 1.,
+        };
         let mut cell = RenderCell::default();
         cell.c = 'x';
         cell.fg = to_hsla(Rgb {
@@ -2997,11 +3033,12 @@ mod tests {
     #[test]
     fn paint_colors_dimmed_keeps_translucent_tint_alphas() {
         let colors = caret_colors();
-        let under = to_hsla(Rgb {
-            r: 16,
-            g: 18,
-            b: 19,
-        });
+        let under = Rgba {
+            r: 16. / 255.,
+            g: 18. / 255.,
+            b: 19. / 255.,
+            a: 1.,
+        };
         let dimmed = colors.dimmed(0.55, under);
         assert!((dimmed.caret.a - colors.caret.a).abs() < 1e-3);
         assert!(
@@ -3020,18 +3057,80 @@ mod tests {
         // A dimmed pane blends toward the colour the workspace actually paints
         // behind it: the fill scaled by the window's own opacity (premultiplied
         // alpha), never toward a colour that includes the OS backdrop.
-        let under = premultiplied(0xda_62_7d, 0.82);
-        let u = Rgba::from(under);
+        let u = premultiplied(0xda_62_7d, 0.82);
         assert_eq!(u.a, 1.0, "the under must stay an opaque paint colour");
-        assert!((u.r - 0.82 * (218. / 255.)).abs() < 1e-3);
-        assert!((u.g - 0.82 * (98. / 255.)).abs() < 1e-3);
-        assert!((u.b - 0.82 * (125. / 255.)).abs() < 1e-3);
-        // A fully opaque window keeps the fill untouched (within the
-        // Hsla round-trip's rounding).
-        let opaque = Rgba::from(premultiplied(0xda_62_7d, 1.0));
-        assert!((opaque.r - 218. / 255.).abs() < 1e-3);
-        assert!((opaque.g - 98. / 255.).abs() < 1e-3);
-        assert!((opaque.b - 125. / 255.).abs() < 1e-3);
+        assert!((u.r - 0.82 * (218. / 255.)).abs() < 1e-6);
+        assert!((u.g - 0.82 * (98. / 255.)).abs() < 1e-6);
+        assert!((u.b - 0.82 * (125. / 255.)).abs() < 1e-6);
+        // A fully opaque window keeps the fill untouched.
+        let opaque = premultiplied(0xda_62_7d, 1.0);
+        assert!((opaque.r - 218. / 255.).abs() < 1e-6);
+        assert!((opaque.g - 98. / 255.).abs() < 1e-6);
+        assert!((opaque.b - 125. / 255.).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fill_under_maps_preset_fills_to_their_premultiplied_under() {
+        use crate::ui::presets::Fill;
+
+        // A solid fill is exactly the colour the workspace paints behind the
+        // terminal, scaled by the window's own opacity.
+        let solid = fill_under(&Fill::Solid(0xda_62_7d), Some(0.82));
+        assert!((solid.r - 0.82 * (218. / 255.)).abs() < 1e-6);
+        assert!((solid.g - 0.82 * (98. / 255.)).abs() < 1e-6);
+        assert!((solid.b - 0.82 * (125. / 255.)).abs() < 1e-6);
+        assert_eq!(solid.a, 1.0);
+
+        // A gradient is approximated by its midpoint stop (`mix` rounds each
+        // channel, so 0x00…ff lands on 128/255 rather than exactly 0.5).
+        let vertical = fill_under(
+            &Fill::Vertical {
+                top: 0x00_00_00,
+                bottom: 0xff_ff_ff,
+            },
+            None,
+        );
+        assert!((vertical.r - 128. / 255.).abs() < 1e-6);
+        assert_eq!(vertical.r, vertical.g);
+        assert_eq!(vertical.r, vertical.b);
+        let horizontal = fill_under(
+            &Fill::Horizontal {
+                left: 0xff_00_00,
+                right: 0x00_00_ff,
+            },
+            None,
+        );
+        assert!((horizontal.r - 128. / 255.).abs() < 1e-6);
+        assert!((horizontal.b - 128. / 255.).abs() < 1e-6);
+
+        // No explicit opacity means the fill is used at full strength.
+        let full = fill_under(&Fill::Solid(0xda_62_7d), None);
+        assert!((full.r - 218. / 255.).abs() < 1e-6);
+    }
+
+    #[test]
+    fn theme_under_premultiplies_by_the_theme_background_alpha() {
+        // The no-preset fallback mirrors `theme().background`, whose alpha is
+        // the window's own opacity.
+        let bg = to_hsla(Rgb {
+            r: 218,
+            g: 98,
+            b: 125,
+        });
+        let mut bg = bg;
+        bg.a = 0.82;
+        let under = theme_under(bg);
+        assert_eq!(under.a, 1.0);
+        assert!((under.r - 0.82 * (218. / 255.)).abs() < 1e-6);
+        assert!((under.g - 0.82 * (98. / 255.)).abs() < 1e-6);
+        assert!((under.b - 0.82 * (125. / 255.)).abs() < 1e-6);
+        // An opaque theme token is used untouched.
+        let opaque = theme_under(to_hsla(Rgb {
+            r: 218,
+            g: 98,
+            b: 125,
+        }));
+        assert!((opaque.r - 218. / 255.).abs() < 1e-6);
     }
 
     #[test]

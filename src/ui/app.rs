@@ -6022,18 +6022,11 @@ impl Render for Tty7App {
                         .any(|l| l.entity_id() == leaf.entity_id())
                 });
                 match maximized {
-                    Some(leaf) => {
-                        // The maximized leaf renders without the pane chrome,
-                        // which is what normally pushes the per-frame dim onto
-                        // the terminal view — reset it so a pane maximized
-                        // while inactive does not stay dimmed.
-                        leaf.update(cx, |v, _cx| v.set_dim(1.));
-                        div()
-                            .size_full()
-                            .overflow_hidden()
-                            .child(leaf.clone())
-                            .into_any_element()
-                    }
+                    Some(leaf) => div()
+                        .size_full()
+                        .overflow_hidden()
+                        .child(leaf.clone())
+                        .into_any_element(),
                     None => {
                         let several = active_tab.pane.leaves().len() > 1;
                         let chrome = crate::ui::pane::PaneChrome {
