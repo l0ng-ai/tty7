@@ -17,6 +17,10 @@
 
 <sub>English · [简体中文](README.zh-CN.md)</sub>
 
+<br />
+
+<img src="assets/hero.webp" alt="tty7 with a tab sidebar of agent sessions across several repos, running Claude Code" width="900" />
+
 </div>
 
 ## Why

@@ -17,6 +17,10 @@
 
 <sub>[English](README.md) · 简体中文</sub>
 
+<br />
+
+<img src="assets/hero.webp" alt="tty7 侧边栏列出多个仓库的 agent 会话，右侧运行 Claude Code" width="900" />
+
 </div>
 
 ## 为什么

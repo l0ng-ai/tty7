@@ -210,12 +210,33 @@ if [[ "$PACKAGE_UPDATE_ZIP" != "0" ]]; then
 fi
 
 # Package the (now stapled) bundle as a drag-to-Applications DMG.
+#
+# `hdiutil` needs room for the whole image beside the staged bundle, and the
+# hosted Intel runners stopped having it — three nightlies in a row died right
+# here on 2026-08-10 with "hdiutil: create failed - No space left on device",
+# across two different commits. The arm64 runners have never hit it. So the two
+# steps below give the image somewhere to go rather than assuming there is room.
 DMG="dist/tty7-${VERSION}-macos-${ARCH}.dmg"
 STAGE="dist/dmg-stage"
 rm -rf "$STAGE"
 mkdir "$STAGE"
-cp -R "$APP" "$STAGE/"
+# `mv`, not `cp -R`: this is the peak, and a second full copy of the bundle is
+# the most expensive thing on the volume that nobody needs. Nothing reads
+# dist/tty7.app after this point — the zip above is what the updater ships and
+# what nightly.yml verifies (it extracts that, not this), and release.yml only
+# knows about tty7.app as an intermediate to keep out of the upload globs.
+mv "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
+# The build tree is dead weight from here on: every binary it produced is
+# already inside the bundle, and no later step in either workflow reads it.
+# The cost is that rust-cache finds little left to save, so the next macOS
+# build recompiles the dependency graph. That is a slower nightly; the
+# alternative is no nightly at all. `df` first so the next person to look at
+# this has the number that made it necessary.
+df -h . || true
+rm -rf "target/${TARGET}/release/deps" \
+       "target/${TARGET}/release/build" \
+       "target/${TARGET}/release/incremental"
 hdiutil create -volname "tty7" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
 rm -rf "$STAGE"
 if [[ -n "$SIGN_ID" && -n "${APPLE_CERTIFICATE:-}" ]]; then
