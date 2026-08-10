@@ -143,6 +143,12 @@ pub(crate) struct SftpPanelState {
     pub(crate) filter_input: gpui::Entity<InputState>,
     pub(crate) error: Option<String>,
     pub(crate) jobs: Vec<SftpJobProgress>,
+    /// Uploads this panel started whose landing it has not listed yet.
+    ///
+    /// An upload is written to `<name>.tty7-upload-<hex>` and renamed into
+    /// place at the very end, so any listing taken while one is in flight
+    /// shows the temporary name. These are the jobs a listing is owed to.
+    uploads_awaiting_listing: HashSet<u64>,
     /// Local names handed to a download that has not created its file yet.
     /// Two quick downloads of the same remote file would otherwise both find
     /// the name free and the second would write over the first.
@@ -182,6 +188,7 @@ impl SftpPanelState {
             filter_input,
             error: None,
             jobs: Vec::new(),
+            uploads_awaiting_listing: HashSet::new(),
             claimed_downloads: HashSet::new(),
             dismissed_jobs: HashSet::new(),
             show_history: false,
@@ -198,6 +205,22 @@ impl SftpPanelState {
             _subs: vec![sub],
         }
     }
+}
+
+/// Of the uploads a listing is owed to, the ones that are still writing.
+///
+/// A job that has dropped off the list entirely counts as done: whether it
+/// finished, failed or was trimmed from the history, it is not going to rename
+/// anything into place later.
+fn uploads_still_running(owed: &HashSet<u64>, jobs: &[SftpJobProgress]) -> HashSet<u64> {
+    owed.iter()
+        .copied()
+        .filter(|id| {
+            jobs.iter()
+                .find(|job| job.job_id == *id)
+                .is_some_and(|job| job.state == SftpJobState::Running)
+        })
+        .collect()
 }
 
 fn is_dir_like(e: &SftpEntry) -> bool {
@@ -929,13 +952,18 @@ impl Tty7App {
                 remote: remote_join(&cwd, &name),
                 recursive,
             };
-            if let Err(e) = self.sftp_route().transfer_start(spec) {
-                self.sftp_panel.error = Some(e);
+            match self.sftp_route().transfer_start(spec) {
+                Ok(job_id) => {
+                    self.sftp_panel.uploads_awaiting_listing.insert(job_id);
+                }
+                Err(e) => self.sftp_panel.error = Some(e),
             }
         }
         self.sftp_poll_jobs(cx);
         self.sftp_start_polling(cx);
-        self.sftp_refresh(cx);
+        // No listing here on purpose. The upload has only just been handed to
+        // the daemon, so a listing taken now catches the temporary name it
+        // writes under; the one owed for it is taken when it settles.
     }
 
     pub(crate) fn sftp_cancel_job(&mut self, job_id: u64, cx: &mut Context<Self>) {
@@ -966,8 +994,28 @@ impl Tty7App {
 
     fn sftp_poll_jobs(&mut self, cx: &mut Context<Self>) {
         if self.sftp_panel.open_pane_id.is_some() {
-            self.sftp_panel.jobs = self.sftp_route().transfer_list();
-            cx.notify();
+            let jobs = self.sftp_route().transfer_list();
+            self.sftp_apply_jobs(jobs, cx);
+        }
+    }
+
+    /// Take a fresh job list, and list the directory again once the uploads
+    /// that were running have stopped running.
+    ///
+    /// Nothing used to ask for that listing. An upload lands under
+    /// `<name>.tty7-upload-<hex>` and is renamed into place at the end, so the
+    /// listing on screen was the one taken while the temporary name existed —
+    /// and it stayed, so a finished upload read as a file with a hash glued to
+    /// its name.
+    fn sftp_apply_jobs(&mut self, jobs: Vec<SftpJobProgress>, cx: &mut Context<Self>) {
+        let owed = &self.sftp_panel.uploads_awaiting_listing;
+        let still_running = uploads_still_running(owed, &jobs);
+        let settled = still_running.len() != owed.len();
+        self.sftp_panel.uploads_awaiting_listing = still_running;
+        self.sftp_panel.jobs = jobs;
+        cx.notify();
+        if settled {
+            self.sftp_refresh(cx);
         }
     }
 
@@ -1004,8 +1052,7 @@ impl Tty7App {
                         if this.sftp_panel.poll_gen != generation {
                             return false;
                         }
-                        this.sftp_panel.jobs = jobs;
-                        cx.notify();
+                        this.sftp_apply_jobs(jobs, cx);
                         true
                     })
                     .unwrap_or(false);
@@ -1773,6 +1820,59 @@ impl Tty7App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn upload(job_id: u64, state: SftpJobState) -> SftpJobProgress {
+        SftpJobProgress {
+            job_id,
+            pane_id: 1,
+            kind: SftpTransferKind::Upload,
+            state,
+            current: String::new(),
+            bytes_done: 0,
+            bytes_total: 0,
+            error: None,
+            local: "/here/note.txt".into(),
+            remote: "/there/note.txt".into(),
+        }
+    }
+
+    #[test]
+    fn an_upload_owes_a_listing_until_it_stops_running() {
+        let owed = HashSet::from([7]);
+        let running = uploads_still_running(&owed, &[upload(7, SftpJobState::Running)]);
+        assert_eq!(
+            running, owed,
+            "a listing taken now shows the temporary name"
+        );
+
+        for done in [
+            SftpJobState::Done,
+            SftpJobState::Error,
+            SftpJobState::Cancelled,
+        ] {
+            let running = uploads_still_running(&owed, &[upload(7, done)]);
+            assert!(running.is_empty(), "{done:?} still owes the listing");
+        }
+    }
+
+    #[test]
+    fn a_job_that_falls_off_the_list_is_not_waited_on_forever() {
+        let owed = HashSet::from([7]);
+        assert!(uploads_still_running(&owed, &[]).is_empty());
+    }
+
+    #[test]
+    fn one_upload_finishing_does_not_settle_the_one_beside_it() {
+        let owed = HashSet::from([7, 8]);
+        let running = uploads_still_running(
+            &owed,
+            &[
+                upload(7, SftpJobState::Done),
+                upload(8, SftpJobState::Running),
+            ],
+        );
+        assert_eq!(running, HashSet::from([8]));
+    }
 
     #[test]
     fn a_second_download_is_numbered_rather_than_written_over_the_first() {
