@@ -1222,6 +1222,13 @@ impl DaemonPane {
     ) -> anyhow::Result<Arc<Self>> {
         let pty_size = pty_size(size);
 
+        // Before the shell exists, not after: a ConPTY child inherits the
+        // "ignore Ctrl+C" state of whoever created it, and the daemon can be
+        // carrying it from its own launch. Leaving it on costs the pane every
+        // Ctrl+C it will ever be sent (#451, #314).
+        #[cfg(windows)]
+        crate::daemon::winproc::allow_ctrl_c_in_children();
+
         let pair = native_pty_system().openpty(pty_size)?;
         let spawn = build_spawn_config(id, cwd, shell, workspace.as_deref())?;
 

@@ -187,11 +187,12 @@ fn detach(cmd: &mut Command) {
 fn detach(cmd: &mut Command) {
     use std::os::windows::process::CommandExt as _;
 
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    // The daemon's flags, not a second opinion. `CREATE_NEW_PROCESS_GROUP` used
+    // to be in here too, and it disables Ctrl+C for everything in the new group:
+    // the server, every pane shell it spawns, and everything those shells run
+    // (#451, #314). `DETACHED_PROCESS` alone already leaves the server without a
+    // console for a control event to arrive on.
+    cmd.creation_flags(spawn::DAEMON_CREATION_FLAGS);
 }
 
 #[cfg(not(any(unix, windows)))]

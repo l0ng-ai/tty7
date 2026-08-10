@@ -7,13 +7,19 @@ use std::ptr;
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Threading::{
-    CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CreateProcessW, DETACHED_PROCESS,
-    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
+    CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
     GetProcessMitigationPolicy, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
     OpenProcess, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, PROCESS_CREATE_PROCESS, PROCESS_INFORMATION,
     ProcessRedirectionTrustPolicy, STARTUPINFOEXW, UpdateProcThreadAttribute,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId};
+
+/// The ordinary daemon flags plus the attribute list this path exists for.
+///
+/// Derived from the shared constant rather than spelled out again: the two
+/// spawn paths differing here is how one of them could quietly go back to
+/// creating the daemon into a process group where Ctrl+C is disabled.
+pub(super) const SPAWN_FLAGS: u32 = super::DAEMON_CREATION_FLAGS | EXTENDED_STARTUPINFO_PRESENT;
 
 /// Returns whether the current process has the enforcing Redirection Trust bit.
 ///
@@ -249,10 +255,7 @@ pub(super) fn spawn_detached_with_parent(
     startup.lpAttributeList = attributes.as_mut_ptr();
     let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
-    let flags = DETACHED_PROCESS
-        | CREATE_NEW_PROCESS_GROUP
-        | CREATE_NO_WINDOW
-        | EXTENDED_STARTUPINFO_PRESENT;
+    let flags = SPAWN_FLAGS;
     // SAFETY: Both strings are NUL-terminated, the command line is writable,
     // and every pointer, handle, and output structure remains alive throughout
     // CreateProcessW. Handle inheritance is intentionally disabled.

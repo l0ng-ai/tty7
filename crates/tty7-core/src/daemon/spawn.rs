@@ -734,15 +734,64 @@ fn detach(cmd: &mut Command) {
     }
 }
 
+/// How the daemon is created: no console of its own, and no window.
+///
+/// Deliberately without `CREATE_NEW_PROCESS_GROUP`. That flag disables Ctrl+C
+/// for the whole new group, and Windows hands the resulting "ignore Ctrl+C"
+/// process state down to every descendant — which for the daemon means every
+/// ConPTY shell it spawns, and everything those shells run. It bought nothing
+/// either: `DETACHED_PROCESS` already leaves the daemon with no console, so no
+/// console control event could reach it in the first place. Keeping it cost
+/// every pane its Ctrl+C (#451, #314).
+///
+/// Public because `tty7-cli` launches the headless `tty7-server` the same way,
+/// and that server spawns panes too: the two detach paths agreeing is the whole
+/// point of the constant.
+#[cfg(windows)]
+pub const DAEMON_CREATION_FLAGS: u32 = DETACHED_PROCESS | CREATE_NO_WINDOW;
+
+#[cfg(windows)]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// Named only so the tests can say which bit must stay out of the flags above.
+#[cfg(all(windows, test))]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
 #[cfg(windows)]
 fn detach(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
 
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(DAEMON_CREATION_FLAGS);
+}
 
-    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+#[cfg(all(test, windows))]
+mod ctrl_c_flag_tests {
+    use super::*;
+
+    /// `CREATE_NEW_PROCESS_GROUP` disables Ctrl+C for every process in the new
+    /// group, and the daemon's group is every pane shell it ever spawns. Both
+    /// spawn paths — the ordinary one and the Redirection Trust detour — have to
+    /// stay clear of it or #451 and #314 come straight back.
+    #[test]
+    fn the_daemon_is_never_created_into_a_ctrl_c_free_process_group() {
+        assert_eq!(
+            DAEMON_CREATION_FLAGS & CREATE_NEW_PROCESS_GROUP,
+            0,
+            "the daemon must not disable Ctrl+C for everything it spawns"
+        );
+        assert_eq!(
+            DAEMON_CREATION_FLAGS,
+            DETACHED_PROCESS | CREATE_NO_WINDOW,
+            "the daemon still wants no console and no window"
+        );
+
+        assert_eq!(
+            windows::SPAWN_FLAGS & CREATE_NEW_PROCESS_GROUP,
+            0,
+            "the clean-parent spawn path must not reintroduce the group either"
+        );
+    }
 }
 
 #[cfg(all(test, windows))]
