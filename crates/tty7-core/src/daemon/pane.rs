@@ -988,6 +988,14 @@ impl AdoptedMaster {
         if unsafe { libc::isatty(fd) } != 1 {
             anyhow::bail!("descriptor {fd} is not a terminal");
         }
+        // Crossing the exec required stripping close-on-exec; being across is
+        // when it goes back on. Children this daemon spawns from here — shells,
+        // `lsof`, ssh transports — must not inherit another pane's master: a
+        // child holding one keeps the pty open after this pane closes it, and
+        // the hangup the shell should see never comes.
+        if let Err(e) = crate::daemon::handoff::close_on_exec_again(fd) {
+            log::warn!("could not restore close-on-exec on adopted pty {fd}: {e}");
+        }
         Ok(Self {
             fd: unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) },
         })
@@ -1931,6 +1939,16 @@ impl DaemonPane {
     /// mark that claims to cover bytes its snapshot does not have — a pane
     /// that stopped producing at that moment would keep the stale copy for
     /// good, because its mark would never move again.
+    /// The mark alone, for deciding whether a snapshot is worth taking:
+    /// [`scrollback_snapshot`](Self::scrollback_snapshot) clones the whole
+    /// ring under the state lock, which is a lot to pay every tick for the
+    /// answer "nothing changed". A pane that moves between this read and the
+    /// snapshot is fine — the snapshot returns its own mark, and that pair is
+    /// what gets recorded.
+    pub fn scrollback_mark(&self) -> u64 {
+        self.state.lock().unwrap().ring.appended
+    }
+
     pub fn scrollback_snapshot(&self) -> (Vec<crate::daemon::scrollback::Segment>, u64) {
         let st = self.state.lock().unwrap();
         let mut segments = st.ring.snapshot();
@@ -3409,6 +3427,31 @@ mod tests {
         // dropping `file` here is what closes it. Adopting first and failing
         // later would have closed a descriptor belonging to someone else.
         drop(file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_adopted_master_goes_back_to_close_on_exec() {
+        let pair = native_pty_system()
+            .openpty(PtySize::default())
+            .expect("open a pty");
+        let fd = pair
+            .master
+            .as_raw_fd()
+            .expect("a fresh master has a descriptor");
+        // What crossing the exec leaves behind: `dup` hands out a descriptor
+        // with close-on-exec clear, exactly like one that was deliberately
+        // stripped to survive.
+        let inherited = unsafe { libc::dup(fd) };
+        assert!(inherited >= 0, "dup the master");
+        let master = AdoptedMaster::from_fd(inherited).expect("a pty is adoptable");
+        let flags = unsafe { libc::fcntl(inherited, libc::F_GETFD) };
+        assert!(
+            flags >= 0 && flags & libc::FD_CLOEXEC != 0,
+            "an adopted master left inheritable ends up in every child this daemon spawns, \
+             and a child holding it keeps the pty from ever hanging up"
+        );
+        drop(master);
     }
 
     #[test]

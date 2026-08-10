@@ -94,6 +94,14 @@ fn note_held(_file: &File) {}
 /// and not owned by anything else.
 #[cfg(unix)]
 pub unsafe fn adopt(fd: std::os::fd::RawFd) -> Singleton {
+    // The exec this descriptor crossed required stripping close-on-exec; put it
+    // back before anything is spawned. A child inheriting the seat holds the
+    // flock as long as it lives — an ssh transport that outlives a killed
+    // daemon would then keep every future daemon standing down in favour of a
+    // process that is not serving anyone.
+    if let Err(e) = crate::daemon::handoff::close_on_exec_again(fd) {
+        log::warn!("could not restore close-on-exec on the seat descriptor {fd}: {e}");
+    }
     let file = unsafe { <File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
     note_held(&file);
     Singleton { _file: file }

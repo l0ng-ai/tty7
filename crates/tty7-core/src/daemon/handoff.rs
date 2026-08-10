@@ -152,13 +152,23 @@ pub fn take_over(
     };
 
     // Past this point every descriptor the new image needs has to survive the
-    // exec, and Rust opens everything close-on-exec.
+    // exec, and Rust opens everything close-on-exec. Returning without the exec
+    // means putting every flag back: the daemon that keeps serving after a
+    // failed handoff spawns children of its own — `lsof`, ssh transports — and
+    // a pty master or the seat lock inherited by one of those outlives every
+    // assumption this module makes. A child holding the seat keeps the flock
+    // held after this daemon dies, and the next daemon would stand down in
+    // favour of a process that is not a daemon at all.
     let blob_fd = std::os::fd::AsRawFd::as_raw_fd(&blob);
-    for fd in std::iter::once(blob_fd)
+    let kept: Vec<RawFd> = std::iter::once(blob_fd)
         .chain(seat_fd)
         .chain(panes.iter().map(|p| p.master_fd))
-    {
-        if let Err(e) = keep_across_exec(fd) {
+        .collect();
+    for (i, fd) in kept.iter().enumerate() {
+        if let Err(e) = keep_across_exec(*fd) {
+            for fd in &kept[..i] {
+                let _ = close_on_exec_again(*fd);
+            }
             return anyhow::anyhow!("descriptor {fd} would not survive the exec: {e}");
         }
     }
@@ -178,9 +188,23 @@ pub fn take_over(
         panes.len(),
         exe.display()
     );
+    // `exec` resets this thread's signal mask and puts SIGPIPE back to its
+    // default before the attempt, and a failed attempt undoes neither — the
+    // std docs say as much. A daemon that keeps serving with SIGPIPE fatal
+    // dies on the first write to a client that hung up, which is to say: soon.
+    let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+    unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut mask) };
+
     // Only ever returns an error: on success this process is already the new
     // program and this code no longer exists.
     let failure = std::os::unix::process::CommandExt::exec(&mut cmd);
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut());
+    }
+    for fd in &kept {
+        let _ = close_on_exec_again(*fd);
+    }
     anyhow::anyhow!("could not exec {}: {failure}", exe.display())
 }
 
@@ -259,11 +283,25 @@ fn anonymous_file() -> std::io::Result<std::fs::File> {
 }
 
 fn keep_across_exec(fd: RawFd) -> std::io::Result<()> {
+    set_cloexec(fd, false)
+}
+
+/// Put close-on-exec back on a descriptor a failed handoff had cleared it from.
+pub(crate) fn close_on_exec_again(fd: RawFd) -> std::io::Result<()> {
+    set_cloexec(fd, true)
+}
+
+fn set_cloexec(fd: RawFd, on: bool) -> std::io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+    let flags = if on {
+        flags | libc::FD_CLOEXEC
+    } else {
+        flags & !libc::FD_CLOEXEC
+    };
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags) } < 0 {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
@@ -443,6 +481,43 @@ mod tests {
             dir.display()
         );
         drop(file);
+    }
+
+    #[test]
+    fn a_failed_exec_puts_close_on_exec_back_on_every_descriptor() {
+        use std::os::fd::AsRawFd as _;
+
+        let master = std::fs::File::open("/dev/null").expect("a stand-in master");
+        let seat = std::fs::File::open("/dev/null").expect("a stand-in seat");
+        let err = take_over(
+            Path::new("/nonexistent/tty7-that-cannot-exec"),
+            vec![carried(1, master.as_raw_fd(), b"output")],
+            2,
+            Some(seat.as_raw_fd()),
+        );
+        assert!(
+            err.to_string().contains("could not exec"),
+            "the failure was {err}"
+        );
+        for (name, fd) in [("master", master.as_raw_fd()), ("seat", seat.as_raw_fd())] {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(
+                flags >= 0 && flags & libc::FD_CLOEXEC != 0,
+                "the {name} descriptor is left inheritable: every child this daemon spawns \
+                 from now on — a shell, `lsof`, an ssh transport — would hold it open past \
+                 this daemon's death"
+            );
+        }
+        // `exec` also put SIGPIPE back to fatal on its way to the attempt. A
+        // daemon serving sockets with SIGPIPE fatal dies on the first client
+        // that hangs up mid-write.
+        let mut act: libc::sigaction = unsafe { std::mem::zeroed() };
+        unsafe { libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut act) };
+        assert_eq!(
+            act.sa_sigaction,
+            libc::SIG_IGN,
+            "a failed exec must put SIGPIPE back to ignored, the state every Rust process runs in"
+        );
     }
 
     #[test]

@@ -198,10 +198,10 @@ fn spawn_scrollback_writer(registry: Arc<Registry>) {
                 }
                 storing = true;
                 for pane in registry.all() {
-                    let (segments, mark) = pane.scrollback_snapshot();
-                    if marks.get(&pane.id) == Some(&mark) {
+                    if marks.get(&pane.id) == Some(&pane.scrollback_mark()) {
                         continue;
                     }
+                    let (segments, mark) = pane.scrollback_snapshot();
                     crate::daemon::scrollback::save(pane.id, &segments);
                     marks.insert(pane.id, mark);
                 }
@@ -420,6 +420,22 @@ fn run_adopting(inheritance: crate::daemon::handoff::Inheritance) -> anyhow::Res
 /// by then this program has been replaced by the one it was asked to become.
 #[cfg(unix)]
 fn hand_over(registry: &Registry, exe: &std::path::Path) -> anyhow::Error {
+    // Before anything is given up: the native-SSH panes below are hung up on
+    // the promise that this process is about to stop existing, and an exec
+    // that was never going to work must not collect on it. `execve` can still
+    // fail after this — a wrong architecture, a permission the metadata does
+    // not show — but the everyday failures, a path that is not there or not a
+    // program, are caught while everything is still intact.
+    match std::fs::metadata(exe) {
+        Err(e) => return anyhow::anyhow!("cannot become {}: {e}", exe.display()),
+        Ok(meta) => {
+            use std::os::unix::fs::PermissionsExt as _;
+            if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+                return anyhow::anyhow!("cannot become {}: not an executable file", exe.display());
+            }
+        }
+    }
+
     let mut carried = Vec::new();
     for pane in registry.all() {
         match pane.carry() {

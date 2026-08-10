@@ -232,8 +232,8 @@ fn a_handoff_to_something_that_will_not_exec_leaves_the_daemon_serving() {
         .hand_off(Path::new("/nonexistent/tty7-that-is-not-there"))
         .expect_err("a binary that cannot be executed must be reported, not assumed");
     assert!(
-        err.to_string().contains("could not exec"),
-        "the refusal was {err}"
+        err.to_string().contains("cannot become"),
+        "a missing binary is refused before anything is given up; the refusal was {err}"
     );
 
     // The state is staged before the exec and the exec is the last step, so a

@@ -27,19 +27,19 @@ impl Daemon {
     /// A daemon whose config asks for per-pane history, and whose panes get a
     /// `HOME` of their own with an rc file and a history file already in it.
     fn start() -> Daemon {
+        // Where this user keeps their history, said the way a user says it.
+        Self::with_home("HISTFILE=\"$HOME/.bash_history\"\n", "echo from_before\n")
+    }
+
+    fn with_home(bashrc: &str, history: &str) -> Daemon {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(
             dir.path().join("config.json"),
             r#"{"per_pane_history": true}"#,
         )
         .unwrap();
-        // Where this user keeps their history, said the way a user says it.
-        std::fs::write(
-            dir.path().join(".bashrc"),
-            "HISTFILE=\"$HOME/.bash_history\"\n",
-        )
-        .unwrap();
-        std::fs::write(dir.path().join(".bash_history"), "echo from_before\n").unwrap();
+        std::fs::write(dir.path().join(".bashrc"), bashrc).unwrap();
+        std::fs::write(dir.path().join(".bash_history"), history).unwrap();
 
         let child = Command::new(env!("CARGO_BIN_EXE_tty7-server"))
             .arg("--daemon")
@@ -211,6 +211,51 @@ fn a_pane_writes_its_own_history_and_hands_it_back_when_it_closes() {
     assert!(
         daemon.pane_history(pane_id).is_none(),
         "a closed pane leaves no file behind"
+    );
+}
+
+/// A user with more history than their caps allow — which is most users, since
+/// bash defaults both to 500. The exit rewrite keeps only the last
+/// HISTSIZE/HISTFILESIZE lines, so without the integration snippet raising the
+/// caps for the pane's private file, the file ends up shorter than its own seed
+/// mark, the merge reads that as "replaced under us", and the pane's commands
+/// silently never reach the history they were promised to.
+#[test]
+fn a_small_histfilesize_cannot_swallow_the_merge_back() {
+    let mut seed = String::new();
+    for i in 0..400 {
+        seed.push_str(&format!("echo seeded_{i}\n"));
+    }
+    let daemon = Daemon::with_home(
+        "HISTFILE=\"$HOME/.bash_history\"\nHISTSIZE=50\nHISTFILESIZE=50\n",
+        &seed,
+    );
+    let panes = daemon.panes();
+    let mut session = panes
+        .spawn(None, size(), Some(bash()), None, None)
+        .expect("spawn a bash pane");
+    session
+        .set_recv_timeout(Some(STREAM_WITHIN))
+        .expect("bound the stream reads");
+
+    session
+        .input(b"echo tty7_survives_truncation\r")
+        .expect("the shell takes input");
+    collect_until(&mut session, b"tty7_survives_truncation");
+
+    session.input(b"exit\r").expect("ask the shell to exit");
+    loop {
+        match session.recv() {
+            Ok(DaemonMsg::Exited { .. }) => break,
+            Ok(_) => {}
+            Err(e) => panic!("the pane stream ended before Exited: {e}"),
+        }
+    }
+    drop(session);
+
+    wait_until(
+        || daemon.global_history().contains("tty7_survives_truncation"),
+        "the exit rewrite truncated the pane's file below its seed and the merge dropped it",
     );
 }
 

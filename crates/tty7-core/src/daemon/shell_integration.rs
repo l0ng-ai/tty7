@@ -30,6 +30,17 @@ if [[ -o interactive ]] && [[ -z "$TTY7_SHELL_INTEGRATION" ]]; then
         > "$TTY7_HISTFILE.seed" 2>/dev/null
     fi
     HISTFILE="$TTY7_HISTFILE"
+    # The exit rewrite keeps at most SAVEHIST entries, from a memory capped at
+    # HISTSIZE. Smaller than the seed, that rewrite leaves the pane's file
+    # shorter than its own seed mark — which the merge on close reads as "the
+    # file was replaced under us" and rightly refuses, losing this pane's
+    # commands. The caps only govern the pane's private file now, so raising
+    # them costs nothing. Left at zero: a user who saves no history has asked
+    # for exactly that.
+    if (( SAVEHIST > 0 )); then
+      (( SAVEHIST < 100000 )) && SAVEHIST=100000
+      (( HISTSIZE < SAVEHIST )) && HISTSIZE=$SAVEHIST
+    fi
   fi
 
   __tty7_osc() { builtin printf '\e]%s\a' "$1"; }
@@ -217,6 +228,19 @@ if [[ $- == *i* ]] && [[ -z "$TTY7_SHELL_INTEGRATION" ]]; then
         > "$TTY7_HISTFILE.seed" 2>/dev/null
     fi
     HISTFILE="$TTY7_HISTFILE"
+    # On exit bash rewrites the file from a memory capped at HISTSIZE, then
+    # truncates it to HISTFILESIZE lines — both default to 500, which is
+    # smaller than the seed. The result would be a file shorter than its own
+    # seed mark, which the merge on close reads as "replaced under us" and
+    # rightly refuses, losing this pane's commands. Both caps only govern the
+    # pane's private file now, so raising them costs nothing. Negative means
+    # unlimited and is already enough.
+    if (( ${HISTSIZE:-500} >= 0 && ${HISTSIZE:-500} < 100000 )) 2>/dev/null; then
+      HISTSIZE=100000
+    fi
+    if (( ${HISTFILESIZE:-500} >= 0 && ${HISTFILESIZE:-500} < 100000 )) 2>/dev/null; then
+      HISTFILESIZE=100000
+    fi
   fi
 
   __tty7_osc() { builtin printf '\e]%s\a' "$1"; }

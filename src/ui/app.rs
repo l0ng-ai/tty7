@@ -1455,17 +1455,20 @@ impl Tty7App {
             }
             let restarted = cx
                 .background_spawn(async move {
-                    // In place if it can be: the panes and everything running
-                    // in them carry straight over. Every way this fails leaves
-                    // the daemon serving exactly as it was, so falling back to
-                    // stopping and starting it loses nothing that was not
-                    // already going to be lost.
-                    match crate::daemon::spawn::hand_off() {
-                        Ok(()) => Ok(()),
-                        Err(e) => {
-                            log::info!("service could not hand over in place ({e}); restarting it");
-                            crate::daemon::spawn::restart()
-                        }
+                    // The same test that chose the dialog's copy chooses the
+                    // action, because the copy is a promise. A daemon that
+                    // advertises the handoff was described as replacing itself
+                    // with nothing interrupted — if that fails, the failure is
+                    // shown, not silently traded for the restart that kills
+                    // every pane the user was just told would live. The
+                    // stop-and-start path is only taken where its bloodbath is
+                    // what the dialog actually said.
+                    if crate::daemon::spawn::local_daemon_supports(
+                        crate::daemon::protocol::FEATURE_HANDOFF,
+                    ) {
+                        crate::daemon::spawn::hand_off()
+                    } else {
+                        crate::daemon::spawn::restart()
                     }
                 })
                 .await;
