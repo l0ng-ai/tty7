@@ -3274,7 +3274,7 @@ dependencies = [
  "raw-window-handle",
  "refineable",
  "regex",
- "resvg",
+ "resvg 0.47.0",
  "scheduler",
  "schemars",
  "seahash",
@@ -3290,7 +3290,7 @@ dependencies = [
  "thiserror 2.0.20",
  "ttf-parser",
  "url",
- "usvg",
+ "usvg 0.47.0",
  "util_macros",
  "uuid",
  "waker-fn",
@@ -3332,7 +3332,7 @@ dependencies = [
  "paste",
  "raw-window-handle",
  "regex",
- "resvg",
+ "resvg 0.47.0",
  "ropey",
  "rust-i18n",
  "schemars",
@@ -4221,6 +4221,12 @@ name = "imagesize"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09e54e57b4c48b40f7aec75635392b12b3421fa26fe8b4332e63138ed278459c"
+
+[[package]]
+name = "imagesize"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
 
 [[package]]
 name = "imgref"
@@ -7272,8 +7278,23 @@ dependencies = [
  "rgb",
  "svgtypes",
  "tiny-skia",
- "usvg",
+ "usvg 0.47.0",
  "zune-jpeg",
+]
+
+[[package]]
+name = "resvg"
+version = "0.48.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67e3803f97b999e80cbf7c6ecdd07a8102204d92e1633cf48783720c521196bd"
+dependencies = [
+ "bytemuck",
+ "log",
+ "pico-args",
+ "rgb",
+ "svgtypes",
+ "tiny-skia",
+ "usvg 0.48.1",
 ]
 
 [[package]]
@@ -9794,7 +9815,7 @@ dependencies = [
  "plist",
  "regex",
  "reqwest_client",
- "resvg",
+ "resvg 0.48.1",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -10053,7 +10074,7 @@ dependencies = [
  "data-url",
  "flate2",
  "fontdb",
- "imagesize",
+ "imagesize 0.14.0",
  "kurbo",
  "log",
  "pico-args",
@@ -10069,6 +10090,25 @@ dependencies = [
  "unicode-script",
  "unicode-vo",
  "xmlwriter",
+]
+
+[[package]]
+name = "usvg"
+version = "0.48.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "977d0a4abdef933f424a99fe09f95576e089b90aebc6f016a3bc813762493e91"
+dependencies = [
+ "data-url",
+ "imagesize 0.15.0",
+ "kurbo",
+ "log",
+ "pico-args",
+ "roxmltree 0.21.1",
+ "simplecss",
+ "siphasher",
+ "strict-num",
+ "svgtypes",
+ "tiny-skia-path",
 ]
 
 [[package]]
