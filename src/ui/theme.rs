@@ -578,7 +578,6 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     let surfaces = theme.surfaces();
     let sem = theme.semantics();
     let active = theme.active_palette(config.theme_legible_palette);
-    let auto_hide_scrollbars = cx.should_auto_hide_scrollbars();
 
     let backdrop = config.window_backdrop;
 
@@ -769,11 +768,14 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     t.tokens.scrollbar_thumb = scrollbar_thumb.into();
     t.tokens.scrollbar_thumb_hover = scrollbar_thumb_hover.into();
 
-    t.scrollbar_show = if auto_hide_scrollbars {
-        ScrollbarShow::Scrolling
-    } else {
-        ScrollbarShow::Always
-    };
+    // Not `should_auto_hide_scrollbars()`. That preference answers a question
+    // about *legacy* scrollbars — the ones that take a gutter out of the layout
+    // — and macOS says "don't hide them" for anyone with a mouse plugged in.
+    // Ours are overlay bars painted on top of the content, so honouring it
+    // parked an opaque bar over the switcher's tab column for the whole time
+    // the panel was open, with nothing to fade it out. Every list in the app
+    // gets the same bar, so it fades everywhere or nowhere.
+    t.scrollbar_show = ScrollbarShow::Scrolling;
 
     t.radius = px(8.);
 

@@ -33,10 +33,9 @@ pub(crate) fn with_vertical_scrollbar(
                 .right_0()
                 .bottom_0()
                 // No `scrollbar_show` override: it falls back to
-                // `cx.theme().scrollbar_show`, which `apply_theme` derives from
-                // `should_auto_hide_scrollbars()` — the OS "show scroll bars"
-                // preference. Pinning it here would take that choice away from
-                // everyone who asked for always-visible bars.
+                // `cx.theme().scrollbar_show`, which `apply_theme` pins to
+                // `Scrolling` for every list in the app. Overriding it here
+                // would be one list disagreeing with the rest.
                 .child(Scrollbar::vertical(handle).id(id)),
         )
         .into_any_element()
