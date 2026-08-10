@@ -49,6 +49,12 @@ regex = "1"
 # tokenizers in `tty7-core` already use. Already in the tree via `tty7-core`,
 # so this pins no new code.
 memchr = "2"
+# Grapheme-cluster boundaries for the sidebar's label elision
+# (`ui::tab_strip`). Cutting a label by `char` tears emoji apart: a ZWJ
+# sequence loses its joiner, `❤️` loses the variation selector that makes it an
+# emoji, and half a flag renders as a bare letter. Already in the tree via
+# gpui, so this pins no new code.
+unicode-segmentation = "1"
 smol.workspace = true
 smallvec.workspace = true
 serde = { workspace = true }

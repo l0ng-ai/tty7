@@ -9,6 +9,7 @@ use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, Po
 use gpui_component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, h_flex};
 use std::cell::RefCell;
 use std::rc::Rc;
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::core::actions::{
     CloseActiveTab, CloseOtherTabs, CloseTabsToTheRight, CopyAgentSessionId, CopyWorkingDirectory,
@@ -142,8 +143,11 @@ pub(crate) fn short_title(raw: &str) -> String {
             Kind::Relative => join_segments(&segments, sep),
         }
     };
-    if label.chars().count() > 40 {
-        label = format!("{}…", label.chars().take(40).collect::<String>());
+    // Clamped on cluster boundaries, or a label ending in an emoji comes back
+    // holding half of one.
+    let cells = clusters(&label);
+    if cells.len() > 40 {
+        label = format!("{}…", cells[..40].concat());
     }
     label
 }
@@ -249,7 +253,7 @@ pub(crate) fn elide_path_keep_tail(
     }
     // Even the last segment alone is too wide: keep its tail after the
     // ellipsis, with no slash so the reader sees the segment was torn.
-    elide_tail_chars(
+    elide_tail_clusters(
         text_system,
         font,
         size,
@@ -263,20 +267,32 @@ pub(crate) fn elide_path_keep_tail(
 /// branch names, and a word boundary is the cut a reader forgives.
 const TOKEN_BREAKS: [char; 5] = ['-', '_', '/', '.', ' '];
 
-/// The head this token would rather keep: six glyphs, extended to just past
+/// Splits `text` into grapheme clusters — what a reader counts as one
+/// character, and the only place a label may be cut.
+///
+/// Slicing by `char` passes every width check and still tears the result:
+/// `👨‍👩‍👧` loses the joiner holding it together, `❤️` loses the variation
+/// selector that makes it an emoji (and the orphan then attaches itself to the
+/// ellipsis), and `🇨🇳` leaves behind a lone regional indicator that renders
+/// as a bare letter.
+fn clusters(text: &str) -> Vec<&str> {
+    text.graphemes(true).collect()
+}
+
+/// The head this token would rather keep: six clusters, extended to just past
 /// the next break so the cut lands on a boundary (`window-…` rather than
 /// `window…`). When no break is within reach the plain six is kept — running
 /// on to the cap would spend the whole budget on a prefix and leave the tail,
 /// which is what identifies the token, with nothing.
-fn preferred_head(chars: &[char]) -> usize {
-    let base = chars.len().min(6);
-    let cap = chars.len().min(12);
+fn preferred_head(clusters: &[&str]) -> usize {
+    let base = clusters.len().min(6);
+    let cap = clusters.len().min(12);
     if base >= cap {
         return base;
     }
-    match chars[base..cap]
+    match clusters[base..cap]
         .iter()
-        .position(|c| TOKEN_BREAKS.contains(c))
+        .position(|c| c.chars().next().is_some_and(|c| TOKEN_BREAKS.contains(&c)))
     {
         Some(offset) => base + offset + 1,
         None => base,
@@ -290,8 +306,8 @@ fn preferred_head(chars: &[char]) -> usize {
 ///
 /// A head that fits but leaves no room for a tail is worse than no head at
 /// all, so the preferred head is given up for a shorter one when that is what
-/// it takes to keep a few trailing glyphs; only when even a three-glyph head
-/// cannot buy a tail does this fall back to a tail-only elision.
+/// it takes to keep a few trailing clusters; only when even a three-cluster
+/// head cannot buy a tail does this fall back to a tail-only elision.
 pub(crate) fn elide_keep_edges(
     text_system: &gpui::WindowTextSystem,
     font: &gpui::Font,
@@ -303,17 +319,17 @@ pub(crate) fn elide_keep_edges(
     if text.is_empty() || measure_text(text_system, font, size, text) <= max_width {
         return SharedString::from(text);
     }
-    let chars: Vec<char> = text.chars().collect();
+    let cells = clusters(text);
     let shaped = |head_n: usize, tail_n: usize| -> f32 {
-        let mut s: String = chars[..head_n].iter().collect();
+        let mut s = cells[..head_n].concat();
         s.push('…');
-        s.extend(chars[chars.len() - tail_n..].iter());
+        s.push_str(&cells[cells.len() - tail_n..].concat());
         measure_text(text_system, font, size, &s)
     };
     // Width is monotone in the tail length, so a binary search finds the
     // longest tail that still fits behind a given head.
     let longest_tail = |head_n: usize| -> usize {
-        let (mut lo, mut hi) = (0usize, chars.len() - head_n);
+        let (mut lo, mut hi) = (0usize, cells.len() - head_n);
         while lo < hi {
             let mid = (lo + hi + 1) / 2;
             if shaped(head_n, mid) <= max_width {
@@ -324,11 +340,11 @@ pub(crate) fn elide_keep_edges(
         }
         lo
     };
-    /// Enough trailing glyphs to tell two sibling branches apart.
+    /// Enough trailing clusters to tell two sibling branches apart.
     const MIN_TAIL: usize = 3;
-    let preferred = preferred_head(&chars);
+    let preferred = preferred_head(&cells);
     let mut candidates = vec![preferred, 6, 3];
-    candidates.retain(|&h| h > 0 && h <= chars.len());
+    candidates.retain(|&h| h > 0 && h <= cells.len());
     candidates.dedup();
     let mut best: Option<(usize, usize)> = None;
     for head_n in candidates {
@@ -336,7 +352,7 @@ pub(crate) fn elide_keep_edges(
             continue;
         }
         let tail = longest_tail(head_n);
-        if tail >= MIN_TAIL.min(chars.len() - head_n) {
+        if tail >= MIN_TAIL.min(cells.len() - head_n) {
             best = Some((head_n, tail));
             break;
         }
@@ -346,12 +362,11 @@ pub(crate) fn elide_keep_edges(
     }
     let Some((head, tail)) = best.filter(|&(_, tail)| tail > 0) else {
         // No head buys a tail worth showing; a bare tail says more.
-        return elide_tail_chars(text_system, font, size, text, max_width);
+        return elide_tail_clusters(text_system, font, size, text, max_width);
     };
-    let mut out = String::with_capacity(head + 1 + tail);
-    out.extend(chars[..head].iter());
+    let mut out = cells[..head].concat();
     out.push('…');
-    out.extend(chars[chars.len() - tail..].iter());
+    out.push_str(&cells[cells.len() - tail..].concat());
     SharedString::from(out)
 }
 
@@ -378,7 +393,7 @@ pub(crate) fn elide_label(
 
 /// Keeps the longest tail of `text` that fits after a bare ellipsis. Shared
 /// by the path and token elisions as their last resort.
-fn elide_tail_chars(
+fn elide_tail_clusters(
     text_system: &gpui::WindowTextSystem,
     font: &gpui::Font,
     size: f32,
@@ -389,11 +404,11 @@ fn elide_tail_chars(
     if budget <= 0. {
         return SharedString::from("…");
     }
-    let chars: Vec<char> = text.chars().collect();
-    let (mut lo, mut hi) = (0usize, chars.len());
+    let cells = clusters(text);
+    let (mut lo, mut hi) = (0usize, cells.len());
     while lo < hi {
         let mid = (lo + hi + 1) / 2;
-        let s: String = chars[chars.len() - mid..].iter().collect();
+        let s = cells[cells.len() - mid..].concat();
         if measure_text(text_system, font, size, &s) <= budget {
             lo = mid;
         } else {
@@ -403,9 +418,9 @@ fn elide_tail_chars(
     if lo == 0 {
         return SharedString::from("…");
     }
-    let mut out = String::with_capacity(1 + lo);
+    let mut out = String::with_capacity(1 + text.len());
     out.push('…');
-    out.extend(chars[chars.len() - lo..].iter());
+    out.push_str(&cells[cells.len() - lo..].concat());
     SharedString::from(out)
 }
 
@@ -1582,6 +1597,7 @@ impl Tty7App {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+    use unicode_segmentation::UnicodeSegmentation;
 
     #[test]
     fn every_visible_agent_state_has_words_for_it() {
@@ -1891,6 +1907,114 @@ mod tests {
         );
         // A shallow Windows path keeps its drive and its backslashes.
         assert_eq!(short_title(r"C:\Users\app"), r"C:\Users\app");
+    }
+
+    /// Every way of slicing `text` that lands on a grapheme-cluster boundary.
+    fn cluster_prefixes(text: &str) -> Vec<String> {
+        let clusters: Vec<&str> = text.graphemes(true).collect();
+        (0..=clusters.len())
+            .map(|n| clusters[..n].concat())
+            .collect()
+    }
+
+    fn cluster_suffixes(text: &str) -> Vec<String> {
+        let clusters: Vec<&str> = text.graphemes(true).collect();
+        (0..=clusters.len())
+            .map(|n| clusters[clusters.len() - n..].concat())
+            .collect()
+    }
+
+    /// An elision may only drop whole grapheme clusters, so whatever survives
+    /// on either side of the ellipsis has to be a cluster-aligned prefix and
+    /// suffix of what went in. Slicing by `char` instead passes every width
+    /// check and still tears `👨‍👩‍👧` into a dangling joiner, strips the
+    /// variation selector off `❤️`, or leaves half of `🇨🇳` to render as a
+    /// bare letter.
+    #[track_caller]
+    fn assert_cut_on_cluster_boundaries(input: &str, out: &str, max: f32) {
+        let Some((head, tail)) = out.split_once('…') else {
+            assert_eq!(out, input, "an unelided label comes back verbatim");
+            return;
+        };
+        assert!(
+            cluster_prefixes(input).iter().any(|p| p == head),
+            "head {head:?} is not a cluster-aligned prefix of {input:?} (@{max}px)"
+        );
+        assert!(
+            cluster_suffixes(input).iter().any(|s| s == tail),
+            "tail {tail:?} is not a cluster-aligned suffix of {input:?} (@{max}px)"
+        );
+    }
+
+    /// Fixtures whose clusters are wider than one `char`, placed so that a
+    /// `char`-indexed cut lands inside one at some width.
+    const CLUSTER_FIXTURES: [&str; 7] = [
+        "ab\u{1F468}\u{200d}\u{1F469}\u{200d}\u{1F467}cdefghijklmnop",
+        "release-notes-final-ab\u{1F468}\u{200d}\u{1F469}\u{200d}\u{1F467}",
+        "abcdef\u{2764}\u{fe0f}ghijklmnopqr",
+        "long-branch-name-x\u{2764}\u{fe0f}",
+        "abcdef\u{1F1E8}\u{1F1F3}ghijklmnopqr",
+        "abcde\u{301}fghijklmnopqrst",
+        "review-\u{1F44D}\u{1F3FD}-approved-changes",
+    ];
+
+    #[gpui::test]
+    fn elide_edges_cuts_only_on_cluster_boundaries(cx: &mut TestAppContext) {
+        let (ts, font, size) = elide_setup(cx);
+        for text in CLUSTER_FIXTURES {
+            let mut max = 30.;
+            while max <= 200. {
+                let out = elide_keep_edges(&ts, &font, size, text, max);
+                assert_cut_on_cluster_boundaries(text, &out, max);
+                assert!(
+                    measure_text(&ts, &font, size, &out) <= max,
+                    "{out:?} still has to fit its budget (@{max}px)"
+                );
+                max += 2.;
+            }
+        }
+    }
+
+    /// The path elision tears its last segment character by character as a
+    /// last resort; that resort has to respect clusters too.
+    #[gpui::test]
+    fn elide_path_tears_its_last_segment_on_cluster_boundaries(cx: &mut TestAppContext) {
+        let (ts, font, size) = elide_setup(cx);
+        for leaf in CLUSTER_FIXTURES {
+            let path = format!("~/projects/toolbox/{leaf}");
+            let mut max = 30.;
+            while max <= 120. {
+                let out = elide_path_keep_tail(&ts, &font, size, &path, max);
+                // Whatever it settled on, the tail after the ellipsis has to
+                // be cluster-aligned against the path it came from.
+                if let Some((_, tail)) = out.split_once('…') {
+                    let tail = tail.trim_start_matches('/');
+                    assert!(
+                        cluster_suffixes(&path).iter().any(|s| s == tail),
+                        "tail {tail:?} is not a cluster-aligned suffix of {path:?} (@{max}px)"
+                    );
+                }
+                max += 2.;
+            }
+        }
+    }
+
+    /// `short_title`'s 40-glyph clamp is the other `char`-indexed cut.
+    #[test]
+    fn short_title_clamps_on_cluster_boundaries() {
+        for tail in ["\u{1F1E8}\u{1F1F3}-suffix", "\u{2764}\u{fe0f}-suffix"] {
+            for pad in 37..=41 {
+                let name = format!("{}{tail}", "a".repeat(pad));
+                let out = short_title(&name);
+                let Some(body) = out.strip_suffix('…') else {
+                    continue;
+                };
+                assert!(
+                    cluster_prefixes(&name).iter().any(|p| p == body),
+                    "clamped to {body:?}, not a cluster-aligned prefix of {name:?}"
+                );
+            }
+        }
     }
 
     /// One chip is 100 wide plus a 6 gap, so this is "room for exactly four".
