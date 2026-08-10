@@ -6075,37 +6075,7 @@ impl Tty7App {
                                 .into_any_element(),
                             cx,
                         ),
-                    )
-                    // The other half of an in-place update: the app is new, the
-                    // process serving every pane is not. Shown rather than
-                    // prompted — restarting it ends the user's running work,
-                    // which is not a thing to ask for on tty7's initiative.
-                    .when_some(stale_daemon, |this, build| {
-                        this.child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_sm().text_color(foreground).child(t_fmt(
-                                    L10nKey::SettingsDaemonStale,
-                                    &[("build", &build)],
-                                )))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(muted_fg)
-                                        .child(t(stale_daemon_note)),
-                                )
-                                .child(
-                                    h_flex().child(
-                                        Button::new("restart-stale-daemon")
-                                            .label(t(L10nKey::SettingsRestartServer))
-                                            .small()
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.restart_daemon(window, cx)
-                                            })),
-                                    ),
-                                ),
-                        )
-                    }),
+                    ),
             )
             .child(self.settings_row(
                 t(L10nKey::SettingsAppHttpProxy),
@@ -6118,11 +6088,30 @@ impl Tty7App {
             .child(
                 v_flex()
                     .gap_2()
+                    // The other half of an in-place update: the app is new, the
+                    // process serving every pane is not. Said here rather than
+                    // beside the update controls, so the one button that offers
+                    // to pick the new build up stays the only one on the page.
+                    .when_some(stale_daemon.as_deref(), |this, build| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(foreground)
+                                .child(t_fmt(L10nKey::SettingsDaemonStale, &[("build", build)])),
+                        )
+                    })
                     .child(
                         div()
                             .text_sm()
                             .text_color(muted_fg)
-                            .child(t(L10nKey::SettingsServerDesc)),
+                            // A stale server has a more specific thing to say
+                            // than the section's standing description, and it
+                            // ends with the same button.
+                            .child(t(if stale_daemon.is_some() {
+                                stale_daemon_note
+                            } else {
+                                L10nKey::SettingsServerDesc
+                            })),
                     )
                     .child(
                         h_flex().child(
