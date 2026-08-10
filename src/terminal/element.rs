@@ -411,7 +411,6 @@ impl PaintColors {
             selection_bg: blend_toward(self.selection_bg, dim, under),
             match_bg: blend_toward(self.match_bg, dim, under),
             current_match_bg: blend_toward(self.current_match_bg, dim, under),
-            current_match_border: blend_toward(self.current_match_border, dim, under),
             fg_rgb: self.fg_rgb,
             bg_rgb: self.bg_rgb,
         }
