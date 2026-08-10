@@ -107,9 +107,9 @@ pub(crate) struct PaneChrome {
     /// Whether a pane can be picked up and put somewhere else. False for a tab
     /// holding one pane: there is nowhere to move it to.
     pub rearrangeable: bool,
-    /// The pane the pointer is over. The leaves write it as the pointer crosses
-    /// them and the same frame's siblings read it, so only the pane under the
-    /// pointer offers its drag handle.
+    /// The pane whose top edge the pointer is near. The leaves write it as the
+    /// pointer crosses their reveal bands and the same frame's siblings read
+    /// it, so at most one grip is ever drawn.
     pub hovered: Rc<Cell<Option<gpui::EntityId>>>,
     /// The pane being dragged, drawn faded where it came from.
     pub lifted: Option<gpui::EntityId>,
@@ -830,41 +830,41 @@ impl Pane<PaneSlot> {
                 let id = v.entity_id();
                 let focused = v.contains_focused(window, cx);
                 let lifted = chrome.lifted == Some(id);
-                let handle = chrome.rearrangeable
-                    && chrome.lifted.is_none()
-                    && chrome.hovered.get() == Some(id);
+                let grip = chrome.rearrangeable && chrome.lifted.is_none();
+                // Whatever fading the pane is under is worn by what it holds,
+                // not by the pane: a grip dimmed along with the pane it belongs
+                // to would be faintest on exactly the panes being reached for.
+                let fade = if lifted {
+                    Some(0.45)
+                } else if chrome.dim_inactive && !focused {
+                    Some(0.55)
+                } else {
+                    None
+                };
+                let content =
+                    div()
+                        .size_full()
+                        .when_some(fade, |d, f| d.opacity(f))
+                        .map(|d| match v {
+                            PaneSlot::Ready(t) => d.child(t.clone()),
+                            PaneSlot::Connecting(p) => d.child(p.clone()),
+                        });
                 div()
-                    // An id only so the pane can hear the pointer arrive and
-                    // leave; it adds no listener of its own, so everything the
-                    // terminal below reacts to still reaches it.
-                    .id(("pane-leaf", id.as_u64() as usize))
                     .size_full()
                     .relative()
                     .overflow_hidden()
-                    .when(chrome.dim_inactive && !focused, |d| d.opacity(0.55))
-                    .when(lifted, |d| d.opacity(0.45))
                     .when(chrome.rearrangeable, |d| {
-                        d.pt(px(crate::ui::pane_drag::HANDLE_STRIP)).on_hover({
-                            let hovered = chrome.hovered.clone();
-                            move |over, window, _cx| {
-                                let next = match (*over, hovered.get() == Some(id)) {
-                                    (true, _) => Some(id),
-                                    (false, true) => None,
-                                    // Left a pane the pointer had already left:
-                                    // the enter of its neighbour got here first.
-                                    (false, false) => return,
-                                };
-                                hovered.set(next);
-                                window.refresh();
-                            }
-                        })
+                        d.pt(px(crate::ui::pane_drag::HANDLE_STRIP))
                     })
-                    .map(|d| match v {
-                        PaneSlot::Ready(t) => d.child(t.clone()),
-                        PaneSlot::Connecting(p) => d.child(p.clone()),
-                    })
-                    .when(handle, |d| {
-                        d.child(crate::ui::pane_drag::handle(id, &chrome.drag, cx))
+                    .child(content)
+                    .when(grip, |d| {
+                        d.child(crate::ui::pane_drag::reveal_band(id, &chrome.hovered))
+                            .child(crate::ui::pane_drag::handle(
+                                id,
+                                chrome.hovered.get() == Some(id),
+                                &chrome.drag,
+                                cx,
+                            ))
                     })
                     .into_any_element()
             }
