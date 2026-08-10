@@ -897,6 +897,18 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeContextCopyPath => "パスをコピー",
         L10nKey::FileTreeContextHideDotfiles => "ドットファイルを非表示",
         L10nKey::FileTreeContextShowDotfiles => "ドットファイルを表示",
+        L10nKey::FileDropIntoItself => "フォルダを自分自身の中にはコピーできません",
+        L10nKey::FileDropNotHere => "このマシンにはありません",
+        L10nKey::FileDropTooDeep => "フォルダの入れ子が {n} 階層を超えています",
+        L10nKey::FileDropTooLarge => "{limit} MB を超えています。SFTP で転送してください",
+        L10nKey::FileDropReplaceTitle => "「{name}」を置き換えますか？",
+        L10nKey::FileDropReplaceManyTitle => "{n} 項目を置き換えますか？",
+        L10nKey::FileDropReplaceBody => {
+            "このフォルダには同じ名前のものがすでにあります。置き換えると元に戻せません"
+        }
+        L10nKey::FileDropReplace => "置き換える",
+        L10nKey::FileDropFailed => "{name} をコピーできませんでした",
+        L10nKey::FileDropFailedMany => "{name} をコピーできませんでした。他に {n} 件も失敗しました",
         L10nKey::SshPromptNewKey => "新しいキー {fingerprint}",
         L10nKey::SshPromptOldKey => "以前のキー {old_fingerprint}",
         L10nKey::EditorCantOpen => "{path} を開けません: {e}",

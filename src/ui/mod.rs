@@ -2,6 +2,7 @@ pub mod app;
 pub mod assets;
 pub mod code_editor;
 pub mod diff_overlay;
+pub mod file_copy;
 pub mod file_tree;
 pub mod forwards;
 pub mod hints;

@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Drop files into the Files panel to copy them in** — the panel has always
+  been a drag *source*; it now takes a drop as well. Files dragged in from the
+  desktop land in the folder under the cursor: a folder row takes them itself,
+  a file row stands in for the folder holding it, and the space below the tree
+  belongs to the top of it. The landing is highlighted while the drag is in
+  flight. Folders come in whole, the executable bit survives the copy, and a
+  name already taken is asked about rather than silently replaced — a "no"
+  leaves every file in the drop untouched. It works over a remote workspace
+  too, reading here and writing there, up to the size one control frame can
+  carry; past that the panel says to use SFTP.
+
 - **Rearrange splits by dragging a pane** — hovering a pane now floats a small
   grip along its top edge; dragging it moves that pane elsewhere in the tab.
   A drop on a pane's **side** goes in beside it: facing a neighbour in the same

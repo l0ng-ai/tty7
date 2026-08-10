@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::core::config::RightPanelTab;
 use crate::ui::app::Tty7App;
+use crate::ui::file_copy;
 use crate::ui::host_ops::{ByHost, HostId, HostOps, InFlight, SharedHost, WatchSub};
 use crate::ui::host_registry::HostRegistry;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
@@ -1214,6 +1215,98 @@ impl Tty7App {
         .detach();
     }
 
+    /// Copy what was dropped on the tree into `dir`.
+    ///
+    /// The drop is the whole gesture: the panel does not ask where to put the
+    /// files, it puts them where the cursor was. The one question it does ask
+    /// is about replacing something already there, and that question is asked
+    /// before anything has been written.
+    fn file_tree_drop_paths(
+        &mut self,
+        sources: Vec<PathBuf>,
+        dir: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.file_tree_copy_into(sources, dir, false, window, cx);
+    }
+
+    fn file_tree_copy_into(
+        &mut self,
+        sources: Vec<PathBuf>,
+        dir: PathBuf,
+        overwrite: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if sources.is_empty() {
+            return;
+        }
+        let Some(host) = self.active_host(cx) else {
+            return;
+        };
+        let id = host.id();
+        let asked_for = sources.clone();
+        let target = dir.clone();
+        HostOps::run_in(
+            host,
+            window,
+            cx,
+            move |h| file_copy::copy_into_dir(h, &sources, &target, overwrite),
+            move |app, report: file_copy::DropReport, window, cx| {
+                if !report.copied.is_empty() {
+                    app.file_tree.invalidate_dir(id, &dir);
+                }
+                if !report.conflicts.is_empty() {
+                    app.file_tree_confirm_replace(asked_for, dir, report.conflicts, window, cx);
+                } else if let Some((name, e)) = report.errors.first() {
+                    // One notification for the drop, not one per file: a folder
+                    // of unreadable files would otherwise bury the screen.
+                    let context = match report.errors.len() {
+                        1 => t_fmt(L10nKey::FileDropFailed, &[("name", name)]),
+                        n => t_fmt(
+                            L10nKey::FileDropFailedMany,
+                            &[("name", name), ("n", &(n - 1).to_string())],
+                        ),
+                    };
+                    HostOps::notify_err(window, cx, &context, e);
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    fn file_tree_confirm_replace(
+        &mut self,
+        sources: Vec<PathBuf>,
+        dir: PathBuf,
+        conflicts: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = match conflicts.as_slice() {
+            [one] => t_fmt(L10nKey::FileDropReplaceTitle, &[("name", one)]),
+            many => t_fmt(
+                L10nKey::FileDropReplaceManyTitle,
+                &[("n", &many.len().to_string())],
+            ),
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &title,
+            Some(t(L10nKey::FileDropReplaceBody)),
+            &crate::ui::confirm_answers(t(L10nKey::FileDropReplace), t(L10nKey::Cancel)),
+            cx,
+        );
+        cx.spawn_in(window, async move |app, cx| {
+            let Ok(0) = answer.await else { return };
+            let _ = app.update_in(cx, |app, window, cx| {
+                app.file_tree_copy_into(sources, dir, true, window, cx);
+            });
+        })
+        .detach();
+    }
+
     fn file_tree_cd(&mut self, dir: &Path, window: &mut Window, cx: &mut Context<Self>) {
         let Some(leaf) = self
             .tabs
@@ -1316,7 +1409,21 @@ impl Tty7App {
             .children(
                 rows.iter()
                     .flat_map(|row| self.render_tree_row(row, window, cx)),
-            );
+            )
+            // Everything the rows do not cover — the gap below the last one,
+            // and the whole column while the tree is still empty — belongs to
+            // the top of the tree. A row under the cursor wins: gpui hands a
+            // drop to the innermost target first, and it stops there.
+            .when_some(roots.first().cloned(), |d, root| {
+                d.drag_over::<ExternalPaths>(|s, _, _, cx| {
+                    s.bg(cx.theme().drag_border.opacity(0.06))
+                })
+                .on_drop(cx.listener(
+                    move |this, paths: &ExternalPaths, window, cx| {
+                        this.file_tree_drop_paths(paths.paths().to_vec(), root.clone(), window, cx);
+                    },
+                ))
+            });
         crate::ui::scrollbar::with_vertical_scrollbar(
             "right-panel-tree-scrollbar",
             column,
@@ -1337,7 +1444,10 @@ impl Tty7App {
 
         // A placeholder standing in for children that are not there. Not a
         // file, so it takes none of the row machinery below — no hover, no
-        // selection, no context menu, no drag.
+        // selection, no context menu, no drag. It does take a drop: it is
+        // drawn inside a folder and it is the only thing in an empty one, so
+        // letting it fall through to the root would put files somewhere the
+        // cursor never was.
         if let Some(note) = row.note {
             let (key, ink) = match note {
                 TreeNote::Loading => (L10nKey::TreeDirLoading, muted),
@@ -1360,6 +1470,24 @@ impl Tty7App {
                     .child(match note {
                         TreeNote::SearchCapped => t_fmt(key, &[("n", &SEARCH_LIMIT.to_string())]),
                         _ => t(key).to_string(),
+                    })
+                    // Every note but the capped-search one stands for a real
+                    // directory, and carries its path; that one stands for the
+                    // rest of a search and has nowhere to put anything.
+                    .when(!path.as_os_str().is_empty(), |d| {
+                        d.drag_over::<ExternalPaths>(|s, _, _, cx| {
+                            s.bg(cx.theme().drag_border.opacity(0.14))
+                        })
+                        .on_drop(cx.listener(
+                            move |this, paths: &ExternalPaths, window, cx| {
+                                this.file_tree_drop_paths(
+                                    paths.paths().to_vec(),
+                                    path.clone(),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ))
                     })
                     .into_any_element(),
             ];
@@ -1447,6 +1575,19 @@ impl Tty7App {
                     cx.new(|_| DragGhost { name })
                 }
             })
+            // The other direction: files dropped on this row are copied in.
+            // A folder takes them itself; a file stands in for the folder it
+            // is in, which is where "put it next to this one" lands.
+            .drag_over::<ExternalPaths>(|s, _, _, cx| s.bg(cx.theme().drag_border.opacity(0.14)))
+            .on_drop(cx.listener({
+                let dir = match is_dir {
+                    true => path.clone(),
+                    false => path.parent().unwrap_or(&path).to_path_buf(),
+                };
+                move |this, paths: &ExternalPaths, window, cx| {
+                    this.file_tree_drop_paths(paths.paths().to_vec(), dir.clone(), window, cx);
+                }
+            }))
             .context_menu({
                 let app = cx.entity().downgrade();
                 let path = path.clone();
@@ -2112,19 +2253,19 @@ mod render_idle_gpui_tests {
 
     const BUDGET: u64 = 200;
 
-    fn serial() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn serial() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn scratch(name: &str) -> PathBuf {
+    pub(super) fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("tty7-idle-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::canonicalize(&dir).unwrap()
     }
 
-    fn files_panel_on(
+    pub(super) fn files_panel_on(
         cx: &mut TestAppContext,
         root: &Path,
     ) -> (
@@ -2177,7 +2318,7 @@ mod render_idle_gpui_tests {
         (app, vcx, pane)
     }
 
-    fn rows(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> usize {
+    pub(super) fn rows(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> usize {
         app.update_in(vcx, |app, _, _| {
             let code = app.tab_code().expect("panel state");
             app.file_tree
@@ -2194,7 +2335,7 @@ mod render_idle_gpui_tests {
         });
     }
 
-    fn settle(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, root: &Path) {
+    pub(super) fn settle(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, root: &Path) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while std::time::Instant::now() < deadline {
             vcx.background_executor.run_until_parked();
@@ -2621,5 +2762,117 @@ mod render_idle_gpui_tests {
         });
         assert_eq!(left, 0, "the marked listing was re-read once it came back");
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// The drop end of the panel, driven through the real app: the copy runs on a
+/// `HostOps` worker and the tree has to catch up with what it wrote.
+///
+/// What these cannot reach is the hit test — whether the row under the cursor
+/// is the one that gets the drop is decided by gpui's hitbox stack, and there
+/// is no headless way to put a cursor over a row.
+#[cfg(all(test, unix))]
+mod drop_gpui_tests {
+    use super::render_idle_gpui_tests::{files_panel_on, rows, scratch, serial, settle};
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+
+    /// The copy runs on a `HostOps` worker — a real OS thread the test
+    /// executor does not own, so parking it proves nothing about whether the
+    /// worker is done. This waits for the result instead of assuming it.
+    fn wait_until(
+        vcx: &mut VisualTestContext,
+        what: &str,
+        mut done: impl FnMut(&mut VisualTestContext) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            vcx.background_executor.run_until_parked();
+            if done(vcx) {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[gpui::test]
+    fn a_dropped_file_is_copied_in_and_shows_up_in_the_tree(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("drop-lands");
+        let from = scratch("drop-source");
+        std::fs::write(from.join("note.txt"), "hello").unwrap();
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+        let before = rows(&app, &mut vcx);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.file_tree_drop_paths(vec![from.join("note.txt")], root.clone(), window, cx);
+        });
+        wait_until(&mut vcx, "the copy never landed", |_| {
+            root.join("note.txt").exists()
+        });
+        settle(&app, &mut vcx, &root);
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("note.txt")).unwrap(),
+            "hello"
+        );
+        assert_eq!(rows(&app, &mut vcx), before + 1, "the tree never caught up");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&from);
+    }
+
+    #[gpui::test]
+    fn a_drop_over_a_name_that_is_taken_asks_before_it_writes(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("drop-conflict-no");
+        std::fs::write(root.join("note.txt"), "old").unwrap();
+        let from = scratch("drop-conflict-no-source");
+        std::fs::write(from.join("note.txt"), "new").unwrap();
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.file_tree_drop_paths(vec![from.join("note.txt")], root.clone(), window, cx);
+        });
+        wait_until(&mut vcx, "it overwrote without asking", |vcx| {
+            vcx.has_pending_prompt()
+        });
+        vcx.simulate_prompt_answer(t(L10nKey::Cancel));
+        settle(&app, &mut vcx, &root);
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("note.txt")).unwrap(),
+            "old",
+            "answering no still replaced the file"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&from);
+    }
+
+    #[gpui::test]
+    fn answering_yes_replaces_what_was_there(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("drop-conflict-yes");
+        std::fs::write(root.join("note.txt"), "old").unwrap();
+        let from = scratch("drop-conflict-yes-source");
+        std::fs::write(from.join("note.txt"), "new").unwrap();
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.file_tree_drop_paths(vec![from.join("note.txt")], root.clone(), window, cx);
+        });
+        wait_until(&mut vcx, "it never asked", |vcx| vcx.has_pending_prompt());
+        vcx.simulate_prompt_answer(t(L10nKey::FileDropReplace));
+        wait_until(&mut vcx, "the replacement never landed", |_| {
+            std::fs::read_to_string(root.join("note.txt")).is_ok_and(|s| s == "new")
+        });
+        settle(&app, &mut vcx, &root);
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("note.txt")).unwrap(),
+            "new"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&from);
     }
 }
