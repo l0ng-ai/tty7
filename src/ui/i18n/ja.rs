@@ -874,6 +874,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForwardToLabel => "転送先",
         L10nKey::ForwardSocksLabel => "SOCKS",
         L10nKey::ForwardAdd => "追加",
+        L10nKey::ForwardRequestFailed => "セッションに届きませんでした。何も変更していません",
         L10nKey::FileTreePlaceholderFileName => "ファイル名",
         L10nKey::FileTreePlaceholderFolderName => "フォルダ名",
         L10nKey::FileTreePlaceholderNewName => "新しい名前",

@@ -832,6 +832,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ForwardToLabel => "to",
         L10nKey::ForwardSocksLabel => "SOCKS",
         L10nKey::ForwardAdd => "Add",
+        L10nKey::ForwardRequestFailed => "Could not reach the session — nothing changed.",
         L10nKey::FileTreePlaceholderFileName => "file name",
         L10nKey::FileTreePlaceholderFolderName => "folder name",
         L10nKey::FileTreePlaceholderNewName => "new name",

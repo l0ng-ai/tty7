@@ -799,6 +799,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForwardToLabel => "到",
         L10nKey::ForwardSocksLabel => "SOCKS",
         L10nKey::ForwardAdd => "添加",
+        L10nKey::ForwardRequestFailed => "联系不上这个会话——什么都没有改动。",
         L10nKey::FileTreePlaceholderFileName => "文件名",
         L10nKey::FileTreePlaceholderFolderName => "文件夹名",
         L10nKey::FileTreePlaceholderNewName => "新名称",

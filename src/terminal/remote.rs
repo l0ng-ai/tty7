@@ -1492,7 +1492,10 @@ impl RemoteTerminal {
         query(pane_id).unwrap_or_default()
     }
 
-    pub fn add_forward(pane_id: u64, rule: SshForwardRule) -> Vec<ManagedForward> {
+    /// `None` when the request never got a list back — which is not the same
+    /// as getting an empty one, because only the caller of a *failed* request
+    /// still has to keep showing what it had.
+    pub fn add_forward(pane_id: u64, rule: SshForwardRule) -> Option<Vec<ManagedForward>> {
         fn query(pane_id: u64, rule: SshForwardRule) -> anyhow::Result<Vec<ManagedForward>> {
             let mut stream = connect()?;
             ClientMsg::AddForward { pane_id, rule }.encode(&mut stream)?;
@@ -1502,10 +1505,13 @@ impl RemoteTerminal {
                 other => Err(anyhow::anyhow!("unexpected reply to AddForward: {other:?}")),
             }
         }
-        query(pane_id, rule).unwrap_or_default()
+        query(pane_id, rule)
+            .inspect_err(|e| log::warn!("AddForward failed: {e}"))
+            .ok()
     }
 
-    pub fn remove_forward(pane_id: u64, forward_id: u64) -> Vec<ManagedForward> {
+    /// `None` when the request never got a list back — see `add_forward`.
+    pub fn remove_forward(pane_id: u64, forward_id: u64) -> Option<Vec<ManagedForward>> {
         fn query(pane_id: u64, forward_id: u64) -> anyhow::Result<Vec<ManagedForward>> {
             let mut stream = connect()?;
             ClientMsg::RemoveForward {
@@ -1520,7 +1526,9 @@ impl RemoteTerminal {
                 )),
             }
         }
-        query(pane_id, forward_id).unwrap_or_default()
+        query(pane_id, forward_id)
+            .inspect_err(|e| log::warn!("RemoveForward failed: {e}"))
+            .ok()
     }
 
     pub fn list_forwards(pane_id: u64) -> Vec<ManagedForward> {

@@ -638,6 +638,7 @@ l10n_keys! {
     ForwardToLabel,
     ForwardSocksLabel,
     ForwardAdd,
+    ForwardRequestFailed,
     FileTreePlaceholderFileName,
     FileTreePlaceholderFolderName,
     FileTreePlaceholderNewName,
