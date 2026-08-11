@@ -924,6 +924,12 @@ export const Tty7Presence = async ({{ $ }}) => {{
   const cmd = {prefix}
   let sessionId = ""
   let announced = ""
+  // A subagent runs in a child session on the *same* event stream, and its
+  // status events are indistinguishable from the pane's own — only
+  // `session.created`/`session.updated` name a parent. Remember the children,
+  // so a task tool cannot hand the pane the wrong session to resume, nor call
+  // the pane done when only the subagent is.
+  const children = new Set()
   const emit = (event) => {{
     // Every event carries the session id (`properties.sessionID`), so a pane
     // that restarts can resume the same session with `opencode --session`.
@@ -935,7 +941,7 @@ export const Tty7Presence = async ({{ $ }}) => {{
   // `session.created` event); the session-start report rides on the first
   // event that names one, so a restored pane can reattach to it.
   const capture = async (id) => {{
-    if (id) sessionId = id
+    if (id && !children.has(id)) sessionId = id
     if (sessionId && sessionId !== announced) {{
       announced = sessionId
       await emit("session-start")
@@ -956,12 +962,15 @@ export const Tty7Presence = async ({{ $ }}) => {{
       await capture(input?.sessionID)
       await emit("prompt-submit")
     }},
-    "permission.ask": async () => {{
-      await capture()
+    "permission.ask": async (input) => {{
+      await capture(input?.sessionID)
       await emit("permission-request")
     }},
     event: async ({{ event }}) => {{
       const properties = event.properties ?? {{}}
+      const info = properties.info
+      if (info?.id && info.parentID) children.add(info.id)
+      if (properties.sessionID && children.has(properties.sessionID)) return
       await capture(properties.sessionID)
       const key = event.type === "session.status" ? `session.status.${{properties.status?.type}}` : event.type
       const action = ACTION[key]
@@ -1425,6 +1434,14 @@ mod tests {
             (
                 "session.idle",
                 "opencode still maps the session.idle event to stop",
+            ),
+            (
+                "info.parentID",
+                "opencode tells a subagent's child session apart from the pane's own",
+            ),
+            (
+                "children.has(properties.sessionID)",
+                "opencode lets a child session's events pass without touching the pane",
             ),
         ] {
             assert!(opencode.contains(needle), "{message}");
