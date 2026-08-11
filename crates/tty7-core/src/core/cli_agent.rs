@@ -589,6 +589,13 @@ pub struct AgentEvent {
     pub session_id: Option<String>,
     pub message: Option<String>,
     pub cwd: Option<std::path::PathBuf>,
+    /// What the user typed, on a `PromptSubmit` — already clamped to a label's
+    /// worth of text by the hook that sent it, since this rides an OSC payload
+    /// the tokenizer abandons rather than truncates past 8 KiB.
+    ///
+    /// Separate from `message`, which carries what the *agent* said and is
+    /// deliberately cleared when a turn starts.
+    pub prompt: Option<String>,
 }
 
 pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
@@ -610,6 +617,8 @@ pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
         message: Option<String>,
         #[serde(default)]
         cwd: Option<String>,
+        #[serde(default)]
+        prompt: Option<String>,
     }
 
     let w: Wire = serde_json::from_slice(json).ok()?;
@@ -621,6 +630,7 @@ pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
         session_id: nonempty(w.session_id),
         message: nonempty(w.message),
         cwd: nonempty(w.cwd).map(std::path::PathBuf::from),
+        prompt: nonempty(w.prompt),
     })
 }
 
@@ -933,6 +943,7 @@ mod tests {
             session_id: id.map(String::from),
             message: msg.map(String::from),
             cwd: None,
+            prompt: None,
         };
 
         s.apply_event(&ev(AgentEventKind::SessionStart, None, Some("sid-1")));
@@ -988,6 +999,7 @@ mod tests {
             session_id: None,
             message: None,
             cwd: None,
+            prompt: None,
         };
 
         let mut s = AgentSessionState::default();
@@ -1023,6 +1035,7 @@ mod tests {
             session_id: None,
             message: None,
             cwd: cwd.map(PathBuf::from),
+            prompt: None,
         };
 
         let mut s = AgentSessionState::default();

@@ -1307,6 +1307,50 @@ impl TerminalView {
         self.terminal.agent_session()
     }
 
+    /// One entry per turn of the agent's conversation, oldest first — see
+    /// [`crate::terminal::agent_marks`].
+    pub fn agent_turns(&self) -> Vec<crate::terminal::agent_marks::AgentTurn> {
+        self.terminal.agent_turns().list()
+    }
+
+    /// Scroll back to where a turn began, putting that row at the top of the
+    /// viewport so the answer to it reads downwards from there.
+    ///
+    /// The stored anchor only says roughly where the agent was drawing when the
+    /// turn started, so the prompt's own text gets the final say; the row it is
+    /// found on is written back, and a second click on the same turn lands in
+    /// the same place without searching again.
+    pub fn scroll_to_agent_turn(
+        &mut self,
+        turn: &crate::terminal::agent_marks::AgentTurn,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(anchor) = turn.row else {
+            return false;
+        };
+        // Nothing behind the alt screen to scroll to, and `scroll_display` is a
+        // no-op there anyway — say so rather than pretending the click worked.
+        if self.on_alt_screen() {
+            return false;
+        }
+        self.cancel_scroll_anim();
+        let row = {
+            let mut term = self.terminal.term.lock();
+            use alacritty_terminal::grid::Dimensions as _;
+            let history = term.grid().history_size() as i64;
+            let row = crate::terminal::agent_marks::locate(&term, anchor, &turn.text);
+            let target = (history - row).clamp(0, history);
+            let delta = (target - term.grid().display_offset() as i64)
+                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+            term.scroll_display(Scroll::Delta(delta));
+            row
+        };
+        self.terminal.agent_turns().recenter(turn.id, row);
+        self.scroll_frac = 0.;
+        cx.notify();
+        true
+    }
+
     /// What this pane is in the middle of, when it can say so. `None` means
     /// either nothing is running or the shell never told us — and a terminal
     /// that guessed would raise this question on every single close.
@@ -2683,6 +2727,9 @@ impl TerminalView {
         // not replay out-of-band image frames, so a browser redraws on its next
         // transmit (same reasoning as the reattach path in `adopt_relink`).
         self.terminal.images().clear();
+        // Agent turn anchors are rows in the same discarded history, and unlike
+        // images they cannot be redrawn back into place.
+        self.terminal.agent_turns().clear();
         self.scroll_frac = 0.;
         self.terminal.write(vec![0x0c_u8]);
         cx.notify();
@@ -9262,6 +9309,94 @@ mod gpui_tests {
                 view.on_scroll(&ev, w, cx);
                 assert!(view.scroll_anim.is_none(), "half a line was animated");
                 assert!(view.scroll_frac > 0., "and it did not move either");
+            })
+            .unwrap();
+    }
+
+    /// The agent's prompt drawn on row 20, with enough output after it that the
+    /// row can actually be scrolled to the top of the viewport.
+    const CONVERSATION_ROW: i64 = 20;
+
+    fn painted_conversation(view: &TerminalView) {
+        let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+        let mut term = view.terminal.term.lock();
+        for i in 0..300 {
+            let line = match i {
+                20 => "> restore the outline\r\n".to_string(),
+                _ => format!("line {i}\r\n"),
+            };
+            parser.advance(&mut *term, line.as_bytes());
+        }
+    }
+
+    fn viewport_top(view: &TerminalView) -> String {
+        use alacritty_terminal::index::{Column, Line};
+        let term = view.terminal.term.lock();
+        let grid = term.grid();
+        let line = -(grid.display_offset() as i32);
+        (0..grid.columns())
+            .map(|c| grid[Line(line)][Column(c)].c)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[gpui::test]
+    fn jumping_to_a_turn_puts_the_prompt_at_the_top_of_the_viewport(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _w, cx| {
+                painted_conversation(view);
+                // Off by three, the way a hook firing into a live repaint is.
+                let turn = crate::terminal::agent_marks::AgentTurn {
+                    row: Some(CONVERSATION_ROW + 3),
+                    text: "restore the outline".into(),
+                    done: true,
+                    id: 1,
+                };
+                assert!(view.scroll_to_agent_turn(&turn, cx));
+                assert_eq!(
+                    viewport_top(view),
+                    "> restore the outline",
+                    "the text corrected the anchor's three-row error"
+                );
+                let history = {
+                    use alacritty_terminal::grid::Dimensions as _;
+                    view.terminal.term.lock().grid().history_size() as i64
+                };
+                assert_eq!(
+                    display_offset(view) as i64,
+                    history - CONVERSATION_ROW,
+                    "the turn's row is the first one shown, not merely on screen"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_turn_with_nowhere_to_go_reports_that_it_did_not_move(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _w, cx| {
+                painted_conversation(view);
+                let mut turn = crate::terminal::agent_marks::AgentTurn {
+                    row: None,
+                    text: "restore the outline".into(),
+                    done: true,
+                    id: 1,
+                };
+                assert!(
+                    !view.scroll_to_agent_turn(&turn, cx),
+                    "a turn that began on the alt screen has no row"
+                );
+
+                turn.row = Some(CONVERSATION_ROW);
+                let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+                parser.advance(&mut *view.terminal.term.lock(), b"\x1b[?1049h");
+                assert!(
+                    !view.scroll_to_agent_turn(&turn, cx),
+                    "and a pane sitting on the alt screen has no scrollback to show"
+                );
             })
             .unwrap();
     }

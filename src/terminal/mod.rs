@@ -1,3 +1,4 @@
+pub(crate) mod agent_marks;
 mod boxdraw;
 mod cmd_editor;
 mod completion;

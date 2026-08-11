@@ -27,6 +27,15 @@ impl OscTokenizer {
     }
 
     pub fn feed(&mut self, bytes: &[u8], mut on_payload: impl FnMut(&[u8])) {
+        self.feed_at(bytes, |_, payload| on_payload(payload));
+    }
+
+    /// [`feed`](Self::feed), but also reporting where each payload ended: an
+    /// offset one past its terminator, in ascending order, so a reader can
+    /// advance an emulator to exactly there and read the state the sequence
+    /// left behind. A payload split across two feeds is reported against the
+    /// batch its terminator landed in.
+    pub fn feed_at(&mut self, bytes: &[u8], mut on_payload: impl FnMut(usize, &[u8])) {
         let mut i = 0;
         while i < bytes.len() {
             match self.state {
@@ -64,7 +73,7 @@ impl OscTokenizer {
                     _ => self.state = State::Ground,
                 },
                 State::Osc => match b {
-                    0x07 => self.finish(&mut on_payload),
+                    0x07 => self.finish(i + 1, &mut on_payload),
                     0x1b => self.state = State::OscEsc,
                     _ => {
                         self.buf.push(b);
@@ -75,7 +84,7 @@ impl OscTokenizer {
                     }
                 },
                 State::OscEsc => match b {
-                    b'\\' => self.finish(&mut on_payload),
+                    b'\\' => self.finish(i + 1, &mut on_payload),
                     0x1b => {}
                     b']' => {
                         self.buf.clear();
@@ -107,8 +116,8 @@ impl OscTokenizer {
         }
     }
 
-    fn finish(&mut self, on_payload: &mut impl FnMut(&[u8])) {
-        on_payload(&self.buf);
+    fn finish(&mut self, at: usize, on_payload: &mut impl FnMut(usize, &[u8])) {
+        on_payload(at, &self.buf);
         self.buf.clear();
         self.state = State::Ground;
     }
@@ -235,6 +244,31 @@ mod tests {
             ),
             vec![b"9;ok".to_vec()]
         );
+    }
+
+    #[test]
+    fn offsets_land_one_past_the_terminator() {
+        let mut tok = OscTokenizer::new(&[b"9"]);
+        let mut got = Vec::new();
+        let stream = b"ab\x1b]9;bel\x07cd\x1b]9;st\x1b\\";
+        tok.feed_at(stream, |at, payload| got.push((at, payload.to_vec())));
+        assert_eq!(
+            got,
+            vec![(10, b"9;bel".to_vec()), (20, b"9;st".to_vec())],
+            "a cut must point just past its sequence"
+        );
+        assert_eq!(&stream[10..12], b"cd");
+        assert_eq!(stream.len(), 20, "the ST-terminated one ends the stream");
+    }
+
+    #[test]
+    fn an_offset_is_reported_against_the_batch_its_terminator_lands_in() {
+        let mut tok = OscTokenizer::new(&[b"777"]);
+        let mut got = Vec::new();
+        tok.feed_at(b"out\x1b]777;no", |at, p| got.push((at, p.to_vec())));
+        assert!(got.is_empty(), "unterminated, so nothing to report yet");
+        tok.feed_at(b"tify;x\x07tail", |at, p| got.push((at, p.to_vec())));
+        assert_eq!(got, vec![(7, b"777;notify;x".to_vec())]);
     }
 
     #[test]

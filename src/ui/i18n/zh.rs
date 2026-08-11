@@ -861,6 +861,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelNoChanges => "没有未提交的变更。",
         L10nKey::PanelNoChangesHint => "worktree 是干净的。",
         L10nKey::PanelSessionSubtitle => "会话",
+        L10nKey::PanelConversationSubtitle => "对话",
         L10nKey::PanelProcessesSubtitle => "进程",
         L10nKey::PanelPortsSubtitle => "端口",
         L10nKey::PanelCwd => "工作目录",

@@ -472,6 +472,7 @@ impl Tty7App {
         let mut cwd_for_actions: Option<(PathBuf, bool)> = None;
         let mut pane_id: Option<u64> = None;
         let mut forwards_pane: Option<u64> = None;
+        let mut detail_pane = None;
 
         if let Some(tab) = self.tabs.get(self.active) {
             if let Some(leaf) = tab.detail_pane(window, cx) {
@@ -505,6 +506,7 @@ impl Tty7App {
                 if connected_ssh || view.workspace().is_some() {
                     forwards_pane = Some(view.pane_id);
                 }
+                detail_pane = Some(leaf);
             }
             if let Some(git) = tab.git_status(Some(window), cx) {
                 rows.push((t(L10nKey::PanelBranch), git.branch.clone()));
@@ -593,6 +595,7 @@ impl Tty7App {
             .when_some(cwd_for_actions, |this, (cwd, local)| {
                 this.child(self.cwd_actions(cwd, local, cx))
             })
+            .children(self.turns_section(detail_pane.as_ref(), cx))
             .children(self.procs_section(pane_id, cx))
             .children(self.ports_section(pane_id, cx))
             .children(self.forwards_section(forwards_pane, cx))
@@ -680,6 +683,103 @@ impl Tty7App {
             )
             .when_some(trailing, |this, t| this.child(t))
             .into_any_element()
+    }
+
+    /// The agent's conversation, one row per turn, each a way back to where
+    /// that turn started in the scrollback.
+    ///
+    /// It sits under the session facts rather than in a tab of its own: this is
+    /// something *this pane* is, like its shell and its cwd, and the tab strip
+    /// has no room for a fourth tile at 260px.
+    fn turns_section(
+        &self,
+        leaf: Option<&gpui::Entity<crate::terminal::view::TerminalView>>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let leaf = leaf?;
+        let turns = leaf.read(cx).agent_turns();
+        // A turn the hook announced but could not name is a row with nothing on
+        // it. The status dot already says a turn is running.
+        let turns: Vec<_> = turns
+            .into_iter()
+            .filter(|t| !t.text.trim().is_empty())
+            .collect();
+        if turns.is_empty() {
+            return None;
+        }
+        let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
+        let count = turns.len().to_string();
+        let mut list = v_flex().px(px(CONTENT_INSET - 4.)).py(px(1.)).gap(px(1.));
+        for turn in turns {
+            let id = turn.id;
+            // Only a turn that was drawn into the scrollback has somewhere to
+            // go: one that began on the alt screen is history the pane never
+            // kept, so its row reads as a label and not as a link.
+            let jumpable = turn.row.is_some();
+            let dot = {
+                let d = div().flex_none().size(px(7.)).rounded_full();
+                if turn.done {
+                    d.border_1()
+                        .border_color(cx.theme().muted_foreground.opacity(0.55))
+                } else {
+                    d.bg(cx.theme().muted_foreground)
+                }
+            };
+            list = list.child(
+                h_flex()
+                    .id(gpui::SharedString::from(format!("panel-turn-{id}")))
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(4.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .when(jumpable, |this| {
+                        let leaf = leaf.clone();
+                        let turn = turn.clone();
+                        this.cursor_pointer()
+                            .hover(|s| s.bg(gpui::rgb(sf.hover)))
+                            .on_click(cx.listener(move |_this, _, _window, cx| {
+                                leaf.update(cx, |view, cx| {
+                                    view.scroll_to_agent_turn(&turn, cx);
+                                });
+                            }))
+                    })
+                    .child(dot)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(rems(TEXT))
+                            .text_color(if jumpable {
+                                cx.theme().foreground
+                            } else {
+                                cx.theme().muted_foreground
+                            })
+                            .child(turn.text),
+                    ),
+            );
+        }
+        Some(
+            v_flex()
+                .child(
+                    self.panel_subtitle(
+                        t(L10nKey::PanelConversationSubtitle),
+                        true,
+                        Some(
+                            div()
+                                .text_size(rems(META_MONO))
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_color(cx.theme().muted_foreground.opacity(0.75))
+                                .child(count)
+                                .into_any_element(),
+                        ),
+                        cx,
+                    ),
+                )
+                .child(list)
+                .into_any_element(),
+        )
     }
 
     fn procs_section(&self, pane_id: Option<u64>, cx: &mut Context<Self>) -> Option<AnyElement> {
