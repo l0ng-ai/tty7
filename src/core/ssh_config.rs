@@ -161,14 +161,42 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 pub struct ImportedProfile {
     pub profile: ManagedProfile,
     pub proxy_jump: Option<String>,
+    /// Unsupported option keys the import dropped for this host (#501).
+    pub dropped_options: Vec<String>,
+}
+
+/// What the settings-page import has to say when it is done (#501): whether
+/// there was a config to read at all, what came out of it, and what it had
+/// to leave behind.
+pub struct ImportReport {
+    pub profiles: Vec<ImportedProfile>,
+    pub config_found: bool,
 }
 
 #[allow(dead_code)]
 pub fn import_profiles() -> Vec<ImportedProfile> {
+    import_profiles_report().profiles
+}
+
+pub fn import_profiles_report() -> ImportReport {
     let Some(home) = home_dir() else {
-        return Vec::new();
+        return ImportReport {
+            profiles: Vec::new(),
+            config_found: false,
+        };
     };
-    import_profiles_from(home.join(".ssh/config"), &home)
+    let root = home.join(".ssh/config");
+    ImportReport {
+        config_found: root.exists(),
+        profiles: import_profiles_from(root, &home),
+    }
+}
+
+/// Where an import looks, for the message that says it found nothing (#501).
+pub fn default_config_path() -> PathBuf {
+    home_dir()
+        .map(|home| home.join(".ssh/config"))
+        .unwrap_or_else(|| PathBuf::from("~/.ssh/config"))
 }
 
 pub fn import_profiles_from(root: PathBuf, home: &Path) -> Vec<ImportedProfile> {
@@ -189,12 +217,14 @@ pub fn import_profiles_from(root: PathBuf, home: &Path) -> Vec<ImportedProfile> 
         .into_iter()
         .map(|alias| {
             let resolved = resolve_alias(&alias, &blocks);
+            let dropped = resolved.dropped_options.clone();
             let mut profile = ManagedProfile::new(alias.clone());
             profile.group = Some(IMPORTED_GROUP.to_string());
             let proxy_jump = apply_resolved(&mut profile, &alias, resolved);
             ImportedProfile {
                 profile,
                 proxy_jump,
+                dropped_options: dropped,
             }
         })
         .collect()
@@ -262,20 +292,33 @@ fn apply_resolved(profile: &mut ManagedProfile, alias: &str, r: ResolvedHost) ->
     r.proxy_jump
 }
 
+/// How a merge landed, for the import summary (#501).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MergeCounts {
+    pub added: usize,
+    pub updated: usize,
+}
+
 #[allow(dead_code)]
-pub fn merge_imported(existing: &mut Vec<ManagedProfile>, imported: Vec<ImportedProfile>) {
+pub fn merge_imported(
+    existing: &mut Vec<ManagedProfile>,
+    imported: Vec<ImportedProfile>,
+) -> MergeCounts {
+    let mut counts = MergeCounts::default();
     let mut jump_targets: Vec<(String, String)> = Vec::new();
 
     for entry in imported {
         let ImportedProfile {
             profile,
             proxy_jump,
+            ..
         } = entry;
         if let Some(raw) = proxy_jump {
             jump_targets.push((profile.name.clone(), raw));
         }
         match existing.iter_mut().find(|p| p.name == profile.name) {
             Some(current) => {
+                counts.updated += 1;
                 current.host = profile.host;
                 current.port = profile.port;
                 current.user = profile.user;
@@ -283,7 +326,10 @@ pub fn merge_imported(existing: &mut Vec<ManagedProfile>, imported: Vec<Imported
                 current.proxy_command = profile.proxy_command;
                 current.agent_forward = profile.agent_forward;
             }
-            None => existing.push(profile),
+            None => {
+                counts.added += 1;
+                existing.push(profile);
+            }
         }
     }
 
@@ -299,6 +345,7 @@ pub fn merge_imported(existing: &mut Vec<ManagedProfile>, imported: Vec<Imported
             profile.jump_host = target_id;
         }
     }
+    counts
 }
 
 #[allow(dead_code)]
@@ -336,7 +383,36 @@ struct ResolvedHost {
     verify_host_keys: Option<bool>,
     strict_seen: bool,
     forwards: Vec<ForwardRule>,
+    /// Unknown option keys from blocks that matched, in first-seen order.
+    /// Importing used to drop them without a word (#501).
+    dropped_options: Vec<String>,
 }
+
+/// Every key `resolve_alias` understands. Anything else on a matching block
+/// is dropped — and now reported instead of vanishing (#501). Keys are the
+/// lowercased forms the parser stores.
+const KNOWN_OPTIONS: &[&str] = &[
+    "hostname",
+    "user",
+    "port",
+    "identityfile",
+    "proxyjump",
+    "proxycommand",
+    "forwardagent",
+    "connecttimeout",
+    "serveraliveinterval",
+    "serveralivecountmax",
+    "ciphers",
+    "macs",
+    "kexalgorithms",
+    "hostkeyalgorithms",
+    "compression",
+    "forwardx11",
+    "stricthostkeychecking",
+    "localforward",
+    "remoteforward",
+    "dynamicforward",
+];
 
 fn parse_config_blocks(root: PathBuf, home: &Path) -> Vec<HostBlock> {
     let mut blocks = Vec::new();
@@ -517,7 +593,13 @@ fn resolve_alias(alias: &str, blocks: &[HostBlock]) -> ResolvedHost {
                         r.forwards.push(rule);
                     }
                 }
-                _ => {}
+                _ => {
+                    // A shadowed known key (first-match-wins) lands here too;
+                    // only genuinely unsupported ones count as dropped.
+                    if !KNOWN_OPTIONS.contains(&key.as_str()) && !r.dropped_options.contains(key) {
+                        r.dropped_options.push(key.clone());
+                    }
+                }
             }
         }
     }
@@ -649,6 +731,87 @@ mod tests {
         assert!(glob_match("*.conf", "dev.conf"));
         assert!(glob_match("host?", "host1"));
         assert!(!glob_match("host?", "host12"));
+    }
+
+    #[test]
+    fn import_names_the_options_it_had_to_drop() {
+        // #501: unsupported options used to vanish between the file and the
+        // imported profile with no trace.
+        let root = temp_root("import-dropped");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(
+            ssh.join("config"),
+            concat!(
+                "Host prod\n",
+                "  HostName 10.0.0.5\n",
+                "  IdentitiesOnly yes\n",
+                "  CertificateFile ~/.ssh/id-cert.pub\n",
+                "  CertificateFile ~/.ssh/other-cert.pub\n",
+                "Host other\n",
+                "  RequestTTY yes\n",
+            ),
+        )
+        .unwrap();
+
+        let imported = import_profiles_from(ssh.join("config"), &root);
+        let prod = imported.iter().find(|p| p.profile.name == "prod").unwrap();
+        assert_eq!(
+            prod.dropped_options,
+            vec!["identitiesonly".to_string(), "certificatefile".to_string()],
+            "unknown keys are named once each, in file order"
+        );
+        let other = imported.iter().find(|p| p.profile.name == "other").unwrap();
+        assert_eq!(other.dropped_options, vec!["requesttty".to_string()]);
+
+        // A shadowed known key is first-match-wins, not "dropped".
+        let root = temp_root("import-shadowed");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(
+            ssh.join("config"),
+            "Host prod\n  User first\n  User second\n",
+        )
+        .unwrap();
+        let imported = import_profiles_from(ssh.join("config"), &root);
+        assert!(imported[0].dropped_options.is_empty());
+        assert_eq!(imported[0].profile.user, "first");
+    }
+
+    #[test]
+    fn merge_counts_the_new_and_the_updated() {
+        let root = temp_root("merge-counts");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(
+            ssh.join("config"),
+            "Host prod\n  HostName 10.0.0.5\nHost stage\n  HostName 10.0.0.6\n",
+        )
+        .unwrap();
+
+        let mut existing = Vec::new();
+        let counts = merge_imported(
+            &mut existing,
+            import_profiles_from(ssh.join("config"), &root),
+        );
+        assert_eq!(
+            counts,
+            MergeCounts {
+                added: 2,
+                updated: 0
+            }
+        );
+        let counts = merge_imported(
+            &mut existing,
+            import_profiles_from(ssh.join("config"), &root),
+        );
+        assert_eq!(
+            counts,
+            MergeCounts {
+                added: 0,
+                updated: 2
+            }
+        );
     }
 
     #[test]

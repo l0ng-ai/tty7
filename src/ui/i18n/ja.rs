@@ -297,10 +297,24 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsJumpHostVia => "{jump_name} 経由",
         L10nKey::SshFormNameRequired => "名前は必須です。",
         L10nKey::SshFormHostRequired => "ホストは必須です。",
-        L10nKey::SshFormPortInvalid => "ポート「{port}」は 1〜65535 の数値ではありません（空欄 = 22）。",
-        L10nKey::SshFormJumpUnknown => "ジャンプホスト「{jump_name}」はプロファイルに存在しません。",
+        L10nKey::SshFormPortInvalid => {
+            "ポート「{port}」は 1〜65535 の数値ではありません（空欄 = 22）。"
+        }
+        L10nKey::SshFormJumpUnknown => {
+            "ジャンプホスト「{jump_name}」はプロファイルに存在しません。"
+        }
         L10nKey::SshFormProxyHostMissing => "{label}：ホストがありません。",
-        L10nKey::SshFormProxyPortInvalid => "{label}：「{value}」は host:port 形式で、ポートは 1〜65535 である必要があります。",
+        L10nKey::SshFormProxyPortInvalid => {
+            "{label}：「{value}」は host:port 形式で、ポートは 1〜65535 である必要があります。"
+        }
+        L10nKey::SshImportNoConfig => "{path} に ssh 設定が見つかりません。",
+        L10nKey::SshImportNoHosts => {
+            "インポートするものがありません — ssh 設定に具体的な Host エントリがありません。"
+        }
+        L10nKey::SshImportSummary => {
+            "ssh 設定からインポートしました：新規 {added} 件、更新 {updated} 件。"
+        }
+        L10nKey::SshImportDropped => "tty7 がサポートしないオプションを破棄しました：{options}。",
         L10nKey::SettingsConnected => "接続済み",
         L10nKey::SettingsProfileCopied => "{name}（コピー）",
         L10nKey::SettingsCompressionDesc => "カンマ区切り（空欄 = デフォルト）",

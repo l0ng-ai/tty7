@@ -268,7 +268,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SshFormPortInvalid => "端口“{port}”不是 1-65535 之间的数字（留空 = 22）。",
         L10nKey::SshFormJumpUnknown => "跳板主机“{jump_name}”不在你的配置列表中。",
         L10nKey::SshFormProxyHostMissing => "{label}：缺少主机。",
-        L10nKey::SshFormProxyPortInvalid => "{label}：“{value}”需要 host:port 形式，端口为 1-65535。",
+        L10nKey::SshFormProxyPortInvalid => {
+            "{label}：“{value}”需要 host:port 形式，端口为 1-65535。"
+        }
+        L10nKey::SshImportNoConfig => "未在 {path} 找到 ssh 配置。",
+        L10nKey::SshImportNoHosts => "没有可导入的内容——ssh 配置中没有具体的 Host 条目。",
+        L10nKey::SshImportSummary => "已从 ssh 配置导入：新增 {added} 个，更新 {updated} 个。",
+        L10nKey::SshImportDropped => "已丢弃 tty7 不支持的选项：{options}。",
         L10nKey::SettingsConnected => "已连接",
         L10nKey::SettingsProfileCopied => "{name}（副本）",
         L10nKey::SettingsCompressionDesc => "逗号分隔（留空 = 默认值）。",

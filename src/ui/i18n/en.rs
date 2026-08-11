@@ -45,9 +45,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::KeepMine => "Keep mine",
         L10nKey::Dismiss => "Dismiss",
         L10nKey::StoredPasswordRejected => "The stored password was rejected. Enter a new one.",
-        L10nKey::StoredPassphraseRejected => {
-            "The stored passphrase did not work. Enter a new one."
-        }
+        L10nKey::StoredPassphraseRejected => "The stored passphrase did not work. Enter a new one.",
         L10nKey::Trust => "Trust",
         L10nKey::Abort => "Abort",
         L10nKey::HostKeyOverrideMessage => {
@@ -300,10 +298,20 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsJumpHostVia => "via {jump_name}",
         L10nKey::SshFormNameRequired => "Name is required.",
         L10nKey::SshFormHostRequired => "Host is required.",
-        L10nKey::SshFormPortInvalid => "Port \"{port}\" is not a number from 1 to 65535 (blank = 22).",
+        L10nKey::SshFormPortInvalid => {
+            "Port \"{port}\" is not a number from 1 to 65535 (blank = 22)."
+        }
         L10nKey::SshFormJumpUnknown => "Jump host \"{jump_name}\" is not one of your profiles.",
         L10nKey::SshFormProxyHostMissing => "{label}: the host is missing.",
-        L10nKey::SshFormProxyPortInvalid => "{label}: \"{value}\" needs a port from 1 to 65535, as host:port.",
+        L10nKey::SshFormProxyPortInvalid => {
+            "{label}: \"{value}\" needs a port from 1 to 65535, as host:port."
+        }
+        L10nKey::SshImportNoConfig => "No ssh config found at {path}.",
+        L10nKey::SshImportNoHosts => {
+            "Nothing to import — the ssh config names no concrete Host entries."
+        }
+        L10nKey::SshImportSummary => "Imported from ssh config: {added} new, {updated} updated.",
+        L10nKey::SshImportDropped => "Dropped options tty7 does not support: {options}.",
         L10nKey::SettingsConnected => "connected",
         L10nKey::SettingsProfileCopied => "{name} (copy)",
         L10nKey::SettingsCompressionDesc => "Comma-separated (blank = default).",
@@ -1113,7 +1121,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteStripConnecting => "Connecting to {machine}…",
         L10nKey::RemoteStripReconnecting => "Reconnecting to {machine}…",
         L10nKey::RemoteStripReconnectingAttempt => "Reconnecting to {machine}… (attempt {count})",
-        L10nKey::RemoteStripReconnectingFailed => "Reconnecting to {machine}… — last failure: {error}",
+        L10nKey::RemoteStripReconnectingFailed => {
+            "Reconnecting to {machine}… — last failure: {error}"
+        }
         L10nKey::RemoteStripReconnectingAttemptFailed => {
             "Reconnecting to {machine}… (attempt {count}) — last failure: {error}"
         }

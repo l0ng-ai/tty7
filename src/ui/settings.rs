@@ -2416,8 +2416,9 @@ impl Tty7App {
             .item(
                 PopupMenuItem::new(t(L10nKey::SettingsImportFromSshConfig)).on_click({
                     let app = app.clone();
-                    move |_, _window, cx| {
-                        let _ = app.update(cx, |this, cx| this.import_ssh_config_profiles(cx));
+                    move |_, window, cx| {
+                        let _ =
+                            app.update(cx, |this, cx| this.import_ssh_config_profiles(window, cx));
                     }
                 }),
             )
@@ -2795,9 +2796,9 @@ impl Tty7App {
                         Button::new("ssh-empty-import")
                             .label(t(L10nKey::Link))
                             .small()
-                            .on_click(
-                                cx.listener(|this, _, _w, cx| this.import_ssh_config_profiles(cx)),
-                            ),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.import_ssh_config_profiles(window, cx)
+                            })),
                     ),
             );
         }
@@ -2841,9 +2842,9 @@ impl Tty7App {
                     Button::new("ssh-defaults-import")
                         .label(t(L10nKey::SettingsImportNow))
                         .small()
-                        .on_click(
-                            cx.listener(|this, _, _w, cx| this.import_ssh_config_profiles(cx)),
-                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.import_ssh_config_profiles(window, cx)
+                        }))
                         .into_any_element(),
                     cx,
                 ),
@@ -2903,9 +2904,8 @@ impl Tty7App {
                 PopupMenuItem::new(t(L10nKey::SettingsForgetPassword)).on_click({
                     let app = app.clone();
                     move |_, window, cx| {
-                        let _ = app.update(cx, |this, cx| {
-                            this.forget_profile_password(id, window, cx)
-                        });
+                        let _ =
+                            app.update(cx, |this, cx| this.forget_profile_password(id, window, cx));
                     }
                 }),
             )
@@ -3354,14 +3354,62 @@ impl Tty7App {
         cx.notify();
     }
 
-    pub(crate) fn import_ssh_config_profiles(&mut self, cx: &mut Context<Self>) {
-        let imported = crate::core::ssh_config::import_profiles();
-        if imported.is_empty() {
+    pub(crate) fn import_ssh_config_profiles(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui_component::WindowExt as _;
+        let report = crate::core::ssh_config::import_profiles_report();
+        // Every branch says something now: a missing file, an empty one, and
+        // a successful import all used to close over the same silence (#501).
+        if !report.config_found {
+            let path = crate::core::ssh_config::default_config_path();
+            window.push_notification(
+                t_fmt(
+                    L10nKey::SshImportNoConfig,
+                    &[("path", &path.display().to_string())],
+                ),
+                cx,
+            );
+            cx.notify();
             return;
         }
+        if report.profiles.is_empty() {
+            window.push_notification(t(L10nKey::SshImportNoHosts).to_string(), cx);
+            cx.notify();
+            return;
+        }
+        let mut dropped: Vec<String> = Vec::new();
+        for p in &report.profiles {
+            for key in &p.dropped_options {
+                if !dropped.contains(key) {
+                    dropped.push(key.clone());
+                }
+            }
+        }
+        let mut counts = crate::core::ssh_config::MergeCounts::default();
         self.update_config(cx, |cfg| {
-            crate::core::ssh_config::merge_imported(&mut cfg.ssh_profiles, imported);
+            counts =
+                crate::core::ssh_config::merge_imported(&mut cfg.ssh_profiles, report.profiles);
         });
+        let mut message = t_fmt(
+            L10nKey::SshImportSummary,
+            &[
+                ("added", &counts.added.to_string()),
+                ("updated", &counts.updated.to_string()),
+            ],
+        );
+        if !dropped.is_empty() {
+            let shown = dropped.len().min(6);
+            let mut options = dropped[..shown].join(", ");
+            if dropped.len() > shown {
+                options.push_str(", …");
+            }
+            message.push(' ');
+            message.push_str(&t_fmt(L10nKey::SshImportDropped, &[("options", &options)]));
+        }
+        window.push_notification(message, cx);
         cx.notify();
     }
 
@@ -3414,7 +3462,10 @@ impl Tty7App {
         }
         let answer = window.prompt(
             gpui::PromptLevel::Warning,
-            &t_fmt(L10nKey::SettingsForgetPasswordTitle, &[("endpoint", &endpoint)]),
+            &t_fmt(
+                L10nKey::SettingsForgetPasswordTitle,
+                &[("endpoint", &endpoint)],
+            ),
             Some(&body),
             &crate::ui::confirm_answers(t(L10nKey::SettingsForgetPassword), t(L10nKey::Cancel)),
             cx,
@@ -3620,12 +3671,7 @@ impl Tty7App {
             .gap_4()
             .child(header)
             .when_some(form.form_error.clone(), |page, error| {
-                page.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().danger)
-                        .child(error),
-                )
+                page.child(div().text_xs().text_color(cx.theme().danger).child(error))
             })
             .child(core)
             .child(self.render_ssh_profile_jump_section(form, cx))
