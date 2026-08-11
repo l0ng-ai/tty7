@@ -9,6 +9,7 @@ use gpui_component::color_picker::{ColorPicker, ColorPickerState};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::link::Link;
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_component::notification::{Notification, NotificationType};
 use gpui_component::select::{SearchableVec, Select, SelectState};
 use gpui_component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
 use gpui_component::slider::{Slider, SliderState};
@@ -2347,8 +2348,9 @@ impl Tty7App {
             .item(
                 PopupMenuItem::new(t(L10nKey::SettingsImportFromSshConfig)).on_click({
                     let app = app.clone();
-                    move |_, _window, cx| {
-                        let _ = app.update(cx, |this, cx| this.import_ssh_config_profiles(cx));
+                    move |_, window, cx| {
+                        let _ =
+                            app.update(cx, |this, cx| this.import_ssh_config_profiles(window, cx));
                     }
                 }),
             )
@@ -2726,9 +2728,9 @@ impl Tty7App {
                         Button::new("ssh-empty-import")
                             .label(t(L10nKey::Link))
                             .small()
-                            .on_click(
-                                cx.listener(|this, _, _w, cx| this.import_ssh_config_profiles(cx)),
-                            ),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.import_ssh_config_profiles(window, cx)
+                            })),
                     ),
             );
         }
@@ -2772,9 +2774,9 @@ impl Tty7App {
                     Button::new("ssh-defaults-import")
                         .label(t(L10nKey::SettingsImportNow))
                         .small()
-                        .on_click(
-                            cx.listener(|this, _, _w, cx| this.import_ssh_config_profiles(cx)),
-                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.import_ssh_config_profiles(window, cx)
+                        }))
                         .into_any_element(),
                     cx,
                 ),
@@ -3246,15 +3248,107 @@ impl Tty7App {
         cx.notify();
     }
 
-    pub(crate) fn import_ssh_config_profiles(&mut self, cx: &mut Context<Self>) {
-        let imported = crate::core::ssh_config::import_profiles();
-        if imported.is_empty() {
+    /// Import `~/.ssh/config`, and say what that did.
+    ///
+    /// Every branch here ends in a notification because every branch used to
+    /// end in nothing: a missing file, a file of nothing but `Host *`, and a
+    /// clean import of six hosts were all the same silent button press, and the
+    /// only way to tell them apart was to go count the host list.
+    pub(crate) fn import_ssh_config_profiles(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // One id for all three outcomes, so pressing the button again replaces
+        // what it said last time instead of stacking a second toast on top of
+        // an answer that is now out of date.
+        const NOTIFICATION: &str = "ssh-config-import";
+        // A toast is 448pt wide. A config with a dozen unsupported keywords in
+        // it would push the counts out of view, so the notification names the
+        // first few and the log line below carries the whole list, with the
+        // hosts each keyword was set on.
+        const OPTIONS_SHOWN: usize = 5;
+
+        let report = crate::core::ssh_config::import_report();
+        let source = report.source.display().to_string();
+
+        if !report.source_read {
+            window.push_notification(
+                Notification::error(t_fmt(
+                    L10nKey::SettingsImportUnreadable,
+                    &[("path", &source)],
+                ))
+                .id1::<Self>(NOTIFICATION),
+                cx,
+            );
             return;
         }
+        if report.profiles.is_empty() {
+            window.push_notification(
+                Notification::warning(t_fmt(L10nKey::SettingsImportNoHosts, &[("path", &source)]))
+                    .id1::<Self>(NOTIFICATION),
+                cx,
+            );
+            return;
+        }
+
+        let read = report.profiles.len();
+        let ignored = report.ignored;
+        let mut stats = crate::core::ssh_config::MergeStats::default();
         self.update_config(cx, |cfg| {
-            crate::core::ssh_config::merge_imported(&mut cfg.ssh_profiles, imported);
+            stats = crate::core::ssh_config::merge_imported(&mut cfg.ssh_profiles, report.profiles);
         });
-        cx.notify();
+
+        let dropped: Vec<String> = ignored
+            .iter()
+            .map(|opt| format!("{} ({})", opt.option, opt.hosts.join(", ")))
+            .collect();
+        log::info!(
+            "imported {read} alias(es) from {source} ({} file(s) read): {} added, {} updated, \
+             {} unchanged; no tty7 setting for: [{}]",
+            report.files_read,
+            stats.added,
+            stats.updated,
+            stats.unchanged,
+            dropped.join("; ")
+        );
+
+        let mut notification = Notification::new()
+            .with_type(NotificationType::Success)
+            .title(t_plural(
+                L10nKey::SettingsImportSummary,
+                stats.added,
+                &[
+                    ("updated", &stats.updated.to_string()),
+                    ("unchanged", &stats.unchanged.to_string()),
+                ],
+            ))
+            .id1::<Self>(NOTIFICATION);
+        if !ignored.is_empty() {
+            let mut options: Vec<String> = ignored
+                .iter()
+                .take(OPTIONS_SHOWN)
+                .map(|opt| opt.option.clone())
+                .collect();
+            let rest = ignored.len() - options.len();
+            if rest > 0 {
+                options.push(t_fmt(
+                    L10nKey::SettingsImportMoreOptions,
+                    &[("count", &rest.to_string())],
+                ));
+            }
+            notification = notification
+                .message(t_plural(
+                    L10nKey::SettingsImportIgnored,
+                    ignored.len(),
+                    &[("options", &options.join(", "))],
+                ))
+                // A list of what the import could not carry is something to
+                // read and act on, and four seconds is not long enough to do
+                // either. The counts alone still fade on their own.
+                .autohide(false);
+        }
+        window.push_notification(notification, cx);
     }
 
     pub(crate) fn copy_profile_connect_string(&mut self, id: Uuid, cx: &mut Context<Self>) {

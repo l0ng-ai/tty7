@@ -194,6 +194,17 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "Re-reads the file and adds anything new. Edits you make here are stored by tty7 — the file itself is never written."
         }
         L10nKey::SettingsImportNow => "Import now",
+        L10nKey::SettingsImportUnreadable => "Could not read {path} — nothing was imported.",
+        L10nKey::SettingsImportNoHosts => {
+            "{path} names no hosts to import — only wildcard or Match rules."
+        }
+        L10nKey::SettingsImportSummary => {
+            "{count} hosts added — {updated} updated, {unchanged} already current"
+        }
+        L10nKey::SettingsImportIgnored => {
+            "{count} options have no setting in tty7 and were left in the file: {options}"
+        }
+        L10nKey::SettingsImportMoreOptions => "+{count} more",
         L10nKey::SettingsDefaultsIntro => {
             "Every host starts from these. Any host can override one under its own Advanced."
         }
@@ -1583,6 +1594,22 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsAliasesLinked, "zero") => "No aliases linked yet.",
         (L10nKey::SettingsAliasesLinked, "one") => "1 alias linked.",
         (L10nKey::SettingsAliasesLinked, "other") => "{count} aliases linked.",
+        (L10nKey::SettingsImportSummary, "zero") => {
+            "Nothing new — {updated} updated, {unchanged} already current"
+        }
+        (L10nKey::SettingsImportSummary, "one") => {
+            "1 host added — {updated} updated, {unchanged} already current"
+        }
+        (L10nKey::SettingsImportSummary, "other") => {
+            "{count} hosts added — {updated} updated, {unchanged} already current"
+        }
+        (L10nKey::SettingsImportIgnored, "zero") => "Every option in the file has a tty7 setting.",
+        (L10nKey::SettingsImportIgnored, "one") => {
+            "1 option has no setting in tty7 and was left in the file: {options}"
+        }
+        (L10nKey::SettingsImportIgnored, "other") => {
+            "{count} options have no setting in tty7 and were left in the file: {options}"
+        }
         (L10nKey::SettingsRulesOpenedWithConnection, "zero") => {
             "0 rules, opened with the connection"
         }

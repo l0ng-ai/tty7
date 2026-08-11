@@ -175,6 +175,15 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "重新读取文件并添加新内容。你在这里做的编辑由 tty7 保存——不会写入该文件本身。"
         }
         L10nKey::SettingsImportNow => "立即导入",
+        L10nKey::SettingsImportUnreadable => "无法读取 {path}——没有导入任何内容。",
+        L10nKey::SettingsImportNoHosts => "{path} 中没有可导入的主机——只有通配符或 Match 规则。",
+        L10nKey::SettingsImportSummary => {
+            "新增 {count} 个主机——更新 {updated} 个，{unchanged} 个已是最新"
+        }
+        L10nKey::SettingsImportIgnored => {
+            "有 {count} 个选项在 tty7 中没有对应设置，仍留在文件里：{options}"
+        }
+        L10nKey::SettingsImportMoreOptions => "还有 {count} 个",
         L10nKey::SettingsDefaultsIntro => {
             "所有主机都从这些设置开始。每个主机都可以在自己的高级选项中覆盖某项。"
         }
@@ -1505,6 +1514,22 @@ pub fn translate_variant_zh(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsAliasesLinked, "zero") => "还没有关联别名。",
         (L10nKey::SettingsAliasesLinked, "one") => "已关联 1 个别名。",
         (L10nKey::SettingsAliasesLinked, "other") => "已关联 {count} 个别名。",
+        (L10nKey::SettingsImportSummary, "zero") => {
+            "没有新主机——更新 {updated} 个，{unchanged} 个已是最新"
+        }
+        (L10nKey::SettingsImportSummary, "one") => {
+            "新增 1 个主机——更新 {updated} 个，{unchanged} 个已是最新"
+        }
+        (L10nKey::SettingsImportSummary, "other") => {
+            "新增 {count} 个主机——更新 {updated} 个，{unchanged} 个已是最新"
+        }
+        (L10nKey::SettingsImportIgnored, "zero") => "文件里的每个选项在 tty7 中都有对应设置。",
+        (L10nKey::SettingsImportIgnored, "one") => {
+            "有 1 个选项在 tty7 中没有对应设置，仍留在文件里：{options}"
+        }
+        (L10nKey::SettingsImportIgnored, "other") => {
+            "有 {count} 个选项在 tty7 中没有对应设置，仍留在文件里：{options}"
+        }
         (L10nKey::SettingsRulesOpenedWithConnection, "zero") => "0 条规则，随连接打开",
         (L10nKey::SettingsRulesOpenedWithConnection, "one") => "1 条规则，随连接打开",
         (L10nKey::SettingsRulesOpenedWithConnection, "other") => "{count} 条规则，随连接打开",

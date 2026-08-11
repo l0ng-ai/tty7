@@ -195,6 +195,19 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "ファイルを再読み込みして新しい項目を追加します。ここでの編集は tty7 が保存します — ファイル自体には書き込まれません"
         }
         L10nKey::SettingsImportNow => "今すぐインポート",
+        L10nKey::SettingsImportUnreadable => {
+            "{path} を読み取れませんでした — 何もインポートされていません"
+        }
+        L10nKey::SettingsImportNoHosts => {
+            "{path} にインポートできるホストがありません — ワイルドカードや Match のルールだけです"
+        }
+        L10nKey::SettingsImportSummary => {
+            "ホスト {count} 件を追加 — {updated} 件を更新、{unchanged} 件は変更なし"
+        }
+        L10nKey::SettingsImportIgnored => {
+            "tty7 に設定のないオプションが {count} 件あり、ファイルに残されています: {options}"
+        }
+        L10nKey::SettingsImportMoreOptions => "他 {count} 件",
         L10nKey::SettingsDefaultsIntro => {
             "すべてのホストはこの設定から始まります。各ホストは詳細設定で個別に上書きできます"
         }
@@ -1630,6 +1643,24 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsAliasesLinked, "zero") => "エイリアスはまだリンクされていません",
         (L10nKey::SettingsAliasesLinked, "one") => "エイリアス 1 件がリンクされています",
         (L10nKey::SettingsAliasesLinked, "other") => "エイリアス {count} 件がリンクされています",
+        (L10nKey::SettingsImportSummary, "zero") => {
+            "新しいホストはありません — {updated} 件を更新、{unchanged} 件は変更なし"
+        }
+        (L10nKey::SettingsImportSummary, "one") => {
+            "ホスト 1 件を追加 — {updated} 件を更新、{unchanged} 件は変更なし"
+        }
+        (L10nKey::SettingsImportSummary, "other") => {
+            "ホスト {count} 件を追加 — {updated} 件を更新、{unchanged} 件は変更なし"
+        }
+        (L10nKey::SettingsImportIgnored, "zero") => {
+            "ファイル内のすべてのオプションに tty7 側の設定があります"
+        }
+        (L10nKey::SettingsImportIgnored, "one") => {
+            "tty7 に設定のないオプションが 1 件あり、ファイルに残されています: {options}"
+        }
+        (L10nKey::SettingsImportIgnored, "other") => {
+            "tty7 に設定のないオプションが {count} 件あり、ファイルに残されています: {options}"
+        }
         (L10nKey::SettingsRulesOpenedWithConnection, "zero") => "接続と同時に開くルール 0 件",
         (L10nKey::SettingsRulesOpenedWithConnection, "one") => "接続と同時に開くルール 1 件",
         (L10nKey::SettingsRulesOpenedWithConnection, "other") => {
