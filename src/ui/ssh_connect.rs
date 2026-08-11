@@ -191,13 +191,18 @@ fn build_spec_inner(
 
     let mut key_passphrases: HashMap<String, String> = HashMap::new();
     if matches!(profile.auth, AuthMode::Auto | AuthMode::PublicKey) {
-        // Explicit files, then the same `~/.ssh` defaults the daemon probes
-        // (#484): it looks passphrases up by the candidate string, so both
-        // sides must iterate the one shared list.
-        for path in identity_files
-            .iter()
-            .chain(crate::core::ssh_profile::default_identity_candidates().iter())
-        {
+        // Whichever list the daemon will actually offer (#484, #513): the
+        // profile's own files, or — only when it names none — the same
+        // `~/.ssh` defaults, from the one shared candidate list. The daemon
+        // looks passphrases up by the candidate string, so both sides must
+        // spell them identically.
+        let owned = identity_files.clone();
+        let probed = if owned.is_empty() {
+            crate::core::ssh_profile::default_identity_candidates()
+        } else {
+            owned
+        };
+        for path in &probed {
             let Ok(bytes) = std::fs::read(path) else {
                 continue;
             };
