@@ -837,6 +837,10 @@ pub(crate) struct SshProfileForm {
     verify_host_keys: Option<bool>,
     warn_on_close: Option<bool>,
 
+    /// Why the last save attempt was refused (#492–#494); shown under the
+    /// header until the next attempt clears it.
+    form_error: Option<String>,
+
     _subs: Vec<Subscription>,
 }
 
@@ -920,6 +924,71 @@ fn parse_host_port(s: &str) -> Option<HostPort> {
         Some((h, p)) => Some(HostPort::new(h.trim(), p.trim().parse().unwrap_or(0))),
         None => Some(HostPort::new(s, 0)),
     }
+}
+
+/// The save-time gate for the SSH form, kept pure so the rules are testable
+/// without a window. Blank port is fine — it falls back to 22, which is
+/// correct — but a port that was typed and does not parse is not (#492).
+fn ssh_form_field_problems(
+    name: &str,
+    host: &str,
+    port: &str,
+    jump_name: &str,
+    known_profile_names: &[&str],
+    socks: &str,
+    http: &str,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    if name.is_empty() {
+        problems.push(t(L10nKey::SshFormNameRequired).to_string());
+    }
+    if host.is_empty() {
+        problems.push(t(L10nKey::SshFormHostRequired).to_string());
+    }
+    if !port.is_empty() && !matches!(port.parse::<u16>(), Ok(p) if p > 0) {
+        problems.push(t_fmt(L10nKey::SshFormPortInvalid, &[("port", port)]));
+    }
+    if !jump_name.is_empty() && !known_profile_names.contains(&jump_name) {
+        // The unknown name used to be collected as "no jump host" — the
+        // profile saved fine and the jump the user asked for silently was
+        // not there (#493).
+        problems.push(t_fmt(
+            L10nKey::SshFormJumpUnknown,
+            &[("jump_name", jump_name)],
+        ));
+    }
+    for (value, label) in [
+        (socks, t(L10nKey::SettingsSocks5Proxy)),
+        (http, t(L10nKey::SettingsHttpProxy)),
+    ] {
+        if let Some(problem) = proxy_field_problem(value, label) {
+            problems.push(problem);
+        }
+    }
+    problems
+}
+
+/// A proxy field is host:port; a port that does not parse used to be stored
+/// as 0 and the connect then failed somewhere far from the form (#494).
+fn proxy_field_problem(value: &str, label: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let (host, port) = match value.rsplit_once(':') {
+        Some((h, p)) => (h.trim(), p.trim()),
+        None => (value, ""),
+    };
+    if host.is_empty() {
+        return Some(t_fmt(L10nKey::SshFormProxyHostMissing, &[("label", label)]));
+    }
+    if port.is_empty() || !matches!(port.parse::<u16>(), Ok(p) if p > 0) {
+        return Some(t_fmt(
+            L10nKey::SshFormProxyPortInvalid,
+            &[("label", label), ("value", value)],
+        ));
+    }
+    None
 }
 
 fn host_port_text(hp: &Option<HostPort>) -> String {
@@ -3035,6 +3104,7 @@ impl Tty7App {
             shell_integration: profile.shell_integration,
             verify_host_keys: profile.verify_host_keys,
             warn_on_close: profile.warn_on_close,
+            form_error: None,
             _subs: subs,
         };
         let editing = form.editing;
@@ -3096,7 +3166,49 @@ impl Tty7App {
         })
     }
 
+    /// What stands between the form on screen and a saveable profile. Every
+    /// problem names its field; `save_editing_profile` refuses while this is
+    /// non-empty, because saving used to mean the bad value silently won
+    /// (#492, #493, #494).
+    fn ssh_form_problems(&self, cx: &App) -> Vec<String> {
+        let Some(form) = self.active_settings().and_then(|s| s.ssh_form.as_ref()) else {
+            return Vec::new();
+        };
+        let val = |e: &Entity<InputState>| e.read(cx).value().trim().to_string();
+        let known: Vec<&str> = cx
+            .global::<Config>()
+            .ssh_profiles
+            .iter()
+            .filter(|p| p.id != form.editing)
+            .map(|p| p.name.as_str())
+            .collect();
+        ssh_form_field_problems(
+            &val(&form.name),
+            &val(&form.host),
+            &val(&form.port),
+            &val(&form.jump),
+            &known,
+            &val(&form.socks),
+            &val(&form.http),
+        )
+    }
+
     pub(crate) fn save_editing_profile(&mut self, cx: &mut Context<Self>) -> Option<Uuid> {
+        let problems = self.ssh_form_problems(cx);
+        if !problems.is_empty() {
+            // Saving used to take whatever the fields held: an empty name or
+            // host (#492), a jump-host typo that silently unlinked the jump
+            // (#493), a proxy port that would not parse and was stored as 0
+            // (#494). The form says what is wrong and keeps everything.
+            if let Some(form) = self.active_settings_mut().and_then(|s| s.ssh_form.as_mut()) {
+                form.form_error = Some(problems.join(" · "));
+            }
+            cx.notify();
+            return None;
+        }
+        if let Some(form) = self.active_settings_mut().and_then(|s| s.ssh_form.as_mut()) {
+            form.form_error = None;
+        }
         let profile = self.ssh_form_collect(cx)?;
         let id = profile.id;
         self.update_config(cx, |cfg| {
@@ -3507,6 +3619,14 @@ impl Tty7App {
         v_flex()
             .gap_4()
             .child(header)
+            .when_some(form.form_error.clone(), |page, error| {
+                page.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().danger)
+                        .child(error),
+                )
+            })
             .child(core)
             .child(self.render_ssh_profile_jump_section(form, cx))
             .child(self.render_ssh_profile_forwards_section(form, cx))
@@ -6607,6 +6727,42 @@ mod tests {
         assert_eq!(hp.host, "example.com");
         assert_eq!(hp.port, 2222);
         assert_eq!(parse_host_port("host").unwrap().port, 0);
+    }
+
+    #[test]
+    fn the_form_gate_blocks_what_used_to_save_silently() {
+        crate::ui::i18n::set_locale("en");
+        let known = ["bastion"];
+        let good = |name, host, port, jump, socks, http| {
+            ssh_form_field_problems(name, host, port, jump, &known, socks, http)
+        };
+
+        // #492: empty name / host could be saved and connected.
+        assert_eq!(good("", "h", "", "", "", "").len(), 1);
+        assert_eq!(good("n", "", "", "", "", "").len(), 1);
+        assert_eq!(good("", "", "", "", "", "").len(), 2);
+
+        // #492, narrowed: a blank port falling back to 22 is correct and
+        // must not be blocked; a typed-but-bad one must.
+        assert!(good("n", "h", "", "", "", "").is_empty());
+        assert!(good("n", "h", "22", "", "", "").is_empty());
+        assert_eq!(good("n", "h", "abc", "", "", "").len(), 1);
+        assert_eq!(good("n", "h", "0", "", "", "").len(), 1);
+        assert_eq!(good("n", "h", "65536", "", "", "").len(), 1);
+        assert_eq!(good("n", "h", "-1", "", "", "").len(), 1);
+
+        // #493: a jump-host typo was collected as no jump host at all.
+        assert!(good("n", "h", "", "bastion", "", "").is_empty());
+        assert_eq!(good("n", "h", "", "bastino", "", "").len(), 1);
+
+        // #494: a proxy port that would not parse was stored as 0.
+        assert!(good("n", "h", "", "", "proxy:1080", "").is_empty());
+        assert_eq!(good("n", "h", "", "", "proxy", "").len(), 1);
+        assert_eq!(good("n", "h", "", "", "proxy:abc", "").len(), 1);
+        assert_eq!(good("n", "h", "", "", "proxy:0", "").len(), 1);
+        assert_eq!(good("n", "h", "", "", ":1080", "").len(), 1);
+        assert_eq!(good("n", "h", "", "", "", "proxy:99999").len(), 1);
+        assert!(good("n", "h", "", "", "", "").is_empty());
     }
 }
 
