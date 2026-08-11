@@ -202,11 +202,18 @@ Notes that decide whether a loop works:
 - **`idle` is not "the command finished".** It is something an *agent* says
   about itself. A pane running a build has no agent and reports `no-agent`.
   Use `free` for commands.
-- **`free` costs a second request per poll**, so it is only checked when named.
+- **`free` costs a second request per poll**, so it is only checked when named,
+  and only if none of the agent states you asked for matched first — pairing
+  `waiting,done,free` never loses you a `waiting`.
 - **`--changed` means something different for `free`**: a shell goes free →
   busy → free and ends where it started, so there is no new state to compare
   against. There it means "something ran while I watched" — exactly what you
-  want on the line after a `send`.
+  want on the line after a `send`. A command fast enough to finish inside one
+  `--interval` is never seen running, so it times out instead; use
+  `--interval 100` for those, or drop `--changed` and read a sentinel file.
+- **`free` reads the process tree**, so a pane whose root process is the command
+  itself (a `tty7 run` pane) looks free while it runs, and a backgrounded job
+  keeps a pane busy after the foreground command is gone.
 
 ### `tty7 events`
 Streams server events until interrupted, one per line — pane exits, agent
@@ -303,10 +310,11 @@ still tell a real name from a stand-in.
 `orphan: true` means no workspace holds it. An interrupted `tty7 run` is what
 leaves them.
 
-`close` takes several ids at once and keeps going after a failure, reporting
-what could not be closed at the end rather than abandoning the rest. `--orphans`
-closes exactly what `pane ls --all` marks orphaned, and reports an empty list
-instead of an error when there is nothing to do.
+`close` takes several ids at once and keeps going after a failure: the rest are
+still attempted, and it exits 1 with `{"closed":[...],"failed":[...]}` so you
+know what is left. `--orphans` closes exactly what `pane ls --all` marks
+orphaned, and reports an empty list instead of an error when there is nothing
+to do.
 
 **`--orphans` is the user's broom, not yours.** It closes every abandoned pane
 on the machine, and an abandoned pane may still be running someone's command.

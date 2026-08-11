@@ -68,16 +68,12 @@ pub enum Command {
     #[command(about = "Split a pane (= tty7 pane split)")]
     Split(SplitArgs),
 
+    // The key list is built from the table it is a list *of*, rather than
+    // written out here: a hand-copied vocabulary drifts the first time a key
+    // is added, and this is the text a caller reaches for to learn the names.
     #[command(
         about = "Type text into a pane, or send it keystrokes with --key",
-        long_about = "Types TEXT into the pane exactly as a keyboard would.\n\n\
-                      --key sends a keystroke rather than characters, which is what a pane \
-                      wants once something is already running in it: answering a prompt that \
-                      only takes arrow keys, closing a TUI with escape, stopping a build with \
-                      C-c. Repeat it for a sequence.\n\n\
-                      Keys: enter, escape, tab, backtab, space, backspace, delete, up, down, \
-                      right, left, home, end, pageup, pagedown, C-<char> (Ctrl), M-<char> \
-                      (Alt). Aliases: return, cr, esc, del, bs, shift-tab, pgup, pgdn."
+        long_about = crate::keys::send_long_help()
     )]
     Send(SendArgs),
 

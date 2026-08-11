@@ -186,6 +186,11 @@ Exit codes are built for this: `0` means a state you asked for was reached,
 `124` means the timeout ran out (the `timeout(1)` convention, so "not yet" is
 distinguishable from "broken"), `1` means the pane died first.
 
+One trap in `--changed`: a command that finishes inside a single poll (500ms by
+default) is never *seen* running, so the wait keeps going until it times out.
+For something that quick, `--interval 100`, or drop `--changed` and read the
+`.rc` file. The timeout message says so when it happens.
+
 If you want the process tree itself — "what is running in there", "which port is
 this pane serving" — that is `tty7 procs %83`: indented by depth, `*` on the
 foreground process, then the ports those processes are listening on.
@@ -225,6 +230,10 @@ understanding.
 "your turn again". Note that `idle` is something an agent says about *itself* —
 a pane running a build is `no-agent`, never `idle`, so `--until idle` is never
 the way to ask "is the command finished". That is `free`.
+
+Mixing the two is safe: `--until waiting,done,free` covers a pane whose kind you
+don't know, because `free` is only consulted when none of the agent states you
+named matched first.
 
 ### `--changed` is not optional in a loop
 

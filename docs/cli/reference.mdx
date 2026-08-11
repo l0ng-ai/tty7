@@ -161,8 +161,10 @@ by its [hooks](/agents/status); the last three are facts about the pane:
 
 `free` is how you wait for a **command** rather than an agent, and it is the
 one state that costs a second request per poll — so it is only checked when you
-name it. With `--changed` it means "something ran and then finished", which is
-what you want directly after a `send`.
+name it, and only when none of the agent states you asked for already matched.
+With `--changed` it means "something ran and then finished", which is what you
+want directly after a `send`; a command quick enough to finish inside one
+`--interval` is never seen running, and the timeout says so.
 
 The reply carries the agent's message and native session id. The JSON's `stale`
 flag says whether the answer might belong to the previous turn.
@@ -268,7 +270,9 @@ holds it. An interrupted `run` and a removed workspace both leave orphans here.
 lists as orphaned and nothing else — panes a workspace holds are untouched —
 and reports an empty list rather than an error when there is nothing to clean
 up, so a script does not have to guard it. A pane that cannot be closed does
-not abandon the rest of the batch; the failure is reported at the end.
+not abandon the rest of the batch: the rest are still attempted, the complaint
+goes to stderr, and the verb exits 1 with `{"closed":[…],"failed":[…]}` — the
+list a retry needs.
 
 <Warning>
   `--orphans` closes every orphan on the machine, and an orphan can still be

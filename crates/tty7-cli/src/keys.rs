@@ -68,17 +68,36 @@ const ALIASES: &[(&str, &str)] = &[
     ("pgdown", "pagedown"),
 ];
 
-/// What `--help` prints, and what an unknown name is answered with.
+/// Every spelling `--key` accepts, in one line: what an unknown name is
+/// answered with, and half of what `tty7 send --help` prints.
 pub fn vocabulary() -> String {
     let named: Vec<&str> = NAMED.iter().map(|(name, _)| *name).collect();
     format!("{}, C-<char> (Ctrl), M-<char> (Alt)", named.join(", "))
+}
+
+/// `tty7 send --help`. Assembled from the tables above so that adding a key or
+/// an alias cannot leave the help text describing the vocabulary of an older
+/// build — the drift nobody notices until a caller is told a key exists and it
+/// does not, or the reverse.
+pub fn send_long_help() -> String {
+    let aliases: Vec<&str> = ALIASES.iter().map(|(from, _)| *from).collect();
+    format!(
+        "Types TEXT into the pane exactly as a keyboard would.\n\n\
+         --key sends a keystroke rather than characters, which is what a pane wants once \
+         something is already running in it: answering a prompt that only takes arrow keys, \
+         closing a TUI with escape, stopping a build with C-c. Repeat it for a sequence.\n\n\
+         Keys: {}. Aliases: {}.",
+        vocabulary(),
+        aliases.join(", ")
+    )
 }
 
 /// clap's `value_parser` for `--key`, so an unknown name is a usage error
 /// caught before a single byte reaches the pane — sending half a key sequence
 /// and then failing would leave the pane in a state nobody asked for.
 pub fn parse(spelling: &str) -> Result<Key, String> {
-    let folded = spelling.trim().to_ascii_lowercase();
+    let trimmed = spelling.trim();
+    let folded = trimmed.to_ascii_lowercase();
     let canonical = ALIASES
         .iter()
         .find_map(|(from, to)| (*from == folded).then_some(*to))
@@ -90,6 +109,8 @@ pub fn parse(spelling: &str) -> Result<Key, String> {
             bytes: bytes.to_vec(),
         });
     }
+    // Ctrl reads the folded spelling: the C0 rule clears the top three bits, so
+    // C-c and C-C are the same byte and always were.
     if let Some(rest) = strip_modifier(canonical, &["c-", "ctrl-", "control-"]) {
         return control(rest).map(|byte| Key {
             name: format!("c-{rest}"),
@@ -98,7 +119,14 @@ pub fn parse(spelling: &str) -> Result<Key, String> {
     }
     // Alt is a prefixed ESC — the encoding every Unix terminal has used for it
     // since long before there was a modifier-reporting protocol to do better.
-    if let Some(rest) = strip_modifier(canonical, &["m-", "alt-", "meta-"]) {
+    // Which means the character rides through as itself, so unlike Ctrl this
+    // one has to read the spelling as written: M-X is not M-x.
+    // Stripped from `folded` rather than `canonical`: only that one is the
+    // caller's own spelling with the case knocked out of it, which is what
+    // makes the tail recoverable from `trimmed` by length.
+    if let Some(rest) =
+        strip_modifier(&folded, &["m-", "alt-", "meta-"]).map(|rest| as_written(trimmed, rest))
+    {
         let mut chars = rest.chars();
         return match (chars.next(), chars.next()) {
             (Some(ch), None) => {
@@ -126,6 +154,15 @@ fn strip_modifier<'a>(name: &'a str, prefixes: &[&str]) -> Option<&'a str> {
         .iter()
         .find_map(|prefix| name.strip_prefix(prefix))
         .filter(|rest| !rest.is_empty())
+}
+
+/// The same tail of the spelling the caller wrote, before it was folded.
+///
+/// Safe to index by length: `to_ascii_lowercase` is byte-for-byte, and every
+/// modifier prefix is ASCII, so a suffix of the folded form is a suffix of the
+/// original at the same offset and on the same char boundary.
+fn as_written<'a>(original: &'a str, folded_rest: &str) -> &'a str {
+    &original[original.len() - folded_rest.len()..]
 }
 
 /// The C0 control byte a Ctrl-chord produces. This is the ASCII table's own
@@ -203,6 +240,38 @@ mod tests {
     fn alt_is_a_prefixed_escape() {
         assert_eq!(bytes("M-x"), vec![0x1b, b'x']);
         assert_eq!(bytes("alt-b"), vec![0x1b, b'b']);
+    }
+
+    /// Ctrl can be folded and Alt cannot: the ASCII rule throws the case away
+    /// either way for a control byte, while Alt carries the character through
+    /// as itself, so `M-X` and `M-x` are two different keys and must stay so.
+    #[test]
+    fn alt_keeps_the_case_the_caller_wrote() {
+        assert_eq!(bytes("M-X"), vec![0x1b, b'X']);
+        assert_eq!(bytes("Meta-X"), vec![0x1b, b'X']);
+        assert_eq!(bytes("M-x"), vec![0x1b, b'x']);
+        assert_eq!(parse("M-X").unwrap().name, "m-X");
+        // Non-ASCII rides through as its own UTF-8, and the prefix arithmetic
+        // must not land mid-character doing it.
+        assert_eq!(bytes("M-ä"), vec![0x1b, 0xc3, 0xa4]);
+    }
+
+    /// The help text is generated from the tables, so it cannot describe a
+    /// vocabulary the parser does not have. This is the assertion that the
+    /// generating is real rather than a second copy that happens to agree.
+    #[test]
+    fn the_help_text_lists_every_key_the_parser_takes() {
+        let help = send_long_help();
+        for (name, _) in NAMED {
+            assert!(help.contains(name), "`{name}` is missing from --help");
+        }
+        for (alias, _) in ALIASES {
+            assert!(help.contains(alias), "`{alias}` is missing from --help");
+        }
+        assert!(
+            help.contains("C-<char>") && help.contains("M-<char>"),
+            "{help}"
+        );
     }
 
     /// An unknown name has to fail before anything is written: a key sequence

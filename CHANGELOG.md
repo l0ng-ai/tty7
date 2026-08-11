@@ -68,7 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pane is back to its bare shell, which is what a `cargo test` running in a
   pane has instead of an agent status. With `--changed` it means "something ran
   and then finished", the shape you want on the line after a `send`. It costs a
-  second request per poll and so is only checked when you name it.
+  second request per poll and so is only checked when you name it — and only
+  when none of the agent states you named answered first, so `waiting,done,free`
+  on a pane of unknown kind cannot lose you a `waiting`.
 
 - **`tty7 send --key` presses keys instead of typing characters** — `C-c` to
   stop a runaway build, `escape` to close a TUI, `up`/`down`/`enter` to answer
@@ -92,7 +94,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **`tty7 pane close --json` now reports `{"closed": [ids]}`** rather than a
-  single `{"closed": id}`, because the verb takes more than one pane.
+  single `{"closed": id}`, because the verb takes more than one pane. A batch
+  that could not close everything exits 1 with `{"closed": […], "failed": […]}`
+  and the complaint on stderr, so a retry knows what is left.
 
 ### Fixed
 

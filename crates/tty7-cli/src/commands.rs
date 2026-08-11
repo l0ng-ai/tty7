@@ -826,12 +826,24 @@ fn pane_close(
     }
 
     if !failures.is_empty() {
-        bail!(
-            "closed {} pane(s); {} could not be closed — {}",
+        // Structured even here, for the reason `wait` is: the caller was
+        // cleaning up, and what they need next is which panes are still theirs
+        // to deal with — an anyhow error would leave `--json` holding prose.
+        // The complaint goes to stderr all the same, so `-q` still reports it
+        // and the exit code is not the only thing that says so.
+        eprintln!(
+            "tty7: closed {} pane(s); {} could not be closed — {}",
             closed.len(),
             failures.len(),
             failures.join("; ")
         );
+        return Ok(Outcome::Exit(
+            1,
+            Report {
+                human: String::new(),
+                json: json!({ "closed": closed, "failed": failures }),
+            },
+        ));
     }
     let human = match closed.as_slice() {
         // The single-pane case is the overwhelming one and has always been
@@ -973,10 +985,12 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
         let mut changed = cursor != baseline;
 
         // `free` is a fact about the process tree, not the agent ladder, so it
-        // is asked separately and only when requested. It outranks the ladder
-        // when true: a pane whose foreground command has exited is free
-        // whatever a hook last said about it.
-        if watch_free && current != WaitState::Exit {
+        // is asked separately, only when requested, and only once the ladder
+        // has failed to answer. A state the caller listed is their answer:
+        // overwriting a real `waiting` with a process-tree fact would strand a
+        // pane whose depth-0 process *is* the agent (see `pane_is_free`), where
+        // the tree reads free for the whole turn.
+        if watch_free && current != WaitState::Exit && !args.until.contains(&current) {
             if pane_is_free(backend, pane)? {
                 current = WaitState::Free;
                 changed = seen_busy;
@@ -1055,6 +1069,17 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
                      status hook",
                 );
             }
+            // `--changed` needs to have *seen* the pane busy, and a command
+            // that starts and finishes inside one interval never is. That
+            // looks exactly like "the command never ran", so say both, rather
+            // than let a finished command read as a timeout.
+            if current == WaitState::Free && !seen_busy {
+                human.push_str(
+                    "\nnothing was ever seen running here — either the command never started, \
+                     or it finished inside one --interval. Poll faster (--interval 100) or drop \
+                     --changed",
+                );
+            }
             return Ok(Outcome::Exit(
                 124,
                 Report {
@@ -1078,8 +1103,18 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
 /// Depth, not count: the pane's own shell sits at depth 0 and everything it
 /// launched hangs below, so "nothing deeper than the shell" holds however many
 /// shells the pane ended up with, and does not have to guess at process names.
+/// It is also the portable question — Windows has no foreground process group
+/// to ask about, so `ProcEntry::foreground` is never true there.
+///
+/// What it cannot see, both by construction: a pane whose depth-0 process *is*
+/// the command — which is what `tty7 run` spawns — reads free for as long as it
+/// runs, and a backgrounded job keeps a pane busy after the foreground command
+/// is long gone. An empty tree is "we could not see in" rather than "free":
+/// answering free there would be the same false success `no-agent` exists to
+/// remove.
 fn pane_is_free(backend: &mut dyn Backend, pane: u64) -> Result<bool> {
-    Ok(backend.procs(pane)?.procs.iter().all(|p| p.depth == 0))
+    let procs = backend.procs(pane)?.procs;
+    Ok(!procs.is_empty() && procs.iter().all(|p| p.depth == 0))
 }
 
 /// Whether the daemon still has a live pane behind this id. Absent from the
@@ -2020,6 +2055,10 @@ mod tests {
     /// A batch keeps going after a failure. Stopping at the first one would
     /// leave the rest of the leak exactly where it was — while still reporting
     /// the failure, because a half-done cleanup that claims success is worse.
+    ///
+    /// Reported as an exit code carrying a report, not as an error: the caller
+    /// was cleaning up, and the useful answer is which panes are still theirs
+    /// to deal with. An anyhow error would leave `--json` with prose.
     #[test]
     fn pane_close_reports_failures_without_abandoning_the_batch() {
         let mut backend = mock();
@@ -2030,13 +2069,30 @@ mod tests {
         ];
         backend.kill_failures = vec![78];
 
-        let err = execute(
+        let out = execute(
             cli(&["tty7", "pane", "close", "--orphans"]),
             &Context::default(),
             &mut backend,
         )
-        .expect_err("a pane that could not be closed has to be reported");
-        assert!(err.to_string().contains("%78"), "{err}");
+        .expect("a partial cleanup is an exit code, not an error");
+        let Outcome::Exit(1, r) = out else {
+            panic!("a pane that could not be closed has to be reported");
+        };
+        assert_eq!(
+            r.json["closed"],
+            serde_json::json!([77, 79]),
+            "the survivors of the batch are what a retry needs: {}",
+            r.json
+        );
+        assert!(
+            r.json["failed"]
+                .as_array()
+                .expect("the failures are a list")
+                .iter()
+                .any(|f| f.as_str().is_some_and(|f| f.contains("%78"))),
+            "{}",
+            r.json
+        );
         assert_eq!(
             backend.killed,
             vec![77, 78, 79],
@@ -2864,6 +2920,94 @@ mod tests {
         assert_eq!(json["status"], "free");
         assert_eq!(json["matched"], true);
         assert_eq!(json["stale"], false);
+    }
+
+    /// A command that starts and finishes between two polls is never *seen*
+    /// busy, which is indistinguishable from one that never ran — so the
+    /// timeout has to name both doors instead of letting a finished command
+    /// read as "still going".
+    #[test]
+    fn wait_changed_free_says_why_it_saw_nothing_run() {
+        let mut backend = mock();
+        for _ in 0..2 {
+            backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+        }
+        backend.procs_reply = idle_procs();
+
+        let out = execute(
+            cli(&[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "free",
+                "--changed",
+                "--timeout",
+                "0",
+            ]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect("a timeout is an exit code, not an error");
+        let Outcome::Exit(124, r) = out else {
+            panic!("a pane that was free all along has not run anything");
+        };
+        assert!(
+            r.human.contains("--interval") && r.human.contains("--changed"),
+            "the timeout should name the two ways out: {}",
+            r.human
+        );
+    }
+
+    /// `free` answers for a pane the agent ladder cannot, so it must not answer
+    /// *over* it. A pane whose depth-0 process is the agent itself reads free
+    /// for its whole turn; letting that outrank a `waiting` the caller asked
+    /// for would strand exactly the delegation loop the verb exists for.
+    #[test]
+    fn wait_free_does_not_overrule_a_state_the_caller_asked_for() {
+        use tty7_core::core::cli_agent::AgentStatus;
+        let mut backend = mock();
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![agent_state(
+                3,
+                AgentStatus::Waiting,
+            )]));
+        // The agent is the pane's only process, so the tree reads "free".
+        backend.procs_reply = idle_procs();
+
+        let json = json_of(run_cli(
+            &["tty7", "wait", "%3", "--until", "waiting,free"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["status"], "waiting", "the ladder answered first");
+        assert_eq!(json["matched"], true);
+        assert!(
+            backend.procs_calls.is_empty(),
+            "and the process tree was never asked"
+        );
+    }
+
+    /// An unreadable process tree is not an idle one. Answering `free` on an
+    /// empty reply would be the same false success `no-agent` was added to
+    /// remove, one layer down.
+    #[test]
+    fn wait_free_does_not_read_an_empty_process_tree_as_finished() {
+        let mut backend = mock();
+        backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+        backend.procs_reply = tty7_core::daemon::protocol::PaneProcs::default();
+
+        let out = execute(
+            cli(&["tty7", "wait", "%3", "--until", "free", "--timeout", "0"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect("a timeout is an exit code, not an error");
+        assert!(
+            matches!(out, Outcome::Exit(124, _)),
+            "nothing was seen, so nothing can be claimed"
+        );
     }
 
     /// Watching `free` must not cost anything for callers who did not ask:

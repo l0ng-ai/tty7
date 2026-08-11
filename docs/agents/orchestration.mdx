@@ -78,7 +78,17 @@ tty7 wait "$PANE" --until free --changed --timeout 900
 cat /tmp/t.rc /tmp/t.log
 ```
 
-`free` costs one extra request per poll, so it is only checked when you name it.
+`free` costs one extra request per poll, so it is only checked when you name it —
+and only once the agent ladder has not already answered, so pairing it with
+`waiting,done` never costs you a state you asked for.
+
+<Warning>
+  `free` is read off the process tree, which has two blind spots. A pane whose
+  own root process *is* the command — what `tty7 run` spawns — looks free the
+  whole time it runs; wait on `tty7 run` itself instead, it already blocks. And
+  a backgrounded job (`… &`) keeps the pane busy after the foreground command
+  has finished.
+</Warning>
 
 <Note>
   A pane with no agent reports `no-agent`, **not** `idle`. That distinction is
@@ -100,6 +110,12 @@ Without it, the JSON's `stale` flag tells you whether that happened.
 free ends up where it started, so there is no new state to compare against.
 There `--changed` means "something ran while I was watching", which is exactly
 what you want in the line after a `send`.
+
+That does mean a command which starts *and* finishes between two polls is never
+seen running, and the wait sits there until it times out. If the thing you are
+waiting on can be that quick, poll faster (`--interval 100`) or drop `--changed`
+and let a sentinel file carry the answer. The timeout says as much when it
+happens.
 
 ## Answering a prompt
 
