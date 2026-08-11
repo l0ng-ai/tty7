@@ -191,13 +191,18 @@ fn build_spec_inner(
 
     let mut key_passphrases: HashMap<String, String> = HashMap::new();
     if matches!(profile.auth, AuthMode::Auto | AuthMode::PublicKey) {
-        // Explicit files, then the same `~/.ssh` defaults the daemon probes
-        // (#484): it looks passphrases up by the candidate string, so both
-        // sides must iterate the one shared list.
-        for path in identity_files
-            .iter()
-            .chain(crate::core::ssh_profile::default_identity_candidates().iter())
-        {
+        // Whichever list the daemon will actually offer (#484, #513): the
+        // profile's own files, or — only when it names none — the same
+        // `~/.ssh` defaults, from the one shared candidate list. The daemon
+        // looks passphrases up by the candidate string, so both sides must
+        // spell them identically.
+        let owned = identity_files.clone();
+        let probed = if owned.is_empty() {
+            crate::core::ssh_profile::default_identity_candidates()
+        } else {
+            owned
+        };
+        for path in &probed {
             let Ok(bytes) = std::fs::read(path) else {
                 continue;
             };
@@ -271,8 +276,12 @@ fn map_proxy(profile: &SshProfile) -> SshProxy {
             return SshProxy::Command(cmd.clone());
         }
     }
+    // Port 0 is not somewhere a proxy listens. The settings form used to write
+    // it whenever the address had no port or an unparseable one, so configs
+    // carrying it are already on disk; connecting direct is the honest reading
+    // of an address that names nowhere.
     if let Some(HostPort { host, port }) = &profile.socks_proxy {
-        if !host.is_empty() {
+        if !host.is_empty() && *port != 0 {
             return SshProxy::Socks {
                 host: host.clone(),
                 port: *port,
@@ -280,7 +289,7 @@ fn map_proxy(profile: &SshProfile) -> SshProxy {
         }
     }
     if let Some(HostPort { host, port }) = &profile.http_proxy {
-        if !host.is_empty() {
+        if !host.is_empty() && *port != 0 {
             return SshProxy::Http {
                 host: host.clone(),
                 port: *port,
@@ -618,6 +627,24 @@ mod tests {
         assert!(matches!(
             build_native_ssh_spec(&p, &[], &store, true).proxy,
             SshProxy::Command(_)
+        ));
+    }
+
+    #[test]
+    fn a_proxy_on_port_zero_is_no_proxy() {
+        // What the settings form wrote for `proxy.example.com` before it
+        // checked the port, and what is still sitting in configs saved then.
+        let store = InMemoryCredentialStore::new();
+        let mut p = profile("web", "h", "u");
+        p.socks_proxy = Some(HostPort::new("socks", 0));
+        assert!(matches!(
+            build_native_ssh_spec(&p, &[], &store, true).proxy,
+            SshProxy::None
+        ));
+        p.http_proxy = Some(HostPort::new("http", 8080));
+        assert!(matches!(
+            build_native_ssh_spec(&p, &[], &store, true).proxy,
+            SshProxy::Http { .. }
         ));
     }
 }

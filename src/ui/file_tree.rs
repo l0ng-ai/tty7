@@ -66,6 +66,9 @@ pub(crate) enum TreeNote {
     /// The search stopped at `SEARCH_LIMIT`; the list is a prefix, not the
     /// whole answer, and has to say so.
     SearchCapped,
+    /// The search never ran to an answer — the host refused it or the link to
+    /// it went away. An empty list here means nothing at all.
+    SearchFailed,
 }
 
 /// `landed` is how many entries the listing returned, or `None` when nothing
@@ -122,6 +125,10 @@ struct SearchState {
     pending: String,
     hidden: bool,
     hits: Vec<TreeEntry>,
+    /// Whether the last search came back as a failure rather than as no hits.
+    /// The two used to print the same "Nothing matches …", which is the same
+    /// lie `unreadable` was added to stop a directory listing from telling.
+    failed: bool,
 }
 
 impl SearchState {
@@ -134,22 +141,25 @@ impl SearchState {
         self.hidden = show_hidden;
         if query.is_empty() {
             self.hits.clear();
+            self.failed = false;
             return None;
         }
         Some(self.generation)
     }
 
-    fn accept(&mut self, generation: u64, hits: Vec<TreeEntry>) -> bool {
+    fn accept(&mut self, generation: u64, ok: bool, hits: Vec<TreeEntry>) -> bool {
         if self.generation != generation {
             return false;
         }
         self.hits = hits;
+        self.failed = !ok;
         true
     }
 
     fn restart(&mut self) {
         self.generation += 1;
         self.pending.clear();
+        self.failed = false;
     }
 }
 
@@ -438,7 +448,14 @@ impl FileTreeState {
                     host,
                     cx,
                     move |h| {
-                        h.search(&roots, &query, SEARCH_LIMIT, SEARCH_MAX_DIRS, show_hidden)
+                        // `(ok, hits)` the way `spawn_load` reports a listing:
+                        // a search the host refused is not a search with no
+                        // hits, and the column has to be able to tell them
+                        // apart before it says "Nothing matches".
+                        let found =
+                            h.search(&roots, &query, SEARCH_LIMIT, SEARCH_MAX_DIRS, show_hidden);
+                        let ok = found.is_ok();
+                        let hits = found
                             .unwrap_or_default()
                             .into_iter()
                             .map(|hit| TreeEntry {
@@ -447,10 +464,11 @@ impl FileTreeState {
                                 is_dir: hit.is_dir,
                                 ignored: hit.ignored,
                             })
-                            .collect::<Vec<_>>()
+                            .collect::<Vec<_>>();
+                        (ok, hits)
                     },
-                    move |app, hits, cx| {
-                        if app.file_tree.search.accept(generation, hits) {
+                    move |app, (ok, hits), cx| {
+                        if app.file_tree.search.accept(generation, ok, hits) {
                             cx.notify();
                         }
                     },
@@ -461,35 +479,51 @@ impl FileTreeState {
     }
 
     fn search_rows(&self) -> Vec<TreeRow> {
-        let mut rows: Vec<TreeRow> = self
-            .search
-            .hits
-            .iter()
-            .map(|e| TreeRow {
-                entry: e.clone(),
-                depth: 0,
-                is_root: false,
-                expanded: false,
-                note: None,
-            })
-            .collect();
-        if rows.len() >= SEARCH_LIMIT {
-            rows.push(TreeRow {
-                entry: TreeEntry {
-                    name: String::new(),
-                    path: PathBuf::new(),
-                    is_dir: false,
-                    ignored: false,
-                },
-                depth: 0,
-                is_root: false,
-                expanded: false,
-                note: Some(TreeNote::SearchCapped),
-            });
-        }
-        rows
+        search_rows(&self.search)
     }
+}
 
+/// The rows a search puts in the column, and the note that stands for whatever
+/// they do not say by themselves.
+fn search_rows(search: &SearchState) -> Vec<TreeRow> {
+    let mut rows: Vec<TreeRow> = search
+        .hits
+        .iter()
+        .map(|e| TreeRow {
+            entry: e.clone(),
+            depth: 0,
+            is_root: false,
+            expanded: false,
+            note: None,
+        })
+        .collect();
+    let note = if search.failed {
+        // Ahead of the cap: a failed search has no hits to have capped, and
+        // this is the one thing worth saying about it.
+        Some(TreeNote::SearchFailed)
+    } else if rows.len() >= SEARCH_LIMIT {
+        Some(TreeNote::SearchCapped)
+    } else {
+        None
+    };
+    if let Some(note) = note {
+        rows.push(TreeRow {
+            entry: TreeEntry {
+                name: String::new(),
+                path: PathBuf::new(),
+                is_dir: false,
+                ignored: false,
+            },
+            depth: 0,
+            is_root: false,
+            expanded: false,
+            note: Some(note),
+        });
+    }
+    rows
+}
+
+impl FileTreeState {
     pub(crate) fn visible_rows(
         &self,
         host: HostId,
@@ -1116,6 +1150,20 @@ impl Tty7App {
         }
 
         let target = new_path.clone();
+        // The same gap `file_tree_delete` closed: on its own, "Permission
+        // denied (os error 13)" says neither which file nor what was being
+        // done to it, and those are the only two things worth knowing here.
+        // A rename is named by the name it is leaving, which is the one still
+        // on screen to find.
+        let (context, failed_name) = match &edit {
+            TreeEdit::Rename { path, .. } => (
+                L10nKey::FileTreeRenameFailed,
+                path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| name.clone()),
+            ),
+            _ => (L10nKey::FileTreeCreateFailed, name.clone()),
+        };
         HostOps::run_in(
             host,
             window,
@@ -1141,8 +1189,12 @@ impl Tty7App {
                         {
                             code.selected = None;
                         }
-                        use gpui_component::WindowExt as _;
-                        window.push_notification(format!("{e}"), cx);
+                        HostOps::notify_err(
+                            window,
+                            cx,
+                            &t_fmt(context, &[("name", &failed_name)]),
+                            &e,
+                        );
                     }
                 }
                 cx.notify();
@@ -1503,6 +1555,7 @@ impl Tty7App {
                 TreeNote::HiddenOnly => (L10nKey::TreeDirHiddenOnly, muted),
                 TreeNote::Unreadable => (L10nKey::TreeDirUnreadable, cx.theme().danger),
                 TreeNote::SearchCapped => (L10nKey::TreeSearchCapped, muted),
+                TreeNote::SearchFailed => (L10nKey::TreeSearchFailed, cx.theme().danger),
             };
             return vec![
                 h_flex()
@@ -1519,9 +1572,10 @@ impl Tty7App {
                         TreeNote::SearchCapped => t_fmt(key, &[("n", &SEARCH_LIMIT.to_string())]),
                         _ => t(key).to_string(),
                     })
-                    // Every note but the capped-search one stands for a real
-                    // directory, and carries its path; that one stands for the
-                    // rest of a search and has nowhere to put anything.
+                    // Every note but the two search ones stands for a real
+                    // directory, and carries its path; those stand for the rest
+                    // of a search, or for one that never ran, and have nowhere
+                    // to put anything.
                     .when(!path.as_os_str().is_empty(), |d| {
                         d.drag_over::<ExternalPaths>(|s, _, _, cx| {
                             s.bg(cx.theme().drag_border.opacity(0.14))
@@ -2059,6 +2113,28 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_search_says_so_instead_of_drawing_no_rows() {
+        let mut search = SearchState::default();
+        let walk = search.retarget("foo", false).expect("a new query walks");
+        search.accept(walk, false, Vec::new());
+        assert_eq!(
+            search_rows(&search)
+                .iter()
+                .filter_map(|r| r.note)
+                .collect::<Vec<_>>(),
+            vec![TreeNote::SearchFailed],
+            "without a note the column falls through to \"Nothing matches\""
+        );
+
+        // A search that ran and found nothing still draws nothing.
+        let walk = search
+            .retarget("bar", false)
+            .expect("a changed query walks");
+        search.accept(walk, true, Vec::new());
+        assert!(search_rows(&search).is_empty());
+    }
+
+    #[test]
     fn a_listing_superseded_in_flight_is_still_shown() {
         let mut loads: InFlight<DirKey> = InFlight::default();
         let mut children: ByHost<PathBuf, Vec<TreeEntry>> = ByHost::default();
@@ -2426,10 +2502,10 @@ mod tests {
         assert_ne!(first, second);
 
         assert!(
-            !search.accept(first, vec![entry("stale.rs", false)]),
+            !search.accept(first, true, vec![entry("stale.rs", false)]),
             "the overtaken walk's hits are dropped"
         );
-        assert!(search.accept(second, vec![entry("foo.rs", false)]));
+        assert!(search.accept(second, true, vec![entry("foo.rs", false)]));
         assert_eq!(search.hits.len(), 1);
 
         let third = search
@@ -2443,6 +2519,30 @@ mod tests {
         search.retarget("foo", true).expect("typing again walks");
         search.restart();
         assert!(search.retarget("foo", true).is_some(), "restart re-walks");
+    }
+
+    #[test]
+    fn a_search_that_failed_is_not_a_search_with_no_hits() {
+        let mut search = SearchState::default();
+        let walk = search.retarget("foo", false).expect("a new query walks");
+        assert!(search.accept(walk, false, Vec::new()));
+        assert!(
+            search.failed,
+            "an empty list from a host that refused the walk is not an answer"
+        );
+
+        // And it is not carried past the query it belongs to.
+        let next = search
+            .retarget("food", false)
+            .expect("a changed query walks");
+        assert!(search.accept(next, true, vec![entry("food.rs", false)]));
+        assert!(!search.failed);
+
+        let last = search.retarget("foodie", false).expect("and again");
+        assert!(search.accept(last, false, Vec::new()));
+        assert!(search.failed);
+        search.retarget("", false);
+        assert!(!search.failed, "an emptied box has nothing to report");
     }
 
     #[test]

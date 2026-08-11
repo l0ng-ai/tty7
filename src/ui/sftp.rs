@@ -115,21 +115,18 @@ impl SftpRoute {
         }
     }
 
-    pub(crate) fn transfer_list(&self) -> Vec<SftpJobProgress> {
+    pub(crate) fn transfer_list(&self) -> Result<Vec<SftpJobProgress>, String> {
         let Some(req) = self.workspace_op(crate::daemon::protocol::WorkspaceOp::SftpTransferList)
         else {
             return RemoteTerminal::sftp_transfer_list(self.pane_id);
         };
         match RemoteTerminal::on_workspace(req) {
-            Ok(crate::daemon::protocol::DaemonMsg::SftpTransferProgress(jobs)) => jobs,
-            Ok(other) => {
-                log::warn!("unexpected reply to a workspace transfer list: {other:?}");
-                Vec::new()
-            }
-            Err(e) => {
-                log::warn!("workspace transfer list failed: {e}");
-                Vec::new()
-            }
+            Ok(crate::daemon::protocol::DaemonMsg::SftpTransferProgress(jobs)) => Ok(jobs),
+            Ok(other) => Err(t_fmt(
+                L10nKey::SftpErrorUnexpectedReply,
+                &[("reply", &format!("{other:?}"))],
+            )),
+            Err(e) => Err(e.to_string()),
         }
     }
 }
@@ -143,6 +140,12 @@ pub(crate) struct SftpPanelState {
     pub(crate) filter_input: gpui::Entity<InputState>,
     pub(crate) error: Option<String>,
     pub(crate) jobs: Vec<SftpJobProgress>,
+    /// Why the last transfer poll came back empty-handed, if it did.
+    ///
+    /// Kept apart from `error`, which blanks the directory listing: a poll
+    /// that could not reach the daemon says nothing about the listing already
+    /// on screen, and the transfer tray is the only place it belongs.
+    jobs_error: Option<String>,
     /// Uploads this panel started whose landing it has not listed yet.
     ///
     /// An upload is written to `<name>.tty7-upload-<hex>` and renamed into
@@ -188,6 +191,7 @@ impl SftpPanelState {
             filter_input,
             error: None,
             jobs: Vec::new(),
+            jobs_error: None,
             uploads_awaiting_listing: HashSet::new(),
             claimed_downloads: HashSet::new(),
             dismissed_jobs: HashSet::new(),
@@ -221,6 +225,24 @@ fn uploads_still_running(owed: &HashSet<u64>, jobs: &[SftpJobProgress]) -> HashS
                 .is_some_and(|job| job.state == SftpJobState::Running)
         })
         .collect()
+}
+
+/// What the tray shows after a poll: the jobs to draw, and the failure to say
+/// out loud beside them.
+///
+/// A poll that failed used to come back as an empty `Vec`, which reads as "the
+/// transfers are all gone" — the tray disappeared and every upload the panel
+/// was waiting on counted as landed. Over a link that is down that is not a
+/// blink but the permanent answer, so a failure keeps the previous list and is
+/// reported instead of replacing it.
+fn apply_poll(
+    previous: Vec<SftpJobProgress>,
+    reply: Result<Vec<SftpJobProgress>, String>,
+) -> (Vec<SftpJobProgress>, Option<String>) {
+    match reply {
+        Ok(jobs) => (jobs, None),
+        Err(e) => (previous, Some(e)),
+    }
 }
 
 fn is_dir_like(e: &SftpEntry) -> bool {
@@ -362,6 +384,7 @@ impl Tty7App {
         self.sftp_panel.editing_path = None;
         self.sftp_panel.editing_path_sub.clear();
         self.sftp_panel.jobs.clear();
+        self.sftp_panel.jobs_error = None;
         self.sftp_panel.open_workspace = None;
         self.sftp_panel.poll_gen = self.sftp_panel.poll_gen.wrapping_add(1);
         cx.notify();
@@ -1007,12 +1030,28 @@ impl Tty7App {
     /// listing on screen was the one taken while the temporary name existed —
     /// and it stayed, so a finished upload read as a file with a hash glued to
     /// its name.
-    fn sftp_apply_jobs(&mut self, jobs: Vec<SftpJobProgress>, cx: &mut Context<Self>) {
+    ///
+    /// A poll that failed is not a job list, so it settles nothing: the uploads
+    /// still owe their listing, and asking for one now would only refresh from
+    /// the same unreachable daemon.
+    fn sftp_apply_jobs(
+        &mut self,
+        reply: Result<Vec<SftpJobProgress>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let previous = std::mem::take(&mut self.sftp_panel.jobs);
+        let (jobs, failure) = apply_poll(previous, reply);
+        let failed = failure.is_some();
+        self.sftp_panel.jobs = jobs;
+        self.sftp_panel.jobs_error = failure;
+        if failed {
+            cx.notify();
+            return;
+        }
         let owed = &self.sftp_panel.uploads_awaiting_listing;
-        let still_running = uploads_still_running(owed, &jobs);
+        let still_running = uploads_still_running(owed, &self.sftp_panel.jobs);
         let settled = still_running.len() != owed.len();
         self.sftp_panel.uploads_awaiting_listing = still_running;
-        self.sftp_panel.jobs = jobs;
         cx.notify();
         if settled {
             self.sftp_refresh(cx);
@@ -1568,7 +1607,11 @@ impl Tty7App {
             .iter()
             .filter(|j| history || !self.sftp_panel.dismissed_jobs.contains(&j.job_id))
             .collect();
-        if jobs.is_empty() && !history {
+        // A poll that failed is worth a tray of its own. Without one the whole
+        // footer vanishes at the moment the panel stops being able to say
+        // anything about the transfers, which reads as "they are all finished".
+        let jobs_error = self.sftp_panel.jobs_error.as_ref();
+        if jobs.is_empty() && !history && jobs_error.is_none() {
             return None;
         }
 
@@ -1596,7 +1639,12 @@ impl Tty7App {
         } else {
             0.0
         };
-        let summary = if running > 0 {
+        // The failed poll outranks the counts, because the counts are only as
+        // fresh as the last poll that got through and the summary is the one
+        // line a collapsed tray gets to say.
+        let summary = if let Some(e) = jobs_error {
+            t_fmt(L10nKey::SftpTransferListFailed, &[("error", e)])
+        } else if running > 0 {
             t_fmt(
                 L10nKey::SftpTransferSummaryRunning,
                 &[
@@ -1612,7 +1660,7 @@ impl Tty7App {
         } else {
             t(L10nKey::SftpTransferSummaryIdle).to_string()
         };
-        let summary_color = if running == 0 && failed > 0 {
+        let summary_color = if jobs_error.is_some() || (running == 0 && failed > 0) {
             danger
         } else {
             muted
@@ -1671,13 +1719,23 @@ impl Tty7App {
 
         let body = expanded.then(|| {
             let inner: Div = if jobs.is_empty() {
+                // The summary above says the same thing when a poll failed, but
+                // it is a single truncated line; this one wraps, so it is where
+                // the reason is actually readable.
+                let (text, color): (gpui::SharedString, _) = match jobs_error {
+                    Some(e) => (
+                        t_fmt(L10nKey::SftpTransferListFailed, &[("error", e)]).into(),
+                        danger,
+                    ),
+                    None => (t(L10nKey::SftpNoTransfers).into(), muted),
+                };
                 v_flex().child(
                     div()
                         .px(px(CONTENT_INSET))
                         .py(px(3.))
                         .text_size(rems(META))
-                        .text_color(muted)
-                        .child(t(L10nKey::SftpNoTransfers)),
+                        .text_color(color)
+                        .child(text),
                 )
             } else {
                 let mut list = v_flex().px(px(CONTENT_INSET)).pb(px(6.)).gap(px(6.));
@@ -1881,6 +1939,36 @@ mod tests {
             ],
         );
         assert_eq!(running, HashSet::from([8]));
+    }
+
+    #[test]
+    fn a_failed_poll_keeps_the_transfers_it_cannot_see() {
+        let previous = vec![upload(7, SftpJobState::Running)];
+        let (jobs, failure) = apply_poll(previous.clone(), Err("broken pipe".into()));
+        assert_eq!(jobs.len(), 1, "the last list anyone saw is still the truth");
+        assert_eq!(jobs[0].job_id, 7);
+        assert_eq!(failure.as_deref(), Some("broken pipe"));
+
+        // And the upload is still owed its listing, so nothing settles behind
+        // a link that has gone quiet.
+        assert_eq!(
+            uploads_still_running(&HashSet::from([7]), &jobs),
+            HashSet::from([7])
+        );
+    }
+
+    #[test]
+    fn a_poll_that_got_through_replaces_the_list_and_clears_the_failure() {
+        let previous = vec![upload(7, SftpJobState::Running)];
+        let (jobs, failure) = apply_poll(previous, Ok(vec![upload(8, SftpJobState::Done)]));
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].job_id, 8);
+        assert!(failure.is_none());
+
+        // An empty reply from a daemon that answered really is an empty list.
+        let (jobs, failure) = apply_poll(jobs, Ok(Vec::new()));
+        assert!(jobs.is_empty());
+        assert!(failure.is_none());
     }
 
     #[test]

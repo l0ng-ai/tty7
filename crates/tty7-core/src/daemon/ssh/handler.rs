@@ -28,8 +28,22 @@ impl ClientHandler {
                 remember,
             } => {
                 if remember {
-                    if let Err(e) = known_hosts::append_trusted(&self.host, self.port, key) {
-                        log::warn!("failed to record host key in known_hosts: {e}");
+                    // The superseded line has to go before the new one lands.
+                    // `known_hosts::check` answers `Known` on any
+                    // same-algorithm match, so an override that only appended
+                    // left the key the user had just rejected trusted for good.
+                    // If it cannot be dropped, do not append either: being
+                    // asked again next time is the better half of that trade.
+                    match known_hosts::forget_superseded(&self.host, self.port, key) {
+                        Ok(()) => {
+                            if let Err(e) = known_hosts::append_trusted(&self.host, self.port, key)
+                            {
+                                log::warn!("failed to record host key in known_hosts: {e}");
+                            }
+                        }
+                        Err(e) => log::warn!(
+                            "not recording host key: the superseded known_hosts line could not be removed: {e}"
+                        ),
                     }
                 }
                 true
@@ -75,6 +89,28 @@ impl russh::client::Handler for ClientHandler {
                         port: self.port,
                         algorithm,
                         fingerprint_sha256,
+                        previously_known_as: None,
+                    })
+                    .await;
+                Ok(self.apply_decision(resp, server_public_key))
+            }
+            // Deliberately the unknown-host prompt and not a variant of its
+            // own: `AuthPromptKind` crosses to the GUI *and* to whatever
+            // `tty7-server` the far end happens to be running, and a new
+            // externally-tagged variant is a hard decode failure on any peer
+            // that predates it. The extra field is additive in both
+            // directions.
+            HostKeyStatus::ChangedAlgorithm {
+                known_algorithm, ..
+            } => {
+                let resp = self
+                    .broker
+                    .prompt(AuthPromptKind::HostKeyUnknown {
+                        host: self.host.clone(),
+                        port: self.port,
+                        algorithm,
+                        fingerprint_sha256,
+                        previously_known_as: Some(known_algorithm),
                     })
                     .await;
                 Ok(self.apply_decision(resp, server_public_key))

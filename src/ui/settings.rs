@@ -9,6 +9,7 @@ use gpui_component::color_picker::{ColorPicker, ColorPickerState};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::link::Link;
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_component::notification::{Notification, NotificationType};
 use gpui_component::select::{SearchableVec, Select, SelectState};
 use gpui_component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
 use gpui_component::slider::{Slider, SliderState};
@@ -797,6 +798,27 @@ fn ssh_row_matches(p: &SshProfile, query: &str) -> bool {
     hit(&p.name) || hit(&p.host) || hit(&p.user) || hit(&p.port.to_string())
 }
 
+/// How many *other* profiles reach the same `user@host:port` as this one.
+///
+/// The keychain is keyed by the endpoint, not by the profile, so two hosts that
+/// differ only in how they get there — one direct, one through a jump host —
+/// hand the same saved password back and forth. Every path that is about to
+/// remove that password has to know this first: deleting a profile keeps the
+/// secret while someone else still needs it, and forgetting one says out loud
+/// who else it takes down. Both used to work the answer out on their own, which
+/// is exactly how the two policies would have drifted apart.
+fn profiles_sharing_endpoint(cfg: &Config, id: Uuid) -> usize {
+    let Some(profile) = cfg.ssh_profiles.iter().find(|p| p.id == id) else {
+        return 0;
+    };
+    cfg.ssh_profiles
+        .iter()
+        .filter(|p| {
+            p.id != id && (&p.user, &p.host, p.port) == (&profile.user, &profile.host, profile.port)
+        })
+        .count()
+}
+
 pub(crate) struct SshProfileForm {
     editing: Uuid,
     carry_group: Option<String>,
@@ -838,6 +860,19 @@ pub(crate) struct SshProfileForm {
     warn_on_close: Option<bool>,
 
     _subs: Vec<Subscription>,
+}
+
+impl SshProfileForm {
+    /// Whether the group that identifies the host — name, host, port, user —
+    /// is still untouched. Every field notifies on change, so the form
+    /// re-renders on each keystroke; without this a new host would be told it
+    /// needs a host before anyone had the chance to type one. Same deal the
+    /// forward rows strike with `ForwardRuleForm::is_blank`.
+    fn core_is_blank(&self, cx: &App) -> bool {
+        [&self.name, &self.host, &self.port, &self.user]
+            .iter()
+            .all(|e| e.read(cx).value().trim().is_empty())
+    }
 }
 
 pub(crate) struct ForwardRuleForm {
@@ -911,14 +946,39 @@ pub(crate) fn humanize_action(action: &str) -> String {
     out
 }
 
-fn parse_host_port(s: &str) -> Option<HostPort> {
+/// What a blank port field means. The same number `SshProfile`'s serde default
+/// writes for a config that never mentioned a port, which is why leaving the
+/// field empty has to stay legal: every host imported from `~/.ssh/config`
+/// leaves it empty.
+const DEFAULT_SSH_PORT: u16 = 22;
+
+/// The port each proxy scheme listens on when the field names only a host.
+const DEFAULT_SOCKS_PORT: u16 = 1080;
+const DEFAULT_HTTP_PROXY_PORT: u16 = 8080;
+
+/// A port as a form field spells it. Nothing here accepts 0: every port in a
+/// profile is one something has to connect to, and no listener answers on 0.
+fn parse_port(s: &str) -> Option<u16> {
+    s.trim().parse::<u16>().ok().filter(|p| *p > 0)
+}
+
+/// A proxy address as the form spells it: blank is "no proxy", a bare host
+/// takes the scheme's default port, and anything else has to carry a port that
+/// exists. This used to be `parse().unwrap_or(0)`, so `proxy.example.com:88O`
+/// saved a proxy on port 0 and the failure surfaced far away, in the socket
+/// layer. The default port is not a secret either — `host_port_text` writes it
+/// back into the field the next time the form opens.
+fn parse_host_port_checked(s: &str, default_port: u16) -> Result<Option<HostPort>, SshFieldError> {
     let s = s.trim();
     if s.is_empty() {
-        return None;
+        return Ok(None);
     }
     match s.rsplit_once(':') {
-        Some((h, p)) => Some(HostPort::new(h.trim(), p.trim().parse().unwrap_or(0))),
-        None => Some(HostPort::new(s, 0)),
+        Some((h, p)) => match parse_port(p) {
+            Some(port) => Ok(Some(HostPort::new(h.trim(), port))),
+            None => Err(SshFieldError::ProxyPortRange),
+        },
+        None => Ok(Some(HostPort::new(s, default_port))),
     }
 }
 
@@ -942,6 +1002,207 @@ fn split_lines(s: &str) -> Vec<String> {
         .filter(|l| !l.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// Why one field of the SSH profile form cannot be saved. A value rather than
+/// a finished sentence, so the rules stay a plain function a test can call —
+/// the wording, and the locale it is written in, belong to the render pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SshFieldError {
+    /// Nothing to connect to. Saved anyway, the profile used to render as an
+    /// empty row in the host list and hand `TcpStream::connect` an empty name.
+    HostMissing,
+    /// A port field that is neither blank nor a port.
+    PortRange,
+    /// The same, for the port half of a proxy address.
+    ProxyPortRange,
+    /// The jump field names a profile no host list has.
+    JumpUnknown(String),
+    /// The jump field names the profile being edited.
+    JumpIsSelf,
+}
+
+impl SshFieldError {
+    fn message(&self) -> String {
+        match self {
+            Self::HostMissing => t(L10nKey::SettingsHostRequired).to_string(),
+            Self::PortRange => t(L10nKey::SettingsPortInvalid).to_string(),
+            Self::ProxyPortRange => t(L10nKey::SettingsProxyPortInvalid).to_string(),
+            Self::JumpUnknown(name) => {
+                t_fmt(L10nKey::SettingsJumpHostUnknown, &[("jump_name", name)])
+            }
+            Self::JumpIsSelf => t(L10nKey::SettingsJumpHostSelf).to_string(),
+        }
+    }
+}
+
+/// What the form has to fix before it can be saved, one slot per field so each
+/// complaint can be printed under the control it is about.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SshFormErrors {
+    host: Option<SshFieldError>,
+    port: Option<SshFieldError>,
+    jump: Option<SshFieldError>,
+    socks: Option<SshFieldError>,
+    http: Option<SshFieldError>,
+}
+
+impl SshFormErrors {
+    fn is_empty(&self) -> bool {
+        self.host.is_none()
+            && self.port.is_none()
+            && self.jump.is_none()
+            && self.socks.is_none()
+            && self.http.is_none()
+    }
+}
+
+/// The SSH profile form as plain text, lifted out of the `InputState` entities
+/// it lives in. The rules that turn it into a profile are the part worth
+/// testing, and a GPUI entity is not something a unit test can hand them, so
+/// the window layer's job stops at reading the strings out.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SshFormDraft {
+    id: Uuid,
+    name: String,
+    group: Option<String>,
+    host: String,
+    port: String,
+    user: String,
+    jump: String,
+    proxy_command: String,
+    socks: String,
+    http: String,
+    auth: AuthMode,
+    identity_files: String,
+    agent_forward: bool,
+    credential_ref: Option<CredentialRef>,
+    forwards: Vec<ForwardRule>,
+    keepalive_interval: String,
+    keepalive_count: String,
+    connect_timeout: String,
+    warn_on_close: Option<bool>,
+    skip_banner: bool,
+    shell_integration: bool,
+    login_scripts: String,
+    x11: bool,
+    kex: String,
+    cipher: String,
+    mac: String,
+    hostkey: String,
+    compression: String,
+    verify_host_keys: Option<bool>,
+}
+
+/// The one place that decides what the form would save and what is wrong with
+/// it. Both, always — never one or the other: the Escape prompt asks whether
+/// the form differs from what is on disk, and a form that is merely invalid
+/// still holds everything the user typed. Handing back only the errors would
+/// make a brand-new invalid profile compare equal to the nothing on disk, and
+/// Escape would throw the typing away without asking.
+///
+/// A missing `name` is deliberately not an error: the host list already falls
+/// back to the host for a nameless profile, and requiring one would refuse
+/// every host imported from `~/.ssh/config`.
+fn validate_ssh_draft(draft: SshFormDraft, profiles: &[SshProfile]) -> (SshProfile, SshFormErrors) {
+    let mut errors = SshFormErrors::default();
+
+    let host = draft.host.trim().to_string();
+    if host.is_empty() {
+        errors.host = Some(SshFieldError::HostMissing);
+    }
+
+    let port_text = draft.port.trim();
+    let port = match port_text.is_empty() {
+        true => DEFAULT_SSH_PORT,
+        false => parse_port(port_text).unwrap_or_else(|| {
+            errors.port = Some(SshFieldError::PortRange);
+            DEFAULT_SSH_PORT
+        }),
+    };
+
+    // The field is a name but the profile stores an id, so a jump host already
+    // survives its target being renamed. What it never survived was a name
+    // nobody has: the lookup returned `None`, the profile saved as a direct
+    // connection, and reopening the form showed an empty field.
+    let jump_name = draft.jump.trim();
+    let jump_host = if jump_name.is_empty() {
+        None
+    } else {
+        let named = |p: &&SshProfile| p.name == jump_name;
+        // Duplicate names resolve to whichever profile comes first, as they
+        // always have. The one profile that can never be the answer is the one
+        // being edited, and typing its own name is worth saying out loud
+        // rather than quietly connecting direct.
+        match profiles.iter().filter(named).find(|p| p.id != draft.id) {
+            Some(p) => Some(p.id),
+            None => {
+                errors.jump = Some(match profiles.iter().any(|p| p.name == jump_name) {
+                    true => SshFieldError::JumpIsSelf,
+                    false => SshFieldError::JumpUnknown(jump_name.to_string()),
+                });
+                None
+            }
+        }
+    };
+
+    let proxy = |text: &str, default_port: u16, slot: &mut Option<SshFieldError>| {
+        match parse_host_port_checked(text, default_port) {
+            Ok(hp) => hp,
+            Err(e) => {
+                *slot = Some(e);
+                None
+            }
+        }
+    };
+    let socks_proxy = proxy(&draft.socks, DEFAULT_SOCKS_PORT, &mut errors.socks);
+    let http_proxy = proxy(&draft.http, DEFAULT_HTTP_PROXY_PORT, &mut errors.http);
+
+    let proxy_command = draft.proxy_command.trim();
+    let profile = SshProfile {
+        id: draft.id,
+        name: draft.name.trim().to_string(),
+        group: draft.group,
+        host,
+        port,
+        user: draft.user.trim().to_string(),
+        jump_host,
+        proxy_command: (!proxy_command.is_empty()).then(|| proxy_command.to_string()),
+        socks_proxy,
+        http_proxy,
+        auth: draft.auth,
+        identity_files: split_lines(&draft.identity_files),
+        agent_forward: draft.agent_forward,
+        credential_ref: draft.credential_ref,
+        forwards: draft.forwards,
+        keepalive_interval_s: draft.keepalive_interval.trim().parse().ok(),
+        keepalive_count_max: draft.keepalive_count.trim().parse().ok(),
+        connect_timeout_s: draft.connect_timeout.trim().parse().ok(),
+        warn_on_close: draft.warn_on_close,
+        skip_banner: draft.skip_banner,
+        shell_integration: draft.shell_integration,
+        login_scripts: split_lines(&draft.login_scripts),
+        x11: draft.x11,
+        algorithms: Algorithms {
+            kex: split_list(&draft.kex),
+            cipher: split_list(&draft.cipher),
+            mac: split_list(&draft.mac),
+            hostkey: split_list(&draft.hostkey),
+            compression: split_list(&draft.compression),
+        },
+        verify_host_keys: draft.verify_host_keys,
+    };
+    (profile, errors)
+}
+
+/// The inline complaint under a field: one line, in the danger colour, in the
+/// column the control sits in. Built before the row rather than inside a
+/// `when` closure so it borrows the app for the length of one call.
+fn field_error(message: impl Into<String>, cx: &App) -> Div {
+    div()
+        .text_xs()
+        .text_color(cx.theme().danger)
+        .child(message.into())
 }
 
 fn forward_row_inputs(row: &ForwardRuleForm) -> [&Entity<InputState>; 5] {
@@ -2347,8 +2608,9 @@ impl Tty7App {
             .item(
                 PopupMenuItem::new(t(L10nKey::SettingsImportFromSshConfig)).on_click({
                     let app = app.clone();
-                    move |_, _window, cx| {
-                        let _ = app.update(cx, |this, cx| this.import_ssh_config_profiles(cx));
+                    move |_, window, cx| {
+                        let _ =
+                            app.update(cx, |this, cx| this.import_ssh_config_profiles(window, cx));
                     }
                 }),
             )
@@ -2726,9 +2988,9 @@ impl Tty7App {
                         Button::new("ssh-empty-import")
                             .label(t(L10nKey::Link))
                             .small()
-                            .on_click(
-                                cx.listener(|this, _, _w, cx| this.import_ssh_config_profiles(cx)),
-                            ),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.import_ssh_config_profiles(window, cx)
+                            })),
                     ),
             );
         }
@@ -2772,9 +3034,9 @@ impl Tty7App {
                     Button::new("ssh-defaults-import")
                         .label(t(L10nKey::SettingsImportNow))
                         .small()
-                        .on_click(
-                            cx.listener(|this, _, _w, cx| this.import_ssh_config_profiles(cx)),
-                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.import_ssh_config_profiles(window, cx)
+                        }))
                         .into_any_element(),
                     cx,
                 ),
@@ -2834,13 +3096,8 @@ impl Tty7App {
                 PopupMenuItem::new(t(L10nKey::SettingsForgetPassword)).on_click({
                     let app = app.clone();
                     move |_, window, cx| {
-                        if let Some(msg) = app
-                            .update(cx, |this, cx| this.forget_profile_password(id, cx))
-                            .ok()
-                            .flatten()
-                        {
-                            window.push_notification(msg, cx);
-                        }
+                        let _ =
+                            app.update(cx, |this, cx| this.forget_profile_password(id, window, cx));
                     }
                 }),
             )
@@ -3049,59 +3306,62 @@ impl Tty7App {
         cx.notify();
     }
 
-    fn ssh_form_collect(&self, cx: &App) -> Option<SshProfile> {
+    /// Reads the form out of its entities and runs it past
+    /// [`validate_ssh_draft`]. The profile that comes back is what the form
+    /// would save; the errors are what stands in the way.
+    fn ssh_form_collect(&self, cx: &App) -> Option<(SshProfile, SshFormErrors)> {
         let form = self.active_settings()?.ssh_form.as_ref()?;
-        let id = form.editing;
         let val = |e: &Entity<InputState>| e.read(cx).value().trim().to_string();
+        // The multi-line and comma-separated fields do their own splitting, so
+        // they travel whole rather than trimmed.
+        let raw = |e: &Entity<InputState>| e.read(cx).value().to_string();
 
-        let jump_name = val(&form.jump);
-        let jump_host = if jump_name.is_empty() {
-            None
-        } else {
-            cx.global::<Config>()
-                .ssh_profiles
-                .iter()
-                .find(|p| p.name == jump_name && p.id != id)
-                .map(|p| p.id)
-        };
-
-        Some(SshProfile {
-            id,
+        let draft = SshFormDraft {
+            id: form.editing,
             name: val(&form.name),
             group: form.carry_group.clone(),
             host: val(&form.host),
-            port: val(&form.port).parse().unwrap_or(22),
+            port: val(&form.port),
             user: val(&form.user),
-            jump_host,
-            proxy_command: (!val(&form.proxy_command).is_empty()).then(|| val(&form.proxy_command)),
-            socks_proxy: parse_host_port(&val(&form.socks)),
-            http_proxy: parse_host_port(&val(&form.http)),
+            jump: val(&form.jump),
+            proxy_command: val(&form.proxy_command),
+            socks: val(&form.socks),
+            http: val(&form.http),
             auth: form.auth,
-            identity_files: split_lines(&form.identity_files.read(cx).value()),
+            identity_files: raw(&form.identity_files),
             agent_forward: form.agent_forward,
             credential_ref: form.carry_credential_ref.clone(),
             forwards: form.forwards.iter().filter_map(|r| r.collect(cx)).collect(),
-            keepalive_interval_s: val(&form.keepalive_interval).parse().ok(),
-            keepalive_count_max: val(&form.keepalive_count).parse().ok(),
-            connect_timeout_s: val(&form.connect_timeout).parse().ok(),
+            keepalive_interval: val(&form.keepalive_interval),
+            keepalive_count: val(&form.keepalive_count),
+            connect_timeout: val(&form.connect_timeout),
             warn_on_close: form.warn_on_close,
             skip_banner: form.skip_banner,
             shell_integration: form.shell_integration,
-            login_scripts: split_lines(&form.login_scripts.read(cx).value()),
+            login_scripts: raw(&form.login_scripts),
             x11: form.x11,
-            algorithms: Algorithms {
-                kex: split_list(&form.kex.read(cx).value()),
-                cipher: split_list(&form.cipher.read(cx).value()),
-                mac: split_list(&form.mac.read(cx).value()),
-                hostkey: split_list(&form.hostkey.read(cx).value()),
-                compression: split_list(&form.compression.read(cx).value()),
-            },
+            kex: raw(&form.kex),
+            cipher: raw(&form.cipher),
+            mac: raw(&form.mac),
+            hostkey: raw(&form.hostkey),
+            compression: raw(&form.compression),
             verify_host_keys: form.verify_host_keys,
-        })
+        };
+        Some(validate_ssh_draft(
+            draft,
+            &cx.global::<Config>().ssh_profiles,
+        ))
     }
 
     pub(crate) fn save_editing_profile(&mut self, cx: &mut Context<Self>) -> Option<Uuid> {
-        let profile = self.ssh_form_collect(cx)?;
+        let (profile, errors) = self.ssh_form_collect(cx)?;
+        // Save and Connect are both disabled while anything is wrong, but this
+        // is the door all of them go through, and what gets past it lands in
+        // the config file — where a host-less profile is a blank row nobody
+        // can identify or delete on sight.
+        if !errors.is_empty() {
+            return None;
+        }
         let id = profile.id;
         self.update_config(cx, |cfg| {
             if let Some(slot) = cfg.ssh_profiles.iter_mut().find(|p| p.id == id) {
@@ -3120,7 +3380,9 @@ impl Tty7App {
 
     /// Whether the SSH profile form on screen holds edits that were never
     /// saved. Save is enabled off exactly this, so closing on it is the same
-    /// question the button already answers.
+    /// question the button already answers — and it compares what the form
+    /// would save even when the form cannot be saved yet, so a half-typed new
+    /// host is still something Escape has to ask about.
     pub(crate) fn ssh_form_dirty(&self, cx: &App) -> bool {
         let Some(form) = self.active_settings().and_then(|s| s.ssh_form.as_ref()) else {
             return false;
@@ -3131,7 +3393,7 @@ impl Tty7App {
             .iter()
             .find(|p| p.id == form.editing)
             .cloned();
-        self.ssh_form_collect(cx) != saved
+        self.ssh_form_collect(cx).map(|(profile, _)| profile) != saved
     }
 
     /// Closing from Escape or the X is the user leaving; every other caller
@@ -3224,11 +3486,7 @@ impl Tty7App {
             .iter()
             .find(|p| p.id == id)
             .map(|p| (p.user.clone(), p.host.clone(), p.port));
-        let shared = endpoint.as_ref().is_some_and(|(user, host, port)| {
-            cfg.ssh_profiles
-                .iter()
-                .any(|p| p.id != id && (&p.user, &p.host, p.port) == (user, host, *port))
-        });
+        let shared = profiles_sharing_endpoint(cfg, id) > 0;
         if let Some((user, host, port)) = endpoint.filter(|_| !shared) {
             use crate::core::keychain::{CredentialStore, OsCredentialStore};
             let _ = OsCredentialStore.delete_password(&user, &host, port);
@@ -3273,15 +3531,107 @@ impl Tty7App {
         cx.notify();
     }
 
-    pub(crate) fn import_ssh_config_profiles(&mut self, cx: &mut Context<Self>) {
-        let imported = crate::core::ssh_config::import_profiles();
-        if imported.is_empty() {
+    /// Import `~/.ssh/config`, and say what that did.
+    ///
+    /// Every branch here ends in a notification because every branch used to
+    /// end in nothing: a missing file, a file of nothing but `Host *`, and a
+    /// clean import of six hosts were all the same silent button press, and the
+    /// only way to tell them apart was to go count the host list.
+    pub(crate) fn import_ssh_config_profiles(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // One id for all three outcomes, so pressing the button again replaces
+        // what it said last time instead of stacking a second toast on top of
+        // an answer that is now out of date.
+        const NOTIFICATION: &str = "ssh-config-import";
+        // A toast is 448pt wide. A config with a dozen unsupported keywords in
+        // it would push the counts out of view, so the notification names the
+        // first few and the log line below carries the whole list, with the
+        // hosts each keyword was set on.
+        const OPTIONS_SHOWN: usize = 5;
+
+        let report = crate::core::ssh_config::import_report();
+        let source = report.source.display().to_string();
+
+        if !report.source_read {
+            window.push_notification(
+                Notification::error(t_fmt(
+                    L10nKey::SettingsImportUnreadable,
+                    &[("path", &source)],
+                ))
+                .id1::<Self>(NOTIFICATION),
+                cx,
+            );
             return;
         }
+        if report.profiles.is_empty() {
+            window.push_notification(
+                Notification::warning(t_fmt(L10nKey::SettingsImportNoHosts, &[("path", &source)]))
+                    .id1::<Self>(NOTIFICATION),
+                cx,
+            );
+            return;
+        }
+
+        let read = report.profiles.len();
+        let ignored = report.ignored;
+        let mut stats = crate::core::ssh_config::MergeStats::default();
         self.update_config(cx, |cfg| {
-            crate::core::ssh_config::merge_imported(&mut cfg.ssh_profiles, imported);
+            stats = crate::core::ssh_config::merge_imported(&mut cfg.ssh_profiles, report.profiles);
         });
-        cx.notify();
+
+        let dropped: Vec<String> = ignored
+            .iter()
+            .map(|opt| format!("{} ({})", opt.option, opt.hosts.join(", ")))
+            .collect();
+        log::info!(
+            "imported {read} alias(es) from {source} ({} file(s) read): {} added, {} updated, \
+             {} unchanged; no tty7 setting for: [{}]",
+            report.files_read,
+            stats.added,
+            stats.updated,
+            stats.unchanged,
+            dropped.join("; ")
+        );
+
+        let mut notification = Notification::new()
+            .with_type(NotificationType::Success)
+            .title(t_plural(
+                L10nKey::SettingsImportSummary,
+                stats.added,
+                &[
+                    ("updated", &stats.updated.to_string()),
+                    ("unchanged", &stats.unchanged.to_string()),
+                ],
+            ))
+            .id1::<Self>(NOTIFICATION);
+        if !ignored.is_empty() {
+            let mut options: Vec<String> = ignored
+                .iter()
+                .take(OPTIONS_SHOWN)
+                .map(|opt| opt.option.clone())
+                .collect();
+            let rest = ignored.len() - options.len();
+            if rest > 0 {
+                options.push(t_fmt(
+                    L10nKey::SettingsImportMoreOptions,
+                    &[("count", &rest.to_string())],
+                ));
+            }
+            notification = notification
+                .message(t_plural(
+                    L10nKey::SettingsImportIgnored,
+                    ignored.len(),
+                    &[("options", &options.join(", "))],
+                ))
+                // A list of what the import could not carry is something to
+                // read and act on, and four seconds is not long enough to do
+                // either. The counts alone still fade on their own.
+                .autohide(false);
+        }
+        window.push_notification(notification, cx);
     }
 
     pub(crate) fn copy_profile_connect_string(&mut self, id: Uuid, cx: &mut Context<Self>) {
@@ -3297,6 +3647,60 @@ impl Tty7App {
     }
 
     pub(crate) fn forget_profile_password(
+        &mut self,
+        id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cfg = cx.global::<Config>();
+        let Some(endpoint) = cfg
+            .ssh_profiles
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| format!("{}@{}:{}", p.user, p.host, p.port))
+        else {
+            return;
+        };
+        // One click used to be the whole gesture, and the thing it removed does
+        // not come back. Worse, the entry is the endpoint's rather than this
+        // row's, so a menu opened on one host can sign several of them out —
+        // name that count here instead of letting it turn up at the next
+        // connect on a host nobody touched.
+        let others = profiles_sharing_endpoint(cfg, id);
+        let body = if others == 0 {
+            t(L10nKey::SettingsForgetPasswordBody).to_string()
+        } else {
+            t_plural(
+                L10nKey::SettingsForgetPasswordSharedBody,
+                others,
+                &[("endpoint", &endpoint)],
+            )
+        };
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &t_fmt(
+                L10nKey::SettingsForgetPasswordTitle,
+                &[("endpoint", &endpoint)],
+            ),
+            Some(&body),
+            &crate::ui::confirm_answers(t(L10nKey::SettingsForgetPassword), t(L10nKey::Cancel)),
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(0) = answer.await else { return };
+            // The notification is the only sign the keychain was touched, and
+            // by now the click that asked for it is long gone — so it has to be
+            // raised from in here, on the window the prompt belonged to.
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Some(msg) = this.forget_profile_password_confirmed(id, cx) {
+                    window.push_notification(msg, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn forget_profile_password_confirmed(
         &mut self,
         id: Uuid,
         cx: &mut Context<Self>,
@@ -3337,7 +3741,8 @@ impl Tty7App {
             .iter()
             .find(|p| p.id == editing)
             .cloned();
-        let collected = self.ssh_form_collect(cx);
+        let (collected, errors) = self.ssh_form_collect(cx).unzip();
+        let errors = errors.unwrap_or_default();
         let dirty = collected != saved;
         let address = collected
             .as_ref()
@@ -3406,19 +3811,37 @@ impl Tty7App {
                         Button::new("ssh-form-save")
                             .label(t(L10nKey::Save))
                             .small()
-                            .disabled(!dirty)
+                            .disabled(!dirty || !errors.is_empty())
                             .on_click(cx.listener(|this, _, _w, cx| this.save_ssh_form(cx))),
                     )
                     .child(
+                        // Connect saves first, so it answers to the same
+                        // rules. Before this it answered to none at all, and
+                        // an empty host reached the socket layer as a DNS
+                        // error about a name nobody typed.
                         Button::new("ssh-form-connect")
                             .label(t(L10nKey::Connect))
                             .primary()
                             .small()
+                            .disabled(!errors.is_empty())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.save_and_connect_profile(window, cx)
                             })),
                     ),
             );
+
+        // Every field notifies on change, so this form re-renders on each
+        // keystroke: telling a brand-new host that it needs a host is
+        // something it would say before the user had typed a character. Hold
+        // that one line back until the group it belongs to has something in
+        // it. A malformed value has nothing to wait for and says so at once.
+        let core_blank = form.core_is_blank(cx);
+        let host_error = errors
+            .host
+            .as_ref()
+            .filter(|_| !core_blank)
+            .map(|e| field_error(e.message(), cx));
+        let port_error = errors.port.as_ref().map(|e| field_error(e.message(), cx));
 
         let core = v_flex()
             .gap_3()
@@ -3438,21 +3861,28 @@ impl Tty7App {
                 self.settings_row(
                     t(L10nKey::SettingsHost),
                     t(L10nKey::SettingsHostDesc),
-                    h_flex()
-                        .gap_2()
+                    v_flex()
+                        .gap_1()
                         .max_w_full()
                         .child(
-                            div()
-                                .w(px(172.))
-                                .min_w_0()
-                                .child(Input::new(&form.host).small()),
+                            h_flex()
+                                .gap_2()
+                                .max_w_full()
+                                .child(
+                                    div()
+                                        .w(px(172.))
+                                        .min_w_0()
+                                        .child(Input::new(&form.host).small()),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(80.))
+                                        .flex_shrink_0()
+                                        .child(Input::new(&form.port).small()),
+                                ),
                         )
-                        .child(
-                            div()
-                                .w(px(80.))
-                                .flex_shrink_0()
-                                .child(Input::new(&form.port).small()),
-                        )
+                        .when_some(host_error, |col, line| col.child(line))
+                        .when_some(port_error, |col, line| col.child(line))
                         .into_any_element(),
                     cx,
                 ),
@@ -3505,9 +3935,9 @@ impl Tty7App {
             .gap_4()
             .child(header)
             .child(core)
-            .child(self.render_ssh_profile_jump_section(form, cx))
+            .child(self.render_ssh_profile_jump_section(form, &errors, cx))
             .child(self.render_ssh_profile_forwards_section(form, cx))
-            .child(self.render_ssh_profile_advanced_section(form, cx))
+            .child(self.render_ssh_profile_advanced_section(form, &errors, cx))
             .into_any_element()
     }
 
@@ -3553,6 +3983,7 @@ impl Tty7App {
     fn render_ssh_profile_jump_section(
         &self,
         form: &SshProfileForm,
+        errors: &SshFormErrors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let summary = {
@@ -3563,11 +3994,15 @@ impl Tty7App {
                 name
             }
         };
+        // A complaint nobody can see is a Save button that is greyed out for
+        // no reason the user can read, and the field keeps its text whether
+        // this section is folded or not — so an error holds it open.
+        let open = form.show_jump || errors.jump.is_some();
         let mut section = v_flex().child(self.disclosure_header(
             "ssh-sec-jump",
             t(L10nKey::SettingsJumpHost),
             &summary,
-            form.show_jump,
+            open,
             cx,
             |this, cx| {
                 if let Some(f) = this.ssh_form_mut() {
@@ -3576,15 +4011,18 @@ impl Tty7App {
                 }
             },
         ));
-        if form.show_jump {
+        if open {
+            let error = errors.jump.as_ref().map(|e| field_error(e.message(), cx));
             section = section.child(
                 self.settings_row(
                     t(L10nKey::SettingsJumpHost),
                     t(L10nKey::SettingsJumpHostDesc),
-                    div()
+                    v_flex()
+                        .gap_1()
                         .w(px(260.))
                         .max_w_full()
                         .child(Input::new(&form.jump).small())
+                        .when_some(error, |col, line| col.child(line))
                         .into_any_element(),
                     cx,
                 ),
@@ -3662,14 +4100,21 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let danger = cx.theme().danger;
         let needs_target = row.kind != ForwardKind::Dynamic;
         let kind_idx = match row.kind {
             ForwardKind::Local => 0,
             ForwardKind::Remote => 1,
             ForwardKind::Dynamic => 2,
         };
-        let incomplete = row.collect(cx).is_none() && !row.is_blank(cx);
+        let incomplete = (row.collect(cx).is_none() && !row.is_blank(cx)).then(|| {
+            field_error(
+                match needs_target {
+                    true => t(L10nKey::SettingsFwdNeedsBoth),
+                    false => t(L10nKey::SettingsFwdNeedsListen),
+                },
+                cx,
+            )
+        });
 
         // Below `SPLIT_FORWARD_ROW_BELOW` the five controls stop fitting on one
         // line. The kind switch, the description and the remove button keep the
@@ -3773,13 +4218,7 @@ impl Tty7App {
             .gap_0p5()
             .py_1()
             .child(rule)
-            .when(incomplete, |col| {
-                col.child(div().text_xs().text_color(danger).child(if needs_target {
-                    t(L10nKey::SettingsFwdNeedsBoth)
-                } else {
-                    t(L10nKey::SettingsFwdNeedsListen)
-                }))
-            })
+            .when_some(incomplete, |col, line| col.child(line))
             .into_any_element()
     }
 
@@ -3815,13 +4254,18 @@ impl Tty7App {
     fn render_ssh_profile_advanced_section(
         &self,
         form: &SshProfileForm,
+        errors: &SshFormErrors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // This section opens folded, and a proxy address saved back when the
+        // form wrote port 0 is wrong the moment the profile is opened. Let the
+        // error unfold it, or Save is disabled over something out of sight.
+        let open = form.show_advanced || errors.socks.is_some() || errors.http.is_some();
         let mut section = v_flex().child(self.disclosure_header(
             "ssh-sec-adv",
             t(L10nKey::SettingsAdvanced),
             t(L10nKey::SettingsAdvancedSummary),
-            form.show_advanced,
+            open,
             cx,
             |this, cx| {
                 if let Some(f) = this.ssh_form_mut() {
@@ -3830,7 +4274,7 @@ impl Tty7App {
                 }
             },
         ));
-        if !form.show_advanced {
+        if !open {
             return section.into_any_element();
         }
 
@@ -3846,6 +4290,28 @@ impl Tty7App {
                     .w(px(260.))
                     .max_w_full()
                     .child(Input::new(input).small())
+                    .into_any_element(),
+                cx,
+            )
+        };
+        // The two proxy addresses are the only advanced fields with a rule of
+        // their own, so they carry room for the complaint under the control.
+        let proxy_row = |this: &Self,
+                         label: &str,
+                         desc: &str,
+                         input: &Entity<InputState>,
+                         error: Option<&SshFieldError>,
+                         cx: &mut Context<Self>| {
+            let line = error.map(|e| field_error(e.message(), cx));
+            this.settings_row(
+                label.to_string(),
+                desc.to_string(),
+                v_flex()
+                    .gap_1()
+                    .w(px(260.))
+                    .max_w_full()
+                    .child(Input::new(input).small())
+                    .when_some(line, |col, line| col.child(line))
                     .into_any_element(),
                 cx,
             )
@@ -3904,18 +4370,20 @@ impl Tty7App {
                 &form.proxy_command,
                 cx,
             ))
-            .child(text_row(
+            .child(proxy_row(
                 self,
                 t(L10nKey::SettingsSocks5Proxy),
                 t(L10nKey::SettingsSocks5ProxyDesc),
                 &form.socks,
+                errors.socks.as_ref(),
                 cx,
             ))
-            .child(text_row(
+            .child(proxy_row(
                 self,
                 t(L10nKey::SettingsHttpProxy),
                 t(L10nKey::SettingsHttpProxyDesc),
                 &form.http,
+                errors.http.as_ref(),
                 cx,
             ))
             .child(self.subgroup_header(L10nKey::SettingsGroupAlgorithms, cx))
@@ -5801,19 +6269,14 @@ impl Tty7App {
         let http_proxy_value = http_proxy_input.read(cx).value().trim().to_string();
         let http_proxy_invalid = !http_proxy_value.is_empty()
             && !tty7_core::daemon::install::proxy::is_valid_manual(&http_proxy_value);
+        let http_proxy_error =
+            http_proxy_invalid.then(|| field_error(t(L10nKey::SettingsAppHttpProxyInvalid), cx));
         let http_proxy_control = v_flex()
             .gap_1()
             .w(px(260.))
             .max_w_full()
             .child(Input::new(&http_proxy_input).small())
-            .when(http_proxy_invalid, |this| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(danger)
-                        .child(t(L10nKey::SettingsAppHttpProxyInvalid)),
-                )
-            })
+            .when_some(http_proxy_error, |this, line| this.child(line))
             .into_any_element();
 
         let logo = Arc::new(Image::from_bytes(
@@ -6599,11 +7062,217 @@ mod tests {
 
     #[test]
     fn parse_host_port_handles_blank_and_ports() {
-        assert!(parse_host_port("  ").is_none());
-        let hp = parse_host_port("example.com:2222").unwrap();
+        assert!(
+            parse_host_port_checked("  ", DEFAULT_SOCKS_PORT)
+                .unwrap()
+                .is_none()
+        );
+        let hp = parse_host_port_checked("example.com:2222", DEFAULT_SOCKS_PORT)
+            .unwrap()
+            .unwrap();
         assert_eq!(hp.host, "example.com");
         assert_eq!(hp.port, 2222);
-        assert_eq!(parse_host_port("host").unwrap().port, 0);
+        // Used to be port 0, which no proxy answers on.
+        assert_eq!(
+            parse_host_port_checked("host", DEFAULT_SOCKS_PORT)
+                .unwrap()
+                .unwrap()
+                .port,
+            DEFAULT_SOCKS_PORT
+        );
+    }
+
+    /// A form with the one field that is genuinely required, and nothing else.
+    fn draft_with_host() -> SshFormDraft {
+        SshFormDraft {
+            host: "example.com".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_profile_with_no_host_is_not_saveable() {
+        let (_, errors) = validate_ssh_draft(SshFormDraft::default(), &[]);
+        assert_eq!(errors.host, Some(SshFieldError::HostMissing));
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn spaces_are_not_a_host() {
+        let draft = SshFormDraft {
+            host: "   ".to_string(),
+            ..Default::default()
+        };
+        let (profile, errors) = validate_ssh_draft(draft, &[]);
+        assert_eq!(errors.host, Some(SshFieldError::HostMissing));
+        assert_eq!(profile.host, "");
+    }
+
+    #[test]
+    fn a_name_is_not_required() {
+        // Every host imported from ~/.ssh/config arrives without one, and the
+        // list falls back to the address.
+        let (profile, errors) = validate_ssh_draft(draft_with_host(), &[]);
+        assert_eq!(profile.name, "");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn a_blank_port_still_means_22() {
+        let (profile, errors) = validate_ssh_draft(draft_with_host(), &[]);
+        assert_eq!(profile.port, 22);
+        assert_eq!(errors.port, None);
+    }
+
+    #[test]
+    fn a_port_that_is_not_a_port_is_refused() {
+        // "0" parses as a u16 and used to be saved as written; the other two
+        // failed to parse and were silently rewritten to 22.
+        for text in ["0", "abc", "70000", "-1", "22 "] {
+            let draft = SshFormDraft {
+                port: text.to_string(),
+                ..draft_with_host()
+            };
+            let (profile, errors) = validate_ssh_draft(draft, &[]);
+            match text {
+                "22 " => {
+                    assert_eq!(errors.port, None, "{text:?} is a port with spare space");
+                    assert_eq!(profile.port, 22);
+                }
+                _ => {
+                    assert_eq!(errors.port, Some(SshFieldError::PortRange), "{text:?}");
+                    assert!(!errors.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_jump_host_that_exists_is_kept_by_id() {
+        let bastion = SshProfile::new("bastion");
+        let draft = SshFormDraft {
+            jump: "bastion".to_string(),
+            ..draft_with_host()
+        };
+        let (profile, errors) = validate_ssh_draft(draft, &[bastion.clone()]);
+        assert_eq!(profile.jump_host, Some(bastion.id));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn a_mistyped_jump_host_says_which_name_it_could_not_find() {
+        let draft = SshFormDraft {
+            jump: "bastian".to_string(),
+            ..draft_with_host()
+        };
+        let (profile, errors) = validate_ssh_draft(draft, &[SshProfile::new("bastion")]);
+        assert_eq!(
+            errors.jump,
+            Some(SshFieldError::JumpUnknown("bastian".to_string()))
+        );
+        assert_eq!(
+            profile.jump_host, None,
+            "a typo never saves as a direct connection"
+        );
+    }
+
+    #[test]
+    fn a_host_cannot_jump_through_itself() {
+        let me = SshProfile::new("prod");
+        let draft = SshFormDraft {
+            id: me.id,
+            jump: "prod".to_string(),
+            ..draft_with_host()
+        };
+        let (profile, errors) = validate_ssh_draft(draft, &[me]);
+        assert_eq!(errors.jump, Some(SshFieldError::JumpIsSelf));
+        assert_eq!(profile.jump_host, None);
+    }
+
+    #[test]
+    fn a_bare_proxy_host_takes_the_scheme_default_port() {
+        let draft = SshFormDraft {
+            socks: "socks.example.com".to_string(),
+            http: "http.example.com".to_string(),
+            ..draft_with_host()
+        };
+        let (profile, errors) = validate_ssh_draft(draft, &[]);
+        assert_eq!(
+            profile.socks_proxy,
+            Some(HostPort::new("socks.example.com", 1080))
+        );
+        assert_eq!(
+            profile.http_proxy,
+            Some(HostPort::new("http.example.com", 8080))
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn a_proxy_address_with_a_colon_and_no_port_is_refused() {
+        for text in ["proxy.example.com:", "proxy.example.com:abc", "proxy:0"] {
+            let draft = SshFormDraft {
+                socks: text.to_string(),
+                ..draft_with_host()
+            };
+            let (profile, errors) = validate_ssh_draft(draft, &[]);
+            assert_eq!(
+                errors.socks,
+                Some(SshFieldError::ProxyPortRange),
+                "{text:?}"
+            );
+            assert_eq!(profile.socks_proxy, None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_form_that_cannot_be_saved_still_reports_what_it_would_save() {
+        // The Escape prompt asks whether the form differs from the config, so
+        // an invalid form has to hand back a profile to compare — otherwise a
+        // half-typed new host looks identical to the nothing on disk and
+        // Escape throws it away without asking.
+        let draft = SshFormDraft {
+            name: "half typed".to_string(),
+            ..Default::default()
+        };
+        let (profile, errors) = validate_ssh_draft(draft, &[]);
+        assert!(!errors.is_empty());
+        assert_eq!(profile.name, "half typed");
+    }
+
+    fn profile_at(name: &str, user: &str, host: &str, port: u16) -> SshProfile {
+        let mut p = SshProfile::new(name);
+        p.user = user.to_string();
+        p.host = host.to_string();
+        p.port = port;
+        p
+    }
+
+    /// The saved password belongs to `user@host:port`, so what counts as
+    /// "shared" is exactly that triple — a different name or a jump host in
+    /// front of it changes nothing, and a different port makes it a different
+    /// secret entirely.
+    #[test]
+    fn the_same_endpoint_under_two_names_counts_as_shared() {
+        let direct = profile_at("direct", "ana", "build.example.com", 22);
+        let mut via_jump = profile_at("via bastion", "ana", "build.example.com", 22);
+        via_jump.jump_host = Some(direct.id);
+        let staging = profile_at("staging", "ana", "build.example.com", 2222);
+        let other_user = profile_at("root", "root", "build.example.com", 22);
+
+        let mut cfg = Config::default();
+        let (direct_id, jump_id, staging_id) = (direct.id, via_jump.id, staging.id);
+        cfg.ssh_profiles = vec![direct, via_jump, staging, other_user];
+
+        // The two that reach the same endpoint see each other, and neither
+        // counts itself.
+        assert_eq!(profiles_sharing_endpoint(&cfg, direct_id), 1);
+        assert_eq!(profiles_sharing_endpoint(&cfg, jump_id), 1);
+        // A port apart is a keychain entry apart, so this one is alone even
+        // though the user and host match two of the others.
+        assert_eq!(profiles_sharing_endpoint(&cfg, staging_id), 0);
+        // A profile that is no longer on the list shares with nobody.
+        assert_eq!(profiles_sharing_endpoint(&cfg, Uuid::new_v4()), 0);
     }
 }
 

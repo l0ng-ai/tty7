@@ -96,10 +96,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was running, which on Windows is the common case (the OpenSSH
   Authentication Agent service is off by default), and then reported "no
   public key was accepted" when no key had ever been sent. `id_ed25519`,
-  `id_ecdsa` and `id_rsa` are now offered after the connection's own files
-  and before the agent, OpenSSH-style, deduplicated against the explicit list
-  by canonical path so one key spelled two ways is offered once — every offer
-  spends one of the server's `MaxAuthTries`. A discovered key that is
+  `id_ecdsa` and `id_rsa` now stand in for the identity list when the
+  connection names no key of its own, the way `IdentityFile`'s default works
+  in ssh_config — naming a key replaces them rather than adding to them. The
+  agent is asked before either, because every public key offered spends one
+  of the server's `MaxAuthTries` whether or not it is wanted, and the key the
+  user loaded into the agent is the one most likely to work. A discovered key
+  that is
   encrypted is used only when its passphrase is already in the OS keychain:
   russh has no offer-without-signing probe, so asking would spend a prompt on
   a key the server may not even want. A key named in the profile still asks,
