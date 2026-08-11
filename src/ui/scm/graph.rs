@@ -2212,12 +2212,18 @@ mod render_idle_gpui_tests {
     }
 
     fn draws_while_idle(vcx: &mut VisualTestContext) -> u64 {
+        test_window::quiesce(vcx, None);
         render_probe::arm(BUDGET);
         vcx.background_executor.run_until_parked();
         vcx.executor()
             .advance_clock(std::time::Duration::from_secs(3));
         vcx.background_executor.run_until_parked();
         render_probe::arm(BUDGET);
+        // No real-time exposure in the counted window, deliberately. The file
+        // tree holds a real filesystem watch, so real time is a channel input
+        // arrives on — and a test that spends it here is asking to be handed
+        // some. What has to be waited out is waited out in `quiesce` above,
+        // where a frame costs nothing.
         vcx.executor()
             .advance_clock(std::time::Duration::from_secs(9));
         vcx.background_executor.run_until_parked();
@@ -2234,6 +2240,7 @@ mod render_idle_gpui_tests {
             let page = app.update_in(vcx, |app, _, _| app.scm.graph.page.clone());
             if page.is_some() {
                 vcx.background_executor.run_until_parked();
+                test_window::quiesce(vcx, None);
                 return page;
             }
             if std::time::Instant::now() >= deadline {

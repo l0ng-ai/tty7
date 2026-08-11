@@ -166,6 +166,12 @@ impl Debounce {
         self.seq
     }
 
+    /// Is an event still waiting for its probe?
+    #[cfg(test)]
+    pub fn is_open(&self) -> bool {
+        self.opened.is_some()
+    }
+
     /// What the timer should do now. `Fire` closes the burst, so it is
     /// returned exactly once however many events went into it.
     pub fn poll(&mut self, now: Instant) -> DebounceStep {
@@ -487,6 +493,17 @@ impl ScmData {
     /// Nobody is holding a repository open and nothing is watching one.
     pub fn is_quiet(&self) -> bool {
         self.subs.is_empty() && self.watches.is_empty()
+    }
+
+    /// Is any repository still inside a debounce window?
+    ///
+    /// The window is measured on the real clock, and closing it costs a
+    /// frame. A test driving a virtual clock has no other way to tell a panel
+    /// that has gone quiet from one whose next repaint is merely still owed —
+    /// see `ui::app::test_window::quiesce`.
+    #[cfg(test)]
+    pub fn is_debouncing(&self) -> bool {
+        self.watches.values().any(|watch| watch.debounce.is_open())
     }
 
     /// Repositories that have a holder but no watch, nothing on the way, and

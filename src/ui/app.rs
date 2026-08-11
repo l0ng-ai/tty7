@@ -7842,6 +7842,88 @@ pub(crate) mod test_window {
         vcx.background_executor.run_until_parked();
         (app, vcx, stream)
     }
+
+    /// Wait until the window has actually stopped drawing — which is not the
+    /// same as having reached the state a test was waiting for.
+    ///
+    /// Called both after a settle and at the top of `draws_while_idle`: a test
+    /// that reaches its state, asserts a few things about it and only then
+    /// measures has given the setup more time to land, but not necessarily
+    /// enough, and the measurement is the place that cannot afford to be
+    /// wrong.
+    ///
+    /// Both of a `render_idle` test's clocks have to be pumped here, and they
+    /// are pumped differently.
+    ///
+    /// The pane runs its own git pipeline, separate from whatever panel is on
+    /// screen, and it hangs off a 300ms timer on the *virtual* clock — so it
+    /// never starts at all unless a test advances that clock. It used to be
+    /// `draws_while_idle`'s own `advance_clock` that started it, which put the
+    /// pane's first real `git` run, and the repaint it lands with, inside the
+    /// window being counted. Whether that repaint arrived before or after the
+    /// count then came down to how fast git ran, which is why these tests were
+    /// green here and red on a loaded CI runner (issue #523).
+    ///
+    /// What that repaint sets off in turn is timed on the *real* clock: the
+    /// landing opens a `GIT_WATCH_DEBOUNCE` burst, and closing the burst costs
+    /// another frame 250ms later. So the sleep below is load-bearing too, and
+    /// a round that drew nothing is not on its own enough to stop on — a burst
+    /// still open is a frame already owed.
+    #[cfg(unix)]
+    pub(crate) fn quiesce(vcx: &mut VisualTestContext, cwd: Option<&std::path::Path>) {
+        use crate::terminal::git_data::ScmData;
+        use crate::terminal::git_status::GitStatusCache;
+        use crate::ui::app::render_probe;
+        use crate::ui::host_ops::HostId;
+
+        /// How long quiet has to hold before it counts as quiet.
+        ///
+        /// Real time, and the only defence against the third clock in play:
+        /// the kernel's. The file tree keeps a real `inotify`/`FSEvents`
+        /// watch, and the writes a test makes while setting up its repository
+        /// are still being delivered long after every future the test can wait
+        /// on has resolved. They arrive on the channel, sit in a 200ms debounce
+        /// on the virtual clock, and are released by the next `advance_clock`
+        /// — which, without this, was the measurement's own. Any delivery
+        /// restarts the hold, so the wait is as long as the runner needs and
+        /// no longer.
+        const QUIET_HOLD: std::time::Duration = std::time::Duration::from_millis(400);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut quiet_since: Option<std::time::Instant> = None;
+        loop {
+            render_probe::arm(u64::MAX);
+            vcx.executor()
+                .advance_clock(std::time::Duration::from_millis(300));
+            vcx.background_executor.run_until_parked();
+            let quiet = render_probe::draws() == 0
+                && vcx.update(|_, cx| {
+                    let owed = cx
+                        .try_global::<ScmData>()
+                        .is_some_and(ScmData::is_debouncing);
+                    let answered = cwd.is_none_or(|cwd| {
+                        cx.try_global::<GitStatusCache>()
+                            .and_then(|cache| cache.known_repo_for(HostId::LOCAL, cwd))
+                            .is_some()
+                    });
+                    !owed && answered
+                });
+            match quiet {
+                false => quiet_since = None,
+                true => {
+                    let since = *quiet_since.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() >= QUIET_HOLD {
+                        return;
+                    }
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the window never stopped drawing"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
