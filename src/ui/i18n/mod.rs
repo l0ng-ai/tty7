@@ -767,6 +767,7 @@ l10n_keys! {
     PanelNoChangesHint,
     PanelMoreChangedFiles,
     PanelSessionSubtitle,
+    PanelConversationSubtitle,
     PanelProcessesSubtitle,
     PanelPortsSubtitle,
     PanelCwd,
