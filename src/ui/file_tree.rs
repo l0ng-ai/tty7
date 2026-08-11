@@ -66,6 +66,8 @@ pub(crate) enum TreeNote {
     /// The search stopped at `SEARCH_LIMIT`; the list is a prefix, not the
     /// whole answer, and has to say so.
     SearchCapped,
+    /// The walk itself failed; "no matches" would be a lie (#503).
+    SearchFailed,
 }
 
 /// `landed` is how many entries the listing returned, or `None` when nothing
@@ -122,6 +124,9 @@ struct SearchState {
     pending: String,
     hidden: bool,
     hits: Vec<TreeEntry>,
+    /// The walk itself failed. Kept separate from `hits` so "the search
+    /// errored" never renders as "no matches" (#503).
+    failed: Option<String>,
 }
 
 impl SearchState {
@@ -132,6 +137,7 @@ impl SearchState {
         self.generation += 1;
         self.pending = query.to_string();
         self.hidden = show_hidden;
+        self.failed = None;
         if query.is_empty() {
             self.hits.clear();
             return None;
@@ -143,13 +149,24 @@ impl SearchState {
         if self.generation != generation {
             return false;
         }
+        self.failed = None;
         self.hits = hits;
+        true
+    }
+
+    fn fail(&mut self, generation: u64, error: String) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        self.hits.clear();
+        self.failed = Some(error);
         true
     }
 
     fn restart(&mut self) {
         self.generation += 1;
         self.pending.clear();
+        self.failed = None;
     }
 }
 
@@ -439,19 +456,36 @@ impl FileTreeState {
                     cx,
                     move |h| {
                         h.search(&roots, &query, SEARCH_LIMIT, SEARCH_MAX_DIRS, show_hidden)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|hit| TreeEntry {
-                                name: hit.name,
-                                path: hit.path,
-                                is_dir: hit.is_dir,
-                                ignored: hit.ignored,
+                            .map(|hits| {
+                                hits.into_iter()
+                                    .map(|hit| TreeEntry {
+                                        name: hit.name,
+                                        path: hit.path,
+                                        is_dir: hit.is_dir,
+                                        ignored: hit.ignored,
+                                    })
+                                    .collect::<Vec<_>>()
                             })
-                            .collect::<Vec<_>>()
                     },
-                    move |app, hits, cx| {
-                        if app.file_tree.search.accept(generation, hits) {
-                            cx.notify();
+                    move |app, out, cx| {
+                        match out {
+                            Ok(hits) => {
+                                if app.file_tree.search.accept(generation, hits) {
+                                    cx.notify();
+                                }
+                            }
+                            Err(e) => {
+                                // The error was unwrapped into an empty hit
+                                // list, so a broken walk read as "no matches"
+                                // (#503).
+                                if app
+                                    .file_tree
+                                    .search
+                                    .fail(generation, crate::ui::host_ops::explain_io(&e))
+                                {
+                                    cx.notify();
+                                }
+                            }
                         }
                     },
                 );
@@ -473,6 +507,25 @@ impl FileTreeState {
                 note: None,
             })
             .collect();
+        if let Some(error) = &self.search.failed {
+            // The message rides in `name`: a note row has no entry of its
+            // own, and the render reads it back out for the {error} slot.
+            rows.insert(
+                0,
+                TreeRow {
+                    entry: TreeEntry {
+                        name: error.clone(),
+                        path: PathBuf::new(),
+                        is_dir: false,
+                        ignored: false,
+                    },
+                    depth: 0,
+                    is_root: false,
+                    expanded: false,
+                    note: Some(TreeNote::SearchFailed),
+                },
+            );
+        }
         if rows.len() >= SEARCH_LIMIT {
             rows.push(TreeRow {
                 entry: TreeEntry {
@@ -1116,6 +1169,7 @@ impl Tty7App {
         }
 
         let target = new_path.clone();
+        let failed_name = name.clone();
         HostOps::run_in(
             host,
             window,
@@ -1141,8 +1195,16 @@ impl Tty7App {
                         {
                             code.selected = None;
                         }
-                        use gpui_component::WindowExt as _;
-                        window.push_notification(format!("{e}"), cx);
+                        // A bare "{e}" notification answered neither what was
+                        // being done nor what to do about it; say both, the
+                        // way the delete path already did (#503).
+                        let context = match &edit {
+                            TreeEdit::Rename { .. } => {
+                                t_fmt(L10nKey::FileTreeRenameFailed, &[("name", &failed_name)])
+                            }
+                            _ => t_fmt(L10nKey::FileTreeCreateFailed, &[("name", &failed_name)]),
+                        };
+                        HostOps::notify_err(window, cx, &context, &e);
                     }
                 }
                 cx.notify();
@@ -1503,6 +1565,7 @@ impl Tty7App {
                 TreeNote::HiddenOnly => (L10nKey::TreeDirHiddenOnly, muted),
                 TreeNote::Unreadable => (L10nKey::TreeDirUnreadable, cx.theme().danger),
                 TreeNote::SearchCapped => (L10nKey::TreeSearchCapped, muted),
+                TreeNote::SearchFailed => (L10nKey::TreeSearchFailed, cx.theme().danger),
             };
             return vec![
                 h_flex()
@@ -1517,11 +1580,12 @@ impl Tty7App {
                     .text_color(ink)
                     .child(match note {
                         TreeNote::SearchCapped => t_fmt(key, &[("n", &SEARCH_LIMIT.to_string())]),
+                        TreeNote::SearchFailed => t_fmt(key, &[("error", &row.entry.name)]),
                         _ => t(key).to_string(),
                     })
-                    // Every note but the capped-search one stands for a real
-                    // directory, and carries its path; that one stands for the
-                    // rest of a search and has nowhere to put anything.
+                    // Every note but the search ones stands for a real
+                    // directory, and carries its path; those stand for the
+                    // search itself and have nowhere to put anything.
                     .when(!path.as_os_str().is_empty(), |d| {
                         d.drag_over::<ExternalPaths>(|s, _, _, cx| {
                             s.bg(cx.theme().drag_border.opacity(0.14))
@@ -2443,6 +2507,31 @@ mod tests {
         search.retarget("foo", true).expect("typing again walks");
         search.restart();
         assert!(search.retarget("foo", true).is_some(), "restart re-walks");
+    }
+
+    #[test]
+    fn a_failed_search_walk_is_not_an_empty_result() {
+        // #503: the walk's error was unwrapped into zero hits, so a broken
+        // search read exactly like "no matches".
+        let mut search = SearchState::default();
+        let generation = search.retarget("foo", false).expect("a new query walks");
+        assert!(search.fail(generation, "You do not have permission.".into()));
+        assert_eq!(
+            search.failed.as_deref(),
+            Some("You do not have permission.")
+        );
+        assert!(search.hits.is_empty());
+
+        assert!(
+            !search.fail(generation + 1, "stale".into()),
+            "an overtaken walk's error is dropped like its hits"
+        );
+
+        // The next query asks again with a clean slate.
+        let generation = search.retarget("fo", false).expect("a changed query walks");
+        assert_eq!(search.failed, None);
+        assert!(search.accept(generation, vec![entry("fo.rs", false)]));
+        assert_eq!(search.failed, None, "a fresh answer clears the error");
     }
 
     #[test]

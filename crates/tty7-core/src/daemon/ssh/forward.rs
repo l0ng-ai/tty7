@@ -232,6 +232,29 @@ impl ForwardEntry {
             status: self.status.clone(),
         }
     }
+
+    /// "Listening" is stamped once, at creation. If the accept loop has since
+    /// exited — `accept_retrying` giving up after repeated accept errors (fd
+    /// exhaustion is the reachable case), or the SSH connection dying under
+    /// it — the entry must stop claiming a listener it no longer has (#500).
+    /// Checked at list time: that is where the UI reads the status, and a
+    /// dead listener is exactly what a refresh should reveal.
+    fn reflect_listener_death(&mut self) {
+        if !matches!(self.status, ForwardStatus::Listening) {
+            return;
+        }
+        let ForwardCancel::Task(handle) = &self.cancel else {
+            return;
+        };
+        if handle.is_finished() {
+            log::warn!(
+                "local forward on {}:{} is no longer accepting",
+                self.bind_host,
+                self.bind_port
+            );
+            self.status = ForwardStatus::Error("listener stopped".to_string());
+        }
+    }
 }
 
 #[derive(Default)]
@@ -330,12 +353,15 @@ impl SshForwardRegistry {
     }
 
     fn list_owned(&self, owner: &ForwardOwner, view_pane: u64) -> Vec<ManagedForward> {
-        let owners = self.owners.lock().unwrap();
+        let mut owners = self.owners.lock().unwrap();
         let mut list: Vec<_> = owners
-            .get(owner)
+            .get_mut(owner)
             .into_iter()
             .flatten()
-            .map(|e| e.to_managed(view_pane))
+            .map(|e| {
+                e.reflect_listener_death();
+                e.to_managed(view_pane)
+            })
             .collect();
         list.sort_by_key(|m| m.id);
         list
@@ -608,9 +634,14 @@ impl SshForwardRegistry {
         remote_host: &str,
         remote_port: u16,
     ) -> Option<u16> {
-        let owners = self.owners.lock().unwrap();
-        owners
-            .get(owner)?
+        let mut owners = self.owners.lock().unwrap();
+        let entries = owners.get_mut(owner)?;
+        // A dead listener must not be "reused": its port accepts nothing,
+        // so the loopback link would be handed a corpse (#500).
+        for e in entries.iter_mut() {
+            e.reflect_listener_death();
+        }
+        entries
             .iter()
             .find(|e| {
                 e.auto_local
@@ -812,6 +843,54 @@ mod tests {
         assert_eq!(table.lookup("localhost", 9999), None);
         table.unregister("localhost", 9000);
         assert_eq!(table.lookup("localhost", 9000), None);
+    }
+
+    #[tokio::test]
+    async fn a_dead_accept_loop_stops_claiming_to_listen() {
+        // #500: the status was stamped Listening at creation and never
+        // revisited, so an accept loop that had exited still read as a live
+        // listener everywhere the UI looked.
+        let reg = SshForwardRegistry::default();
+        let entry = |id: u64, done: bool| {
+            let task = tokio::spawn(async move {
+                if !done {
+                    std::future::pending::<()>().await;
+                }
+            });
+            ForwardEntry {
+                id,
+                kind: SshForwardKind::Local,
+                bind_host: "127.0.0.1".into(),
+                bind_port: 8000 + id as u16,
+                target_host: "h".into(),
+                target_port: 80,
+                description: None,
+                status: ForwardStatus::Listening,
+                cancel: ForwardCancel::Task(task),
+                auto_local: false,
+            }
+        };
+        let dead = entry(0, true);
+        let live = entry(1, false);
+        {
+            let mut owners = reg.owners.lock().unwrap();
+            let entries = owners.entry(ForwardOwner::Pane(7)).or_default();
+            entries.push(dead);
+            entries.push(live);
+        }
+        // Let the already-finished task actually retire.
+        tokio::task::yield_now().await;
+
+        let list = reg.list(7);
+        assert!(
+            matches!(&list[0].status, ForwardStatus::Error(e) if e == "listener stopped"),
+            "the dead accept loop must not read as Listening: {:?}",
+            list[0].status
+        );
+        assert!(
+            matches!(list[1].status, ForwardStatus::Listening),
+            "the live one keeps its status"
+        );
     }
 
     #[tokio::test]

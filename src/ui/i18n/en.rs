@@ -39,6 +39,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TreeDirHiddenOnly => "Only hidden files",
         L10nKey::TreeDirUnreadable => "Could not be read",
         L10nKey::TreeSearchCapped => "First {n} matches",
+        L10nKey::TreeSearchFailed => "Search failed: {error}",
         L10nKey::FileChangedOnDisk => "File changed on disk",
         L10nKey::Reload => "Reload",
         L10nKey::KeepMine => "Keep mine",
@@ -829,6 +830,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SftpTransferDone => "done",
         L10nKey::SftpTransferCancelled => "cancelled",
         L10nKey::SftpTransferError => "error",
+        L10nKey::SftpTransferListFailed => "Transfer list unavailable: {error}",
         L10nKey::SftpImagePasteUploadFailed => {
             "Could not upload the pasted image to {host}: {error}"
         }
@@ -869,6 +871,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "The file will be deleted on {host}. There is no trash on the far side."
         }
         L10nKey::FileTreeDeleteFailed => "Could not delete {name}",
+        L10nKey::FileTreeCreateFailed => "Could not create {name}",
+        L10nKey::FileTreeRenameFailed => "Could not rename {name}",
         L10nKey::FileTreeContextOpen => "Open",
         L10nKey::FileTreeContextCdHere => "cd Here",
         L10nKey::FileTreeContextInsertPath => "Insert Path in Terminal",

@@ -2654,6 +2654,11 @@ impl TerminalView {
                 cx.background_spawn(async move { route.transfer_list() })
                     .await
             };
+            let Ok(listed) = listed else {
+                // A transient poll failure (the link dropping mid-upload,
+                // say) is not the job ending — keep watching (#491).
+                continue;
+            };
             let Some(progress) = listed.into_iter().find(|j| j.job_id == job) else {
                 // Pruned after the retention window, or the daemon restarted:
                 // there is nothing left to report either way.

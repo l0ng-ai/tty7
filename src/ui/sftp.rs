@@ -115,21 +115,20 @@ impl SftpRoute {
         }
     }
 
-    pub(crate) fn transfer_list(&self) -> Vec<SftpJobProgress> {
+    pub(crate) fn transfer_list(&self) -> Result<Vec<SftpJobProgress>, String> {
         let Some(req) = self.workspace_op(crate::daemon::protocol::WorkspaceOp::SftpTransferList)
         else {
-            return RemoteTerminal::sftp_transfer_list(self.pane_id);
+            return Ok(RemoteTerminal::sftp_transfer_list(self.pane_id));
         };
         match RemoteTerminal::on_workspace(req) {
-            Ok(crate::daemon::protocol::DaemonMsg::SftpTransferProgress(jobs)) => jobs,
-            Ok(other) => {
-                log::warn!("unexpected reply to a workspace transfer list: {other:?}");
-                Vec::new()
-            }
-            Err(e) => {
-                log::warn!("workspace transfer list failed: {e}");
-                Vec::new()
-            }
+            Ok(crate::daemon::protocol::DaemonMsg::SftpTransferProgress(jobs)) => Ok(jobs),
+            Ok(other) => Err(t_fmt(
+                L10nKey::SftpErrorUnexpectedReply,
+                &[("reply", &format!("{other:?}"))],
+            )),
+            // This used to come back as an empty list: a dropped link emptied
+            // the transfers tray in silence (#491).
+            Err(e) => Err(e.to_string()),
         }
     }
 }
@@ -143,6 +142,10 @@ pub(crate) struct SftpPanelState {
     pub(crate) filter_input: gpui::Entity<InputState>,
     pub(crate) error: Option<String>,
     pub(crate) jobs: Vec<SftpJobProgress>,
+    /// The last transfer-list poll failure. The jobs stay on screen when the
+    /// link drops — they are the last truth — and this says why they stopped
+    /// moving (#491).
+    pub(crate) jobs_error: Option<String>,
     /// Uploads this panel started whose landing it has not listed yet.
     ///
     /// An upload is written to `<name>.tty7-upload-<hex>` and renamed into
@@ -188,6 +191,7 @@ impl SftpPanelState {
             filter_input,
             error: None,
             jobs: Vec::new(),
+            jobs_error: None,
             uploads_awaiting_listing: HashSet::new(),
             claimed_downloads: HashSet::new(),
             dismissed_jobs: HashSet::new(),
@@ -362,6 +366,7 @@ impl Tty7App {
         self.sftp_panel.editing_path = None;
         self.sftp_panel.editing_path_sub.clear();
         self.sftp_panel.jobs.clear();
+        self.sftp_panel.jobs_error = None;
         self.sftp_panel.open_workspace = None;
         self.sftp_panel.poll_gen = self.sftp_panel.poll_gen.wrapping_add(1);
         cx.notify();
@@ -1007,7 +1012,26 @@ impl Tty7App {
     /// listing on screen was the one taken while the temporary name existed —
     /// and it stayed, so a finished upload read as a file with a hash glued to
     /// its name.
-    fn sftp_apply_jobs(&mut self, jobs: Vec<SftpJobProgress>, cx: &mut Context<Self>) {
+    fn sftp_apply_jobs(
+        &mut self,
+        jobs: Result<Vec<SftpJobProgress>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let jobs = match jobs {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                // Keep the jobs already on screen — they are the last truth —
+                // and say why they stopped moving (#491). Deduped: the poll
+                // fires twice a second and a dead link would otherwise
+                // re-render every time.
+                if self.sftp_panel.jobs_error.as_deref() != Some(e.as_str()) {
+                    self.sftp_panel.jobs_error = Some(e);
+                    cx.notify();
+                }
+                return;
+            }
+        };
+        self.sftp_panel.jobs_error = None;
         let owed = &self.sftp_panel.uploads_awaiting_listing;
         let still_running = uploads_still_running(owed, &jobs);
         let settled = still_running.len() != owed.len();
@@ -1568,7 +1592,7 @@ impl Tty7App {
             .iter()
             .filter(|j| history || !self.sftp_panel.dismissed_jobs.contains(&j.job_id))
             .collect();
-        if jobs.is_empty() && !history {
+        if jobs.is_empty() && !history && self.sftp_panel.jobs_error.is_none() {
             return None;
         }
 
@@ -1604,6 +1628,10 @@ impl Tty7App {
                     ("pct", &format!("{pct:.0}")),
                 ],
             )
+        } else if let Some(error) = &self.sftp_panel.jobs_error {
+            // The poll is failing: the jobs below are the last truth, so the
+            // summary carries why they stopped moving (#491).
+            t_fmt(L10nKey::SftpTransferListFailed, &[("error", error)])
         } else if failed > 0 {
             t_fmt(
                 L10nKey::SftpTransferSummaryFailed,
@@ -1612,7 +1640,8 @@ impl Tty7App {
         } else {
             t(L10nKey::SftpTransferSummaryIdle).to_string()
         };
-        let summary_color = if running == 0 && failed > 0 {
+        let summary_color = if running == 0 && (failed > 0 || self.sftp_panel.jobs_error.is_some())
+        {
             danger
         } else {
             muted
@@ -1671,13 +1700,22 @@ impl Tty7App {
 
         let body = expanded.then(|| {
             let inner: Div = if jobs.is_empty() {
+                let (text, ink) = match &self.sftp_panel.jobs_error {
+                    // The poll is failing: an empty list here would be the
+                    // swallowed error reading as "nothing ever ran" (#491).
+                    Some(error) => (
+                        t_fmt(L10nKey::SftpTransferListFailed, &[("error", error)]),
+                        danger,
+                    ),
+                    None => (t(L10nKey::SftpNoTransfers).to_string(), muted),
+                };
                 v_flex().child(
                     div()
                         .px(px(CONTENT_INSET))
                         .py(px(3.))
                         .text_size(rems(META))
-                        .text_color(muted)
-                        .child(t(L10nKey::SftpNoTransfers)),
+                        .text_color(ink)
+                        .child(text),
                 )
             } else {
                 let mut list = v_flex().px(px(CONTENT_INSET)).pb(px(6.)).gap(px(6.));
