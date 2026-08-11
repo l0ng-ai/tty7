@@ -5,7 +5,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 
 use crate::core::keychain::{CredentialStore as _, OsCredentialStore};
 use crate::daemon::protocol::{AuthPromptKind, AuthResponse, SshPhase};
@@ -41,6 +41,9 @@ pub(crate) enum PromptModel {
         port: u16,
         algorithm: String,
         fingerprint: String,
+        /// Set when the host is already on file under some other algorithm, so
+        /// the sheet can say why a known host is offering an unseen key.
+        previously_known_as: Option<String>,
     },
     HostKeyChanged {
         host: String,
@@ -108,11 +111,13 @@ impl PromptModel {
                 port,
                 algorithm,
                 fingerprint_sha256,
+                previously_known_as,
             } => PromptModel::HostKeyUnknown {
                 host,
                 port,
                 algorithm,
                 fingerprint: fingerprint_sha256,
+                previously_known_as,
             },
             AuthPromptKind::HostKeyChanged {
                 host,
@@ -312,10 +317,14 @@ impl Tty7App {
                     subs.push(cx.subscribe_in(
                         input,
                         window,
-                        |this, _input, ev: &InputEvent, window, cx| {
-                            if matches!(ev, InputEvent::PressEnter { .. }) {
-                                this.submit_ssh_prompt(window, cx);
-                            }
+                        |this, _input, ev: &InputEvent, window, cx| match ev {
+                            InputEvent::PressEnter { .. } => this.submit_ssh_prompt(window, cx),
+                            // The changed-host sheet enables Override off the
+                            // typed text, so the flag has to be recomputed
+                            // between keystrokes rather than at whatever
+                            // repaint happened to come along.
+                            InputEvent::Change => cx.notify(),
+                            _ => {}
                         },
                     ));
                 }
@@ -358,10 +367,12 @@ impl Tty7App {
             subs.push(cx.subscribe_in(
                 input,
                 window,
-                |this, _input, ev: &InputEvent, window, cx| {
-                    if matches!(ev, InputEvent::PressEnter { .. }) {
-                        this.submit_ssh_prompt(window, cx);
-                    }
+                |this, _input, ev: &InputEvent, window, cx| match ev {
+                    InputEvent::PressEnter { .. } => this.submit_ssh_prompt(window, cx),
+                    // Same reason as the pane-routed path above: Override's
+                    // enabled state is read off the input on every repaint.
+                    InputEvent::Change => cx.notify(),
+                    _ => {}
                 },
             ));
         }
@@ -392,6 +403,18 @@ impl Tty7App {
             .iter()
             .map(|i| i.read(cx).value().to_string())
             .collect();
+
+        // A changed host key is the one prompt where submitting the wrong thing
+        // is indistinguishable from aborting: the decision it sends for
+        // anything but "yes" is byte-for-byte what Abort sends, and the sheet
+        // closed either way. So Enter on a half-typed answer looked like the
+        // app had swallowed the connection. Leave the sheet up instead; the
+        // rejection stays available on Abort, where the user meant it.
+        if let PromptModel::HostKeyChanged { .. } = &model {
+            if !changed_confirmed(values.first().map(String::as_str).unwrap_or_default()) {
+                return;
+            }
+        }
 
         let (response, write) = match &model {
             PromptModel::Password {
@@ -730,6 +753,7 @@ impl Tty7App {
                 fingerprint,
                 port,
                 host,
+                previously_known_as,
             } => card
                 .child(div().text_xs().child(format!("{host}:{port}  {algorithm}")))
                 .child(
@@ -738,6 +762,21 @@ impl Tty7App {
                         .font_family("monospace")
                         .child(fingerprint.clone()),
                 )
+                // A host that already has an entry under another algorithm is
+                // the ordinary way a server grows an ed25519 key beside its old
+                // ssh-rsa one. Saying so is the difference between "who is
+                // this?" and "this is the host you know, with a second key".
+                .when_some(previously_known_as.as_ref(), |c, previous| {
+                    c.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(crate::ui::i18n::t_fmt(
+                                crate::ui::i18n::L10nKey::SshPromptHostKeyNewAlgorithm,
+                                &[("previous_algorithm", previous), ("algorithm", algorithm)],
+                            )),
+                    )
+                })
                 .child(
                     h_flex()
                         .justify_end()
@@ -766,8 +805,20 @@ impl Tty7App {
                 old_fingerprint,
                 port,
                 host,
-            } => card
-                .child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+            } => {
+                // Override without "yes" typed used to send the *rejection* —
+                // the same bytes Abort sends — and close the sheet, so the
+                // button read as a way through and behaved as a way out. It is
+                // dead until the word is there, which is what the line above
+                // the field has been claiming all along.
+                let typed = self
+                    .ssh_prompt
+                    .inputs
+                    .first()
+                    .map(|i| i.read(cx).value().to_string())
+                    .unwrap_or_default();
+                let can_override = changed_confirmed(&typed);
+                card.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
                     crate::ui::i18n::L10nKey::SshPromptHostKeyChangedBody,
                 )))
                 .child(div().text_xs().child(format!("{host}:{port}  {algorithm}")))
@@ -794,6 +845,18 @@ impl Tty7App {
                     crate::ui::i18n::L10nKey::HostKeyOverrideMessage,
                 )))
                 .child(self.render_ssh_input(0))
+                // Only once they have typed something: an empty field is not a
+                // mistake to be corrected, it is where everyone starts.
+                .when(!typed.trim().is_empty() && !can_override, |c| {
+                    c.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(crate::ui::i18n::t(
+                                crate::ui::i18n::L10nKey::SshPromptTypeYesToOverride,
+                            )),
+                    )
+                })
                 .child(
                     h_flex()
                         .justify_end()
@@ -805,6 +868,7 @@ impl Tty7App {
                             Button::new("ssh-hkc-override")
                                 .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Override))
                                 .small()
+                                .disabled(!can_override)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.submit_ssh_prompt(window, cx)
                                 })),
@@ -818,7 +882,8 @@ impl Tty7App {
                                     this.cancel_ssh_prompt(window, cx)
                                 })),
                         ),
-                ),
+                )
+            }
         };
 
         card.into_any_element()
@@ -1024,6 +1089,58 @@ mod tests {
             }
         );
     }
+
+    /// `changed_confirmed` is also what enables the Override button, so the
+    /// button and the decision can never disagree about what "yes" means — the
+    /// bug was a button that offered a way through and sent the rejection.
+    #[test]
+    fn override_is_enabled_by_exactly_what_accepts() {
+        for typed in ["", " ", "y", "no", "yesss"] {
+            assert!(
+                !changed_confirmed(typed),
+                "{typed:?} must leave Override disabled"
+            );
+            assert_eq!(
+                host_key_changed_decision(typed),
+                AuthResponse::HostKeyDecision {
+                    accept: false,
+                    remember: false
+                }
+            );
+        }
+        for typed in ["yes", "YES", " yes "] {
+            assert!(changed_confirmed(typed), "{typed:?} must enable Override");
+        }
+    }
+
+    /// The host is known, just not by this algorithm — the mild confirmation,
+    /// carrying the algorithm it *is* known by, and never the danger sheet.
+    #[test]
+    fn a_new_algorithm_raises_the_unknown_host_sheet_not_the_changed_one() {
+        let m = PromptModel::from_prompt(
+            AuthPromptKind::HostKeyUnknown {
+                host: "example.com".into(),
+                port: 22,
+                algorithm: "ssh-ed25519".into(),
+                fingerprint_sha256: "SHA256:new".into(),
+                previously_known_as: Some("ssh-rsa".into()),
+            },
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            m,
+            PromptModel::HostKeyUnknown {
+                host: "example.com".into(),
+                port: 22,
+                algorithm: "ssh-ed25519".into(),
+                fingerprint: "SHA256:new".into(),
+                previously_known_as: Some("ssh-rsa".into()),
+            }
+        );
+        assert_eq!(m.input_count(), 0);
+    }
 }
 
 #[cfg(test)]
@@ -1071,6 +1188,7 @@ mod focus_tests {
                     port: 22,
                     algorithm: "ssh-ed25519".into(),
                     fingerprint: "SHA256:zzz".into(),
+                    previously_known_as: None,
                 });
                 window.focus(&app.ssh_prompt.focus_handle, cx);
                 // A headless harness has no live pane, so `focus_active`

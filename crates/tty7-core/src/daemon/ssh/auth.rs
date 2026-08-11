@@ -441,49 +441,20 @@ async fn try_publickeys(
     let mut last: Option<MethodSet> = None;
     let mut round = KeyRound::default();
 
-    if spec.auth_mode != SshAuthMode::Agent {
-        // OpenSSH parity (#484): the `~/.ssh` default identities are appended
-        // after the explicit ones (there is no `IdentitiesOnly` yet), and
-        // deduped against them by canonical path — the explicit list may spell
-        // the same key with different separators or casing, and every offer
-        // spends one of the server's MaxAuthTries. Dedup compares the *expanded*
-        // explicit paths, the same ones `try_identity_file` opens: a spec entry
-        // still carrying `~` or `%h` names a real file, and comparing it raw
-        // would fail to canonicalize and offer that key a second time.
-        let explicit: Vec<String> = spec
-            .identity_files
-            .iter()
-            .map(|p| {
-                crate::core::ssh_profile::expand_identity_placeholders(p, &spec.host, &spec.user)
-            })
-            .collect();
-        let discovered = dedup_candidates(
-            crate::core::ssh_profile::default_identity_candidates(),
-            &explicit,
-            canonical_key,
-        );
-        let files = spec
-            .identity_files
-            .iter()
-            .map(|p| (p.clone(), KeySource::Explicit))
-            .chain(discovered.into_iter().map(|p| (p, KeySource::Discovered)));
-        for (path, source) in files {
-            match try_identity_file(handle, spec, broker, &path, source, &mut round).await {
-                Outcome::Authenticated => return Outcome::Authenticated,
-                Outcome::Failed {
-                    remaining_methods, ..
-                } => {
-                    if remaining_methods.is_some() {
-                        last = remaining_methods;
-                    }
-                }
-                Outcome::Skipped => {}
-            }
-        }
-    }
+    let named_own_keys = !spec.identity_files.is_empty();
+    let files = identity_offers(
+        &spec.identity_files,
+        crate::core::ssh_profile::default_identity_candidates,
+    );
 
-    if spec.auth_mode != SshAuthMode::PublicKey {
-        match try_agent(handle, spec, &mut round).await {
+    for step in auth_steps(spec.auth_mode, named_own_keys) {
+        let outcome = match step {
+            AuthStep::IdentityFiles => {
+                try_identity_files(handle, spec, broker, &files, &mut round).await
+            }
+            AuthStep::Agent => try_agent(handle, spec, &mut round).await,
+        };
+        match outcome {
             Outcome::Authenticated => return Outcome::Authenticated,
             Outcome::Failed {
                 remaining_methods, ..
@@ -498,8 +469,68 @@ async fn try_publickeys(
 
     Outcome::Failed {
         remaining_methods: last,
-        reason: Some(round.reason(spec.auth_mode)),
+        reason: Some(round.reason(spec.auth_mode, !spec.identity_files.is_empty())),
     }
+}
+
+/// One leg of a publickey round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthStep {
+    IdentityFiles,
+    Agent,
+}
+
+/// The order a publickey round works through its sources, most plainly asked
+/// for first (#513). Every key offered spends one of the server's
+/// `MaxAuthTries` — six by default — whether or not the server wants it, so
+/// the order decides who gets locked out when the budget runs dry:
+///
+/// 1. a key the profile **names** — the user said "use this one"
+/// 2. the **agent** — the user said "I loaded these"
+/// 3. the `~/.ssh` **defaults** — nobody said anything and we are guessing
+///
+/// Steps 1 and 3 are the same leg: `identity_offers` already makes the two
+/// lists alternatives, so a profile that names a key has no defaults to
+/// reach and its named key goes first, while one that names none has only
+/// guesses and puts them after the agent. Offering the guesses first is what
+/// let three stale keys in `~/.ssh` exhaust the budget ahead of a working
+/// agent; offering the agent ahead of a *named* key would do the same to
+/// someone who spelled out exactly which key to use.
+fn auth_steps(mode: SshAuthMode, named_own_keys: bool) -> Vec<AuthStep> {
+    let mut steps = Vec::new();
+    if mode != SshAuthMode::Agent && named_own_keys {
+        steps.push(AuthStep::IdentityFiles);
+    }
+    if mode != SshAuthMode::PublicKey {
+        steps.push(AuthStep::Agent);
+    }
+    if mode != SshAuthMode::Agent && !named_own_keys {
+        steps.push(AuthStep::IdentityFiles);
+    }
+    steps
+}
+
+/// The identity files one publickey round will offer, in order, each tagged
+/// with where it came from. The `~/.ssh` defaults are the list a profile
+/// falls back to, not a list appended to its own: `IdentityFile` in
+/// ssh_config replaces the defaults the same way, and appending instead made
+/// a profile that names a key spend *more* of the server's `MaxAuthTries`
+/// than one that names none (#513). `defaults` is a thunk so that the common
+/// path — a profile with its own key — never goes looking for `$HOME`.
+fn identity_offers(
+    explicit: &[String],
+    defaults: impl FnOnce() -> Vec<String>,
+) -> Vec<(String, KeySource)> {
+    if explicit.is_empty() {
+        return defaults()
+            .into_iter()
+            .map(|path| (path, KeySource::Discovered))
+            .collect();
+    }
+    explicit
+        .iter()
+        .map(|path| (path.clone(), KeySource::Explicit))
+        .collect()
 }
 
 /// Where an identity file came from. Provenance decides failure behaviour:
@@ -511,41 +542,6 @@ async fn try_publickeys(
 enum KeySource {
     Explicit,
     Discovered,
-}
-
-/// Canonical path for dedup: the same key reached via `~`, an absolute path,
-/// or different separator/casing spellings must be offered once, not twice —
-/// each offer spends one of the server's MaxAuthTries. Files that cannot be
-/// canonicalized (missing) never enter the set; the read step skips them.
-fn canonical_key(path: &str) -> Option<String> {
-    std::fs::canonicalize(path)
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned())
-}
-
-/// Drop default candidates an explicit entry already names, comparing by
-/// canonical path. Pure apart from the injected canonicalizer, so tests never
-/// touch the filesystem.
-fn dedup_candidates(
-    candidates: Vec<String>,
-    explicit: &[String],
-    canon: impl Fn(&str) -> Option<String>,
-) -> Vec<String> {
-    let mut seen: std::collections::HashSet<String> =
-        explicit.iter().filter_map(|p| canon(p)).collect();
-    let mut out = Vec::new();
-    for candidate in candidates {
-        match canon(&candidate) {
-            Some(key) if seen.contains(&key) => {}
-            Some(key) => {
-                seen.insert(key);
-                out.push(candidate);
-            }
-            // Not canonicalizable means not readable; the read step skips it.
-            None => out.push(candidate),
-        }
-    }
-    out
 }
 
 /// What one publickey round learned, kept so the final error can distinguish
@@ -571,7 +567,11 @@ struct KeyRound {
 }
 
 impl KeyRound {
-    fn reason(&self, mode: SshAuthMode) -> String {
+    /// `named_own_keys` is whether the profile listed identity files of its
+    /// own, which is what decides whether the `~/.ssh` defaults were in play
+    /// — the two are alternatives, so the "checked" list must name one or
+    /// the other and never both.
+    fn reason(&self, mode: SshAuthMode, named_own_keys: bool) -> String {
         if !self.rejected_files.is_empty() || self.agent_rejected > 0 {
             let mut what = self.rejected_files.clone();
             if self.agent_rejected > 0 {
@@ -590,8 +590,11 @@ impl KeyRound {
         if self.offered_files.is_empty() && self.agent_offered == 0 {
             let mut looked: Vec<String> = Vec::new();
             if mode != SshAuthMode::Agent {
-                looked.push("identity files".to_string());
-                looked.push("~/.ssh default keys".to_string());
+                looked.push(if named_own_keys {
+                    "identity files".to_string()
+                } else {
+                    "~/.ssh default keys".to_string()
+                });
             }
             if mode != SshAuthMode::PublicKey {
                 looked.push(if self.agent_available {
@@ -682,6 +685,36 @@ fn load_identity(
                 KeySource::Discovered => IdentityLoad::Skip,
             }
         }
+    }
+}
+
+/// Offer an identity list in order, stopping at the first key the server
+/// takes. A file that cannot be offered at all is skipped rather than ending
+/// the leg — `round` is what remembers why, for the failure text.
+async fn try_identity_files(
+    handle: &mut Handle<ClientHandler>,
+    spec: &NativeSshSpec,
+    broker: &Arc<PromptBroker>,
+    files: &[(String, KeySource)],
+    round: &mut KeyRound,
+) -> Outcome {
+    let mut last: Option<MethodSet> = None;
+    for (path, source) in files {
+        match try_identity_file(handle, spec, broker, path, *source, round).await {
+            Outcome::Authenticated => return Outcome::Authenticated,
+            Outcome::Failed {
+                remaining_methods, ..
+            } => {
+                if remaining_methods.is_some() {
+                    last = remaining_methods;
+                }
+            }
+            Outcome::Skipped => {}
+        }
+    }
+    Outcome::Failed {
+        remaining_methods: last,
+        reason: None,
     }
 }
 
@@ -1095,35 +1128,81 @@ mod tests {
     }
 
     #[test]
-    fn default_candidates_dedup_against_explicit_by_canonical_path() {
-        // The fake canonicalizer collapses spelling differences; two strings
-        // with the same canonical form are one file, and the explicit entry
-        // wins the offer slot.
-        let canon = |p: &str| Some(p.replace("//", "/"));
-        let out = dedup_candidates(
-            vec![
-                "/home/me/.ssh/id_ed25519".to_string(),
-                "/home/me/.ssh/id_ecdsa".to_string(),
-                "/home/me/.ssh/id_rsa".to_string(),
-            ],
-            &["/home/me//.ssh/id_rsa".to_string()],
-            canon,
+    fn a_named_key_outranks_the_agent_and_the_agent_outranks_a_guess() {
+        // #513: the budget is spent in order of how plainly the user asked
+        // for the key. Naming one puts it first; naming none leaves only
+        // guesses, which go behind the agent.
+        assert_eq!(
+            auth_steps(SshAuthMode::Auto, true),
+            vec![AuthStep::IdentityFiles, AuthStep::Agent],
+            "a key the profile names is offered before the agent's"
         );
         assert_eq!(
-            out,
-            vec![
-                "/home/me/.ssh/id_ed25519".to_string(),
-                "/home/me/.ssh/id_ecdsa".to_string()
-            ]
+            auth_steps(SshAuthMode::Auto, false),
+            vec![AuthStep::Agent, AuthStep::IdentityFiles],
+            "the ~/.ssh guesses come after the agent, never ahead of it"
         );
     }
 
     #[test]
-    fn candidates_that_do_not_canonicalize_pass_through() {
-        // A missing default is the normal case; the read step skips it, so
-        // dedup must not drop it here either.
-        let out = dedup_candidates(vec!["/missing/id_ed25519".to_string()], &[], |_| None);
-        assert_eq!(out, vec!["/missing/id_ed25519".to_string()]);
+    fn a_pinned_mode_runs_only_its_own_step() {
+        for named in [true, false] {
+            assert_eq!(
+                auth_steps(SshAuthMode::PublicKey, named),
+                vec![AuthStep::IdentityFiles],
+                "publickey-only never reaches the agent (named: {named})"
+            );
+            assert_eq!(
+                auth_steps(SshAuthMode::Agent, named),
+                vec![AuthStep::Agent],
+                "agent-only never reads a file (named: {named})"
+            );
+        }
+    }
+
+    #[test]
+    fn the_defaults_stand_in_only_for_a_profile_that_names_no_key() {
+        // #513: the two lists are alternatives, never a concatenation. A
+        // profile naming one key must spend one attempt, not four.
+        let defaults = || {
+            vec![
+                "/home/me/.ssh/id_ed25519".to_string(),
+                "/home/me/.ssh/id_rsa".to_string(),
+            ]
+        };
+
+        assert_eq!(
+            identity_offers(&[], defaults),
+            vec![
+                (
+                    "/home/me/.ssh/id_ed25519".to_string(),
+                    KeySource::Discovered
+                ),
+                ("/home/me/.ssh/id_rsa".to_string(), KeySource::Discovered),
+            ],
+            "no key of its own falls back to the ~/.ssh defaults"
+        );
+
+        assert_eq!(
+            identity_offers(&["~/keys/work".to_string()], defaults),
+            vec![("~/keys/work".to_string(), KeySource::Explicit)],
+            "naming a key replaces the defaults rather than adding to them"
+        );
+    }
+
+    #[test]
+    fn a_named_key_is_offered_in_the_order_it_was_written() {
+        let offers = identity_offers(
+            &["~/keys/first".to_string(), "~/keys/second".to_string()],
+            Vec::new,
+        );
+        assert_eq!(
+            offers
+                .iter()
+                .map(|(p, _)| p.as_str())
+                .collect::<Vec<&str>>(),
+            vec!["~/keys/first", "~/keys/second"]
+        );
     }
 
     const PASSPHRASE: &str = "correct horse battery staple";
@@ -1255,7 +1334,7 @@ mod tests {
         let mut round = KeyRound::default();
         round.offered_files = vec!["/home/me/.ssh/id_ed25519".to_string()];
         round.rejected_files = round.offered_files.clone();
-        let msg = round.reason(SshAuthMode::Auto);
+        let msg = round.reason(SshAuthMode::Auto, true);
         assert_eq!(
             msg,
             "server rejected public key(s): /home/me/.ssh/id_ed25519"
@@ -1263,7 +1342,7 @@ mod tests {
 
         round.agent_offered = 2;
         round.agent_rejected = 2;
-        let msg = round.reason(SshAuthMode::Auto);
+        let msg = round.reason(SshAuthMode::Auto, true);
         assert_eq!(
             msg,
             "server rejected public key(s): /home/me/.ssh/id_ed25519, 2 agent identities"
@@ -1273,7 +1352,7 @@ mod tests {
     #[test]
     fn reason_for_nothing_offered_says_where_it_looked() {
         let round = KeyRound::default();
-        let msg = round.reason(SshAuthMode::Auto);
+        let msg = round.reason(SshAuthMode::Auto, false);
         assert!(msg.contains("no usable private key was found"), "{msg}");
         assert!(msg.contains("~/.ssh default keys"), "{msg}");
         assert!(msg.contains("agent (unavailable)"), "{msg}");
@@ -1282,14 +1361,14 @@ mod tests {
         // "unavailable".
         let mut round = KeyRound::default();
         round.agent_available = true;
-        let msg = round.reason(SshAuthMode::Auto);
+        let msg = round.reason(SshAuthMode::Auto, false);
         assert!(msg.contains("the SSH agent"), "{msg}");
         assert!(!msg.contains("unavailable"), "{msg}");
 
         // Pinned modes name only what they would have used.
-        let msg = KeyRound::default().reason(SshAuthMode::Agent);
+        let msg = KeyRound::default().reason(SshAuthMode::Agent, false);
         assert!(!msg.contains("default keys"), "{msg}");
-        let msg = KeyRound::default().reason(SshAuthMode::PublicKey);
+        let msg = KeyRound::default().reason(SshAuthMode::PublicKey, false);
         assert!(!msg.contains("agent"), "{msg}");
     }
 
@@ -1299,7 +1378,7 @@ mod tests {
         round
             .unusable
             .push("cannot read identity file /bad/key: denied".to_string());
-        let msg = round.reason(SshAuthMode::PublicKey);
+        let msg = round.reason(SshAuthMode::PublicKey, true);
         assert!(
             msg.contains("cannot read identity file /bad/key: denied"),
             "{msg}"
@@ -1314,7 +1393,7 @@ mod tests {
             "public-key auth error with /home/me/.ssh/id_ed25519: connection lost".to_string(),
         );
         assert_eq!(
-            round.reason(SshAuthMode::Auto),
+            round.reason(SshAuthMode::Auto, true),
             "public-key auth error with /home/me/.ssh/id_ed25519: connection lost"
         );
     }

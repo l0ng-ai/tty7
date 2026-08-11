@@ -1,9 +1,11 @@
 use gpui::{AnyElement, Context, Div, Entity, FontWeight, Stateful, div, prelude::*, px, rems};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
-use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
+};
 
-use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind};
+use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind, SshForwardRule};
 use crate::terminal::view::TerminalView;
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_SM, TILE_SIZE_SM, Tty7App};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
@@ -13,6 +15,103 @@ use crate::ui::right_panel::{META, TEXT, TEXT_MONO};
 /// no target to name. The rules editor in Settings and the live Forwards panel
 /// draw the same row, so they fade it by the same amount.
 pub(crate) const NO_TARGET_FADE: f32 = 0.4;
+
+/// The managed-forward form's five text fields, read out of their inputs.
+///
+/// Split out so the question "do these make a rule?" can be asked without a
+/// `Window` and answered the same way twice: `add_managed_forward` needs the
+/// rule, and `forward_form` needs to know whether there is one yet — that is
+/// what decides whether Add is live and whether the form says what is missing.
+pub(crate) struct ForwardFields {
+    pub(crate) kind: SshForwardKind,
+    pub(crate) bind_host: String,
+    pub(crate) bind_port: String,
+    pub(crate) target_host: String,
+    pub(crate) target_port: String,
+    pub(crate) description: String,
+}
+
+impl ForwardFields {
+    /// The rule these fields describe, or `None` while they do not describe
+    /// one yet.
+    ///
+    /// The same conditions the settings sheet's `ForwardRuleForm::collect`
+    /// applies, so a rule typed here and a rule typed there are accepted or
+    /// refused alike — including port 0, which parses as a `u16` but asks the
+    /// OS to pick the port, and there is nowhere in either form to say which
+    /// one it picked.
+    pub(crate) fn collect(&self) -> Option<SshForwardRule> {
+        let bind_port: u16 = self.bind_port.trim().parse().ok().filter(|p| *p > 0)?;
+        let (target_host, target_port) = if self.kind == SshForwardKind::Dynamic {
+            (String::new(), 0)
+        } else {
+            let port: u16 = self.target_port.trim().parse().ok().filter(|p| *p > 0)?;
+            let host = self.target_host.trim();
+            if host.is_empty() {
+                return None;
+            }
+            (host.to_string(), port)
+        };
+        let bind_host = match self.bind_host.trim() {
+            // The panel's own default, and the one the strip's tooltip
+            // promises: an empty bind host is loopback, not every interface.
+            "" => "127.0.0.1".to_string(),
+            host => host.to_string(),
+        };
+        let description = self.description.trim();
+        Some(SshForwardRule {
+            kind: self.kind,
+            bind_host,
+            bind_port,
+            target_host,
+            target_port,
+            description: (!description.is_empty()).then(|| description.to_string()),
+        })
+    }
+
+    /// Whether the form is still empty enough that saying what is missing
+    /// would be nagging rather than helping — the same restraint the settings
+    /// sheet shows through `ForwardRuleForm::is_blank`.
+    pub(crate) fn is_blank(&self) -> bool {
+        [
+            &self.bind_host,
+            &self.bind_port,
+            &self.target_host,
+            &self.target_port,
+            &self.description,
+        ]
+        .iter()
+        .all(|v| v.trim().is_empty())
+    }
+}
+
+/// The entry a forward request just appended: the one the panel did not have
+/// before it asked.
+///
+/// Ids come from a counter that only goes up, so "none of the ids from before"
+/// names the new entry exactly — and it is the new entry that says whether the
+/// rule is listening or why it is not.
+pub(crate) fn added_forward<'a>(
+    before: &[u64],
+    list: &'a [ManagedForward],
+) -> Option<&'a ManagedForward> {
+    list.iter().find(|m| !before.contains(&m.id))
+}
+
+/// The rule a live forward was made from.
+///
+/// An edit removes the old forward before adding the new one, so when the new
+/// one will not come up this is what puts the old one back.
+pub(crate) fn rule_of(forward: &ManagedForward) -> SshForwardRule {
+    SshForwardRule {
+        kind: forward.kind,
+        bind_host: forward.bind_host.clone(),
+        bind_port: forward.bind_port,
+        target_host: forward.target_host.clone(),
+        target_port: forward.target_port,
+        description: forward.description.clone(),
+    }
+}
 
 impl Tty7App {
     pub(crate) fn render_ssh_status_strip(
@@ -315,9 +414,17 @@ impl Tty7App {
     fn forward_form(&self, pane_id: u64, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        let danger = theme.danger;
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let kind = self.loopback_panel.mf_kind;
         let editing = self.loopback_panel.mf_editing.is_some();
+        let fields = self.managed_forward_fields(cx);
+        // The form used to accept a click on Add and then do nothing at all
+        // when the fields did not make a rule. Now Add is only live when there
+        // is something to add, and the line below the form says what is still
+        // missing — but not while the form has barely been touched.
+        let complete = fields.collect().is_some();
+        let incomplete = !complete && !fields.is_blank();
         let selected = match kind {
             SshForwardKind::Local => 0,
             SshForwardKind::Remote => 1,
@@ -387,6 +494,17 @@ impl Tty7App {
                     )),
             )
             .child(Input::new(&self.loopback_panel.mf_description).xsmall())
+            .when(incomplete, |form| {
+                form.child(div().text_size(rems(META)).text_color(danger).child(
+                    match needs_target {
+                        true => t(L10nKey::SettingsFwdNeedsBoth),
+                        false => t(L10nKey::SettingsFwdNeedsListen),
+                    },
+                ))
+            })
+            .when_some(self.loopback_panel.mf_error.clone(), |form, msg| {
+                form.child(div().text_size(rems(META)).text_color(danger).child(msg))
+            })
             .child(
                 h_flex()
                     .justify_end()
@@ -410,10 +528,135 @@ impl Tty7App {
                             })
                             .primary()
                             .xsmall()
+                            .disabled(!complete)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.add_managed_forward(pane_id, window, cx)
                             })),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fields(kind: SshForwardKind, bind_port: &str, host: &str, port: &str) -> ForwardFields {
+        ForwardFields {
+            kind,
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: bind_port.to_string(),
+            target_host: host.to_string(),
+            target_port: port.to_string(),
+            description: String::new(),
+        }
+    }
+
+    fn managed(id: u64, bind_port: u16) -> ManagedForward {
+        ManagedForward {
+            id,
+            pane_id: 7,
+            kind: SshForwardKind::Local,
+            bind_host: "127.0.0.1".to_string(),
+            bind_port,
+            target_host: "10.0.0.5".to_string(),
+            target_port: 80,
+            description: Some("the staging box".to_string()),
+            status: ForwardStatus::Listening,
+        }
+    }
+
+    #[test]
+    fn a_complete_local_rule_is_collected() {
+        let rule = fields(SshForwardKind::Local, "8080", "10.0.0.5", "80")
+            .collect()
+            .expect("a bind port and a target make a rule");
+        assert_eq!(rule.bind_port, 8080);
+        assert_eq!(rule.target_host, "10.0.0.5");
+        assert_eq!(rule.target_port, 80);
+        assert_eq!(rule.description, None);
+    }
+
+    #[test]
+    fn a_half_typed_rule_is_not_a_rule() {
+        assert!(
+            fields(SshForwardKind::Local, "", "10.0.0.5", "80")
+                .collect()
+                .is_none()
+        );
+        assert!(
+            fields(SshForwardKind::Local, "8080", "", "80")
+                .collect()
+                .is_none()
+        );
+        assert!(
+            fields(SshForwardKind::Local, "8080", "10.0.0.5", "")
+                .collect()
+                .is_none()
+        );
+        assert!(
+            fields(SshForwardKind::Local, "http", "10.0.0.5", "80")
+                .collect()
+                .is_none(),
+            "a service name is not a port"
+        );
+    }
+
+    #[test]
+    fn port_zero_is_refused_rather_than_quietly_ephemeral() {
+        assert!(
+            fields(SshForwardKind::Local, "0", "10.0.0.5", "80")
+                .collect()
+                .is_none(),
+            "there is nowhere in this form to say which port the OS picked"
+        );
+        assert!(
+            fields(SshForwardKind::Local, "8080", "10.0.0.5", "0")
+                .collect()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_socks_proxy_needs_nothing_but_a_port_to_listen_on() {
+        let rule = fields(SshForwardKind::Dynamic, "1080", "", "")
+            .collect()
+            .expect("a dynamic forward has no target");
+        assert_eq!(rule.bind_port, 1080);
+        assert_eq!(rule.target_host, "");
+        assert_eq!(rule.target_port, 0);
+    }
+
+    #[test]
+    fn an_untouched_form_is_blank_and_a_touched_one_is_not() {
+        let mut form = fields(SshForwardKind::Local, "", "", "");
+        form.bind_host = String::new();
+        assert!(form.is_blank());
+        form.description = "  ".to_string();
+        assert!(form.is_blank(), "whitespace is not typing");
+        form.bind_port = "8".to_string();
+        assert!(!form.is_blank());
+    }
+
+    #[test]
+    fn a_rule_survives_the_round_trip_through_a_live_forward() {
+        let rule = rule_of(&managed(3, 8080));
+        assert_eq!(rule.kind, SshForwardKind::Local);
+        assert_eq!(rule.bind_host, "127.0.0.1");
+        assert_eq!(rule.bind_port, 8080);
+        assert_eq!(rule.target_host, "10.0.0.5");
+        assert_eq!(rule.target_port, 80);
+        assert_eq!(rule.description.as_deref(), Some("the staging box"));
+    }
+
+    #[test]
+    fn the_entry_an_add_appended_is_the_one_that_was_not_there_before() {
+        let list = vec![managed(1, 8080), managed(4, 9090)];
+        let added = added_forward(&[1], &list).expect("the new entry");
+        assert_eq!(added.id, 4);
+        assert!(
+            added_forward(&[1, 4], &list).is_none(),
+            "nothing was added, so there is nothing to point at"
+        );
     }
 }

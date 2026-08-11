@@ -551,6 +551,17 @@ pub enum AuthPromptKind {
         port: u16,
         algorithm: String,
         fingerprint_sha256: String,
+        /// The algorithm this host is already on file under, when the key is
+        /// new only because its algorithm is.
+        ///
+        /// A field rather than a variant of its own on purpose. This enum is
+        /// externally tagged and travels both to the GUI and to the remote
+        /// `tty7-server`, either of which may be an older build; an unknown
+        /// variant fails the whole decode, while an unknown field is ignored
+        /// and a missing one defaults. So an old peer shows the plain
+        /// unknown-host confirmation, which is the right prompt either way.
+        #[serde(default)]
+        previously_known_as: Option<String>,
     },
     HostKeyChanged {
         host: String,
@@ -1933,6 +1944,28 @@ mod tests {
         assert!(info.alive);
         assert_eq!(info.cwd, None);
         assert_eq!(info.title, "");
+    }
+
+    /// The reason `previously_known_as` is a field and not a variant: this
+    /// prompt is decoded by whatever GUI or `tty7-server` is at the other end,
+    /// and one of them is regularly older than the build that sent it. A
+    /// missing field defaults; an unknown variant would fail the whole frame.
+    #[test]
+    fn an_unknown_host_prompt_from_an_older_peer_still_decodes() {
+        let prompt: AuthPromptKind = serde_json::from_str(
+            r#"{"HostKeyUnknown":{"host":"h","port":22,"algorithm":"ssh-ed25519","fingerprint_sha256":"SHA256:x"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            prompt,
+            AuthPromptKind::HostKeyUnknown {
+                host: "h".into(),
+                port: 22,
+                algorithm: "ssh-ed25519".into(),
+                fingerprint_sha256: "SHA256:x".into(),
+                previously_known_as: None,
+            }
+        );
     }
 
     fn sample_native_spec() -> NativeSshSpec {

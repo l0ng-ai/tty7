@@ -2654,6 +2654,9 @@ impl TerminalView {
                 cx.background_spawn(async move { route.transfer_list() })
                     .await
             };
+            // A poll that failed says nothing about the job — keep asking
+            // until it answers or the budget above runs out.
+            let Ok(listed) = listed else { continue };
             let Some(progress) = listed.into_iter().find(|j| j.job_id == job) else {
                 // Pruned after the retention window, or the daemon restarted:
                 // there is nothing left to report either way.
