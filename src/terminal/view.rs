@@ -10,6 +10,7 @@ use gpui::{
 };
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_component::scroll::Scrollbar;
 use gpui_component::{ActiveTheme as _, Icon, IconName, WindowExt as _, h_flex};
 
 use super::TermSize;
@@ -20,6 +21,7 @@ use super::highlight::{self, TokenKind};
 use super::hold::{GapHold, Verdict};
 use super::remote::RemoteTerminal;
 use super::reverse_search::{self, ReverseSearch};
+use super::scrollbar::{GridScroll, TerminalScrollHandle};
 use super::search::{LinkTarget, SearchState};
 use super::typeahead::{RawInput, Typeahead};
 use crate::core::actions::{
@@ -171,6 +173,9 @@ pub struct TerminalView {
     /// to the other.
     zoom_debt: f32,
     pub(super) scroll_frac: f32,
+    /// The scrollback bar's end of the grid: where it thinks the viewport is,
+    /// and where it has asked for it to go. See [`super::scrollbar`].
+    pub(super) scroll_handle: TerminalScrollHandle,
     pub search: Option<SearchState>,
     pub cursor_visible: bool,
     pub focused: bool,
@@ -1133,6 +1138,7 @@ impl TerminalView {
             scroll_debt: 0.,
             zoom_debt: 0.,
             scroll_frac: 0.,
+            scroll_handle: TerminalScrollHandle::default(),
             search: None,
             cursor_visible: true,
             focused: true,
@@ -4520,6 +4526,56 @@ impl TerminalView {
         false
     }
 
+    /// Settle up with the scrollback bar for this frame: move the viewport
+    /// where a drag asked for, then tell the bar where the grid ended up.
+    ///
+    /// Both halves belong here rather than in the handle, so the bar — which
+    /// runs from a mouse handler, with no pane to call into — never reaches
+    /// into the terminal behind the pane's back.
+    fn sync_scrollbar(&mut self) {
+        if let Some(target) = self.scroll_handle.take_pending() {
+            // Whatever the wheel had in flight was heading somewhere else.
+            self.cancel_scroll_anim();
+            let mut term = self.terminal.term.lock();
+            let delta = target as i32 - term.grid().display_offset() as i32;
+            if delta != 0 {
+                term.scroll_display(Scroll::Delta(delta));
+            }
+            drop(term);
+            // A sub-line remainder left over from a smooth wheel scroll would
+            // paint the grid shifted off the row the thumb just picked.
+            self.scroll_frac = 0.;
+        }
+        let term = self.terminal.term.lock();
+        let grid = GridScroll {
+            history: term.grid().history_size(),
+            display_offset: term.grid().display_offset(),
+            screen_lines: term.screen_lines(),
+            line_height: self.line_height.as_f32(),
+        };
+        drop(term);
+        self.scroll_handle.sync(grid);
+    }
+
+    /// The scrollback bar, laid down the right edge of the grid.
+    ///
+    /// The track is inset to the rows themselves — [`GRID_PAD_Y`] is padding
+    /// the grid never scrolls through, and counting it would leave the thumb
+    /// short of the ends by that much.
+    fn render_scrollbar(&self) -> impl IntoElement + use<> {
+        div()
+            .absolute()
+            .top(px(GRID_PAD_Y))
+            .left_0()
+            .right_0()
+            .h(self.line_height * self.terminal.size().rows as f32)
+            // No `scrollbar_show` override: the bar takes `cx.theme()`'s, which
+            // `apply_theme` pins to `Scrolling` for every list in the app. A
+            // pane disagreeing with the sidebar about when a scrollbar is worth
+            // showing would be the odd one out.
+            .child(Scrollbar::vertical(&self.scroll_handle).id("terminal-scrollbar"))
+    }
+
     fn grid_line(
         term: &alacritty_terminal::Term<crate::terminal::remote::EventProxy>,
         row: usize,
@@ -5270,6 +5326,7 @@ impl Drop for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_typeahead_owner();
+        self.sync_scrollbar();
         if self.shell_owns_prompt() {
             if let Some((_net, bytes)) = self.hold.release() {
                 self.terminal.write(bytes);
@@ -5377,6 +5434,7 @@ impl Render for TerminalView {
                 this.tab_pressed(false, cx);
             }))
             .child(TerminalElement::new(entity))
+            .child(self.render_scrollbar())
             .children(search_bar)
             .children(input_bar)
             .children(completion_menu)
@@ -7737,6 +7795,78 @@ mod gpui_tests {
                     view.terminal.term.lock().selection.is_none(),
                     "a selection left pointing at purged rows clamps onto the \
                      viewport and copies whatever text moved into them"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn the_scrollbar_moves_the_viewport_and_follows_it_back(cx: &mut TestAppContext) {
+        use gpui_component::scroll::ScrollbarHandle as _;
+
+        let (window, mut daemon) = harness(cx);
+
+        // Overflow the 24-row viewport so there is a scrollback to scroll.
+        let mut out = Vec::new();
+        for i in 0..60 {
+            out.extend_from_slice(format!("line {i}\r\n").as_bytes());
+        }
+        DaemonMsg::Output(out).encode(&mut daemon).unwrap();
+        // Wait for the reader to go quiet, not just to start: a scrollback
+        // still filling underneath would move every row this test names.
+        let mut settled = 0;
+        for _ in 0..200 {
+            let now = window
+                .update(cx, |view, _, _| {
+                    view.terminal.term.lock().grid().history_size()
+                })
+                .unwrap();
+            if now > 0 && now == settled {
+                break;
+            }
+            settled = now;
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, _, _| {
+                view.sync_scrollbar();
+                let history = view.terminal.term.lock().grid().history_size();
+                assert!(history > 0, "the test needs a scrollback to scroll");
+                let row = view.line_height.as_f32();
+                assert_eq!(
+                    view.scroll_handle.offset().y,
+                    px(-(history as f32) * row),
+                    "at the live edge the whole scrollback sits above the viewport"
+                );
+
+                // Drag the thumb a third of the way up its track. The bar only
+                // records the row; the pane applies it on its next render.
+                view.scroll_frac = 0.5;
+                view.scroll_handle
+                    .set_offset(point(px(0.), px(-(history as f32) * row / 3.)));
+                assert_eq!(
+                    view.terminal.term.lock().grid().display_offset(),
+                    0,
+                    "the bar does not reach into the terminal itself"
+                );
+
+                view.sync_scrollbar();
+                let offset = view.terminal.term.lock().grid().display_offset();
+                assert_eq!(
+                    offset,
+                    history - (history as f32 / 3.).round() as usize,
+                    "the viewport lands on the row the thumb was dropped on"
+                );
+                assert_eq!(
+                    view.scroll_frac, 0.,
+                    "a sub-line remainder left over from the wheel would paint \
+                     the grid off the row the thumb picked"
+                );
+                assert_eq!(
+                    view.scroll_handle.offset().y,
+                    px(-((history - offset) as f32) * row),
+                    "and the thumb reports the row the grid actually reached"
                 );
             })
             .unwrap();
