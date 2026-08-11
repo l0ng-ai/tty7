@@ -1075,6 +1075,15 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
                 link.next_attempt = None;
                 link.last_error = None;
             });
+            // A live link is not an attachment. Preemption of a GUI client
+            // leaves the control connection alone (only a `dedicated` client is
+            // hung up on), and a link brought up by the switcher's own connect
+            // never sends `WorkspaceAttach` at all — so the far end can be
+            // talking to us happily while holding none of our workspaces. This
+            // runs before anything below that touches a window's contents: a
+            // workspace wants to be claimed for this client before we start
+            // rebuilding its tabs and their panes on the machine.
+            pump_attachments(cx, host);
             if became {
                 changed = true;
                 log::info!("link to {target} is attached");
@@ -1083,13 +1092,13 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
                 // and is still saying so. The supervisor is the one that got
                 // through, so nobody else is going to retire that.
                 clear_window_failures_for(cx, &target);
+                // A link this machine's windows never asked for — the switcher
+                // connected it, or `finish_connect` installed it — comes up
+                // without any reconnect attempt finishing, so nothing else
+                // tells the windows on it that their machine can be reached
+                // now. One of them may be sitting empty owing a pull.
+                crate::ui::tree_sync::on_link_up(cx, host);
             }
-            // A live link is not an attachment. Preemption of a GUI client
-            // leaves the control connection alone (only a `dedicated` client is
-            // hung up on), and a link brought up by the switcher's own connect
-            // never sends `WorkspaceAttach` at all — so the far end can be
-            // talking to us happily while holding none of our workspaces.
-            pump_attachments(cx, host);
             continue;
         }
         if attempting {

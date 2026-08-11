@@ -19,6 +19,7 @@ pub(crate) mod pane_liveness;
 pub(crate) mod parked_cursor;
 mod remote;
 mod reverse_search;
+pub(crate) mod scrollbar;
 pub mod search;
 mod signature;
 mod size;

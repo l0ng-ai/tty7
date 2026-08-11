@@ -1,0 +1,97 @@
+---
+title: "Updates"
+description: "How tty7 updates itself, and what the two channels mean."
+---
+
+**Settings → About** is where everything lives: the version you are on, the
+channel you follow, and the button that installs what is waiting.
+
+## How it works
+
+<Steps>
+  <Step title="Check">
+    tty7 checks at launch and every six hours after that. Turn it off entirely
+    with `check_for_updates: false`, or check on demand with **Check now**.
+  </Step>
+  <Step title="Download and verify, in the background">
+    A found release is fetched and verified before you are asked to do anything
+    — which turns "spend five minutes downloading" into "press restart".
+    Nothing is ever *installed* without an explicit choice; the staged package
+    waits in Settings.
+
+    Turn this off on a metered connection: the packages run 25–30 MB.
+    (`auto_download_updates: false`)
+  </Step>
+  <Step title="Update and relaunch">
+    A dedicated `tty7-updater` helper verifies the release checksum, the bundle
+    version, and — on macOS — the code-signing requirement, before replacing the
+    installation. If the relaunch fails, it puts the previous copy back.
+  </Step>
+</Steps>
+
+Declining an update defers it rather than retiring it; it comes back later.
+
+## Channels
+
+**Settings → About → Update channel.**
+
+| | |
+|---|---|
+| **Stable** *(default)* | Published releases. Reads `/releases/latest`, which excludes prereleases. |
+| **Nightly** | Rebuilt from the latest code every night — newer, but not release-tested. Reads the rolling `nightly` tag. |
+
+The channel is a property of your **installation**, not something inferred from
+how version numbers sort. Neither feed can hand the other an update, so a
+Nightly is never walked back onto Stable by an update it did not ask for, and an
+installation only changes channel when you change it.
+
+Switching channels invalidates what the old feed produced: the staged package,
+the deferred prompt, and any transfer still in flight.
+
+<Note>
+  A stable release outranks every dated build of its core version, which is how
+  switching back to Stable *graduates* rather than downgrades.
+</Note>
+
+## Platform notes
+
+<AccordionGroup>
+  <Accordion title="macOS">
+    The new GUI reuses a running local server when its wire protocol is
+    compatible, so your shells survive the update. An incompatible server keeps
+    its shells too and raises an explicit keep-or-restart prompt.
+  </Accordion>
+  <Accordion title="Windows">
+    Windows cannot replace a running daemon's image, so the install path stops
+    the service first — and the dialog says so before you agree.
+
+    An all-users `C:\Program Files` install cannot be updated in place and keeps
+    the release-page fallback instead. Running Setup as the signed-in user would
+    either install a second copy beside the real one, or put a bare UAC prompt
+    in front of someone whose GUI just vanished.
+  </Accordion>
+  <Accordion title="Linux">
+    AppImage and tarball installs are replaced by downloading the new file.
+  </Accordion>
+</AccordionGroup>
+
+## "The background server is still running &lt;build&gt;"
+
+If Settings tells you this, tty7 was updated in place: the app is the new build,
+but your panes are still served by the previous one. Restarting the server picks
+up the new one — **and ends every process running in your panes**, shells,
+agents, and SSH sessions alike.
+
+There is no hurry. Pick a moment when your panes are idle.
+
+## Proxies
+
+Update checks and downloads resolve a proxy from, in order:
+
+1. `http_proxy` in `config.json` — `http://127.0.0.1:7890` or
+   `socks5://127.0.0.1:1080`
+2. The platform system proxy (Windows registry, macOS `SCDynamicStore`)
+3. `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`
+
+Programs running in a pane are deliberately unaffected — they inherit their
+proxy from their own environment, as in any other terminal.

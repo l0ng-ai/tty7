@@ -1,0 +1,6 @@
+<svg width="120" height="120" viewBox="8 6 80 80" xmlns="http://www.w3.org/2000/svg">
+  <!-- "Duo" mark on transparent — same geometry as app-icon.svg, no tile. -->
+  <rect x="28" y="16" width="58" height="46" rx="12" fill="#3FDD8C" opacity="0.8"/>
+  <rect x="10" y="30" width="58" height="46" rx="12" fill="#17171A"/>
+  <path d="M24 42 L35 53 L24 64" fill="none" stroke="#ECEAE4" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

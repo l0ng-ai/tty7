@@ -1,0 +1,94 @@
+---
+title: "Keybindings"
+description: "Rebinding anything, chord sequences, and the tmux preset."
+---
+
+**Settings → Keybindings** (<kbd>⌘ ,</kbd>) lists every shortcut in the app,
+grouped the same way the command palette is.
+
+## Rebinding
+
+Click a shortcut and press the new keys. It saves after a brief pause.
+
+| | |
+|---|---|
+| Press keys | Set the binding |
+| Press more keys | Chain a sequence — <kbd>⌃ B</kbd> then <kbd>X</kbd> |
+| <kbd>Esc</kbd> | Cancel |
+| <kbd>⌫</kbd> | Remove the last key — or, pressed first, reset the shortcut to its default |
+
+**Restore all defaults** at the bottom undoes every rebinding at once. There is
+no undo for that one.
+
+<Frame caption="Placeholder — screenshot: the Keybindings page mid-capture, showing “Press keys…”">
+  <img src="/images/placeholder.svg" alt="Rebinding a shortcut" />
+</Frame>
+
+## Actions with no default key
+
+Some actions ship deliberately unbound, because there is no obvious key left to
+take: pane resize and swap, workspace selection, most git commands, SFTP, and
+the panel tabs. They are all in the command palette, and all bindable here.
+
+## Editing `config.json` instead
+
+```json
+{
+  "keybindings": {
+    "SplitRight": "cmd-d",
+    "ResizePaneLeft": "ctrl-alt-left",
+    "ToggleSftp": "cmd-shift-u"
+  }
+}
+```
+
+The syntax is modifiers joined by `-`, then the key. Chords are separated by a
+space.
+
+| Token | Means |
+|---|---|
+| `secondary` | <kbd>⌘</kbd> on macOS, <kbd>Ctrl</kbd> elsewhere |
+| `cmd` · `ctrl` · `alt` · `shift` | Literal modifiers |
+| `ctrl-b n` | A two-key sequence |
+
+An unknown action name or an invalid keystroke is skipped with a warning in the
+log rather than breaking the rest of your bindings.
+
+The full action list is on the [keyboard shortcuts](/reference/keyboard-shortcuts)
+page.
+
+## The tmux preset
+
+**Settings → Keybindings → Preset → tmux** remaps pane and tab actions onto a
+prefix — <kbd>⌃ B</kbd> by default, changeable in the **Prefix** field beside
+it.
+
+| | |
+|---|---|
+| <kbd>⌃ B</kbd> <kbd>C</kbd> · <kbd>X</kbd> | New tab · close tab |
+| <kbd>⌃ B</kbd> <kbd>%</kbd> · <kbd>"</kbd> | Split right · split down |
+| <kbd>⌃ B</kbd> <kbd>←→↑↓</kbd> | Move focus |
+| <kbd>⌃ B</kbd> <kbd>⌃ ←→↑↓</kbd> | Resize the pane |
+| <kbd>⌃ B</kbd> <kbd>O</kbd> · <kbd>;</kbd> | Next pane · previous pane |
+| <kbd>⌃ B</kbd> <kbd>&#123;</kbd> · <kbd>&#125;</kbd> | Swap with the previous · next pane |
+| <kbd>⌃ B</kbd> <kbd>Z</kbd> | Zoom the pane |
+| <kbd>⌃ B</kbd> <kbd>N</kbd> · <kbd>P</kbd> | Next tab · previous tab |
+| <kbd>⌃ B</kbd> <kbd>1</kbd>…<kbd>9</kbd> | Jump to a tab |
+
+Two details that make it livable:
+
+- A **bare prefix** reaches the shell after about a second, so <kbd>⌃ B</kbd>
+  still works as "back one character" when you meant it.
+- **Prefix plus an unbound key** is passed straight through to the terminal, so
+  a tmux binding you did not remap still lands in whatever is running.
+
+## Some non-obvious defaults
+
+| | |
+|---|---|
+| <kbd>⇧ ⏎</kbd> · <kbd>⌥ ⏎</kbd> | Insert a newline at the prompt instead of submitting (`InsertNewline`) |
+| <kbd>⌘ ⇧ ⏎</kbd> | Zoom the focused pane |
+| <kbd>⌘ ⇧ E</kbd> | Toggle the code panel |
+| <kbd>⌘ ⇧ R</kbd> | Restart the SSH session in this pane |
+| <kbd>⌘ ⇧ O</kbd> | Workspace switcher |
+| <kbd>⌘ ⇧ N</kbd> | New workspace |

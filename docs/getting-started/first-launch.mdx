@@ -1,0 +1,126 @@
+---
+title: "First launch"
+description: "The handful of settings worth changing before you start working."
+---
+
+Open tty7 and you get a window with one tab and one shell, and a tab sidebar
+down the left. Everything below is optional — but these are the settings people
+end up changing anyway, so they are worth five minutes now.
+
+Open Settings with <kbd>⌘ ,</kbd> (<kbd>Ctrl ,</kbd> on Windows and Linux), or
+from the command palette (<kbd>⌘ P</kbd> → *Settings*).
+
+<Frame caption="Placeholder — screenshot: the Settings window, Appearance section">
+  <img src="/images/placeholder.svg" alt="tty7 Settings" />
+</Frame>
+
+## 1. Pick a theme
+
+**Settings → Appearance → Theme.** Nine themes ship built in — Light, One Light,
+Catppuccin Latte, Rosé Pine Dawn, Dark, Dracula, Harbor, One Dark Pro, and
+Rosé Pine. The default is **Light**.
+
+Turn on **Sync with system** to pick a light theme and a dark theme separately;
+tty7 then follows the OS appearance live.
+
+Transparency lives on the same page, under **Transparency** — opacity applies to
+every theme, and *Follow theme* hands the decision back to the theme's own
+setting. On Windows there is also a **Background material** picker (Mica,
+Acrylic, and friends).
+
+[More about themes →](/customization/themes)
+
+## 2. Choose your shell
+
+**Settings → Terminal → Shell.** Leave **Program** empty to use the platform
+default. Otherwise it takes an executable name on PATH or an absolute path
+(`zsh`, `fish`, `pwsh`, `nu`, `/opt/homebrew/bin/bash`), plus space-separated
+**Arguments** — `-l` for a login shell, say.
+
+**Start in** decides what a *fresh* shell opens in: tty7's launch directory
+(the default), your home folder, or a fixed path. New tabs and splits keep
+inheriting the active pane's directory either way.
+
+## 3. macOS only: decide what Option does
+
+**Settings → Input → Keyboard → Option (⌥) acts as Meta.**
+
+Off (the default), <kbd>⌥ B</kbd> types `∫`, which is what macOS has always
+done. On, it sends the escape chord shells expect, so <kbd>⌥ B</kbd> moves back
+a word and <kbd>⌥ ⌫</kbd> deletes one. Turn it on if you live in readline;
+leave it off if you type accented characters.
+
+## 4. If you use coding agents, install the hooks
+
+**Settings → Agents.** tty7 detects 18 coding CLIs by process name on its own —
+you get brand avatars and tab labels for free. The *status dots*, the "needs
+your permission" notifications, and `tty7 wait` all need one more thing: a small
+hook the agent calls to report what it is doing.
+
+Click **Install** next to Claude Code, Codex, Copilot CLI, OpenCode, Pi, Grok
+Build, or Oh My Pi. It writes into that agent's own config directory and can be
+removed from the same row.
+
+[More about agents →](/agents/status)
+
+## 5. Know what Quit does
+
+Plain **Quit** closes the window and leaves the background server running.
+Your shells, builds, and agent turns keep going, and reopening tty7 reattaches
+to them.
+
+To actually stop everything, use **Quit and Stop Server…** from the tray icon's
+menu. It says so plainly before it does it: anything still running in your
+shells is terminated, while your tabs and layout are kept and reopen with fresh
+shells.
+
+<Note>
+  This is why there is no tmux in the picture. The persistence is not a feature
+  of your shell setup — it belongs to the server underneath.
+  [Core concepts →](/getting-started/concepts)
+</Note>
+
+## 6. Tune the notifications
+
+**Settings → Window & Tabs → Notifications.** By default tty7 posts a desktop
+notification when a foreground command that ran longer than 10 seconds
+finishes — but only while the window is unfocused. Set **Notify on command
+finish** to *Never* or *Always*, and move the threshold if 10 seconds is the
+wrong number for your work.
+
+Agent notifications ("needs your permission…", "finished after 42s") follow the
+same policy.
+
+## 7. Coming from tmux?
+
+**Settings → Keybindings → Preset → tmux** remaps pane and tab actions onto a
+prefix, <kbd>⌃ B</kbd> by default. <kbd>⌃ B</kbd> <kbd>C</kbd> opens a tab,
+<kbd>⌃ B</kbd> <kbd>%</kbd> splits, <kbd>⌃ B</kbd> then an arrow moves focus.
+
+A bare prefix reaches the shell after about a second, and prefix plus an unbound
+key passes straight through — so a tmux binding you did not remap still lands in
+whatever is running.
+
+[More about keybindings →](/customization/keybindings)
+
+## Where things live
+
+| | macOS / Linux | Windows |
+|---|---|---|
+| Settings file | `~/.config/tty7/config.json` | `%APPDATA%\tty7\config.json` |
+| Custom themes | `~/.config/tty7/themes/` | `%APPDATA%\tty7\themes\` |
+
+Everything in the Settings window writes to `config.json`, and you can edit it
+by hand instead — see the [configuration reference](/reference/configuration).
+Set `TTY7_CONFIG_DIR` to move the whole directory somewhere else.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Core concepts" icon="cube" href="/getting-started/concepts">
+    Workspaces, tabs, panes, and the server that owns them.
+  </Card>
+  <Card title="The prompt" icon="terminal" href="/terminal/prompt">
+    Suggestions, completion, and history search — the part you touch most.
+  </Card>
+</CardGroup>

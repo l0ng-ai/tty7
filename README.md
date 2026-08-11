@@ -17,6 +17,10 @@
 
 <sub>English · [简体中文](README.zh-CN.md)</sub>
 
+<br />
+
+<img src="assets/hero.webp" alt="tty7 with a tab sidebar of agent sessions across several repos, running Claude Code" width="900" />
+
 </div>
 
 ## Why
@@ -50,8 +54,11 @@ Native builds for each platform on [**Releases**](https://github.com/l0ng-ai/tty
 | **CLI + Skills** | bundled `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · pane/workspace control · real PTY commands · output, process, port, and agent status |
 | **SSH** | native russh stack: profiles with keychain secrets · SFTP panel · port forwarding · jump hosts · one-time, unprivileged `tty7-server` install |
 
-Terminal and keybinding reference: [docs/features.md](docs/features.md). The agent-facing CLI
-interface is documented in [skills/tty7/SKILL.md](skills/tty7/SKILL.md).
+Full documentation lives in [**`docs/`**](docs/) —
+[keyboard shortcuts](docs/reference/keyboard-shortcuts.mdx) ·
+[config.json](docs/reference/configuration.mdx) ·
+[CLI reference](docs/cli/reference.mdx). The agent-facing CLI interface is also
+documented in [skills/tty7/SKILL.md](skills/tty7/SKILL.md).
 
 Install the skill with:
 

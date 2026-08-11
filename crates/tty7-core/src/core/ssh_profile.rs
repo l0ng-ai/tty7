@@ -288,25 +288,62 @@ pub fn expand_identity_placeholders(path: &str, host: &str, user: &str) -> Strin
     expand_tilde(&out)
 }
 
-pub fn expand_tilde(path: &str) -> String {
-    let home = || {
-        #[cfg(windows)]
-        let var = "USERPROFILE";
-        #[cfg(not(windows))]
-        let var = "HOME";
-        std::env::var(var).ok().filter(|h| !h.is_empty())
-    };
+/// The platform home directory: `%USERPROFILE%` on Windows, `$HOME` elsewhere.
+fn home_dir() -> Option<String> {
+    #[cfg(windows)]
+    let var = "USERPROFILE";
+    #[cfg(not(windows))]
+    let var = "HOME";
+    std::env::var(var).ok().filter(|h| !h.is_empty())
+}
+
+fn expand_tilde_with(path: &str, home: Option<&str>) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = home() {
+        if let Some(home) = home {
             let sep = if home.ends_with('/') { "" } else { "/" };
             return format!("{home}{sep}{rest}");
         }
     } else if path == "~" {
-        if let Some(home) = home() {
-            return home;
+        if let Some(home) = home {
+            return home.to_string();
         }
     }
     path.to_string()
+}
+
+pub fn expand_tilde(path: &str) -> String {
+    expand_tilde_with(path, home_dir().as_deref())
+}
+
+/// The private keys publickey auth probes when a connection carries no usable
+/// `IdentityFile` of its own — OpenSSH's default-identity behaviour (issue
+/// #484). Without it, "no profile key + no agent" offers the server zero keys,
+/// which on Windows is the common case (the OpenSSH Authentication Agent
+/// service is disabled by default there).
+///
+/// Both the GUI (`ui::ssh_connect`, preloading cached passphrases) and the
+/// daemon (`daemon::ssh::auth`, offering the keys) must see the *same* list:
+/// `NativeSshSpec::key_passphrases` is keyed on these exact strings, so the
+/// two sides share this one definition rather than formatting their own.
+///
+/// The list stays short on purpose: every offered key spends one of the
+/// server's `MaxAuthTries` (default 6), shared with explicit keys and agent
+/// identities. `id_dsa` is long deprecated, `id_xmss`/`id_*_sk` are beyond
+/// what russh can sign with, so the three software keys cover what exists in
+/// practice — ed25519 first as the modern default.
+pub fn default_identity_candidates() -> Vec<String> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    default_identity_candidates_in(&home)
+}
+
+/// The pure core, home injected so tests never touch the environment.
+fn default_identity_candidates_in(home: &str) -> Vec<String> {
+    ["id_ed25519", "id_ecdsa", "id_rsa"]
+        .into_iter()
+        .map(|name| expand_tilde_with(&format!("~/.ssh/{name}"), Some(home)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -457,6 +494,25 @@ mod tests {
         assert_eq!(expand_tilde("/a/~/b"), "/a/~/b");
         assert_eq!(expand_tilde("~user/x"), "~user/x");
         assert_eq!(expand_tilde("/abs/path"), "/abs/path");
+    }
+
+    #[test]
+    fn default_identity_candidates_are_ordered_and_home_relative() {
+        assert_eq!(
+            default_identity_candidates_in("/home/me"),
+            vec![
+                "/home/me/.ssh/id_ed25519".to_string(),
+                "/home/me/.ssh/id_ecdsa".to_string(),
+                "/home/me/.ssh/id_rsa".to_string()
+            ]
+        );
+        // A trailing separator must not double up, and the strings must be
+        // exactly what an explicit `~/.ssh/...` entry expands to, because
+        // `key_passphrases` is keyed on them.
+        assert_eq!(
+            default_identity_candidates_in("/home/me/"),
+            default_identity_candidates_in("/home/me")
+        );
     }
 
     #[test]

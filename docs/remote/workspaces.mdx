@@ -1,0 +1,114 @@
+---
+title: "Remote workspaces"
+description: "Whole workspaces hosted on another machine — files, repos, panes, and git all stay over there."
+---
+
+An SSH pane runs one shell on a remote machine. A **remote workspace** goes
+further: tty7 runs a server on the far machine, and the whole workbench points
+at it. Tabs, splits, the file tree, the git panel, the diff overlay, the process
+list — all of it is the remote machine's, rendered here.
+
+Nothing is synced or copied. The repository stays where it is.
+
+<Frame caption="Placeholder — screenshot: a remote workspace open, sidebar showing remote repos, with the machine name in the strip">
+  <img src="/images/placeholder.svg" alt="A remote workspace in tty7" />
+</Frame>
+
+## Connecting
+
+<Steps>
+  <Step title="Open the switcher">
+    <kbd>⌘ ⇧ O</kbd>. Machines are listed alongside your local workspaces —
+    *This Computer* first, then every saved SSH profile and, on Windows, every
+    WSL distribution.
+  </Step>
+  <Step title="Pick a machine">
+    tty7 connects over the same SSH stack as everything else, so profiles,
+    keychain credentials, and jump hosts all apply.
+  </Step>
+  <Step title="Approve the server install, once">
+    The first connection asks:
+
+    > tty7 will write its server binary to *devbox* so this machine can host
+    > workspaces there. Nothing else on *devbox* is touched, and no sudo is
+    > used.
+
+    It shows the exact path, version, size, source, and SHA-256 before you
+    agree. Later upgrades on that machine install silently.
+  </Step>
+  <Step title="Open a workspace">
+    From then on the machine's workspaces are in the switcher, and a new one
+    opens like a local one.
+  </Step>
+</Steps>
+
+## What gets installed
+
+| | |
+|---|---|
+| **What** | A single static `tty7-server` binary |
+| **Where** | `~/.local/share/tty7/bin/tty7-server-c<control>p<protocol>` |
+| **Privileges** | None. No sudo, nothing outside your home directory |
+| **Hosts** | Linux, x86-64 or aarch64 |
+
+The binary is named after the wire dialect it speaks, so a client and a server
+that disagree never quietly half-work — tty7 installs the matching one instead.
+
+On Windows, a WSL distribution is handed the Linux server the installer already
+shipped, so a WSL workspace needs no network access at all.
+
+## Reattaching
+
+Remote workspaces are the point at which persistence pays off twice: the panes
+survive on the remote machine whether or not your laptop is awake, and you can
+reattach from a different client entirely.
+
+A strip along the top of the window says what the connection is doing —
+*connecting*, *reconnecting (attempt 3)*, *disconnected*, or *taken over by
+someone else*. Reconnection is automatic; a workspace another client has claimed
+says so by name rather than fighting over it.
+
+## Keeping the server current
+
+Two dialogs you may meet:
+
+<AccordionGroup>
+  <Accordion title="Update tty7's server on “devbox”?">
+    The machine is serving sessions from a build whose protocol this client
+    cannot speak. tty7 has already installed a matching server, but the one
+    already running is the one your sessions are on. **Update Server** replaces
+    it and **ends every session it is hosting** — including ones this window is
+    not showing. Cancel leaves the machine exactly as it is.
+  </Accordion>
+  <Accordion title="Restart tty7's server on “devbox”?">
+    Same consequence, deliberately: every shell on that machine ends. Workspaces
+    and layouts are kept and come back with fresh shells.
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+  Both of these end other people's work if the machine is shared. tty7 spells
+  out what will happen before either one runs — read it.
+</Warning>
+
+## What a remote pane cannot do
+
+- **Fork an agent session.** The fork command would run against the *local*
+  agent, so tty7 does not offer it.
+- **Move very large files through the Files panel.** Drag-and-drop across the
+  link is capped at what one control frame can carry; past that the panel tells
+  you to use [SFTP](/remote/sftp).
+
+## From the CLI
+
+```bash
+tty7 machine ls              # this machine plus every link the server holds
+tty7 -m devbox ls            # route any command to a linked machine
+tty7 -m devbox run -- cargo test
+```
+
+`-m` matches the full link key (`me@devbox:22`) or just the host. It uses a link
+the local server *already* holds — it will not dial a fresh connection, and it
+says so rather than guessing. Connect from the switcher first.
+
+[CLI overview →](/cli/overview)

@@ -2119,11 +2119,18 @@ fn connect_routed(route: &PaneRoute) -> anyhow::Result<Stream> {
 
     tty7_core::host::guard_off_ui();
 
-    if let crate::daemon::router::RouteTarget::Wsl { distro } = &header.target {
-        crate::daemon::install::wsl::ensure_wsl_server(distro)
-            .map_err(|e| anyhow::anyhow!("prepare tty7-server in WSL `{distro}`: {e}"))?;
-    }
-
+    // No `ensure_wsl_server` here on purpose. The daemon runs exactly the same
+    // probe inside `router::open_link` before it opens the link, so asking from
+    // this side too bought nothing and cost a second full round of `wsl.exe`
+    // invocations — five of them, serially, on every single pane. On a machine
+    // where a `wsl.exe` round trip is slow (issue #454 measured 3.3s) that
+    // duplicate was half of the wait before a new tab could take a key.
+    //
+    // Nothing is lost by dropping it: the returned path was discarded, the
+    // failure is reported just as well through the route ack below, and the
+    // first-install consent question still reaches this process — the daemon
+    // runs its probe under `RouteSetup::blocking`, which installs the relay
+    // that turns the question into a frame on this very connection.
     let mut stream = connect()?;
     let ack = crate::daemon::router::negotiate(&mut stream, header)
         .map_err(|e| anyhow::anyhow!("route this pane to {}: {e}", header.describe()))?;

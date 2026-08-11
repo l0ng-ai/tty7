@@ -1,0 +1,142 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "tty7",
+  "description": "A terminal workbench: persistent sessions, remote work, agents.",
+  "colors": {
+    "primary": "#0FA968",
+    "light": "#3FDD8C",
+    "dark": "#0FA968"
+  },
+  "favicon": "/favicon.ico",
+  "logo": {
+    "light": "/logo/logo.svg",
+    "dark": "/logo/logo.svg",
+    "href": "https://github.com/l0ng-ai/tty7"
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting started",
+            "pages": [
+              "index",
+              "getting-started/installation",
+              "getting-started/first-launch",
+              "getting-started/concepts"
+            ]
+          },
+          {
+            "group": "The window",
+            "pages": [
+              "window/tabs-and-splits",
+              "window/sidebar",
+              "window/command-palette",
+              "window/search",
+              "window/side-panel"
+            ]
+          },
+          {
+            "group": "The terminal",
+            "pages": [
+              "terminal/prompt",
+              "terminal/history",
+              "terminal/selection-and-clipboard",
+              "terminal/links",
+              "terminal/mouse-and-scrolling"
+            ]
+          },
+          {
+            "group": "Coding agents",
+            "pages": [
+              "agents/overview",
+              "agents/status",
+              "agents/sessions",
+              "agents/orchestration"
+            ]
+          },
+          {
+            "group": "Remote work",
+            "pages": [
+              "remote/ssh",
+              "remote/sftp",
+              "remote/port-forwarding",
+              "remote/workspaces"
+            ]
+          },
+          {
+            "group": "Git",
+            "pages": [
+              "git/source-control",
+              "git/diffs",
+              "git/worktrees"
+            ]
+          },
+          {
+            "group": "Customization",
+            "pages": [
+              "customization/settings",
+              "customization/themes",
+              "customization/fonts",
+              "customization/keybindings"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "CLI",
+        "groups": [
+          {
+            "group": "The tty7 command",
+            "pages": [
+              "cli/overview",
+              "cli/reference",
+              "cli/agent-skill"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/configuration",
+              "reference/keyboard-shortcuts",
+              "reference/shell-integration",
+              "reference/updates",
+              "reference/privacy",
+              "reference/troubleshooting"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/l0ng-ai/tty7"
+      },
+      {
+        "label": "Discord",
+        "href": "https://discord.gg/s3dethqz2V"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Download",
+      "href": "https://github.com/l0ng-ai/tty7/releases"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/l0ng-ai/tty7",
+      "discord": "https://discord.gg/s3dethqz2V"
+    }
+  }
+}

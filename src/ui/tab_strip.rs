@@ -535,7 +535,6 @@ pub(crate) const UNKNOWN_DOT: u32 = 0x9AA0A6;
 pub(crate) fn workspace_avatar(
     name: &str,
     live: crate::terminal::pane_liveness::Liveness,
-    current: bool,
     size: f32,
     cx: &App,
 ) -> impl IntoElement + use<> {
@@ -550,6 +549,10 @@ pub(crate) fn workspace_avatar(
         .next()
         .map(|c| c.to_uppercase().to_string())
         .unwrap_or_else(|| "~".to_string());
+    // The disc reads the same on every row, current one included: the rows that
+    // are the current workspace already say so with a badge, a heavier name and
+    // a selected background, and dimming the disc on top of that only pushed the
+    // monogram under the liveness dot beside it, which is never dimmed.
     div()
         .relative()
         .flex_shrink_0()
@@ -565,8 +568,7 @@ pub(crate) fn workspace_avatar(
                 .text_size(px((size * 0.46).round()))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(cx.theme().foreground.opacity(0.65))
-                .child(initial)
-                .when(!current, |disc| disc.opacity(0.55)),
+                .child(initial),
         )
         .children(dot.map(|rgb| Tty7App::status_dot(rgb, 0, size, cx.theme().popover, false)))
 }

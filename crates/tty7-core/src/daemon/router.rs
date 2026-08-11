@@ -605,7 +605,25 @@ async fn drive(local: Stream, header: &RouteHeader) -> io::Result<()> {
     if !leftover.is_empty() {
         tokio::io::AsyncWriteExt::write_all(&mut *link, &leftover).await?;
     }
-    let (to_remote, to_local) = tokio::io::copy_bidirectional(&mut local, &mut *link).await?;
+    let copied = tokio::io::copy_bidirectional(&mut local, &mut *link).await;
+    // A bridge that never sent a byte never ran. This is where a stale note is
+    // actually found out: `wsl.exe` spawns quite happily with a server path
+    // that no longer exists inside the distro — the distro was reinstalled, the
+    // directory was cleaned out — and only fails once it is the shell trying to
+    // exec it. Forget the distro, so the pane after this one proves it again
+    // rather than repeating a failure that would otherwise outlive every window
+    // and last until tty7 itself restarts.
+    if let RouteTarget::Wsl { distro } = &header.target
+        && header.server_command.is_none()
+        && !copied
+            .as_ref()
+            .is_ok_and(|(_, from_remote)| *from_remote > 0)
+    {
+        log::info!("wsl:{distro}: the bridge closed without answering; proving it again next time");
+        crate::daemon::install::wsl::forget_wsl_server(distro);
+    }
+
+    let (to_remote, to_local) = copied?;
     log::debug!("routed connection closed after {to_remote} up / {to_local} down bytes");
     drop(conn);
     Ok(())
@@ -742,6 +760,15 @@ async fn restart_server(
     }
 }
 
+/// Prove (or recall) where this distro's server is, off the reactor — the probe
+/// is a chain of blocking `wsl.exe` calls the first time round.
+async fn ensure_wsl_server(distro: &str, setup: &RouteSetup) -> anyhow::Result<String> {
+    let distro = distro.to_string();
+    Ok(setup
+        .blocking(move || crate::daemon::install::wsl::ensure_wsl_server(&distro))
+        .await??)
+}
+
 async fn open_link(
     header: &RouteHeader,
     setup: &RouteSetup,
@@ -754,25 +781,30 @@ async fn open_link(
             Ok((link, Some(conn)))
         }
         RouteTarget::Wsl { distro } => {
-            let resolved = match header.server_command {
-                Some(_) => None,
-                None => {
-                    let distro = distro.clone();
-                    Some(
-                        setup
-                            .blocking(move || {
-                                crate::daemon::install::wsl::ensure_wsl_server(&distro)
-                            })
-                            .await??,
-                    )
+            if let Some(command) = header.server_command.as_deref() {
+                let link = RemoteLink::wsl_shell(distro, command, setup.channel)?;
+                return Ok((link, None));
+            }
+
+            let from_memory = crate::daemon::install::wsl::remembered_wsl_server(distro).is_some();
+            let binary = ensure_wsl_server(distro, setup).await?;
+            match RemoteLink::wsl(distro, &binary, setup.channel) {
+                Ok(link) => Ok((link, None)),
+                // Only worth a second look when the path came from memory: one
+                // proved a moment ago will prove the same, and re-proving it
+                // just doubles the wait before the error reaches the user.
+                Err(stale) if from_memory => {
+                    log::info!(
+                        "wsl:{distro}: the remembered server would not start ({stale}); \
+                         looking again"
+                    );
+                    crate::daemon::install::wsl::forget_wsl_server(distro);
+                    let binary = ensure_wsl_server(distro, setup).await?;
+                    let link = RemoteLink::wsl(distro, &binary, setup.channel)?;
+                    Ok((link, None))
                 }
-            };
-            let link = match (header.server_command.as_deref(), resolved.as_deref()) {
-                (Some(command), _) => RemoteLink::wsl_shell(distro, command, setup.channel)?,
-                (None, Some(binary)) => RemoteLink::wsl(distro, binary, setup.channel)?,
-                (None, None) => unreachable!("resolved is Some whenever there is no override"),
-            };
-            Ok((link, None))
+                Err(e) => Err(e.into()),
+            }
         }
         RouteTarget::LocalStdio { program, args } => {
             let args: Vec<&str> = args.iter().map(String::as_str).collect();

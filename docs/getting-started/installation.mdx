@@ -1,0 +1,151 @@
+---
+title: "Installation"
+description: "Native builds for macOS, Windows, and Linux — plus building from source."
+---
+
+Every release publishes native builds on
+[**GitHub Releases**](https://github.com/l0ng-ai/tty7/releases). There is no
+runtime to install first: fonts are embedded in the binary, and the Linux
+AppImage bundles its own X11/Wayland/font libraries.
+
+<Tabs>
+  <Tab title="macOS">
+    Download the DMG that matches your Mac and drag **tty7** into Applications.
+
+    | Mac | File |
+    |---|---|
+    | Apple silicon (M1 and later) | `tty7-<version>-macos-arm64.dmg` |
+    | Intel | `tty7-<version>-macos-x86_64.dmg` |
+
+    Builds are signed with a Developer ID certificate and notarized by Apple, so
+    Gatekeeper opens them without a right-click dance.
+
+    <Note>
+      Builds are produced on macOS 14 and macOS 15. macOS 14 (Sonoma) or later
+      is the tested range.
+    </Note>
+  </Tab>
+
+  <Tab title="Windows">
+    Two shapes, both x86-64:
+
+    | File | Use it when |
+    |---|---|
+    | `tty7-<version>-windows-x86_64-setup.exe` | You want a normal install with Start-menu entries and an uninstaller. |
+    | `tty7-<version>-windows-x86_64.zip` | You want it portable — unzip anywhere and run `tty7-app.exe`. |
+
+    The installer offers one optional setup task, off by default: **Add "Open in
+    tty7" to the folder context menu**. It writes shell verbs under `HKCU`, so
+    only your own Windows account is affected, and the uninstaller always takes
+    them back out.
+
+    A portable install can add or remove the same entries itself:
+
+    ```powershell
+    tty7-app.exe --register-explorer-menu
+    tty7-app.exe --unregister-explorer-menu
+    ```
+
+    <Note>
+      The Windows package also carries a Linux `tty7-server` binary so a WSL
+      distro can be served locally instead of downloading one. See
+      [Remote workspaces](/remote/workspaces).
+    </Note>
+  </Tab>
+
+  <Tab title="Linux">
+    | File | Use it when |
+    |---|---|
+    | `tty7-<version>-linux-x86_64.AppImage` | Almost always. `chmod +x` and run — the X11, Wayland, xkb, and font libraries are bundled, so it works on Fedora, Arch, Debian and friends, not just Ubuntu. |
+    | `tty7-<version>-linux-x86_64.tar.gz` | You would rather unpack the plain binary and place it yourself. |
+
+    ```bash
+    chmod +x tty7-*-linux-x86_64.AppImage
+    ./tty7-*-linux-x86_64.AppImage
+    ```
+  </Tab>
+</Tabs>
+
+## The `tty7` command
+
+Every installer ships the `tty7` CLI beside the app, and the app puts it on your
+PATH the first time it launches. That is what lets a script — or a coding agent
+in some other terminal — open panes and read them back.
+
+- **On Unix** it is a symlink into whichever of `/opt/homebrew/bin`,
+  `/usr/local/bin`, `~/.local/bin`, `~/bin`, or `~/.cargo/bin` your PATH already
+  covers.
+- **On Windows** the install directory is appended to your user PATH, and the
+  uninstaller removes it again.
+
+A `tty7` you installed yourself — a `cargo install` build, a package manager's
+copy — is never replaced. To turn the whole thing off, uncheck **Settings →
+Agents → Install the tty7 command on PATH**.
+
+<Tip>
+  Inside a tty7 pane the CLI works regardless of PATH, because panes inherit the
+  app's environment.
+</Tip>
+
+## Updating
+
+tty7 checks for updates every six hours and can update itself: **Settings →
+About → Check now**, then **Update and relaunch**. Releases are downloaded and
+verified in the background so applying one is just a restart.
+
+Pick **Stable** or **Nightly** under **Settings → About → Update channel**. See
+[Updates and channels](/reference/updates) for what each feed publishes and how
+switching behaves.
+
+## Building from source
+
+You need a stable Rust toolchain. The build is a plain `cargo build`; the app
+binary is `tty7-app`.
+
+<Tabs>
+  <Tab title="macOS / Windows">
+    ```bash
+    git clone https://github.com/l0ng-ai/tty7
+    cd tty7
+    cargo build --release
+    ```
+  </Tab>
+  <Tab title="Linux">
+    gpui resolves its X11/Wayland/font backends through `pkg-config` at build
+    time, so the development packages have to be present:
+
+    ```bash
+    sudo apt-get install -y pkg-config cmake clang \
+      libxkbcommon-dev libxkbcommon-x11-dev \
+      libfontconfig1-dev libfreetype6-dev \
+      libwayland-dev libx11-dev libxcb1-dev \
+      libzstd-dev libssl-dev libkrb5-dev
+    cargo build --release
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  A source build does not update itself, and it will not replace an installed
+  copy's server. If you run both, see
+  [Troubleshooting](/reference/troubleshooting).
+</Warning>
+
+## Uninstalling
+
+<AccordionGroup>
+  <Accordion title="macOS">
+    Quit tty7 (use **Quit and Stop Server** from the tray menu so the background
+    server stops too), then drag the app to the Trash. Your settings live in
+    `~/.config/tty7` and are left alone; delete that folder to remove them.
+  </Accordion>
+  <Accordion title="Windows">
+    Use **Add or remove programs**. The uninstaller removes the PATH entry and
+    any Explorer context-menu keys it added. Settings live in
+    `%APPDATA%\tty7`.
+  </Accordion>
+  <Accordion title="Linux">
+    Delete the AppImage or the unpacked directory. Settings live in
+    `~/.config/tty7`.
+  </Accordion>
+</AccordionGroup>

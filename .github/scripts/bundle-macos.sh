@@ -214,9 +214,29 @@ DMG="dist/tty7-${VERSION}-macos-${ARCH}.dmg"
 STAGE="dist/dmg-stage"
 rm -rf "$STAGE"
 mkdir "$STAGE"
-cp -R "$APP" "$STAGE/"
+# `mv`, not `cp -R`: this is the peak, and a second full copy of the bundle is
+# the most expensive thing on the volume that nobody needs. Nothing reads
+# dist/tty7.app after this point — the zip above is what the updater ships and
+# what nightly.yml verifies (it extracts that, not this), and release.yml only
+# knows about tty7.app as an intermediate to keep out of the upload globs.
+mv "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
-hdiutil create -volname "tty7" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+# Size the image explicitly. Left to itself, `-srcfolder` measures the bytes it
+# is about to copy and asks for about that much, which does not cover what the
+# filesystem spends carrying them — so the copy runs the *volume* out of room
+# partway through and hdiutil reports "No space left on device". The path in
+# that message is under /Volumes/tty7, not on the host: three nightlies died
+# here on 2026-08-10 with 105 GiB free on the runner. It is a threshold, not a
+# cliff — the x86_64 binaries are the larger pair and crossed it first, while
+# arm64 went on building fine just underneath.
+#
+# Doubling the content and adding 64 MiB is far more slack than the shortfall
+# needs, and it is close to free: the image is compressed on the way out, so
+# measured against a stage of this shape, 127 MiB of empty volume cost 672 KiB
+# in the published DMG.
+STAGE_KB="$(du -sk "$STAGE" | awk '{print $1}')"
+hdiutil create -volname "tty7" -srcfolder "$STAGE" -ov -format UDZO \
+    -size "$(( STAGE_KB * 2 + 65536 ))k" "$DMG"
 rm -rf "$STAGE"
 if [[ -n "$SIGN_ID" && -n "${APPLE_CERTIFICATE:-}" ]]; then
     codesign --force --timestamp --sign "$SIGN_ID" "$DMG"
