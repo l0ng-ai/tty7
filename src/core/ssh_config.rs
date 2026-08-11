@@ -1423,11 +1423,27 @@ mod tests {
         );
 
         std::fs::write(ssh.join("conf.d/work"), "Host work\n").unwrap();
+        edited_just_now(&ssh.join("conf.d/work"));
         assert!(
             cache.resolves(&cfg, &root, "work"),
             "an alias put back in an included file is found again, \
              though the root config never changed"
         );
+    }
+
+    /// Make a write that has just happened look like one, on a filesystem
+    /// whose clock is coarser than this test is fast.
+    ///
+    /// Windows stamps files from a clock that ticks about every 15ms, so two
+    /// writes as close together as the ones above can share an mtime — and a
+    /// cache keyed on mtime is then right to say nothing changed. A real edit
+    /// arrives at human speed, and the poll behind this cache runs at 4Hz, so
+    /// the collision is an artefact of the test rather than something a user
+    /// can reach. Stated by hand instead of slept out.
+    fn edited_just_now(path: &Path) {
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(1);
+        f.set_modified(ahead).unwrap();
     }
 
     fn temp_root(name: &str) -> PathBuf {
