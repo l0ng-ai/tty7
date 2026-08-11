@@ -624,6 +624,7 @@ l10n_keys! {
     SftpTransferDone,
     SftpTransferCancelled,
     SftpTransferError,
+    SftpTransferListFailed,
     SftpImagePasteUploadFailed,
     ForwardPanelTitle,
     ForwardDisconnected,

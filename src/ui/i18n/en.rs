@@ -816,6 +816,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SftpTransferDone => "done",
         L10nKey::SftpTransferCancelled => "cancelled",
         L10nKey::SftpTransferError => "error",
+        L10nKey::SftpTransferListFailed => "Could not check transfers: {error}",
         L10nKey::SftpImagePasteUploadFailed => {
             "Could not upload the pasted image to {host}: {error}"
         }

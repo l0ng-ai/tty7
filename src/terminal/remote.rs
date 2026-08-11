@@ -1478,18 +1478,20 @@ impl RemoteTerminal {
         query(job_id).unwrap_or_default()
     }
 
-    pub fn sftp_transfer_list(pane_id: u64) -> Vec<SftpJobProgress> {
-        fn query(pane_id: u64) -> anyhow::Result<Vec<SftpJobProgress>> {
+    /// A failed poll is not an empty transfer list: the caller has to be able
+    /// to keep the jobs it already knows about, so this reports the failure
+    /// the way `sftp_list` does rather than answering with an empty `Vec`.
+    pub fn sftp_transfer_list(pane_id: u64) -> Result<Vec<SftpJobProgress>, String> {
+        fn query(pane_id: u64) -> anyhow::Result<Result<Vec<SftpJobProgress>, String>> {
             let mut stream = connect()?;
             ClientMsg::SftpTransferList { pane_id }.encode(&mut stream)?;
-            match DaemonMsg::read(&mut stream)? {
+            Ok(match DaemonMsg::read(&mut stream)? {
                 DaemonMsg::SftpTransferProgress(jobs) => Ok(jobs),
-                other => Err(anyhow::anyhow!(
-                    "unexpected reply to SftpTransferList: {other:?}"
-                )),
-            }
+                DaemonMsg::Error(msg) => Err(msg),
+                other => Err(format!("unexpected reply to SftpTransferList: {other:?}")),
+            })
         }
-        query(pane_id).unwrap_or_default()
+        query(pane_id).unwrap_or_else(|e| Err(e.to_string()))
     }
 
     pub fn add_forward(pane_id: u64, rule: SshForwardRule) -> Vec<ManagedForward> {
