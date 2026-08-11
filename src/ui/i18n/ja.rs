@@ -39,6 +39,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TreeDirHiddenOnly => "隠しファイルのみ",
         L10nKey::TreeDirUnreadable => "読み取れません",
         L10nKey::TreeSearchCapped => "最初の {n} 件のみ",
+        L10nKey::TreeSearchFailed => "検索に失敗しました",
         L10nKey::FileChangedOnDisk => "ディスク上でファイルが変更されました",
         L10nKey::Reload => "再読み込み",
         L10nKey::KeepMine => "自分の変更を保持",
@@ -888,6 +889,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "{host} 上でファイルが削除されます。リモート側にゴミ箱はありません。"
         }
         L10nKey::FileTreeDeleteFailed => "{name} を削除できませんでした",
+        L10nKey::FileTreeCreateFailed => "{name} を作成できませんでした",
+        L10nKey::FileTreeRenameFailed => "{name} の名前を変更できませんでした",
         L10nKey::FileTreeContextOpen => "開く",
         L10nKey::FileTreeContextCdHere => "ここで cd",
         L10nKey::FileTreeContextInsertPath => "ターミナルにパスを挿入",

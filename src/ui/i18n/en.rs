@@ -39,6 +39,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TreeDirHiddenOnly => "Only hidden files",
         L10nKey::TreeDirUnreadable => "Could not be read",
         L10nKey::TreeSearchCapped => "First {n} matches",
+        L10nKey::TreeSearchFailed => "Search failed",
         L10nKey::FileChangedOnDisk => "File changed on disk",
         L10nKey::Reload => "Reload",
         L10nKey::KeepMine => "Keep mine",
@@ -846,6 +847,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "The file will be deleted on {host}. There is no trash on the far side."
         }
         L10nKey::FileTreeDeleteFailed => "Could not delete {name}",
+        L10nKey::FileTreeCreateFailed => "Could not create {name}",
+        L10nKey::FileTreeRenameFailed => "Could not rename {name}",
         L10nKey::FileTreeContextOpen => "Open",
         L10nKey::FileTreeContextCdHere => "cd Here",
         L10nKey::FileTreeContextInsertPath => "Insert Path in Terminal",
