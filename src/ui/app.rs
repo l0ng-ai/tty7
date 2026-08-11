@@ -500,6 +500,9 @@ pub struct Tty7App {
     /// Errors reported for a remote host that should be shown inside that host's
     /// switcher group instead of as a global modal or toast.
     pub(crate) remote_host_errors: std::collections::HashMap<String, String>,
+    /// Parked switcher groups (#485) whose notice the user dismissed by key —
+    /// the entries stay, only the "will not reconnect" block is hidden.
+    pub(crate) parked_dismissed: std::collections::HashSet<String>,
     /// Why the window opened with no terminal in it. Shown on the home screen,
     /// which is otherwise indistinguishable from having closed everything.
     pub(crate) startup_error: Option<gpui::SharedString>,
@@ -1029,6 +1032,7 @@ impl Tty7App {
             switcher: None,
             host_snapshots: std::collections::HashMap::new(),
             remote_host_errors: std::collections::HashMap::new(),
+            parked_dismissed: std::collections::HashSet::new(),
             startup_error,
         };
         if !cfg!(test) && crate::ui::windows::WindowRegistry::count(cx) == 0 {
@@ -1418,7 +1422,7 @@ impl Tty7App {
             return;
         };
         let target = remote.target.clone();
-        let label = crate::ui::remote_connect::label_for(&target, cx);
+        let label = crate::ui::remote_connect::route_label(cx, &remote);
         if !target.hosts_our_server() {
             window.push_notification(
                 t_fmt(L10nKey::AppRestartServerNoServer, &[("label", &label)]),

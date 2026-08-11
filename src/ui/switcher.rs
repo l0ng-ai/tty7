@@ -11,7 +11,7 @@ use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use tty7_core::core::machine::TabId;
-use tty7_core::core::session::{RemoteTarget, WorkspaceId};
+use tty7_core::core::session::{RemoteTarget, RouteSnapshot, WorkspaceId};
 
 use crate::core::actions::{SwitcherAcross, SwitcherAcrossBack};
 use crate::core::session::WorkspaceStore;
@@ -72,6 +72,11 @@ struct Group {
     home: Option<PathBuf>,
     error: Option<String>,
     installing: Option<InstallPhase>,
+    /// The route behind this group no longer resolves — its profile was
+    /// deleted or its alias left the ssh config (#485). Parked groups are
+    /// not retried; the group shows the snapshot label and offers to forget
+    /// its entries instead of a retry button that could never succeed.
+    parked: bool,
     rows: Vec<Row>,
 }
 
@@ -387,27 +392,41 @@ impl Tty7App {
             let app: &App = cx;
             let store = WorkspaceStore::all(app);
             for w in &store.views {
-                let (key, label, target) = match w.host.as_ref() {
+                let (key, label, endpoint, target) = match w.host.as_ref() {
                     None => (
                         String::new(),
                         t(L10nKey::SwitcherThisComputer).to_string(),
+                        String::new(),
                         None,
                     ),
                     Some(r) => {
                         let key = r.target.to_string();
-                        (key.clone(), key, Some(r.target.clone()))
+                        // The live profile's own name overwrites this below
+                        // while the route still resolves; when it does not,
+                        // the snapshot — or, for entries saved before
+                        // snapshots existed, a placeholder — is all the entry
+                        // has. Never the bare profile UUID (#485).
+                        let label = r.route_label(t(L10nKey::RemoteProfileGone));
+                        let endpoint = r
+                            .via
+                            .as_ref()
+                            .map(RouteSnapshot::endpoint)
+                            .filter(|e| e != &label)
+                            .unwrap_or_default();
+                        (key, label, endpoint, Some(r.target.clone()))
                     }
                 };
                 let slot = *index.entry(key.clone()).or_insert_with(|| {
                     groups.push(Group {
                         key,
                         label,
-                        endpoint: String::new(),
+                        endpoint,
                         target,
                         link: Link::Offline,
                         home: None,
                         error: None,
                         installing: None,
+                        parked: false,
                         rows: Vec::new(),
                     });
                     groups.len() - 1
@@ -445,6 +464,7 @@ impl Tty7App {
                 home: None,
                 error: None,
                 installing: None,
+                parked: false,
                 rows: Vec::new(),
             });
         }
@@ -461,6 +481,7 @@ impl Tty7App {
                     home: None,
                     error: None,
                     installing: None,
+                    parked: false,
                     rows: Vec::new(),
                 },
             );
@@ -556,6 +577,12 @@ impl Tty7App {
                 }
             }
             group.link = self.link_state(&target, cx);
+            // A route that no longer resolves parks the whole group (#485):
+            // not retried, labeled from the snapshot, forget-not-retry for
+            // actions. A live link is exempt — its panes keep working
+            // regardless of what happened to the profile that made them.
+            group.parked =
+                group.link != Link::Connected && !remote_connect::route_resolvable(cx, &target);
             if let Some(ConnectFlow::Failed { choice, error }) = &self.connect
                 && choice.target == target
             {
@@ -1374,7 +1401,10 @@ impl Tty7App {
         if let Some(phase) = group.installing {
             block = block.child(self.render_install_progress(phase, cx));
         }
-        if let Some(error) = group.error.as_ref().filter(|_| group.installing.is_none()) {
+        if group.parked && !self.parked_dismissed.contains(&group.key) && group.installing.is_none()
+        {
+            block = block.child(self.render_parked_notice(group, cx));
+        } else if let Some(error) = group.error.as_ref().filter(|_| group.installing.is_none()) {
             let retry = GroupRef::of(group);
             let replace = retry.clone();
             let retry_key = group.key.clone();
@@ -1489,6 +1519,84 @@ impl Tty7App {
             block = block.child(self.indent(group, kids, cx));
         }
         block.into_any_element()
+    }
+
+    /// The parked group's notice (#485): no retry button — nothing it could
+    /// try would succeed — just the way back (a fresh profile rediscovers
+    /// the session) and the two honest actions.
+    fn render_parked_notice(&self, group: &Group, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let forget_key = group.key.clone();
+        let dismiss_key = group.key.clone();
+        let dismiss_target = group.target.clone();
+        let entries: Vec<WorkspaceId> = group.rows.iter().map(|r| r.id).collect();
+        v_flex()
+            .gap(px(4.))
+            .ml(px(KID_INDENT))
+            .mr(px(4.))
+            .mb(px(2.))
+            .px(px(10.))
+            .py(px(8.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(t(L10nKey::RemoteRouteParkedHint)),
+            )
+            .child(
+                h_flex()
+                    .gap(px(4.))
+                    .child(
+                        Button::new(gpui::SharedString::from(format!(
+                            "switcher-forget:{}",
+                            group.key
+                        )))
+                        .label(t(L10nKey::RemoteActionRemoveEntry))
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                // Forget, never delete: nothing is sent to the
+                                // machine, so the remote sessions keep running
+                                // (#485). Adopt rows name no local entry and are
+                                // skipped by the store.
+                                for id in &entries {
+                                    crate::ui::windows::forget_workspace(cx, *id);
+                                }
+                                this.remote_host_errors.remove(&forget_key);
+                                this.parked_dismissed.remove(&forget_key);
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        Button::new(gpui::SharedString::from(format!(
+                            "switcher-parked-dismiss:{}",
+                            group.key
+                        )))
+                        .label(t(L10nKey::Dismiss))
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                this.parked_dismissed.insert(dismiss_key.clone());
+                                // A parked group can still carry the deterministic
+                                // failure that predated the parking — retire it
+                                // too, or it pops right back as the error block.
+                                this.remote_host_errors.remove(&dismiss_key);
+                                if let Some(ConnectFlow::Failed { choice, .. }) = &this.connect
+                                    && Some(&choice.target) == dismiss_target.as_ref()
+                                {
+                                    this.connect = None;
+                                }
+                                cx.notify();
+                            },
+                        )),
+                    ),
+            )
     }
 
     fn render_install_progress(
@@ -2651,6 +2759,7 @@ mod tests {
             home: None,
             error: None,
             installing: None,
+            parked: false,
             rows,
         }
     }

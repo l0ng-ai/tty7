@@ -481,6 +481,36 @@ pub fn delete_workspace(cx: &mut App, workspace: WorkspaceId) {
     refresh_menu(cx);
 }
 
+/// Drop a workspace's local bookmark without telling its machine anything.
+/// `delete_workspace` goes through `fire_workspace_op`, which sends
+/// `WorkspaceRemove` — and with a live link that really kills the remote
+/// panes. Forgetting only stops tracking the entry here; the remote daemon
+/// keeps the session, and the switcher re-discovers it from the machine's
+/// own workspace list if a route to it ever exists again (#485).
+pub fn forget_workspace(cx: &mut App, workspace: WorkspaceId) {
+    crate::ui::tree_sync::forget(cx, workspace);
+    WorkspaceStore::remove(cx, workspace);
+    release_unused_hosts(cx);
+    refresh_menu(cx);
+}
+
+/// The local entries routing through a profile, minus the ones a profile
+/// deletion must not touch (#485): an entry with a live or in-flight link
+/// keeps its bookmark — the link holds an authenticated connection rather
+/// than a profile reference, and forgetting the entry would release the
+/// link under any window still attached to the machine. Whatever survives
+/// the deletion without a link falls into the parked state instead.
+pub fn cascade_for_profile(cx: &mut App, profile: uuid::Uuid) -> Vec<WorkspaceId> {
+    WorkspaceStore::all(cx)
+        .workspaces_via_profile(profile)
+        .into_iter()
+        .filter(|ws| {
+            let host = WorkspaceStore::host_of(cx, *ws);
+            !crate::ui::remote_workspace::link_alive_or_connecting(cx, host)
+        })
+        .collect()
+}
+
 fn delete_from_tree(cx: &mut App, workspace: WorkspaceId) -> Vec<u64> {
     let doomed = doomed_pane_ids(cx, workspace);
     crate::ui::tree_sync::fire_workspace_op(cx, workspace, |ws| {
@@ -613,7 +643,7 @@ fn cascade(bounds: Bounds<gpui::Pixels>, existing: usize) -> Bounds<gpui::Pixels
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::session::{WindowView, WindowViews};
+    use crate::core::session::{RemoteRef, RemoteTarget, WindowView, WindowViews};
     use crate::ui::i18n::{L10nKey, set_locale, t_plural};
 
     fn bounds_at(x: f32, y: f32) -> Bounds<gpui::Pixels> {
@@ -801,6 +831,122 @@ mod tests {
                 doomed_pane_ids(cx, id).is_empty(),
                 "the removal has been folded into the mirror — which is exactly why \
                  the list must be read first"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn the_cascade_counts_only_the_deleted_profiles_unlinked_entries(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // #485: deleting a profile forgets every entry routing through it —
+        // its own entries, all of them, and nothing else's.
+        cx.update(|cx| {
+            let doomed = uuid::Uuid::new_v4();
+            let on_doomed_a = WindowView::on_remote(RemoteRef::new(
+                RemoteTarget::Profile { id: doomed },
+                WorkspaceId::new(),
+            ));
+            let on_doomed_b = WindowView::on_remote(RemoteRef::new(
+                RemoteTarget::Profile { id: doomed },
+                WorkspaceId::new(),
+            ));
+            let on_other = WindowView::on_remote(RemoteRef::new(
+                RemoteTarget::Profile {
+                    id: uuid::Uuid::new_v4(),
+                },
+                WorkspaceId::new(),
+            ));
+            let local = WindowView::default();
+            let (a, b) = (on_doomed_a.id, on_doomed_b.id);
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![on_doomed_a, on_doomed_b, on_other, local],
+                    active: None,
+                },
+            );
+
+            // No links exist in a test app, so nothing is excluded as
+            // connected or connecting.
+            let cascade = cascade_for_profile(cx, doomed);
+            assert_eq!(cascade.len(), 2, "exactly the deleted profile's entries");
+            assert!(cascade.contains(&a) && cascade.contains(&b));
+            assert!(
+                cascade_for_profile(cx, uuid::Uuid::new_v4()).is_empty(),
+                "a profile with no entries cascades to nothing"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn forgetting_a_workspace_never_tells_its_machine(cx: &mut gpui::TestAppContext) {
+        // #485: the profile-deletion cascade forgets rather than deletes —
+        // `WorkspaceRemove` on a live link would kill the remote panes. The
+        // machine mirror observes every op `fire_workspace_op` fires, so "the
+        // mirror still lists the workspace" pins "no remove ever went out".
+        use tty7_core::core::machine::{Machine, Workspace as TreeWorkspace};
+
+        // `WorkspaceStore::remove` saves; a test has no business writing the
+        // real views.
+        let _ = tty7_core::core::config::set_config_dir(
+            std::env::temp_dir().join(format!("tty7-windows-test-{}", std::process::id())),
+        );
+        cx.update(|cx| {
+            let target = RemoteTarget::Profile {
+                id: uuid::Uuid::new_v4(),
+            };
+            let machine_ws = WorkspaceId::new();
+            let view = WindowView::on_remote(RemoteRef::new(target.clone(), machine_ws));
+            let entry = view.id;
+            let host = view.host_id();
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![view],
+                    active: None,
+                },
+            );
+            crate::ui::machine_mirror::MachineMirrors::install(
+                cx,
+                host,
+                Machine {
+                    workspaces: vec![TreeWorkspace {
+                        id: machine_ws,
+                        ..TreeWorkspace::default()
+                    }],
+                    panes: vec![],
+                },
+            );
+
+            forget_workspace(cx, entry);
+            assert!(
+                WorkspaceStore::all(cx).get(entry).is_none(),
+                "the local bookmark is gone"
+            );
+            let machine = crate::ui::machine_mirror::MachineMirrors::machine(cx, host)
+                .expect("the mirror itself stays");
+            assert!(
+                machine.workspaces.iter().any(|w| w.id == machine_ws),
+                "forgetting fired no WorkspaceRemove — the machine keeps its session"
+            );
+
+            // Contrast: the delete path means it, and the mirror folds the
+            // removal in even with the control link down.
+            let view = WindowView::on_remote(RemoteRef::new(target, machine_ws));
+            let entry = view.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![view],
+                    active: None,
+                },
+            );
+            delete_from_tree(cx, entry);
+            let machine = crate::ui::machine_mirror::MachineMirrors::machine(cx, host).unwrap();
+            assert!(
+                !machine.workspaces.iter().any(|w| w.id == machine_ws),
+                "delete_from_tree noted the remove it fired"
             );
         });
     }

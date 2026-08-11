@@ -204,6 +204,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsDeleteProfileBody => {
             "The password saved for it goes too, unless another connection still uses the same address."
         }
+        L10nKey::SettingsDeleteProfileCascade => {
+            "{count} saved remote workspace entries point at {endpoint} and are removed from \
+             this computer along with it — the sessions on the remote machine keep running, \
+             and connecting with a new profile brings them back to the workspace list."
+        }
         L10nKey::SettingsCouldntForgetPassword => {
             "Could not forget the saved password for {endpoint}: {error}"
         }
@@ -1078,18 +1083,28 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteStripReconnectingAttempt => "Reconnecting to {machine}… (attempt {count})",
         L10nKey::RemoteStripPreempted => "This workspace was opened on {by}",
         L10nKey::RemoteStripFailed => "Not connected to {machine} — {error}",
+        L10nKey::RemoteStripRouteLost => {
+            "The connection profile for {machine} no longer exists — it cannot reconnect"
+        }
+        L10nKey::RemoteRouteParkedHint => {
+            "Its connection profile no longer exists, so it will not reconnect on its own. \
+             The remote session is still there — connect to the machine with a new profile \
+             and it reappears in the workspace list."
+        }
         L10nKey::RemoteNoticePreempted => "Opened elsewhere — typing has no effect",
         L10nKey::RemoteNoticeDisconnected => "Not connected — typing has no effect",
         L10nKey::RemoteActionRetryNow => "Retry Now",
         L10nKey::RemoteActionTakeBack => "Take Back",
         L10nKey::RemoteActionConnect => "Connect",
         L10nKey::RemoteActionRetry => "Retry",
+        L10nKey::RemoteActionRemoveEntry => "Remove entry",
         L10nKey::RemoteNoConnectionDetails => {
             "This window is a workspace on {machine}, but tty7 has no connection \
              details for it any more — check that its SSH profile or ~/.ssh/config \
              entry still exists."
         }
         L10nKey::RemoteThisComputer => "this computer",
+        L10nKey::RemoteProfileGone => "deleted profile",
         L10nKey::RemoteRestartTitle => "Restart tty7's server on \"{machine}\"?",
         L10nKey::RemoteRestartBody => {
             "This stops every shell on {machine} — anything still running in them \

@@ -185,6 +185,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDeleteProfileBody => {
             "为它保存的密码也会一并删除，除非还有别的连接用着同一个地址。"
         }
+        L10nKey::SettingsDeleteProfileCascade => {
+            "有 {count} 个已保存的远程工作区条目指向 {endpoint}，将随配置一并从本机清除；\
+             远端机器上的会话不受影响，新建配置连上同一台机器后即可在工作区列表找回。"
+        }
         L10nKey::SettingsCouldntForgetPassword => "无法清除 {endpoint} 的已保存密码：{error}",
         L10nKey::SettingsSecurity => "安全",
         L10nKey::SettingsSecurityIntro => "主机可以在自己的高级选项中覆盖这些设置。",
@@ -1023,17 +1027,24 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteStripReconnectingAttempt => "正在重新连接 {machine}…（第 {count} 次尝试）",
         L10nKey::RemoteStripPreempted => "此工作区已在 {by} 上打开",
         L10nKey::RemoteStripFailed => "未连接到 {machine}——{error}",
+        L10nKey::RemoteStripRouteLost => "{machine} 的连接配置已不存在，无法重连",
+        L10nKey::RemoteRouteParkedHint => {
+            "其连接配置已不存在，不会再自动重连。远端会话仍在——\
+             新建配置连上该机器后，可在工作区列表中找回。"
+        }
         L10nKey::RemoteNoticePreempted => "已在别处打开——输入无效",
         L10nKey::RemoteNoticeDisconnected => "未连接——输入无效",
         L10nKey::RemoteActionRetryNow => "立即重试",
         L10nKey::RemoteActionTakeBack => "收回",
         L10nKey::RemoteActionConnect => "连接",
         L10nKey::RemoteActionRetry => "重试",
+        L10nKey::RemoteActionRemoveEntry => "移除条目",
         L10nKey::RemoteNoConnectionDetails => {
             "此窗口是 {machine} 上的工作区，但 tty7 已没有它的连接详情——\
              请检查其 SSH 主机配置或 ~/.ssh/config 条目是否仍然存在。"
         }
         L10nKey::RemoteThisComputer => "本机",
+        L10nKey::RemoteProfileGone => "已删除的配置",
         L10nKey::RemoteRestartTitle => "重启“{machine}”上的 tty7 server？",
         L10nKey::RemoteRestartBody => {
             "这将停止 {machine} 上的所有 shell——其中仍在运行的任何内容都会被终止，\

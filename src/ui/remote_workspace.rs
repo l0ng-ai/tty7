@@ -32,9 +32,17 @@ pub enum RemoteStatus {
     Disconnected,
     Connecting,
     Attached,
-    Reconnecting { attempt: u32 },
-    Preempted { by: String },
+    Reconnecting {
+        attempt: u32,
+    },
+    Preempted {
+        by: String,
+    },
     Failed(String),
+    /// The route itself is gone — the profile was deleted or the alias left
+    /// the ssh config — so no reconnect can ever succeed (#485). Parked: no
+    /// retry button, just the truth plus the way back.
+    RouteLost,
 }
 
 impl RemoteStatus {
@@ -64,6 +72,10 @@ impl RemoteStatus {
                 L10nKey::RemoteStripFailed,
                 &[("machine", machine), ("error", e)],
             )),
+            RemoteStatus::RouteLost => Some(t_fmt(
+                L10nKey::RemoteStripRouteLost,
+                &[("machine", machine)],
+            )),
         }
     }
 
@@ -82,6 +94,9 @@ impl RemoteStatus {
             RemoteStatus::Preempted { .. } => Some(t(L10nKey::RemoteActionTakeBack)),
             RemoteStatus::Disconnected => Some(t(L10nKey::RemoteActionConnect)),
             RemoteStatus::Failed(_) => Some(t(L10nKey::RemoteActionRetry)),
+            // A retry on a dead route fails deterministically; the switcher
+            // row carries the honest actions (forget the entry, or dismiss).
+            RemoteStatus::RouteLost => None,
         }
     }
 
@@ -214,7 +229,7 @@ impl Tty7App {
 
     pub(crate) fn remote_machine_label(&self, cx: &gpui::App) -> String {
         match WorkspaceStore::remote_ref(cx, self.workspace) {
-            Some(host) => host.target.to_string(),
+            Some(host) => remote_connect::route_label(cx, &host),
             None => t(L10nKey::RemoteThisComputer).to_string(),
         }
     }
@@ -267,7 +282,18 @@ impl Tty7App {
     }
 
     pub(crate) fn remote_status(&self, cx: &gpui::App) -> Option<RemoteStatus> {
-        WorkspaceStore::remote_ref(cx, self.workspace)?;
+        let host = WorkspaceStore::remote_ref(cx, self.workspace)?;
+        let link = RemoteLinks::status_of(cx, self.workspace);
+        // A live link outranks the route check: the panes on it keep working
+        // no matter what happened to the profile that made them.
+        if matches!(link, Some(RemoteStatus::Attached)) {
+            return link;
+        }
+        // A route that no longer resolves parks the workspace (#485): nothing
+        // it could try would ever succeed, so say that instead of retrying.
+        if !remote_connect::route_resolvable(cx, &host.target) {
+            return Some(RemoteStatus::RouteLost);
+        }
         match &self.connect {
             Some(ConnectFlow::Connecting { .. }) => return Some(RemoteStatus::Connecting),
             Some(ConnectFlow::Failed { error, .. }) => {
@@ -275,7 +301,7 @@ impl Tty7App {
             }
             _ => {}
         }
-        RemoteLinks::status_of(cx, self.workspace)
+        link
     }
 
     pub(crate) fn remote_retry(&mut self, cx: &mut Context<Self>) {
@@ -969,9 +995,20 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
             continue;
         }
 
+        // A route that no longer resolves — the profile was deleted, or the
+        // alias left the ssh config — can only fail, deterministically and
+        // forever (#485). Park the entry: drop any dead link state, but no
+        // backoff, no attempt, no error. Its label comes from the route
+        // snapshot, and the switcher offers to forget it.
+        let resolvable = remote_connect::route_resolvable(cx, &target);
         if remote_connect::HostLinks::get(cx, host).is_some() {
             remote_connect::HostLinks::remove(cx, host);
-            log::info!("lost the control connection to {target}; reconnecting");
+            if resolvable {
+                log::info!("lost the control connection to {target}; reconnecting");
+            }
+        }
+        if !resolvable {
+            continue;
         }
 
         let due = {
@@ -1009,6 +1046,19 @@ fn prune_suspended(
     bound: &[(HostId, RemoteTarget)],
 ) {
     suspended.retain(|host| bound.iter().any(|(id, _)| id == host));
+}
+
+/// Does this machine's entry survive a profile deletion (#485)? A live link
+/// or an in-flight attempt does: the connection holds an authenticated spec,
+/// not a profile reference, and forgetting the entry would release the link
+/// under any window still attached to it.
+pub(crate) fn link_alive_or_connecting(cx: &mut gpui::App, host: HostId) -> bool {
+    if remote_connect::HostLinks::get(cx, host).is_some() {
+        return true;
+    }
+    cx.try_global::<RemoteLinks>()
+        .and_then(|links| links.machines.get(&host))
+        .is_some_and(|link| link.attempting || matches!(link.state, LinkState::Connecting))
 }
 
 fn bound_machines(cx: &gpui::App) -> Vec<(HostId, RemoteTarget)> {

@@ -65,6 +65,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Deleting an SSH profile no longer strands its remote workspaces** — the
+  switcher kept every entry that had connected through the profile, labelled
+  with a bare internal id, retrying a route that could never work again. The
+  confirmation now names the profile's endpoint and counts the entries going
+  with it, and deleting forgets those bookmarks along with the profile and its
+  keychain credentials — *forgets*, not deletes: the sessions on the remote
+  machine are untouched, and connecting to it again under a new profile brings
+  its workspaces back from the machine's own list. An entry holding a live or
+  in-flight connection is left alone, and parks once the link drops: it stops
+  retrying, keeps the name of the route that made it rather than the id, and
+  its switcher row offers *Remove entry* next to a note that a new profile
+  finds the session again.
+
 - **An SFTP upload no longer sits in the browser under its temporary name** —
   an upload is written as `<name>.tty7-upload-<hex>` and renamed into place at
   the end, and the browser listed the directory the moment the transfer

@@ -217,17 +217,54 @@ pub fn resolve_alias_to_profile_from(
     alias: &str,
 ) -> Option<ResolvedAlias> {
     let blocks = parse_config_blocks(root, home);
-    let matched = blocks.iter().any(|block| block_matches(block, alias));
-    let resolved = resolve_alias(alias, &blocks);
-    if !matched && resolved.hostname.is_none() {
+    if !alias_resolves_in(&blocks, alias) {
         return None;
     }
+    let resolved = resolve_alias(alias, &blocks);
     let mut profile = ManagedProfile::new(alias.to_string());
     let proxy_jump = apply_resolved(&mut profile, alias, resolved);
     Some(ResolvedAlias {
         profile,
         proxy_jump,
     })
+}
+
+fn alias_resolves_in(blocks: &[HostBlock], alias: &str) -> bool {
+    let matched = blocks.iter().any(|block| block_matches(block, alias));
+    matched || resolve_alias(alias, blocks).hostname.is_some()
+}
+
+/// "Does this alias still resolve", asked by the route supervisor four times
+/// a second for every open alias workspace (#485). Re-parsing per tick would
+/// be the only file IO on that hot path, so the parse is cached by mtime:
+/// an edit made outside tty7 is seen on the first tick after the file
+/// changes, and an untouched file costs one stat.
+pub fn alias_still_resolves(alias: &str) -> bool {
+    struct Cache {
+        mtime: Option<std::time::SystemTime>,
+        blocks: Vec<HostBlock>,
+    }
+    static CACHE: std::sync::Mutex<Option<Cache>> = std::sync::Mutex::new(None);
+
+    let Some(home) = home_dir() else {
+        return false;
+    };
+    let root = home.join(".ssh/config");
+    let mtime = std::fs::metadata(&root).and_then(|m| m.modified()).ok();
+    let mut cache = match CACHE.lock() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    if cache.as_ref().is_none_or(|c| c.mtime != mtime) {
+        *cache = Some(Cache {
+            mtime,
+            blocks: parse_config_blocks(root, &home),
+        });
+    }
+    match cache.as_ref() {
+        Some(c) => alias_resolves_in(&c.blocks, alias),
+        None => false,
+    }
 }
 
 fn apply_resolved(profile: &mut ManagedProfile, alias: &str, r: ResolvedHost) -> Option<String> {

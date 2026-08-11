@@ -71,6 +71,11 @@ Passwords and key passphrases go in the **OS keychain**, never in
 `config.json` and never on disk in plain text. **Forget Password** in a
 profile's menu removes the stored one.
 
+Deleting a profile drops its keychain credentials and forgets the remote
+workspace entries that connected through it — the confirmation counts them
+first. The sessions on the machine itself keep running; [what happens to its
+entries →](/remote/workspaces#deleting-a-profile)
+
 ### Advanced
 
 Behind **Advanced** on a profile, grouped:

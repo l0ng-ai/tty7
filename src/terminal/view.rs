@@ -460,7 +460,7 @@ impl TerminalView {
         let host = self
             .workspace
             .as_ref()
-            .map(|w| crate::ui::remote_connect::label_for(&w.target, cx));
+            .map(|w| crate::ui::remote_connect::target_label(cx, &w.target));
         let workspace = self
             .owner_workspace
             .and_then(|id| crate::ui::machine_mirror::display_name_for(cx, id));

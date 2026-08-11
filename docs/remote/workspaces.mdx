@@ -68,6 +68,21 @@ A strip along the top of the window says what the connection is doing —
 someone else*. Reconnection is automatic; a workspace another client has claimed
 says so by name rather than fighting over it.
 
+## Deleting a profile
+
+Deleting an SSH profile forgets every local workspace entry that connected
+through it. The confirmation names the profile's endpoint and counts the
+entries going with it, and the profile's keychain credentials go too. Only the
+bookmarks on this computer are touched — the sessions on the remote machine
+keep running, and connecting to that machine again under a new profile brings
+its workspaces back into the switcher from the machine's own list.
+
+An entry holding a live or in-flight connection is left alone, and parks once
+the link drops: it stops reconnecting on its own, keeps the name of the route
+that made it rather than falling back to an internal id, and its switcher row
+offers **Remove entry**. The sessions behind it are still on the machine,
+waiting for a new profile.
+
 ## Keeping the server current
 
 Two dialogs you may meet:

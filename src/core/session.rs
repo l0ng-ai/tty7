@@ -1,6 +1,6 @@
 pub use tty7_core::core::session::{
-    RemoteRef, RemoteTarget, Session, SessionAxis, SessionPane, SessionTab, WindowView,
-    WindowViews, WorkspaceId,
+    RemoteRef, RemoteTarget, RouteSnapshot, Session, SessionAxis, SessionPane, SessionTab,
+    WindowView, WindowViews, WorkspaceId,
 };
 pub use tty7_core::host::HostId;
 
@@ -166,18 +166,32 @@ impl WorkspaceStore {
         crate::ui::remote_connect::HostLinks::get(cx, host.host_id()).is_some()
     }
 
-    pub fn claim_remote(cx: &mut gpui::App, host: RemoteRef) -> WorkspaceId {
+    pub fn claim_remote(cx: &mut gpui::App, mut host: RemoteRef) -> WorkspaceId {
+        // Remember the route while it still resolves: after the profile is
+        // deleted, this snapshot is the only name the entry has left (#485).
+        // Every (re-)open comes through here, so a rename or a repoint is
+        // picked up in time.
+        if let Some(cfg) = cx.try_global::<crate::core::config::Config>() {
+            host.refresh_via(&cfg.ssh_profiles);
+        }
         let Some(store) = Self::try_store(cx) else {
             return WorkspaceId::new();
         };
         let existing = store
             .views
             .views
-            .iter()
-            .find(|w| w.host.as_ref() == Some(&host))
-            .map(|w| w.id);
+            .iter_mut()
+            .find(|w| w.host.as_ref() == Some(&host));
         let id = match existing {
-            Some(id) => id,
+            Some(view) => {
+                // A fresh snapshot refreshes the stored one; a `None` here
+                // means the profile is already gone and the stored snapshot
+                // is the last name the entry has — keep it.
+                if let (Some(h), Some(via)) = (view.host.as_mut(), host.via.clone()) {
+                    h.via = Some(via);
+                }
+                view.id
+            }
             None => {
                 let view = WindowView::on_remote(host);
                 let id = view.id;
@@ -268,6 +282,69 @@ mod tests {
             let fresh = WorkspaceStore::claim(cx, None);
             assert_ne!(fresh, on_the_machine);
             assert_eq!(WorkspaceStore::all(cx).views.len(), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn claim_remote_remembers_the_route_and_refreshes_it_while_the_profile_lives(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // #485: the snapshot is written at creation, refreshed on every
+        // re-open while the profile still exists, and — once the profile is
+        // gone — kept as the last name the entry has.
+        let _ = tty7_core::core::config::set_config_dir(
+            std::env::temp_dir().join(format!("tty7-session-test-{}", std::process::id())),
+        );
+        cx.update(|cx| {
+            let profile_id = uuid::Uuid::new_v4();
+            let mut profile = tty7_core::core::ssh_profile::SshProfile::new("lager");
+            profile.id = profile_id;
+            profile.user = "qhw".into();
+            profile.host = "222.29.101.16".into();
+            let mut cfg = crate::core::config::Config::default();
+            cfg.ssh_profiles.push(profile);
+            cx.set_global(cfg);
+            WorkspaceStore::install_for_test(cx, WindowViews::default());
+
+            let target = RemoteTarget::Profile { id: profile_id };
+            let machine_ws = WorkspaceId::new();
+            let entry =
+                WorkspaceStore::claim_remote(cx, RemoteRef::new(target.clone(), machine_ws));
+            let via = WorkspaceStore::all(cx)
+                .get(entry)
+                .and_then(|w| w.host.as_ref())
+                .and_then(|h| h.via.clone())
+                .expect("creation writes the snapshot");
+            assert_eq!(via.label(), "lager");
+            assert_eq!(via.endpoint(), "qhw@222.29.101.16");
+
+            // A rename lands on the next open, without piling up entries.
+            cx.global_mut::<crate::core::config::Config>().ssh_profiles[0].name =
+                "lager-renamed".into();
+            let again =
+                WorkspaceStore::claim_remote(cx, RemoteRef::new(target.clone(), machine_ws));
+            assert_eq!(again, entry);
+            assert_eq!(WorkspaceStore::all(cx).views.len(), 1);
+            let via = WorkspaceStore::all(cx)
+                .get(entry)
+                .and_then(|w| w.host.as_ref())
+                .and_then(|h| h.via.clone())
+                .unwrap();
+            assert_eq!(via.label(), "lager-renamed");
+
+            // Once the profile is gone, the stored snapshot survives a
+            // re-open with a via-less ref.
+            cx.global_mut::<crate::core::config::Config>()
+                .ssh_profiles
+                .clear();
+            let orphaned = WorkspaceStore::claim_remote(cx, RemoteRef::new(target, machine_ws));
+            assert_eq!(orphaned, entry);
+            let via = WorkspaceStore::all(cx)
+                .get(entry)
+                .and_then(|w| w.host.as_ref())
+                .and_then(|h| h.via.clone())
+                .unwrap();
+            assert_eq!(via.label(), "lager-renamed", "the last name is kept");
         });
     }
 

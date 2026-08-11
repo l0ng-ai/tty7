@@ -182,6 +182,25 @@ impl RemoteTarget {
         }
     }
 
+    /// Whether this target can still be resolved into a connection. `Profile`
+    /// is a bare config pointer and dangles once the profile is deleted;
+    /// `Alias` dangles once the name leaves the ssh config (#485). The other
+    /// targets carry everything they need. The alias half is injected because
+    /// it belongs to the on-disk ssh config, which this crate cannot see.
+    pub fn resolvable(
+        &self,
+        profiles: &[crate::core::ssh_profile::SshProfile],
+        alias_known: impl Fn(&str) -> bool,
+    ) -> bool {
+        match self {
+            RemoteTarget::Profile { id } => profiles.iter().any(|p| p.id == *id),
+            RemoteTarget::Alias { alias } => alias_known(alias),
+            RemoteTarget::Direct { .. }
+            | RemoteTarget::Wsl { .. }
+            | RemoteTarget::LocalStdio { .. } => true,
+        }
+    }
+
     pub fn host_id(&self) -> crate::host::HostId {
         crate::host::HostId::from_connection_key(&self.connection_key())
     }
@@ -214,15 +233,115 @@ impl std::fmt::Display for RemoteTarget {
     }
 }
 
+/// Who carried a workspace entry to its machine, remembered at creation and
+/// refreshed on every open while the profile still exists: a `Profile`
+/// target is just a config UUID, so once the profile is deleted this snapshot
+/// is the only thing left that can name the entry (#485). It never drives a
+/// connection — labels and the profile-deletion confirmation only.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RouteSnapshot {
+    pub name: String,
+    #[serde(default)]
+    pub user: String,
+    pub host: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+}
+
+impl RouteSnapshot {
+    pub fn of_profile(profile: &crate::core::ssh_profile::SshProfile) -> RouteSnapshot {
+        RouteSnapshot {
+            name: profile.name.clone(),
+            user: profile.user.clone(),
+            host: profile.host.clone(),
+            port: profile.port,
+        }
+    }
+
+    /// The profile's display name when it has one, else the endpoint.
+    pub fn label(&self) -> String {
+        let name = self.name.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+        self.endpoint()
+    }
+
+    pub fn endpoint(&self) -> String {
+        let mut out = String::new();
+        if !self.user.is_empty() {
+            out.push_str(&self.user);
+            out.push('@');
+        }
+        out.push_str(&self.host);
+        if self.port != 22 {
+            out.push(':');
+            out.push_str(&self.port.to_string());
+        }
+        out
+    }
+}
+
+/// Identity comes from `target` + `workspace` alone: `via` is a
+/// label-serving snapshot that changes as profiles are renamed or deleted,
+/// and two refs to the same remote workspace must compare (and hash) equal
+/// no matter how stale either snapshot is.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteRef {
     pub target: RemoteTarget,
     pub workspace: WorkspaceId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<RouteSnapshot>,
+}
+
+impl PartialEq for RemoteRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.target == other.target && self.workspace == other.workspace
+    }
+}
+
+impl Eq for RemoteRef {}
+
+impl std::hash::Hash for RemoteRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.target, state);
+        std::hash::Hash::hash(&self.workspace, state);
+    }
 }
 
 impl RemoteRef {
     pub fn new(target: RemoteTarget, workspace: WorkspaceId) -> RemoteRef {
-        RemoteRef { target, workspace }
+        RemoteRef {
+            target,
+            workspace,
+            via: None,
+        }
+    }
+
+    /// Refresh the remembered route from the profile it points at, while that
+    /// profile still exists. Called on every (re-)open so a rename or a
+    /// repoint lands before the profile can be deleted (#485).
+    pub fn refresh_via(&mut self, profiles: &[crate::core::ssh_profile::SshProfile]) {
+        if let RemoteTarget::Profile { id } = &self.target
+            && let Some(profile) = profiles.iter().find(|p| p.id == *id)
+        {
+            self.via = Some(RouteSnapshot::of_profile(profile));
+        }
+    }
+
+    /// The name this route can still answer to with no live config: the
+    /// remembered route when there is one, the target's own spelling when
+    /// that spelling is human-readable already (alias, endpoint, distro),
+    /// and — for a profile reduced to a bare UUID, the symptom of #485 — the
+    /// caller's placeholder rather than that UUID.
+    pub fn route_label(&self, deleted_profile: &str) -> String {
+        if let Some(via) = &self.via {
+            return via.label();
+        }
+        match &self.target {
+            RemoteTarget::Profile { .. } => deleted_profile.to_string(),
+            other => other.to_string(),
+        }
     }
 
     pub fn host_id(&self) -> crate::host::HostId {
@@ -326,6 +445,17 @@ impl WindowViews {
         self.views.iter_mut().find(|w| w.id == id)
     }
 
+    /// Every entry routing through `Profile { id }` — the set a profile
+    /// deletion forgets (#485). The caller subtracts entries with a live or
+    /// in-flight link before acting on the list.
+    pub fn workspaces_via_profile(&self, id: uuid::Uuid) -> Vec<WorkspaceId> {
+        self.views
+            .iter()
+            .filter(|w| matches!(&w.host, Some(h) if h.target == RemoteTarget::Profile { id }))
+            .map(|w| w.id)
+            .collect()
+    }
+
     pub fn open_views(&self) -> impl Iterator<Item = &WindowView> {
         self.views.iter().filter(|w| w.open)
     }
@@ -417,6 +547,165 @@ mod tests {
             },
             WorkspaceId::new(),
         ))
+    }
+
+    fn profile_view(id: uuid::Uuid) -> WindowView {
+        WindowView::on_remote(RemoteRef::new(
+            RemoteTarget::Profile { id },
+            WorkspaceId::new(),
+        ))
+    }
+
+    #[test]
+    fn views_saved_before_the_snapshot_existed_still_load() {
+        // #485 added `RemoteRef.via`; a views file written before it has no
+        // such field and must deserialize with `None`.
+        let id = uuid::Uuid::new_v4();
+        let ws = uuid::Uuid::new_v4();
+        let json = format!(
+            r#"{{"views":[{{"id":"{ws}","open":true,"last_active":1700000000,"host":{{"target":{{"kind":"profile","id":"{id}"}},"workspace":"{ws}"}}}}]}}"#
+        );
+        let views: WindowViews = serde_json::from_str(&json).unwrap();
+        let host = views.views[0].host.as_ref().unwrap();
+        assert_eq!(host.target, RemoteTarget::Profile { id });
+        assert_eq!(host.via, None);
+    }
+
+    #[test]
+    fn remote_ref_with_a_snapshot_round_trips() {
+        let mut host = RemoteRef::new(
+            RemoteTarget::Profile {
+                id: uuid::Uuid::new_v4(),
+            },
+            WorkspaceId::new(),
+        );
+        host.via = Some(RouteSnapshot {
+            name: "lager".into(),
+            user: "deploy".into(),
+            host: "10.2.3.4".into(),
+            port: 2222,
+        });
+        let back: RemoteRef = serde_json::from_str(&serde_json::to_string(&host).unwrap()).unwrap();
+        assert_eq!(back, host, "equality ignores via, so compare it directly");
+        assert_eq!(
+            back.via.as_ref().unwrap().endpoint(),
+            "deploy@10.2.3.4:2222"
+        );
+    }
+
+    #[test]
+    fn remote_ref_equality_ignores_the_snapshot() {
+        let target = RemoteTarget::Profile {
+            id: uuid::Uuid::new_v4(),
+        };
+        let ws = WorkspaceId::new();
+        let bare = RemoteRef::new(target.clone(), ws);
+        let mut remembered = RemoteRef::new(target, ws);
+        remembered.via = Some(RouteSnapshot {
+            name: "lager".into(),
+            user: String::new(),
+            host: "h".into(),
+            port: 22,
+        });
+        // `claim_remote` finds existing entries by this equality; a refreshed
+        // snapshot must never read as a different route and pile up entries.
+        assert_eq!(bare, remembered);
+    }
+
+    #[test]
+    fn route_label_never_lands_on_a_bare_profile_uuid() {
+        // The symptom of #485, pinned: a profile entry whose config is gone
+        // must never render its raw UUID as a name.
+        let id = uuid::Uuid::new_v4();
+        let bare = RemoteRef::new(RemoteTarget::Profile { id }, WorkspaceId::new());
+        let label = bare.route_label("已删除的配置");
+        assert_eq!(label, "已删除的配置");
+        assert!(!label.contains(id.to_string().as_str()));
+
+        let mut remembered = bare.clone();
+        remembered.via = Some(RouteSnapshot {
+            name: "lager".into(),
+            user: "qhw".into(),
+            host: "222.29.101.16".into(),
+            port: 22,
+        });
+        assert_eq!(remembered.route_label("已删除的配置"), "lager");
+
+        // Targets that spell themselves readably never need the placeholder.
+        let alias = RemoteRef::new(
+            RemoteTarget::Alias {
+                alias: "build-box".into(),
+            },
+            WorkspaceId::new(),
+        );
+        assert_eq!(alias.route_label("已删除的配置"), "build-box");
+    }
+
+    #[test]
+    fn snapshot_label_prefers_the_name_then_the_endpoint() {
+        let named = RouteSnapshot {
+            name: "lager".into(),
+            user: "qhw".into(),
+            host: "222.29.101.16".into(),
+            port: 22,
+        };
+        assert_eq!(named.label(), "lager");
+        let unnamed = RouteSnapshot {
+            name: "  ".into(),
+            ..named.clone()
+        };
+        assert_eq!(unnamed.label(), "qhw@222.29.101.16");
+        assert_eq!(named.endpoint(), "qhw@222.29.101.16");
+    }
+
+    #[test]
+    fn resolvable_covers_both_dangling_kinds() {
+        let id = uuid::Uuid::new_v4();
+        let mut profile = crate::core::ssh_profile::SshProfile::new("lager");
+        profile.id = id;
+        let profiles = std::slice::from_ref(&profile);
+
+        let by_profile = RemoteTarget::Profile { id };
+        assert!(by_profile.resolvable(profiles, |_| false));
+        assert!(!by_profile.resolvable(&[], |_| true));
+
+        let by_alias = RemoteTarget::Alias {
+            alias: "build-box".into(),
+        };
+        assert!(by_alias.resolvable(&[], |a| a == "build-box"));
+        assert!(!by_alias.resolvable(profiles, |_| false));
+
+        // Self-contained targets never dangle.
+        for target in [
+            RemoteTarget::direct("me", "box.local", 22),
+            RemoteTarget::Wsl {
+                distro: "Ubuntu".into(),
+            },
+            RemoteTarget::LocalStdio {
+                program: "tty7-server".into(),
+                args: vec![],
+            },
+        ] {
+            assert!(target.resolvable(&[], |_| false), "{target}");
+        }
+    }
+
+    #[test]
+    fn workspaces_via_profile_counts_all_and_only_its_entries() {
+        let doomed = uuid::Uuid::new_v4();
+        let kept = uuid::Uuid::new_v4();
+        let a = profile_view(doomed);
+        let b = profile_view(doomed);
+        let c = profile_view(kept);
+        let d = remote_view("build-box");
+        let e = view();
+        let views = WindowViews {
+            views: vec![a.clone(), b.clone(), c, d, e],
+            ..WindowViews::default()
+        };
+        let got = views.workspaces_via_profile(doomed);
+        assert_eq!(got.len(), 2, "one machine can hold several entries (#485)");
+        assert!(got.contains(&a.id) && got.contains(&b.id));
     }
 
     #[test]
