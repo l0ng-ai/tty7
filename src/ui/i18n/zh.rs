@@ -832,6 +832,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileDropFailedMany => "无法复制 {name}，另有 {n} 个也失败了",
         L10nKey::SshPromptNewKey => "新 {fingerprint}",
         L10nKey::SshPromptOldKey => "旧 {old_fingerprint}",
+        L10nKey::SshPromptHostKeyNewAlgorithm => {
+            "你已经通过一把 {previous_algorithm} 密钥认识这台主机。这是一把新的 {algorithm} 密钥，并不是用来替换那一把的。"
+        }
         L10nKey::EditorCantOpen => "无法打开 {path}：{e}",
         L10nKey::EditorCantRead => "无法读取 {path}：{e}",
         L10nKey::EditorNotUtf8 => "“{path}”不是有效的 UTF-8",

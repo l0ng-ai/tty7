@@ -9,6 +9,7 @@ use tokio::net::TcpStream;
 
 use crate::daemon::protocol::{NativeSshSpec, SshAlgorithms, SshProxy};
 
+use super::known_hosts;
 use super::session::SshConnection;
 
 pub enum Transport {
@@ -369,8 +370,11 @@ async fn http_connect(
 }
 
 pub fn build_config(spec: &NativeSshSpec) -> Arc<russh::client::Config> {
+    // Every hop comes through here — the target and each jump host build their
+    // own config from their own spec — so each asks known_hosts about itself.
+    let known = known_hosts::known_algorithms(&spec.host, spec.port);
     let mut cfg = russh::client::Config {
-        preferred: build_preferred(&spec.algorithms),
+        preferred: build_preferred(&spec.algorithms, &known),
         ..Default::default()
     };
     if let Some(iv) = spec.keepalive_interval_s.filter(|v| *v > 0) {
@@ -382,7 +386,10 @@ pub fn build_config(spec: &NativeSshSpec) -> Arc<russh::client::Config> {
     Arc::new(cfg)
 }
 
-fn build_preferred(a: &SshAlgorithms) -> russh::Preferred {
+fn build_preferred(
+    a: &SshAlgorithms,
+    known_host_keys: &[russh::keys::Algorithm],
+) -> russh::Preferred {
     let mut p = russh::Preferred::DEFAULT;
     if !a.kex.is_empty() {
         let v: Vec<russh::kex::Name> = a
@@ -423,6 +430,21 @@ fn build_preferred(a: &SshAlgorithms) -> russh::Preferred {
         if !v.is_empty() {
             p.key = Cow::Owned(v);
         }
+    } else if !known_host_keys.is_empty() {
+        // What OpenSSH's `order_hostkeyalgs()` does: offer the algorithms this
+        // host already has entries for ahead of the rest, so a server that has
+        // both an ssh-rsa key on file and an ed25519 key on offer answers with
+        // the one the user has already accepted. Without it the default order
+        // picks ed25519, and a host known only by ssh-rsa raises a
+        // key-you-have-never-seen prompt on every single connection.
+        //
+        // Reordering only, never filtering — a host whose keys have genuinely
+        // rotated must still be able to negotiate — and skipped entirely when
+        // the user pinned `HostKeyAlgorithms`, which OpenSSH also treats as the
+        // last word.
+        let mut ordered: Vec<russh::keys::Algorithm> = p.key.iter().cloned().collect();
+        ordered.sort_by_key(|alg| !known_host_keys.iter().any(|k| same_key_type(k, alg)));
+        p.key = Cow::Owned(ordered);
     }
     if !a.compression.is_empty() {
         let v: Vec<russh::compression::Name> = a
@@ -435,6 +457,21 @@ fn build_preferred(a: &SshAlgorithms) -> russh::Preferred {
         }
     }
     p
+}
+
+/// Whether two host-key algorithms stand for the same *key*.
+///
+/// An `ssh-rsa` line in known_hosts parses to `Rsa { hash: None }`, but what
+/// gets negotiated is one of `rsa-sha2-512`, `rsa-sha2-256` or `ssh-rsa` — three
+/// signature algorithms over one key. Comparing with `==` would float only the
+/// SHA-1 spelling to the front of the list, which is a downgrade dressed up as a
+/// preference; OpenSSH's `order_hostkeyalgs()` matches on the key type too.
+fn same_key_type(a: &russh::keys::Algorithm, b: &russh::keys::Algorithm) -> bool {
+    use russh::keys::Algorithm;
+    match (a, b) {
+        (Algorithm::Rsa { .. }, Algorithm::Rsa { .. }) => true,
+        _ => a == b,
+    }
 }
 
 #[cfg(test)]
@@ -473,9 +510,10 @@ mod tests {
     #[test]
     fn build_preferred_keeps_defaults_for_empty_lists() {
         let a = SshAlgorithms::default();
-        let p = build_preferred(&a);
+        let p = build_preferred(&a, &[]);
         assert_eq!(p.kex, russh::Preferred::DEFAULT.kex);
         assert_eq!(p.cipher, russh::Preferred::DEFAULT.cipher);
+        assert_eq!(p.key, russh::Preferred::DEFAULT.key);
     }
 
     #[test]
@@ -484,8 +522,61 @@ mod tests {
             cipher: vec!["totally-not-a-cipher".into(), "aes256-ctr".into()],
             ..Default::default()
         };
-        let p = build_preferred(&a);
+        let p = build_preferred(&a, &[]);
         let aes = russh::cipher::Name::try_from("aes256-ctr").unwrap();
         assert_eq!(p.cipher.as_ref(), &[aes]);
+    }
+
+    /// The default order leads with ed25519, so a host known only by an
+    /// ssh-rsa key was greeted with a key it had never seen on every connect.
+    #[test]
+    fn build_preferred_floats_known_hosts_algorithms_to_the_front() {
+        let rsa = russh::keys::Algorithm::Rsa { hash: None };
+        let p = build_preferred(&SshAlgorithms::default(), &[rsa]);
+        // All three RSA spellings sign for the one key on file, so all three
+        // lead — anything less would pin the host to SHA-1 signatures.
+        assert!(
+            p.key
+                .iter()
+                .take(3)
+                .all(|a| matches!(a, russh::keys::Algorithm::Rsa { .. })),
+            "expected the RSA spellings first, got {:?}",
+            p.key
+        );
+    }
+
+    #[test]
+    fn build_preferred_reordering_never_drops_an_algorithm() {
+        let rsa = russh::keys::Algorithm::Rsa { hash: None };
+        let p = build_preferred(&SshAlgorithms::default(), &[rsa]);
+        let mut got: Vec<String> = p.key.iter().map(|a| a.to_string()).collect();
+        let mut want: Vec<String> = russh::Preferred::DEFAULT
+            .key
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    /// OpenSSH stops reordering once `HostKeyAlgorithms` is explicit, because
+    /// the user has already said what order they want.
+    #[test]
+    fn build_preferred_leaves_a_pinned_host_key_list_alone() {
+        let a = SshAlgorithms {
+            host_key: vec!["ssh-ed25519".into(), "rsa-sha2-512".into()],
+            ..Default::default()
+        };
+        let p = build_preferred(&a, &[russh::keys::Algorithm::Rsa { hash: None }]);
+        assert_eq!(
+            p.key.as_ref(),
+            &[
+                russh::keys::Algorithm::Ed25519,
+                russh::keys::Algorithm::Rsa {
+                    hash: Some(russh::keys::HashAlg::Sha512)
+                },
+            ]
+        );
     }
 }

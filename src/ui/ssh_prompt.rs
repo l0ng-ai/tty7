@@ -41,6 +41,9 @@ pub(crate) enum PromptModel {
         port: u16,
         algorithm: String,
         fingerprint: String,
+        /// Set when the host is already on file under some other algorithm, so
+        /// the sheet can say why a known host is offering an unseen key.
+        previously_known_as: Option<String>,
     },
     HostKeyChanged {
         host: String,
@@ -108,11 +111,13 @@ impl PromptModel {
                 port,
                 algorithm,
                 fingerprint_sha256,
+                previously_known_as,
             } => PromptModel::HostKeyUnknown {
                 host,
                 port,
                 algorithm,
                 fingerprint: fingerprint_sha256,
+                previously_known_as,
             },
             AuthPromptKind::HostKeyChanged {
                 host,
@@ -730,6 +735,7 @@ impl Tty7App {
                 fingerprint,
                 port,
                 host,
+                previously_known_as,
             } => card
                 .child(div().text_xs().child(format!("{host}:{port}  {algorithm}")))
                 .child(
@@ -738,6 +744,21 @@ impl Tty7App {
                         .font_family("monospace")
                         .child(fingerprint.clone()),
                 )
+                // A host that already has an entry under another algorithm is
+                // the ordinary way a server grows an ed25519 key beside its old
+                // ssh-rsa one. Saying so is the difference between "who is
+                // this?" and "this is the host you know, with a second key".
+                .when_some(previously_known_as.as_ref(), |c, previous| {
+                    c.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(crate::ui::i18n::t_fmt(
+                                crate::ui::i18n::L10nKey::SshPromptHostKeyNewAlgorithm,
+                                &[("previous_algorithm", previous), ("algorithm", algorithm)],
+                            )),
+                    )
+                })
                 .child(
                     h_flex()
                         .justify_end()
@@ -1024,6 +1045,35 @@ mod tests {
             }
         );
     }
+
+    /// The host is known, just not by this algorithm — the mild confirmation,
+    /// carrying the algorithm it *is* known by, and never the danger sheet.
+    #[test]
+    fn a_new_algorithm_raises_the_unknown_host_sheet_not_the_changed_one() {
+        let m = PromptModel::from_prompt(
+            AuthPromptKind::HostKeyUnknown {
+                host: "example.com".into(),
+                port: 22,
+                algorithm: "ssh-ed25519".into(),
+                fingerprint_sha256: "SHA256:new".into(),
+                previously_known_as: Some("ssh-rsa".into()),
+            },
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            m,
+            PromptModel::HostKeyUnknown {
+                host: "example.com".into(),
+                port: 22,
+                algorithm: "ssh-ed25519".into(),
+                fingerprint: "SHA256:new".into(),
+                previously_known_as: Some("ssh-rsa".into()),
+            }
+        );
+        assert_eq!(m.input_count(), 0);
+    }
 }
 
 #[cfg(test)]
@@ -1071,6 +1121,7 @@ mod focus_tests {
                     port: 22,
                     algorithm: "ssh-ed25519".into(),
                     fingerprint: "SHA256:zzz".into(),
+                    previously_known_as: None,
                 });
                 window.focus(&app.ssh_prompt.focus_handle, cx);
                 // A headless harness has no live pane, so `focus_active`

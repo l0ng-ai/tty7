@@ -911,6 +911,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileDropFailedMany => "{name} をコピーできませんでした。他に {n} 件も失敗しました",
         L10nKey::SshPromptNewKey => "新しいキー {fingerprint}",
         L10nKey::SshPromptOldKey => "以前のキー {old_fingerprint}",
+        L10nKey::SshPromptHostKeyNewAlgorithm => {
+            "このホストはすでに {previous_algorithm} キーで登録されています。これはそれを置き換えるものではなく、新しい {algorithm} キーです"
+        }
         L10nKey::EditorCantOpen => "{path} を開けません: {e}",
         L10nKey::EditorCantRead => "{path} を読み取れません: {e}",
         L10nKey::EditorNotUtf8 => "「{path}」は有効な UTF-8 ではありません",
