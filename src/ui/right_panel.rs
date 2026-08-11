@@ -477,11 +477,7 @@ impl Tty7App {
             if let Some(leaf) = tab.detail_pane(window, cx) {
                 let view = leaf.read(cx);
                 pane_id = Some(view.pane_id);
-                if let Some(cwd) = view
-                    .git_status_cwd()
-                    .map(|p| p.to_path_buf())
-                    .or_else(|| view.cwd())
-                {
+                if let Some(cwd) = view.effective_cwd() {
                     rows.push((t(L10nKey::PanelCwd), compact_path(&cwd)));
                     // Copy Path is right either way; Reveal only means anything
                     // when the path is on the machine the file manager can see.

@@ -1398,6 +1398,31 @@ impl TerminalView {
         self.git_status_cwd.as_deref()
     }
 
+    /// The directory this pane's *work* is happening in — what every panel
+    /// that answers "where am I?" should show.
+    ///
+    /// [`Self::cwd`] is the kernel's idea: the cwd of the foreground process.
+    /// That is right for a shell, and wrong for a coding agent, because an
+    /// agent moving into a git worktree does not `chdir` — the `claude`
+    /// process stays where it was launched while the session works somewhere
+    /// else entirely. The hook stream carries the agent's own cwd for exactly
+    /// this reason (`AgentSessionState::cwd`), and the git-status poll already
+    /// folds the two together into `git_status_cwd`; this reads that result
+    /// back out under a name that doesn't imply it's only about git.
+    ///
+    /// `git_status_cwd` is only ever set for a pane whose paths belong to its
+    /// host, so the fallback here is what decides that: this one takes any
+    /// cwd, [`Self::effective_host_cwd`] takes only one the host can resolve.
+    pub fn effective_cwd(&self) -> Option<std::path::PathBuf> {
+        self.git_status_cwd.clone().or_else(|| self.cwd())
+    }
+
+    /// [`Self::effective_cwd`], restricted to paths the pane's host can act
+    /// on — for callers that will hand the result to a `Host` call.
+    pub fn effective_host_cwd(&self) -> Option<std::path::PathBuf> {
+        self.git_status_cwd.clone().or_else(|| self.host_cwd())
+    }
+
     pub fn refresh_git_status_now(&mut self, cx: &mut Context<Self>) {
         let cwd = self.git_status_cwd.clone();
         if cwd.is_some() {
@@ -7716,6 +7741,86 @@ mod gpui_tests {
             1,
             "an unchanged session must not re-save on every poll"
         );
+    }
+
+    /// An agent that moves into a git worktree does not `chdir` — the process
+    /// stays put and only its hook stream says where the work went. Every
+    /// panel that answers "where am I?" reads `effective_cwd`, so this is the
+    /// one place that has to prefer the agent's answer over the kernel's.
+    #[gpui::test]
+    fn a_pane_follows_its_agent_into_a_worktree(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::{AgentSessionState, AgentStatus};
+        use std::io::Write as _;
+        use std::path::PathBuf;
+
+        let launched_in = PathBuf::from("/repo");
+        let working_in = PathBuf::from("/repo/.claude/worktrees/wt");
+
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Cwd(launched_in.clone())
+            .encode(&mut daemon)
+            .unwrap();
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status: AgentStatus::Working,
+            message: None,
+            session_id: Some("sid-wt".into()),
+            launch_argv: Some(vec!["claude".into()]),
+            rich: true,
+            cwd: Some(working_in.clone()),
+            activity: 0,
+        }))
+        .encode(&mut daemon)
+        .unwrap();
+        daemon.flush().unwrap();
+        for _ in 0..200 {
+            let seen = window
+                .update(cx, |view, _, _| {
+                    view.cwd().is_some() && view.agent_session().is_some()
+                })
+                .unwrap();
+            if seen {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, window, cx| {
+                assert_eq!(
+                    view.cwd(),
+                    Some(launched_in.clone()),
+                    "the process really is still in the launch directory"
+                );
+                view.poll_foreground(window, cx);
+                assert_eq!(
+                    view.effective_cwd(),
+                    Some(working_in.clone()),
+                    "the file tree, the cwd row and the SCM panel all root here"
+                );
+                assert_eq!(view.effective_host_cwd(), Some(working_in.clone()));
+            })
+            .unwrap();
+
+        // Turn over: the agent is gone, and with it any claim about where the
+        // work is. Falling back to a stale worktree would be worse than the
+        // bug this fixes.
+        DaemonMsg::AgentStatus(None).encode(&mut daemon).unwrap();
+        daemon.flush().unwrap();
+        for _ in 0..200 {
+            let gone = window
+                .update(cx, |view, _, _| view.agent_session().is_none())
+                .unwrap();
+            if gone {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        window
+            .update(cx, |view, window, cx| {
+                view.poll_foreground(window, cx);
+                assert_eq!(view.effective_cwd(), Some(launched_in.clone()));
+            })
+            .unwrap();
     }
 
     /// A 1x1 red placement anchored at an absolute scrollback row, built the way

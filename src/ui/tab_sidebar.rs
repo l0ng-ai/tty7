@@ -425,12 +425,7 @@ impl Tty7App {
                     cwd_shown = tab
                         .pane
                         .focused_or_first(window, cx)
-                        .and_then(|leaf| {
-                            let view = leaf.read(cx);
-                            view.git_status_cwd()
-                                .map(|p| p.to_path_buf())
-                                .or_else(|| view.cwd())
-                        })
+                        .and_then(|leaf| leaf.read(cx).effective_cwd())
                         .map(|cwd| {
                             let full = SharedString::from(
                                 abbreviate_home(&cwd.display().to_string()).into_owned(),

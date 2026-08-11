@@ -1041,10 +1041,7 @@ impl Tty7App {
     ) -> Option<(SharedHost, PathBuf)> {
         let leaf = self.tabs.get(self.active)?.detail_pane(window, cx)?;
         let view = leaf.read(cx);
-        let cwd = view
-            .git_status_cwd()
-            .map(Path::to_path_buf)
-            .or_else(|| view.host_cwd())?;
+        let cwd = view.effective_host_cwd()?;
         Some((view.host(cx)?, cwd))
     }
 

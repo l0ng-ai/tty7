@@ -233,6 +233,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unexpected password prompt on a host nobody had touched. It now confirms, and
   when the endpoint is shared the dialog says how many others go with it.
 
+- **The Files tree follows an agent into a git worktree** — the pane's cwd row,
+  the tab sidebar and the source control panel all track where a coding agent
+  is actually working, because an agent reports its own directory over the hook
+  stream. The file tree was the one panel still reading the foreground
+  process's cwd, and an agent that moves into a worktree never `chdir`s — so
+  `claude` entering `.claude/worktrees/feature` left the tree rooted in the
+  main checkout, disagreeing with the path printed directly above it.
+
 - **`tty7 wait` no longer calls a busy shell `idle`** — a pane with nothing
   reporting agent status was reported as `idle`, so `tty7 wait %3 --until idle`
   returned success immediately, `matched: true`, about a pane that was midway

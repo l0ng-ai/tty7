@@ -732,10 +732,15 @@ impl Tty7App {
             Some(tab) => tab.pane.terminals(),
             None => Vec::new(),
         };
+        // `effective_cwd`, not `cwd`: a pane running an agent that moved into
+        // a git worktree keeps its kernel cwd back at the launch directory, so
+        // the raw process cwd would root the tree in the wrong checkout — and
+        // in the wrong one *visibly*, since the cwd row directly above this
+        // tree already follows the agent.
         let cwds: Vec<PathBuf> = leaves
             .iter()
             .filter(|leaf| leaf.read(cx).host_id() == id)
-            .filter_map(|leaf| leaf.read(cx).cwd())
+            .filter_map(|leaf| leaf.read(cx).effective_cwd())
             .collect();
         let mut roots: Vec<PathBuf> = Vec::new();
         let mut resolved = true;
