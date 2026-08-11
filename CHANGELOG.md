@@ -63,7 +63,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A pane's shell is recorded alongside, so a git bash pane no longer comes
   back as PowerShell.
 
+- **`tty7 wait` can wait for a command, not just an agent** — a new `free`
+  state ends the wait when the pane's foreground command has exited and the
+  pane is back to its bare shell, which is what a `cargo test` running in a
+  pane has instead of an agent status. With `--changed` it means "something ran
+  and then finished", the shape you want on the line after a `send`. It costs a
+  second request per poll and so is only checked when you name it.
+
+- **`tty7 send --key` presses keys instead of typing characters** — `C-c` to
+  stop a runaway build, `escape` to close a TUI, `up`/`down`/`enter` to answer
+  a permission prompt that takes no text. Repeatable for a sequence, composable
+  with `TEXT`, and delivered as separate events 200 ms apart so a raw-mode TUI
+  reads a sequence as a sequence rather than as a paste. An unknown key name is
+  a usage error raised before anything is written.
+
+- **`tty7 pane close` takes several panes, and `--orphans` clears the lot** —
+  `pane ls --all` has been able to *show* the panes an interrupted `run` leaves
+  behind; there was no way to act on that except by reading ids off the table
+  one at a time. A pane that cannot be closed no longer abandons the rest of
+  the batch.
+
+- **`tty7 doctor` reports where the agent status hooks stand** — it has claimed
+  to check hooks in its own `--help` for a while without doing so. Missing or
+  outdated hooks are why an agent can look frozen in `tty7 agents` and why
+  `tty7 wait` on it only ever times out, so the check belongs in the verb
+  people run when something is not working.
+
+### Changed
+
+- **`tty7 pane close --json` now reports `{"closed": [ids]}`** rather than a
+  single `{"closed": id}`, because the verb takes more than one pane.
+
 ### Fixed
+
+- **`tty7 wait` no longer calls a busy shell `idle`** — a pane with nothing
+  reporting agent status was reported as `idle`, so `tty7 wait %3 --until idle`
+  returned success immediately, `matched: true`, about a pane that was midway
+  through a build. Those panes now report `no-agent`, which is both true and
+  the signal to use `--until free` instead; a wait that times out there says so.
 
 - **An SFTP upload no longer sits in the browser under its temporary name** —
   an upload is written as `<name>.tty7-upload-<hex>` and renamed into place at

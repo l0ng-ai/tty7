@@ -43,8 +43,9 @@ Every tab chip and sidebar row carries a dot:
   <img src="/images/placeholder.svg" alt="Agent status dots" />
 </Frame>
 
-The same three states are what `tty7 agents` reports as `running` / `waiting` /
-`idle`, and what [`tty7 wait`](/agents/orchestration) blocks on.
+The same three states are what `tty7 agents` reports as `working` / `waiting` /
+`done`, and what [`tty7 wait`](/agents/orchestration) blocks on. A fourth state,
+`idle`, carries no dot — it is an agent that has not started a turn.
 
 ## Notifications
 
