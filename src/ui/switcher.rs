@@ -1812,11 +1812,7 @@ impl Tty7App {
             .anchor_scroll(self.switcher_anchor(Column::Left, picked))
             .hover(move |r| r.bg(hover))
             .child(crate::ui::tab_strip::workspace_avatar(
-                &row.name,
-                row.live,
-                row.current,
-                ROW_AVATAR,
-                cx,
+                &row.name, row.live, ROW_AVATAR, cx,
             ))
             .child(
                 v_flex()
