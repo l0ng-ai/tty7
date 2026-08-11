@@ -44,16 +44,28 @@ there too.
 
 ## Branches and remotes
 
+The branch name at the top of the panel is a dropdown. It holds:
+
 | | |
 |---|---|
-| **Checkout to…** | Switch branches, with a search box; offers **Stash & Switch** when the tree is dirty |
+| **The branch list** | Click one to check it out. Past a dozen branches the list scrolls instead of growing past the window |
 | **Create Branch…** | From here, or from any commit in the history |
-| **Publish Branch** | For a branch with no upstream yet |
-| **Sync Changes** | Pull, then push |
-| **Push** · **Pull** · **Fetch** | Individually |
+| **Fetch** · **Pull** · **Push** | Individually |
+| **Switch Repository** | Only when the window has panes in more than one repo |
 
-All of these are also in the command palette under **Git**, so they are
-bindable.
+Beside it, the sync button pulls then pushes — and relabels itself **Publish
+Branch** when the branch has no upstream yet.
+
+The command palette carries the verbs under **Git** — *Git: Commit*, *Stage
+All*, *Unstage All*, *Discard All*, *Create Branch*, *Sync*, *Push*, *Pull*,
+*Fetch* — so those are bindable. Checking out is a pick rather than a verb, so
+it lives only in the dropdown.
+
+<Warning>
+  Checking out does not stash for you. A dirty tree that would be clobbered
+  makes git refuse the checkout, and tty7 shows you git's own refusal as a
+  notification rather than working around it.
+</Warning>
 
 When a repository is mid-operation — merging, rebasing, cherry-picking,
 reverting, bisecting, applying — the panel says so instead of pretending
@@ -61,9 +73,12 @@ everything is normal.
 
 ## History
 
-**Git: Toggle Commit History** (or the *History* section header) opens the
-commit graph: branches drawn as lanes, a filter box, **Current Branch** or
-**All Branches**, and *Load more* at the bottom.
+The *History* section header opens the commit graph: branches drawn as lanes, a
+filter box, **Current Branch** or **All Branches**, and *Load more* at the
+bottom.
+
+**Git: Toggle Commit History** does the same from the keyboard. It ships with no
+default key — bind one under **Settings → Keyboard Shortcuts**.
 
 Click a commit for its detail view — message, parents, and the files it touched,
 each openable as a diff. From a commit's menu:

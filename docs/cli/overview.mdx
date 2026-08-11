@@ -22,9 +22,9 @@ server is reachable, whether its wire dialect matches this binary, and whether
 running *inside* a tty7 pane.
 
 Being inside a pane matters because the address-taking verbs (`split`, `send`,
-`capture`, `procs`, `pane close`) default to `$TTY7_PANE`, and `run --keep`
-files its pane into `$TTY7_WS`. Outside one you must name a target, and the
-error says so rather than guessing.
+`capture`, `procs`, `wait`, `pane close`) default to `$TTY7_PANE`, and
+`run --keep` files its pane into `$TTY7_WS`. Outside one you must name a target,
+and the error says so rather than guessing.
 
 ## Addresses
 

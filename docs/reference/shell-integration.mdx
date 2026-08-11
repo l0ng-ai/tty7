@@ -26,8 +26,8 @@ removes itself from the equation if you run the same shell elsewhere.
 injection when shells nest.
 
 <Note>
-  A shell launched with custom arguments is left alone for bash and PowerShell,
-  because tty7's injection would conflict with the flags you chose.
+  A shell launched with custom arguments is left alone for bash, PowerShell, and
+  WSL, because tty7's injection would conflict with the flags you chose.
 </Note>
 
 ## What it reports
@@ -39,7 +39,7 @@ injection when shells nest.
 | Command finished, with exit code | `OSC 133;D` | The "finished after 42s" notification, failure marks in [history](/terminal/history) |
 | Working directory | `OSC 7` | New tabs and splits opening in the right place, the sidebar's repo grouping, the git branch readout |
 | Editing mode (vi / emacs) | `OSC 133;V` | Matching tty7's key handling to your shell's mode |
-| Window title | `OSC 0` | Tab labels |
+| Window title | `OSC 0` | Tab labels. Only PowerShell is given this — zsh, bash, and fish already set a title of their own, and tty7 reads whatever they emit |
 
 ## What turns off without it
 

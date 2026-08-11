@@ -8,23 +8,22 @@ description: "Fuzzy history search, and whether each pane gets its own."
 <kbd>⌃ R</kbd> opens a fuzzy search over what you have actually run. Type any
 fragment — the letters do not have to be adjacent — and the list narrows.
 
-Each row carries the context the plain shell version throws away:
+Each row carries context the plain shell version throws away:
 
-- **where** you ran it, so `npm run dev` from three repositories is three
-  distinct entries
-- **when**, as a relative time
+- **when** you last ran it, as a relative time
 - **whether it failed**, from the exit code
 
-Ranking mixes frequency with recency, and commands you ran in the *current*
-directory are pushed up — the thing you want is usually the thing you last did
-here.
+A command appears once, however many times you have run it — repeats collapse
+into their most recent occurrence. Ranking mixes frequency with recency, and
+commands you ran in the *current* directory are pushed up, so the thing you want
+is usually the thing you last did here.
 
-<Frame caption="Placeholder — screenshot: ⌃R open, matching rows showing directory, time, and a failed exit">
+<Frame caption="Placeholder — screenshot: ⌃R open, matching rows showing relative time and a failed exit">
   <img src="/images/placeholder.svg" alt="Fuzzy history search" />
 </Frame>
 
-<kbd>⏎</kbd> puts the command on the prompt. <kbd>Esc</kbd> closes without
-touching it.
+<kbd>⏎</kbd> puts the command on the prompt. <kbd>⌘ ⏎</kbd> puts it there and
+runs it. <kbd>Esc</kbd> closes without touching it.
 
 ### Handing <kbd>⌃ R</kbd> back
 
@@ -35,16 +34,19 @@ working.
 
 ## Where the history comes from
 
-Your existing shell history file, as-is. Nothing is imported or converted, there
-is no separate store to warm up, and a history written outside tty7 shows up
-immediately.
+Your existing shell history file, as-is. Nothing is imported or converted, and a
+history written outside tty7 shows up immediately.
+
+The per-row extras — when you last ran it, whether it failed — come from a small
+file tty7 keeps alongside it, filled in as you run things. A command tty7 has
+never seen still appears; it just arrives without a timestamp or an exit code.
 
 ## One history, or one per pane
 
 By default every pane shares your shell's history file, which is what a terminal
 has always done: a command typed in one pane is available in the next.
 
-**Settings → Terminal → Give each pane its own shell history**
+**Settings → Input → Prompt → Give each pane its own shell history**
 (`per_pane_history: true`) changes that. Each pane gets a private history file:
 
 - **seeded** from your real history when the pane opens, so it is not blank

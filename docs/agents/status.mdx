@@ -14,20 +14,24 @@ the agent say which one it is.
 
 | Agent | |
 |---|---|
-| Claude Code · Codex · Copilot · OpenCode · Pi · Grok · Oh My Pi | Hooks available |
+| Claude Code · Codex · Copilot CLI · OpenCode · Pi · Grok Build · Oh My Pi | Hooks available |
 | Gemini · Aider · Amp · Cursor · Goose · Droid · Auggie · Hermes · Vibe · Antigravity · Qwen Code | Detected and labelled, but no status channel yet |
 
-Installing writes into that agent's own configuration directory and can be
-undone from the same row — the button becomes **Uninstall**, and reads
-**Outdated** with an **Update** when tty7 ships a newer hook.
+Installing writes into that agent's own configuration directory. Once installed
+the row grows a second **Uninstall** button beside the first, which itself
+becomes **Reinstall** — or **Update**, against an **Outdated** state, when tty7
+ships a newer hook.
 
 <Note>
   The hooks only do anything inside tty7. Running the same agent in another
   terminal is unaffected.
 </Note>
 
-Connected [remote machines](/remote/workspaces) get their own row, so an agent
-running on a dev box reports status to the window you are watching it from.
+Hooks are installed per machine. Once a second
+[machine](/remote/workspaces) is linked, a row of chips appears above the table
+to pick which one you are looking at, and the table then shows that machine's
+agents — so a dev box gets its hooks installed the same way, from the same
+screen.
 
 ## The status dot
 

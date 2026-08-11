@@ -23,7 +23,7 @@ Results are grouped, and the groups are the map of the app:
 | **Tabs & Panes** | New Tab · New Worktree Tab… · Split Right · Zoom Pane · Focus Pane Left · Resize Pane Up · Swap Pane Next · Reopen Closed Tab · Copy Working Directory · Fork Session |
 | **Workspaces** | New Workspace · Switch Workspace… · Rename Workspace… · Stop Workspace… · Delete Workspace… |
 | **View** | Show/Hide Left Sidebar · Show/Hide Right Panel · Show Code Panel · Tab Bar: Move to Top · Right Panel: Info / Changes / Files · Change Theme… · Enter Full Screen · Toggle Unified / Side-by-Side Diff |
-| **Git** | Commit · Stage All Changes · Unstage All · Discard All · Checkout to… · Create Branch… · Sync · Push · Pull · Fetch · Toggle Commit History |
+| **Git** | Commit · Stage All Changes · Unstage All · Discard All · Create Branch… · Sync · Push · Pull · Fetch |
 | **Terminal** | Clear Scrollback · Find in Terminal… · Find Next / Previous · Copy · Cut · Paste · Select All |
 | **SSH** | Add Connection… · Manage Profiles… · Reconnect · Remote Files · Port Forwarding |
 | **Agents** | Send Selection · Send Git Diff for Review · Copy Session ID |
@@ -43,8 +43,9 @@ me@devbox:2222
 [::1]:22
 ```
 
-Saved profiles and `~/.ssh/config` aliases show up the same way — start typing
-the name. [SSH →](/remote/ssh)
+Saved profiles show up the same way — start typing the name. A host that only
+exists in `~/.ssh/config` does not: import it into a profile first, or reach it
+from the workspace switcher. [SSH →](/remote/ssh)
 
 ## Sending context to an agent
 

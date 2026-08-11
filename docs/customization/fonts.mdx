@@ -33,10 +33,17 @@ turn for anything the primary lacks.
 }
 ```
 
-The defaults name faces the host OS actually ships — PingFang SC and Apple Color
-Emoji on macOS, Microsoft YaHei and Segoe UI Emoji on Windows, Noto on Linux.
-Those stock names are appended to whatever list you write, too, so a
-`config.json` copied from another platform still resolves.
+Leave `font_fallbacks` out and you get the platform's default chain:
+
+| | Default fallbacks, in order |
+|---|---|
+| **macOS** | Menlo · Hasklug Nerd Font Mono · Maple Mono NF CN · PingFang SC · Apple Color Emoji |
+| **Windows** | Maple Mono NF CN · Cascadia Mono · Microsoft YaHei · Segoe UI Emoji |
+| **Linux** | Maple Mono NF CN · DejaVu Sans Mono · Noto Sans CJK SC · Noto Color Emoji |
+
+Each ends in faces the host OS actually ships, and those stock names are
+appended to whatever list you write yourself — so a `config.json` copied from
+another platform still resolves.
 
 ## OpenType features
 
@@ -65,10 +72,12 @@ stock CJK face (Microsoft YaHei, PingFang SC, Noto Sans CJK) advances 1.0em.
 Those glyphs get left-aligned in the slot, leaving a ~0.2em gap on the right of
 every character.
 
-[Maple Mono NF CN](https://github.com/subframe7536/maple-font) is tried first on
-every platform for exactly this reason: 0.6em Latin, 1.2em CJK, an exact
-two-cell fit against Hack. It is referenced by name only, never bundled (~20 MB
-per weight) — install it and tty7 picks it up with no config change.
+[Maple Mono NF CN](https://github.com/subframe7536/maple-font) is in every
+platform's default chain for exactly this reason: 0.6em Latin, 1.2em CJK, an
+exact two-cell fit against Hack. It leads the chain on Windows and Linux, and on
+macOS sits behind Menlo and Hasklug, which cover Latin and Nerd Font glyphs
+first. It is referenced by name only, never bundled (~20 MB per weight) —
+install it and tty7 picks it up with no config change.
 
 If you want CJK set *tight* rather than merely even, change the **primary** face
 instead. One that advances 0.5em — Sarasa Mono SC, say — makes two columns

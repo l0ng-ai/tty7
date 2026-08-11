@@ -39,8 +39,9 @@ default) and *Flat*.
     [diff overlay](/git/diffs).
   </Card>
   <Card title="Whether you have looked" icon="circle-dot">
-    An unread marker on tabs that produced output while you were elsewhere.
-    *Mark as Unread* is in the right-click menu.
+    An unread marker on tabs where a coding agent finished its turn while you
+    were elsewhere. Agent tabs also carry *Mark as Unread* in the right-click
+    menu, once there is a finished turn to mark.
   </Card>
 </CardGroup>
 
@@ -50,21 +51,24 @@ they simply stop opening the overlay.
 
 ## Rearranging
 
-Drag a row to reorder it, or drag a whole group header to move the group.
-Dropping a row into another group moves the tab there.
+Drag a row to reorder it within its group, or drag a whole group header to move
+the group. A row cannot be dragged into a different group: with the default repo
+grouping a tab's group comes from its working directory, so `cd` is what moves
+it.
 
 ## Naming
 
-Almost no tab has a name of its own, so the label falls back through the best
-evidence available, in order:
+Almost no tab has a name of its own, so the sidebar falls back:
 
 1. a name you set (right-click → **Rename Tab…**)
-2. the coding agent running in the tab — "Claude Code"
-3. the last segment of the working directory
-4. the foreground process
+2. the title the shell is reporting — the running command, usually
+3. **Shell 3**, numbered by position, when there is no title at all
 
-That order is also what `tty7 tab ls` reports as `label`, with `name` left
-literal so a script can tell a real name from a stand-in.
+`tty7 tab ls` answers the same question with more evidence, because a script has
+no screen to look at. Its `label` falls back through the name, then the coding
+agent running in the tab ("Claude Code"), then the last segment of the working
+directory, then the foreground process — while `name` stays literal, so a script
+can tell a real name from a stand-in.
 
 ## The switcher
 

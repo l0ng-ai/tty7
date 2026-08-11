@@ -60,7 +60,7 @@ instead of a password echoing into your shell.
 | **Name** | A label for this connection |
 | **Host** | Hostname or IP |
 | **User** | Login user — blank resolves at connect time |
-| **Auth** | *Auto* (tries every applicable method), *Password*, *Key*, *Agent*, or *2FA* |
+| **Auth** | *Auto* (tries every applicable method), *GSSAPI*, *Password*, *Key*, *Agent*, or *2FA* |
 | **Jump host** | Another profile, or a `ProxyJump` chain |
 | **Port forwarding** | Rules opened with the connection |
 
@@ -110,6 +110,7 @@ the current pane. Useful after a laptop sleeps or a network changes.
 ## What is not supported
 
 - No fallback to the system `ssh` binary
-- No `Match`, `canonicalize*`, or GSSAPI directives from `~/.ssh/config`
-- Kerberos `gssapi-with-mic` is offered by the desktop app for managed
-  connections, but is not part of the `~/.ssh/config` resolution path
+- No `Match` or `canonicalize*` directives from `~/.ssh/config`
+- No GSSAPI *directives* from `~/.ssh/config`. Kerberos `gssapi-with-mic` itself
+  is supported — pick **GSSAPI** in a profile's Auth field — it is just not
+  something the config-file resolution path reads
