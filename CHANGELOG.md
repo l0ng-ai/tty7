@@ -119,6 +119,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A rejected stored credential asks again instead of failing forever** — a key
+  passphrase saved with "remember" was written to the keychain before the daemon
+  had tried it, and a wrong one then ended every later connection at "could not
+  decrypt identity file" with no prompt at all: the key was unusable and nothing
+  in the app could clear the entry. Keyboard-interactive had the matching hole,
+  replaying a stale saved password on every reconnect, because OpenSSH ends a
+  rejected request with a plain failure rather than another question. The daemon
+  now says which secret was refused, both paths ask again, and an answer given
+  without "remember" forgets the stale entry — the self-heal the password path
+  has always had. Deleting a host profile also stops stranding its key
+  passphrases in the keychain, and a prompt raised for a remote workspace now
+  carries the real user, host and port instead of filing everything under port
+  22.
+
+- **A host key of a new algorithm is no longer reported as a compromise** — a
+  server that grew an ed25519 key beside the ssh-rsa one it had always had was
+  met with the full man-in-the-middle sheet: fingerprint diff, type `yes` to
+  override. Worse, negotiation always led with ed25519 rather than with what was
+  on file, so a host known only by an ssh-rsa key raised that alarm on every
+  single connection. The algorithms already in `known_hosts` are now offered
+  first, the way OpenSSH's own ordering does it, so the question usually never
+  comes up; when it does it is the ordinary "a key you have not seen" confirm,
+  naming the algorithm the host is already known by. A key that contradicts one
+  on file still raises the alarm, and overriding it now removes the superseded
+  line instead of leaving the rejected key trusted for good.
+
+- **The "Override" button on a changed host key overrides** — it submitted the
+  same refusal the Abort button sends whenever the field did not read exactly
+  `yes`, so clicking it, or typing a stray character first, closed the sheet and
+  quietly abandoned the connection. It is now disabled until the confirmation is
+  typed, says so once there is something in the field, and Enter no longer
+  abandons the connection either.
+
+- **One account of whether a machine is connected** — the window's memory of a
+  manual attempt used to outrank the supervisor that actually holds the links,
+  in every place the two were consulted. Taking a workspace back from another
+  client flipped the status to Attached and re-enabled input without ever
+  sending the attach, so keystrokes went into a socket the far end had given
+  away; a link brought up from the switcher never attached anything at all; a
+  failed connect owned the status strip of every remote window, including
+  windows on other machines, until it was dismissed by hand; and a machine being
+  retried in the background was drawn as one nobody had ever connected to, its
+  workspaces folded out of the switcher, with the reason for the last failure on
+  screen for a quarter of a second before being overwritten. The supervisor is
+  now the only account: the reclaim is really sent and undone if it is refused,
+  a stale failure is retired the moment the link comes up, and a retry says
+  which attempt it is on and what went wrong last time.
+
+- **A failed SFTP poll no longer reads as an empty transfer list** — a poll that
+  could not reach the daemon returned no jobs, which is the same answer as
+  having none: the transfer tray disappeared and every upload the panel was
+  waiting on was counted as landed. Over a link that is down that was the
+  permanent answer, not a blink. A failed poll now keeps the transfers it cannot
+  see, settles nothing, and says so in the tray.
+
+- **A port forward whose loop has exited stops reporting Listening** — the
+  status was written once when the forward was set up and never again, so a
+  forward whose accept loop had already gone reported itself as healthy for as
+  long as the pane stayed open — which is indefinitely, because a pane is
+  deliberately not closed when its SSH connection dies. The loop now records why
+  it left, and the panel shows it.
+
+- **A file-tree search that failed says so** — an unreachable host, or a search
+  the host refused, drew "Nothing matches" — indistinguishable from a search
+  that ran and found nothing, and every bit as convincing. It now says the
+  search failed. Creating or renaming a file through the tree also stops
+  reporting a bare `Permission denied (os error 13)` and names the file and the
+  operation, the way deleting one already did.
+
+- **A port-forward edit cannot lose the rule it replaces** — saving an edit
+  removed the old rule before adding the new one, so an edit onto a port already
+  in use ended with the working forward gone and nothing in its place. The old
+  rule is now put back when the new one cannot start, and the form stays open
+  with the reason. Add and Save also stop doing nothing in silence: an
+  unparseable bind port, a missing target host or a target port of 0 used to be
+  a button that did not respond, and now disables itself and says which field is
+  wrong. A forward request that never reaches the session no longer empties the
+  panel either.
+
+- **A half-filled SSH profile is refused rather than saved** — the form saved
+  whatever was in it. An empty host became a blank, unidentifiable row in the
+  host list and reached the socket layer as a DNS error about a name nobody had
+  typed, because Connect had no gate at all. A mistyped jump host was silently
+  dropped and saved as a direct connection. `proxy.example.com` with no port,
+  and `proxy.example.com:88O` with a bad one, both saved a proxy on port 0 and
+  failed much later, somewhere else. Each complaint now prints under its own
+  field and disables Save and Connect: the host is required (a name is not, and
+  a blank port still means 22), an unknown or self-referential jump host is
+  named out loud, and a proxy address with no port takes the scheme's default —
+  1080 or 8080 — rather than none at all. A proxy already saved on port 0 is
+  read as no proxy.
+
+- **An ssh config import says what it did** — the button was silent three ways
+  over: a missing or unreadable file did nothing, a file naming no importable
+  hosts did nothing, and a clean import of six hosts also did nothing visible.
+  It now reports each of those, with counts of the hosts added, updated and
+  already current, and names the options tty7 has no field for — `IdentityAgent`,
+  `CertificateFile`, `IdentitiesOnly` and the rest — grouped with the hosts that
+  set them, so a host that behaves differently under tty7 than under `ssh` has
+  something to point at.
+
+- **"Forget Password" asks first, and says who else it signs out** — one click
+  deleted the keychain entry, irreversibly and without a word. The entry belongs
+  to the endpoint rather than the profile, so forgetting from one host also
+  signed out every other profile reaching the same `user@host:port` — a direct
+  connection and one through a jump host, say — and that only turned up as an
+  unexpected password prompt on a host nobody had touched. It now confirms, and
+  when the endpoint is shared the dialog says how many others go with it.
+
 - **`tty7 wait` no longer calls a busy shell `idle`** — a pane with nothing
   reporting agent status was reported as `idle`, so `tty7 wait %3 --until idle`
   returned success immediately, `matched: true`, about a pane that was midway
