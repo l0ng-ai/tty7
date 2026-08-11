@@ -201,14 +201,44 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("tty7-singleton-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).ok();
-        crate::core::config::set_config_dir(dir.clone());
-        (dir, guard)
+        crate::core::config::set_config_dir(dir);
+        // `set_config_dir` is first-wins, so the directory in force may be one
+        // an earlier test in this process pinned. Hand back the one the seat
+        // will actually be taken in — a case that writes to the directory it
+        // asked for instead would be testing a file nothing ever reads.
+        let path = lock_path().expect("a config directory is pinned");
+        let dir = path.parent().expect("the lock lives in a directory");
+        (dir.to_path_buf(), guard)
     }
+
+    /// [`claim`], allowing for a seat some neighbour is still holding a
+    /// reference to.
+    ///
+    /// A `Command::spawn` anywhere in this process forks every descriptor this
+    /// one has open, and BSD `flock` counts an inherited descriptor as another
+    /// reference to the same lock rather than a second lock — so between a
+    /// neighbour's `fork` and its `exec`, a seat this thread has already
+    /// dropped still reads as taken. The suite forks constantly. What these
+    /// cases are about is that the seat comes back, not the microsecond it
+    /// comes back in.
+    fn claim_within(patience: std::time::Duration) -> Claim {
+        let deadline = std::time::Instant::now() + patience;
+        loop {
+            match claim() {
+                Claim::Taken if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                other => return other,
+            }
+        }
+    }
+
+    const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
     #[test]
     fn the_second_claim_is_refused_while_the_first_is_held() {
         let _pinned = pin_dir("basic");
-        let first = match claim() {
+        let first = match claim_within(PATIENCE) {
             Claim::Held(s) => s,
             other => panic!("the first claim must be granted, got {other:?}"),
         };
@@ -218,8 +248,40 @@ mod tests {
         );
         drop(first);
         assert!(
-            matches!(claim(), Claim::Held(_)),
+            matches!(claim_within(PATIENCE), Claim::Held(_)),
             "releasing it hands the seat to the next server — no stale file to interpret"
+        );
+    }
+
+    /// A neighbour that forks while the seat is held keeps the seat alive past
+    /// the holder's `drop`, and this suite forks constantly.
+    #[cfg(unix)]
+    #[test]
+    fn a_reference_a_forking_neighbour_left_behind_does_not_lose_the_seat() {
+        let _pinned = pin_dir("inherited");
+        let seat = match claim_within(PATIENCE) {
+            Claim::Held(s) => s,
+            other => panic!("the first claim must be granted, got {other:?}"),
+        };
+        // What a `Command::spawn` on another thread does to this descriptor
+        // between `fork` and `exec`, done deterministically: BSD `flock` counts
+        // an inherited descriptor as a second reference to one lock, not a
+        // second lock, so the seat is not free the instant this process drops
+        // it.
+        let inherited = unsafe { libc::dup(held_fd().expect("the seat records its descriptor")) };
+        assert!(inherited >= 0, "dup the seat descriptor");
+        drop(seat);
+        let released = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            unsafe { libc::close(inherited) };
+        });
+        let again = claim_within(PATIENCE);
+        // Joined before the assertion so a failure leaves nothing referencing
+        // the seat for the next case to trip over.
+        released.join().expect("the reference is let go");
+        assert!(
+            matches!(again, Claim::Held(_)),
+            "the seat comes back once the last reference to it is gone, got {again:?}"
         );
     }
 
@@ -232,7 +294,7 @@ mod tests {
         // in reverse.
         std::fs::write(&path, b"").unwrap();
         assert!(
-            matches!(claim(), Claim::Held(_)),
+            matches!(claim_within(PATIENCE), Claim::Held(_)),
             "an unlocked file is not a holder, however it came to exist"
         );
     }

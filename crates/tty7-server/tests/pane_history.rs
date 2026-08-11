@@ -168,10 +168,18 @@ fn a_pane_writes_its_own_history_and_hands_it_back_when_it_closes() {
         .expect("the shell takes input");
     collect_until(&mut session, b"tty7_ran_here");
 
-    // Seeded from the user's file, so the pane is not starting blank.
+    // Seeded from the user's file, so the pane is not starting blank. Waited
+    // for by its contents rather than its name: the snippet seeds with a
+    // redirection, which creates the file before `tail` has written a byte
+    // into it, and a pane caught in that window reads as one that lost the
+    // user's history.
     wait_until(
-        || daemon.pane_history(pane_id).is_some(),
-        "the pane never got a history file of its own",
+        || {
+            daemon
+                .pane_history(pane_id)
+                .is_some_and(|h| h.contains("echo from_before"))
+        },
+        "the pane never got a history file of its own, seeded from the user's",
     );
     let seeded = daemon.pane_history(pane_id).unwrap();
     assert!(
@@ -211,6 +219,45 @@ fn a_pane_writes_its_own_history_and_hands_it_back_when_it_closes() {
     assert!(
         daemon.pane_history(pane_id).is_none(),
         "a closed pane leaves no file behind"
+    );
+}
+
+/// The snippet seeds with `tail … > "$TTY7_HISTFILE"`, and a redirection
+/// creates the file before the command that fills it writes a byte. So the
+/// pane's file existing does not mean the pane's history exists, and anything
+/// that reads it on the strength of the name being there can read an empty one
+/// — the pane looking, for that moment, exactly like a pane that lost the
+/// user's history.
+///
+/// The window is a `tail` wide, which is why this drives it with a `HISTFILE`
+/// that takes a known second to produce its bytes rather than hoping to land
+/// inside it.
+#[test]
+fn a_pane_whose_seed_is_still_copying_is_not_an_empty_history() {
+    let daemon = Daemon::with_home(
+        "mkfifo \"$HOME/slow_history\" 2>/dev/null\n\
+         HISTFILE=\"$HOME/slow_history\"\n\
+         ( sleep 1; printf 'echo from_before\\n' > \"$HOME/slow_history\" ) &\n",
+        "echo from_before\n",
+    );
+    let panes = daemon.panes();
+    let session = panes
+        .spawn(None, size(), Some(bash()), None, None)
+        .expect("spawn a bash pane");
+    let pane_id = session.pane_id();
+
+    wait_until(
+        || {
+            daemon
+                .pane_history(pane_id)
+                .is_some_and(|h| h.contains("echo from_before"))
+        },
+        "the pane never got a history file of its own, seeded from the user's",
+    );
+    let seeded = daemon.pane_history(pane_id).unwrap();
+    assert!(
+        seeded.contains("echo from_before"),
+        "a pane whose history starts empty has lost the user their history; got {seeded:?}"
     );
 }
 
