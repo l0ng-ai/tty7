@@ -1123,6 +1123,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteStripConnecting => "{machine} に接続中…",
         L10nKey::RemoteStripReconnecting => "{machine} に再接続中…",
         L10nKey::RemoteStripReconnectingAttempt => "{machine} に再接続中…（{count} 回目の試行）",
+        L10nKey::RemoteStripReconnectingWhy => "{machine} に再接続中…（前回の失敗: {error}）",
+        L10nKey::RemoteStripReconnectingAttemptWhy => {
+            "{machine} に再接続中…（{count} 回目の試行、前回の失敗: {error}）"
+        }
         L10nKey::RemoteStripPreempted => "このワークスペースは {by} で開かれました",
         L10nKey::RemoteStripFailed => "{machine} に未接続です — {error}",
         L10nKey::RemoteNoticePreempted => "別の場所で開かれました — 入力しても反映されません",
@@ -1494,6 +1498,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherStatusConnecting => "接続中…",
         L10nKey::SwitcherStatusConnectFailed => "接続できませんでした",
         L10nKey::SwitcherStatusNotConnected => "未接続",
+        L10nKey::SwitcherStatusReconnecting => "再接続中…",
+        L10nKey::SwitcherStatusTakenOver => "他のクライアントが使用中",
         L10nKey::SettingsFontDefault => "デフォルト（メインに合わせる）",
         L10nKey::ForwardDescriptionPlaceholder => "用途",
         L10nKey::SettingsShellDefaultLoginShell => "あなたのログインシェル",
