@@ -370,7 +370,7 @@ async fn http_connect(
 
 pub fn build_config(spec: &NativeSshSpec) -> Arc<russh::client::Config> {
     let mut cfg = russh::client::Config {
-        preferred: build_preferred(&spec.algorithms),
+        preferred: build_preferred(&spec.algorithms, &spec.host, spec.port),
         ..Default::default()
     };
     if let Some(iv) = spec.keepalive_interval_s.filter(|v| *v > 0) {
@@ -382,7 +382,11 @@ pub fn build_config(spec: &NativeSshSpec) -> Arc<russh::client::Config> {
     Arc::new(cfg)
 }
 
-fn build_preferred(a: &SshAlgorithms) -> russh::Preferred {
+fn build_preferred(a: &SshAlgorithms, host: &str, port: u16) -> russh::Preferred {
+    build_preferred_with(a, &super::known_hosts::algorithms_for(host, port))
+}
+
+fn build_preferred_with(a: &SshAlgorithms, trusted_key_types: &[String]) -> russh::Preferred {
     let mut p = russh::Preferred::DEFAULT;
     if !a.kex.is_empty() {
         let v: Vec<russh::kex::Name> = a
@@ -420,6 +424,38 @@ fn build_preferred(a: &SshAlgorithms) -> russh::Preferred {
             .iter()
             .filter_map(|s| s.parse::<russh::keys::Algorithm>().ok())
             .collect();
+        if !v.is_empty() {
+            p.key = Cow::Owned(v);
+        }
+    } else if !trusted_key_types.is_empty() {
+        // OpenSSH negotiates the host key types it already trusts first, so a
+        // machine whose known_hosts entry is ssh-rsa keeps speaking RSA
+        // rather than greeting the user with an unfamiliar ed25519 key
+        // (#495). An explicit host_key list overrides this; otherwise the
+        // trusted types lead and the defaults stay behind them — a server
+        // that retired the old type still negotiates something.
+        let mut v: Vec<russh::keys::Algorithm> = Vec::new();
+        let mut push = |name: &str| {
+            if let Ok(alg) = name.parse::<russh::keys::Algorithm>()
+                && !v.contains(&alg)
+            {
+                v.push(alg);
+            }
+        };
+        for keytype in trusted_key_types {
+            if keytype == "ssh-rsa" {
+                // An RSA entry trusts the key, not SHA-1: offer the modern
+                // signature names for it first, the way OpenSSH does.
+                push("rsa-sha2-512");
+                push("rsa-sha2-256");
+            }
+            push(keytype);
+        }
+        for alg in russh::Preferred::DEFAULT.key.iter() {
+            if !v.contains(alg) {
+                v.push(alg.clone());
+            }
+        }
         if !v.is_empty() {
             p.key = Cow::Owned(v);
         }
@@ -473,7 +509,7 @@ mod tests {
     #[test]
     fn build_preferred_keeps_defaults_for_empty_lists() {
         let a = SshAlgorithms::default();
-        let p = build_preferred(&a);
+        let p = build_preferred_with(&a, &[]);
         assert_eq!(p.kex, russh::Preferred::DEFAULT.kex);
         assert_eq!(p.cipher, russh::Preferred::DEFAULT.cipher);
     }
@@ -484,8 +520,41 @@ mod tests {
             cipher: vec!["totally-not-a-cipher".into(), "aes256-ctr".into()],
             ..Default::default()
         };
-        let p = build_preferred(&a);
+        let p = build_preferred_with(&a, &[]);
         let aes = russh::cipher::Name::try_from("aes256-ctr").unwrap();
         assert_eq!(p.cipher.as_ref(), &[aes]);
+    }
+
+    #[test]
+    fn trusted_key_types_lead_the_host_key_list_without_dropping_the_defaults() {
+        let a = SshAlgorithms::default();
+        let p = build_preferred_with(&a, &["ssh-ed25519".to_string()]);
+        assert_eq!(p.key[0], "ssh-ed25519".parse().unwrap());
+        // Everything the default list offers must still be reachable, or a
+        // server that retired the trusted type could no longer be connected
+        // to at all.
+        for alg in russh::Preferred::DEFAULT.key.iter() {
+            assert!(p.key.contains(alg), "default {alg} went missing");
+        }
+        let unique: std::collections::HashSet<_> = p.key.iter().collect();
+        assert_eq!(unique.len(), p.key.len());
+    }
+
+    #[test]
+    fn an_rsa_entry_prefers_the_modern_sha2_names() {
+        let a = SshAlgorithms::default();
+        let p = build_preferred_with(&a, &["ssh-rsa".to_string()]);
+        let names: Vec<String> = p.key.iter().take(3).map(ToString::to_string).collect();
+        assert_eq!(names, ["rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"]);
+    }
+
+    #[test]
+    fn an_explicit_host_key_list_beats_the_known_hosts_preference() {
+        let a = SshAlgorithms {
+            host_key: vec!["ssh-ed25519".into()],
+            ..Default::default()
+        };
+        let p = build_preferred_with(&a, &["ssh-rsa".to_string()]);
+        assert_eq!(p.key.as_ref(), &["ssh-ed25519".parse().unwrap()]);
     }
 }

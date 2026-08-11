@@ -48,6 +48,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::Trust => "信任",
         L10nKey::Abort => "中止",
         L10nKey::HostKeyOverrideMessage => "输入 yes 覆盖并信任新密钥，或按 Esc 中止。",
+        L10nKey::HostKeyOverrideNeedsYes => "未确认——输入 yes 才会覆盖，或按 Esc 中止。",
         L10nKey::Override => "覆盖",
         L10nKey::RememberKeychain => "记住（钥匙串）",
         L10nKey::Cancel => "取消",
@@ -1155,6 +1156,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SshPromptUnknownHost => "未知主机 {host}",
         L10nKey::SshPromptHostKeyChanged => "主机密钥已更改——可能存在中间人攻击",
         L10nKey::SshPromptHostKeyChangedBody => "主机密钥与之前信任的密钥不同，这可能是一次攻击。",
+        L10nKey::SshPromptNewAlgorithmTitle => "{host} 出现了新的密钥类型",
+        L10nKey::SshPromptNewAlgorithmBody => {
+            "该主机返回了一种你从未见过的密钥类型；它的另一种密钥已受信任——通常是服务器升级，而非攻击。"
+        }
         L10nKey::SshPromptConnect => "连接",
         L10nKey::SshPromptUnlock => "解锁",
         L10nKey::SshPromptSubmit => "提交",

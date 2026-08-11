@@ -54,6 +54,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::HostKeyOverrideMessage => {
             "「yes」を入力すると新しいキーを上書きして信頼します。中止するには Esc を押してください"
         }
+        L10nKey::HostKeyOverrideNeedsYes => {
+            "未確認です — 上書きするには「yes」と入力してください。中止するには Esc を押してください"
+        }
         L10nKey::Override => "上書き",
         L10nKey::RememberKeychain => "キーチェーンに保存",
         L10nKey::Cancel => "キャンセル",
@@ -1263,6 +1266,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SshPromptHostKeyChangedBody => {
             "ホストキーが以前に信頼したものと異なります。攻撃の可能性があります"
+        }
+        L10nKey::SshPromptNewAlgorithmTitle => "{host} の新しいキータイプ",
+        L10nKey::SshPromptNewAlgorithmBody => {
+            "このホストは未確認のキータイプで応答しました。別のキータイプはすでに信頼されています — 通常はサーバーの更新であり、攻撃ではありません"
         }
         L10nKey::SshPromptConnect => "接続",
         L10nKey::SshPromptUnlock => "ロック解除",

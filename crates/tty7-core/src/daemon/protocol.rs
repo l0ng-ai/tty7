@@ -569,6 +569,18 @@ pub enum AuthPromptKind {
         fingerprint_sha256: String,
         old_fingerprint_sha256: String,
     },
+    /// The host answered with a key type known_hosts has no entry for, while
+    /// some *other* type for the same host is already trusted — the everyday
+    /// result of an OpenSSH server gaining ed25519 alongside RSA (#495).
+    /// Distinct from `HostKeyChanged` (same type, new key) so the client can
+    /// grade this as a gentle "new key" prompt instead of the MITM alarm.
+    HostKeyNewAlgorithm {
+        host: String,
+        port: u16,
+        algorithm: String,
+        fingerprint_sha256: String,
+        known_fingerprint_sha256: String,
+    },
     Banner {
         text: String,
     },

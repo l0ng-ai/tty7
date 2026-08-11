@@ -7,7 +7,18 @@ use russh::keys::ssh_key::{HashAlg, PublicKey};
 pub enum HostKeyStatus {
     Known,
     Unknown,
-    Changed { old_fingerprint_sha256: String },
+    /// Same host, same algorithm, different key: the MITM alarm. OpenSSH
+    /// reserves "REMOTE HOST IDENTIFICATION HAS CHANGED" for exactly this.
+    Changed {
+        old_fingerprint_sha256: String,
+    },
+    /// The host is known, just not with this key type. An algorithm rotation
+    /// — or a first connect after OpenSSH learned a different type — is an
+    /// everyday event, and raising the same alarm as `Changed` trains users
+    /// to type "yes" at the real thing (#495).
+    ChangedAlgorithm {
+        known_fingerprint_sha256: String,
+    },
     Revoked,
 }
 
@@ -100,12 +111,47 @@ pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> H
         }
     }
 
-    match changed.or(changed_other_alg) {
+    match changed {
         Some(old_fingerprint_sha256) => HostKeyStatus::Changed {
             old_fingerprint_sha256,
         },
-        None => HostKeyStatus::Unknown,
+        None => match changed_other_alg {
+            Some(known_fingerprint_sha256) => HostKeyStatus::ChangedAlgorithm {
+                known_fingerprint_sha256,
+            },
+            None => HostKeyStatus::Unknown,
+        },
     }
+}
+
+/// The host key algorithms already trusted for a host, in file order.
+/// OpenSSH feeds exactly this back into negotiation, so a machine keeps
+/// speaking the key type it was first trusted with instead of presenting an
+/// unfamiliar one (#495).
+pub fn algorithms_for(host: &str, port: u16) -> Vec<String> {
+    match default_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+        Some(contents) => algorithms_in_str(&contents, host, port),
+        None => Vec::new(),
+    }
+}
+
+pub fn algorithms_in_str(contents: &str, host: &str, port: u16) -> Vec<String> {
+    let token = host_token(host, port);
+    let mut out: Vec<String> = Vec::new();
+    for line in contents.lines() {
+        let Some(entry) = KnownHostsLine::parse(line) else {
+            continue;
+        };
+        // Marked lines are not ordinary trust: a cert-authority key signs
+        // other keys, a revoked one is distrusted.
+        if entry.marker.is_some() || !entry.matches_host(&token) {
+            continue;
+        }
+        if !out.iter().any(|k| k == entry.keytype) {
+            out.push(entry.keytype.to_string());
+        }
+    }
+    out
 }
 
 pub fn append_trusted(host: &str, port: u16, key: &PublicKey) -> std::io::Result<()> {
@@ -556,18 +602,53 @@ mod tests {
     }
 
     #[test]
-    fn different_key_type_for_a_known_host_reports_changed_not_unknown() {
+    fn different_key_type_for_a_known_host_is_a_gentle_new_algorithm_not_the_mitm_alarm() {
+        // #495: an algorithm rotation (or a first connect after OpenSSH
+        // learned a different type) must not read as "host key changed".
         const KEY_ECDSA: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCdv5xfuuCGyVbYZSTqcFjQWE7YtIsx8fqlXF1+v728j1RUnELLVrmgsC6gZ0zObXAzJ39JEynaQv9tf/v16V58=";
         let file = format!("example.com {KEY_A}\n");
         match check_in_str(&file, "example.com", 22, &key(KEY_ECDSA)) {
-            HostKeyStatus::Changed { .. } => {}
-            other => panic!("expected Changed, got {other:?}"),
+            HostKeyStatus::ChangedAlgorithm {
+                known_fingerprint_sha256,
+            } => {
+                assert_eq!(known_fingerprint_sha256, fingerprint_sha256(&key(KEY_A)));
+            }
+            other => panic!("expected ChangedAlgorithm, got {other:?}"),
         }
         let file = format!("example.com {KEY_A}\nexample.com {KEY_ECDSA}\n");
         assert_eq!(
             check_in_str(&file, "example.com", 22, &key(KEY_ECDSA)),
             HostKeyStatus::Known
         );
+    }
+
+    #[test]
+    fn a_same_algorithm_mismatch_still_raises_the_full_alarm() {
+        // The split must not water the real case down: same type, different
+        // key stays Changed.
+        let kb = key(KEY_B);
+        let file = format!("example.com {KEY_A}\n");
+        match check_in_str(&file, "example.com", 22, &kb) {
+            HostKeyStatus::Changed {
+                old_fingerprint_sha256,
+            } => {
+                assert_eq!(old_fingerprint_sha256, fingerprint_sha256(&key(KEY_A)));
+            }
+            other => panic!("expected Changed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trusted_algorithms_are_collected_in_file_order_without_marked_lines() {
+        const KEY_RSA: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC0T2NtjGQ1+WGZXmBBWz4fV//2kN5sqBJRU6/hMLzT6vJSZ6WhW4LNDLw4iU6RY4c4eXYIG5C4cHW2VOV6bC5Vu0XbLv1Wxu4jZfSKj3uJ0lMxLcSUAEUe6EFLMHbkb5FiN6UkcpwAt4KROnX3F3m6qaKPbi4rTHrHyELNDKeV4xJ3Lu7GQrTNpNdGZ3w/YE5fMIwLVlxhQjRJVPbANJkXI0fPFeMTRUVbBPbDdpGyJZvAl0mAFKztJGT4qy0n2SQzQ5VfBLXRDrYOPr0EqfI3WYKOTQL2pVrm6hKGZz+aQ9LEt6UWNyIBmmOqjFwClXlLN0VHn0gCcGmXmZVCx";
+        let file = format!(
+            "example.com {KEY_A}\nexample.com {KEY_RSA}\n@cert-authority example.com {KEY_B}\nother.com {KEY_B}\n"
+        );
+        assert_eq!(
+            algorithms_in_str(&file, "example.com", 22),
+            vec!["ssh-ed25519".to_string(), "ssh-rsa".to_string()]
+        );
+        assert!(algorithms_in_str(&file, "nobody.com", 22).is_empty());
     }
 
     #[test]

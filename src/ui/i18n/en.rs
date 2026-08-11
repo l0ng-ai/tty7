@@ -52,6 +52,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::HostKeyOverrideMessage => {
             "Type \"yes\" to override and trust the new key, or Esc to abort."
         }
+        L10nKey::HostKeyOverrideNeedsYes => {
+            "Not confirmed — type \"yes\" to override, or press Esc to abort."
+        }
         L10nKey::Override => "Override",
         L10nKey::RememberKeychain => "Remember (keychain)",
         L10nKey::Cancel => "Cancel",
@@ -1229,6 +1232,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SshPromptHostKeyChanged => "Host key CHANGED — possible man-in-the-middle",
         L10nKey::SshPromptHostKeyChangedBody => {
             "The host key differs from the one previously trusted. This may be an attack."
+        }
+        L10nKey::SshPromptNewAlgorithmTitle => "New key type for {host}",
+        L10nKey::SshPromptNewAlgorithmBody => {
+            "This host answered with a key type you have not seen before. A different key type is already trusted for it — usually a server upgrade, not an attack."
         }
         L10nKey::SshPromptConnect => "Connect",
         L10nKey::SshPromptUnlock => "Unlock",

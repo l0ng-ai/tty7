@@ -94,6 +94,21 @@ impl russh::client::Handler for ClientHandler {
                     .await;
                 Ok(self.apply_decision(resp, server_public_key))
             }
+            HostKeyStatus::ChangedAlgorithm {
+                known_fingerprint_sha256,
+            } => {
+                let resp = self
+                    .broker
+                    .prompt(AuthPromptKind::HostKeyNewAlgorithm {
+                        host: self.host.clone(),
+                        port: self.port,
+                        algorithm,
+                        fingerprint_sha256,
+                        known_fingerprint_sha256,
+                    })
+                    .await;
+                Ok(self.apply_decision(resp, server_public_key))
+            }
         }
     }
 

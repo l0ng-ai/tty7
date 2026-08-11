@@ -5,7 +5,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 
 use crate::core::keychain::{CredentialStore as _, OsCredentialStore};
 use crate::daemon::protocol::{AuthPromptKind, AuthResponse, SshPhase};
@@ -56,6 +56,16 @@ pub(crate) enum PromptModel {
         algorithm: String,
         fingerprint: String,
         old_fingerprint: String,
+    },
+    /// A key type known_hosts has no entry for, on a host some *other* type
+    /// is already trusted for (#495). The everyday "server gained ed25519"
+    /// case — graded as a gentle trust sheet, not the MITM alarm.
+    HostKeyNewAlgorithm {
+        host: String,
+        port: u16,
+        algorithm: String,
+        fingerprint: String,
+        known_fingerprint: String,
     },
 }
 
@@ -153,6 +163,19 @@ impl PromptModel {
                 fingerprint: fingerprint_sha256,
                 old_fingerprint: old_fingerprint_sha256,
             },
+            AuthPromptKind::HostKeyNewAlgorithm {
+                host,
+                port,
+                algorithm,
+                fingerprint_sha256,
+                known_fingerprint_sha256,
+            } => PromptModel::HostKeyNewAlgorithm {
+                host,
+                port,
+                algorithm,
+                fingerprint: fingerprint_sha256,
+                known_fingerprint: known_fingerprint_sha256,
+            },
             AuthPromptKind::Banner { .. } => return None,
         })
     }
@@ -161,7 +184,7 @@ impl PromptModel {
         match self {
             PromptModel::Password { .. } | PromptModel::KeyPassphrase { .. } => 1,
             PromptModel::KeyboardInteractive { prompts, .. } => prompts.len(),
-            PromptModel::HostKeyUnknown { .. } => 0,
+            PromptModel::HostKeyUnknown { .. } | PromptModel::HostKeyNewAlgorithm { .. } => 0,
             PromptModel::HostKeyChanged { .. } => 1,
         }
     }
@@ -263,6 +286,9 @@ pub(crate) struct SshPromptState {
     banners: Vec<String>,
     inputs: Vec<Entity<InputState>>,
     remember: bool,
+    /// Set when the host-key Override was attempted without typing "yes"
+    /// (#496): the sheet stays up and explains instead of silently aborting.
+    override_hint: bool,
     phase: Option<SshPhase>,
     routed: Option<crate::ui::remote_connect::PendingAuth>,
     routed_host: Option<tty7_core::host::HostId>,
@@ -280,6 +306,7 @@ impl SshPromptState {
             banners: Vec::new(),
             inputs: Vec::new(),
             remember: false,
+            override_hint: false,
             phase: None,
             routed: None,
             routed_host: None,
@@ -295,6 +322,7 @@ impl SshPromptState {
         self.model = None;
         self.inputs.clear();
         self.remember = false;
+        self.override_hint = false;
         self._subs.clear();
         if let Some(pending) = self.routed.take() {
             pending.answer(AuthResponse::Cancelled);
@@ -359,8 +387,13 @@ impl Tty7App {
                         input,
                         window,
                         |this, _input, ev: &InputEvent, window, cx| {
-                            if matches!(ev, InputEvent::PressEnter { .. }) {
-                                this.submit_ssh_prompt(window, cx);
+                            match ev {
+                                InputEvent::PressEnter { .. } => this.submit_ssh_prompt(window, cx),
+                                // The host-key Override button enables as
+                                // "yes" is typed (#496); every other sheet
+                                // just pays a cheap re-render.
+                                InputEvent::Change => cx.notify(),
+                                _ => {}
                             }
                         },
                     ));
@@ -406,8 +439,13 @@ impl Tty7App {
                 input,
                 window,
                 |this, _input, ev: &InputEvent, window, cx| {
-                    if matches!(ev, InputEvent::PressEnter { .. }) {
-                        this.submit_ssh_prompt(window, cx);
+                    match ev {
+                        InputEvent::PressEnter { .. } => this.submit_ssh_prompt(window, cx),
+                        // The host-key Override button enables as "yes" is
+                        // typed (#496); every other sheet just pays a cheap
+                        // re-render.
+                        InputEvent::Change => cx.notify(),
+                        _ => {}
                     }
                 },
             ));
@@ -459,11 +497,19 @@ impl Tty7App {
             PromptModel::KeyboardInteractive { rejected, .. } => {
                 ki_submit(values, rejected.clone())
             }
-            PromptModel::HostKeyUnknown { .. } => {
+            PromptModel::HostKeyUnknown { .. } | PromptModel::HostKeyNewAlgorithm { .. } => {
                 (host_key_unknown_decision(true), KeychainWrite::None)
             }
             PromptModel::HostKeyChanged { .. } => {
                 let typed = values.first().cloned().unwrap_or_default();
+                // Anything short of "yes" used to fall into the abort arm of
+                // host_key_changed_decision, ending the connection with no
+                // hint as to why (#496). Hold the sheet instead.
+                if !changed_confirmed(&typed) {
+                    self.ssh_prompt.override_hint = true;
+                    cx.notify();
+                    return;
+                }
                 (host_key_changed_decision(&typed), KeychainWrite::None)
             }
         };
@@ -478,7 +524,9 @@ impl Tty7App {
             return;
         };
         let response = match model {
-            PromptModel::HostKeyUnknown { .. } => host_key_unknown_decision(false),
+            PromptModel::HostKeyUnknown { .. } | PromptModel::HostKeyNewAlgorithm { .. } => {
+                host_key_unknown_decision(false)
+            }
             PromptModel::HostKeyChanged { .. } => AuthResponse::HostKeyDecision {
                 accept: false,
                 remember: false,
@@ -710,6 +758,13 @@ impl Tty7App {
                 crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptHostKeyChanged).to_string(),
                 true,
             ),
+            PromptModel::HostKeyNewAlgorithm { host, .. } => (
+                crate::ui::i18n::t_fmt(
+                    crate::ui::i18n::L10nKey::SshPromptNewAlgorithmTitle,
+                    &[("host", host)],
+                ),
+                false,
+            ),
         };
 
         let mut card = v_flex()
@@ -742,164 +797,229 @@ impl Tty7App {
                 .child(title),
         );
 
-        card = match model {
-            PromptModel::Password { rejected, .. } => {
-                let mut c = card;
-                if *rejected {
-                    c = c.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
-                        crate::ui::i18n::L10nKey::StoredPasswordRejected,
-                    )));
+        card =
+            match model {
+                PromptModel::Password { rejected, .. } => {
+                    let mut c = card;
+                    if *rejected {
+                        c = c.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+                            crate::ui::i18n::L10nKey::StoredPasswordRejected,
+                        )));
+                    }
+                    c.child(self.render_ssh_input(0))
+                        .child(self.render_ssh_remember(cx))
+                        .child(self.render_ssh_actions(
+                            crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptConnect),
+                            cx,
+                        ))
                 }
-                c.child(self.render_ssh_input(0))
-                    .child(self.render_ssh_remember(cx))
-                    .child(self.render_ssh_actions(
-                        crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptConnect),
+                PromptModel::KeyPassphrase {
+                    comment, rejected, ..
+                } => {
+                    let mut c = card;
+                    if *rejected {
+                        c = c.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+                            crate::ui::i18n::L10nKey::StoredPassphraseRejected,
+                        )));
+                    }
+                    if !comment.is_empty() {
+                        c = c.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(comment.clone()),
+                        );
+                    }
+                    c.child(self.render_ssh_input(0))
+                        .child(self.render_ssh_remember(cx))
+                        .child(self.render_ssh_actions(
+                            crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptUnlock),
+                            cx,
+                        ))
+                }
+                PromptModel::KeyboardInteractive {
+                    instructions,
+                    prompts,
+                    rejected,
+                    ..
+                } => {
+                    let mut c = card;
+                    if rejected.is_some() {
+                        c = c.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+                            crate::ui::i18n::L10nKey::StoredPasswordRejected,
+                        )));
+                    }
+                    if !instructions.is_empty() {
+                        c = c.child(div().text_xs().child(instructions.clone()));
+                    }
+                    for (i, row) in prompts.iter().enumerate() {
+                        c = c.child(div().text_xs().child(row.text.clone()));
+                        c = c.child(self.render_ssh_input(i));
+                    }
+                    c.child(self.render_ssh_actions(
+                        crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptSubmit),
                         cx,
                     ))
-            }
-            PromptModel::KeyPassphrase {
-                comment, rejected, ..
-            } => {
-                let mut c = card;
-                if *rejected {
-                    c = c.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
-                        crate::ui::i18n::L10nKey::StoredPassphraseRejected,
-                    )));
                 }
-                if !comment.is_empty() {
-                    c = c.child(
+                PromptModel::HostKeyUnknown {
+                    algorithm,
+                    fingerprint,
+                    port,
+                    host,
+                } => card
+                    .child(div().text_xs().child(format!("{host}:{port}  {algorithm}")))
+                    .child(
                         div()
                             .text_xs()
+                            .font_family("monospace")
+                            .child(fingerprint.clone()),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("ssh-hk-abort")
+                                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Abort))
+                                    .small()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.cancel_ssh_prompt(window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("ssh-hk-trust")
+                                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Trust))
+                                    .small()
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.trust_ssh_host_key(window, cx)
+                                    })),
+                            ),
+                    ),
+                PromptModel::HostKeyChanged {
+                    algorithm,
+                    fingerprint,
+                    old_fingerprint,
+                    port,
+                    host,
+                } => {
+                    let typed = self
+                        .ssh_prompt
+                        .inputs
+                        .first()
+                        .map(|i| i.read(cx).value().to_string())
+                        .unwrap_or_default();
+                    let confirmed = changed_confirmed(&typed);
+                    let mut c = card
+                        .child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+                            crate::ui::i18n::L10nKey::SshPromptHostKeyChangedBody,
+                        )))
+                        .child(div().text_xs().child(format!("{host}:{port}  {algorithm}")))
+                        .child(div().text_xs().font_family("monospace").child(
+                            crate::ui::i18n::t_fmt(
+                                crate::ui::i18n::L10nKey::SshPromptNewKey,
+                                &[("fingerprint", &fingerprint)],
+                            ),
+                        ))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_family("monospace")
+                                .text_color(cx.theme().muted_foreground)
+                                .child(crate::ui::i18n::t_fmt(
+                                    crate::ui::i18n::L10nKey::SshPromptOldKey,
+                                    &[("old_fingerprint", &old_fingerprint)],
+                                )),
+                        )
+                        .child(div().text_xs().child(crate::ui::i18n::t(
+                            crate::ui::i18n::L10nKey::HostKeyOverrideMessage,
+                        )))
+                        .child(self.render_ssh_input(0));
+                    if self.ssh_prompt.override_hint {
+                        c = c.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+                            crate::ui::i18n::L10nKey::HostKeyOverrideNeedsYes,
+                        )));
+                    }
+                    c.child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            // Abort stays the emphasized one and now also sits
+                            // where the eye lands last: a changed host key is the
+                            // one prompt where the safe answer wants both.
+                            .child(
+                                Button::new("ssh-hkc-override")
+                                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Override))
+                                    .small()
+                                    // Until the input says "yes", clicking this
+                                    // used to silently abort the connection
+                                    // (#496).
+                                    .disabled(!confirmed)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.submit_ssh_prompt(window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("ssh-hkc-abort")
+                                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Abort))
+                                    .small()
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.cancel_ssh_prompt(window, cx)
+                                    })),
+                            ),
+                    )
+                }
+                PromptModel::HostKeyNewAlgorithm {
+                    algorithm,
+                    fingerprint,
+                    known_fingerprint,
+                    port,
+                    host,
+                } => card
+                    .child(div().text_xs().child(crate::ui::i18n::t(
+                        crate::ui::i18n::L10nKey::SshPromptNewAlgorithmBody,
+                    )))
+                    .child(div().text_xs().child(format!("{host}:{port}  {algorithm}")))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family("monospace")
+                            .child(fingerprint.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family("monospace")
                             .text_color(cx.theme().muted_foreground)
-                            .child(comment.clone()),
-                    );
-                }
-                c.child(self.render_ssh_input(0))
-                    .child(self.render_ssh_remember(cx))
-                    .child(self.render_ssh_actions(
-                        crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptUnlock),
-                        cx,
-                    ))
-            }
-            PromptModel::KeyboardInteractive {
-                instructions,
-                prompts,
-                rejected,
-                ..
-            } => {
-                let mut c = card;
-                if rejected.is_some() {
-                    c = c.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
-                        crate::ui::i18n::L10nKey::StoredPasswordRejected,
-                    )));
-                }
-                if !instructions.is_empty() {
-                    c = c.child(div().text_xs().child(instructions.clone()));
-                }
-                for (i, row) in prompts.iter().enumerate() {
-                    c = c.child(div().text_xs().child(row.text.clone()));
-                    c = c.child(self.render_ssh_input(i));
-                }
-                c.child(self.render_ssh_actions(
-                    crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshPromptSubmit),
-                    cx,
-                ))
-            }
-            PromptModel::HostKeyUnknown {
-                algorithm,
-                fingerprint,
-                port,
-                host,
-            } => card
-                .child(div().text_xs().child(format!("{host}:{port}  {algorithm}")))
-                .child(
-                    div()
-                        .text_xs()
-                        .font_family("monospace")
-                        .child(fingerprint.clone()),
-                )
-                .child(
-                    h_flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new("ssh-hk-abort")
-                                .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Abort))
-                                .small()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.cancel_ssh_prompt(window, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new("ssh-hk-trust")
-                                .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Trust))
-                                .small()
-                                .primary()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.trust_ssh_host_key(window, cx)
-                                })),
-                        ),
-                ),
-            PromptModel::HostKeyChanged {
-                algorithm,
-                fingerprint,
-                old_fingerprint,
-                port,
-                host,
-            } => card
-                .child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
-                    crate::ui::i18n::L10nKey::SshPromptHostKeyChangedBody,
-                )))
-                .child(div().text_xs().child(format!("{host}:{port}  {algorithm}")))
-                .child(
-                    div()
-                        .text_xs()
-                        .font_family("monospace")
-                        .child(crate::ui::i18n::t_fmt(
-                            crate::ui::i18n::L10nKey::SshPromptNewKey,
-                            &[("fingerprint", &fingerprint)],
-                        )),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .font_family("monospace")
-                        .text_color(cx.theme().muted_foreground)
-                        .child(crate::ui::i18n::t_fmt(
-                            crate::ui::i18n::L10nKey::SshPromptOldKey,
-                            &[("old_fingerprint", &old_fingerprint)],
-                        )),
-                )
-                .child(div().text_xs().child(crate::ui::i18n::t(
-                    crate::ui::i18n::L10nKey::HostKeyOverrideMessage,
-                )))
-                .child(self.render_ssh_input(0))
-                .child(
-                    h_flex()
-                        .justify_end()
-                        .gap_2()
-                        // Abort stays the emphasized one and now also sits
-                        // where the eye lands last: a changed host key is the
-                        // one prompt where the safe answer wants both.
-                        .child(
-                            Button::new("ssh-hkc-override")
-                                .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Override))
-                                .small()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.submit_ssh_prompt(window, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new("ssh-hkc-abort")
-                                .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Abort))
-                                .small()
-                                .primary()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.cancel_ssh_prompt(window, cx)
-                                })),
-                        ),
-                ),
-        };
+                            .child(crate::ui::i18n::t_fmt(
+                                crate::ui::i18n::L10nKey::SshPromptOldKey,
+                                &[("old_fingerprint", &known_fingerprint)],
+                            )),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("ssh-hkn-abort")
+                                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Abort))
+                                    .small()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.cancel_ssh_prompt(window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("ssh-hkn-trust")
+                                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Trust))
+                                    .small()
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.trust_ssh_host_key(window, cx)
+                                    })),
+                            ),
+                    ),
+            };
 
         card.into_any_element()
     }
@@ -967,7 +1087,9 @@ fn build_inputs(
                 PromptModel::KeyboardInteractive { prompts, .. } => {
                     prompts.get(i).map(|p| !p.echo).unwrap_or(true)
                 }
-                PromptModel::HostKeyUnknown { .. } | PromptModel::HostKeyChanged { .. } => false,
+                PromptModel::HostKeyUnknown { .. }
+                | PromptModel::HostKeyChanged { .. }
+                | PromptModel::HostKeyNewAlgorithm { .. } => false,
             };
             cx.new(|cx| InputState::new(window, cx).masked(masked))
         })
@@ -1004,8 +1126,13 @@ mod tests {
     #[test]
     fn banner_is_not_a_blocking_model() {
         assert!(
-            PromptModel::from_prompt(AuthPromptKind::Banner { text: "hi".into() }, None, false, None)
-                .is_none()
+            PromptModel::from_prompt(
+                AuthPromptKind::Banner { text: "hi".into() },
+                None,
+                false,
+                None
+            )
+            .is_none()
         );
     }
 
@@ -1035,14 +1162,11 @@ mod tests {
         );
         // No user, or no endpoint — the re-ask still happens, but no keychain
         // entry can be named for the cleanup.
-        let no_user = PromptModel::from_prompt(
-            kind.clone(),
-            Some(("10.0.0.5".into(), 2222)),
-            false,
-            None,
-        )
-        .unwrap();
-        let no_endpoint = PromptModel::from_prompt(kind, None, false, Some("deploy".into())).unwrap();
+        let no_user =
+            PromptModel::from_prompt(kind.clone(), Some(("10.0.0.5".into(), 2222)), false, None)
+                .unwrap();
+        let no_endpoint =
+            PromptModel::from_prompt(kind, None, false, Some("deploy".into())).unwrap();
         for m in [no_user, no_endpoint] {
             assert_eq!(
                 m,
@@ -1129,7 +1253,10 @@ mod tests {
     fn ki_submit_bundles_all_answers() {
         assert_eq!(
             ki_submit(vec!["a".into(), "b".into()], None),
-            (AuthResponse::Secrets(vec!["a".into(), "b".into()]), KeychainWrite::None)
+            (
+                AuthResponse::Secrets(vec!["a".into(), "b".into()]),
+                KeychainWrite::None
+            )
         );
     }
 
@@ -1189,6 +1316,34 @@ mod tests {
                 accept: true,
                 remember: true
             }
+        );
+    }
+
+    #[test]
+    fn a_new_key_type_on_a_known_host_keeps_both_fingerprints() {
+        // #495: the gentle sheet shows the new fingerprint against the one
+        // already trusted under another algorithm.
+        let m = PromptModel::from_prompt(
+            AuthPromptKind::HostKeyNewAlgorithm {
+                host: "example".into(),
+                port: 22,
+                algorithm: "ssh-ed25519".into(),
+                fingerprint_sha256: "SHA256:new".into(),
+                known_fingerprint_sha256: "SHA256:trusted".into(),
+            },
+            Some(("example".into(), 22)),
+            false,
+            None,
+        );
+        assert_eq!(
+            m,
+            Some(PromptModel::HostKeyNewAlgorithm {
+                host: "example".into(),
+                port: 22,
+                algorithm: "ssh-ed25519".into(),
+                fingerprint: "SHA256:new".into(),
+                known_fingerprint: "SHA256:trusted".into(),
+            })
         );
     }
 }
@@ -1267,5 +1422,42 @@ mod focus_tests {
                 .unwrap(),
             "dismissing the last prompt must hand focus back to the app"
         );
+    }
+
+    /// #496: submitting the changed-host-key sheet with anything short of
+    /// "yes" used to fall into the decision's abort arm — the connection
+    /// died with no hint as to why. The sheet must stay up and explain.
+    #[gpui::test]
+    fn an_unconfirmed_override_holds_the_sheet(cx: &mut TestAppContext) {
+        let (window, _vcx) = harness(cx);
+
+        // No `InputState` — this harness cannot build one (see above) — so
+        // the confirmation reads as "", the exact not-"yes" case under test.
+        window
+            .update(cx, |app, window, cx| {
+                app.ssh_prompt.model = Some(PromptModel::HostKeyChanged {
+                    host: "example".into(),
+                    port: 22,
+                    algorithm: "ssh-ed25519".into(),
+                    fingerprint: "SHA256:new".into(),
+                    old_fingerprint: "SHA256:old".into(),
+                });
+                app.submit_ssh_prompt(window, cx);
+            })
+            .expect("the app window stays open");
+        cx.background_executor.run_until_parked();
+
+        window
+            .update(cx, |app, _, _| {
+                assert!(
+                    app.ssh_prompt.model.is_some(),
+                    "an unconfirmed override must not dismiss the sheet"
+                );
+                assert!(
+                    app.ssh_prompt.override_hint,
+                    "an unconfirmed override must explain why nothing happened"
+                );
+            })
+            .expect("the app window stays open");
     }
 }
