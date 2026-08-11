@@ -124,6 +124,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An idle window stops re-reading the repository on Linux** — with a
+  repository open, tty7 ran `git status -uall` about two and a half times a
+  second, forever, with nothing on screen changing and nobody touching the
+  machine. The filesystem watch was feeding itself: Linux reports opening a
+  file as a watch event, every read of `.git` is an open, and reading `.git`
+  is exactly how the watch's own events were answered — so each answer
+  scheduled the next question. Reads are no longer mistaken for changes;
+  a write finishing still is. macOS and Windows were never affected, which is
+  why this survived so long.
+
 - **An alias put back in an `Include`d ssh config file is found again** — the
   check behind a parked remote workspace watched `~/.ssh/config` for changes
   and nothing else, but `Include` is common and editing an included file

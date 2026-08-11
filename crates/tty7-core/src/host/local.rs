@@ -381,6 +381,7 @@ fn local_watch(dirs: &[PathBuf], gitignore: Arc<Mutex<GitignoreChain>>) -> io::R
     let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res
             && !ev.paths.is_empty()
+            && crate::host::is_content_change(&ev.kind)
         {
             let _ = raw_tx.send(ev.paths);
         }

@@ -43,6 +43,11 @@ fn spawn_config_watcher(cx: &mut App) {
     let watched_file = config_file.clone();
     let handler = move |res: notify::Result<notify::Event>| {
         let Ok(event) = res else { return };
+        // A reload re-reads the file, and on Linux reading it is itself an
+        // event — see `tty7_core::host::is_content_change`.
+        if !tty7_core::host::is_content_change(&event.kind) {
+            return;
+        }
         let hit = event
             .paths
             .iter()

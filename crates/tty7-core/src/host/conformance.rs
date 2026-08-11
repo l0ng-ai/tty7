@@ -66,6 +66,7 @@ macro_rules! for_each_host_case {
             search_respects_max_dirs,
             shells_are_named_and_have_a_default,
             watch_reports_create_and_delete,
+            watch_ignores_reads,
             watch_is_non_recursive,
             watch_set_dirs_adds_and_drops,
             watch_coalesces_within_window,
@@ -943,6 +944,47 @@ pub fn watch_reports_create_and_delete(h: &dyn Host, sb: &dyn Sandbox) {
     assert!(
         await_event(&sub, "watched.txt").is_some(),
         "no event for the delete"
+    );
+}
+
+/// Reading a watched file is not a change.
+///
+/// The one case where a watch can feed itself: every consumer answers an event
+/// by reading the directory it came from, so if a read is an event, the answer
+/// asks the question again. `notify`'s inotify backend subscribes to `IN_OPEN`,
+/// which makes this reachable on Linux and only there — an idle Source Control
+/// panel ran `git status -uall` about 2.6 times a second before this was
+/// filtered (issue #523). macOS passes this trivially, which is exactly why it
+/// has to be a conformance case rather than a platform test.
+pub fn watch_ignores_reads(h: &dyn Host, sb: &dyn Sandbox) {
+    let sandbox = sb.path();
+    let f = h.join(sandbox, "read-me.txt");
+    write(h, &f, "hello");
+
+    let sub = h.watch(&[sandbox.to_path_buf()]).unwrap();
+    // The file this asserts about is created *before* the watch, so the drain
+    // has to come after the tail of that create can still arrive — FSEvents
+    // will hand one over a beat late, and a stale create is indistinguishable
+    // here from the reads below reporting.
+    std::thread::sleep(WATCH_QUIET);
+    drain(&sub);
+
+    for _ in 0..5 {
+        h.read_file(&f, 1 << 20)
+            .expect("the watched file reads back");
+    }
+    std::thread::sleep(WATCH_QUIET);
+
+    let batches = collect_batches(&sub, Duration::from_millis(200));
+    let leaked: Vec<&PathBuf> = batches
+        .iter()
+        .flatten()
+        .filter(|p| p.file_name().is_some_and(|n| n == "read-me.txt"))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "reading a watched file reported as a change, so a watch can feed \
+         itself: {leaked:?}"
     );
 }
 

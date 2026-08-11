@@ -262,6 +262,32 @@ pub trait Host: Send + Sync + 'static {
     }
 }
 
+/// Did this watch event mean something *changed*, or only that something was
+/// read?
+///
+/// The distinction does not exist on macOS, and on Linux it decides whether a
+/// watch can feed itself. `notify`'s inotify backend asks for `IN_OPEN`, so
+/// every `open(2)` under a watched directory arrives as an event — and the one
+/// thing every consumer of a watch does with an event is go and read the
+/// directory it came from. Reading `.git/index` to answer "did the repository
+/// change" is itself an event saying the repository may have changed, so the
+/// answer schedules the next question, at whatever rate the debounce allows,
+/// forever. Measured at ~2.6 `git status -uall` per second on an idle Source
+/// Control panel before this filter existed (issue #523).
+///
+/// `IN_CLOSE_WRITE` also arrives as `Access`, and that one is a real write
+/// finishing, so it stays. Everything else under `Access` is a reader.
+pub fn is_content_change(kind: &notify::EventKind) -> bool {
+    use notify::event::{AccessKind, AccessMode};
+
+    !matches!(
+        kind,
+        notify::EventKind::Access(
+            AccessKind::Open(_) | AccessKind::Read | AccessKind::Close(AccessMode::Read),
+        )
+    )
+}
+
 pub fn default_join(dir: &Path, name: &str, sep: char) -> PathBuf {
     let mut s = dir.to_string_lossy().into_owned();
     if !s.is_empty() && !s.ends_with(sep) && !s.ends_with('/') {
