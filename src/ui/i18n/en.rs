@@ -229,6 +229,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsNameDesc => "A label for this connection.",
         L10nKey::SettingsHost => "Host",
         L10nKey::SettingsHostDesc => "Hostname or IP address.",
+        L10nKey::SettingsHostRequired => "Needs a host — won't be saved.",
+        L10nKey::SettingsPortInvalid => "Port must be 1-65535 — blank means 22.",
         L10nKey::SettingsUser => "User",
         L10nKey::SettingsUserDesc => "Login user (blank = resolve at connect).",
         L10nKey::SettingsAuth => "Auth",
@@ -242,6 +244,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsJumpHostDesc => {
             "Name of another profile to tunnel through (blank = direct)."
         }
+        L10nKey::SettingsJumpHostUnknown => "No host profile named {jump_name} — won't be saved.",
+        L10nKey::SettingsJumpHostSelf => "A host can't be its own jump host — won't be saved.",
         L10nKey::SettingsNoneSummary => "(none)",
         L10nKey::SettingsPortForwarding => "Port forwarding",
         L10nKey::SettingsRulesOpenedWithConnection => "1 rule, opened with the connection",
@@ -274,6 +278,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSocks5ProxyDesc => "host:port (blank = none).",
         L10nKey::SettingsHttpProxy => "HTTP proxy",
         L10nKey::SettingsHttpProxyDesc => "host:port (blank = none).",
+        L10nKey::SettingsProxyPortInvalid => {
+            "Port must be 1-65535 — the host on its own takes the default port."
+        }
         L10nKey::SettingsKexAlgorithms => "KEX algorithms",
         L10nKey::SettingsKexAlgorithmsDesc => "Comma-separated (blank = library default).",
         L10nKey::SettingsCiphers => "Ciphers",

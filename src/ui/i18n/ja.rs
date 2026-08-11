@@ -226,6 +226,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNameDesc => "この接続の表示名",
         L10nKey::SettingsHost => "ホスト名",
         L10nKey::SettingsHostDesc => "ホスト名または IP アドレス",
+        L10nKey::SettingsHostRequired => "ホスト名が必要です — 保存されません",
+        L10nKey::SettingsPortInvalid => "ポートは 1-65535 の範囲です — 空欄なら 22 です",
         L10nKey::SettingsUser => "ユーザー名",
         L10nKey::SettingsUserDesc => "ログインユーザー (空欄 = 接続時に解決)",
         L10nKey::SettingsAuth => "認証方式",
@@ -238,6 +240,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsJumpHost => "ジャンプホスト",
         L10nKey::SettingsJumpHostDesc => {
             "トンネリングに使用する別のプロファイル名 (空欄 = 直接接続)"
+        }
+        L10nKey::SettingsJumpHostUnknown => {
+            "{jump_name} という名前のホストプロファイルはありません — 保存されません"
+        }
+        L10nKey::SettingsJumpHostSelf => {
+            "ホストを自分自身のジャンプホストにはできません — 保存されません"
         }
         L10nKey::SettingsNoneSummary => "(なし)",
         L10nKey::SettingsPortForwarding => "ポートフォワーディング",
@@ -271,6 +279,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSocks5ProxyDesc => "host:port（空欄 = なし）",
         L10nKey::SettingsHttpProxy => "HTTP プロキシ",
         L10nKey::SettingsHttpProxyDesc => "host:port（空欄 = なし）",
+        L10nKey::SettingsProxyPortInvalid => {
+            "ポートは 1-65535 の範囲です — ホストだけならデフォルトポートを使います"
+        }
         L10nKey::SettingsKexAlgorithms => "KEX アルゴリズム",
         L10nKey::SettingsKexAlgorithmsDesc => "カンマ区切り（空欄 = ライブラリのデフォルト）",
         L10nKey::SettingsCiphers => "暗号方式",

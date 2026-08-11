@@ -265,8 +265,12 @@ fn map_proxy(profile: &SshProfile) -> SshProxy {
             return SshProxy::Command(cmd.clone());
         }
     }
+    // Port 0 is not somewhere a proxy listens. The settings form used to write
+    // it whenever the address had no port or an unparseable one, so configs
+    // carrying it are already on disk; connecting direct is the honest reading
+    // of an address that names nowhere.
     if let Some(HostPort { host, port }) = &profile.socks_proxy {
-        if !host.is_empty() {
+        if !host.is_empty() && *port != 0 {
             return SshProxy::Socks {
                 host: host.clone(),
                 port: *port,
@@ -274,7 +278,7 @@ fn map_proxy(profile: &SshProfile) -> SshProxy {
         }
     }
     if let Some(HostPort { host, port }) = &profile.http_proxy {
-        if !host.is_empty() {
+        if !host.is_empty() && *port != 0 {
             return SshProxy::Http {
                 host: host.clone(),
                 port: *port,
@@ -549,6 +553,24 @@ mod tests {
         assert!(matches!(
             build_native_ssh_spec(&p, &[], &store, true).proxy,
             SshProxy::Command(_)
+        ));
+    }
+
+    #[test]
+    fn a_proxy_on_port_zero_is_no_proxy() {
+        // What the settings form wrote for `proxy.example.com` before it
+        // checked the port, and what is still sitting in configs saved then.
+        let store = InMemoryCredentialStore::new();
+        let mut p = profile("web", "h", "u");
+        p.socks_proxy = Some(HostPort::new("socks", 0));
+        assert!(matches!(
+            build_native_ssh_spec(&p, &[], &store, true).proxy,
+            SshProxy::None
+        ));
+        p.http_proxy = Some(HostPort::new("http", 8080));
+        assert!(matches!(
+            build_native_ssh_spec(&p, &[], &store, true).proxy,
+            SshProxy::Http { .. }
         ));
     }
 }
