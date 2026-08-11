@@ -873,6 +873,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "You already know this host by a {previous_algorithm} key. This is a new \
              {algorithm} key, not a replacement for that one."
         }
+        L10nKey::SshPromptTypeYesToOverride => "Type \"yes\" to enable Override.",
         L10nKey::EditorCantOpen => "Could not open {path}: {e}",
         L10nKey::EditorCantRead => "Could not read {path}: {e}",
         L10nKey::EditorNotUtf8 => "\"{path}\" is not valid UTF-8",

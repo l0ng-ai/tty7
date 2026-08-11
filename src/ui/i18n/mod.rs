@@ -670,6 +670,7 @@ l10n_keys! {
     SshPromptNewKey,
     SshPromptOldKey,
     SshPromptHostKeyNewAlgorithm,
+    SshPromptTypeYesToOverride,
     EditorCantOpen,
     EditorCantRead,
     EditorNotUtf8,

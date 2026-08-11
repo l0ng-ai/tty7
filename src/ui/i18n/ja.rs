@@ -914,6 +914,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SshPromptHostKeyNewAlgorithm => {
             "このホストはすでに {previous_algorithm} キーで登録されています。これはそれを置き換えるものではなく、新しい {algorithm} キーです"
         }
+        L10nKey::SshPromptTypeYesToOverride => "「yes」を入力すると「上書き」が有効になります",
         L10nKey::EditorCantOpen => "{path} を開けません: {e}",
         L10nKey::EditorCantRead => "{path} を読み取れません: {e}",
         L10nKey::EditorNotUtf8 => "「{path}」は有効な UTF-8 ではありません",

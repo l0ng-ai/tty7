@@ -835,6 +835,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SshPromptHostKeyNewAlgorithm => {
             "你已经通过一把 {previous_algorithm} 密钥认识这台主机。这是一把新的 {algorithm} 密钥，并不是用来替换那一把的。"
         }
+        L10nKey::SshPromptTypeYesToOverride => "输入 yes 才能启用“覆盖”。",
         L10nKey::EditorCantOpen => "无法打开 {path}：{e}",
         L10nKey::EditorCantRead => "无法读取 {path}：{e}",
         L10nKey::EditorNotUtf8 => "“{path}”不是有效的 UTF-8",
