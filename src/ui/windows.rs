@@ -498,8 +498,13 @@ pub fn forget_workspace(cx: &mut App, workspace: WorkspaceId) {
 /// deletion must not touch (#485): an entry with a live or in-flight link
 /// keeps its bookmark — the link holds an authenticated connection rather
 /// than a profile reference, and forgetting the entry would release the
-/// link under any window still attached to the machine. Whatever survives
-/// the deletion without a link falls into the parked state instead.
+/// link under any window still attached to the machine. An entry whose
+/// window is still on screen keeps it too: `forget_workspace` drops the
+/// store entry without closing the window, and a window whose workspace
+/// the store has forgotten reads as local — its next tab would open a
+/// local shell on what the user still sees as a remote box. Whatever
+/// survives the deletion falls into the parked state instead, which is
+/// where the entry can be dismissed deliberately.
 pub fn cascade_for_profile(cx: &mut App, profile: uuid::Uuid) -> Vec<WorkspaceId> {
     WorkspaceStore::all(cx)
         .workspaces_via_profile(profile)
@@ -507,6 +512,7 @@ pub fn cascade_for_profile(cx: &mut App, profile: uuid::Uuid) -> Vec<WorkspaceId
         .filter(|ws| {
             let host = WorkspaceStore::host_of(cx, *ws);
             !crate::ui::remote_workspace::link_alive_or_connecting(cx, host)
+                && WindowRegistry::app_for(cx, *ws).is_none()
         })
         .collect()
 }
@@ -842,6 +848,7 @@ mod tests {
         // #485: deleting a profile forgets every entry routing through it —
         // its own entries, all of them, and nothing else's.
         cx.update(|cx| {
+            WindowRegistry::init(cx);
             let doomed = uuid::Uuid::new_v4();
             let on_doomed_a = WindowView::on_remote(RemoteRef::new(
                 RemoteTarget::Profile { id: doomed },
@@ -875,6 +882,45 @@ mod tests {
             assert!(
                 cascade_for_profile(cx, uuid::Uuid::new_v4()).is_empty(),
                 "a profile with no entries cascades to nothing"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn the_cascade_leaves_an_entry_whose_window_is_still_open(cx: &mut gpui::TestAppContext) {
+        // #485: forgetting an entry does not close its window, and a window
+        // the store has forgotten reads as local — so the one entry the user
+        // is looking at must survive the cascade and park instead.
+        use gpui::VisualContext as _;
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let handle = vcx.window_handle();
+        app.update_in(&mut vcx, |_, _, cx| {
+            WindowRegistry::init(cx);
+            let doomed = uuid::Uuid::new_v4();
+            let onscreen = WindowView::on_remote(RemoteRef::new(
+                RemoteTarget::Profile { id: doomed },
+                WorkspaceId::new(),
+            ));
+            let offscreen = WindowView::on_remote(RemoteRef::new(
+                RemoteTarget::Profile { id: doomed },
+                WorkspaceId::new(),
+            ));
+            let (open, closed) = (onscreen.id, offscreen.id);
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![onscreen, offscreen],
+                    active: None,
+                },
+            );
+            WindowRegistry::register(cx, open, handle, app.downgrade());
+
+            let cascade = cascade_for_profile(cx, doomed);
+            assert_eq!(
+                cascade,
+                vec![closed],
+                "only the entry with no window on screen is forgotten"
             );
         });
     }

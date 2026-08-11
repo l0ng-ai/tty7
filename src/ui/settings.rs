@@ -3211,12 +3211,10 @@ impl Tty7App {
         if !cascade.is_empty() {
             let endpoint = crate::core::session::RouteSnapshot::of_profile(&profile).endpoint();
             body.push(' ');
-            body.push_str(&t_fmt(
+            body.push_str(&t_plural(
                 L10nKey::SettingsDeleteProfileCascade,
-                &[
-                    ("endpoint", endpoint.as_str()),
-                    ("count", &cascade.len().to_string()),
-                ],
+                cascade.len(),
+                &[("endpoint", endpoint.as_str())],
             ));
         }
         let answer = window.prompt(

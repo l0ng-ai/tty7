@@ -1639,6 +1639,16 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
 
 pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'static str> {
     let res = match (key, branch) {
+        (L10nKey::SettingsDeleteProfileCascade, "one") => {
+            "{endpoint} を参照しているリモートワークスペースのエントリが 1 件あり、\
+             プロファイルと一緒にこのコンピュータから削除されます。リモートマシン上のセッションは\
+             維持され、新しいプロファイルで接続すればワークスペース一覧に再表示されます。"
+        }
+        (L10nKey::SettingsDeleteProfileCascade, "other") => {
+            "{endpoint} を参照しているリモートワークスペースのエントリが {count} 件あり、\
+             プロファイルと一緒にこのコンピュータから削除されます。リモートマシン上のセッションは\
+             維持され、新しいプロファイルで接続すればワークスペース一覧に再表示されます。"
+        }
         (L10nKey::SettingsAliasesLinked, "zero") => "エイリアスはまだリンクされていません",
         (L10nKey::SettingsAliasesLinked, "one") => "エイリアス 1 件がリンクされています",
         (L10nKey::SettingsAliasesLinked, "other") => "エイリアス {count} 件がリンクされています",

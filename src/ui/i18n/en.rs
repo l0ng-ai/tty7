@@ -1614,6 +1614,17 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsOfflineMachines, "other") => {
             "{count} more saved machines are not connected — open a workspace on one to install its hooks there."
         }
+        (L10nKey::SettingsDeleteProfileCascade, "one") => {
+            "1 saved remote workspace entry points at {endpoint} and is removed from \
+             this computer along with it — the session on the remote machine keeps \
+             running, and connecting with a new profile brings it back to the \
+             workspace list."
+        }
+        (L10nKey::SettingsDeleteProfileCascade, "other") => {
+            "{count} saved remote workspace entries point at {endpoint} and are removed from \
+             this computer along with it — the sessions on the remote machine keep running, \
+             and connecting with a new profile brings them back to the workspace list."
+        }
         (L10nKey::SftpReplaceBody, "one") => {
             "{names} already exists in this folder. Uploading overwrites it."
         }

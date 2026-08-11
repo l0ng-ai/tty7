@@ -2000,6 +2000,7 @@ mod tests {
     #[test]
     fn plural_and_select_branches_are_translated() {
         let plural_keys = [
+            L10nKey::SettingsDeleteProfileCascade,
             L10nKey::SettingsAliasesLinked,
             L10nKey::SettingsRulesOpenedWithConnection,
             L10nKey::SettingsOfflineMachines,

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use gpui::{App, AppContext as _, BorrowAppContext as _, Global};
 
 use crate::core::config::Config;
-use crate::core::session::{RemoteRef, RemoteTarget, RouteSnapshot, WorkspaceId};
+use crate::core::session::{RemoteRef, RemoteTarget, WorkspaceId};
 use crate::daemon::control::{ControlHello, ControlRequest, ReplyOk};
 use crate::daemon::install::{
     InstallConfirm, InstallDecision, InstallPhase, InstallProgress, InstallRequest,
@@ -37,11 +37,7 @@ pub fn available_hosts(cx: &App) -> Vec<HostChoice> {
         seen.push(profile.name.clone());
         out.push(HostChoice {
             detail: endpoint_label(&profile.user, &profile.host, profile.port),
-            label: if profile.name.trim().is_empty() {
-                profile.host.clone()
-            } else {
-                profile.name.clone()
-            },
+            label: profile_label(profile),
             target,
         });
     }
@@ -95,34 +91,49 @@ pub fn route_resolvable(cx: &App, target: &RemoteTarget) -> bool {
     })
 }
 
-/// The name a route entry answers to: the live profile/alias listing while
-/// the route still exists, then the remembered snapshot, and — for a profile
-/// entry saved before snapshots existed — a placeholder, but never the bare
-/// profile UUID (#485).
+/// The name a route entry answers to: the live listing while the route still
+/// exists, then the remembered snapshot, and — for a profile entry saved
+/// before snapshots existed — a placeholder, but never the bare profile UUID
+/// (#485).
 pub fn route_label(cx: &App, host: &RemoteRef) -> String {
-    if let Some(choice) = available_hosts(cx)
-        .into_iter()
-        .find(|h| h.target == host.target)
-    {
-        return choice.label;
+    match live_label(cx, &host.target) {
+        Some(label) => label,
+        None => host.route_label(t(L10nKey::RemoteProfileGone)),
     }
-    host.route_label(t(L10nKey::RemoteProfileGone))
 }
 
-/// The endpoint a route entry points at, from the live profile while it
-/// exists and from the snapshot afterwards — what the delete confirmation
-/// and the parked label show underneath the name.
-pub fn route_endpoint(cx: &App, host: &RemoteRef) -> String {
-    if let Some(choice) = available_hosts(cx)
-        .into_iter()
-        .find(|h| h.target == host.target)
-    {
-        return choice.detail;
+/// What the live config calls a target, reading memory only. Deliberately not
+/// `available_hosts`: `route_label` runs on the render path of every remote
+/// window (the workspace strip), and that listing re-reads `~/.ssh/config`
+/// off the disk. The two targets it answers are the two whose name lives
+/// somewhere other than the target itself; the rest spell themselves the same
+/// way the listing labels them, so falling through costs nothing.
+fn live_label(cx: &App, target: &RemoteTarget) -> Option<String> {
+    match target {
+        RemoteTarget::Profile { id } => cx
+            .global::<Config>()
+            .ssh_profiles
+            .iter()
+            .find(|p| p.id == *id)
+            .map(profile_label),
+        RemoteTarget::Wsl { .. } => wsl_hosts(cx)
+            .into_iter()
+            .find(|h| h.target == *target)
+            .map(|h| h.label),
+        RemoteTarget::Alias { .. }
+        | RemoteTarget::Direct { .. }
+        | RemoteTarget::LocalStdio { .. } => None,
     }
-    host.via
-        .as_ref()
-        .map(RouteSnapshot::endpoint)
-        .unwrap_or_default()
+}
+
+/// What a profile calls itself in a host listing: its name, or the address
+/// when it was saved without one.
+fn profile_label(profile: &crate::core::ssh_profile::SshProfile) -> String {
+    if profile.name.trim().is_empty() {
+        profile.host.clone()
+    } else {
+        profile.name.clone()
+    }
 }
 
 pub fn filter_hosts(hosts: &[HostChoice], query: &str) -> Vec<HostChoice> {

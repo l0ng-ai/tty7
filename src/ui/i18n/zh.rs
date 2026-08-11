@@ -1513,6 +1513,14 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
 
 pub fn translate_variant_zh(key: L10nKey, branch: &'static str) -> Option<&'static str> {
     let res = match (key, branch) {
+        (L10nKey::SettingsDeleteProfileCascade, "one") => {
+            "有 1 个已保存的远程工作区条目指向 {endpoint}，将随配置一并从本机清除；\
+             远端机器上的会话不受影响，新建配置连上同一台机器后即可在工作区列表找回。"
+        }
+        (L10nKey::SettingsDeleteProfileCascade, "other") => {
+            "有 {count} 个已保存的远程工作区条目指向 {endpoint}，将随配置一并从本机清除；\
+             远端机器上的会话不受影响，新建配置连上同一台机器后即可在工作区列表找回。"
+        }
         (L10nKey::SettingsAliasesLinked, "zero") => "还没有关联别名。",
         (L10nKey::SettingsAliasesLinked, "one") => "已关联 1 个别名。",
         (L10nKey::SettingsAliasesLinked, "other") => "已关联 {count} 个别名。",
