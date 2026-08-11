@@ -82,6 +82,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer hands the cursor back to the arrow the moment the drag it
   advertised begins.
 
+- **Destructive operations now succeed before they replace** — two paths
+  destroyed the old thing before the new one existed, and lost both to any
+  failure in between. A drag-and-drop overwrite deleted the destination and
+  then copied into the hole, so a dropped folder whose copy failed midway — a
+  lost link, a full disk — left neither the old file nor the new. The copy now
+  stages under a `.tty7-partial-*` sibling and takes the destination's place
+  only once complete, with the old tree stepping aside to `.tty7-replaced-*`
+  in between and coming back on any failure; the planning pass also catches
+  two sources in one drop sharing a basename, which used to land both on one
+  path with the second silently winning. And editing a managed port forward
+  removed the old rule before the new one bound, so a typo'd or taken port
+  turned a working forward into no forward — the edit now treats a Listening
+  replacement as the only success, restores the old rule otherwise, and keeps
+  the form open saying which field failed. (#490, #499)
+
+- **A stored credential that stops working now heals instead of locking
+  out** — a key passphrase typed wrong with "remember" checked was replayed on
+  every connect: decryption failed, the prompt never returned, and the only
+  way out was the OS keychain app. The daemon now re-asks when the stored
+  passphrase fails to open its key, and answering without "remember" drops the
+  bad entry. A keyboard-interactive server that refused the stored password
+  got the same lockout — the exchange died on the first Failure and the stale
+  password replayed forever; the first refusal now restarts the exchange once
+  as an interactive ask, and submitting forgets the stale entry. Separately,
+  "Forget password" on a profile menu deleted the keychain entry with no
+  confirmation even though every other profile on the same endpoint shared it;
+  it now asks first and counts the other hosts that will be asked again.
+  (#486, #487, #502)
+
+- **Host-key alerts are graded by what actually changed** — a host answering
+  with a key *type* known_hosts had no entry for — the everyday case of an
+  OpenSSH server gaining ed25519 alongside its RSA key — raised the full
+  man-in-the-middle alarm. That case now gets its own gentle trust sheet
+  showing the new fingerprint against the one already trusted, while a
+  changed key of a known type keeps the alarm. Better still, the sheet now
+  rarely fires: the client offers the already-trusted key types first in
+  negotiation, the way OpenSSH feeds its known_hosts back into it. And
+  clicking Override on the changed-key sheet without typing "yes" no longer
+  silently kills the connection — the button stays disabled until the input
+  says "yes", and the Enter path holds the sheet with an inline hint.
+  (#495, #496)
+
+- **One machine, one connection status** — four views of a remote machine
+  could disagree because four places kept their own answer. A window whose own
+  connect attempt failed kept showing the failure banner after the background
+  supervisor reconnected; the supervisor's word now retires the stale banner.
+  The reconnect loop retried forever with the reason discarded as it happened
+  — retrying forever is the design, since a laptop closed overnight must come
+  back on its own, but the strip now reads "Reconnecting… — last failure: …"
+  so an endless loop can explain itself. "Take Back" on a preempted workspace
+  with the control link still live showed success while the panes stayed
+  released; the supervisor now sends the attach itself. And the workspace
+  switcher, blind to anything but connected-or-not, now shows a machine
+  mid-reconnect as "reconnecting…" instead of a stale Connected or a
+  misleading Offline. (#488, #489, #497, #498)
+
+- **Failures that rendered as empty results now say so** — three places drew
+  "nothing came back" and "the answer failed" as the same picture. A file-tree
+  search whose walk failed read as "no matches"; the failure is shown in the
+  tree instead, and new-file / new-folder / rename errors arrive as a
+  "Could not create/rename" sentence rather than a raw io error. An SFTP
+  transfer list that failed — the link dropping mid-upload, say — silently
+  emptied the transfers tray twice a second; the panel keeps the last list on
+  screen and names the error in the tray summary. And a port forward whose
+  accept loop had died still read "Listening", since that status was stamped
+  once at creation; the status now reflects the listener's death, and a dead
+  auto-loopback port is no longer "reused" by the next forward. (#491, #500,
+  #503)
+
+- **The SSH form validates before it saves** — the form used to take whatever
+  the fields held, so the bad value silently won: an empty name or host saved
+  fine and connected nowhere, a jump-host name that matched no profile was
+  stored as "no jump host", and a proxy whose port wouldn't parse was saved as
+  port 0 to fail far from the form. The save is now refused with the problems
+  listed inline — a typed-but-invalid port (a blank one still means 22), an
+  unknown jump host, a proxy that isn't `host:port` with the port in
+  1-65535 — and every field stays as typed. (#492, #493, #494)
+
+- **Importing an ssh config says what it did** — the import button answered
+  all three of its outcomes with silence: no file, nothing importable in the
+  file, and a successful import were indistinguishable, and options tty7
+  doesn't support (`IdentitiesOnly`, `CertificateFile`, …) vanished between
+  the file and the profile. Every path now reports: the missing config names
+  the path it looked for, an empty one says so, and a successful merge
+  summarizes "N new, M updated" along with the names of the options it had to
+  drop. (#501)
+
 ## [26.8.2] - 2026-08-09
 
 ### Added
