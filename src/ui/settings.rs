@@ -797,6 +797,27 @@ fn ssh_row_matches(p: &SshProfile, query: &str) -> bool {
     hit(&p.name) || hit(&p.host) || hit(&p.user) || hit(&p.port.to_string())
 }
 
+/// How many *other* profiles reach the same `user@host:port` as this one.
+///
+/// The keychain is keyed by the endpoint, not by the profile, so two hosts that
+/// differ only in how they get there — one direct, one through a jump host —
+/// hand the same saved password back and forth. Every path that is about to
+/// remove that password has to know this first: deleting a profile keeps the
+/// secret while someone else still needs it, and forgetting one says out loud
+/// who else it takes down. Both used to work the answer out on their own, which
+/// is exactly how the two policies would have drifted apart.
+fn profiles_sharing_endpoint(cfg: &Config, id: Uuid) -> usize {
+    let Some(profile) = cfg.ssh_profiles.iter().find(|p| p.id == id) else {
+        return 0;
+    };
+    cfg.ssh_profiles
+        .iter()
+        .filter(|p| {
+            p.id != id && (&p.user, &p.host, p.port) == (&profile.user, &profile.host, profile.port)
+        })
+        .count()
+}
+
 pub(crate) struct SshProfileForm {
     editing: Uuid,
     carry_group: Option<String>,
@@ -2834,13 +2855,8 @@ impl Tty7App {
                 PopupMenuItem::new(t(L10nKey::SettingsForgetPassword)).on_click({
                     let app = app.clone();
                     move |_, window, cx| {
-                        if let Some(msg) = app
-                            .update(cx, |this, cx| this.forget_profile_password(id, cx))
-                            .ok()
-                            .flatten()
-                        {
-                            window.push_notification(msg, cx);
-                        }
+                        let _ =
+                            app.update(cx, |this, cx| this.forget_profile_password(id, window, cx));
                     }
                 }),
             )
@@ -3224,11 +3240,7 @@ impl Tty7App {
             .iter()
             .find(|p| p.id == id)
             .map(|p| (p.user.clone(), p.host.clone(), p.port));
-        let shared = endpoint.as_ref().is_some_and(|(user, host, port)| {
-            cfg.ssh_profiles
-                .iter()
-                .any(|p| p.id != id && (&p.user, &p.host, p.port) == (user, host, *port))
-        });
+        let shared = profiles_sharing_endpoint(cfg, id) > 0;
         if let Some((user, host, port)) = endpoint.filter(|_| !shared) {
             use crate::core::keychain::{CredentialStore, OsCredentialStore};
             let _ = OsCredentialStore.delete_password(&user, &host, port);
@@ -3270,6 +3282,60 @@ impl Tty7App {
     }
 
     pub(crate) fn forget_profile_password(
+        &mut self,
+        id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cfg = cx.global::<Config>();
+        let Some(endpoint) = cfg
+            .ssh_profiles
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| format!("{}@{}:{}", p.user, p.host, p.port))
+        else {
+            return;
+        };
+        // One click used to be the whole gesture, and the thing it removed does
+        // not come back. Worse, the entry is the endpoint's rather than this
+        // row's, so a menu opened on one host can sign several of them out —
+        // name that count here instead of letting it turn up at the next
+        // connect on a host nobody touched.
+        let others = profiles_sharing_endpoint(cfg, id);
+        let body = if others == 0 {
+            t(L10nKey::SettingsForgetPasswordBody).to_string()
+        } else {
+            t_plural(
+                L10nKey::SettingsForgetPasswordSharedBody,
+                others,
+                &[("endpoint", &endpoint)],
+            )
+        };
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &t_fmt(
+                L10nKey::SettingsForgetPasswordTitle,
+                &[("endpoint", &endpoint)],
+            ),
+            Some(&body),
+            &crate::ui::confirm_answers(t(L10nKey::SettingsForgetPassword), t(L10nKey::Cancel)),
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(0) = answer.await else { return };
+            // The notification is the only sign the keychain was touched, and
+            // by now the click that asked for it is long gone — so it has to be
+            // raised from in here, on the window the prompt belonged to.
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Some(msg) = this.forget_profile_password_confirmed(id, cx) {
+                    window.push_notification(msg, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn forget_profile_password_confirmed(
         &mut self,
         id: Uuid,
         cx: &mut Context<Self>,
@@ -6577,6 +6643,41 @@ mod tests {
         assert_eq!(hp.host, "example.com");
         assert_eq!(hp.port, 2222);
         assert_eq!(parse_host_port("host").unwrap().port, 0);
+    }
+
+    fn profile_at(name: &str, user: &str, host: &str, port: u16) -> SshProfile {
+        let mut p = SshProfile::new(name);
+        p.user = user.to_string();
+        p.host = host.to_string();
+        p.port = port;
+        p
+    }
+
+    /// The saved password belongs to `user@host:port`, so what counts as
+    /// "shared" is exactly that triple — a different name or a jump host in
+    /// front of it changes nothing, and a different port makes it a different
+    /// secret entirely.
+    #[test]
+    fn the_same_endpoint_under_two_names_counts_as_shared() {
+        let direct = profile_at("direct", "ana", "build.example.com", 22);
+        let mut via_jump = profile_at("via bastion", "ana", "build.example.com", 22);
+        via_jump.jump_host = Some(direct.id);
+        let staging = profile_at("staging", "ana", "build.example.com", 2222);
+        let other_user = profile_at("root", "root", "build.example.com", 22);
+
+        let mut cfg = Config::default();
+        let (direct_id, jump_id, staging_id) = (direct.id, via_jump.id, staging.id);
+        cfg.ssh_profiles = vec![direct, via_jump, staging, other_user];
+
+        // The two that reach the same endpoint see each other, and neither
+        // counts itself.
+        assert_eq!(profiles_sharing_endpoint(&cfg, direct_id), 1);
+        assert_eq!(profiles_sharing_endpoint(&cfg, jump_id), 1);
+        // A port apart is a keychain entry apart, so this one is alone even
+        // though the user and host match two of the others.
+        assert_eq!(profiles_sharing_endpoint(&cfg, staging_id), 0);
+        // A profile that is no longer on the list shares with nobody.
+        assert_eq!(profiles_sharing_endpoint(&cfg, Uuid::new_v4()), 0);
     }
 }
 

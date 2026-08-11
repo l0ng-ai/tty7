@@ -201,6 +201,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCopyAddress => "アドレスをコピー",
         L10nKey::SettingsDuplicate => "複製",
         L10nKey::SettingsForgetPassword => "パスワードを消去",
+        L10nKey::SettingsForgetPasswordTitle => "{endpoint} の保存されたパスワードを消去しますか？",
+        L10nKey::SettingsForgetPasswordBody => {
+            "次に接続するときに、もう一度パスワードを尋ねられます。このホストの他の設定は変わりません"
+        }
+        L10nKey::SettingsForgetPasswordSharedBody => {
+            "他にも {count} 件のホストプロファイルが {endpoint} を使っているため、それらの接続でもパスワードの再入力が必要になります"
+        }
         L10nKey::SettingsForgotPasswordFor => "{endpoint} の保存されたパスワードを消去しました",
         L10nKey::SettingsDeleteProfileBody => {
             "保存されたパスワードも一緒に削除されます。同じアドレスを使う接続が他にある場合は残ります。"
@@ -1643,6 +1650,12 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         }
         (L10nKey::SettingsOfflineMachines, "other") => {
             "未接続の保存済みマシンがさらに {count} 台あります — いずれかでワークスペースを開くと、そこにフックをインストールできます"
+        }
+        (L10nKey::SettingsForgetPasswordSharedBody, "one") => {
+            "他にも 1 件のホストプロファイルが {endpoint} を使っているため、その接続でもパスワードの再入力が必要になります"
+        }
+        (L10nKey::SettingsForgetPasswordSharedBody, "other") => {
+            "他にも {count} 件のホストプロファイルが {endpoint} を使っているため、それらの接続でもパスワードの再入力が必要になります"
         }
         (L10nKey::SftpReplaceBody, "one") => {
             "{names} はこのフォルダに既に存在します。アップロードすると上書きされます。"

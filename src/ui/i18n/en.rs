@@ -200,6 +200,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsCopyAddress => "Copy Address",
         L10nKey::SettingsDuplicate => "Duplicate",
         L10nKey::SettingsForgetPassword => "Forget Password",
+        L10nKey::SettingsForgetPasswordTitle => "Forget the saved password for {endpoint}?",
+        L10nKey::SettingsForgetPasswordBody => {
+            "The next connection to it asks for the password again. Nothing else about this host changes."
+        }
+        L10nKey::SettingsForgetPasswordSharedBody => {
+            "{count} other host profiles use {endpoint} as well, so those connections will have to enter the password again too."
+        }
         L10nKey::SettingsForgotPasswordFor => "Forgot saved password for {endpoint}",
         L10nKey::SettingsDeleteProfileBody => {
             "The password saved for it goes too, unless another connection still uses the same address."
@@ -1598,6 +1605,12 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         }
         (L10nKey::SettingsOfflineMachines, "other") => {
             "{count} more saved machines are not connected — open a workspace on one to install its hooks there."
+        }
+        (L10nKey::SettingsForgetPasswordSharedBody, "one") => {
+            "1 other host profile uses {endpoint} as well, so that connection will have to enter the password again too."
+        }
+        (L10nKey::SettingsForgetPasswordSharedBody, "other") => {
+            "{count} other host profiles use {endpoint} as well, so those connections will have to enter the password again too."
         }
         (L10nKey::SftpReplaceBody, "one") => {
             "{names} already exists in this folder. Uploading overwrites it."

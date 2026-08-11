@@ -181,6 +181,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCopyAddress => "复制地址",
         L10nKey::SettingsDuplicate => "复制",
         L10nKey::SettingsForgetPassword => "清除已保存的密码",
+        L10nKey::SettingsForgetPasswordTitle => "要清除 {endpoint} 的已保存密码吗？",
+        L10nKey::SettingsForgetPasswordBody => {
+            "下次连接它时会重新询问密码。这台主机的其他设置不受影响。"
+        }
+        L10nKey::SettingsForgetPasswordSharedBody => {
+            "还有 {count} 个主机配置同样使用 {endpoint}，那些连接也需要重新输入密码。"
+        }
         L10nKey::SettingsForgotPasswordFor => "已清除 {endpoint} 的已保存密码",
         L10nKey::SettingsDeleteProfileBody => {
             "为它保存的密码也会一并删除，除非还有别的连接用着同一个地址。"
@@ -1516,6 +1523,12 @@ pub fn translate_variant_zh(key: L10nKey, branch: &'static str) -> Option<&'stat
         }
         (L10nKey::SettingsOfflineMachines, "other") => {
             "还有 {count} 台已保存的机器未连接——在其中一台上打开工作区，即可在那台机器上安装 hook。"
+        }
+        (L10nKey::SettingsForgetPasswordSharedBody, "one") => {
+            "还有 1 个主机配置同样使用 {endpoint}，那个连接也需要重新输入密码。"
+        }
+        (L10nKey::SettingsForgetPasswordSharedBody, "other") => {
+            "还有 {count} 个主机配置同样使用 {endpoint}，那些连接也需要重新输入密码。"
         }
         (L10nKey::SftpReplaceBody, "one") => "{names} 在这个文件夹里已经存在，上传会覆盖它。",
         (L10nKey::SftpReplaceBody, "other") => "{names} 在这个文件夹里已经存在，上传会覆盖它们。",
