@@ -3,6 +3,7 @@ mod backend;
 mod cli;
 mod commands;
 mod gui;
+mod keys;
 mod output;
 mod resolve;
 mod screen;

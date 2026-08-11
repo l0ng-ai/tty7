@@ -191,7 +191,18 @@ fn build_spec_inner(
 
     let mut key_passphrases: HashMap<String, String> = HashMap::new();
     if matches!(profile.auth, AuthMode::Auto | AuthMode::PublicKey) {
-        for path in &identity_files {
+        // Whichever list the daemon will actually offer (#484, #513): the
+        // profile's own files, or — only when it names none — the same
+        // `~/.ssh` defaults, from the one shared candidate list. The daemon
+        // looks passphrases up by the candidate string, so both sides must
+        // spell them identically.
+        let owned = identity_files.clone();
+        let probed = if owned.is_empty() {
+            crate::core::ssh_profile::default_identity_candidates()
+        } else {
+            owned
+        };
+        for path in &probed {
             let Ok(bytes) = std::fs::read(path) else {
                 continue;
             };
@@ -265,8 +276,12 @@ fn map_proxy(profile: &SshProfile) -> SshProxy {
             return SshProxy::Command(cmd.clone());
         }
     }
+    // Port 0 is not somewhere a proxy listens. The settings form used to write
+    // it whenever the address had no port or an unparseable one, so configs
+    // carrying it are already on disk; connecting direct is the honest reading
+    // of an address that names nowhere.
     if let Some(HostPort { host, port }) = &profile.socks_proxy {
-        if !host.is_empty() {
+        if !host.is_empty() && *port != 0 {
             return SshProxy::Socks {
                 host: host.clone(),
                 port: *port,
@@ -274,7 +289,7 @@ fn map_proxy(profile: &SshProfile) -> SshProxy {
         }
     }
     if let Some(HostPort { host, port }) = &profile.http_proxy {
-        if !host.is_empty() {
+        if !host.is_empty() && *port != 0 {
             return SshProxy::Http {
                 host: host.clone(),
                 port: *port,
@@ -422,6 +437,69 @@ mod tests {
         assert_eq!(spec.password, None);
     }
 
+    /// Both halves of "remember passphrase" key the keychain entry off the
+    /// *contents* of the key file, so the read-back here and the write in
+    /// `ui::ssh_prompt` only ever meet if both expand a leading `~/` first.
+    /// They do — `expanded_identity_files` runs the path through
+    /// `expand_tilde` — and this pins that down from the outside: whichever
+    /// way the profile spells the path, the spec lists it expanded and files
+    /// the passphrase under that same string, which is the key the daemon's
+    /// `spec.key_passphrases` lookup uses.
+    #[test]
+    fn a_tilde_and_an_absolute_identity_path_resolve_the_same_stored_passphrase() {
+        let home = crate::core::ssh_profile::expand_tilde("~");
+        let dir = tempfile::Builder::new()
+            .prefix("tty7-key-test")
+            .tempdir_in(&home)
+            .expect("the home directory is writable");
+        let key = dir.path().join("id_ed25519");
+        std::fs::write(&key, b"-----BEGIN OPENSSH PRIVATE KEY-----\nencrypted\n")
+            .expect("the temp directory is writable");
+
+        let store = InMemoryCredentialStore::new();
+        let account = key_account_from_contents(&std::fs::read(&key).unwrap());
+        store.set_key_passphrase(&account, "pp").unwrap();
+
+        let leaf = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let mut p = profile("web", "10.0.0.5", "deploy");
+        p.auth = AuthMode::PublicKey;
+
+        for spelling in [
+            format!("~/{leaf}/id_ed25519"),
+            key.to_string_lossy().to_string(),
+        ] {
+            p.identity_files = vec![spelling.clone()];
+            let spec = build_native_ssh_spec(&p, &[], &store, true);
+            let listed = spec
+                .identity_files
+                .first()
+                .expect("the profile lists one key");
+            assert!(!listed.starts_with('~'), "{spelling} was left unexpanded");
+            assert_eq!(
+                spec.key_passphrases
+                    .as_ref()
+                    .and_then(|m| m.get(listed))
+                    .map(String::as_str),
+                Some("pp"),
+                "{spelling} should resolve its stored passphrase"
+            );
+        }
+
+        // A mode that will never offer the key does not go looking for its
+        // secret either.
+        p.auth = AuthMode::Password;
+        assert!(
+            build_native_ssh_spec(&p, &[], &store, true)
+                .key_passphrases
+                .is_none()
+        );
+    }
+
     #[test]
     fn resolves_jump_chain_into_nested_specs() {
         let bastion = profile("bastion", "bastion.example.com", "jump");
@@ -549,6 +627,24 @@ mod tests {
         assert!(matches!(
             build_native_ssh_spec(&p, &[], &store, true).proxy,
             SshProxy::Command(_)
+        ));
+    }
+
+    #[test]
+    fn a_proxy_on_port_zero_is_no_proxy() {
+        // What the settings form wrote for `proxy.example.com` before it
+        // checked the port, and what is still sitting in configs saved then.
+        let store = InMemoryCredentialStore::new();
+        let mut p = profile("web", "h", "u");
+        p.socks_proxy = Some(HostPort::new("socks", 0));
+        assert!(matches!(
+            build_native_ssh_spec(&p, &[], &store, true).proxy,
+            SshProxy::None
+        ));
+        p.http_proxy = Some(HostPort::new("http", 8080));
+        assert!(matches!(
+            build_native_ssh_spec(&p, &[], &store, true).proxy,
+            SshProxy::Http { .. }
         ));
     }
 }

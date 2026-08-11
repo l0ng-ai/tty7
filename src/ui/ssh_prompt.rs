@@ -5,7 +5,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 
 use crate::core::keychain::{CredentialStore as _, OsCredentialStore};
 use crate::daemon::protocol::{AuthPromptKind, AuthResponse, SshPhase};
@@ -19,6 +19,18 @@ pub(crate) struct KiRow {
     pub echo: bool,
 }
 
+/// The connection a prompt belongs to, which is also the key the keychain
+/// files its password under. A password prompt names its own user and host,
+/// but nothing on the wire carries the port and a keyboard-interactive prompt
+/// names none of the three — so whoever raises the sheet has to supply what it
+/// knows about the connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PromptEndpoint {
+    pub user: String,
+    pub host: String,
+    pub port: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PromptModel {
     Password {
@@ -30,17 +42,27 @@ pub(crate) enum PromptModel {
     KeyPassphrase {
         key_path: String,
         comment: String,
+        rejected: bool,
     },
     KeyboardInteractive {
         name: String,
         instructions: String,
         prompts: Vec<KiRow>,
+        /// `None` when nothing told the sheet which connection is asking — a
+        /// route the GUI could not resolve to an SSH hop. Without it there is
+        /// no keychain entry to name, so a rejected stored password can only
+        /// be re-typed, not forgotten.
+        endpoint: Option<PromptEndpoint>,
+        stored_rejected: bool,
     },
     HostKeyUnknown {
         host: String,
         port: u16,
         algorithm: String,
         fingerprint: String,
+        /// Set when the host is already on file under some other algorithm, so
+        /// the sheet can say why a known host is offering an unseen key.
+        previously_known_as: Option<String>,
     },
     HostKeyChanged {
         host: String,
@@ -69,15 +91,18 @@ pub(crate) enum KeychainWrite {
         key_path: String,
         secret: String,
     },
+    DeleteKeyPassphrase {
+        key_path: String,
+    },
 }
 
 impl PromptModel {
     pub(crate) fn from_prompt(
         kind: AuthPromptKind,
-        endpoint: Option<(String, u16)>,
+        endpoint: Option<PromptEndpoint>,
         auto_supplied_password: bool,
     ) -> Option<PromptModel> {
-        let port = endpoint.as_ref().map(|(_, p)| *p).unwrap_or(22);
+        let port = endpoint.as_ref().map(|e| e.port).unwrap_or(22);
         Some(match kind {
             AuthPromptKind::Password { user, host } => PromptModel::Password {
                 user,
@@ -85,13 +110,20 @@ impl PromptModel {
                 port,
                 rejected: auto_supplied_password,
             },
-            AuthPromptKind::KeyPassphrase { key_path, comment } => {
-                PromptModel::KeyPassphrase { key_path, comment }
-            }
+            AuthPromptKind::KeyPassphrase {
+                key_path,
+                comment,
+                rejected,
+            } => PromptModel::KeyPassphrase {
+                key_path,
+                comment,
+                rejected,
+            },
             AuthPromptKind::KeyboardInteractive {
                 name,
                 instructions,
                 prompts,
+                stored_rejected,
             } => PromptModel::KeyboardInteractive {
                 name,
                 instructions,
@@ -102,17 +134,21 @@ impl PromptModel {
                         echo: p.echo,
                     })
                     .collect(),
+                endpoint,
+                stored_rejected,
             },
             AuthPromptKind::HostKeyUnknown {
                 host,
                 port,
                 algorithm,
                 fingerprint_sha256,
+                previously_known_as,
             } => PromptModel::HostKeyUnknown {
                 host,
                 port,
                 algorithm,
                 fingerprint: fingerprint_sha256,
+                previously_known_as,
             },
             AuthPromptKind::HostKeyChanged {
                 host,
@@ -172,11 +208,19 @@ pub(crate) fn passphrase_submit(
     key_path: &str,
     secret: String,
     remember: bool,
+    rejected: bool,
 ) -> (AuthResponse, KeychainWrite) {
     let write = if remember {
         KeychainWrite::SetKeyPassphrase {
             key_path: key_path.to_string(),
             secret: secret.clone(),
+        }
+    } else if rejected {
+        // The stored passphrase is the reason this sheet is up, and the user
+        // has just declined to save the replacement. Leaving the old one
+        // behind would hand the same dead secret to the next connection.
+        KeychainWrite::DeleteKeyPassphrase {
+            key_path: key_path.to_string(),
         }
     } else {
         KeychainWrite::None
@@ -184,8 +228,23 @@ pub(crate) fn passphrase_submit(
     (AuthResponse::Secret(secret), write)
 }
 
-pub(crate) fn ki_submit(answers: Vec<String>) -> AuthResponse {
-    AuthResponse::Secrets(answers)
+/// Keyboard-interactive answers are never saved — one of them is as likely to
+/// be a one-time code as a password — so this side only ever *forgets*: the
+/// stored password the daemon says the server just turned down.
+pub(crate) fn ki_submit(
+    endpoint: Option<&PromptEndpoint>,
+    answers: Vec<String>,
+    stored_rejected: bool,
+) -> (AuthResponse, KeychainWrite) {
+    let write = match endpoint.filter(|_| stored_rejected) {
+        Some(e) => KeychainWrite::DeletePassword {
+            user: e.user.clone(),
+            host: e.host.clone(),
+            port: e.port,
+        },
+        None => KeychainWrite::None,
+    };
+    (AuthResponse::Secrets(answers), write)
 }
 
 pub(crate) fn host_key_unknown_decision(trust: bool) -> AuthResponse {
@@ -290,8 +349,13 @@ impl Tty7App {
                     }
                 }
             }
+            let endpoint = term.ssh_endpoint().map(|(host, port)| PromptEndpoint {
+                user: term.ssh_user().unwrap_or_default(),
+                host,
+                port,
+            });
             (
-                term.ssh_endpoint(),
+                endpoint,
                 term.auto_supplied_password(),
                 term.ssh_phase(),
                 banners,
@@ -312,10 +376,14 @@ impl Tty7App {
                     subs.push(cx.subscribe_in(
                         input,
                         window,
-                        |this, _input, ev: &InputEvent, window, cx| {
-                            if matches!(ev, InputEvent::PressEnter { .. }) {
-                                this.submit_ssh_prompt(window, cx);
-                            }
+                        |this, _input, ev: &InputEvent, window, cx| match ev {
+                            InputEvent::PressEnter { .. } => this.submit_ssh_prompt(window, cx),
+                            // The changed-host sheet enables Override off the
+                            // typed text, so the flag has to be recomputed
+                            // between keystrokes rather than at whatever
+                            // repaint happened to come along.
+                            InputEvent::Change => cx.notify(),
+                            _ => {}
                         },
                     ));
                 }
@@ -344,7 +412,11 @@ impl Tty7App {
         if self.ssh_prompt.model.is_some() {
             return SheetOutcome::GiveBack(pending);
         }
-        let Some(model) = PromptModel::from_prompt(pending.prompt.clone(), None, false) else {
+        let Some(model) = PromptModel::from_prompt(
+            pending.prompt.clone(),
+            pending.endpoint.clone(),
+            pending.auto_supplied_password,
+        ) else {
             if let AuthPromptKind::Banner { text } = &pending.prompt {
                 self.ssh_prompt.banners.push(text.clone());
             }
@@ -358,10 +430,12 @@ impl Tty7App {
             subs.push(cx.subscribe_in(
                 input,
                 window,
-                |this, _input, ev: &InputEvent, window, cx| {
-                    if matches!(ev, InputEvent::PressEnter { .. }) {
-                        this.submit_ssh_prompt(window, cx);
-                    }
+                |this, _input, ev: &InputEvent, window, cx| match ev {
+                    InputEvent::PressEnter { .. } => this.submit_ssh_prompt(window, cx),
+                    // Same reason as the pane-routed path above: Override's
+                    // enabled state is read off the input on every repaint.
+                    InputEvent::Change => cx.notify(),
+                    _ => {}
                 },
             ));
         }
@@ -393,6 +467,18 @@ impl Tty7App {
             .map(|i| i.read(cx).value().to_string())
             .collect();
 
+        // A changed host key is the one prompt where submitting the wrong thing
+        // is indistinguishable from aborting: the decision it sends for
+        // anything but "yes" is byte-for-byte what Abort sends, and the sheet
+        // closed either way. So Enter on a half-typed answer looked like the
+        // app had swallowed the connection. Leave the sheet up instead; the
+        // rejection stays available on Abort, where the user meant it.
+        if let PromptModel::HostKeyChanged { .. } = &model {
+            if !changed_confirmed(values.first().map(String::as_str).unwrap_or_default()) {
+                return;
+            }
+        }
+
         let (response, write) = match &model {
             PromptModel::Password {
                 user,
@@ -403,11 +489,17 @@ impl Tty7App {
                 let secret = values.first().cloned().unwrap_or_default();
                 password_submit(user, host, *port, secret, remember, *rejected)
             }
-            PromptModel::KeyPassphrase { key_path, .. } => {
+            PromptModel::KeyPassphrase {
+                key_path, rejected, ..
+            } => {
                 let secret = values.first().cloned().unwrap_or_default();
-                passphrase_submit(key_path, secret, remember)
+                passphrase_submit(key_path, secret, remember, *rejected)
             }
-            PromptModel::KeyboardInteractive { .. } => (ki_submit(values), KeychainWrite::None),
+            PromptModel::KeyboardInteractive {
+                endpoint,
+                stored_rejected,
+                ..
+            } => ki_submit(endpoint.as_ref(), values, *stored_rejected),
             PromptModel::HostKeyUnknown { .. } => {
                 (host_key_unknown_decision(true), KeychainWrite::None)
             }
@@ -534,6 +626,24 @@ impl Tty7App {
                         }
                     }
                     Err(e) => log::warn!("not remembering passphrase; cannot read {path}: {e}"),
+                }
+            }
+            KeychainWrite::DeleteKeyPassphrase { key_path } => {
+                // Keyed by the key file's contents, exactly as the set arm
+                // above is — the keychain account for a passphrase is a hash
+                // of the file, not its path. A delete that keeps failing
+                // leaves the rejected passphrase in place, and the key stays
+                // locked out on every later connection with nothing anywhere
+                // recording why.
+                let path = crate::core::ssh_profile::expand_tilde(&key_path);
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        let account = crate::core::keychain::key_account_from_contents(&bytes);
+                        if let Err(e) = store.delete_key_passphrase(&account) {
+                            log::warn!("could not forget key passphrase in keychain: {e}");
+                        }
+                    }
+                    Err(e) => log::warn!("not forgetting passphrase; cannot read {path}: {e}"),
                 }
             }
         }
@@ -690,8 +800,15 @@ impl Tty7App {
                         cx,
                     ))
             }
-            PromptModel::KeyPassphrase { comment, .. } => {
+            PromptModel::KeyPassphrase {
+                comment, rejected, ..
+            } => {
                 let mut c = card;
+                if *rejected {
+                    c = c.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+                        crate::ui::i18n::L10nKey::StoredPassphraseRejected,
+                    )));
+                }
                 if !comment.is_empty() {
                     c = c.child(
                         div()
@@ -710,9 +827,15 @@ impl Tty7App {
             PromptModel::KeyboardInteractive {
                 instructions,
                 prompts,
+                stored_rejected,
                 ..
             } => {
                 let mut c = card;
+                if *stored_rejected {
+                    c = c.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+                        crate::ui::i18n::L10nKey::StoredPasswordRejected,
+                    )));
+                }
                 if !instructions.is_empty() {
                     c = c.child(div().text_xs().child(instructions.clone()));
                 }
@@ -730,6 +853,7 @@ impl Tty7App {
                 fingerprint,
                 port,
                 host,
+                previously_known_as,
             } => card
                 .child(div().text_xs().child(format!("{host}:{port}  {algorithm}")))
                 .child(
@@ -738,6 +862,21 @@ impl Tty7App {
                         .font_family("monospace")
                         .child(fingerprint.clone()),
                 )
+                // A host that already has an entry under another algorithm is
+                // the ordinary way a server grows an ed25519 key beside its old
+                // ssh-rsa one. Saying so is the difference between "who is
+                // this?" and "this is the host you know, with a second key".
+                .when_some(previously_known_as.as_ref(), |c, previous| {
+                    c.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(crate::ui::i18n::t_fmt(
+                                crate::ui::i18n::L10nKey::SshPromptHostKeyNewAlgorithm,
+                                &[("previous_algorithm", previous), ("algorithm", algorithm)],
+                            )),
+                    )
+                })
                 .child(
                     h_flex()
                         .justify_end()
@@ -766,8 +905,20 @@ impl Tty7App {
                 old_fingerprint,
                 port,
                 host,
-            } => card
-                .child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+            } => {
+                // Override without "yes" typed used to send the *rejection* —
+                // the same bytes Abort sends — and close the sheet, so the
+                // button read as a way through and behaved as a way out. It is
+                // dead until the word is there, which is what the line above
+                // the field has been claiming all along.
+                let typed = self
+                    .ssh_prompt
+                    .inputs
+                    .first()
+                    .map(|i| i.read(cx).value().to_string())
+                    .unwrap_or_default();
+                let can_override = changed_confirmed(&typed);
+                card.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
                     crate::ui::i18n::L10nKey::SshPromptHostKeyChangedBody,
                 )))
                 .child(div().text_xs().child(format!("{host}:{port}  {algorithm}")))
@@ -794,6 +945,18 @@ impl Tty7App {
                     crate::ui::i18n::L10nKey::HostKeyOverrideMessage,
                 )))
                 .child(self.render_ssh_input(0))
+                // Only once they have typed something: an empty field is not a
+                // mistake to be corrected, it is where everyone starts.
+                .when(!typed.trim().is_empty() && !can_override, |c| {
+                    c.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(crate::ui::i18n::t(
+                                crate::ui::i18n::L10nKey::SshPromptTypeYesToOverride,
+                            )),
+                    )
+                })
                 .child(
                     h_flex()
                         .justify_end()
@@ -805,6 +968,7 @@ impl Tty7App {
                             Button::new("ssh-hkc-override")
                                 .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Override))
                                 .small()
+                                .disabled(!can_override)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.submit_ssh_prompt(window, cx)
                                 })),
@@ -818,7 +982,8 @@ impl Tty7App {
                                     this.cancel_ssh_prompt(window, cx)
                                 })),
                         ),
-                ),
+                )
+            }
         };
 
         card.into_any_element()
@@ -898,6 +1063,14 @@ fn build_inputs(
 mod tests {
     use super::*;
 
+    fn endpoint() -> PromptEndpoint {
+        PromptEndpoint {
+            user: "deploy".into(),
+            host: "10.0.0.5".into(),
+            port: 2222,
+        }
+    }
+
     #[test]
     fn password_prompt_carries_port_from_endpoint_and_marks_rejection() {
         let m = PromptModel::from_prompt(
@@ -905,7 +1078,7 @@ mod tests {
                 user: "deploy".into(),
                 host: "10.0.0.5".into(),
             },
-            Some(("10.0.0.5".into(), 2222)),
+            Some(endpoint()),
             true,
         )
         .unwrap();
@@ -964,7 +1137,7 @@ mod tests {
 
     #[test]
     fn passphrase_remember_stores_by_key_path() {
-        let (_resp, write) = passphrase_submit("/home/u/.ssh/id_ed25519", "pp".into(), true);
+        let (_resp, write) = passphrase_submit("/home/u/.ssh/id_ed25519", "pp".into(), true, false);
         assert_eq!(
             write,
             KeychainWrite::SetKeyPassphrase {
@@ -972,15 +1145,117 @@ mod tests {
                 secret: "pp".into(),
             }
         );
-        let (_r, w) = passphrase_submit("/k", "pp".into(), false);
+        let (_r, w) = passphrase_submit("/k", "pp".into(), false, false);
         assert_eq!(w, KeychainWrite::None);
+    }
+
+    /// The passphrase side of `fr_a6_rejected_without_remember_deletes_stale_entry`
+    /// above. It matters more here than it does for a password: a key
+    /// passphrase the daemon cannot use is not one wrong login, it is a key
+    /// that never opens again, and before this the sheet had no way at all to
+    /// let go of one.
+    #[test]
+    fn passphrase_rejected_without_remember_deletes_stale_entry() {
+        let (resp, write) = passphrase_submit("~/.ssh/id_ed25519", "right".into(), false, true);
+        assert!(matches!(resp, AuthResponse::Secret(_)));
+        assert_eq!(
+            write,
+            KeychainWrite::DeleteKeyPassphrase {
+                key_path: "~/.ssh/id_ed25519".into(),
+            }
+        );
+
+        // Remembering still wins: the new secret replaces the old one, so
+        // there is nothing left to delete.
+        let (_r, w) = passphrase_submit("~/.ssh/id_ed25519", "right".into(), true, true);
+        assert_eq!(
+            w,
+            KeychainWrite::SetKeyPassphrase {
+                key_path: "~/.ssh/id_ed25519".into(),
+                secret: "right".into(),
+            }
+        );
     }
 
     #[test]
     fn ki_submit_bundles_all_answers() {
+        let (resp, write) = ki_submit(Some(&endpoint()), vec!["a".into(), "b".into()], false);
+        assert_eq!(resp, AuthResponse::Secrets(vec!["a".into(), "b".into()]));
+        assert_eq!(write, KeychainWrite::None);
+    }
+
+    /// Keyboard-interactive has no "remember" of its own — an answer may well
+    /// be a one-time code — so the only keychain move it makes is letting go
+    /// of the stored password the server just turned down. Without it that
+    /// password was replayed into every later connection, and the prompt the
+    /// user answered here never became the one the next attempt sent.
+    #[test]
+    fn ki_answer_forgets_the_stored_password_the_server_rejected() {
+        let (resp, write) = ki_submit(Some(&endpoint()), vec!["typed".into()], true);
+        assert_eq!(resp, AuthResponse::Secrets(vec!["typed".into()]));
         assert_eq!(
-            ki_submit(vec!["a".into(), "b".into()]),
-            AuthResponse::Secrets(vec!["a".into(), "b".into()])
+            write,
+            KeychainWrite::DeletePassword {
+                user: "deploy".into(),
+                host: "10.0.0.5".into(),
+                port: 2222,
+            }
+        );
+
+        // A prompt nobody could tie to an endpoint has no entry to name, so it
+        // must not guess one — deleting the wrong account is worse than
+        // leaving the right one in place.
+        let (_r, w) = ki_submit(None, vec!["typed".into()], true);
+        assert_eq!(w, KeychainWrite::None);
+    }
+
+    /// The port has to come from the connection, not from the default: a
+    /// prompt for `:2222` that files its keychain entry under `:22` writes a
+    /// secret nothing ever reads back.
+    #[test]
+    fn keyboard_interactive_carries_the_endpoint_and_the_rejection_through() {
+        let m = PromptModel::from_prompt(
+            AuthPromptKind::KeyboardInteractive {
+                name: "2FA".into(),
+                instructions: "code please".into(),
+                prompts: vec![],
+                stored_rejected: true,
+            },
+            Some(endpoint()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            m,
+            PromptModel::KeyboardInteractive {
+                name: "2FA".into(),
+                instructions: "code please".into(),
+                prompts: vec![],
+                endpoint: Some(endpoint()),
+                stored_rejected: true,
+            }
+        );
+    }
+
+    #[test]
+    fn passphrase_prompt_carries_the_daemons_rejection() {
+        let m = PromptModel::from_prompt(
+            AuthPromptKind::KeyPassphrase {
+                key_path: "~/.ssh/id_ed25519".into(),
+                comment: String::new(),
+                rejected: true,
+            },
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            m,
+            PromptModel::KeyPassphrase {
+                key_path: "~/.ssh/id_ed25519".into(),
+                comment: String::new(),
+                rejected: true,
+            }
         );
     }
 
@@ -1023,6 +1298,58 @@ mod tests {
                 remember: true
             }
         );
+    }
+
+    /// `changed_confirmed` is also what enables the Override button, so the
+    /// button and the decision can never disagree about what "yes" means — the
+    /// bug was a button that offered a way through and sent the rejection.
+    #[test]
+    fn override_is_enabled_by_exactly_what_accepts() {
+        for typed in ["", " ", "y", "no", "yesss"] {
+            assert!(
+                !changed_confirmed(typed),
+                "{typed:?} must leave Override disabled"
+            );
+            assert_eq!(
+                host_key_changed_decision(typed),
+                AuthResponse::HostKeyDecision {
+                    accept: false,
+                    remember: false
+                }
+            );
+        }
+        for typed in ["yes", "YES", " yes "] {
+            assert!(changed_confirmed(typed), "{typed:?} must enable Override");
+        }
+    }
+
+    /// The host is known, just not by this algorithm — the mild confirmation,
+    /// carrying the algorithm it *is* known by, and never the danger sheet.
+    #[test]
+    fn a_new_algorithm_raises_the_unknown_host_sheet_not_the_changed_one() {
+        let m = PromptModel::from_prompt(
+            AuthPromptKind::HostKeyUnknown {
+                host: "example.com".into(),
+                port: 22,
+                algorithm: "ssh-ed25519".into(),
+                fingerprint_sha256: "SHA256:new".into(),
+                previously_known_as: Some("ssh-rsa".into()),
+            },
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            m,
+            PromptModel::HostKeyUnknown {
+                host: "example.com".into(),
+                port: 22,
+                algorithm: "ssh-ed25519".into(),
+                fingerprint: "SHA256:new".into(),
+                previously_known_as: Some("ssh-rsa".into()),
+            }
+        );
+        assert_eq!(m.input_count(), 0);
     }
 }
 
@@ -1071,6 +1398,7 @@ mod focus_tests {
                     port: 22,
                     algorithm: "ssh-ed25519".into(),
                     fingerprint: "SHA256:zzz".into(),
+                    previously_known_as: None,
                 });
                 window.focus(&app.ssh_prompt.focus_handle, cx);
                 // A headless harness has no live pane, so `focus_active`

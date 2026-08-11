@@ -39,12 +39,16 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TreeDirHiddenOnly => "隠しファイルのみ",
         L10nKey::TreeDirUnreadable => "読み取れません",
         L10nKey::TreeSearchCapped => "最初の {n} 件のみ",
+        L10nKey::TreeSearchFailed => "検索に失敗しました",
         L10nKey::FileChangedOnDisk => "ディスク上でファイルが変更されました",
         L10nKey::Reload => "再読み込み",
         L10nKey::KeepMine => "自分の変更を保持",
         L10nKey::Dismiss => "閉じる",
         L10nKey::StoredPasswordRejected => {
             "保存されたパスワードが拒否されました。新しいパスワードを入力してください"
+        }
+        L10nKey::StoredPassphraseRejected => {
+            "保存されたパスフレーズではこの鍵を解除できませんでした。正しいものを入力してください"
         }
         L10nKey::Trust => "信頼する",
         L10nKey::Abort => "中止",
@@ -195,12 +199,32 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "ファイルを再読み込みして新しい項目を追加します。ここでの編集は tty7 が保存します — ファイル自体には書き込まれません"
         }
         L10nKey::SettingsImportNow => "今すぐインポート",
+        L10nKey::SettingsImportUnreadable => {
+            "{path} を読み取れませんでした — 何もインポートされていません"
+        }
+        L10nKey::SettingsImportNoHosts => {
+            "{path} にインポートできるホストがありません — ワイルドカードや Match のルールだけです"
+        }
+        L10nKey::SettingsImportSummary => {
+            "ホスト {count} 件を追加 — {updated} 件を更新、{unchanged} 件は変更なし"
+        }
+        L10nKey::SettingsImportIgnored => {
+            "tty7 に設定のないオプションが {count} 件あり、ファイルに残されています: {options}"
+        }
+        L10nKey::SettingsImportMoreOptions => "他 {count} 件",
         L10nKey::SettingsDefaultsIntro => {
             "すべてのホストはこの設定から始まります。各ホストは詳細設定で個別に上書きできます"
         }
         L10nKey::SettingsCopyAddress => "アドレスをコピー",
         L10nKey::SettingsDuplicate => "複製",
         L10nKey::SettingsForgetPassword => "パスワードを消去",
+        L10nKey::SettingsForgetPasswordTitle => "{endpoint} の保存されたパスワードを消去しますか？",
+        L10nKey::SettingsForgetPasswordBody => {
+            "次に接続するときに、もう一度パスワードを尋ねられます。このホストの他の設定は変わりません"
+        }
+        L10nKey::SettingsForgetPasswordSharedBody => {
+            "他にも {count} 件のホストプロファイルが {endpoint} を使っているため、それらの接続でもパスワードの再入力が必要になります"
+        }
         L10nKey::SettingsForgotPasswordFor => "{endpoint} の保存されたパスワードを消去しました",
         L10nKey::SettingsDeleteProfileBody => {
             "保存されたパスワードも一緒に削除されます。同じアドレスを使う接続が他にある場合は残ります。"
@@ -226,6 +250,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNameDesc => "この接続の表示名",
         L10nKey::SettingsHost => "ホスト名",
         L10nKey::SettingsHostDesc => "ホスト名または IP アドレス",
+        L10nKey::SettingsHostRequired => "ホスト名が必要です — 保存されません",
+        L10nKey::SettingsPortInvalid => "ポートは 1-65535 の範囲です — 空欄なら 22 です",
         L10nKey::SettingsUser => "ユーザー名",
         L10nKey::SettingsUserDesc => "ログインユーザー (空欄 = 接続時に解決)",
         L10nKey::SettingsAuth => "認証方式",
@@ -238,6 +264,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsJumpHost => "ジャンプホスト",
         L10nKey::SettingsJumpHostDesc => {
             "トンネリングに使用する別のプロファイル名 (空欄 = 直接接続)"
+        }
+        L10nKey::SettingsJumpHostUnknown => {
+            "{jump_name} という名前のホストプロファイルはありません — 保存されません"
+        }
+        L10nKey::SettingsJumpHostSelf => {
+            "ホストを自分自身のジャンプホストにはできません — 保存されません"
         }
         L10nKey::SettingsNoneSummary => "(なし)",
         L10nKey::SettingsPortForwarding => "ポートフォワーディング",
@@ -271,6 +303,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSocks5ProxyDesc => "host:port（空欄 = なし）",
         L10nKey::SettingsHttpProxy => "HTTP プロキシ",
         L10nKey::SettingsHttpProxyDesc => "host:port（空欄 = なし）",
+        L10nKey::SettingsProxyPortInvalid => {
+            "ポートは 1-65535 の範囲です — ホストだけならデフォルトポートを使います"
+        }
         L10nKey::SettingsKexAlgorithms => "KEX アルゴリズム",
         L10nKey::SettingsKexAlgorithmsDesc => "カンマ区切り（空欄 = ライブラリのデフォルト）",
         L10nKey::SettingsCiphers => "暗号方式",
@@ -858,6 +893,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpTransferDone => "完了",
         L10nKey::SftpTransferCancelled => "キャンセル済み",
         L10nKey::SftpTransferError => "エラー",
+        L10nKey::SftpTransferListFailed => "転送状況を取得できませんでした: {error}",
         L10nKey::SftpImagePasteUploadFailed => {
             "貼り付けた画像を {host} にアップロードできませんでした: {error}"
         }
@@ -874,6 +910,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForwardToLabel => "転送先",
         L10nKey::ForwardSocksLabel => "SOCKS",
         L10nKey::ForwardAdd => "追加",
+        L10nKey::ForwardRequestFailed => "セッションに届きませんでした。何も変更していません",
         L10nKey::FileTreePlaceholderFileName => "ファイル名",
         L10nKey::FileTreePlaceholderFolderName => "フォルダ名",
         L10nKey::FileTreePlaceholderNewName => "新しい名前",
@@ -887,6 +924,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "{host} 上でファイルが削除されます。リモート側にゴミ箱はありません。"
         }
         L10nKey::FileTreeDeleteFailed => "{name} を削除できませんでした",
+        L10nKey::FileTreeCreateFailed => "{name} を作成できませんでした",
+        L10nKey::FileTreeRenameFailed => "{name} の名前を変更できませんでした",
         L10nKey::FileTreeContextOpen => "開く",
         L10nKey::FileTreeContextCdHere => "ここで cd",
         L10nKey::FileTreeContextInsertPath => "ターミナルにパスを挿入",
@@ -916,6 +955,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileDropFailedMany => "{name} をコピーできませんでした。他に {n} 件も失敗しました",
         L10nKey::SshPromptNewKey => "新しいキー {fingerprint}",
         L10nKey::SshPromptOldKey => "以前のキー {old_fingerprint}",
+        L10nKey::SshPromptHostKeyNewAlgorithm => {
+            "このホストはすでに {previous_algorithm} キーで登録されています。これはそれを置き換えるものではなく、新しい {algorithm} キーです"
+        }
+        L10nKey::SshPromptTypeYesToOverride => "「yes」を入力すると「上書き」が有効になります",
         L10nKey::EditorCantOpen => "{path} を開けません: {e}",
         L10nKey::EditorCantRead => "{path} を読み取れません: {e}",
         L10nKey::EditorNotUtf8 => "「{path}」は有効な UTF-8 ではありません",
@@ -1128,6 +1171,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteStripConnecting => "{machine} に接続中…",
         L10nKey::RemoteStripReconnecting => "{machine} に再接続中…",
         L10nKey::RemoteStripReconnectingAttempt => "{machine} に再接続中…（{count} 回目の試行）",
+        L10nKey::RemoteStripReconnectingWhy => "{machine} に再接続中…（前回の失敗: {error}）",
+        L10nKey::RemoteStripReconnectingAttemptWhy => {
+            "{machine} に再接続中…（{count} 回目の試行、前回の失敗: {error}）"
+        }
         L10nKey::RemoteStripPreempted => "このワークスペースは {by} で開かれました",
         L10nKey::RemoteStripFailed => "{machine} に未接続です — {error}",
         L10nKey::RemoteNoticePreempted => "別の場所で開かれました — 入力しても反映されません",
@@ -1499,6 +1546,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherStatusConnecting => "接続中…",
         L10nKey::SwitcherStatusConnectFailed => "接続できませんでした",
         L10nKey::SwitcherStatusNotConnected => "未接続",
+        L10nKey::SwitcherStatusReconnecting => "再接続中…",
+        L10nKey::SwitcherStatusTakenOver => "他のクライアントが使用中",
         L10nKey::SettingsFontDefault => "デフォルト（メインに合わせる）",
         L10nKey::ForwardDescriptionPlaceholder => "用途",
         L10nKey::SettingsShellDefaultLoginShell => "あなたのログインシェル",
@@ -1635,6 +1684,24 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsAliasesLinked, "zero") => "エイリアスはまだリンクされていません",
         (L10nKey::SettingsAliasesLinked, "one") => "エイリアス 1 件がリンクされています",
         (L10nKey::SettingsAliasesLinked, "other") => "エイリアス {count} 件がリンクされています",
+        (L10nKey::SettingsImportSummary, "zero") => {
+            "新しいホストはありません — {updated} 件を更新、{unchanged} 件は変更なし"
+        }
+        (L10nKey::SettingsImportSummary, "one") => {
+            "ホスト 1 件を追加 — {updated} 件を更新、{unchanged} 件は変更なし"
+        }
+        (L10nKey::SettingsImportSummary, "other") => {
+            "ホスト {count} 件を追加 — {updated} 件を更新、{unchanged} 件は変更なし"
+        }
+        (L10nKey::SettingsImportIgnored, "zero") => {
+            "ファイル内のすべてのオプションに tty7 側の設定があります"
+        }
+        (L10nKey::SettingsImportIgnored, "one") => {
+            "tty7 に設定のないオプションが 1 件あり、ファイルに残されています: {options}"
+        }
+        (L10nKey::SettingsImportIgnored, "other") => {
+            "tty7 に設定のないオプションが {count} 件あり、ファイルに残されています: {options}"
+        }
         (L10nKey::SettingsRulesOpenedWithConnection, "zero") => "接続と同時に開くルール 0 件",
         (L10nKey::SettingsRulesOpenedWithConnection, "one") => "接続と同時に開くルール 1 件",
         (L10nKey::SettingsRulesOpenedWithConnection, "other") => {
@@ -1648,6 +1715,12 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         }
         (L10nKey::SettingsOfflineMachines, "other") => {
             "未接続の保存済みマシンがさらに {count} 台あります — いずれかでワークスペースを開くと、そこにフックをインストールできます"
+        }
+        (L10nKey::SettingsForgetPasswordSharedBody, "one") => {
+            "他にも 1 件のホストプロファイルが {endpoint} を使っているため、その接続でもパスワードの再入力が必要になります"
+        }
+        (L10nKey::SettingsForgetPasswordSharedBody, "other") => {
+            "他にも {count} 件のホストプロファイルが {endpoint} を使っているため、それらの接続でもパスワードの再入力が必要になります"
         }
         (L10nKey::SftpReplaceBody, "one") => {
             "{names} はこのフォルダに既に存在します。アップロードすると上書きされます。"

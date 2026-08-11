@@ -27,6 +27,7 @@ use crate::core::window_state::{WindowGeometry as _, WindowState};
 use crate::daemon::protocol::{RemoteContext, ShellSpec, ssh_option_takes_value};
 use crate::daemon::spawn::DaemonMismatch;
 use crate::terminal::view::{ChildExited, TerminalView};
+use crate::ui::forwards::{ForwardFields, added_forward, rule_of};
 use crate::ui::host_registry::HostId;
 use crate::ui::i18n::{L10nKey, set_locale, t, t_fmt, t_plural};
 use crate::ui::palette::{
@@ -398,7 +399,13 @@ pub(crate) struct LoopbackForwardPanelState {
     pub(crate) mf_target_host: Entity<InputState>,
     pub(crate) mf_target_port: Entity<InputState>,
     pub(crate) mf_description: Entity<InputState>,
-    pub(crate) mf_editing: Option<u64>,
+    /// The rule the form is editing, whole rather than by id: an edit that
+    /// fails has to be able to put back what it took out, and the id alone
+    /// cannot describe the rule it named.
+    pub(crate) mf_editing: Option<crate::daemon::protocol::ManagedForward>,
+    /// Why the last Add or Save did not take, in the far side's own words.
+    /// Cleared the moment the form is closed or the edit is abandoned.
+    pub(crate) mf_error: Option<String>,
 }
 
 pub struct Tty7App {
@@ -985,6 +992,7 @@ impl Tty7App {
                 mf_target_port,
                 mf_description,
                 mf_editing: None,
+                mf_error: None,
             },
             sftp_panel,
             right_panel: Default::default(),
@@ -2196,74 +2204,105 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// The managed-forward form's fields as plain text, for the two callers
+    /// that have to agree on what they add up to.
+    pub(crate) fn managed_forward_fields(&self, cx: &gpui::App) -> ForwardFields {
+        let val = |input: &Entity<InputState>| input.read(cx).value().to_string();
+        ForwardFields {
+            kind: self.loopback_panel.mf_kind,
+            bind_host: val(&self.loopback_panel.mf_bind_host),
+            bind_port: val(&self.loopback_panel.mf_bind_port),
+            target_host: val(&self.loopback_panel.mf_target_host),
+            target_port: val(&self.loopback_panel.mf_target_port),
+            description: val(&self.loopback_panel.mf_description),
+        }
+    }
+
     pub(crate) fn add_managed_forward(
         &mut self,
         pane_id: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use crate::daemon::protocol::{SshForwardKind, SshForwardRule};
-        let kind = self.loopback_panel.mf_kind;
-        let bind_host = self
-            .loopback_panel
-            .mf_bind_host
-            .read(cx)
-            .value()
-            .trim()
-            .to_string();
-        let bind_host = if bind_host.is_empty() {
-            "127.0.0.1".to_string()
-        } else {
-            bind_host
-        };
-        let Ok(bind_port) = self
-            .loopback_panel
-            .mf_bind_port
-            .read(cx)
-            .value()
-            .trim()
-            .parse::<u16>()
-        else {
+        use crate::daemon::protocol::ForwardStatus;
+
+        let Some(rule) = self.managed_forward_fields(cx).collect() else {
+            // Add is disabled while the fields do not make a rule and the form
+            // already says what is missing, so there is nothing to do here and
+            // nothing left to explain.
             return;
-        };
-        let target_host = self
-            .loopback_panel
-            .mf_target_host
-            .read(cx)
-            .value()
-            .trim()
-            .to_string();
-        let target_port = self
-            .loopback_panel
-            .mf_target_port
-            .read(cx)
-            .value()
-            .trim()
-            .parse::<u16>()
-            .unwrap_or(0);
-        if kind != SshForwardKind::Dynamic && (target_host.is_empty() || target_port == 0) {
-            return;
-        }
-        let description = self
-            .loopback_panel
-            .mf_description
-            .read(cx)
-            .value()
-            .trim()
-            .to_string();
-        let rule = SshForwardRule {
-            kind,
-            bind_host,
-            bind_port,
-            target_host,
-            target_port,
-            description: (!description.is_empty()).then_some(description),
         };
         let route = self.forward_route(pane_id, cx);
-        if let Some(old_id) = self.loopback_panel.mf_editing.take() {
-            let _ = route.remove(old_id);
+        let previous = self.loopback_panel.mf_editing.clone();
+        // A saved edit is a replace, and the rule being replaced has to come
+        // out first: the ordinary edit keeps the bind port, and the far side
+        // really does bind it, so adding first would collide with the very
+        // rule it is replacing and fail every edit that only renames a rule or
+        // moves its target.
+        if let Some(old) = &previous {
+            let Some(list) = route.remove(old.id) else {
+                // Nothing came back, so what the far side still has is
+                // unknown — most likely the old rule, still listening. Adding
+                // on top of that would collide with it, and putting it back
+                // afterwards would leave two of it. Stop while nothing has
+                // changed.
+                self.loopback_panel.mf_error = Some(t(L10nKey::ForwardRequestFailed).to_string());
+                cx.notify();
+                return;
+            };
+            self.loopback_panel.managed = list;
         }
-        self.loopback_panel.managed = route.add(rule);
+
+        let before: Vec<u64> = self.loopback_panel.managed.iter().map(|m| m.id).collect();
+        let mut failure = None;
+        match route.add(rule) {
+            // The request never got an answer. An empty list here is not "this
+            // pane has no forwards", it is "nobody said" — assigning it is what
+            // used to blank the panel on a dropped connection.
+            None => failure = Some(t(L10nKey::ForwardRequestFailed).to_string()),
+            Some(list) => {
+                // A rule that could not be started is registered all the same,
+                // with the reason in its status, so whether the add worked is a
+                // question about the entry it appended rather than about
+                // whether the call returned.
+                let broken = added_forward(&before, &list).and_then(|added| match &added.status {
+                    ForwardStatus::Error(msg) => Some((added.id, msg.clone())),
+                    ForwardStatus::Listening => None,
+                });
+                self.loopback_panel.managed = list;
+                if let Some((id, msg)) = broken {
+                    if let Some(list) = route.remove(id) {
+                        self.loopback_panel.managed = list;
+                    }
+                    failure = Some(msg);
+                }
+            }
+        }
+
+        if let Some(msg) = failure {
+            // Put back what the edit took out, so the worst a failed Save can
+            // do is leave everything exactly as it was — with the form still
+            // open on the rule and the reason underneath it.
+            if let Some(old) = &previous {
+                let before: Vec<u64> = self.loopback_panel.managed.iter().map(|m| m.id).collect();
+                if let Some(list) = route.add(rule_of(old)) {
+                    // The rule comes back under a new id and the form is still
+                    // editing it, so the form has to be pointed at the entry
+                    // that now exists — otherwise the next Save would remove
+                    // an id nobody has and add a second copy of the rule.
+                    if let Some(restored) = added_forward(&before, &list) {
+                        self.loopback_panel.mf_editing = Some(restored.clone());
+                    }
+                    self.loopback_panel.managed = list;
+                }
+            }
+            self.loopback_panel.mf_error = Some(msg);
+            cx.notify();
+            return;
+        }
+
+        self.loopback_panel.mf_editing = None;
+        self.loopback_panel.mf_error = None;
         self.loopback_panel.form_pane_id = None;
         for input in [
             &self.loopback_panel.mf_bind_port,
@@ -2283,8 +2322,8 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         self.loopback_panel.mf_kind = forward.kind;
-        self.loopback_panel.mf_editing = Some(forward.id);
         self.loopback_panel.form_pane_id = Some(forward.pane_id);
+        self.loopback_panel.mf_error = None;
         let target_port = if forward.target_port == 0 {
             String::new()
         } else {
@@ -2309,6 +2348,7 @@ impl Tty7App {
         for (input, value) in fields {
             input.update(cx, |input, cx| input.set_value(&value, window, cx));
         }
+        self.loopback_panel.mf_editing = Some(forward);
         cx.notify();
     }
 
@@ -2318,6 +2358,7 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         self.loopback_panel.mf_editing = None;
+        self.loopback_panel.mf_error = None;
         for input in [
             &self.loopback_panel.mf_bind_port,
             &self.loopback_panel.mf_target_host,
@@ -2338,7 +2379,12 @@ impl Tty7App {
         forward_id: u64,
         cx: &mut Context<Self>,
     ) {
-        self.loopback_panel.managed = self.forward_route(pane_id, cx).remove(forward_id);
+        // Only what the far side actually answered with. A request that never
+        // got a reply knows nothing about the remaining forwards, and writing
+        // its empty list into the panel would blank a list that is still there.
+        if let Some(list) = self.forward_route(pane_id, cx).remove(forward_id) {
+            self.loopback_panel.managed = list;
+        }
         cx.notify();
     }
 
@@ -5910,18 +5956,26 @@ impl ForwardRoute {
         )
     }
 
+    /// The list a forward request answered with, or `None` when it did not
+    /// answer at all.
+    ///
+    /// The two are not the same and the panel has to be able to tell them
+    /// apart: an empty list is a pane with no forwards left, while a request
+    /// that failed says nothing about what the far side still has. Reporting
+    /// the second as the first is what blanked the panel whenever the daemon
+    /// was briefly unreachable.
     fn forwards(
         reply: anyhow::Result<crate::daemon::protocol::DaemonMsg>,
-    ) -> Vec<crate::daemon::protocol::ManagedForward> {
+    ) -> Option<Vec<crate::daemon::protocol::ManagedForward>> {
         match reply {
-            Ok(crate::daemon::protocol::DaemonMsg::ForwardList(list)) => list,
+            Ok(crate::daemon::protocol::DaemonMsg::ForwardList(list)) => Some(list),
             Ok(other) => {
                 log::warn!("unexpected reply to a workspace forward request: {other:?}");
-                Vec::new()
+                None
             }
             Err(e) => {
                 log::warn!("a workspace forward request failed: {e}");
-                Vec::new()
+                None
             }
         }
     }
@@ -5931,13 +5985,13 @@ impl ForwardRoute {
         else {
             return crate::terminal::RemoteTerminal::list_forwards(self.pane_id);
         };
-        Self::forwards(crate::terminal::RemoteTerminal::on_workspace(req))
+        Self::forwards(crate::terminal::RemoteTerminal::on_workspace(req)).unwrap_or_default()
     }
 
     pub(crate) fn add(
         &self,
         rule: crate::daemon::protocol::SshForwardRule,
-    ) -> Vec<crate::daemon::protocol::ManagedForward> {
+    ) -> Option<Vec<crate::daemon::protocol::ManagedForward>> {
         let Some(req) = self
             .workspace_op(crate::daemon::protocol::WorkspaceOp::AddForward { rule: rule.clone() })
         else {
@@ -5951,10 +6005,13 @@ impl ForwardRoute {
         else {
             return Vec::new();
         };
-        Self::forwards(crate::terminal::RemoteTerminal::on_workspace(req))
+        Self::forwards(crate::terminal::RemoteTerminal::on_workspace(req)).unwrap_or_default()
     }
 
-    pub(crate) fn remove(&self, forward_id: u64) -> Vec<crate::daemon::protocol::ManagedForward> {
+    pub(crate) fn remove(
+        &self,
+        forward_id: u64,
+    ) -> Option<Vec<crate::daemon::protocol::ManagedForward>> {
         let Some(req) =
             self.workspace_op(crate::daemon::protocol::WorkspaceOp::RemoveForward { forward_id })
         else {
@@ -8145,6 +8202,100 @@ mod rename_gpui_tests {
                 end..end,
                 "typing has to continue {value:?}, not land in front of it"
             );
+        });
+    }
+}
+
+// A test window has no daemon behind it — its socket path is under the pinned
+// test config dir and nothing is listening on it — so every forward request
+// fails. That is exactly the case these are about: what the panel and the form
+// are left holding when the far side does not answer.
+#[cfg(all(test, unix))]
+mod managed_forward_gpui_tests {
+    use gpui::TestAppContext;
+    use gpui_component::input::InputState;
+
+    use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind};
+    use crate::ui::app::test_window::harness_with_tabs;
+
+    fn listening(id: u64) -> ManagedForward {
+        ManagedForward {
+            id,
+            pane_id: 1,
+            kind: SshForwardKind::Local,
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 8080,
+            target_host: "10.0.0.5".to_string(),
+            target_port: 80,
+            description: None,
+            status: ForwardStatus::Listening,
+        }
+    }
+
+    #[gpui::test]
+    fn an_add_that_never_reaches_the_session_leaves_the_panel_as_it_was(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.loopback_panel.managed = vec![listening(1)];
+            app.loopback_panel.form_pane_id = Some(1);
+            let typed: [(&gpui::Entity<InputState>, &str); 3] = [
+                (&app.loopback_panel.mf_bind_port, "9000"),
+                (&app.loopback_panel.mf_target_host, "127.0.0.1"),
+                (&app.loopback_panel.mf_target_port, "22"),
+            ];
+            for (input, value) in typed {
+                input.update(cx, |input, cx| input.set_value(value, window, cx));
+            }
+
+            app.add_managed_forward(1, window, cx);
+
+            assert_eq!(
+                app.loopback_panel.managed.len(),
+                1,
+                "a request that failed says nothing about the forwards that are up"
+            );
+            assert!(
+                app.loopback_panel.mf_error.is_some(),
+                "and the form has to say why the Add did nothing"
+            );
+            assert_eq!(
+                app.loopback_panel.form_pane_id,
+                Some(1),
+                "the form stays open on what was typed"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_save_that_cannot_be_made_leaves_the_rule_it_would_replace_alone(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.loopback_panel.managed = vec![listening(1)];
+            app.loopback_panel.form_pane_id = Some(1);
+            app.loopback_panel.mf_editing = Some(listening(1));
+            let typed: [(&gpui::Entity<InputState>, &str); 3] = [
+                (&app.loopback_panel.mf_bind_port, "8080"),
+                (&app.loopback_panel.mf_target_host, "10.0.0.6"),
+                (&app.loopback_panel.mf_target_port, "80"),
+            ];
+            for (input, value) in typed {
+                input.update(cx, |input, cx| input.set_value(value, window, cx));
+            }
+
+            app.add_managed_forward(1, window, cx);
+
+            assert_eq!(
+                app.loopback_panel.managed,
+                vec![listening(1)],
+                "the rule being edited must survive an edit that could not be made"
+            );
+            assert!(
+                app.loopback_panel.mf_editing.is_some(),
+                "the form is still editing it"
+            );
+            assert!(app.loopback_panel.mf_error.is_some());
         });
     }
 }

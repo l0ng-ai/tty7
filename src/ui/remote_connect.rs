@@ -551,6 +551,18 @@ pub fn take_pending_install() -> Option<PendingInstall> {
 pub struct PendingAuth {
     pub host: HostId,
     pub prompt: AuthPromptKind,
+    /// Which connection is asking, when the route is an SSH hop. The sheet
+    /// files and forgets keychain entries under this; a route that is not SSH
+    /// (WSL, a local stdio server) has no endpoint to name and gets `None`.
+    ///
+    /// Without it the sheet fell back to port 22 and a hard-coded "not
+    /// auto-supplied", so a routed prompt for a non-22 endpoint wrote its
+    /// password under the wrong key and a rejected stored one was never
+    /// noticed, let alone cleared.
+    pub endpoint: Option<crate::ui::ssh_prompt::PromptEndpoint>,
+    /// The route already carried a stored password into this attempt, so a
+    /// password prompt arriving anyway means the server turned it down.
+    pub auto_supplied_password: bool,
     reply: std::sync::mpsc::SyncSender<AuthResponse>,
 }
 
@@ -612,6 +624,17 @@ impl crate::daemon::router::RouteAuthResponder for GuiRouteAuth {
     ) -> AuthResponse {
         let key = machine.origin_key();
         let host = origin_host(&key).unwrap_or_else(|| HostId::from_connection_key(&key));
+        let (endpoint, auto_supplied_password) = match machine {
+            crate::daemon::router::RouteTarget::Ssh(spec) => (
+                Some(crate::ui::ssh_prompt::PromptEndpoint {
+                    user: spec.user.clone(),
+                    host: spec.host.clone(),
+                    port: spec.port,
+                }),
+                spec.password.is_some(),
+            ),
+            _ => (None, false),
+        };
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         {
             let Ok(mut mailbox) = AUTH_MAILBOX.lock() else {
@@ -620,6 +643,8 @@ impl crate::daemon::router::RouteAuthResponder for GuiRouteAuth {
             mailbox.push(PendingAuth {
                 host,
                 prompt: prompt.clone(),
+                endpoint,
+                auto_supplied_password,
                 reply: tx,
             });
         }

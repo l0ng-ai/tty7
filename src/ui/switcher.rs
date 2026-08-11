@@ -20,7 +20,7 @@ use crate::terminal::pane_liveness::Liveness;
 use crate::ui::app::Tty7App;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow, human_bytes};
-use crate::ui::remote_workspace::ConnectFlow;
+use crate::ui::remote_workspace::{ConnectFlow, MachineStatus, RemoteLinks};
 
 const CARD_W: f32 = 840.0;
 
@@ -54,13 +54,64 @@ const TAB_PATH_W: f32 = 160.0;
 
 const PROGRESS_H: f32 = 3.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// `Failed` stays a unit variant so `Link` can be `Copy` and travel by value in
+/// `GroupRef`; what went wrong rides in `Group::error` instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Link {
     Local,
     Connected,
     Connecting,
+    /// The supervisor is retrying this machine on its backoff. Distinct from
+    /// `Offline` because the group still has rows worth showing and Disconnect
+    /// still has something to call off.
+    Reconnecting {
+        attempt: u32,
+    },
     Failed,
     Offline,
+}
+
+/// Whether Disconnect has anything to stop. A machine the supervisor is still
+/// retrying has no live link, but calling the retry off is exactly what the
+/// verb is for, so it has to stay enabled.
+fn link_is_engaged(link: Link) -> bool {
+    matches!(link, Link::Connected | Link::Reconnecting { .. })
+}
+
+/// How one machine's row is drawn, from the two things that know.
+///
+/// This window's own `connect` still comes first — it is the attempt the user
+/// is watching, and it is the only one that can be Failed with a reason on
+/// screen. Everything after it is the supervisor's, which is the only view that
+/// survives the window that started the connect. Reading the `HostLinks` table
+/// alone, as this used to, cannot tell a machine that is being retried right
+/// now from one nobody has ever connected to: the pump drops the entry the
+/// moment the link dies, and the group then collapses as if it were empty.
+fn link_from(
+    connect: Option<&ConnectFlow>,
+    target: &RemoteTarget,
+    supervised: Option<&MachineStatus>,
+    has_link: bool,
+) -> Link {
+    match connect {
+        Some(ConnectFlow::Connecting { choice }) if &choice.target == target => {
+            return Link::Connecting;
+        }
+        Some(ConnectFlow::Failed { choice, .. }) if &choice.target == target => {
+            return Link::Failed;
+        }
+        _ => {}
+    }
+    match supervised {
+        Some(MachineStatus::Connecting) => Link::Connecting,
+        Some(MachineStatus::Attached) => Link::Connected,
+        Some(MachineStatus::Reconnecting { attempt, .. }) => {
+            Link::Reconnecting { attempt: *attempt }
+        }
+        Some(MachineStatus::Failed(_)) => Link::Failed,
+        None if has_link => Link::Connected,
+        None => Link::Offline,
+    }
 }
 
 struct Group {
@@ -72,6 +123,9 @@ struct Group {
     home: Option<PathBuf>,
     error: Option<String>,
     installing: Option<InstallPhase>,
+    /// Another client is holding at least one workspace of this machine. The
+    /// link itself is fine, so nothing in `link` would ever say so.
+    preempted: bool,
     rows: Vec<Row>,
 }
 
@@ -83,6 +137,7 @@ struct Row {
     live: Liveness,
     open: bool,
     current: bool,
+    preempted: bool,
     adopt: Option<Box<RemoteWorkspaceRow>>,
     remote_id: Option<WorkspaceId>,
     tabs: Vec<TabRow>,
@@ -408,6 +463,7 @@ impl Tty7App {
                         home: None,
                         error: None,
                         installing: None,
+                        preempted: false,
                         rows: Vec::new(),
                     });
                     groups.len() - 1
@@ -423,6 +479,7 @@ impl Tty7App {
                     live: crate::terminal::pane_liveness::liveness_of(app, w),
                     open: w.open,
                     current: w.id == current,
+                    preempted: false,
                     adopt: None,
                     remote_id: w.host.as_ref().map(|r| r.workspace),
                     tabs: self.tab_rows_for(w.id, app),
@@ -445,6 +502,7 @@ impl Tty7App {
                 home: None,
                 error: None,
                 installing: None,
+                preempted: false,
                 rows: Vec::new(),
             });
         }
@@ -461,6 +519,7 @@ impl Tty7App {
                     home: None,
                     error: None,
                     installing: None,
+                    preempted: false,
                     rows: Vec::new(),
                 },
             );
@@ -487,6 +546,7 @@ impl Tty7App {
                     live: Liveness::Alive,
                     open: true,
                     current: true,
+                    preempted: false,
                     adopt: None,
                     remote_id: None,
                     tabs: self.tab_rows_for(current, app),
@@ -525,6 +585,7 @@ impl Tty7App {
                     },
                     open: false,
                     current: false,
+                    preempted: false,
                     adopt: None,
                     remote_id: None,
                     tabs: self.tab_rows_for(ws.id, app),
@@ -555,7 +616,9 @@ impl Tty7App {
                     group.endpoint = known.detail.clone();
                 }
             }
-            group.link = self.link_state(&target, cx);
+            let id = target.host_id();
+            let supervised = RemoteLinks::machine_status(cx, id);
+            group.link = self.link_state(&target, supervised.as_ref(), cx);
             if let Some(ConnectFlow::Failed { choice, error }) = &self.connect
                 && choice.target == target
             {
@@ -566,9 +629,26 @@ impl Tty7App {
                     group.error = Some(error.clone());
                 }
             }
-            let id = target.host_id();
+            // The supervisor's own attempts never touch this window's `connect`,
+            // so without this last fallback the route it could not build, and
+            // the reconnect that has been failing for an hour, have nowhere at
+            // all to be said.
+            if group.error.is_none() {
+                group.error = match supervised {
+                    Some(MachineStatus::Failed(e)) => Some(e),
+                    Some(MachineStatus::Reconnecting { last_error, .. }) => last_error,
+                    _ => None,
+                };
+            }
+            let taken: HashSet<WorkspaceId> =
+                RemoteLinks::preempted_on(cx, id).into_iter().collect();
+            group.preempted = !taken.is_empty();
+            for row in &mut group.rows {
+                row.preempted = taken.contains(&row.id);
+            }
             let reported = remote_connect::install_progress_for(id);
             if group.link == Link::Connecting
+                || matches!(group.link, Link::Reconnecting { .. })
                 || group.error.is_some()
                 || matches!(reported, Some(InstallPhase::Restarting))
             {
@@ -743,20 +823,14 @@ impl Tty7App {
         out
     }
 
-    fn link_state(&self, target: &RemoteTarget, cx: &mut Context<Self>) -> Link {
-        match &self.connect {
-            Some(ConnectFlow::Connecting { choice }) if &choice.target == target => {
-                return Link::Connecting;
-            }
-            Some(ConnectFlow::Failed { choice, .. }) if &choice.target == target => {
-                return Link::Failed;
-            }
-            _ => {}
-        }
-        match remote_connect::HostLinks::get(cx, target.host_id()) {
-            Some(_) => Link::Connected,
-            None => Link::Offline,
-        }
+    fn link_state(
+        &self,
+        target: &RemoteTarget,
+        supervised: Option<&MachineStatus>,
+        cx: &mut Context<Self>,
+    ) -> Link {
+        let has_link = remote_connect::HostLinks::get(cx, target.host_id()).is_some();
+        link_from(self.connect.as_ref(), target, supervised, has_link)
     }
 
     fn other_hosts(&self, groups: &[Group], cx: &App) -> Vec<HostChoice> {
@@ -1606,6 +1680,10 @@ impl Tty7App {
                 Some(theme.warning),
                 Some(t(L10nKey::SwitcherStatusConnecting)),
             ),
+            Link::Reconnecting { .. } => (
+                Some(theme.warning),
+                Some(t(L10nKey::SwitcherStatusReconnecting)),
+            ),
             Link::Failed => (
                 Some(theme.danger),
                 Some(t(L10nKey::SwitcherStatusConnectFailed)),
@@ -1615,8 +1693,18 @@ impl Tty7App {
                 Some(t(L10nKey::SwitcherStatusNotConnected)),
             ),
         };
+        // A takeover leaves the link untouched, so a machine whose workspace
+        // someone else is holding would otherwise draw as plain Connected.
+        let (dot, word) = match group.preempted && matches!(group.link, Link::Connected) {
+            true => (
+                Some(theme.warning),
+                Some(t(L10nKey::SwitcherStatusTakenOver)),
+            ),
+            false => (dot, word),
+        };
         let word_color = match group.link {
-            Link::Connecting => theme.warning,
+            _ if group.preempted => theme.warning,
+            Link::Connecting | Link::Reconnecting { .. } => theme.warning,
             Link::Failed => theme.danger,
             _ => muted,
         };
@@ -1765,10 +1853,11 @@ impl Tty7App {
         }
 
         let theme = cx.theme();
-        let (fg, muted, dim) = (
+        let (fg, muted, dim, warn) = (
             theme.foreground,
             theme.muted_foreground,
             theme.muted_foreground.opacity(0.7),
+            theme.warning,
         );
         let sf = rungs(cx);
         let hover = gpui::rgb(sf.hover);
@@ -1781,7 +1870,11 @@ impl Tty7App {
         let key = row.id.element_key() as usize;
         let holding = self.switcher.as_ref().is_some_and(|sw| sw.hold.is_some());
 
-        let badge = if row.current {
+        // "Open" is what this workspace would say either way, and it is the
+        // wrong word for one another client is driving.
+        let badge = if row.preempted {
+            Some((t(L10nKey::SwitcherStatusTakenOver), false))
+        } else if row.current {
             Some((t(L10nKey::SwitcherThisWindow), true))
         } else if row.open {
             Some((t(L10nKey::SwitcherOpen), false))
@@ -1839,7 +1932,11 @@ impl Tty7App {
                     .rounded(px(4.))
                     .text_xs()
                     .bg(gpui::rgb(sf.selected))
-                    .text_color(if here { fg.opacity(0.85) } else { muted })
+                    .text_color(match (row.preempted, here) {
+                        (true, _) => warn,
+                        (_, true) => fg.opacity(0.85),
+                        _ => muted,
+                    })
                     .child(label)
             }))
             .child(
@@ -2306,6 +2403,7 @@ impl Group {
                 live: Liveness::Stopped,
                 open: false,
                 current: false,
+                preempted: false,
                 adopt: Some(Box::new(r.clone())),
                 remote_id: Some(r.id),
                 // A workspace this client has never adopted has no local id to
@@ -2369,7 +2467,7 @@ fn group_menu_is_empty_handed(group: &GroupRef) -> bool {
         // A local machine can always take a new workspace.
         return false;
     };
-    group.home.is_none() && group.link != Link::Connected && !target.is_ssh()
+    group.home.is_none() && !link_is_engaged(group.link) && !target.is_ssh()
 }
 
 fn group_menu(
@@ -2393,7 +2491,7 @@ fn group_menu(
     let Some(target) = group.target.clone() else {
         return menu;
     };
-    let connected = group.link == Link::Connected;
+    let connected = link_is_engaged(group.link);
     let restartable = target.hosts_our_server();
     let (label, for_restart) = (group.label.clone(), target.clone());
     let menu = menu.separator().item(
@@ -2608,6 +2706,65 @@ mod tests {
             None,
             Link::Local
         )));
+        // A machine the supervisor is retrying still has a retry to call off.
+        assert!(!group_menu_is_empty_handed(&group_ref(
+            wsl(),
+            None,
+            Link::Reconnecting { attempt: 2 }
+        )));
+    }
+
+    /// The switcher used to read the `HostLinks` table and nothing else, which
+    /// cannot tell "being retried right now" from "never heard of". The group
+    /// then collapsed mid-reconnect as if the machine had no workspaces.
+    #[test]
+    fn a_machine_being_retried_does_not_read_as_one_nobody_ever_connected_to() {
+        let target = RemoteTarget::direct("me", "build-box", 22);
+        let retrying = MachineStatus::Reconnecting {
+            attempt: 2,
+            last_error: Some("connection refused".into()),
+        };
+
+        assert_eq!(
+            link_from(None, &target, Some(&retrying), false),
+            Link::Reconnecting { attempt: 2 }
+        );
+        assert_eq!(link_from(None, &target, None, false), Link::Offline);
+        assert_eq!(
+            link_from(None, &target, Some(&MachineStatus::Attached), false),
+            Link::Connected
+        );
+        assert_eq!(
+            link_from(
+                None,
+                &target,
+                Some(&MachineStatus::Failed("no route to host".into())),
+                false
+            ),
+            Link::Failed,
+            "a route the supervisor could not build has to reach the panel too"
+        );
+        // A link this window knows nothing about is still a link.
+        assert_eq!(link_from(None, &target, None, true), Link::Connected);
+    }
+
+    #[test]
+    fn this_windows_own_attempt_is_only_ever_about_its_own_machine() {
+        let build = RemoteTarget::direct("me", "build-box", 22);
+        let gpu = RemoteTarget::direct("me", "gpu-lab", 22);
+        let flow = ConnectFlow::Connecting {
+            choice: HostChoice {
+                target: gpu,
+                label: "gpu-lab".into(),
+                detail: String::new(),
+            },
+        };
+
+        assert_eq!(
+            link_from(Some(&flow), &build, Some(&MachineStatus::Attached), true),
+            Link::Connected,
+            "a connect to the GPU box says nothing about the build box"
+        );
     }
 
     fn tab(label: &str, path: &str) -> TabRow {
@@ -2635,6 +2792,7 @@ mod tests {
             live: Liveness::Alive,
             open: true,
             current: false,
+            preempted: false,
             adopt: None,
             remote_id: None,
             tabs,
@@ -2651,6 +2809,7 @@ mod tests {
             home: None,
             error: None,
             installing: None,
+            preempted: false,
             rows,
         }
     }

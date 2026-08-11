@@ -86,8 +86,8 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
         Some(Command::Tab(TabCmd::Rename { tab, name })) => tab_rename(&tab, name, backend),
         Some(Command::Tab(TabCmd::Move { tab, index })) => tab_move(&tab, index, backend),
         Some(Command::Pane(PaneCmd::Ls { ws, all })) => pane_ls(ws.as_deref(), all, backend),
-        Some(Command::Pane(PaneCmd::Close { target })) => {
-            pane_close(target.as_deref(), ctx, backend)
+        Some(Command::Pane(PaneCmd::Close { targets, orphans })) => {
+            pane_close(&targets, orphans, ctx, backend)
         }
         Some(Command::Events) => events(json_mode, backend),
         Some(Command::Agents) => agents(backend),
@@ -482,29 +482,64 @@ fn pane_split(args: SplitArgs, ctx: &Context, backend: &mut dyn Backend) -> Resu
 }
 
 fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
-    const ENTER_GAP: Duration = Duration::from_millis(200);
+    const KEY_GAP: Duration = Duration::from_millis(200);
 
-    let (target, text) = match &args.second {
-        Some(text) => (Some(args.first.as_str()), text.as_str()),
-        None => {
-            if args.first.starts_with('%') && address::parse_pane(&args.first).is_ok() {
-                bail!("send needs TEXT after the pane address");
+    // Three shapes reach here, and only the address is ever ambiguous:
+    // `send %3 "text"`, `send "text"` (this pane), and — new with --key —
+    // `send %3 --key C-c`, where there is no text at all and the lone
+    // positional is therefore an address rather than the missing-text error it
+    // has to stay in every other case.
+    let (target, text) = match (&args.first, &args.second) {
+        (Some(first), Some(text)) => (Some(first.as_str()), Some(text.as_str())),
+        (Some(first), None) if first.starts_with('%') && address::parse_pane(first).is_ok() => {
+            if args.keys.is_empty() {
+                bail!("send needs TEXT after the pane address, or a --key to press");
             }
-            (None, args.first.as_str())
+            (Some(first.as_str()), None)
+        }
+        (Some(first), None) => (None, Some(first.as_str())),
+        (None, _) => {
+            if args.keys.is_empty() {
+                bail!("send needs TEXT to type or a --key to press");
+            }
+            (None, None)
         }
     };
+
     let pane = address::pane_or_context(target, ctx)?;
-    backend.send_input(pane, text.as_bytes().to_vec())?;
+    let mut already_wrote = false;
+    if let Some(text) = text {
+        backend.send_input(pane, text.as_bytes().to_vec())?;
+        already_wrote = true;
+    }
+    // `--enter` is the same thing as `--key enter`, and predates it. Keeping it
+    // as sugar rather than deprecating it: it reads better for the overwhelming
+    // case, which is typing one command and running it. Going through the same
+    // parser leaves one definition of what Enter puts on the wire.
+    let mut pressed = args.keys.clone();
     if args.enter {
+        pressed.push(crate::keys::parse("enter").expect("enter is in the vocabulary"));
+    }
+    for key in &pressed {
         // Raw-mode TUIs detect a fast stream as pasted input and intentionally
-        // absorb Enter as a newline. Keep the public one-shot command, but let
-        // the text leave that burst window before delivering the key itself.
-        std::thread::sleep(ENTER_GAP);
-        backend.send_input(pane, vec![b'\r'])?;
+        // absorb Enter as a newline — and a menu being driven by arrow keys has
+        // the same problem. Let each keystroke leave the burst window on its
+        // own, which is what makes a sequence land as a sequence. Nothing
+        // precedes the first write, though, so an interrupt stays immediate.
+        if already_wrote {
+            std::thread::sleep(KEY_GAP);
+        }
+        backend.send_input(pane, key.bytes.clone())?;
+        already_wrote = true;
     }
     report(
         "",
-        json!({ "pane": pane, "sent": text, "enter": args.enter }),
+        json!({
+            "pane": pane,
+            "sent": text.unwrap_or_default(),
+            "enter": args.enter,
+            "keys": pressed.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(),
+        }),
     )
 }
 
@@ -734,27 +769,112 @@ fn pane_ls_all(backend: &mut dyn Backend) -> Result<Outcome> {
     let mut human = output::registry_table(&running, &|pane| holder(pane).map(|ws| ws.to_string()));
     if orphans > 0 {
         human.push_str(&format!(
-            "\n{orphans} pane(s) held by no workspace — `tty7 pane close %<id>` stops one\n"
+            "\n{orphans} pane(s) held by no workspace — `tty7 pane close %<id>` stops one, \
+             `tty7 pane close --orphans` stops all of them\n"
         ));
     }
     report(human, json!({ "panes": panes, "orphans": orphans }))
 }
 
-fn pane_close(target: Option<&str>, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
-    let pane = address::pane_or_context(target, ctx)?;
+fn pane_close(
+    targets: &[String],
+    orphans: bool,
+    ctx: &Context,
+    backend: &mut dyn Backend,
+) -> Result<Outcome> {
+    // One tree read for the whole batch: it resolves the orphan set and then
+    // every pane's owning workspace.
     let machine = fetch_machine(backend)?;
-    match resolve::workspace_of_pane(&machine, pane) {
-        Ok(ws) => {
-            let workspace = ws.id;
-            let reply = backend.control(ControlRequest::PaneClose { workspace, pane })?;
-            hang_up_removed_panes("PaneClose", reply, backend)?;
+    let panes = if orphans {
+        let found = orphan_panes(&machine, backend)?;
+        if found.is_empty() {
+            return report("no orphan panes\n", json!({ "closed": [] }));
         }
-        // No workspace holds it, so PaneClose has nothing to route through.
-        // Hang it up directly instead of refusing — this is exactly the orphan
-        // `pane ls --all` just pointed the user at.
-        Err(_) => backend.kill_pane(pane)?,
+        found
+    } else if targets.is_empty() {
+        vec![address::pane_or_context(None, ctx)?]
+    } else {
+        targets
+            .iter()
+            .map(|t| address::pane_or_context(Some(t), ctx))
+            .collect::<Result<Vec<_>>>()?
+    };
+
+    // Every pane is attempted even if an earlier one fails — a reaper that
+    // stops at the first error leaves the rest of the leak in place, which is
+    // the state the caller was trying to fix.
+    let mut closed = Vec::new();
+    let mut failures = Vec::new();
+    for pane in panes {
+        let outcome = match resolve::workspace_of_pane(&machine, pane) {
+            Ok(ws) => {
+                let workspace = ws.id;
+                match backend.control(ControlRequest::PaneClose { workspace, pane }) {
+                    Ok(reply) => hang_up_removed_panes("PaneClose", reply, backend),
+                    Err(e) => Err(e),
+                }
+            }
+            // No workspace holds it, so PaneClose has nothing to route through.
+            // Hang it up directly instead of refusing — this is exactly the
+            // orphan `pane ls --all` points the user at.
+            Err(_) => backend.kill_pane(pane),
+        };
+        match outcome {
+            Ok(()) => closed.push(pane),
+            Err(e) => failures.push(format!("%{pane}: {e:#}")),
+        }
     }
-    report("", json!({ "closed": pane }))
+
+    if !failures.is_empty() {
+        // Structured even here, for the reason `wait` is: the caller was
+        // cleaning up, and what they need next is which panes are still theirs
+        // to deal with — an anyhow error would leave `--json` holding prose.
+        // The complaint goes to stderr all the same, so `-q` still reports it
+        // and the exit code is not the only thing that says so.
+        eprintln!(
+            "tty7: closed {} pane(s); {} could not be closed — {}",
+            closed.len(),
+            failures.len(),
+            failures.join("; ")
+        );
+        return Ok(Outcome::Exit(
+            1,
+            Report {
+                human: String::new(),
+                json: json!({ "closed": closed, "failed": failures }),
+            },
+        ));
+    }
+    let human = match closed.as_slice() {
+        // The single-pane case is the overwhelming one and has always been
+        // silent on success; only a batch is worth narrating.
+        [_] => String::new(),
+        many => format!(
+            "closed {} panes: {}\n",
+            many.len(),
+            many.iter()
+                .map(|p| format!("%{p}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+    };
+    report(human, json!({ "closed": closed }))
+}
+
+/// The panes the daemon is running that no workspace's tab tree references.
+fn orphan_panes(machine: &Machine, backend: &mut dyn Backend) -> Result<Vec<u64>> {
+    let held: Vec<u64> = machine
+        .workspaces
+        .iter()
+        .flat_map(|ws| ws.tabs.iter())
+        .flat_map(|tab| tab.root.pane_ids())
+        .collect();
+    Ok(backend
+        .list_panes()?
+        .iter()
+        .map(|info| info.pane_id)
+        .filter(|pane| !held.contains(pane))
+        .collect())
 }
 
 fn events(json_mode: bool, backend: &mut dyn Backend) -> Result<Outcome> {
@@ -789,15 +909,23 @@ fn event_line(event: &ControlEvent) -> String {
     }
 }
 
-/// The one verb that *blocks*: poll until the watched pane's agent reaches a
-/// requested state, then report it. This is what turns the CLI into an
-/// orchestration tool — "wake me when my peer agent needs input, or finishes
-/// its turn" — without the screen-scraping a tmux-based agent team resorts to.
+/// The one verb that *blocks*: poll until the watched pane reaches a requested
+/// state, then report it. This is what turns the CLI into an orchestration tool
+/// — "wake me when my peer agent needs input, or finishes its turn" — without
+/// the screen-scraping a tmux-based agent team resorts to.
 ///
-/// A poll of `AgentStates` rather than an `events` subscription on purpose: a
-/// one-shot, stateless question composes into scripts (`tty7 wait %3 &&
-/// tty7 capture %3 --plain`), survives a server restart mid-wait, and needs no
-/// cursor management. At the default 500ms interval the cost is one aggregate
+/// Two kinds of pane can be waited on, and they are watched differently. An
+/// agent pane has a status the server keeps from hook events; a pane merely
+/// running a command has none, and for it the question is whether the
+/// foreground command has exited — `free`, read off the process tree. Keeping
+/// both here rather than in two verbs means a caller that does not know which
+/// kind it has can ask for `waiting,done,free,exit` and get an answer either
+/// way.
+///
+/// A poll rather than an `events` subscription on purpose: a one-shot,
+/// stateless question composes into scripts (`tty7 wait %3 && tty7 capture %3
+/// --plain`), survives a server restart mid-wait, and needs no cursor
+/// management. At the default 500ms interval an agent wait costs one aggregate
 /// control request per tick — the same request `tty7 agents` makes once.
 fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     use std::time::{Duration, Instant};
@@ -821,7 +949,11 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
         .timeout
         .and_then(|t| Instant::now().checked_add(Duration::from_secs(t)));
     let interval = Duration::from_millis(args.interval);
+    let watch_free = args.until.contains(&WaitState::Free);
     let mut baseline: Option<Cursor> = None;
+    // Sticky: has the pane been seen running something since the wait began?
+    // This is `--changed`'s edge for `free` — see the flag's own comment.
+    let mut seen_busy = false;
     let mut polls: u32 = 0;
     loop {
         let states = match backend.control(ControlRequest::AgentStates)? {
@@ -836,11 +968,13 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
                 AgentStatus::Waiting => WaitState::Waiting,
                 AgentStatus::Done => WaitState::Done,
             },
-            // No agent state for the pane: an agentless-but-live pane reads
-            // as idle; a dead or vanished one as exit. The machine tree is
-            // only fetched on this branch — while an agent is reporting, its
-            // state alone answers the question.
-            None if pane_is_live(backend, pane)? => WaitState::Idle,
+            // No agent state for the pane: a live one is agentless — a plain
+            // shell, or an agent whose hooks never got installed — and a dead
+            // or vanished one has exited. Reporting `idle` here (as this once
+            // did) made `--until idle` answer "finished" about a pane that was
+            // midway through a build. The machine tree is only fetched on this
+            // branch — while an agent is reporting, its state alone answers.
+            None if pane_is_live(backend, pane)? => WaitState::NoAgent,
             None => WaitState::Exit,
         };
 
@@ -848,7 +982,22 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
         // position we arrived at is last turn's answer until the agent moves.
         let cursor: Cursor = entry.as_ref().map(|e| (e.state.status, e.state.activity));
         let baseline = *baseline.get_or_insert(cursor);
-        let changed = cursor != baseline;
+        let mut changed = cursor != baseline;
+
+        // `free` is a fact about the process tree, not the agent ladder, so it
+        // is asked separately, only when requested, and only once the ladder
+        // has failed to answer. A state the caller listed is their answer:
+        // overwriting a real `waiting` with a process-tree fact would strand a
+        // pane whose depth-0 process *is* the agent (see `pane_is_free`), where
+        // the tree reads free for the whole turn.
+        if watch_free && current != WaitState::Exit && !args.until.contains(&current) {
+            if pane_is_free(backend, pane)? {
+                current = WaitState::Free;
+                changed = seen_busy;
+            } else {
+                seen_busy = true;
+            }
+        }
 
         let mut matched = args.until.contains(&current) && (changed || !args.changed);
         polls += 1;
@@ -898,17 +1047,43 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
                 human.push_str(&format!(" — {msg}"));
             }
             if !changed {
-                human.push_str(" (unchanged since the wait began)");
+                human.push_str(match current {
+                    WaitState::Free => " (already free — nothing ran while we watched)",
+                    _ => " (unchanged since the wait began)",
+                });
             }
             return report(human, json);
         }
         if deadline.is_some_and(|d| Instant::now() >= d) {
             // 124 = the `timeout(1)` convention: "gave up", distinct from
             // both success and error, so orchestration scripts can branch.
+            let mut human = format!("pane %{pane}: still {} — timed out", current.name());
+            // A wait for agent states that never move is the shape of both
+            // "there is no agent here" and "the agent's hooks are missing",
+            // and neither is visible from a timeout alone. Say which door to
+            // try rather than leaving the caller to poll harder.
+            if current == WaitState::NoAgent {
+                human.push_str(
+                    "\nnothing is reporting agent status in this pane — for a plain command \
+                     wait `--until free`, and for an agent check `tty7 agents` for a missing \
+                     status hook",
+                );
+            }
+            // `--changed` needs to have *seen* the pane busy, and a command
+            // that starts and finishes inside one interval never is. That
+            // looks exactly like "the command never ran", so say both, rather
+            // than let a finished command read as a timeout.
+            if current == WaitState::Free && !seen_busy {
+                human.push_str(
+                    "\nnothing was ever seen running here — either the command never started, \
+                     or it finished inside one --interval. Poll faster (--interval 100) or drop \
+                     --changed",
+                );
+            }
             return Ok(Outcome::Exit(
                 124,
                 Report {
-                    human: format!("pane %{pane}: still {} — timed out", current.name()),
+                    human,
                     json: json!({ "pane": pane, "status": current.name(), "timed_out": true }),
                 },
             ));
@@ -921,6 +1096,25 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
         };
         std::thread::sleep(nap);
     }
+}
+
+/// Whether the pane is back to its bare shell — nothing running in front of it.
+///
+/// Depth, not count: the pane's own shell sits at depth 0 and everything it
+/// launched hangs below, so "nothing deeper than the shell" holds however many
+/// shells the pane ended up with, and does not have to guess at process names.
+/// It is also the portable question — Windows has no foreground process group
+/// to ask about, so `ProcEntry::foreground` is never true there.
+///
+/// What it cannot see, both by construction: a pane whose depth-0 process *is*
+/// the command — which is what `tty7 run` spawns — reads free for as long as it
+/// runs, and a backgrounded job keeps a pane busy after the foreground command
+/// is long gone. An empty tree is "we could not see in" rather than "free":
+/// answering free there would be the same false success `no-agent` exists to
+/// remove.
+fn pane_is_free(backend: &mut dyn Backend, pane: u64) -> Result<bool> {
+    let procs = backend.procs(pane)?.procs;
+    Ok(!procs.is_empty() && procs.iter().all(|p| p.depth == 0))
 }
 
 /// Whether the daemon still has a live pane behind this id. Absent from the
@@ -1089,6 +1283,7 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
         vec![address::ENV_PANE.to_string(), mark(&ctx.pane)],
     ];
     let mut server = json!({ "reachable": false });
+    let mut hooks: Vec<(HookAgent, HooksState)> = Vec::new();
     match backend.hello() {
         Ok(hello) => {
             let dialect_ok = hello.control_version == CONTROL_VERSION
@@ -1127,6 +1322,13 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
                 "machine links".to_string(),
                 format!("{} known, {connected} connected", routes.len()),
             ]);
+            // Without hooks an agent reports no status, which means `tty7
+            // agents` shows it standing still and `tty7 wait` never wakes. That
+            // failure looks like a hang rather than a missing install, so the
+            // check that explains it belongs in the verb people run when
+            // something is not working.
+            hooks = hook_survey(backend);
+            rows.push(vec!["agent hooks".to_string(), hooks_summary(&hooks)]);
             server = json!({
                 "reachable": true,
                 "dialect_ok": dialect_ok,
@@ -1154,8 +1356,74 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
                 "pane": ctx.pane.is_some(),
             },
             "server": server,
+            "hooks": hooks_json(&hooks),
         }),
     )
+}
+
+/// Where every installable status hook stands on this machine.
+///
+/// Agents whose state cannot be read at all are left out rather than guessed
+/// at: the backend answers `None` both for a `-m` run (hooks are a local
+/// install, and this is a local check) and when the app itself cannot be found,
+/// and neither is the same as "not installed".
+fn hook_survey(backend: &mut dyn Backend) -> Vec<(HookAgent, HooksState)> {
+    HookAgent::ALL
+        .into_iter()
+        .filter_map(|agent| Some((agent, backend.agent_hooks_state(agent)?)))
+        .collect()
+}
+
+fn hooks_summary(hooks: &[(HookAgent, HooksState)]) -> String {
+    if hooks.is_empty() {
+        return "unknown — hooks are a local install, and this check could not read them".into();
+    }
+    let named = |want: HooksState| -> Vec<&'static str> {
+        hooks
+            .iter()
+            .filter(|(_, state)| *state == want)
+            .map(|(agent, _)| agent.display_name())
+            .collect()
+    };
+    let installed = named(HooksState::Installed);
+    let outdated = named(HooksState::Outdated);
+
+    // The current ones are named because that is the answer to "can I delegate
+    // to this agent"; the missing ones are a count, since listing every agent
+    // tty7 knows about would bury it. "Up to date" rather than "installed":
+    // an outdated hook *is* installed, and saying "none installed" next to six
+    // outdated ones reads as a contradiction.
+    let mut summary = if installed.is_empty() {
+        "none up to date".to_string()
+    } else {
+        format!("{} up to date", installed.join(", "))
+    };
+    if !outdated.is_empty() {
+        summary.push_str(&format!("; {} OUTDATED", outdated.join(", ")));
+    }
+    let missing = hooks.len() - installed.len() - outdated.len();
+    if missing > 0 {
+        summary.push_str(&format!("; {missing} not installed"));
+    }
+    if installed.is_empty() || !outdated.is_empty() {
+        summary.push_str(" (Settings → Agents)");
+    }
+    summary
+}
+
+fn hooks_json(hooks: &[(HookAgent, HooksState)]) -> Value {
+    let slugs = |want: HooksState| -> Vec<&'static str> {
+        hooks
+            .iter()
+            .filter(|(_, state)| *state == want)
+            .map(|(agent, _)| agent.slug())
+            .collect()
+    };
+    json!({
+        "installed": slugs(HooksState::Installed),
+        "outdated": slugs(HooksState::Outdated),
+        "not_installed": slugs(HooksState::NotInstalled),
+    })
 }
 
 #[cfg(test)]
@@ -1740,6 +2008,98 @@ mod tests {
         );
     }
 
+    /// The CLI is what creates orphans, so it should be able to clear them.
+    /// `--orphans` closes exactly the panes the registry holds and the tab
+    /// trees do not — panes that *are* held must survive it untouched.
+    #[test]
+    fn pane_close_orphans_reaps_only_what_no_workspace_holds() {
+        let mut backend = mock();
+        // %1 and %3 live in the tree (see two_workspace_machine); %77 and %78
+        // are what interrupted `run`s left behind.
+        backend.registry = vec![
+            pane_info(1, None),
+            pane_info(3, None),
+            pane_info(77, Some("tty7-cli")),
+            pane_info(78, Some("tty7-cli")),
+        ];
+
+        let json = json_of(run_cli(
+            &["tty7", "pane", "close", "--orphans"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["closed"], serde_json::json!([77, 78]));
+        assert_eq!(backend.killed, vec![77, 78]);
+        assert!(
+            !backend
+                .control_calls
+                .iter()
+                .any(|c| matches!(c, ControlRequest::PaneClose { .. })),
+            "orphans have no workspace to route a PaneClose through"
+        );
+
+        // Nothing to reap is a success with an empty list, not an error: a
+        // cleanup step that fails when the machine is already clean is one a
+        // script has to guard, and every script would then guard it the same way.
+        let mut backend = mock();
+        backend.registry = vec![pane_info(1, None), pane_info(3, None)];
+        let json = json_of(run_cli(
+            &["tty7", "pane", "close", "--orphans"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["closed"], serde_json::json!([]));
+        assert!(backend.killed.is_empty());
+    }
+
+    /// A batch keeps going after a failure. Stopping at the first one would
+    /// leave the rest of the leak exactly where it was — while still reporting
+    /// the failure, because a half-done cleanup that claims success is worse.
+    ///
+    /// Reported as an exit code carrying a report, not as an error: the caller
+    /// was cleaning up, and the useful answer is which panes are still theirs
+    /// to deal with. An anyhow error would leave `--json` with prose.
+    #[test]
+    fn pane_close_reports_failures_without_abandoning_the_batch() {
+        let mut backend = mock();
+        backend.registry = vec![
+            pane_info(77, None),
+            pane_info(78, None),
+            pane_info(79, None),
+        ];
+        backend.kill_failures = vec![78];
+
+        let out = execute(
+            cli(&["tty7", "pane", "close", "--orphans"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect("a partial cleanup is an exit code, not an error");
+        let Outcome::Exit(1, r) = out else {
+            panic!("a pane that could not be closed has to be reported");
+        };
+        assert_eq!(
+            r.json["closed"],
+            serde_json::json!([77, 79]),
+            "the survivors of the batch are what a retry needs: {}",
+            r.json
+        );
+        assert!(
+            r.json["failed"]
+                .as_array()
+                .expect("the failures are a list")
+                .iter()
+                .any(|f| f.as_str().is_some_and(|f| f.contains("%78"))),
+            "{}",
+            r.json
+        );
+        assert_eq!(
+            backend.killed,
+            vec![77, 78, 79],
+            "the panes after the failure still had to be attempted"
+        );
+    }
+
     #[test]
     fn send_reaches_the_pane_socket_seam_not_the_control_socket() {
         let mut backend = mock();
@@ -1761,6 +2121,66 @@ mod tests {
         backend.sent.clear();
         run_cli(&["tty7", "send", "echo hi"], &ctx, &mut backend);
         assert_eq!(backend.sent, vec![(3, b"echo hi".to_vec())]);
+    }
+
+    /// The keystrokes text cannot express. Each goes out as its own write, in
+    /// the order given, because a pane reads them as separate key events —
+    /// which is what walking a menu and then confirming it requires.
+    #[test]
+    fn send_key_presses_keys_in_order() {
+        let mut backend = mock();
+        run_cli(
+            &["tty7", "send", "%1", "--key", "down", "--key", "enter"],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(
+            backend.sent,
+            vec![(1, b"\x1b[B".to_vec()), (1, b"\r".to_vec())]
+        );
+
+        // Text and keys compose: type the answer, then press the key that
+        // submits it in whatever the pane is showing.
+        let mut backend = mock();
+        run_cli(
+            &["tty7", "send", "%1", "y", "--key", "enter"],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(backend.sent, vec![(1, b"y".to_vec()), (1, b"\r".to_vec())]);
+
+        // Interrupting takes no text at all — the case that made TEXT optional.
+        let mut backend = mock();
+        let json = json_of(run_cli(
+            &["tty7", "send", "%1", "--key", "C-c"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(backend.sent, vec![(1, vec![0x03])]);
+        assert_eq!(json["keys"], serde_json::json!(["c-c"]));
+        assert_eq!(json["sent"], "", "nothing was typed");
+    }
+
+    /// A lone address still has to be the missing-text error it always was —
+    /// otherwise `tty7 send %42` would silently do nothing at all.
+    #[test]
+    fn send_still_refuses_a_bare_address_when_there_is_nothing_to_press() {
+        let mut backend = mock();
+        let err = execute(
+            cli(&["tty7", "send", "%1"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect_err("a bare address sends nothing and must say so");
+        assert!(err.to_string().contains("needs TEXT"), "{err}");
+        assert!(backend.sent.is_empty());
+
+        // And outside a tty7 shell, with neither text nor keys, the complaint
+        // is about the missing input rather than the missing pane.
+        let mut backend = mock();
+        let err = execute(cli(&["tty7", "send"]), &Context::default(), &mut backend)
+            .expect_err("send with no arguments has nothing to do");
+        assert!(err.to_string().contains("--key"), "{err}");
     }
 
     #[test]
@@ -2143,6 +2563,39 @@ mod tests {
         agent_state_at(pane_id, status, 0)
     }
 
+    /// A pane sitting at its prompt: the shell, and nothing in front of it.
+    fn idle_procs() -> tty7_core::daemon::protocol::PaneProcs {
+        tty7_core::daemon::protocol::PaneProcs {
+            procs: vec![proc_entry(100, "zsh", 0, true)],
+            ports: Vec::new(),
+        }
+    }
+
+    /// The same pane with a command running in it.
+    fn busy_procs() -> tty7_core::daemon::protocol::PaneProcs {
+        tty7_core::daemon::protocol::PaneProcs {
+            procs: vec![
+                proc_entry(100, "zsh", 0, false),
+                proc_entry(101, "cargo", 1, true),
+            ],
+            ports: Vec::new(),
+        }
+    }
+
+    fn proc_entry(
+        pid: u32,
+        name: &str,
+        depth: u8,
+        foreground: bool,
+    ) -> tty7_core::daemon::protocol::ProcEntry {
+        tty7_core::daemon::protocol::ProcEntry {
+            pid,
+            name: name.into(),
+            depth,
+            foreground,
+        }
+    }
+
     fn agent_state_at(
         pane_id: u64,
         status: tty7_core::core::cli_agent::AgentStatus,
@@ -2312,18 +2765,18 @@ mod tests {
     }
 
     /// Panes without an agent state fall back to the machine tree: live means
-    /// idle, dead-or-gone means exit — which ends every wait, but only counts
-    /// as *matched* when the caller listed it.
+    /// `no-agent`, dead-or-gone means exit — which ends every wait, but only
+    /// counts as *matched* when the caller listed it.
     #[test]
     fn wait_reads_agentless_panes_from_the_tree() {
         let mut backend = mock();
         backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
         let out = run_cli(
-            &["tty7", "wait", "%3", "--until", "idle"],
+            &["tty7", "wait", "%3", "--until", "no-agent"],
             &Context::default(),
             &mut backend,
         );
-        assert_eq!(json_of(out)["status"], "idle");
+        assert_eq!(json_of(out)["status"], "no-agent");
 
         // Pane 9 exists nowhere: "exit", matched by the default until-set.
         let mut backend = mock();
@@ -2351,6 +2804,230 @@ mod tests {
         assert_eq!(r.json["status"], "exit");
         assert_eq!(r.json["matched"], false);
         assert!(r.human.contains("exited"), "{}", r.human);
+    }
+
+    /// The trap this state exists to close. A pane with nothing reporting used
+    /// to answer `idle`, so `--until idle` returned success — instantly, with
+    /// `matched: true` — about a shell that was midway through a build. The
+    /// caller then read a half-finished screen and believed it.
+    #[test]
+    fn wait_does_not_call_a_busy_shell_idle() {
+        let mut backend = mock();
+        backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+        backend.procs_reply = busy_procs();
+
+        let out = execute(
+            cli(&["tty7", "wait", "%3", "--until", "idle", "--timeout", "0"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect("a timeout is an exit code, not an error");
+        let Outcome::Exit(124, r) = out else {
+            panic!("a pane with no agent must not satisfy --until idle");
+        };
+        assert_eq!(r.json["status"], "no-agent");
+        assert!(
+            r.human.contains("--until free"),
+            "the timeout should point at the flag that answers this question: {}",
+            r.human
+        );
+    }
+
+    /// `free` is the missing half of the verb: an agent pane has a status to
+    /// wait on, a pane merely running a command has only its process tree.
+    /// Nothing below the depth-0 shell means the foreground command exited.
+    #[test]
+    fn wait_free_ends_when_the_foreground_command_exits() {
+        let mut backend = mock();
+        for _ in 0..3 {
+            backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+        }
+        // Busy, busy, then back to the bare shell.
+        backend.procs_replies.push_back(busy_procs());
+        backend.procs_replies.push_back(busy_procs());
+        backend.procs_replies.push_back(idle_procs());
+
+        let json = json_of(run_cli(
+            &["tty7", "wait", "%3", "--until", "free", "--interval", "50"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["status"], "free");
+        assert_eq!(json["matched"], true);
+        assert_eq!(json["stale"], false, "we watched the command finish");
+        assert_eq!(
+            backend.procs_calls.len(),
+            3,
+            "one process-tree read per poll, and only because `free` was asked for"
+        );
+    }
+
+    /// The process tree is level-triggered like the agent ladder, but a shell
+    /// that goes free → busy → free lands back where it started, so a baseline
+    /// comparison would miss it. `--changed` therefore means "something ran
+    /// while I watched" here — which is what a caller wants right after `send`.
+    #[test]
+    fn wait_changed_free_waits_for_something_to_actually_run() {
+        // Already free and it stays that way: the command has not started yet,
+        // so answering "free" would report the shell we sent the work *to*.
+        let mut backend = mock();
+        for _ in 0..2 {
+            backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+        }
+        backend.procs_reply = idle_procs();
+        let out = execute(
+            cli(&[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "free",
+                "--changed",
+                "--timeout",
+                "0",
+            ]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect("a timeout is an exit code, not an error");
+        assert!(
+            matches!(out, Outcome::Exit(124, _)),
+            "a pane that was free all along has not run anything"
+        );
+
+        // Free → busy → free is the real shape, and it must wake.
+        let mut backend = mock();
+        for _ in 0..3 {
+            backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+        }
+        backend.procs_replies.push_back(idle_procs());
+        backend.procs_replies.push_back(busy_procs());
+        backend.procs_replies.push_back(idle_procs());
+        let json = json_of(run_cli(
+            &[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "free",
+                "--changed",
+                "--interval",
+                "50",
+            ],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["status"], "free");
+        assert_eq!(json["matched"], true);
+        assert_eq!(json["stale"], false);
+    }
+
+    /// A command that starts and finishes between two polls is never *seen*
+    /// busy, which is indistinguishable from one that never ran — so the
+    /// timeout has to name both doors instead of letting a finished command
+    /// read as "still going".
+    #[test]
+    fn wait_changed_free_says_why_it_saw_nothing_run() {
+        let mut backend = mock();
+        for _ in 0..2 {
+            backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+        }
+        backend.procs_reply = idle_procs();
+
+        let out = execute(
+            cli(&[
+                "tty7",
+                "wait",
+                "%3",
+                "--until",
+                "free",
+                "--changed",
+                "--timeout",
+                "0",
+            ]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect("a timeout is an exit code, not an error");
+        let Outcome::Exit(124, r) = out else {
+            panic!("a pane that was free all along has not run anything");
+        };
+        assert!(
+            r.human.contains("--interval") && r.human.contains("--changed"),
+            "the timeout should name the two ways out: {}",
+            r.human
+        );
+    }
+
+    /// `free` answers for a pane the agent ladder cannot, so it must not answer
+    /// *over* it. A pane whose depth-0 process is the agent itself reads free
+    /// for its whole turn; letting that outrank a `waiting` the caller asked
+    /// for would strand exactly the delegation loop the verb exists for.
+    #[test]
+    fn wait_free_does_not_overrule_a_state_the_caller_asked_for() {
+        use tty7_core::core::cli_agent::AgentStatus;
+        let mut backend = mock();
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![agent_state(
+                3,
+                AgentStatus::Waiting,
+            )]));
+        // The agent is the pane's only process, so the tree reads "free".
+        backend.procs_reply = idle_procs();
+
+        let json = json_of(run_cli(
+            &["tty7", "wait", "%3", "--until", "waiting,free"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(json["status"], "waiting", "the ladder answered first");
+        assert_eq!(json["matched"], true);
+        assert!(
+            backend.procs_calls.is_empty(),
+            "and the process tree was never asked"
+        );
+    }
+
+    /// An unreadable process tree is not an idle one. Answering `free` on an
+    /// empty reply would be the same false success `no-agent` was added to
+    /// remove, one layer down.
+    #[test]
+    fn wait_free_does_not_read_an_empty_process_tree_as_finished() {
+        let mut backend = mock();
+        backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+        backend.procs_reply = tty7_core::daemon::protocol::PaneProcs::default();
+
+        let out = execute(
+            cli(&["tty7", "wait", "%3", "--until", "free", "--timeout", "0"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect("a timeout is an exit code, not an error");
+        assert!(
+            matches!(out, Outcome::Exit(124, _)),
+            "nothing was seen, so nothing can be claimed"
+        );
+    }
+
+    /// Watching `free` must not cost anything for callers who did not ask:
+    /// the process tree is a second round trip per poll on top of the agent
+    /// snapshot, and the default wait is for agents.
+    #[test]
+    fn wait_only_reads_the_process_tree_when_free_is_asked_for() {
+        use tty7_core::core::cli_agent::AgentStatus;
+        let mut backend = mock();
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![agent_state(
+                3,
+                AgentStatus::Waiting,
+            )]));
+        run_cli(&["tty7", "wait", "%3"], &Context::default(), &mut backend);
+        assert!(
+            backend.procs_calls.is_empty(),
+            "the default until-set names no pane-level state"
+        );
     }
 
     /// A `--timeout` that runs out exits 124 — the `timeout(1)` convention —
@@ -2566,5 +3243,61 @@ mod tests {
         };
         let out = human(run_cli(&["tty7", "doctor"], &ctx, &mut doctor_backend()));
         assert!(out.contains("set (/cfg/tty7)"), "{out}");
+    }
+
+    /// Missing hooks are the reason a perfectly healthy-looking agent never
+    /// reports and `tty7 wait` sits there until it times out. `doctor` is the
+    /// verb people run when something is not working, so it is where that has
+    /// to be visible — and it long claimed to check hooks without doing so.
+    #[test]
+    fn doctor_reports_where_the_agent_status_hooks_stand() {
+        use tty7_core::core::agent_hooks::HookAgent;
+
+        let mut backend = doctor_backend();
+        // The real backend answers for every agent it knows how to install
+        // hooks for, so the mock does too — the interesting part is that the
+        // three states are told apart, not that a lookup can come back empty.
+        backend.agent_hooks_states = HookAgent::ALL
+            .into_iter()
+            .map(|agent| match agent {
+                HookAgent::Claude => (agent, HooksState::Installed),
+                HookAgent::Codex => (agent, HooksState::Outdated),
+                other => (other, HooksState::NotInstalled),
+            })
+            .collect();
+        let out = run_cli(&["tty7", "doctor"], &Context::default(), &mut backend);
+        let Outcome::Report(r) = out else {
+            panic!("doctor reports");
+        };
+        assert!(r.human.contains("agent hooks"), "{}", r.human);
+        assert!(
+            r.human.contains("OUTDATED"),
+            "an outdated hook is the quiet failure worth shouting about: {}",
+            r.human
+        );
+        assert!(
+            r.human.contains("Settings → Agents"),
+            "say where the fix is: {}",
+            r.human
+        );
+        assert_eq!(r.json["hooks"]["installed"], serde_json::json!(["claude"]));
+        assert_eq!(r.json["hooks"]["outdated"], serde_json::json!(["codex"]));
+        assert_eq!(
+            r.json["hooks"]["not_installed"]
+                .as_array()
+                .expect("the rest are reported as a list, not omitted")
+                .len(),
+            HookAgent::ALL.len() - 2
+        );
+
+        // A backend that cannot read hook state at all — a `-m` run, where the
+        // hooks live on the other machine — says so rather than reporting a
+        // machine-wide gap that is not there.
+        let out = human(run_cli(
+            &["tty7", "doctor"],
+            &Context::default(),
+            &mut doctor_backend(),
+        ));
+        assert!(out.contains("unknown"), "{out}");
     }
 }

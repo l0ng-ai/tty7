@@ -68,7 +68,13 @@ pub enum Command {
     #[command(about = "Split a pane (= tty7 pane split)")]
     Split(SplitArgs),
 
-    #[command(about = "Type text into a pane")]
+    // The key list is built from the table it is a list *of*, rather than
+    // written out here: a hand-copied vocabulary drifts the first time a key
+    // is added, and this is the text a caller reaches for to learn the names.
+    #[command(
+        about = "Type text into a pane, or send it keystrokes with --key",
+        long_about = crate::keys::send_long_help()
+    )]
     Send(SendArgs),
 
     #[command(
@@ -100,7 +106,8 @@ pub enum Command {
     Status,
 
     #[command(
-        about = "Check this install: socket, dialect, config, versions, hooks, links, context"
+        about = "Check this install: socket, dialect, config, versions, agent hooks, links, \
+                 context"
     )]
     Doctor,
 
@@ -190,24 +197,51 @@ pub struct SplitArgs {
 #[derive(Debug, Args)]
 pub struct SendArgs {
     #[arg(value_name = "%PANE|TEXT")]
-    pub first: String,
+    pub first: Option<String>,
 
     #[arg(value_name = "TEXT")]
     pub second: Option<String>,
 
     #[arg(long, help = "Press Enter after the text")]
     pub enter: bool,
+
+    // Text covers "type this command"; it cannot express the keystrokes a pane
+    // asks for once something is already running — the arrow keys a permission
+    // prompt is answered with, the Escape that closes a TUI, the Ctrl-C that
+    // stops a runaway build. Repeatable, and delivered in the order given.
+    #[arg(
+        long = "key",
+        value_name = "KEY",
+        value_parser = crate::keys::parse,
+        help = "Send a keystroke instead of text; repeat for a sequence \
+                (C-c, escape, up, enter, …). See `tty7 send --help`"
+    )]
+    pub keys: Vec<crate::keys::Key>,
 }
 
-/// One resting place a `wait` can end on. `Exit` is pane-level (the child
-/// died or the pane is gone), the rest are the agent-status ladder the
-/// server maintains from hook events.
+/// One resting place a `wait` can end on. Three ontologies meet here, which is
+/// why the list is longer than the agent ladder: `Idle`/`Working`/`Waiting`/
+/// `Done` are the agent status the server keeps from hook events, `NoAgent`
+/// and `Free` describe the pane itself, and `Exit` is the pane being gone.
+///
+/// `NoAgent` exists because the alternative was worse: a pane with nothing
+/// reporting used to read as `idle`, so `--until idle` answered "yes, done"
+/// about a shell that was midway through a build. Saying "no agent is
+/// reporting here" is both true and the thing a caller needs in order to
+/// switch to `Free`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum WaitState {
     Idle,
     Working,
     Waiting,
     Done,
+    /// Nothing is reporting agent status in this pane — a plain shell, or an
+    /// agent whose hooks are not installed. Watch `Free` for those.
+    #[value(name = "no-agent")]
+    NoAgent,
+    /// The pane is back to its bare shell: the foreground command has exited.
+    /// Costs one extra request per poll, so it is only checked when asked for.
+    Free,
     Exit,
 }
 
@@ -221,6 +255,8 @@ impl WaitState {
             WaitState::Working => "working",
             WaitState::Waiting => "waiting",
             WaitState::Done => "done",
+            WaitState::NoAgent => "no-agent",
+            WaitState::Free => "free",
             WaitState::Exit => "exit",
         }
     }
@@ -236,12 +272,14 @@ pub struct WaitArgs {
 
     // The default is the two states worth waking for plus the one nobody can
     // wait past: "my peer needs input", "my peer finished", "my peer died".
+    // `free` is deliberately not in it — it is the answer for a pane running a
+    // command rather than an agent, and it costs a second request per poll.
     #[arg(
         long,
         value_name = "STATE,…",
         value_delimiter = ',',
         default_values = ["waiting", "done", "exit"],
-        help = "States that end the wait"
+        help = "States that end the wait; `free` waits for a plain command to finish"
     )]
     pub until: Vec<WaitState>,
 
@@ -259,10 +297,17 @@ pub struct WaitArgs {
     // before the agent has even read the input. `--changed` refuses the state
     // the pane was already in, which is what a delegation loop wants on every
     // round after the first.
+    //
+    // `free` is level-triggered the same way and needs the same guard, but a
+    // shell that goes free → busy → free returns to the state it started in,
+    // so comparing against a baseline would miss it. There the rule is instead
+    // "we watched something run": `free` only counts once the pane has been
+    // seen busy, which is exactly "the command I just sent has finished".
     #[arg(
         long,
         help = "Ignore the state the pane was already in — only wake on a state it \
-                moved into after the wait began (use this after `send`)"
+                moved into after the wait began; with `free`, wait until something \
+                has actually run (use this after `send`)"
     )]
     pub changed: bool,
 
@@ -412,10 +457,22 @@ pub enum PaneCmd {
     #[command(about = "Split a pane in two")]
     Split(SplitArgs),
 
-    #[command(about = "Close a pane; its shell is hung up")]
+    #[command(about = "Close panes; their shells are hung up")]
     Close {
-        #[arg(value_name = "%PANE")]
-        target: Option<String>,
+        #[arg(value_name = "%PANE", help = "Panes to close; defaults to $TTY7_PANE")]
+        targets: Vec<String>,
+
+        // `pane ls --all` has been able to *show* the panes an interrupted
+        // `run` leaves behind for a while, and the only way to act on that was
+        // to read ids off the table and close them one at a time. The CLI
+        // creates these; it should be able to clear them.
+        #[arg(
+            long,
+            conflicts_with = "targets",
+            help = "Close every pane no workspace holds — what an interrupted `run` \
+                    leaves behind. Lists them; pass --json for the ids"
+        )]
+        orphans: bool,
     },
 }
 
@@ -593,7 +650,7 @@ mod tests {
         let Some(Command::Send(args)) = cli.command else {
             panic!("send did not parse");
         };
-        assert_eq!(args.first, "%42");
+        assert_eq!(args.first.as_deref(), Some("%42"));
         assert_eq!(args.second.as_deref(), Some("make -j8"));
         assert!(args.enter);
 
@@ -601,8 +658,37 @@ mod tests {
         let Some(Command::Send(args)) = cli.command else {
             panic!("send did not parse");
         };
-        assert_eq!(args.first, "make -j8");
+        assert_eq!(args.first.as_deref(), Some("make -j8"));
         assert!(args.second.is_none());
+    }
+
+    /// `--key` is the reason TEXT became optional: `send %42 --key C-c` has an
+    /// address and no text, which every other shape would read as a mistake.
+    #[test]
+    fn send_accepts_keys_with_or_without_text() {
+        let cli = parse(&["tty7", "send", "%42", "--key", "C-c"]);
+        let Some(Command::Send(args)) = cli.command else {
+            panic!("send did not parse");
+        };
+        assert_eq!(args.first.as_deref(), Some("%42"));
+        assert!(args.second.is_none());
+        assert_eq!(args.keys.len(), 1);
+        assert_eq!(args.keys[0].bytes, vec![0x03]);
+
+        // A sequence keeps the order it was written in — that is the whole
+        // point for a menu that has to be walked down and then confirmed.
+        let cli = parse(&["tty7", "send", "--key", "down", "--key", "enter"]);
+        let Some(Command::Send(args)) = cli.command else {
+            panic!("send did not parse");
+        };
+        assert!(args.first.is_none(), "the pane comes from $TTY7_PANE");
+        let names: Vec<&str> = args.keys.iter().map(|k| k.name.as_str()).collect();
+        assert_eq!(names, vec!["down", "enter"]);
+
+        // An unknown key is a usage error, caught before anything is sent —
+        // half a key sequence in a live pane is worse than none.
+        let err = Cli::try_parse_from(["tty7", "send", "--key", "f7"]).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
     }
 
     #[test]
@@ -676,8 +762,22 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["tty7", "pane", "close", "%9"]).command,
-            Some(Command::Pane(PaneCmd::Close { target: Some(t) })) if t == "%9"
+            Some(Command::Pane(PaneCmd::Close { targets, orphans: false })) if targets == ["%9"]
         ));
+        // Several at once, because a cleanup usually has more than one thing
+        // to clean up — and the whole registry with `--orphans`.
+        assert!(matches!(
+            parse(&["tty7", "pane", "close", "%9", "%10"]).command,
+            Some(Command::Pane(PaneCmd::Close { targets, .. })) if targets == ["%9", "%10"]
+        ));
+        assert!(matches!(
+            parse(&["tty7", "pane", "close", "--orphans"]).command,
+            Some(Command::Pane(PaneCmd::Close { targets, orphans: true })) if targets.is_empty()
+        ));
+        // Naming panes *and* asking for every orphan is a contradiction: which
+        // set did the caller mean? Refuse rather than pick one.
+        let err = Cli::try_parse_from(["tty7", "pane", "close", "%9", "--orphans"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[test]

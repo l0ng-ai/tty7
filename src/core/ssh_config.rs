@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::core::ssh_profile::{ForwardKind, ForwardRule, HostPort, SshProfile as ManagedProfile};
@@ -163,6 +163,45 @@ pub struct ImportedProfile {
     pub proxy_jump: Option<String>,
 }
 
+/// A keyword the file sets for a host tty7 is importing, that no `SshProfile`
+/// field can hold — `IdentityAgent`, `CertificateFile`, `AddKeysToAgent` and
+/// the rest of what `resolve_alias` walks past.
+///
+/// Grouped by keyword rather than by host because that is the question someone
+/// reads the report to answer — "what did it not keep?" — and because the same
+/// keyword under a two-alias `Host` line is one omission, not two.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IgnoredOption {
+    /// Spelled as the file spells it. A report that says `identityagent` when
+    /// the file says `IdentityAgent` sends the reader hunting for a typo that
+    /// is tty7's, not theirs.
+    pub option: String,
+    pub hosts: Vec<String>,
+}
+
+/// Everything one pass over `~/.ssh/config` found, including the parts of it
+/// that went nowhere.
+///
+/// `import_profiles_from` answers only the first field, because it is also on a
+/// render path; the import button wants the rest so it can say what happened
+/// instead of leaving the person to diff the host list by eye.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportReport {
+    pub profiles: Vec<ImportedProfile>,
+    pub ignored: Vec<IgnoredOption>,
+    pub source: PathBuf,
+    /// Whether `source` itself could be opened. An `Include` that matches
+    /// nothing is ordinary — most of these files carry one for a directory
+    /// that may or may not exist — but a root that cannot be read is the whole
+    /// import, and the two are indistinguishable in `profiles`, which comes
+    /// back empty either way.
+    pub source_read: bool,
+    /// `source` plus every `Include` that resolved to a file that was read,
+    /// for the log line. Someone who edited the wrong `conf.d` fragment finds
+    /// out here that tty7 never opened it.
+    pub files_read: usize,
+}
+
 #[allow(dead_code)]
 pub fn import_profiles() -> Vec<ImportedProfile> {
     let Some(home) = home_dir() else {
@@ -172,11 +211,40 @@ pub fn import_profiles() -> Vec<ImportedProfile> {
 }
 
 pub fn import_profiles_from(root: PathBuf, home: &Path) -> Vec<ImportedProfile> {
-    let blocks = parse_config_blocks(root, home);
+    profiles_from_blocks(&parse_config(&root, home).blocks)
+}
 
+pub fn import_report() -> ImportReport {
+    let Some(home) = home_dir() else {
+        // Without a home directory there is no path to have failed at, and the
+        // caller still has to name one. `~/.ssh/config` is the name the button
+        // itself uses, so it is the name the failure uses too.
+        return ImportReport {
+            profiles: Vec::new(),
+            ignored: Vec::new(),
+            source: PathBuf::from("~/.ssh/config"),
+            source_read: false,
+            files_read: 0,
+        };
+    };
+    import_report_from(home.join(".ssh/config"), &home)
+}
+
+pub fn import_report_from(root: PathBuf, home: &Path) -> ImportReport {
+    let parsed = parse_config(&root, home);
+    ImportReport {
+        profiles: profiles_from_blocks(&parsed.blocks),
+        ignored: ignored_options(&parsed.blocks),
+        source: root,
+        source_read: parsed.root_read,
+        files_read: parsed.files_read,
+    }
+}
+
+fn profiles_from_blocks(blocks: &[HostBlock]) -> Vec<ImportedProfile> {
     let mut aliases: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
-    for block in &blocks {
+    for block in blocks {
         for pat in &block.patterns {
             if concrete_host_alias(pat) && seen.insert(pat.clone()) {
                 aliases.push(pat.clone());
@@ -188,7 +256,7 @@ pub fn import_profiles_from(root: PathBuf, home: &Path) -> Vec<ImportedProfile> 
     aliases
         .into_iter()
         .map(|alias| {
-            let resolved = resolve_alias(&alias, &blocks);
+            let resolved = resolve_alias(&alias, blocks);
             let mut profile = ManagedProfile::new(alias.clone());
             profile.group = Some(IMPORTED_GROUP.to_string());
             let proxy_jump = apply_resolved(&mut profile, &alias, resolved);
@@ -216,7 +284,7 @@ pub fn resolve_alias_to_profile_from(
     home: &Path,
     alias: &str,
 ) -> Option<ResolvedAlias> {
-    let blocks = parse_config_blocks(root, home);
+    let blocks = parse_config(&root, home).blocks;
     let matched = blocks.iter().any(|block| block_matches(block, alias));
     let resolved = resolve_alias(alias, &blocks);
     if !matched && resolved.hostname.is_none() {
@@ -262,8 +330,26 @@ fn apply_resolved(profile: &mut ManagedProfile, alias: &str, r: ResolvedHost) ->
     r.proxy_jump
 }
 
+/// What a merge did, in the three counts the person who pressed the button is
+/// owed: a host that arrived, one whose details moved, and one that already
+/// said the right thing.
+///
+/// The third is the one worth having. Importing the same unedited file twice
+/// changes nothing — the suite pins that — and a report that called those
+/// hosts "updated" would be the old silence with a number on it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MergeStats {
+    pub added: usize,
+    pub updated: usize,
+    pub unchanged: usize,
+}
+
 #[allow(dead_code)]
-pub fn merge_imported(existing: &mut Vec<ManagedProfile>, imported: Vec<ImportedProfile>) {
+pub fn merge_imported(
+    existing: &mut Vec<ManagedProfile>,
+    imported: Vec<ImportedProfile>,
+) -> MergeStats {
+    let mut stats = MergeStats::default();
     let mut jump_targets: Vec<(String, String)> = Vec::new();
 
     for entry in imported {
@@ -276,6 +362,20 @@ pub fn merge_imported(existing: &mut Vec<ManagedProfile>, imported: Vec<Imported
         }
         match existing.iter_mut().find(|p| p.name == profile.name) {
             Some(current) => {
+                // Asked before the assignments below, and only about the fields
+                // they write: afterwards every one of them agrees by
+                // construction, so the answer would always be "updated".
+                let changed = current.host != profile.host
+                    || current.port != profile.port
+                    || current.user != profile.user
+                    || current.identity_files != profile.identity_files
+                    || current.proxy_command != profile.proxy_command
+                    || current.agent_forward != profile.agent_forward;
+                if changed {
+                    stats.updated += 1;
+                } else {
+                    stats.unchanged += 1;
+                }
                 current.host = profile.host;
                 current.port = profile.port;
                 current.user = profile.user;
@@ -283,7 +383,10 @@ pub fn merge_imported(existing: &mut Vec<ManagedProfile>, imported: Vec<Imported
                 current.proxy_command = profile.proxy_command;
                 current.agent_forward = profile.agent_forward;
             }
-            None => existing.push(profile),
+            None => {
+                stats.added += 1;
+                existing.push(profile);
+            }
         }
     }
 
@@ -299,6 +402,8 @@ pub fn merge_imported(existing: &mut Vec<ManagedProfile>, imported: Vec<Imported
             profile.jump_host = target_id;
         }
     }
+
+    stats
 }
 
 #[allow(dead_code)]
@@ -312,7 +417,15 @@ fn jump_alias(raw: &str) -> Option<String> {
 
 struct HostBlock {
     patterns: Vec<String>,
-    options: Vec<(String, String)>,
+    options: Vec<ConfigOption>,
+}
+
+/// One `Keyword value` line, kept twice over: `key` is what the resolver
+/// matches on, `spelled` is what the import report shows a human.
+struct ConfigOption {
+    key: String,
+    spelled: String,
+    value: String,
 }
 
 #[derive(Default)]
@@ -338,30 +451,46 @@ struct ResolvedHost {
     forwards: Vec<ForwardRule>,
 }
 
-fn parse_config_blocks(root: PathBuf, home: &Path) -> Vec<HostBlock> {
-    let mut blocks = Vec::new();
-    let mut seen = HashSet::new();
-    parse_config_file(&root, home, 0, &mut blocks, &mut seen);
-    blocks
+struct ParsedConfig {
+    blocks: Vec<HostBlock>,
+    root_read: bool,
+    files_read: usize,
 }
 
+fn parse_config(root: &Path, home: &Path) -> ParsedConfig {
+    let mut blocks = Vec::new();
+    let mut seen = HashSet::new();
+    let mut files_read = 0;
+    let root_read = parse_config_file(root, home, 0, &mut blocks, &mut seen, &mut files_read);
+    ParsedConfig {
+        blocks,
+        root_read,
+        files_read,
+    }
+}
+
+/// Returns whether this file was read, which only the root's answer is worth
+/// anything: an include that resolves to nothing is a normal config, a root
+/// that does not is a failed import.
 fn parse_config_file(
     path: &Path,
     home: &Path,
     depth: usize,
     blocks: &mut Vec<HostBlock>,
     seen: &mut HashSet<PathBuf>,
-) {
+    files_read: &mut usize,
+) -> bool {
     if depth > MAX_INCLUDE_DEPTH || seen.len() >= MAX_CONFIG_FILES {
-        return;
+        return false;
     }
     let path = expand_path(path, home);
     if !seen.insert(path.clone()) {
-        return;
+        return false;
     }
     let Ok(text) = std::fs::read_to_string(&path) else {
-        return;
+        return false;
     };
+    *files_read += 1;
     let base = path.parent().unwrap_or(home).to_path_buf();
 
     let mut current: Option<HostBlock> = None;
@@ -403,11 +532,15 @@ fn parse_config_file(
             }
             for token in split_words(rest) {
                 for include in expand_include(&token, &base, home) {
-                    parse_config_file(&include, home, depth + 1, blocks, seen);
+                    parse_config_file(&include, home, depth + 1, blocks, seen, files_read);
                 }
             }
         } else if !in_match {
-            let opt = (key.to_ascii_lowercase(), rest.to_string());
+            let opt = ConfigOption {
+                key: key.to_ascii_lowercase(),
+                spelled: key.to_string(),
+                value: rest.to_string(),
+            };
             match current.as_mut() {
                 Some(block) => block.options.push(opt),
                 None => global
@@ -426,6 +559,91 @@ fn parse_config_file(
     if let Some(block) = global.take() {
         blocks.push(block);
     }
+    true
+}
+
+/// Group the keywords no `SshProfile` field can hold, by keyword, over the
+/// blocks that name at least one host tty7 is actually importing.
+///
+/// Grouping happens here rather than in `resolve_alias` because `resolve_alias`
+/// runs once per alias: an option set under a pattern that matches ten hosts
+/// would be reported ten times, and the `Host *` block would drag every
+/// keyword in the file into the report for hosts that never set it.
+///
+/// `Host *` and `Match` blocks are left out for the same reason. A shared
+/// config's `SendEnv LANG` at the top is not something the import dropped from
+/// anyone's host; it is a line about hosts tty7 was never asked to import.
+fn ignored_options(blocks: &[HostBlock]) -> Vec<IgnoredOption> {
+    let mut by_keyword: BTreeMap<&str, IgnoredOption> = BTreeMap::new();
+    for block in blocks {
+        let mut hosts: Vec<&String> = block
+            .patterns
+            .iter()
+            .filter(|pat| concrete_host_alias(pat))
+            .collect();
+        if hosts.is_empty() {
+            continue;
+        }
+        hosts.sort();
+        hosts.dedup();
+        for opt in &block.options {
+            if option_is_supported(&opt.key) {
+                continue;
+            }
+            // Keyed on the lowercased form so `IdentityAgent` under one host
+            // and `identityagent` under another are one entry; the spelling
+            // shown is the first one the file uses.
+            by_keyword
+                .entry(&opt.key)
+                .or_insert_with(|| IgnoredOption {
+                    option: opt.spelled.clone(),
+                    hosts: Vec::new(),
+                })
+                .hosts
+                .extend(hosts.iter().map(|host| (*host).clone()));
+        }
+    }
+    by_keyword
+        .into_values()
+        .map(|mut entry| {
+            entry.hosts.sort();
+            entry.hosts.dedup();
+            entry
+        })
+        .collect()
+}
+
+/// The keywords `resolve_alias` below knows how to carry into an `SshProfile`.
+///
+/// A list of its own rather than a second one written out inside
+/// `ignored_options`, because the report and the resolver have to answer the
+/// same question and a hand-copied pair of lists is a thing that drifts.
+/// `every_supported_keyword_is_kept` sets all twenty of these in one config and
+/// fails if any of them comes back in the report as dropped.
+fn option_is_supported(key: &str) -> bool {
+    matches!(
+        key,
+        "hostname"
+            | "user"
+            | "port"
+            | "identityfile"
+            | "proxyjump"
+            | "proxycommand"
+            | "forwardagent"
+            | "connecttimeout"
+            | "serveraliveinterval"
+            | "serveralivecountmax"
+            | "ciphers"
+            | "macs"
+            | "kexalgorithms"
+            | "hostkeyalgorithms"
+            | "compression"
+            | "forwardx11"
+            | "stricthostkeychecking"
+            | "localforward"
+            | "remoteforward"
+            | "dynamicforward"
+    )
 }
 
 fn resolve_alias(alias: &str, blocks: &[HostBlock]) -> ResolvedHost {
@@ -434,7 +652,10 @@ fn resolve_alias(alias: &str, blocks: &[HostBlock]) -> ResolvedHost {
         if !block_matches(block, alias) {
             continue;
         }
-        for (key, val) in &block.options {
+        for ConfigOption {
+            key, value: val, ..
+        } in &block.options
+        {
             match key.as_str() {
                 "hostname" if r.hostname.is_none() => {
                     r.hostname = first_word(val);
@@ -754,7 +975,15 @@ mod tests {
         let prod_id = existing[0].id;
 
         let imported = import_profiles_from(ssh.join("config"), &root);
-        merge_imported(&mut existing, imported);
+        let stats = merge_imported(&mut existing, imported);
+        assert_eq!(
+            stats,
+            MergeStats {
+                added: 1,
+                updated: 1,
+                unchanged: 0
+            }
+        );
 
         assert_eq!(existing.len(), 2);
         let prod = existing.iter().find(|p| p.name == "prod").unwrap();
@@ -769,8 +998,18 @@ mod tests {
 
         let snapshot = existing.clone();
         let imported_again = import_profiles_from(ssh.join("config"), &root);
-        merge_imported(&mut existing, imported_again);
+        let stats = merge_imported(&mut existing, imported_again);
         assert_eq!(existing, snapshot);
+        // The same invariant the line above pins, said in the words the button
+        // reports: a second import of an unedited file updates nothing.
+        assert_eq!(
+            stats,
+            MergeStats {
+                added: 0,
+                updated: 0,
+                unchanged: 2
+            }
+        );
     }
 
     #[test]
@@ -945,6 +1184,117 @@ mod tests {
         let bastion = resolve_alias_to_profile_from(ssh.join("config"), &root, "bastion").unwrap();
         assert_eq!(bastion.profile.host, "jump.example.com");
         assert_eq!(bastion.profile.user, "jumper");
+    }
+
+    #[test]
+    fn report_groups_ignored_options_by_keyword_as_the_file_spells_them() {
+        let root = temp_root("report-ignored");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(
+            ssh.join("config"),
+            concat!(
+                "Host prod web\n",
+                "  HostName 10.0.0.5\n",
+                "  IdentityAgent /run/agent.sock\n",
+                "  CertificateFile ~/.ssh/id-cert.pub\n",
+                "Host db\n",
+                "  identityagent /run/other.sock\n",
+                "  AddKeysToAgent yes\n",
+                "Host *\n",
+                "  SendEnv LANG\n",
+                "Match host prod\n",
+                "  PKCS11Provider /usr/lib/x.so\n",
+            ),
+        )
+        .unwrap();
+
+        let report = import_report_from(ssh.join("config"), &root);
+        assert!(report.source_read);
+        assert_eq!(report.files_read, 1);
+        let ignored: Vec<(&str, Vec<&str>)> = report
+            .ignored
+            .iter()
+            .map(|opt| {
+                (
+                    opt.option.as_str(),
+                    opt.hosts.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ignored,
+            vec![
+                ("AddKeysToAgent", vec!["db"]),
+                ("CertificateFile", vec!["prod", "web"]),
+                // One entry despite the two spellings, under the first of them,
+                // and one entry per host rather than one per `Host` line.
+                ("IdentityAgent", vec!["db", "prod", "web"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_supported_keyword_is_kept() {
+        let root = temp_root("report-supported");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(
+            ssh.join("config"),
+            concat!(
+                "Host everything\n",
+                "  HostName 10.0.0.5\n",
+                "  User deploy\n",
+                "  Port 2222\n",
+                "  IdentityFile ~/.ssh/id_prod\n",
+                "  ProxyJump bastion\n",
+                "  ProxyCommand nc %h %p\n",
+                "  ForwardAgent yes\n",
+                "  ConnectTimeout 15\n",
+                "  ServerAliveInterval 30\n",
+                "  ServerAliveCountMax 4\n",
+                "  Ciphers aes256-ctr\n",
+                "  MACs hmac-sha2-256\n",
+                "  KexAlgorithms curve25519-sha256\n",
+                "  HostKeyAlgorithms ssh-ed25519\n",
+                "  Compression yes\n",
+                "  ForwardX11 no\n",
+                "  StrictHostKeyChecking no\n",
+                "  LocalForward 8080 localhost:80\n",
+                "  RemoteForward 9000 127.0.0.1:3000\n",
+                "  DynamicForward 1080\n",
+            ),
+        )
+        .unwrap();
+
+        let report = import_report_from(ssh.join("config"), &root);
+        assert_eq!(report.ignored, Vec::new());
+    }
+
+    #[test]
+    fn report_says_when_the_root_config_could_not_be_read() {
+        let root = temp_root("report-missing");
+        let missing = root.join(".ssh/config");
+
+        let report = import_report_from(missing.clone(), &root);
+        assert_eq!(report.source, missing);
+        assert!(!report.source_read);
+        assert_eq!(report.files_read, 0);
+        assert!(report.profiles.is_empty());
+    }
+
+    #[test]
+    fn a_wildcard_only_config_was_still_read() {
+        let root = temp_root("report-wildcard");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(ssh.join("config"), "Host *\n  User fallback\n").unwrap();
+
+        let report = import_report_from(ssh.join("config"), &root);
+        assert!(report.source_read);
+        assert_eq!(report.files_read, 1);
+        assert!(report.profiles.is_empty());
+        assert!(report.ignored.is_empty());
     }
 
     fn temp_root(name: &str) -> PathBuf {

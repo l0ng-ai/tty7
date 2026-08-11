@@ -179,6 +179,10 @@ pub struct RemoteTerminal {
     auth_prompts: Arc<Mutex<VecDeque<(u64, AuthPromptKind)>>>,
     ssh_phase: Arc<Mutex<Option<SshPhase>>>,
     ssh_endpoint: Option<(String, u16)>,
+    /// The account the SSH connection authenticates as. `ssh_endpoint` is what
+    /// the disconnect strip and the forward sheet need; the keychain files a
+    /// password under the user as well, so the auth sheet needs this too.
+    ssh_user: Option<String>,
     auto_supplied_password: bool,
     agent: Arc<Mutex<Option<CLIAgent>>>,
     agent_session: Arc<Mutex<Option<AgentSessionState>>>,
@@ -551,6 +555,7 @@ impl RemoteTerminal {
             auth_prompts,
             ssh_phase,
             ssh_endpoint: None,
+            ssh_user: None,
             auto_supplied_password: false,
             agent,
             agent_session,
@@ -1325,6 +1330,7 @@ impl RemoteTerminal {
         let mut stream = connect()?;
         let win = win_size(size, cell_w, cell_h);
         let endpoint = (spec.host.clone(), spec.port);
+        let user = spec.user.clone();
         let auto_supplied_password = spec.password.is_some();
 
         ClientMsg::SpawnNativeSsh {
@@ -1347,6 +1353,7 @@ impl RemoteTerminal {
 
         let mut term = Self::from_stream(stream, size)?;
         term.ssh_endpoint = Some(endpoint);
+        term.ssh_user = Some(user);
         term.auto_supplied_password = auto_supplied_password;
         Ok((term, pane_id))
     }
@@ -1381,6 +1388,10 @@ impl RemoteTerminal {
 
     pub fn ssh_endpoint(&self) -> Option<(String, u16)> {
         self.ssh_endpoint.clone()
+    }
+
+    pub fn ssh_user(&self) -> Option<String> {
+        self.ssh_user.clone()
     }
 
     pub fn auto_supplied_password(&self) -> bool {
@@ -1478,21 +1489,26 @@ impl RemoteTerminal {
         query(job_id).unwrap_or_default()
     }
 
-    pub fn sftp_transfer_list(pane_id: u64) -> Vec<SftpJobProgress> {
-        fn query(pane_id: u64) -> anyhow::Result<Vec<SftpJobProgress>> {
+    /// A failed poll is not an empty transfer list: the caller has to be able
+    /// to keep the jobs it already knows about, so this reports the failure
+    /// the way `sftp_list` does rather than answering with an empty `Vec`.
+    pub fn sftp_transfer_list(pane_id: u64) -> Result<Vec<SftpJobProgress>, String> {
+        fn query(pane_id: u64) -> anyhow::Result<Result<Vec<SftpJobProgress>, String>> {
             let mut stream = connect()?;
             ClientMsg::SftpTransferList { pane_id }.encode(&mut stream)?;
-            match DaemonMsg::read(&mut stream)? {
+            Ok(match DaemonMsg::read(&mut stream)? {
                 DaemonMsg::SftpTransferProgress(jobs) => Ok(jobs),
-                other => Err(anyhow::anyhow!(
-                    "unexpected reply to SftpTransferList: {other:?}"
-                )),
-            }
+                DaemonMsg::Error(msg) => Err(msg),
+                other => Err(format!("unexpected reply to SftpTransferList: {other:?}")),
+            })
         }
-        query(pane_id).unwrap_or_default()
+        query(pane_id).unwrap_or_else(|e| Err(e.to_string()))
     }
 
-    pub fn add_forward(pane_id: u64, rule: SshForwardRule) -> Vec<ManagedForward> {
+    /// `None` when the request never got a list back — which is not the same
+    /// as getting an empty one, because only the caller of a *failed* request
+    /// still has to keep showing what it had.
+    pub fn add_forward(pane_id: u64, rule: SshForwardRule) -> Option<Vec<ManagedForward>> {
         fn query(pane_id: u64, rule: SshForwardRule) -> anyhow::Result<Vec<ManagedForward>> {
             let mut stream = connect()?;
             ClientMsg::AddForward { pane_id, rule }.encode(&mut stream)?;
@@ -1502,10 +1518,13 @@ impl RemoteTerminal {
                 other => Err(anyhow::anyhow!("unexpected reply to AddForward: {other:?}")),
             }
         }
-        query(pane_id, rule).unwrap_or_default()
+        query(pane_id, rule)
+            .inspect_err(|e| log::warn!("AddForward failed: {e}"))
+            .ok()
     }
 
-    pub fn remove_forward(pane_id: u64, forward_id: u64) -> Vec<ManagedForward> {
+    /// `None` when the request never got a list back — see `add_forward`.
+    pub fn remove_forward(pane_id: u64, forward_id: u64) -> Option<Vec<ManagedForward>> {
         fn query(pane_id: u64, forward_id: u64) -> anyhow::Result<Vec<ManagedForward>> {
             let mut stream = connect()?;
             ClientMsg::RemoveForward {
@@ -1520,7 +1539,9 @@ impl RemoteTerminal {
                 )),
             }
         }
-        query(pane_id, forward_id).unwrap_or_default()
+        query(pane_id, forward_id)
+            .inspect_err(|e| log::warn!("RemoveForward failed: {e}"))
+            .ok()
     }
 
     pub fn list_forwards(pane_id: u64) -> Vec<ManagedForward> {

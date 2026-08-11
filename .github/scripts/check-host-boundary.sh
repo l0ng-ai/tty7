@@ -58,6 +58,7 @@ src/ui/app.rs|std::fs::create_dir_all
 # sees the file, only the resulting auth.
 src/ui/ssh_prompt.rs|std::fs::read
 src/ui/ssh_connect.rs|std::fs::read
+src/ui/settings.rs|std::fs::read
 
 # Shell history lives in the local user's home (`~/.zsh_history` &co.) and backs
 # this app's own history search. A remote pane's history is the remote shell's

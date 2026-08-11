@@ -540,17 +540,47 @@ pub enum AuthPromptKind {
     KeyPassphrase {
         key_path: String,
         comment: String,
+        /// The connection already had a passphrase for this key and the key
+        /// would not decrypt with it, so the one the user is about to type
+        /// replaces a stored secret rather than adding a first one. Only the
+        /// daemon can know this — the client sees a passphrase prompt and
+        /// cannot tell a first ask from a second — and without it a wrong
+        /// "remember" bricks the key for every later connection.
+        ///
+        /// `#[serde(default)]`, and deliberately not a `PROTOCOL_VERSION`
+        /// bump: an older peer on either side of this field simply never sets
+        /// it, and serde ignores fields it does not know, so the flag is
+        /// compatible in both directions across daemon↔GUI and GUI↔remote
+        /// `tty7-server`.
+        #[serde(default)]
+        rejected: bool,
     },
     KeyboardInteractive {
         name: String,
         instructions: String,
         prompts: Vec<KiPrompt>,
+        /// The round that just failed was answered with the stored password
+        /// rather than by the user, so this prompt exists to replace it. Same
+        /// compatibility reasoning as `KeyPassphrase::rejected` above.
+        #[serde(default)]
+        stored_rejected: bool,
     },
     HostKeyUnknown {
         host: String,
         port: u16,
         algorithm: String,
         fingerprint_sha256: String,
+        /// The algorithm this host is already on file under, when the key is
+        /// new only because its algorithm is.
+        ///
+        /// A field rather than a variant of its own on purpose. This enum is
+        /// externally tagged and travels both to the GUI and to the remote
+        /// `tty7-server`, either of which may be an older build; an unknown
+        /// variant fails the whole decode, while an unknown field is ignored
+        /// and a missing one defaults. So an old peer shows the plain
+        /// unknown-host confirmation, which is the right prompt either way.
+        #[serde(default)]
+        previously_known_as: Option<String>,
     },
     HostKeyChanged {
         host: String,
@@ -1935,6 +1965,28 @@ mod tests {
         assert_eq!(info.title, "");
     }
 
+    /// The reason `previously_known_as` is a field and not a variant: this
+    /// prompt is decoded by whatever GUI or `tty7-server` is at the other end,
+    /// and one of them is regularly older than the build that sent it. A
+    /// missing field defaults; an unknown variant would fail the whole frame.
+    #[test]
+    fn an_unknown_host_prompt_from_an_older_peer_still_decodes() {
+        let prompt: AuthPromptKind = serde_json::from_str(
+            r#"{"HostKeyUnknown":{"host":"h","port":22,"algorithm":"ssh-ed25519","fingerprint_sha256":"SHA256:x"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            prompt,
+            AuthPromptKind::HostKeyUnknown {
+                host: "h".into(),
+                port: 22,
+                algorithm: "ssh-ed25519".into(),
+                fingerprint_sha256: "SHA256:x".into(),
+                previously_known_as: None,
+            }
+        );
+    }
+
     fn sample_native_spec() -> NativeSshSpec {
         let mut passphrases = std::collections::HashMap::new();
         passphrases.insert("~/.ssh/id_ed25519".to_string(), "topsecret".to_string());
@@ -2160,6 +2212,15 @@ mod tests {
                         text: "Code:".into(),
                         echo: true,
                     }],
+                    stored_rejected: true,
+                },
+            },
+            DaemonMsg::AuthPrompt {
+                request_id: 3,
+                prompt: AuthPromptKind::KeyPassphrase {
+                    key_path: "~/.ssh/id_ed25519".into(),
+                    comment: String::new(),
+                    rejected: true,
                 },
             },
             DaemonMsg::SshStatus {
@@ -2176,6 +2237,74 @@ mod tests {
         for m in &daemon_msgs {
             assert_eq!(*m, DaemonMsg::read(&mut cur).unwrap());
         }
+    }
+
+    /// `rejected` rides on a struct variant of an externally tagged enum that
+    /// crosses both daemon↔GUI and GUI↔remote `tty7-server`, so it has to
+    /// survive a peer that predates it in *either* direction. That is why
+    /// `PROTOCOL_VERSION` did not move for it: the remote handshake gates on
+    /// it, and bumping would turn every older server away over a field it can
+    /// safely ignore.
+    #[test]
+    fn a_rejected_passphrase_flag_decodes_from_a_peer_that_never_sends_it() {
+        let old = r#"{"KeyPassphrase":{"key_path":"~/.ssh/id_ed25519","comment":""}}"#;
+        assert_eq!(
+            serde_json::from_str::<AuthPromptKind>(old).unwrap(),
+            AuthPromptKind::KeyPassphrase {
+                key_path: "~/.ssh/id_ed25519".into(),
+                comment: String::new(),
+                rejected: false,
+            }
+        );
+
+        // The other direction: a peer that predates the flag is handed one
+        // set, and must read the prompt rather than reject the frame.
+        let new = serde_json::to_string(&AuthPromptKind::KeyPassphrase {
+            key_path: "/k".into(),
+            comment: "work laptop".into(),
+            rejected: true,
+        })
+        .unwrap();
+        #[derive(Deserialize)]
+        enum LegacyPromptKind {
+            KeyPassphrase { key_path: String, comment: String },
+        }
+        let LegacyPromptKind::KeyPassphrase { key_path, comment } =
+            serde_json::from_str::<LegacyPromptKind>(&new).unwrap();
+        assert_eq!(key_path, "/k");
+        assert_eq!(comment, "work laptop");
+    }
+
+    /// `stored_rejected` gets the same treatment as `rejected` above, for the
+    /// same reason and with the same `PROTOCOL_VERSION` left alone.
+    #[test]
+    fn a_stored_rejected_flag_decodes_from_a_peer_that_never_sends_it() {
+        let old = r#"{"KeyboardInteractive":{"name":"2FA","instructions":"","prompts":[]}}"#;
+        assert_eq!(
+            serde_json::from_str::<AuthPromptKind>(old).unwrap(),
+            AuthPromptKind::KeyboardInteractive {
+                name: "2FA".into(),
+                instructions: String::new(),
+                prompts: vec![],
+                stored_rejected: false,
+            }
+        );
+
+        let new = serde_json::to_string(&AuthPromptKind::KeyboardInteractive {
+            name: "2FA".into(),
+            instructions: "code".into(),
+            prompts: vec![],
+            stored_rejected: true,
+        })
+        .unwrap();
+        #[derive(Deserialize)]
+        enum LegacyPromptKind {
+            KeyboardInteractive { name: String, instructions: String },
+        }
+        let LegacyPromptKind::KeyboardInteractive { name, instructions } =
+            serde_json::from_str::<LegacyPromptKind>(&new).unwrap();
+        assert_eq!(name, "2FA");
+        assert_eq!(instructions, "code");
     }
 
     #[test]
