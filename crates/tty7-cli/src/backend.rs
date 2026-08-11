@@ -90,6 +90,10 @@ pub mod mock {
         pub capture_segments: Vec<CaptureSegment>,
         pub procs_calls: Vec<u64>,
         pub procs_reply: PaneProcs,
+        /// Consumed one per call before falling back to `procs_reply`, so a
+        /// test can script a pane going busy and then quiet again — which is
+        /// the whole of what `wait --until free` watches for.
+        pub procs_replies: VecDeque<PaneProcs>,
         pub agent_hooks_states: Vec<(HookAgent, HooksState)>,
         pub registry: Vec<PaneInfo>,
         pub killed: Vec<u64>,
@@ -112,6 +116,7 @@ pub mod mock {
                 capture_segments: Vec::new(),
                 procs_calls: Vec::new(),
                 procs_reply: PaneProcs::default(),
+                procs_replies: VecDeque::new(),
                 agent_hooks_states: Vec::new(),
                 registry: Vec::new(),
                 killed: Vec::new(),
@@ -173,7 +178,10 @@ pub mod mock {
 
         fn procs(&mut self, pane: u64) -> Result<PaneProcs> {
             self.procs_calls.push(pane);
-            Ok(self.procs_reply.clone())
+            Ok(self
+                .procs_replies
+                .pop_front()
+                .unwrap_or_else(|| self.procs_reply.clone()))
         }
 
         fn agent_hooks_state(&mut self, agent: HookAgent) -> Option<HooksState> {

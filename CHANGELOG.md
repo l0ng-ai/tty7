@@ -63,7 +63,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A pane's shell is recorded alongside, so a git bash pane no longer comes
   back as PowerShell.
 
+- **`tty7 wait` can wait for a command, not just an agent** — a new `free`
+  state ends the wait when the pane's foreground command has exited and the
+  pane is back to its bare shell, which is what a `cargo test` running in a
+  pane has instead of an agent status. With `--changed` it means "something ran
+  and then finished", the shape you want on the line after a `send`. It costs a
+  second request per poll and so is only checked when you name it — and only
+  when none of the agent states you named answered first, so `waiting,done,free`
+  on a pane of unknown kind cannot lose you a `waiting`.
+
+- **`tty7 send --key` presses keys instead of typing characters** — `C-c` to
+  stop a runaway build, `escape` to close a TUI, `up`/`down`/`enter` to answer
+  a permission prompt that takes no text. Repeatable for a sequence, composable
+  with `TEXT`, and delivered as separate events 200 ms apart so a raw-mode TUI
+  reads a sequence as a sequence rather than as a paste. An unknown key name is
+  a usage error raised before anything is written.
+
+- **`tty7 pane close` takes several panes, and `--orphans` clears the lot** —
+  `pane ls --all` has been able to *show* the panes an interrupted `run` leaves
+  behind; there was no way to act on that except by reading ids off the table
+  one at a time. A pane that cannot be closed no longer abandons the rest of
+  the batch.
+
+- **`tty7 doctor` reports where the agent status hooks stand** — it has claimed
+  to check hooks in its own `--help` for a while without doing so. Missing or
+  outdated hooks are why an agent can look frozen in `tty7 agents` and why
+  `tty7 wait` on it only ever times out, so the check belongs in the verb
+  people run when something is not working.
+
+- **SSH probes the `~/.ssh` default identity keys** — a connection with no
+  identity file of its own used to offer the server nothing unless an agent
+  was running, which on Windows is the common case (the OpenSSH
+  Authentication Agent service is off by default), and then reported "no
+  public key was accepted" when no key had ever been sent. `id_ed25519`,
+  `id_ecdsa` and `id_rsa` are now offered after the connection's own files
+  and before the agent, OpenSSH-style, deduplicated against the explicit list
+  by canonical path so one key spelled two ways is offered once — every offer
+  spends one of the server's `MaxAuthTries`. A discovered key that is
+  encrypted is used only when its passphrase is already in the OS keychain:
+  russh has no offer-without-signing probe, so asking would spend a prompt on
+  a key the server may not even want. A key named in the profile still asks,
+  as before. The failure text now separates the two situations the old line
+  papered over — keys the server rejected are named, and a round that offered
+  nothing says where it looked. (#484)
+
+### Changed
+
+- **`tty7 pane close --json` now reports `{"closed": [ids]}`** rather than a
+  single `{"closed": id}`, because the verb takes more than one pane. A batch
+  that could not close everything exits 1 with `{"closed": […], "failed": […]}`
+  and the complaint on stderr, so a retry knows what is left.
+
 ### Fixed
+
+- **`tty7 wait` no longer calls a busy shell `idle`** — a pane with nothing
+  reporting agent status was reported as `idle`, so `tty7 wait %3 --until idle`
+  returned success immediately, `matched: true`, about a pane that was midway
+  through a build. Those panes now report `no-agent`, which is both true and
+  the signal to use `--until free` instead; a wait that times out there says so.
 
 - **Deleting an SSH profile no longer strands its remote workspaces** — the
   switcher kept every entry that had connected through the profile, labelled

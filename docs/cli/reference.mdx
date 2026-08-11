@@ -91,12 +91,30 @@ in the same cwd. Exactly one axis is required — `--v`/`--vertical` puts the ne
 pane below, `--h`/`--horizontal` to the right. `--ratio` (default `0.5`) is the
 share kept by the *existing* pane. Prints `%NN`. JSON: `{"pane"}`.
 
-### `tty7 send [%PANE] TEXT [--enter]`
+### `tty7 send [%PANE] [TEXT] [--enter] [--key KEY]…`
 
 Types `TEXT` into the pane as keystrokes; `--enter` appends CR. With one
 argument the text is the argument and the pane comes from `$TTY7_PANE` — but a
-lone `%42` is rejected as a missing-text error rather than typed.
-JSON: `{"pane","sent","enter"}`.
+lone `%42` is rejected as a missing-text error rather than typed, unless a
+`--key` gives it something to do.
+
+`--key` presses a key instead of typing characters, which is what a pane wants
+once something is already running in it: answering a prompt that only takes
+arrow keys, closing a TUI with `escape`, stopping a build with `C-c`. Repeat it
+for a sequence, and it composes with `TEXT` — the text goes first.
+
+| | |
+|---|---|
+| Named | `enter` `escape` `tab` `backtab` `space` `backspace` `delete` `up` `down` `right` `left` `home` `end` `pageup` `pagedown` |
+| Chords | `C-<char>` (Ctrl, e.g. `C-c`), `M-<char>` (Alt) |
+| Aliases | `return` `cr` `esc` `del` `bs` `shift-tab` `pgup` `pgdn` |
+
+Names are case-insensitive, and an unknown one is a usage error (exit `2`)
+raised before anything is sent — half a key sequence in a live pane is worse
+than none. Each keystroke is delivered as its own event, 200 ms apart, so a
+raw-mode TUI reads a sequence as a sequence rather than as a paste.
+
+JSON: `{"pane","sent","enter","keys"}`.
 
 ### `tty7 capture [%PANE] [--plain] [--scrollback]`
 
@@ -132,14 +150,31 @@ a status that never moves.
 
 ### `tty7 wait [%PANE] [--until STATE,…] [--changed] [--timeout SECS] [--interval MS]`
 
-Blocks until the pane's agent reaches one of the named states.
+Blocks until the pane reaches one of the named states.
 
 | Flag | Default | |
 |---|---|---|
-| `--until` | `waiting,done,exit` | `idle`, `working`, `waiting`, `done`, `exit` |
+| `--until` | `waiting,done,exit` | See the state table below |
 | `--changed` | off | Only wake on a state the pane moved into *after* the wait began |
 | `--timeout` | none | Give up after N seconds, exiting `124` |
 | `--interval` | `500` | Poll interval in ms (50–3,600,000) |
+
+The states come from two places. Four are the agent's own status, as reported
+by its [hooks](/agents/status); the last three are facts about the pane:
+
+| State | Means |
+|---|---|
+| `idle` `working` `waiting` `done` | The agent's status |
+| `no-agent` | Nothing is reporting status here — a plain shell, or an agent whose hooks are not installed |
+| `free` | The foreground command has exited; the pane is back to its bare shell |
+| `exit` | The pane itself is gone. Ends every wait whether it was asked for or not |
+
+`free` is how you wait for a **command** rather than an agent, and it is the
+one state that costs a second request per poll — so it is only checked when you
+name it, and only when none of the agent states you asked for already matched.
+With `--changed` it means "something ran and then finished", which is what you
+want directly after a `send`; a command quick enough to finish inside one
+`--interval` is never seen running, and the timeout says so.
 
 The reply carries the agent's message and native session id. The JSON's `stale`
 flag says whether the answer might belong to the previous turn.
@@ -161,11 +196,18 @@ socket path. JSON is the `ServerStatus` object itself (`pid`, `uptime_secs`,
 
 The install check: the three environment variables, whether the server answers,
 whether its control and protocol versions match this binary, pid/uptime/panes,
-and how many machine links exist. Adds a note when you are not inside a tty7
-shell.
+how many machine links exist, and where each agent's
+[status hooks](/agents/status) stand. Adds a note when you are not inside a
+tty7 shell.
 
-JSON: `{"context":{"config_dir","workspace","pane"},"server":{"reachable","dialect_ok","build","status","routes"}}`
-— the context fields are booleans, not values.
+The hooks row is the one that explains a mystery: without them an agent reports
+nothing, so `tty7 agents` shows it standing still and `tty7 wait` sits there
+until it times out. Outdated hooks fail the same quiet way. Hooks are a local
+install, so under `-m` the row reads `unknown`.
+
+JSON: `{"context":{"config_dir","workspace","pane"},"server":{"reachable","dialect_ok","build","status","routes"},"hooks":{"installed","outdated","not_installed"}}`
+— the context fields are booleans, not values, and each `hooks` field is a list
+of agent slugs.
 
 ## `ws` — workspaces
 
@@ -226,12 +268,27 @@ a stand-in.
 | `pane ls [WORKSPACE]` | Panes with their workspace, tab, cwd, live flag | `{"panes":[…]}` |
 | `pane ls --all` | The server's whole pane registry, including orphans | `{"panes":[…],"orphans":N}` |
 | `pane split …` | Identical to top-level `split` | `{"pane"}` |
-| `pane close [%PANE]` | Close the pane; its shell is hung up | `{"closed"}` |
+| `pane close [%PANE…]` | Close panes; their shells are hung up | `{"closed":[…]}` |
+| `pane close --orphans` | Close every pane no workspace holds | `{"closed":[…]}` |
 
 `--all` is the one that shows leaks. Each entry is
 `{"pane","workspace","orphan","owner","title","cwd","live"}`: `owner` is the id
 of the workspace that owns the pane, and `orphan: true` means no workspace holds
 it. An interrupted `run` and a removed workspace both leave orphans here.
+
+`--orphans` is the reaper for exactly those. It closes what `pane ls --all`
+lists as orphaned and nothing else — panes a workspace holds are untouched —
+and reports an empty list rather than an error when there is nothing to clean
+up, so a script does not have to guard it. A pane that cannot be closed does
+not abandon the rest of the batch: the rest are still attempted, the complaint
+goes to stderr, and the verb exits 1 with `{"closed":[…],"failed":[…]}` — the
+list a retry needs.
+
+<Warning>
+  `--orphans` closes every orphan on the machine, and an orphan can still be
+  doing real work — an interrupted `run` leaves the command running. Look at
+  `pane ls --all` first.
+</Warning>
 
 `title` is usually the running command — `claude`, `nvim`, `cargo` — which makes
 `pane ls --all --json` a quick way to find "the pane running X".

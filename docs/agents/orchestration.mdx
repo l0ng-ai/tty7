@@ -34,11 +34,11 @@ That is the whole shape. The interesting step is the third.
 tty7 wait [%PANE] [--until STATE,…] [--changed] [--timeout SECS] [--interval MS]
 ```
 
-Blocks until the pane's agent reaches one of the states you named.
+Blocks until the pane reaches one of the states you named.
 
 | Flag | Default | |
 |---|---|---|
-| `--until` | `waiting,done,exit` | Which states end the wait: `idle`, `working`, `waiting`, `done`, `exit` |
+| `--until` | `waiting,done,exit` | Which states end the wait — see below |
 | `--changed` | off | Ignore the state the pane was *already* in — only wake on one it moved into after the wait began |
 | `--timeout` | none | Give up after this many seconds, exiting 124 |
 | `--interval` | 500 ms | How often to poll |
@@ -54,6 +54,48 @@ Exit codes are made for scripts:
 The reply carries the agent's own message and its native session id, so a
 wake-up is directly actionable.
 
+### The states
+
+Four of them are the agent's own [status](/agents/status). The other three are
+about the pane, because not everything worth waiting on is an agent:
+
+| State | Means |
+|---|---|
+| `idle` `working` `waiting` `done` | What the agent's hooks last reported |
+| `no-agent` | Nothing reports status in this pane — a plain shell, or an agent whose hooks are missing |
+| `free` | The foreground command has exited; the pane is back to its bare shell |
+| `exit` | The pane is gone. Ends every wait, whether you asked for it or not |
+
+### Waiting on a command instead of an agent
+
+An agent says when it is done. A `cargo test` does not — so for a plain pane the
+question is whether anything is still running in front of the shell, which is
+what `free` answers:
+
+```bash
+tty7 send "$PANE" 'cargo test > /tmp/t.log 2>&1; echo $? > /tmp/t.rc' --enter
+tty7 wait "$PANE" --until free --changed --timeout 900
+cat /tmp/t.rc /tmp/t.log
+```
+
+`free` costs one extra request per poll, so it is only checked when you name it —
+and only once the agent ladder has not already answered, so pairing it with
+`waiting,done` never costs you a state you asked for.
+
+<Warning>
+  `free` is read off the process tree, which has two blind spots. A pane whose
+  own root process *is* the command — what `tty7 run` spawns — looks free the
+  whole time it runs; wait on `tty7 run` itself instead, it already blocks. And
+  a backgrounded job (`… &`) keeps the pane busy after the foreground command
+  has finished.
+</Warning>
+
+<Note>
+  A pane with no agent reports `no-agent`, **not** `idle`. That distinction is
+  why `--until idle` cannot be used to mean "the command finished" — `idle` is a
+  thing an agent says about itself, and a busy shell never says it.
+</Note>
+
 ### Why `--changed` matters
 
 The status the server keeps is a **level, not an event**. `done` stands until
@@ -63,6 +105,43 @@ So a `wait` issued immediately after a `send` can answer with the *previous*
 turn's state, before the worker has even read the input. `--changed` refuses the
 state the pane was already in, which is what every round after the first needs.
 Without it, the JSON's `stale` flag tells you whether that happened.
+
+`free` has the same problem and a different fix: a shell that goes free → busy →
+free ends up where it started, so there is no new state to compare against.
+There `--changed` means "something ran while I was watching", which is exactly
+what you want in the line after a `send`.
+
+That does mean a command which starts *and* finishes between two polls is never
+seen running, and the wait sits there until it times out. If the thing you are
+waiting on can be that quick, poll faster (`--interval 100`) or drop `--changed`
+and let a sentinel file carry the answer. The timeout says as much when it
+happens.
+
+## Answering a prompt
+
+A worker that stops at `waiting` is usually showing something that keystrokes,
+not text, are the answer to — a permission prompt driven by the arrow keys, a
+menu, a TUI to be dismissed. `send --key` presses keys:
+
+```bash
+tty7 wait "$PANE" --until waiting --changed   # it needs something
+tty7 capture "$PANE" --plain | tail -20       # see what it is asking
+tty7 send "$PANE" --key down --key enter      # answer it
+tty7 send "$PANE" --key C-c                   # or stop it altogether
+```
+
+Keys are delivered as separate events 200 ms apart, so a raw-mode TUI reads a
+sequence as a sequence rather than as a paste. The
+[full vocabulary](/cli/reference#tty7-send-pane-text-enter-key-key) is in the
+reference.
+
+## When an agent never moves
+
+If `tty7 wait` times out and `tty7 agents` shows a status that never changes,
+the likely cause is that the agent's status hooks are not installed or are out
+of date — the agent is working fine, it just has no way to say so. `tty7 doctor`
+reports where every agent's hooks stand, and `tty7 agents` names the specific
+one when it can see the gap.
 
 ## Watching everything at once
 
@@ -103,5 +182,9 @@ never touches another pane pays nothing for it.
 - **Never `server stop` or `server restart`.** Every pane on the machine dies
   with it.
 - **Clean up what you did create** — `tty7 pane close %83` when you are done.
+  An interrupted `run` leaves its pane behind; `tty7 pane ls --all` shows those,
+  and `tty7 pane close --orphans` clears them. That last one is a human's
+  broom, not an agent's: it closes every orphan on the machine, including ones
+  somebody else abandoned mid-command.
 
 The full agent-facing contract is in [the skill](/cli/agent-skill).
