@@ -1,0 +1,103 @@
+---
+title: "Keyboard shortcuts"
+description: "Every default binding, plus the action names for rebinding."
+---
+
+**Settings → Keybindings** (<kbd>⌘ ,</kbd>) is the live version of this page —
+it shows what *your* copy is bound to. This is the shipped default.
+
+## Tabs and workspaces
+
+| Action | macOS | Windows / Linux |
+|---|---|---|
+| New Tab | <kbd>⌘ T</kbd> | <kbd>Ctrl ⇧ T</kbd> |
+| Close Pane / Tab | <kbd>⌘ W</kbd> | <kbd>Ctrl ⇧ W</kbd> |
+| Reopen Closed Tab | <kbd>⌘ ⇧ T</kbd> | <kbd>Alt ⇧ T</kbd> |
+| Next Tab · Previous Tab | <kbd>⌃ ⇥</kbd> · <kbd>⌃ ⇧ ⇥</kbd> | same |
+| Go to Tab 1–9 | <kbd>⌘ 1</kbd>…<kbd>⌘ 9</kbd> | <kbd>Alt 1</kbd>…<kbd>Alt 9</kbd> |
+| New Workspace | <kbd>⌘ ⇧ N</kbd> | <kbd>Ctrl ⇧ N</kbd> |
+| Switch Workspace | <kbd>⌘ ⇧ O</kbd> | <kbd>Ctrl ⇧ O</kbd> |
+
+## Panes
+
+| Action | macOS | Windows / Linux |
+|---|---|---|
+| Split Right | <kbd>⌘ D</kbd> | <kbd>Ctrl ⇧ D</kbd> |
+| Split Down | <kbd>⌘ ⇧ D</kbd> | <kbd>Ctrl Alt ⇧ D</kbd> |
+| Next Pane · Previous Pane | <kbd>⌘ ]</kbd> · <kbd>⌘ [</kbd> | <kbd>Ctrl ⇧ ]</kbd> · <kbd>Ctrl ⇧ [</kbd> |
+| Focus Pane Left / Right / Up / Down | <kbd>⌘ ⌥ ←→↑↓</kbd> | <kbd>Alt ←→↑↓</kbd> |
+| Zoom Pane | <kbd>⌘ ⇧ ⏎</kbd> | <kbd>Ctrl ⇧ ⏎</kbd> |
+| Enter Full Screen | <kbd>⌘ ⏎</kbd> | <kbd>F11</kbd> |
+
+## View
+
+| Action | macOS | Windows / Linux |
+|---|---|---|
+| Command Palette | <kbd>⌘ P</kbd> | <kbd>Ctrl ⇧ P</kbd> |
+| Toggle Left Sidebar | <kbd>⌘ B</kbd> | <kbd>Ctrl ⇧ B</kbd> |
+| Toggle Right Panel | <kbd>⌘ J</kbd> | <kbd>Ctrl ⇧ J</kbd> |
+| Toggle Code Panel | <kbd>⌘ ⇧ E</kbd> | <kbd>Ctrl ⇧ E</kbd> |
+| Font Size Up · Down · Reset | <kbd>⌘ +</kbd> · <kbd>⌘ −</kbd> · <kbd>⌘ 0</kbd> | <kbd>Ctrl +</kbd> · <kbd>Ctrl −</kbd> · <kbd>Ctrl 0</kbd> |
+| Zoom the font | <kbd>⌘</kbd> + wheel | <kbd>Ctrl</kbd> + wheel |
+
+## Terminal
+
+| Action | macOS | Windows / Linux |
+|---|---|---|
+| Find in Terminal | <kbd>⌘ F</kbd> | <kbd>Ctrl ⇧ F</kbd> |
+| Find Next · Previous | <kbd>⌘ G</kbd> · <kbd>⌘ ⇧ G</kbd> | <kbd>F3</kbd> · <kbd>⇧ F3</kbd> |
+| Clear Scrollback | <kbd>⌘ K</kbd> | <kbd>Ctrl ⇧ K</kbd> |
+| Copy · Paste | <kbd>⌘ C</kbd> · <kbd>⌘ V</kbd> | <kbd>Ctrl ⇧ C</kbd> · <kbd>Ctrl ⇧ V</kbd> · <kbd>⇧ Insert</kbd> |
+| Insert Newline (at the prompt) | <kbd>⇧ ⏎</kbd> · <kbd>⌥ ⏎</kbd> | same |
+| Fuzzy history search | <kbd>⌃ R</kbd> | same |
+| Accept ghost suggestion | <kbd>→</kbd> | same |
+| Completion menu | <kbd>⇥</kbd> | same |
+
+## Git and SSH
+
+| Action | macOS | Windows / Linux |
+|---|---|---|
+| Commit (caret in the message box) | <kbd>⌘ ⏎</kbd> | <kbd>Ctrl ⏎</kbd> |
+| Save (in the editor) | <kbd>⌘ S</kbd> | <kbd>Ctrl S</kbd> |
+| Restart SSH Session | <kbd>⌘ ⇧ R</kbd> | <kbd>Ctrl ⇧ R</kbd> |
+
+## Application
+
+| Action | macOS | Windows / Linux |
+|---|---|---|
+| Settings | <kbd>⌘ ,</kbd> | <kbd>Ctrl ,</kbd> |
+| Keyboard Shortcuts | <kbd>⌘ /</kbd> | — |
+| Hide tty7 · Hide Others · Minimize | <kbd>⌘ H</kbd> · <kbd>⌘ ⌥ H</kbd> · <kbd>⌘ M</kbd> | — |
+| Quit | <kbd>⌘ Q</kbd> | <kbd>Ctrl ⇧ Q</kbd> |
+
+## Actions with no default key
+
+All of these are in the command palette, and all are bindable under **Settings →
+Keybindings**:
+
+| Group | Actions |
+|---|---|
+| Tabs | `RenameTab` · `NewWorktreeTab` · `CloseOtherTabs` · `CloseTabsToTheRight` · `CopyWorkingDirectory` · `MarkTabUnread` · `ToggleTabSidebar` |
+| Panes | `ResizePaneLeft/Right/Up/Down` · `SwapPaneNext` · `SwapPanePrev` |
+| Workspaces | `SelectWorkspace1`…`SelectWorkspace9` · `RenameWorkspace` · `StopWorkspace` · `DeleteWorkspace` |
+| Agents | `ForkAgentSession` (+ `Right` / `Left` / `Down` / `Up`) · `CopyAgentSessionId` |
+| Git | `ScmStageAll` · `ScmUnstageAll` · `ScmDiscardAll` · `ScmCommitAmend` · `ScmRefresh` · `ScmSync` · `ScmPush` · `ScmPull` · `ScmFetch` · `ScmCheckoutBranch` · `ScmCreateBranch` · `ScmToggleGraph` · `ToggleDiffViewMode` |
+| Panels | `ShowRightPanelInfo` · `ShowRightPanelChanges` · `ShowRightPanelFiles` |
+| SSH | `ToggleSftp` · `ShowSshForwards` · `OpenSshProfiles` |
+| Application | `About` · `CheckForUpdates` · `OpenDocumentation` · `OpenDiscord` · `ReportIssue` · `ShowAll` · `ZoomWindow` |
+
+## Rebinding syntax
+
+```json
+{
+  "keybindings": {
+    "ResizePaneLeft": "ctrl-alt-left",
+    "ToggleSftp": "secondary-shift-u",
+    "ScmSync": "ctrl-b s"
+  }
+}
+```
+
+`secondary` means <kbd>⌘</kbd> on macOS and <kbd>Ctrl</kbd> elsewhere. A space
+separates the steps of a chord.
+[More →](/customization/keybindings)

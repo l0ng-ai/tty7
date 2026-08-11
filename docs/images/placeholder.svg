@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" role="img" aria-label="Screenshot placeholder">
+  <rect width="1200" height="675" rx="12" fill="#0f1113"/>
+  <rect x="1" y="1" width="1198" height="673" rx="12" fill="none" stroke="#2a2e33" stroke-width="2"/>
+  <g fill="#3FDD8C" opacity="0.9">
+    <circle cx="44" cy="40" r="7"/>
+    <circle cx="68" cy="40" r="7" opacity="0.45"/>
+    <circle cx="92" cy="40" r="7" opacity="0.25"/>
+  </g>
+  <line x1="0" y1="76" x2="1200" y2="76" stroke="#2a2e33" stroke-width="2"/>
+  <text x="600" y="340" text-anchor="middle" fill="#5c646d" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="34">screenshot coming soon</text>
+  <text x="600" y="386" text-anchor="middle" fill="#3a4046" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20">tty7 docs</text>
+</svg>

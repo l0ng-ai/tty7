@@ -1,0 +1,56 @@
+---
+title: "Worktrees"
+description: "An isolated checkout on a fresh branch, in one dialog and one tab."
+---
+
+Running two agents on the same repository at once means they fight over the
+working tree. A git worktree is the fix, and tty7 makes it a single dialog.
+
+## Creating one
+
+**New Worktree Tab…** — in the command palette, the tab's right-click menu, and
+the application menu — asks three things:
+
+| Field | Default |
+|---|---|
+| **Worktree Name** | A fresh name that does not collide with an existing branch or directory |
+| **New Branch** | The same name, editable |
+| **Start From** | The branch you are currently on |
+
+Each field opens on a suggestion you can accept or type straight over.
+
+<Frame caption="Placeholder — screenshot: the New Worktree Tab dialog">
+  <img src="/images/placeholder.svg" alt="Creating a worktree" />
+</Frame>
+
+Confirm and tty7 creates the worktree, opens a tab in it, and starts a shell
+there. The [sidebar](/window/sidebar) files it under the same repository group as
+its parent, on its own branch.
+
+## Where they go
+
+Worktrees land inside the repository, under:
+
+```
+<repo>/.tty7/worktrees/<name>
+```
+
+`<repo>/.tty7/.gitignore` is created with `*` in it the first time, so the
+directory never shows up as an untracked mess in your own repository.
+
+## Removing one
+
+Closing a worktree tab offers to remove the worktree with it:
+
+- **Clean tree** — *Remove Worktree* or *Keep*.
+- **Dirty tree** — the dialog says so, and removing requires the explicit
+  *Discard Changes & Remove*.
+
+Nothing is removed silently, and *Keep* leaves the worktree on disk for `git
+worktree list` to find later.
+
+<Tip>
+  Pair this with [agent sessions](/agents/sessions): a worktree per agent means
+  two Claude Codes can work on the same repository without stepping on each
+  other's files.
+</Tip>

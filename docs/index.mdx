@@ -1,0 +1,105 @@
+---
+title: "tty7"
+sidebarTitle: "Introduction"
+description: "A terminal workbench: persistent sessions, remote work, agents."
+mode: "wide"
+---
+
+<Frame>
+  <img src="/images/hero.webp" alt="tty7 showing a sidebar of agent sessions across several repositories" />
+</Frame>
+
+tty7 is a terminal you can leave running. Close the window, reboot the machine,
+walk to a different laptop — the shells you started are still there, and so are
+the coding agents you left working in them.
+
+It is written in Rust, renders on the GPU through Zed's
+[gpui](https://github.com/zed-industries/zed), and parses VT with Alacritty's
+terminal core. In practice that means roughly twice the throughput of Alacritty,
+Ghostty, or Kitty on a big `cat`, and a frame rate that does not fall over when
+something floods the screen.
+
+## What makes it different
+
+<CardGroup cols={2}>
+  <Card title="Sessions that outlive the app" icon="power-off" href="/getting-started/concepts">
+    A background server owns your shells, not the window. Quit tty7 and your
+    builds keep building. No tmux to learn or configure.
+  </Card>
+  <Card title="Editor-grade input" icon="keyboard" href="/terminal/prompt">
+    Ghost suggestions from your history, tab completion that explains each flag,
+    syntax highlighting, click-to-place-caret, real multi-line editing.
+  </Card>
+  <Card title="Agent-aware" icon="robot" href="/agents/overview">
+    18 coding CLIs are recognised on sight. Per-pane status dots, notifications
+    when one needs you, git context, and session resume after a reboot.
+  </Card>
+  <Card title="Remote work that feels local" icon="server" href="/remote/workspaces">
+    A native Rust SSH stack with profiles, SFTP, and port forwarding — plus
+    remote workspaces where files, repos, and panes all stay on the far machine.
+  </Card>
+  <Card title="Git where you are looking" icon="code-branch" href="/git/source-control">
+    Branch and diff counts on every sidebar row, a source control panel, a diff
+    overlay, and worktrees in one dialog.
+  </Card>
+  <Card title="Scriptable" icon="terminal" href="/cli/overview">
+    A bundled `tty7` CLI that opens panes, sends keys, reads screens, and blocks
+    until an agent needs you — so scripts and agents can drive the workbench.
+  </Card>
+</CardGroup>
+
+## Start here
+
+<Steps>
+  <Step title="Install it">
+    Native builds for macOS, Windows, and Linux.
+    [Installation →](/getting-started/installation)
+  </Step>
+  <Step title="Set it up">
+    Five minutes of settings that pay for themselves.
+    [First launch →](/getting-started/first-launch)
+  </Step>
+  <Step title="Learn the three words">
+    Workspace, tab, pane — and the server underneath them.
+    [Core concepts →](/getting-started/concepts)
+  </Step>
+</Steps>
+
+## How fast, exactly
+
+Same machine, same day, same 155×40 grid — Apple M1 Pro, macOS 26.3.1,
+five-run averages.
+
+| | **tty7** | Alacritty | Ghostty | Kitty |
+|---|---:|---:|---:|---:|
+| Plaintext I/O — 11 MB `cat` <sub>(lower is better)</sub> | **95 ms** | 239 ms | 179 ms | 185 ms |
+| [DOOM-fire](https://github.com/const-void/DOOM-fire-zig) frame rate <sub>(higher is better)</sub> | **888 fps** | 485 fps | 552 fps | 617 fps |
+| Cold-launch memory | 116 MB <sup>1</sup> | 105 MB | 128 MB | 130 MB |
+
+<sub><sup>1</sup> GUI 105 MB plus the persistent server at 11 MB.</sub>
+
+The methodology and a one-command reproduction live in
+[`scripts/bench/`](https://github.com/l0ng-ai/tty7/tree/main/scripts/bench).
+
+Three decisions account for most of it:
+
+- **The PTY is read at device speed** and parsed in large batches, off the
+  render path — so drawing never throttles reading.
+- **The hot paths are lock-free.** A big `cat` never waits on the renderer.
+- **The server buffers up to 16 MiB** ahead of the window before backpressure
+  applies, which is enough that a flood finishes writing while the window is
+  still catching up.
+
+## Getting help
+
+<CardGroup cols={3}>
+  <Card title="Discord" icon="discord" href="https://discord.gg/s3dethqz2V">
+    Ask a question, show what you built.
+  </Card>
+  <Card title="Issues" icon="github" href="https://github.com/l0ng-ai/tty7/issues">
+    Bugs and feature requests.
+  </Card>
+  <Card title="Changelog" icon="list" href="https://github.com/l0ng-ai/tty7/blob/main/CHANGELOG.md">
+    Everything that shipped, release by release.
+  </Card>
+</CardGroup>
