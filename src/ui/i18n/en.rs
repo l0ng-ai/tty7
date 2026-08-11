@@ -44,6 +44,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::KeepMine => "Keep mine",
         L10nKey::Dismiss => "Dismiss",
         L10nKey::StoredPasswordRejected => "The stored password was rejected. Enter a new one.",
+        L10nKey::StoredPassphraseRejected => {
+            "The stored passphrase did not work. Enter a new one."
+        }
         L10nKey::Trust => "Trust",
         L10nKey::Abort => "Abort",
         L10nKey::HostKeyOverrideMessage => {
@@ -206,6 +209,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsCouldntForgetPassword => {
             "Could not forget the saved password for {endpoint}: {error}"
+        }
+        L10nKey::SettingsForgetPasswordTitle => "Forget the password for {endpoint}?",
+        L10nKey::SettingsForgetPasswordBody => {
+            "The password saved in the OS keychain will be deleted. The next connection asks for it again."
+        }
+        L10nKey::SettingsForgetPasswordShared => {
+            "{count} other saved hosts use {endpoint} too; their connections will also need the password again."
         }
         L10nKey::SettingsSecurity => "Security",
         L10nKey::SettingsSecurityIntro => {
@@ -1691,6 +1701,12 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         }
         (L10nKey::WindowDeleteShells, "other") => {
             "{count} running shells will be ended and the layout forgotten."
+        }
+        (L10nKey::SettingsForgetPasswordShared, "one") => {
+            "1 other saved host uses {endpoint} too; its connections will also need the password again."
+        }
+        (L10nKey::SettingsForgetPasswordShared, "other") => {
+            "{count} other saved hosts use {endpoint} too; their connections will also need the password again."
         }
         _ => return None,
     };

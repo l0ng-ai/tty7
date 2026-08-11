@@ -2834,13 +2834,9 @@ impl Tty7App {
                 PopupMenuItem::new(t(L10nKey::SettingsForgetPassword)).on_click({
                     let app = app.clone();
                     move |_, window, cx| {
-                        if let Some(msg) = app
-                            .update(cx, |this, cx| this.forget_profile_password(id, cx))
-                            .ok()
-                            .flatten()
-                        {
-                            window.push_notification(msg, cx);
-                        }
+                        let _ = app.update(cx, |this, cx| {
+                            this.forget_profile_password(id, window, cx)
+                        });
                     }
                 }),
             )
@@ -3272,28 +3268,62 @@ impl Tty7App {
     pub(crate) fn forget_profile_password(
         &mut self,
         id: Uuid,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<String> {
+    ) {
         use crate::core::keychain::{CredentialStore, OsCredentialStore};
-        let (user, host, port) = cx
-            .global::<Config>()
+        let cfg = cx.global::<Config>();
+        let Some((user, host, port)) = cfg
             .ssh_profiles
             .iter()
             .find(|p| p.id == id)
-            .map(|p| (p.user.clone(), p.host.clone(), p.port))?;
+            .map(|p| (p.user.clone(), p.host.clone(), p.port))
+        else {
+            return;
+        };
         let endpoint = format!("{user}@{host}:{port}");
-        Some(
-            match OsCredentialStore.delete_password(&user, &host, port) {
-                Ok(()) => t_fmt(
-                    L10nKey::SettingsForgotPasswordFor,
-                    &[("endpoint", &endpoint)],
-                ),
-                Err(e) => t_fmt(
-                    L10nKey::SettingsCouldntForgetPassword,
-                    &[("endpoint", &endpoint), ("error", &e.to_string())],
-                ),
-            },
-        )
+        // The keychain entry is keyed by endpoint, not by profile: every
+        // other profile pointing at the same one loses the secret too. That
+        // used to happen with no prompt at all — one click, and a different
+        // profile suddenly asks for a password (#502). Say it first.
+        let shared = cfg
+            .ssh_profiles
+            .iter()
+            .filter(|p| p.id != id && p.user == user && p.host == host && p.port == port)
+            .count();
+        let mut body = t(L10nKey::SettingsForgetPasswordBody).to_string();
+        if shared > 0 {
+            body.push(' ');
+            body.push_str(&t_plural(
+                L10nKey::SettingsForgetPasswordShared,
+                shared,
+                &[("endpoint", &endpoint)],
+            ));
+        }
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &t_fmt(L10nKey::SettingsForgetPasswordTitle, &[("endpoint", &endpoint)]),
+            Some(&body),
+            &crate::ui::confirm_answers(t(L10nKey::SettingsForgetPassword), t(L10nKey::Cancel)),
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(0) = answer.await else { return };
+            let _ = this.update_in(cx, |_this, window, cx| {
+                let msg = match OsCredentialStore.delete_password(&user, &host, port) {
+                    Ok(()) => t_fmt(
+                        L10nKey::SettingsForgotPasswordFor,
+                        &[("endpoint", &endpoint)],
+                    ),
+                    Err(e) => t_fmt(
+                        L10nKey::SettingsCouldntForgetPassword,
+                        &[("endpoint", &endpoint), ("error", &e.to_string())],
+                    ),
+                };
+                window.push_notification(msg, cx);
+            });
+        })
+        .detach();
     }
 
     fn render_ssh_profile_form(&self, cx: &mut Context<Self>) -> AnyElement {

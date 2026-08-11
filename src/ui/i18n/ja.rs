@@ -46,6 +46,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::StoredPasswordRejected => {
             "保存されたパスワードが拒否されました。新しいパスワードを入力してください"
         }
+        L10nKey::StoredPassphraseRejected => {
+            "保存されたパスフレーズでは解錠できませんでした。新しいパスフレーズを入力してください"
+        }
         L10nKey::Trust => "信頼する",
         L10nKey::Abort => "中止",
         L10nKey::HostKeyOverrideMessage => {
@@ -207,6 +210,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsCouldntForgetPassword => {
             "{endpoint} のパスワードを消去できませんでした: {error}"
+        }
+        L10nKey::SettingsForgetPasswordTitle => "{endpoint} のパスワードを忘れますか？",
+        L10nKey::SettingsForgetPasswordBody => {
+            "OS のキーチェーンに保存されたパスワードが削除されます。次回接続時に再入力が必要になります。"
+        }
+        L10nKey::SettingsForgetPasswordShared => {
+            "他にも {count} 件のホスト設定が {endpoint} を使用しており、それらの接続でもパスワードの再入力が必要になります。"
         }
         L10nKey::SettingsSecurity => "セキュリティ",
         L10nKey::SettingsSecurityIntro => "ホストは詳細設定でこれらを上書きできます",
@@ -1730,6 +1740,12 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         }
         (L10nKey::WindowDeleteShells, "other") => {
             "{count} 個の実行中シェルが終了し、レイアウトが消去されます"
+        }
+        (L10nKey::SettingsForgetPasswordShared, "one") => {
+            "他にも 1 件のホスト設定が {endpoint} を使用しており、その接続でもパスワードの再入力が必要になります。"
+        }
+        (L10nKey::SettingsForgetPasswordShared, "other") => {
+            "他にも {count} 件のホスト設定が {endpoint} を使用しており、それらの接続でもパスワードの再入力が必要になります。"
         }
         _ => return None,
     };

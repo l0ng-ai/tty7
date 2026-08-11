@@ -540,11 +540,21 @@ pub enum AuthPromptKind {
     KeyPassphrase {
         key_path: String,
         comment: String,
+        /// The stored passphrase failed to open the key and this prompt is
+        /// the re-ask (#486). `#[serde(default)]`: a peer built before the
+        /// flag existed simply never sets it.
+        #[serde(default)]
+        rejected: bool,
     },
     KeyboardInteractive {
         name: String,
         instructions: String,
         prompts: Vec<KiPrompt>,
+        /// The first round was answered with the stored password and the
+        /// server refused it, so this prompt is the interactive re-ask
+        /// (#487). `#[serde(default)]` for the same reason as above.
+        #[serde(default)]
+        rejected: bool,
     },
     HostKeyUnknown {
         host: String,
@@ -2156,6 +2166,7 @@ mod tests {
                 prompt: AuthPromptKind::KeyboardInteractive {
                     name: "2FA".into(),
                     instructions: "enter code".into(),
+                    rejected: false,
                     prompts: vec![KiPrompt {
                         text: "Code:".into(),
                         echo: true,

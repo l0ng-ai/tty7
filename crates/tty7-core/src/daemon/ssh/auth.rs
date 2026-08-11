@@ -501,13 +501,14 @@ async fn try_identity_file(
                 .as_ref()
                 .and_then(|m| m.get(raw_path))
                 .cloned();
-            let passphrase = match provided {
-                Some(p) => p,
+            let passphrase = match &provided {
+                Some(p) => p.clone(),
                 None => {
                     let resp = broker
                         .prompt(AuthPromptKind::KeyPassphrase {
                             key_path: raw_path.to_string(),
                             comment: String::new(),
+                            rejected: false,
                         })
                         .await;
                     match resp {
@@ -519,8 +520,36 @@ async fn try_identity_file(
             match russh::keys::decode_secret_key(&contents, Some(&passphrase)) {
                 Ok(k) => k,
                 Err(e) => {
-                    log::warn!("could not decrypt identity file {path}: {e}");
-                    return failed(format!("could not decrypt identity file {path}"));
+                    // A stored passphrase that no longer opens its key used to
+                    // be the end of the line: every connect replayed it and
+                    // the prompt never came back, so one typo'd "remember"
+                    // locked the key out for good (#486). Re-ask instead, with
+                    // the marker that lets the UI replace the stored entry.
+                    if provided.is_none() {
+                        log::warn!("could not decrypt identity file {path}: {e}");
+                        return failed(format!("could not decrypt identity file {path}"));
+                    }
+                    let resp = broker
+                        .prompt(AuthPromptKind::KeyPassphrase {
+                            key_path: raw_path.to_string(),
+                            comment: String::new(),
+                            rejected: true,
+                        })
+                        .await;
+                    match resp {
+                        AuthResponse::Secret(p) => {
+                            match russh::keys::decode_secret_key(&contents, Some(&p)) {
+                                Ok(k) => k,
+                                Err(e) => {
+                                    log::warn!("could not decrypt identity file {path}: {e}");
+                                    return failed(format!(
+                                        "could not decrypt identity file {path}"
+                                    ));
+                                }
+                            }
+                        }
+                        _ => return Outcome::Skipped,
+                    }
                 }
             }
         }
@@ -651,7 +680,18 @@ async fn try_keyboard_interactive(
 
     const MAX_ROUNDS: u32 = 16;
     let mut rounds = 0u32;
-    let mut stored_password_used = false;
+    // The stored password answers at most one round, and a refusal of it
+    // restarts the exchange interactively exactly once. Without that restart
+    // an expired stored password was replayed on every connect and the user
+    // was never asked — no prompt, no recovery (#487).
+    let mut stored_state = match spec.password {
+        Some(_) => StoredPassword::Available,
+        None => StoredPassword::Consumed,
+    };
+    // Rides the first interactive re-ask after a stored-password refusal, and
+    // that one only: a later round — a second factor, say — has nothing to do
+    // with the stored entry and must not wear its "rejected" note.
+    let mut rejection_pending = false;
     loop {
         rounds += 1;
         if rounds > MAX_ROUNDS {
@@ -662,6 +702,22 @@ async fn try_keyboard_interactive(
             KeyboardInteractiveAuthResponse::Failure {
                 remaining_methods, ..
             } => {
+                if stored_state == StoredPassword::Consumed && spec.password.is_some() {
+                    // The round the server just refused was answered with the
+                    // stored password. It will never succeed, so start over
+                    // with the asking done interactively; the re-prompt is
+                    // marked so the refused entry can be dropped (#487).
+                    stored_state = StoredPassword::Rejected;
+                    rejection_pending = true;
+                    resp = match handle
+                        .authenticate_keyboard_interactive_start(&spec.user, None)
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => return failed(format!("keyboard-interactive start error: {e}")),
+                    };
+                    continue;
+                }
                 return Outcome::Failed {
                     remaining_methods: Some(remaining_methods),
                     reason: Some("keyboard-interactive rejected".to_string()),
@@ -683,8 +739,11 @@ async fn try_keyboard_interactive(
                     continue;
                 }
 
-                let allow_stored = !stored_password_used;
-                stored_password_used = true;
+                let allow_stored = stored_state == StoredPassword::Available;
+                if allow_stored {
+                    stored_state = StoredPassword::Consumed;
+                }
+                let rejected = std::mem::take(&mut rejection_pending);
                 let answers = match collect_ki_answers(
                     spec,
                     broker,
@@ -692,6 +751,7 @@ async fn try_keyboard_interactive(
                     &instructions,
                     &prompts,
                     allow_stored,
+                    rejected,
                 )
                 .await
                 {
@@ -710,6 +770,16 @@ async fn try_keyboard_interactive(
     }
 }
 
+/// Where the stored password is in its one life: offered once, then either
+/// never involved or already refused.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StoredPassword {
+    Available,
+    Consumed,
+    Rejected,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn collect_ki_answers(
     spec: &NativeSshSpec,
     broker: &Arc<PromptBroker>,
@@ -717,6 +787,7 @@ async fn collect_ki_answers(
     instructions: &str,
     prompts: &[russh::client::Prompt],
     allow_stored: bool,
+    rejected: bool,
 ) -> Option<Vec<String>> {
     let all_password_type = prompts
         .iter()
@@ -739,6 +810,7 @@ async fn collect_ki_answers(
             name: name.to_string(),
             instructions: instructions.to_string(),
             prompts: ki_prompts,
+            rejected,
         })
         .await;
     match resp {

@@ -44,6 +44,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::KeepMine => "保留我的版本",
         L10nKey::Dismiss => "关闭",
         L10nKey::StoredPasswordRejected => "已存储的密码被拒绝，请输入新密码。",
+        L10nKey::StoredPassphraseRejected => "已存储的 passphrase 无法解锁，请重新输入。",
         L10nKey::Trust => "信任",
         L10nKey::Abort => "中止",
         L10nKey::HostKeyOverrideMessage => "输入 yes 覆盖并信任新密钥，或按 Esc 中止。",
@@ -186,6 +187,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "为它保存的密码也会一并删除，除非还有别的连接用着同一个地址。"
         }
         L10nKey::SettingsCouldntForgetPassword => "无法清除 {endpoint} 的已保存密码：{error}",
+        L10nKey::SettingsForgetPasswordTitle => "忘记 {endpoint} 的密码？",
+        L10nKey::SettingsForgetPasswordBody => {
+            "系统钥匙串中保存的密码将被删除，下次连接时需要重新输入。"
+        }
+        L10nKey::SettingsForgetPasswordShared => {
+            "另有 {count} 个主机配置使用 {endpoint}，它们的连接也将需要重新输入密码。"
+        }
         L10nKey::SettingsSecurity => "安全",
         L10nKey::SettingsSecurityIntro => "主机可以在自己的高级选项中覆盖这些设置。",
         L10nKey::SettingsVerifyHostKeys => "校验主机密钥",
@@ -1583,6 +1591,12 @@ pub fn translate_variant_zh(key: L10nKey, branch: &'static str) -> Option<&'stat
         }
         (L10nKey::WindowDeleteShells, "other") => {
             "{count} 个正在运行的 shell 将会被终止，布局也将被清除。"
+        }
+        (L10nKey::SettingsForgetPasswordShared, "one") => {
+            "另有 1 个主机配置使用 {endpoint}，它的连接也将需要重新输入密码。"
+        }
+        (L10nKey::SettingsForgetPasswordShared, "other") => {
+            "另有 {count} 个主机配置使用 {endpoint}，它们的连接也将需要重新输入密码。"
         }
         _ => return None,
     };

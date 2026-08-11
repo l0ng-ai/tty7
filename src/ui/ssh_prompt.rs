@@ -30,11 +30,19 @@ pub(crate) enum PromptModel {
     KeyPassphrase {
         key_path: String,
         comment: String,
+        /// The stored passphrase failed to open the key and this sheet is the
+        /// re-ask (#486): submitting without "remember" drops the bad entry.
+        rejected: bool,
     },
     KeyboardInteractive {
         name: String,
         instructions: String,
         prompts: Vec<KiRow>,
+        /// The stored password answered the first round and was refused
+        /// (#487). `Some` carries the endpoint the keychain entry is keyed
+        /// by, so the stale entry can be dropped; `None` either because this
+        /// is not a re-ask or because a routed prompt names no endpoint.
+        rejected: Option<(String, String, u16)>,
     },
     HostKeyUnknown {
         host: String,
@@ -69,6 +77,9 @@ pub(crate) enum KeychainWrite {
         key_path: String,
         secret: String,
     },
+    DeleteKeyPassphrase {
+        key_path: String,
+    },
 }
 
 impl PromptModel {
@@ -76,6 +87,7 @@ impl PromptModel {
         kind: AuthPromptKind,
         endpoint: Option<(String, u16)>,
         auto_supplied_password: bool,
+        user: Option<String>,
     ) -> Option<PromptModel> {
         let port = endpoint.as_ref().map(|(_, p)| *p).unwrap_or(22);
         Some(match kind {
@@ -85,13 +97,20 @@ impl PromptModel {
                 port,
                 rejected: auto_supplied_password,
             },
-            AuthPromptKind::KeyPassphrase { key_path, comment } => {
-                PromptModel::KeyPassphrase { key_path, comment }
-            }
+            AuthPromptKind::KeyPassphrase {
+                key_path,
+                comment,
+                rejected,
+            } => PromptModel::KeyPassphrase {
+                key_path,
+                comment,
+                rejected,
+            },
             AuthPromptKind::KeyboardInteractive {
                 name,
                 instructions,
                 prompts,
+                rejected,
             } => PromptModel::KeyboardInteractive {
                 name,
                 instructions,
@@ -102,6 +121,13 @@ impl PromptModel {
                         echo: p.echo,
                     })
                     .collect(),
+                // The stale entry can only be dropped where it is named: a
+                // re-ask whose endpoint the prompt does not know (a routed
+                // sheet) still re-asks, it just cannot clean up.
+                rejected: match (rejected, user, endpoint) {
+                    (true, Some(user), Some((host, port))) => Some((user, host, port)),
+                    _ => None,
+                },
             },
             AuthPromptKind::HostKeyUnknown {
                 host,
@@ -172,11 +198,18 @@ pub(crate) fn passphrase_submit(
     key_path: &str,
     secret: String,
     remember: bool,
+    rejected: bool,
 ) -> (AuthResponse, KeychainWrite) {
     let write = if remember {
         KeychainWrite::SetKeyPassphrase {
             key_path: key_path.to_string(),
             secret: secret.clone(),
+        }
+    } else if rejected {
+        // The stored passphrase could not open its key; leaving it in place
+        // replays the same failure on every connect (#486).
+        KeychainWrite::DeleteKeyPassphrase {
+            key_path: key_path.to_string(),
         }
     } else {
         KeychainWrite::None
@@ -184,8 +217,17 @@ pub(crate) fn passphrase_submit(
     (AuthResponse::Secret(secret), write)
 }
 
-pub(crate) fn ki_submit(answers: Vec<String>) -> AuthResponse {
-    AuthResponse::Secrets(answers)
+pub(crate) fn ki_submit(
+    answers: Vec<String>,
+    rejected: Option<(String, String, u16)>,
+) -> (AuthResponse, KeychainWrite) {
+    // The stored password answered the first round and was refused; it stays
+    // wrong until it goes (#487).
+    let write = match rejected {
+        Some((user, host, port)) => KeychainWrite::DeletePassword { user, host, port },
+        None => KeychainWrite::None,
+    };
+    (AuthResponse::Secrets(answers), write)
 }
 
 pub(crate) fn host_key_unknown_decision(trust: bool) -> AuthResponse {
@@ -305,7 +347,11 @@ impl Tty7App {
         }
 
         if let Some((request_id, kind)) = next {
-            if let Some(model) = PromptModel::from_prompt(kind, endpoint, auto_supplied) {
+            // The re-ask after a stored credential is refused names the
+            // keychain entry it replaces — which needs the connection's own
+            // user, not anything the prompt carries.
+            let user = view.read(cx).ssh_spec().map(|s| s.user.clone());
+            if let Some(model) = PromptModel::from_prompt(kind, endpoint, auto_supplied, user) {
                 let inputs = build_inputs(&model, window, cx);
                 let mut subs = Vec::new();
                 for input in &inputs {
@@ -344,7 +390,8 @@ impl Tty7App {
         if self.ssh_prompt.model.is_some() {
             return SheetOutcome::GiveBack(pending);
         }
-        let Some(model) = PromptModel::from_prompt(pending.prompt.clone(), None, false) else {
+        let Some(model) = PromptModel::from_prompt(pending.prompt.clone(), None, false, None)
+        else {
             if let AuthPromptKind::Banner { text } = &pending.prompt {
                 self.ssh_prompt.banners.push(text.clone());
             }
@@ -403,11 +450,15 @@ impl Tty7App {
                 let secret = values.first().cloned().unwrap_or_default();
                 password_submit(user, host, *port, secret, remember, *rejected)
             }
-            PromptModel::KeyPassphrase { key_path, .. } => {
+            PromptModel::KeyPassphrase {
+                key_path, rejected, ..
+            } => {
                 let secret = values.first().cloned().unwrap_or_default();
-                passphrase_submit(key_path, secret, remember)
+                passphrase_submit(key_path, secret, remember, *rejected)
             }
-            PromptModel::KeyboardInteractive { .. } => (ki_submit(values), KeychainWrite::None),
+            PromptModel::KeyboardInteractive { rejected, .. } => {
+                ki_submit(values, rejected.clone())
+            }
             PromptModel::HostKeyUnknown { .. } => {
                 (host_key_unknown_decision(true), KeychainWrite::None)
             }
@@ -534,6 +585,22 @@ impl Tty7App {
                         }
                     }
                     Err(e) => log::warn!("not remembering passphrase; cannot read {path}: {e}"),
+                }
+            }
+            KeychainWrite::DeleteKeyPassphrase { key_path } => {
+                // The passphrase the keychain held could not open its key;
+                // keeping it replays the same failure on every connect
+                // (#486). The entry is keyed by the key's contents, so the
+                // file has to be read to name it — same as the set arm.
+                let path = crate::core::ssh_profile::expand_tilde(&key_path);
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        let account = crate::core::keychain::key_account_from_contents(&bytes);
+                        if let Err(e) = store.delete_key_passphrase(&account) {
+                            log::warn!("could not forget key passphrase in keychain: {e}");
+                        }
+                    }
+                    Err(e) => log::warn!("not forgetting passphrase; cannot read {path}: {e}"),
                 }
             }
         }
@@ -690,8 +757,15 @@ impl Tty7App {
                         cx,
                     ))
             }
-            PromptModel::KeyPassphrase { comment, .. } => {
+            PromptModel::KeyPassphrase {
+                comment, rejected, ..
+            } => {
                 let mut c = card;
+                if *rejected {
+                    c = c.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+                        crate::ui::i18n::L10nKey::StoredPassphraseRejected,
+                    )));
+                }
                 if !comment.is_empty() {
                     c = c.child(
                         div()
@@ -710,9 +784,15 @@ impl Tty7App {
             PromptModel::KeyboardInteractive {
                 instructions,
                 prompts,
+                rejected,
                 ..
             } => {
                 let mut c = card;
+                if rejected.is_some() {
+                    c = c.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+                        crate::ui::i18n::L10nKey::StoredPasswordRejected,
+                    )));
+                }
                 if !instructions.is_empty() {
                     c = c.child(div().text_xs().child(instructions.clone()));
                 }
@@ -907,6 +987,7 @@ mod tests {
             },
             Some(("10.0.0.5".into(), 2222)),
             true,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -923,9 +1004,56 @@ mod tests {
     #[test]
     fn banner_is_not_a_blocking_model() {
         assert!(
-            PromptModel::from_prompt(AuthPromptKind::Banner { text: "hi".into() }, None, false)
+            PromptModel::from_prompt(AuthPromptKind::Banner { text: "hi".into() }, None, false, None)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_ki_reask_keeps_its_endpoint_only_when_both_halves_are_known() {
+        let kind = AuthPromptKind::KeyboardInteractive {
+            name: String::new(),
+            instructions: String::new(),
+            prompts: vec![],
+            rejected: true,
+        };
+        let m = PromptModel::from_prompt(
+            kind.clone(),
+            Some(("10.0.0.5".into(), 2222)),
+            false,
+            Some("deploy".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            m,
+            PromptModel::KeyboardInteractive {
+                name: String::new(),
+                instructions: String::new(),
+                prompts: vec![],
+                rejected: Some(("deploy".into(), "10.0.0.5".into(), 2222)),
+            }
+        );
+        // No user, or no endpoint — the re-ask still happens, but no keychain
+        // entry can be named for the cleanup.
+        let no_user = PromptModel::from_prompt(
+            kind.clone(),
+            Some(("10.0.0.5".into(), 2222)),
+            false,
+            None,
+        )
+        .unwrap();
+        let no_endpoint = PromptModel::from_prompt(kind, None, false, Some("deploy".into())).unwrap();
+        for m in [no_user, no_endpoint] {
+            assert_eq!(
+                m,
+                PromptModel::KeyboardInteractive {
+                    name: String::new(),
+                    instructions: String::new(),
+                    prompts: vec![],
+                    rejected: None,
+                }
+            );
+        }
     }
 
     #[test]
@@ -964,7 +1092,7 @@ mod tests {
 
     #[test]
     fn passphrase_remember_stores_by_key_path() {
-        let (_resp, write) = passphrase_submit("/home/u/.ssh/id_ed25519", "pp".into(), true);
+        let (_resp, write) = passphrase_submit("/home/u/.ssh/id_ed25519", "pp".into(), true, false);
         assert_eq!(
             write,
             KeychainWrite::SetKeyPassphrase {
@@ -972,15 +1100,54 @@ mod tests {
                 secret: "pp".into(),
             }
         );
-        let (_r, w) = passphrase_submit("/k", "pp".into(), false);
+        let (_r, w) = passphrase_submit("/k", "pp".into(), false, false);
         assert_eq!(w, KeychainWrite::None);
+    }
+
+    #[test]
+    fn a_rejected_stored_passphrase_is_forgotten_unless_replaced() {
+        // #486: the same self-heal the password path has — a re-ask after the
+        // stored passphrase failed drops the entry unless the user replaces it.
+        let (_r, w) = passphrase_submit("/k", "pp".into(), false, true);
+        assert_eq!(
+            w,
+            KeychainWrite::DeleteKeyPassphrase {
+                key_path: "/k".into()
+            }
+        );
+        let (_r, w) = passphrase_submit("/k", "new".into(), true, true);
+        assert_eq!(
+            w,
+            KeychainWrite::SetKeyPassphrase {
+                key_path: "/k".into(),
+                secret: "new".into(),
+            }
+        );
     }
 
     #[test]
     fn ki_submit_bundles_all_answers() {
         assert_eq!(
-            ki_submit(vec!["a".into(), "b".into()]),
-            AuthResponse::Secrets(vec!["a".into(), "b".into()])
+            ki_submit(vec!["a".into(), "b".into()], None),
+            (AuthResponse::Secrets(vec!["a".into(), "b".into()]), KeychainWrite::None)
+        );
+    }
+
+    #[test]
+    fn a_ki_reask_after_a_stored_rejection_forgets_the_password() {
+        // #487: the KI twin of the password path's rejected→delete heal.
+        let (resp, write) = ki_submit(
+            vec!["new".into()],
+            Some(("deploy".into(), "10.0.0.5".into(), 2222)),
+        );
+        assert_eq!(resp, AuthResponse::Secrets(vec!["new".into()]));
+        assert_eq!(
+            write,
+            KeychainWrite::DeletePassword {
+                user: "deploy".into(),
+                host: "10.0.0.5".into(),
+                port: 2222,
+            }
         );
     }
 
