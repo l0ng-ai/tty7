@@ -903,6 +903,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileDropTooDeep => "フォルダの入れ子が {n} 階層を超えています",
         L10nKey::FileDropTooLarge => "{limit} MB を超えています。SFTP で転送してください",
         L10nKey::FileDropNoWorkingName => "隣に空いている一時的な名前がなく、先にコピーできません",
+        L10nKey::FileDropLeftAside => {
+            "新しいコピーを所定の位置に移せませんでした。元のものは同じフォルダの「{name}」になっています"
+        }
         L10nKey::FileDropReplaceTitle => "「{name}」を置き換えますか？",
         L10nKey::FileDropReplaceManyTitle => "{n} 項目を置き換えますか？",
         L10nKey::FileDropReplaceBody => {

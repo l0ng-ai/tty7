@@ -663,6 +663,7 @@ l10n_keys! {
     FileDropTooDeep,
     FileDropTooLarge,
     FileDropNoWorkingName,
+    FileDropLeftAside,
     FileDropReplaceTitle,
     FileDropReplaceManyTitle,
     FileDropReplaceBody,

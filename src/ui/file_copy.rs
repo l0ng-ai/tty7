@@ -109,7 +109,12 @@ pub(crate) fn copy_into_dir(
             report.fail(&name, t(L10nKey::FileDropNameTaken).to_string());
             continue;
         }
-        if host.exists(&dest) {
+        // Only ever on the pass that asks. `conflicts` is what re-opens the
+        // "replace?" dialog, so filling it on the pass that carries the answer
+        // asks the same question a second time — and because the panel reports
+        // conflicts *or* errors and never both, it also swallows every error
+        // that pass produced, including a replacement that failed.
+        if !overwrite && host.exists(&dest) {
             report.conflicts.push(name.clone());
         }
         planned.push((src.clone(), dest, name));
@@ -150,14 +155,15 @@ pub(crate) fn copy_into_dir(
 /// and a rename — one metadata operation, not a tree walk — puts the new copy
 /// in its place. A failure anywhere puts the old thing back, and in the one
 /// case where even that fails it is still on disk under the name it was moved
-/// to, which is a name somebody can find.
+/// to — which the panel is told, so it is a name somebody can find rather than
+/// one they have to go looking for.
 fn copy_over(host: &dyn Host, src: &Path, dir: &Path, dest: &Path, name: &str) -> io::Result<()> {
-    let staged = free_name_beside(host, dir, "partial", name)?;
+    let (staged, _) = free_name_beside(host, dir, "partial", name)?;
     if let Err(e) = copy_tree(host, src, &staged, 0) {
         let _ = host.remove(&staged, true);
         return Err(e);
     }
-    let aside = match free_name_beside(host, dir, "replaced", name) {
+    let (aside, aside_name) = match free_name_beside(host, dir, "replaced", name) {
         Ok(aside) => aside,
         Err(e) => {
             let _ = host.remove(&staged, true);
@@ -169,14 +175,22 @@ fn copy_over(host: &dyn Host, src: &Path, dir: &Path, dest: &Path, name: &str) -
         return Err(e);
     }
     if let Err(e) = host.rename(&staged, dest) {
+        let _ = host.remove(&staged, true);
         if let Err(back) = host.rename(&aside, dest) {
+            // Both renames are one control round trip each on a remote host, so
+            // a link that drops between them lands here. Nothing is lost, but
+            // it is under a name nobody chose — which is only better than lost
+            // if the panel says so rather than the log.
             log::warn!(
                 "{} could not be put back after a failed replacement and is at {}: {back}",
                 dest.display(),
                 aside.display()
             );
+            return Err(io::Error::other(t_fmt(
+                L10nKey::FileDropLeftAside,
+                &[("name", &aside_name)],
+            )));
         }
-        let _ = host.remove(&staged, true);
         return Err(e);
     }
     if let Err(e) = host.remove(&aside, true) {
@@ -191,19 +205,28 @@ fn copy_over(host: &dyn Host, src: &Path, dir: &Path, dest: &Path, name: &str) -
 }
 
 /// A name in `dir` that nothing is using yet, for a copy to land on before it
-/// takes the destination's place.
+/// takes the destination's place. Returned with the bare name as well as the
+/// path, because the one message that has to name it is a sentence in the
+/// panel, where a whole path — on a remote host, someone else's whole path —
+/// is not what the sentence wants.
 ///
 /// The leading dot keeps the working copy out of the way of a tree that hides
 /// dotfiles, and the tag says what it is to anyone who finds one that outlived
 /// the copy that made it.
-fn free_name_beside(host: &dyn Host, dir: &Path, tag: &str, name: &str) -> io::Result<PathBuf> {
+fn free_name_beside(
+    host: &dyn Host,
+    dir: &Path,
+    tag: &str,
+    name: &str,
+) -> io::Result<(PathBuf, String)> {
     for n in 0..WORKING_NAME_TRIES {
         let candidate = match n {
-            0 => host.join(dir, &format!(".tty7-{tag}-{name}")),
-            n => host.join(dir, &format!(".tty7-{tag}-{n}-{name}")),
+            0 => format!(".tty7-{tag}-{name}"),
+            n => format!(".tty7-{tag}-{n}-{name}"),
         };
-        if !host.exists(&candidate) {
-            return Ok(candidate);
+        let path = host.join(dir, &candidate);
+        if !host.exists(&path) {
+            return Ok((path, candidate));
         }
     }
     Err(io::Error::other(
@@ -424,6 +447,28 @@ mod tests {
             std::fs::read_to_string(dest_dir.join("notes.md")).unwrap(),
             "first",
             "the first claim on the name stands"
+        );
+    }
+
+    #[test]
+    fn the_pass_that_carries_the_answer_does_not_ask_again() {
+        let root = scratch("no-re-ask");
+        let src = root.join("from/note.txt");
+        write(&src, "new");
+        let dest_dir = root.join("into");
+        write(&dest_dir.join("note.txt"), "old");
+
+        let asked = copy_into_dir(&*LocalHost::shared(), &[src.clone()], &dest_dir, false);
+        assert_eq!(asked.conflicts, vec!["note.txt".to_string()]);
+
+        let answered = copy_into_dir(&*LocalHost::shared(), &[src], &dest_dir, true);
+
+        assert_eq!(answered.copied, vec!["note.txt".to_string()]);
+        assert!(
+            answered.conflicts.is_empty(),
+            "the question was already answered: asking it again re-opens the dialog, \
+             and the panel reports conflicts instead of errors, so it also hides \
+             whatever went wrong on this pass"
         );
     }
 
