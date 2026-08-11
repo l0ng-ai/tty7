@@ -874,6 +874,17 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForwardToLabel => "転送先",
         L10nKey::ForwardSocksLabel => "SOCKS",
         L10nKey::ForwardAdd => "追加",
+        L10nKey::ForwardFormBindPortInvalid => {
+            "バインドポートは 0–65535 の数字で入力してください（0 で空きポートを自動選択）"
+        }
+        L10nKey::ForwardFormTargetMissing => {
+            "ローカル / リモートフォワードには転送先ホストとポート（1–65535）が必要です"
+        }
+        L10nKey::ForwardAddFailed => "フォワードを作成できませんでした：{error}",
+        L10nKey::ForwardAddUnreachable => {
+            "マシンからの応答がなく、フォワードは作成されませんでした"
+        }
+        L10nKey::ForwardEditNotRestored => "元のルールも復元できませんでした。",
         L10nKey::FileTreePlaceholderFileName => "ファイル名",
         L10nKey::FileTreePlaceholderFolderName => "フォルダ名",
         L10nKey::FileTreePlaceholderNewName => "新しい名前",
@@ -909,6 +920,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileDropReplace => "置き換える",
         L10nKey::FileDropFailed => "{name} をコピーできませんでした",
         L10nKey::FileDropFailedMany => "{name} をコピーできませんでした。他に {n} 件も失敗しました",
+        L10nKey::FileDropNameClash => {
+            "同じドロップ内に同名のファイルがあります。最初の 1 つのみコピーしました"
+        }
         L10nKey::SshPromptNewKey => "新しいキー {fingerprint}",
         L10nKey::SshPromptOldKey => "以前のキー {old_fingerprint}",
         L10nKey::EditorCantOpen => "{path} を開けません: {e}",

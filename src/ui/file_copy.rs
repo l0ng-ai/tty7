@@ -63,6 +63,9 @@ pub(crate) fn copy_into_dir(
 ) -> DropReport {
     let mut report = DropReport::default();
     let mut planned: Vec<(PathBuf, PathBuf, String)> = Vec::new();
+    // Basenames already claimed by this drop: two sources from different
+    // folders can share one, and both would land on the same path (#490).
+    let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for src in sources {
         let Some(name) = src.file_name().map(|n| n.to_string_lossy().to_string()) else {
@@ -88,6 +91,13 @@ pub(crate) fn copy_into_dir(
             report.fail(&name, t(L10nKey::FileDropNotHere).to_string());
             continue;
         }
+        if !claimed.insert(name.clone()) {
+            // Copying both would mean the second silently overwrites the
+            // first. Keep the first and say why its namesake did not come
+            // along — there is no answer to "replace?" that lands both.
+            report.fail(&name, t(L10nKey::FileDropNameClash).to_string());
+            continue;
+        }
         if host.exists(&host.join(dir, &name)) {
             report.conflicts.push(name.clone());
         }
@@ -102,18 +112,52 @@ pub(crate) fn copy_into_dir(
         // Replace rather than merge: a folder dropped onto a folder of the
         // same name should end up as what was dropped, not as the union of the
         // two, which is what writing into it one file at a time would leave.
-        if host.exists(&dest)
-            && let Err(e) = host.remove(&dest, true)
-        {
-            report.errors.push((name, e));
-            continue;
-        }
-        match copy_tree(host, &src, &dest, 0) {
+        let result = if host.exists(&dest) {
+            replace_tree(host, dir, &src, &dest, &name)
+        } else {
+            copy_tree(host, &src, &dest, 0)
+        };
+        match result {
             Ok(()) => report.copied.push(name),
             Err(e) => report.errors.push((name, e)),
         }
     }
     report
+}
+
+/// Replace `dest` with a copy of `src` leaving no window in which neither is
+/// there: the new tree is staged under a temporary name and takes the old
+/// one's place only once it is complete, and a failure anywhere along the way
+/// puts the old one back. Deleting the destination first — the order this
+/// replaced — loses the old file to any mid-copy failure (#490).
+fn replace_tree(
+    host: &dyn Host,
+    dir: &Path,
+    src: &Path,
+    dest: &Path,
+    name: &str,
+) -> io::Result<()> {
+    let partial = host.join(dir, &format!(".tty7-partial-{name}"));
+    let replaced = host.join(dir, &format!(".tty7-replaced-{name}"));
+    // Leftovers of an interrupted earlier replace.
+    let _ = host.remove(&partial, true);
+    let _ = host.remove(&replaced, true);
+    if let Err(e) = copy_tree(host, src, &partial, 0) {
+        let _ = host.remove(&partial, true);
+        return Err(e);
+    }
+    host.rename(dest, &replaced)?;
+    if let Err(e) = host.rename(&partial, dest) {
+        // The old tree stepped aside and the new one would not take its
+        // place — put the old one back.
+        let _ = host.rename(&replaced, dest);
+        let _ = host.remove(&partial, true);
+        return Err(e);
+    }
+    // The swap is done; the old tree going away is housekeeping, not part of
+    // the guarantee.
+    let _ = host.remove(&replaced, true);
+    Ok(())
 }
 
 fn copy_tree(host: &dyn Host, src: &Path, dest: &Path, depth: usize) -> io::Result<()> {
@@ -291,6 +335,75 @@ mod tests {
         assert!(
             !dest_dir.join("pkg/stale.txt").exists(),
             "replacing a folder must not merge into it"
+        );
+    }
+
+    #[test]
+    fn two_sources_sharing_a_name_do_not_overwrite_each_other() {
+        // #490: the batch itself can collide even when the destination holds
+        // nothing yet, and the second copy silently winning was the bug.
+        let root = scratch("name-clash");
+        let a = root.join("from/a/readme.txt");
+        let b = root.join("from/b/readme.txt");
+        write(&a, "from a");
+        write(&b, "from b");
+        let dest_dir = root.join("into");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+
+        let report = copy_into_dir(&*LocalHost::shared(), &[a, b], &dest_dir, false);
+
+        assert_eq!(
+            report.copied,
+            vec!["readme.txt".to_string()],
+            "the first of the two still lands"
+        );
+        assert_eq!(report.errors.len(), 1, "the second is reported, not silent");
+        assert_eq!(report.errors[0].0, "readme.txt");
+        assert_eq!(
+            std::fs::read_to_string(dest_dir.join("readme.txt")).unwrap(),
+            "from a",
+            "and it is the first source, not whichever copied last"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_replace_keeps_the_file_that_was_there() {
+        // #490: delete-then-copy lost the old file to any mid-copy failure;
+        // stage-then-swap must leave it exactly where it was.
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = scratch("failed-replace");
+        write(&root.join("from/pkg/ok.txt"), "new ok");
+        let unreadable = root.join("from/pkg/no.txt");
+        write(&unreadable, "new secret");
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let dest_dir = root.join("into");
+        write(&dest_dir.join("pkg/old.txt"), "old");
+
+        let report = copy_into_dir(
+            &*LocalHost::shared(),
+            &[root.join("from/pkg")],
+            &dest_dir,
+            true,
+        );
+
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.copied.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dest_dir.join("pkg/old.txt")).unwrap(),
+            "old",
+            "the failed copy must not have taken the old file with it"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&dest_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(".tty7-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "staging names are cleaned up: {leftovers:?}"
         );
     }
 

@@ -315,6 +315,7 @@ impl Tty7App {
     fn forward_form(&self, pane_id: u64, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        let danger = theme.danger;
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let kind = self.loopback_panel.mf_kind;
         let editing = self.loopback_panel.mf_editing.is_some();
@@ -387,6 +388,9 @@ impl Tty7App {
                     )),
             )
             .child(Input::new(&self.loopback_panel.mf_description).xsmall())
+            .when_some(self.loopback_panel.mf_error.clone(), |this, error| {
+                this.child(div().text_size(rems(META)).text_color(danger).child(error))
+            })
             .child(
                 h_flex()
                     .justify_end()

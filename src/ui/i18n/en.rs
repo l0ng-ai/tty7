@@ -832,6 +832,17 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ForwardToLabel => "to",
         L10nKey::ForwardSocksLabel => "SOCKS",
         L10nKey::ForwardAdd => "Add",
+        L10nKey::ForwardFormBindPortInvalid => {
+            "Enter a bind port: a number from 0 to 65535 (0 picks a free one)."
+        }
+        L10nKey::ForwardFormTargetMissing => {
+            "Local and Remote forwards need a target host and a target port (1–65535)."
+        }
+        L10nKey::ForwardAddFailed => "The forward could not be created: {error}",
+        L10nKey::ForwardAddUnreachable => {
+            "No answer from the machine — the forward was not created."
+        }
+        L10nKey::ForwardEditNotRestored => "The previous rule could not be restored either.",
         L10nKey::FileTreePlaceholderFileName => "file name",
         L10nKey::FileTreePlaceholderFolderName => "folder name",
         L10nKey::FileTreePlaceholderNewName => "new name",
@@ -867,6 +878,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::FileDropReplace => "Replace",
         L10nKey::FileDropFailed => "Could not copy {name}",
         L10nKey::FileDropFailedMany => "Could not copy {name}, and {n} more failed",
+        L10nKey::FileDropNameClash => {
+            "Another file in the same drop has the same name; only the first was copied."
+        }
         L10nKey::SshPromptNewKey => "new {fingerprint}",
         L10nKey::SshPromptOldKey => "old {old_fingerprint}",
         L10nKey::EditorCantOpen => "Could not open {path}: {e}",

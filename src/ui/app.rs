@@ -399,6 +399,9 @@ pub(crate) struct LoopbackForwardPanelState {
     pub(crate) mf_target_port: Entity<InputState>,
     pub(crate) mf_description: Entity<InputState>,
     pub(crate) mf_editing: Option<u64>,
+    /// The form's complaint about the last submit — invalid field, refused
+    /// bind. Shown inside the form; cleared on open, close and success (#499).
+    pub(crate) mf_error: Option<String>,
 }
 
 pub struct Tty7App {
@@ -985,6 +988,7 @@ impl Tty7App {
                 mf_target_port,
                 mf_description,
                 mf_editing: None,
+                mf_error: None,
             },
             sftp_panel,
             right_panel: Default::default(),
@@ -2202,7 +2206,7 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use crate::daemon::protocol::{SshForwardKind, SshForwardRule};
+        use crate::daemon::protocol::{ForwardStatus, SshForwardKind, SshForwardRule};
         let kind = self.loopback_panel.mf_kind;
         let bind_host = self
             .loopback_panel
@@ -2216,6 +2220,9 @@ impl Tty7App {
         } else {
             bind_host
         };
+        // A bare `return` was the old answer to an invalid field: the form
+        // swallowed the click and which field was wrong was the user's to
+        // guess (#499). The form carries the complaint now.
         let Ok(bind_port) = self
             .loopback_panel
             .mf_bind_port
@@ -2224,6 +2231,8 @@ impl Tty7App {
             .trim()
             .parse::<u16>()
         else {
+            self.loopback_panel.mf_error = Some(t(L10nKey::ForwardFormBindPortInvalid).to_string());
+            cx.notify();
             return;
         };
         let target_host = self
@@ -2242,6 +2251,8 @@ impl Tty7App {
             .parse::<u16>()
             .unwrap_or(0);
         if kind != SshForwardKind::Dynamic && (target_host.is_empty() || target_port == 0) {
+            self.loopback_panel.mf_error = Some(t(L10nKey::ForwardFormTargetMissing).to_string());
+            cx.notify();
             return;
         }
         let description = self
@@ -2260,20 +2271,89 @@ impl Tty7App {
             description: (!description.is_empty()).then_some(description),
         };
         let route = self.forward_route(pane_id, cx);
-        if let Some(old_id) = self.loopback_panel.mf_editing.take() {
-            let _ = route.remove(old_id);
+        // An edit replaces its rule rather than destroying it first (#499):
+        // the new rule must be listening before the edit is done, and a
+        // failed bind puts the old rule back — the worst an edit can do is
+        // leave the forward as it was.
+        let editing = self.loopback_panel.mf_editing;
+        let old_rule = editing.and_then(|old_id| {
+            self.loopback_panel
+                .managed
+                .iter()
+                .find(|m| m.id == old_id)
+                .map(|m| SshForwardRule {
+                    kind: m.kind,
+                    bind_host: m.bind_host.clone(),
+                    bind_port: m.bind_port,
+                    target_host: m.target_host.clone(),
+                    target_port: m.target_port,
+                    description: m.description.clone(),
+                })
+        });
+        // A stale editing id is a plain add: there is no old rule to protect.
+        let editing = editing.filter(|_| old_rule.is_some());
+        let before: std::collections::HashSet<u64> =
+            self.loopback_panel.managed.iter().map(|m| m.id).collect();
+        if let Some(old_id) = editing {
+            self.loopback_panel.managed = route.remove(old_id);
         }
-        self.loopback_panel.managed = route.add(rule);
-        self.loopback_panel.form_pane_id = None;
-        for input in [
-            &self.loopback_panel.mf_bind_port,
-            &self.loopback_panel.mf_target_host,
-            &self.loopback_panel.mf_target_port,
-            &self.loopback_panel.mf_description,
-        ] {
-            input.update(cx, |input, cx| input.set_value("", window, cx));
+        let list = route.add(rule);
+        let added = list.iter().find(|m| !before.contains(&m.id)).cloned();
+        match added {
+            Some(m) if matches!(m.status, ForwardStatus::Listening) => {
+                self.loopback_panel.managed = list;
+                self.loopback_panel.mf_editing = None;
+                self.loopback_panel.mf_error = None;
+                self.loopback_panel.form_pane_id = None;
+                for input in [
+                    &self.loopback_panel.mf_bind_port,
+                    &self.loopback_panel.mf_target_host,
+                    &self.loopback_panel.mf_target_port,
+                    &self.loopback_panel.mf_description,
+                ] {
+                    input.update(cx, |input, cx| input.set_value("", window, cx));
+                }
+                cx.notify();
+            }
+            outcome => {
+                // The bind failed (the daemon lists the corpse with its
+                // error) or the machine never answered. Take the corpse down —
+                // the form carries the message now — and put the old rule
+                // back.
+                let (list, mut error) = match outcome {
+                    Some(m) => {
+                        let ForwardStatus::Error(detail) = &m.status else {
+                            unreachable!("just ruled out Listening");
+                        };
+                        let detail = detail.clone();
+                        (
+                            route.remove(m.id),
+                            t_fmt(L10nKey::ForwardAddFailed, &[("error", &detail)]).to_string(),
+                        )
+                    }
+                    None => (list, t(L10nKey::ForwardAddUnreachable).to_string()),
+                };
+                let list = match old_rule {
+                    Some(old) => {
+                        let restored = route.add(old);
+                        let back = restored.iter().any(|m| {
+                            !before.contains(&m.id) && matches!(m.status, ForwardStatus::Listening)
+                        });
+                        if !back {
+                            error.push(' ');
+                            error.push_str(t(L10nKey::ForwardEditNotRestored));
+                        }
+                        restored
+                    }
+                    None => list,
+                };
+                self.loopback_panel.managed = list;
+                self.loopback_panel.mf_error = Some(error);
+                // The form stays open, still editing the rule it was editing.
+                self.loopback_panel.mf_editing = editing;
+                cx.notify();
+            }
         }
-        cx.notify();
     }
 
     pub(crate) fn edit_managed_forward(
@@ -2284,6 +2364,7 @@ impl Tty7App {
     ) {
         self.loopback_panel.mf_kind = forward.kind;
         self.loopback_panel.mf_editing = Some(forward.id);
+        self.loopback_panel.mf_error = None;
         self.loopback_panel.form_pane_id = Some(forward.pane_id);
         let target_port = if forward.target_port == 0 {
             String::new()
@@ -2318,6 +2399,7 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         self.loopback_panel.mf_editing = None;
+        self.loopback_panel.mf_error = None;
         for input in [
             &self.loopback_panel.mf_bind_port,
             &self.loopback_panel.mf_target_host,

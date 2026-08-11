@@ -799,6 +799,15 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForwardToLabel => "到",
         L10nKey::ForwardSocksLabel => "SOCKS",
         L10nKey::ForwardAdd => "添加",
+        L10nKey::ForwardFormBindPortInvalid => {
+            "绑定端口需为 0–65535 的数字（0 表示自动挑选空闲端口）。"
+        }
+        L10nKey::ForwardFormTargetMissing => {
+            "本地和远程转发需要填写目标主机和目标端口（1–65535）。"
+        }
+        L10nKey::ForwardAddFailed => "无法创建转发：{error}",
+        L10nKey::ForwardAddUnreachable => "机器没有回应，转发未创建。",
+        L10nKey::ForwardEditNotRestored => "原规则也未能恢复。",
         L10nKey::FileTreePlaceholderFileName => "文件名",
         L10nKey::FileTreePlaceholderFolderName => "文件夹名",
         L10nKey::FileTreePlaceholderNewName => "新名称",
@@ -830,6 +839,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileDropReplace => "替换",
         L10nKey::FileDropFailed => "无法复制 {name}",
         L10nKey::FileDropFailedMany => "无法复制 {name}，另有 {n} 个也失败了",
+        L10nKey::FileDropNameClash => "同一批拖放中有同名文件，只复制了第一个。",
         L10nKey::SshPromptNewKey => "新 {fingerprint}",
         L10nKey::SshPromptOldKey => "旧 {old_fingerprint}",
         L10nKey::EditorCantOpen => "无法打开 {path}：{e}",
