@@ -39,6 +39,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TreeDirHiddenOnly => "Only hidden files",
         L10nKey::TreeDirUnreadable => "Could not be read",
         L10nKey::TreeSearchCapped => "First {n} matches",
+        L10nKey::TreeSearchFailed => "Search failed",
         L10nKey::FileChangedOnDisk => "File changed on disk",
         L10nKey::Reload => "Reload",
         L10nKey::KeepMine => "Keep mine",
@@ -194,12 +195,30 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "Re-reads the file and adds anything new. Edits you make here are stored by tty7 — the file itself is never written."
         }
         L10nKey::SettingsImportNow => "Import now",
+        L10nKey::SettingsImportUnreadable => "Could not read {path} — nothing was imported.",
+        L10nKey::SettingsImportNoHosts => {
+            "{path} names no hosts to import — only wildcard or Match rules."
+        }
+        L10nKey::SettingsImportSummary => {
+            "{count} hosts added — {updated} updated, {unchanged} already current"
+        }
+        L10nKey::SettingsImportIgnored => {
+            "{count} options have no setting in tty7 and were left in the file: {options}"
+        }
+        L10nKey::SettingsImportMoreOptions => "+{count} more",
         L10nKey::SettingsDefaultsIntro => {
             "Every host starts from these. Any host can override one under its own Advanced."
         }
         L10nKey::SettingsCopyAddress => "Copy Address",
         L10nKey::SettingsDuplicate => "Duplicate",
         L10nKey::SettingsForgetPassword => "Forget Password",
+        L10nKey::SettingsForgetPasswordTitle => "Forget the saved password for {endpoint}?",
+        L10nKey::SettingsForgetPasswordBody => {
+            "The next connection to it asks for the password again. Nothing else about this host changes."
+        }
+        L10nKey::SettingsForgetPasswordSharedBody => {
+            "{count} other host profiles use {endpoint} as well, so those connections will have to enter the password again too."
+        }
         L10nKey::SettingsForgotPasswordFor => "Forgot saved password for {endpoint}",
         L10nKey::SettingsDeleteProfileBody => {
             "The password saved for it goes too, unless another connection still uses the same address."
@@ -229,6 +248,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsNameDesc => "A label for this connection.",
         L10nKey::SettingsHost => "Host",
         L10nKey::SettingsHostDesc => "Hostname or IP address.",
+        L10nKey::SettingsHostRequired => "Needs a host — won't be saved.",
+        L10nKey::SettingsPortInvalid => "Port must be 1-65535 — blank means 22.",
         L10nKey::SettingsUser => "User",
         L10nKey::SettingsUserDesc => "Login user (blank = resolve at connect).",
         L10nKey::SettingsAuth => "Auth",
@@ -242,6 +263,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsJumpHostDesc => {
             "Name of another profile to tunnel through (blank = direct)."
         }
+        L10nKey::SettingsJumpHostUnknown => "No host profile named {jump_name} — won't be saved.",
+        L10nKey::SettingsJumpHostSelf => "A host can't be its own jump host — won't be saved.",
         L10nKey::SettingsNoneSummary => "(none)",
         L10nKey::SettingsPortForwarding => "Port forwarding",
         L10nKey::SettingsRulesOpenedWithConnection => "1 rule, opened with the connection",
@@ -274,6 +297,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSocks5ProxyDesc => "host:port (blank = none).",
         L10nKey::SettingsHttpProxy => "HTTP proxy",
         L10nKey::SettingsHttpProxyDesc => "host:port (blank = none).",
+        L10nKey::SettingsProxyPortInvalid => {
+            "Port must be 1-65535 — the host on its own takes the default port."
+        }
         L10nKey::SettingsKexAlgorithms => "KEX algorithms",
         L10nKey::SettingsKexAlgorithmsDesc => "Comma-separated (blank = library default).",
         L10nKey::SettingsCiphers => "Ciphers",
@@ -816,6 +842,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SftpTransferDone => "done",
         L10nKey::SftpTransferCancelled => "cancelled",
         L10nKey::SftpTransferError => "error",
+        L10nKey::SftpTransferListFailed => "Could not check transfers: {error}",
         L10nKey::SftpImagePasteUploadFailed => {
             "Could not upload the pasted image to {host}: {error}"
         }
@@ -832,6 +859,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ForwardToLabel => "to",
         L10nKey::ForwardSocksLabel => "SOCKS",
         L10nKey::ForwardAdd => "Add",
+        L10nKey::ForwardRequestFailed => "Could not reach the session — nothing changed.",
         L10nKey::FileTreePlaceholderFileName => "file name",
         L10nKey::FileTreePlaceholderFolderName => "folder name",
         L10nKey::FileTreePlaceholderNewName => "new name",
@@ -845,6 +873,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "The file will be deleted on {host}. There is no trash on the far side."
         }
         L10nKey::FileTreeDeleteFailed => "Could not delete {name}",
+        L10nKey::FileTreeCreateFailed => "Could not create {name}",
+        L10nKey::FileTreeRenameFailed => "Could not rename {name}",
         L10nKey::FileTreeContextOpen => "Open",
         L10nKey::FileTreeContextCdHere => "cd Here",
         L10nKey::FileTreeContextInsertPath => "Insert Path in Terminal",
@@ -869,6 +899,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::FileDropFailedMany => "Could not copy {name}, and {n} more failed",
         L10nKey::SshPromptNewKey => "new {fingerprint}",
         L10nKey::SshPromptOldKey => "old {old_fingerprint}",
+        L10nKey::SshPromptHostKeyNewAlgorithm => {
+            "You already know this host by a {previous_algorithm} key. This is a new \
+             {algorithm} key, not a replacement for that one."
+        }
+        L10nKey::SshPromptTypeYesToOverride => "Type \"yes\" to enable Override.",
         L10nKey::EditorCantOpen => "Could not open {path}: {e}",
         L10nKey::EditorCantRead => "Could not read {path}: {e}",
         L10nKey::EditorNotUtf8 => "\"{path}\" is not valid UTF-8",
@@ -1589,6 +1624,22 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsAliasesLinked, "zero") => "No aliases linked yet.",
         (L10nKey::SettingsAliasesLinked, "one") => "1 alias linked.",
         (L10nKey::SettingsAliasesLinked, "other") => "{count} aliases linked.",
+        (L10nKey::SettingsImportSummary, "zero") => {
+            "Nothing new — {updated} updated, {unchanged} already current"
+        }
+        (L10nKey::SettingsImportSummary, "one") => {
+            "1 host added — {updated} updated, {unchanged} already current"
+        }
+        (L10nKey::SettingsImportSummary, "other") => {
+            "{count} hosts added — {updated} updated, {unchanged} already current"
+        }
+        (L10nKey::SettingsImportIgnored, "zero") => "Every option in the file has a tty7 setting.",
+        (L10nKey::SettingsImportIgnored, "one") => {
+            "1 option has no setting in tty7 and was left in the file: {options}"
+        }
+        (L10nKey::SettingsImportIgnored, "other") => {
+            "{count} options have no setting in tty7 and were left in the file: {options}"
+        }
         (L10nKey::SettingsRulesOpenedWithConnection, "zero") => {
             "0 rules, opened with the connection"
         }
@@ -1604,6 +1655,12 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         }
         (L10nKey::SettingsOfflineMachines, "other") => {
             "{count} more saved machines are not connected — open a workspace on one to install its hooks there."
+        }
+        (L10nKey::SettingsForgetPasswordSharedBody, "one") => {
+            "1 other host profile uses {endpoint} as well, so that connection will have to enter the password again too."
+        }
+        (L10nKey::SettingsForgetPasswordSharedBody, "other") => {
+            "{count} other host profiles use {endpoint} as well, so those connections will have to enter the password again too."
         }
         (L10nKey::SftpReplaceBody, "one") => {
             "{names} already exists in this folder. Uploading overwrites it."

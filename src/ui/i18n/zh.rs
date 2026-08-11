@@ -39,6 +39,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::TreeDirHiddenOnly => "只有隐藏文件",
         L10nKey::TreeDirUnreadable => "无法读取",
         L10nKey::TreeSearchCapped => "只显示前 {n} 个匹配",
+        L10nKey::TreeSearchFailed => "搜索失败",
         L10nKey::FileChangedOnDisk => "文件在磁盘上已被修改",
         L10nKey::Reload => "重新加载",
         L10nKey::KeepMine => "保留我的版本",
@@ -175,12 +176,28 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "重新读取文件并添加新内容。你在这里做的编辑由 tty7 保存——不会写入该文件本身。"
         }
         L10nKey::SettingsImportNow => "立即导入",
+        L10nKey::SettingsImportUnreadable => "无法读取 {path}——没有导入任何内容。",
+        L10nKey::SettingsImportNoHosts => "{path} 中没有可导入的主机——只有通配符或 Match 规则。",
+        L10nKey::SettingsImportSummary => {
+            "新增 {count} 个主机——更新 {updated} 个，{unchanged} 个已是最新"
+        }
+        L10nKey::SettingsImportIgnored => {
+            "有 {count} 个选项在 tty7 中没有对应设置，仍留在文件里：{options}"
+        }
+        L10nKey::SettingsImportMoreOptions => "还有 {count} 个",
         L10nKey::SettingsDefaultsIntro => {
             "所有主机都从这些设置开始。每个主机都可以在自己的高级选项中覆盖某项。"
         }
         L10nKey::SettingsCopyAddress => "复制地址",
         L10nKey::SettingsDuplicate => "复制",
         L10nKey::SettingsForgetPassword => "清除已保存的密码",
+        L10nKey::SettingsForgetPasswordTitle => "要清除 {endpoint} 的已保存密码吗？",
+        L10nKey::SettingsForgetPasswordBody => {
+            "下次连接它时会重新询问密码。这台主机的其他设置不受影响。"
+        }
+        L10nKey::SettingsForgetPasswordSharedBody => {
+            "还有 {count} 个主机配置同样使用 {endpoint}，那些连接也需要重新输入密码。"
+        }
         L10nKey::SettingsForgotPasswordFor => "已清除 {endpoint} 的已保存密码",
         L10nKey::SettingsDeleteProfileBody => {
             "为它保存的密码也会一并删除，除非还有别的连接用着同一个地址。"
@@ -204,6 +221,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNameDesc => "此连接的标签。",
         L10nKey::SettingsHost => "主机",
         L10nKey::SettingsHostDesc => "主机名或 IP 地址。",
+        L10nKey::SettingsHostRequired => "需要填写主机——不会被保存。",
+        L10nKey::SettingsPortInvalid => "端口必须在 1-65535 之间——留空表示 22。",
         L10nKey::SettingsUser => "用户",
         L10nKey::SettingsUserDesc => "登录用户（留空表示连接时解析）。",
         L10nKey::SettingsAuth => "认证",
@@ -215,6 +234,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAuthMode2Fa => "2FA",
         L10nKey::SettingsJumpHost => "跳板主机",
         L10nKey::SettingsJumpHostDesc => "用于中转的另一个主机配置的名称（留空 = 直连）。",
+        L10nKey::SettingsJumpHostUnknown => "没有名为 {jump_name} 的主机配置——不会被保存。",
+        L10nKey::SettingsJumpHostSelf => "主机不能把自己当作跳板——不会被保存。",
         L10nKey::SettingsNoneSummary => "（无）",
         L10nKey::SettingsPortForwarding => "端口转发",
         L10nKey::SettingsRulesOpenedWithConnection => "1 条规则，随连接打开",
@@ -243,6 +264,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSocks5ProxyDesc => "host:port（留空 = 无）。",
         L10nKey::SettingsHttpProxy => "HTTP 代理",
         L10nKey::SettingsHttpProxyDesc => "host:port（留空 = 无）。",
+        L10nKey::SettingsProxyPortInvalid => "端口必须在 1-65535 之间——只写主机则使用默认端口。",
         L10nKey::SettingsKexAlgorithms => "KEX 算法",
         L10nKey::SettingsKexAlgorithmsDesc => "逗号分隔（留空 = 库默认值）。",
         L10nKey::SettingsCiphers => "加密算法",
@@ -785,6 +807,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpTransferDone => "完成",
         L10nKey::SftpTransferCancelled => "已取消",
         L10nKey::SftpTransferError => "错误",
+        L10nKey::SftpTransferListFailed => "无法获取传输状态：{error}",
         L10nKey::SftpImagePasteUploadFailed => "无法将粘贴的图片上传到 {host}：{error}",
         L10nKey::ForwardPanelTitle => "端口转发",
         L10nKey::ForwardDisconnected => "已断开",
@@ -799,6 +822,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForwardToLabel => "到",
         L10nKey::ForwardSocksLabel => "SOCKS",
         L10nKey::ForwardAdd => "添加",
+        L10nKey::ForwardRequestFailed => "联系不上这个会话——什么都没有改动。",
         L10nKey::FileTreePlaceholderFileName => "文件名",
         L10nKey::FileTreePlaceholderFolderName => "文件夹名",
         L10nKey::FileTreePlaceholderNewName => "新名称",
@@ -810,6 +834,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SftpDeleteFileBody => "该文件将在 {host} 上被删除。远端没有回收站。",
         L10nKey::FileTreeDeleteFailed => "无法删除 {name}",
+        L10nKey::FileTreeCreateFailed => "无法创建 {name}",
+        L10nKey::FileTreeRenameFailed => "无法重命名 {name}",
         L10nKey::FileTreeContextOpen => "打开",
         L10nKey::FileTreeContextCdHere => "cd 到此处",
         L10nKey::FileTreeContextInsertPath => "在终端中插入路径",
@@ -832,6 +858,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileDropFailedMany => "无法复制 {name}，另有 {n} 个也失败了",
         L10nKey::SshPromptNewKey => "新 {fingerprint}",
         L10nKey::SshPromptOldKey => "旧 {old_fingerprint}",
+        L10nKey::SshPromptHostKeyNewAlgorithm => {
+            "你已经通过一把 {previous_algorithm} 密钥认识这台主机。这是一把新的 {algorithm} 密钥，并不是用来替换那一把的。"
+        }
+        L10nKey::SshPromptTypeYesToOverride => "输入 yes 才能启用“覆盖”。",
         L10nKey::EditorCantOpen => "无法打开 {path}：{e}",
         L10nKey::EditorCantRead => "无法读取 {path}：{e}",
         L10nKey::EditorNotUtf8 => "“{path}”不是有效的 UTF-8",
@@ -1511,6 +1541,22 @@ pub fn translate_variant_zh(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsAliasesLinked, "zero") => "还没有关联别名。",
         (L10nKey::SettingsAliasesLinked, "one") => "已关联 1 个别名。",
         (L10nKey::SettingsAliasesLinked, "other") => "已关联 {count} 个别名。",
+        (L10nKey::SettingsImportSummary, "zero") => {
+            "没有新主机——更新 {updated} 个，{unchanged} 个已是最新"
+        }
+        (L10nKey::SettingsImportSummary, "one") => {
+            "新增 1 个主机——更新 {updated} 个，{unchanged} 个已是最新"
+        }
+        (L10nKey::SettingsImportSummary, "other") => {
+            "新增 {count} 个主机——更新 {updated} 个，{unchanged} 个已是最新"
+        }
+        (L10nKey::SettingsImportIgnored, "zero") => "文件里的每个选项在 tty7 中都有对应设置。",
+        (L10nKey::SettingsImportIgnored, "one") => {
+            "有 1 个选项在 tty7 中没有对应设置，仍留在文件里：{options}"
+        }
+        (L10nKey::SettingsImportIgnored, "other") => {
+            "有 {count} 个选项在 tty7 中没有对应设置，仍留在文件里：{options}"
+        }
         (L10nKey::SettingsRulesOpenedWithConnection, "zero") => "0 条规则，随连接打开",
         (L10nKey::SettingsRulesOpenedWithConnection, "one") => "1 条规则，随连接打开",
         (L10nKey::SettingsRulesOpenedWithConnection, "other") => "{count} 条规则，随连接打开",
@@ -1522,6 +1568,12 @@ pub fn translate_variant_zh(key: L10nKey, branch: &'static str) -> Option<&'stat
         }
         (L10nKey::SettingsOfflineMachines, "other") => {
             "还有 {count} 台已保存的机器未连接——在其中一台上打开工作区，即可在那台机器上安装 hook。"
+        }
+        (L10nKey::SettingsForgetPasswordSharedBody, "one") => {
+            "还有 1 个主机配置同样使用 {endpoint}，那个连接也需要重新输入密码。"
+        }
+        (L10nKey::SettingsForgetPasswordSharedBody, "other") => {
+            "还有 {count} 个主机配置同样使用 {endpoint}，那些连接也需要重新输入密码。"
         }
         (L10nKey::SftpReplaceBody, "one") => "{names} 在这个文件夹里已经存在，上传会覆盖它。",
         (L10nKey::SftpReplaceBody, "other") => "{names} 在这个文件夹里已经存在，上传会覆盖它们。",

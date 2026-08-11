@@ -1,13 +1,27 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use russh::keys::ssh_key::{HashAlg, PublicKey};
+use russh::keys::ssh_key::{Algorithm, HashAlg, PublicKey};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostKeyStatus {
     Known,
     Unknown,
-    Changed { old_fingerprint_sha256: String },
+    Changed {
+        old_fingerprint_sha256: String,
+    },
+    /// The host is on file, but only under some *other* key algorithm.
+    ///
+    /// A server that grows an ed25519 key beside the ssh-rsa one it has always
+    /// had has not been tampered with, and OpenSSH says so: it treats a key of
+    /// an algorithm the host has no entry for as simply unknown, and saves the
+    /// man-in-the-middle warning for a key that contradicts one on file. The
+    /// algorithm travels with the status so the confirmation can name what the
+    /// host was known by.
+    ChangedAlgorithm {
+        known_fingerprint_sha256: String,
+        known_algorithm: String,
+    },
     Revoked,
 }
 
@@ -71,7 +85,7 @@ pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> H
     }
 
     let mut changed: Option<String> = None;
-    let mut changed_other_alg: Option<String> = None;
+    let mut changed_other_alg: Option<(String, String)> = None;
     for line in contents.lines() {
         let Some(entry) = KnownHostsLine::parse(line) else {
             continue;
@@ -84,9 +98,11 @@ pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> H
             Some(Marker::Revoked) => continue,
             None => {
                 let Some(stored) = entry.key() else { continue };
-                if stored.algorithm() != our_alg {
+                let stored_alg = stored.algorithm();
+                if stored_alg != our_alg {
                     if changed_other_alg.is_none() {
-                        changed_other_alg = Some(fingerprint_sha256(&stored));
+                        changed_other_alg =
+                            Some((fingerprint_sha256(&stored), stored_alg.as_str().to_string()));
                     }
                     continue;
                 }
@@ -100,12 +116,60 @@ pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> H
         }
     }
 
-    match changed.or(changed_other_alg) {
-        Some(old_fingerprint_sha256) => HostKeyStatus::Changed {
+    // A same-algorithm contradiction outranks everything else on file: the host
+    // has an entry that says this key is wrong, and no amount of other-algorithm
+    // company softens that.
+    if let Some(old_fingerprint_sha256) = changed {
+        return HostKeyStatus::Changed {
             old_fingerprint_sha256,
+        };
+    }
+    match changed_other_alg {
+        Some((known_fingerprint_sha256, known_algorithm)) => HostKeyStatus::ChangedAlgorithm {
+            known_fingerprint_sha256,
+            known_algorithm,
         },
         None => HostKeyStatus::Unknown,
     }
+}
+
+/// The host-key algorithms this host already has entries for, in file order.
+///
+/// Negotiation reads this so the algorithms already on file are offered first —
+/// see `connect::build_preferred`. Markers are skipped: a `@cert-authority` line
+/// names the authority's key rather than the host's, and a `@revoked` one names
+/// a key that would be refused, so neither predicts what the host will present.
+pub fn known_algorithms(host: &str, port: u16) -> Vec<Algorithm> {
+    match default_path() {
+        Some(path) => known_algorithms_in_file(&path, host, port),
+        None => Vec::new(),
+    }
+}
+
+pub fn known_algorithms_in_file(path: &Path, host: &str, port: u16) -> Vec<Algorithm> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => known_algorithms_in_str(&contents, host, port),
+        Err(_) => Vec::new(),
+    }
+}
+
+pub fn known_algorithms_in_str(contents: &str, host: &str, port: u16) -> Vec<Algorithm> {
+    let token = host_token(host, port);
+    let mut out: Vec<Algorithm> = Vec::new();
+    for line in contents.lines() {
+        let Some(entry) = KnownHostsLine::parse(line) else {
+            continue;
+        };
+        if entry.marker.is_some() || !entry.matches_host(&token) {
+            continue;
+        }
+        let Some(stored) = entry.key() else { continue };
+        let alg = stored.algorithm();
+        if !out.contains(&alg) {
+            out.push(alg);
+        }
+    }
+    out
 }
 
 pub fn append_trusted(host: &str, port: u16, key: &PublicKey) -> std::io::Result<()> {
@@ -252,6 +316,75 @@ pub fn delete_in_str(contents: &str, id: &KnownHostId) -> (String, bool) {
     (out, removed)
 }
 
+/// Drop the lines `key` replaces before it is appended for `host`.
+///
+/// Appending on its own is not enough when the user overrides a *changed* key:
+/// `check_in_str` answers `Known` on any same-algorithm match, so the line the
+/// new key contradicts — the one the user just decided was wrong, and which in
+/// the case the warning exists for is an attacker's — would go on being trusted
+/// forever, with no warning ever shown again. OpenSSH rewrites the file for the
+/// same reason.
+///
+/// A no-op for a host that was merely unknown, which by definition has no
+/// same-algorithm line to drop.
+pub fn forget_superseded(host: &str, port: u16, key: &PublicKey) -> std::io::Result<()> {
+    match default_path() {
+        Some(path) => forget_superseded_in_file(&path, host, port, key),
+        None => Ok(()),
+    }
+}
+
+pub fn forget_superseded_in_file(
+    path: &Path,
+    host: &str,
+    port: u16,
+    key: &PublicKey,
+) -> std::io::Result<()> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for id in superseded_ids_in_str(&contents, host, port, key) {
+        delete_in_file(path, &id)?;
+    }
+    Ok(())
+}
+
+pub fn superseded_ids_in_str(
+    contents: &str,
+    host: &str,
+    port: u16,
+    key: &PublicKey,
+) -> Vec<KnownHostId> {
+    let token = host_token(host, port);
+    let our_alg = key.algorithm();
+    let mut out = Vec::new();
+    for line in contents.lines() {
+        let Some(entry) = KnownHostsLine::parse(line) else {
+            continue;
+        };
+        // Only a plain line for this one host: a `@revoked` line is a standing
+        // refusal that an override of a different key must not lift, and a glob
+        // or a comma list also speaks for hosts nobody is connecting to — the
+        // rest of `*.example.com` should not be forgotten because one machine
+        // behind it rotated its key.
+        if entry.marker.is_some() || !entry.names_only_host(&token) {
+            continue;
+        }
+        let Some(stored) = entry.key() else { continue };
+        if stored.algorithm() != our_alg || &stored == key {
+            continue;
+        }
+        out.push(KnownHostId {
+            host: entry.hosts.to_string(),
+            key_type: entry.keytype.to_string(),
+            keyblob: entry.keyblob.to_string(),
+        });
+    }
+    out
+}
+
 fn split_keep_terminators(text: &str) -> Vec<&str> {
     let mut segments = Vec::new();
     let mut start = 0;
@@ -312,6 +445,29 @@ impl<'a> KnownHostsLine<'a> {
 
     fn key(&self) -> Option<PublicKey> {
         PublicKey::from_openssh(&format!("{} {}", self.keytype, self.keyblob)).ok()
+    }
+
+    /// Whether this line's host field names `token` and nothing else.
+    ///
+    /// `matches_host` is the right question for "does this entry apply here";
+    /// this is the stricter one to ask before *deleting* a line, because a glob
+    /// or a comma list carries other hosts with it. A hashed pattern names
+    /// exactly one token, so it passes.
+    fn names_only_host(&self, token: &str) -> bool {
+        if self.hosts.contains(',') {
+            return false;
+        }
+        let pattern = self.hosts.trim();
+        match pattern.strip_prefix("|1|") {
+            Some(hashed) => hashed_host_matches(hashed, token),
+            None => {
+                !pattern
+                    .as_bytes()
+                    .iter()
+                    .any(|&b| b == b'*' || b == b'?' || b == b'!')
+                    && pattern.eq_ignore_ascii_case(token)
+            }
+        }
     }
 
     fn matches_host(&self, token: &str) -> bool {
@@ -555,19 +711,67 @@ mod tests {
         }
     }
 
+    const KEY_ECDSA: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCdv5xfuuCGyVbYZSTqcFjQWE7YtIsx8fqlXF1+v728j1RUnELLVrmgsC6gZ0zObXAzJ39JEynaQv9tf/v16V58=";
+
+    /// Not `Changed`, which is the man-in-the-middle alarm: a host that has
+    /// grown a second key type has not contradicted anything on file, and
+    /// OpenSSH asks the same mild question it asks about any unseen key.
     #[test]
-    fn different_key_type_for_a_known_host_reports_changed_not_unknown() {
-        const KEY_ECDSA: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCdv5xfuuCGyVbYZSTqcFjQWE7YtIsx8fqlXF1+v728j1RUnELLVrmgsC6gZ0zObXAzJ39JEynaQv9tf/v16V58=";
+    fn a_key_of_a_new_algorithm_is_flagged_as_the_algorithm_being_new() {
         let file = format!("example.com {KEY_A}\n");
         match check_in_str(&file, "example.com", 22, &key(KEY_ECDSA)) {
-            HostKeyStatus::Changed { .. } => {}
-            other => panic!("expected Changed, got {other:?}"),
+            HostKeyStatus::ChangedAlgorithm {
+                known_algorithm, ..
+            } => assert_eq!(known_algorithm, "ssh-ed25519"),
+            other => panic!("expected ChangedAlgorithm, got {other:?}"),
         }
         let file = format!("example.com {KEY_A}\nexample.com {KEY_ECDSA}\n");
         assert_eq!(
             check_in_str(&file, "example.com", 22, &key(KEY_ECDSA)),
             HostKeyStatus::Known
         );
+    }
+
+    #[test]
+    fn a_different_key_of_the_same_algorithm_is_still_a_change() {
+        let file = format!("example.com {KEY_A}\n");
+        match check_in_str(&file, "example.com", 22, &key(KEY_B)) {
+            HostKeyStatus::Changed {
+                old_fingerprint_sha256,
+            } => assert_eq!(old_fingerprint_sha256, fingerprint_sha256(&key(KEY_A))),
+            other => panic!("expected Changed, got {other:?}"),
+        }
+    }
+
+    /// The downgrade this split has to not open: an attacker offering a key of
+    /// an algorithm the host also has an entry for gets the full alarm, however
+    /// many other-algorithm lines sit alongside it.
+    #[test]
+    fn a_same_algorithm_mismatch_outranks_an_other_algorithm_entry() {
+        let file = format!("example.com {KEY_ECDSA}\nexample.com {KEY_A}\n");
+        match check_in_str(&file, "example.com", 22, &key(KEY_B)) {
+            HostKeyStatus::Changed { .. } => {}
+            other => panic!("expected Changed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn known_algorithms_lists_each_algorithm_once_in_file_order() {
+        let file = format!(
+            "example.com {KEY_ECDSA}\nexample.com {KEY_A}\nexample.com {KEY_B}\nother.com {KEY_A}\n"
+        );
+        let algs = known_algorithms_in_str(&file, "example.com", 22);
+        assert_eq!(
+            algs.iter().map(|a| a.as_str()).collect::<Vec<_>>(),
+            vec!["ecdsa-sha2-nistp256", "ssh-ed25519"]
+        );
+        assert!(known_algorithms_in_str(&file, "nowhere.com", 22).is_empty());
+    }
+
+    #[test]
+    fn known_algorithms_ignores_revoked_and_cert_authority_lines() {
+        let file = format!("@revoked example.com {KEY_A}\n@cert-authority example.com {KEY_B}\n");
+        assert!(known_algorithms_in_str(&file, "example.com", 22).is_empty());
     }
 
     #[test]
@@ -769,6 +973,58 @@ mod tests {
         let (after, removed) = delete_in_str(&contents, &missing);
         assert!(!removed);
         assert_eq!(after, contents);
+    }
+
+    /// Overriding a changed key used to append and leave the old line in
+    /// place, and `check_in_str` answers `Known` on any same-algorithm match —
+    /// so the key the user had just refused stayed trusted, silently, forever.
+    #[test]
+    fn overriding_a_changed_key_stops_trusting_the_one_it_replaces() {
+        let dir = std::env::temp_dir().join(format!("tty7-kh-supersede-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("known_hosts");
+        std::fs::write(&path, format!("example.com {KEY_A}\n")).unwrap();
+
+        let kb = key(KEY_B);
+        forget_superseded_in_file(&path, "example.com", 22, &kb).unwrap();
+        append_trusted_to(&path, "example.com", 22, &kb).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !contents.contains(KEY_A.split_whitespace().nth(1).unwrap()),
+            "the superseded key is still on file: {contents}"
+        );
+        assert_eq!(
+            check_in_str(&contents, "example.com", 22, &kb),
+            HostKeyStatus::Known
+        );
+        assert!(matches!(
+            check_in_str(&contents, "example.com", 22, &key(KEY_A)),
+            HostKeyStatus::Changed { .. }
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn nothing_is_superseded_by_a_key_of_another_algorithm_or_another_host() {
+        let file = format!("example.com {KEY_A}\nother.com {KEY_B}\n");
+        assert!(superseded_ids_in_str(&file, "example.com", 22, &key(KEY_ECDSA)).is_empty());
+        assert!(superseded_ids_in_str(&file, "example.com", 22, &key(KEY_A)).is_empty());
+        assert_eq!(
+            superseded_ids_in_str(&file, "example.com", 22, &key(KEY_B)).len(),
+            1
+        );
+    }
+
+    /// A wildcard or comma-list line speaks for hosts nobody is connecting to,
+    /// and a `@revoked` line is a standing refusal — one host's override must
+    /// not quietly drop either.
+    #[test]
+    fn superseding_never_touches_a_shared_or_revoked_line() {
+        let file = format!(
+            "*.example.com {KEY_A}\nweb.example.com,db.example.com {KEY_A}\n@revoked web.example.com {KEY_A}\n"
+        );
+        assert!(superseded_ids_in_str(&file, "web.example.com", 22, &key(KEY_B)).is_empty());
     }
 
     #[test]

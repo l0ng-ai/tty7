@@ -199,6 +199,53 @@ enum ForwardCancel {
     None,
 }
 
+/// A forward's status, shared with the task that serves it.
+///
+/// The status used to be a plain field written once when the forward was set
+/// up and never again, so a forward whose accept loop had already exited went
+/// on reporting `Listening` for as long as the pane stayed open — which is
+/// forever, because a pane is deliberately not closed when its SSH connection
+/// dies. The task that discovers the truth is the one that has to be able to
+/// record it.
+type SharedStatus = Arc<Mutex<ForwardStatus>>;
+
+/// Why a forward's accept loop stopped.
+enum LoopExit {
+    /// `accept()` failed over and over: the listening socket is no longer
+    /// usable, so nothing can even reach the forward any more.
+    ListenerLost,
+    /// The SSH transport went away under it. The port may still be bound —
+    /// a connection to it is accepted and then dropped — but there is nothing
+    /// on the far side of it.
+    ConnectionLost,
+}
+
+/// The status a forward is left in once its loop has exited.
+///
+/// `ForwardStatus::Error` rather than a `Stopped` variant of its own, on
+/// purpose: `ForwardStatus` is serialised across the protocol to remote
+/// `tty7-server` builds, and a variant an older remote has never heard of is a
+/// deserialisation failure rather than an unknown status. `Error` already
+/// draws as a danger badge with its message beside it.
+fn loop_exit_status(exit: LoopExit) -> ForwardStatus {
+    ForwardStatus::Error(
+        match exit {
+            LoopExit::ListenerLost => "stopped: the listening socket closed",
+            LoopExit::ConnectionLost => "stopped: the SSH connection went away",
+        }
+        .to_string(),
+    )
+}
+
+/// A forward that never got as far as a listening socket. It has no task, so
+/// nothing will ever move it off this status.
+fn bind_failed(rule: &SshForwardRule, e: io::Error) -> SharedStatus {
+    Arc::new(Mutex::new(ForwardStatus::Error(format!(
+        "bind {}:{} failed: {e}",
+        rule.bind_host, rule.bind_port
+    ))))
+}
+
 struct ForwardEntry {
     id: u64,
     kind: SshForwardKind,
@@ -207,7 +254,7 @@ struct ForwardEntry {
     target_host: String,
     target_port: u16,
     description: Option<String>,
-    status: ForwardStatus,
+    status: SharedStatus,
     cancel: ForwardCancel,
     auto_local: bool,
 }
@@ -229,7 +276,7 @@ impl ForwardEntry {
             target_host: self.target_host.clone(),
             target_port: self.target_port,
             description: self.description.clone(),
-            status: self.status.clone(),
+            status: self.status.lock().unwrap().clone(),
         }
     }
 }
@@ -390,18 +437,11 @@ impl SshForwardRegistry {
         &self,
         conn: &Arc<SshConnection>,
         rule: &SshForwardRule,
-    ) -> (u16, ForwardStatus, ForwardCancel) {
+    ) -> (u16, SharedStatus, ForwardCancel) {
         let listener = match TcpListener::bind((rule.bind_host.as_str(), rule.bind_port)).await {
             Ok(l) => l,
             Err(e) => {
-                return (
-                    rule.bind_port,
-                    ForwardStatus::Error(format!(
-                        "bind {}:{} failed: {e}",
-                        rule.bind_host, rule.bind_port
-                    )),
-                    ForwardCancel::None,
-                );
+                return (rule.bind_port, bind_failed(rule, e), ForwardCancel::None);
             }
         };
         let bound = listener
@@ -411,14 +451,16 @@ impl SshForwardRegistry {
         let conn = conn.clone();
         let target_host = rule.target_host.clone();
         let target_port = rule.target_port;
+        let status: SharedStatus = Arc::new(Mutex::new(ForwardStatus::Listening));
+        let task_status = status.clone();
         let handle = tokio::spawn(async move {
-            loop {
+            let exit = loop {
                 let sock = match accept_retrying(&listener).await {
                     Some((sock, _peer)) => sock,
-                    None => break,
+                    None => break LoopExit::ListenerLost,
                 };
                 if !conn.is_alive() {
-                    break;
+                    break LoopExit::ConnectionLost;
                 }
                 let conn = conn.clone();
                 let target_host = target_host.clone();
@@ -432,27 +474,21 @@ impl SshForwardRegistry {
                         }
                     }
                 });
-            }
+            };
+            *task_status.lock().unwrap() = loop_exit_status(exit);
         });
-        (bound, ForwardStatus::Listening, ForwardCancel::Task(handle))
+        (bound, status, ForwardCancel::Task(handle))
     }
 
     async fn start_dynamic(
         &self,
         conn: &Arc<SshConnection>,
         rule: &SshForwardRule,
-    ) -> (u16, ForwardStatus, ForwardCancel) {
+    ) -> (u16, SharedStatus, ForwardCancel) {
         let listener = match TcpListener::bind((rule.bind_host.as_str(), rule.bind_port)).await {
             Ok(l) => l,
             Err(e) => {
-                return (
-                    rule.bind_port,
-                    ForwardStatus::Error(format!(
-                        "bind {}:{} failed: {e}",
-                        rule.bind_host, rule.bind_port
-                    )),
-                    ForwardCancel::None,
-                );
+                return (rule.bind_port, bind_failed(rule, e), ForwardCancel::None);
             }
         };
         let bound = listener
@@ -460,14 +496,16 @@ impl SshForwardRegistry {
             .map(|a| a.port())
             .unwrap_or(rule.bind_port);
         let conn = conn.clone();
+        let status: SharedStatus = Arc::new(Mutex::new(ForwardStatus::Listening));
+        let task_status = status.clone();
         let handle = tokio::spawn(async move {
-            loop {
+            let exit = loop {
                 let sock = match accept_retrying(&listener).await {
                     Some((sock, _peer)) => sock,
-                    None => break,
+                    None => break LoopExit::ListenerLost,
                 };
                 if !conn.is_alive() {
-                    break;
+                    break LoopExit::ConnectionLost;
                 }
                 let conn = conn.clone();
                 tokio::spawn(async move {
@@ -492,16 +530,21 @@ impl SshForwardRegistry {
                         }
                     }
                 });
-            }
+            };
+            *task_status.lock().unwrap() = loop_exit_status(exit);
         });
-        (bound, ForwardStatus::Listening, ForwardCancel::Task(handle))
+        (bound, status, ForwardCancel::Task(handle))
     }
 
+    /// Unlike the two above, a remote forward has no accept loop of its own to
+    /// notice a dead transport: the far end opens the channels and russh hands
+    /// them to the connection's handler. Its status stays whatever the
+    /// `tcpip-forward` request answered.
     async fn start_remote(
         &self,
         conn: &Arc<SshConnection>,
         rule: &SshForwardRule,
-    ) -> (u16, ForwardStatus, ForwardCancel) {
+    ) -> (u16, SharedStatus, ForwardCancel) {
         match conn
             .add_remote_forward(
                 &rule.bind_host,
@@ -513,7 +556,7 @@ impl SshForwardRegistry {
         {
             Ok(bound) => (
                 bound,
-                ForwardStatus::Listening,
+                Arc::new(Mutex::new(ForwardStatus::Listening)),
                 ForwardCancel::Remote {
                     conn: Arc::downgrade(conn),
                     bind_host: rule.bind_host.clone(),
@@ -522,7 +565,9 @@ impl SshForwardRegistry {
             ),
             Err(e) => (
                 rule.bind_port,
-                ForwardStatus::Error(format!("remote forward request denied: {e}")),
+                Arc::new(Mutex::new(ForwardStatus::Error(format!(
+                    "remote forward request denied: {e}"
+                )))),
                 ForwardCancel::None,
             ),
         }
@@ -576,7 +621,7 @@ impl SshForwardRegistry {
         };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (bind_port, status, cancel) = self.start_local(&conn, &rule).await;
-        if let ForwardStatus::Error(e) = &status {
+        if let ForwardStatus::Error(e) = &*status.lock().unwrap() {
             return Err(io::Error::other(e.clone()));
         }
         let entry = ForwardEntry {
@@ -617,7 +662,9 @@ impl SshForwardRegistry {
                     && e.kind == SshForwardKind::Local
                     && e.target_host == remote_host
                     && e.target_port == remote_port
-                    && matches!(e.status, ForwardStatus::Listening)
+                    // Now that a dead loop says so, this stops handing out the
+                    // port of a forward that no longer serves anything.
+                    && matches!(*e.status.lock().unwrap(), ForwardStatus::Listening)
             })
             .map(|e| e.bind_port)
     }
@@ -814,6 +861,47 @@ mod tests {
         assert_eq!(table.lookup("localhost", 9000), None);
     }
 
+    #[test]
+    fn a_stopped_forward_says_why_it_stopped() {
+        let listener = loop_exit_status(LoopExit::ListenerLost);
+        let connection = loop_exit_status(LoopExit::ConnectionLost);
+        assert_ne!(
+            listener, connection,
+            "a socket that closed and a transport that died are different problems"
+        );
+        for status in [&listener, &connection] {
+            assert!(
+                matches!(status, ForwardStatus::Error(_)),
+                "an older remote has to be able to deserialise this, so no new variant"
+            );
+        }
+    }
+
+    /// A forward's status used to be copied into `ManagedForward` from a field
+    /// written once when the forward was set up, so a forward whose loop had
+    /// long since exited answered `Listening` to every poll of the panel.
+    #[tokio::test]
+    async fn a_forward_whose_loop_exited_stops_reporting_listening() {
+        let reg = SshForwardRegistry::default();
+        push_listener(&reg, ForwardOwner::Pane(7), 0).await;
+        assert!(matches!(reg.list(7)[0].status, ForwardStatus::Listening));
+
+        // What the accept loop does on its way out. The entry is already in the
+        // registry by then, which is the whole reason the status is shared.
+        let status = reg.owners.lock().unwrap()[&ForwardOwner::Pane(7)][0]
+            .status
+            .clone();
+        *status.lock().unwrap() = loop_exit_status(LoopExit::ConnectionLost);
+
+        match &reg.list(7)[0].status {
+            ForwardStatus::Error(msg) => assert!(
+                msg.contains("SSH connection"),
+                "the panel needs a reason, not just a red badge: {msg}"
+            ),
+            other => panic!("a dead forward still reports {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn registry_add_list_remove_teardown_bookkeeping() {
         let reg = SshForwardRegistry::default();
@@ -827,7 +915,7 @@ mod tests {
                 target_host: "h".into(),
                 target_port: 80,
                 description: None,
-                status: ForwardStatus::Listening,
+                status: Arc::new(Mutex::new(ForwardStatus::Listening)),
                 cancel: ForwardCancel::Task(task),
                 auto_local: false,
             }
@@ -872,7 +960,7 @@ mod tests {
                 target_host: "h".into(),
                 target_port: 80,
                 description: None,
-                status: ForwardStatus::Listening,
+                status: Arc::new(Mutex::new(ForwardStatus::Listening)),
                 cancel: ForwardCancel::Task(handle),
                 auto_local: false,
             }
@@ -933,7 +1021,7 @@ mod tests {
             target_host: "127.0.0.1".into(),
             target_port: 3000,
             description: None,
-            status: ForwardStatus::Listening,
+            status: Arc::new(Mutex::new(ForwardStatus::Listening)),
             cancel: ForwardCancel::Task(handle),
             auto_local: true,
         };
