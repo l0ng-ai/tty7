@@ -44,6 +44,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::KeepMine => "Keep mine",
         L10nKey::Dismiss => "Dismiss",
         L10nKey::StoredPasswordRejected => "The stored password was rejected. Enter a new one.",
+        L10nKey::StoredPassphraseRejected => {
+            "The saved passphrase did not unlock this key. Enter the right one."
+        }
         L10nKey::Trust => "Trust",
         L10nKey::Abort => "Abort",
         L10nKey::HostKeyOverrideMessage => {

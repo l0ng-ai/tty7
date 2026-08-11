@@ -112,6 +112,7 @@ l10n_keys! {
     KeepMine,
     Dismiss,
     StoredPasswordRejected,
+    StoredPassphraseRejected,
     Trust,
     Abort,
     HostKeyOverrideMessage,

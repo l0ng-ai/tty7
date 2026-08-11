@@ -3233,6 +3233,33 @@ impl Tty7App {
             use crate::core::keychain::{CredentialStore, OsCredentialStore};
             let _ = OsCredentialStore.delete_password(&user, &host, port);
         }
+        // The same argument for the key passphrases this profile taught the
+        // app about: the comment above says "the secret", but until now only
+        // the password was let go of, so a deleted profile stranded its
+        // passphrase entries with no UI left to reach them. A key is only
+        // forgotten when no surviving profile still lists it.
+        use crate::core::keychain::{CredentialStore as _, OsCredentialStore};
+        let mine = cfg
+            .ssh_profiles
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.expanded_identity_files())
+            .unwrap_or_default();
+        let kept: std::collections::HashSet<String> = cfg
+            .ssh_profiles
+            .iter()
+            .filter(|p| p.id != id)
+            .flat_map(|p| p.expanded_identity_files())
+            .collect();
+        for path in mine.iter().filter(|p| !kept.contains(*p)) {
+            // Keyed by the key file's contents, so a key already gone from
+            // disk cannot be looked up — and has no live passphrase to leak.
+            let Ok(bytes) = std::fs::read(path) else {
+                continue;
+            };
+            let account = crate::core::keychain::key_account_from_contents(&bytes);
+            let _ = OsCredentialStore.delete_key_passphrase(&account);
+        }
         self.update_config(cx, |cfg| {
             cfg.ssh_profiles.retain(|p| p.id != id);
             cfg.ssh_profile_frecency.remove(&id);

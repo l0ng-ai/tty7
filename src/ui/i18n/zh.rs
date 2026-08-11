@@ -44,6 +44,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::KeepMine => "保留我的版本",
         L10nKey::Dismiss => "关闭",
         L10nKey::StoredPasswordRejected => "已存储的密码被拒绝，请输入新密码。",
+        L10nKey::StoredPassphraseRejected => "已保存的口令无法解锁该密钥，请输入正确的口令。",
         L10nKey::Trust => "信任",
         L10nKey::Abort => "中止",
         L10nKey::HostKeyOverrideMessage => "输入 yes 覆盖并信任新密钥，或按 Esc 中止。",

@@ -30,6 +30,7 @@ pub(crate) enum PromptModel {
     KeyPassphrase {
         key_path: String,
         comment: String,
+        rejected: bool,
     },
     KeyboardInteractive {
         name: String,
@@ -69,6 +70,9 @@ pub(crate) enum KeychainWrite {
         key_path: String,
         secret: String,
     },
+    DeleteKeyPassphrase {
+        key_path: String,
+    },
 }
 
 impl PromptModel {
@@ -85,9 +89,15 @@ impl PromptModel {
                 port,
                 rejected: auto_supplied_password,
             },
-            AuthPromptKind::KeyPassphrase { key_path, comment } => {
-                PromptModel::KeyPassphrase { key_path, comment }
-            }
+            AuthPromptKind::KeyPassphrase {
+                key_path,
+                comment,
+                rejected,
+            } => PromptModel::KeyPassphrase {
+                key_path,
+                comment,
+                rejected,
+            },
             AuthPromptKind::KeyboardInteractive {
                 name,
                 instructions,
@@ -172,11 +182,19 @@ pub(crate) fn passphrase_submit(
     key_path: &str,
     secret: String,
     remember: bool,
+    rejected: bool,
 ) -> (AuthResponse, KeychainWrite) {
     let write = if remember {
         KeychainWrite::SetKeyPassphrase {
             key_path: key_path.to_string(),
             secret: secret.clone(),
+        }
+    } else if rejected {
+        // The stored passphrase is the reason this sheet is up, and the user
+        // has just declined to save the replacement. Leaving the old one
+        // behind would hand the same dead secret to the next connection.
+        KeychainWrite::DeleteKeyPassphrase {
+            key_path: key_path.to_string(),
         }
     } else {
         KeychainWrite::None
@@ -403,9 +421,11 @@ impl Tty7App {
                 let secret = values.first().cloned().unwrap_or_default();
                 password_submit(user, host, *port, secret, remember, *rejected)
             }
-            PromptModel::KeyPassphrase { key_path, .. } => {
+            PromptModel::KeyPassphrase {
+                key_path, rejected, ..
+            } => {
                 let secret = values.first().cloned().unwrap_or_default();
-                passphrase_submit(key_path, secret, remember)
+                passphrase_submit(key_path, secret, remember, *rejected)
             }
             PromptModel::KeyboardInteractive { .. } => (ki_submit(values), KeychainWrite::None),
             PromptModel::HostKeyUnknown { .. } => {
@@ -534,6 +554,24 @@ impl Tty7App {
                         }
                     }
                     Err(e) => log::warn!("not remembering passphrase; cannot read {path}: {e}"),
+                }
+            }
+            KeychainWrite::DeleteKeyPassphrase { key_path } => {
+                // Keyed by the key file's contents, exactly as the set arm
+                // above is — the keychain account for a passphrase is a hash
+                // of the file, not its path. A delete that keeps failing
+                // leaves the rejected passphrase in place, and the key stays
+                // locked out on every later connection with nothing anywhere
+                // recording why.
+                let path = crate::core::ssh_profile::expand_tilde(&key_path);
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        let account = crate::core::keychain::key_account_from_contents(&bytes);
+                        if let Err(e) = store.delete_key_passphrase(&account) {
+                            log::warn!("could not forget key passphrase in keychain: {e}");
+                        }
+                    }
+                    Err(e) => log::warn!("not forgetting passphrase; cannot read {path}: {e}"),
                 }
             }
         }
@@ -690,8 +728,15 @@ impl Tty7App {
                         cx,
                     ))
             }
-            PromptModel::KeyPassphrase { comment, .. } => {
+            PromptModel::KeyPassphrase {
+                comment, rejected, ..
+            } => {
                 let mut c = card;
+                if *rejected {
+                    c = c.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+                        crate::ui::i18n::L10nKey::StoredPassphraseRejected,
+                    )));
+                }
                 if !comment.is_empty() {
                     c = c.child(
                         div()
@@ -964,7 +1009,7 @@ mod tests {
 
     #[test]
     fn passphrase_remember_stores_by_key_path() {
-        let (_resp, write) = passphrase_submit("/home/u/.ssh/id_ed25519", "pp".into(), true);
+        let (_resp, write) = passphrase_submit("/home/u/.ssh/id_ed25519", "pp".into(), true, false);
         assert_eq!(
             write,
             KeychainWrite::SetKeyPassphrase {
@@ -972,8 +1017,58 @@ mod tests {
                 secret: "pp".into(),
             }
         );
-        let (_r, w) = passphrase_submit("/k", "pp".into(), false);
+        let (_r, w) = passphrase_submit("/k", "pp".into(), false, false);
         assert_eq!(w, KeychainWrite::None);
+    }
+
+    /// The passphrase side of `fr_a6_rejected_without_remember_deletes_stale_entry`
+    /// above. It matters more here than it does for a password: a key
+    /// passphrase the daemon cannot use is not one wrong login, it is a key
+    /// that never opens again, and before this the sheet had no way at all to
+    /// let go of one.
+    #[test]
+    fn passphrase_rejected_without_remember_deletes_stale_entry() {
+        let (resp, write) = passphrase_submit("~/.ssh/id_ed25519", "right".into(), false, true);
+        assert!(matches!(resp, AuthResponse::Secret(_)));
+        assert_eq!(
+            write,
+            KeychainWrite::DeleteKeyPassphrase {
+                key_path: "~/.ssh/id_ed25519".into(),
+            }
+        );
+
+        // Remembering still wins: the new secret replaces the old one, so
+        // there is nothing left to delete.
+        let (_r, w) = passphrase_submit("~/.ssh/id_ed25519", "right".into(), true, true);
+        assert_eq!(
+            w,
+            KeychainWrite::SetKeyPassphrase {
+                key_path: "~/.ssh/id_ed25519".into(),
+                secret: "right".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn passphrase_prompt_carries_the_daemons_rejection() {
+        let m = PromptModel::from_prompt(
+            AuthPromptKind::KeyPassphrase {
+                key_path: "~/.ssh/id_ed25519".into(),
+                comment: String::new(),
+                rejected: true,
+            },
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            m,
+            PromptModel::KeyPassphrase {
+                key_path: "~/.ssh/id_ed25519".into(),
+                comment: String::new(),
+                rejected: true,
+            }
+        );
     }
 
     #[test]

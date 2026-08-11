@@ -46,6 +46,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::StoredPasswordRejected => {
             "保存されたパスワードが拒否されました。新しいパスワードを入力してください"
         }
+        L10nKey::StoredPassphraseRejected => {
+            "保存されたパスフレーズではこの鍵を解除できませんでした。正しいものを入力してください"
+        }
         L10nKey::Trust => "信頼する",
         L10nKey::Abort => "中止",
         L10nKey::HostKeyOverrideMessage => {

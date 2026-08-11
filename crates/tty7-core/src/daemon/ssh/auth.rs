@@ -496,31 +496,47 @@ async fn try_identity_file(
     let key = match russh::keys::decode_secret_key(&contents, None) {
         Ok(k) => k,
         Err(russh::keys::Error::KeyIsEncrypted) => {
-            let provided = spec
-                .key_passphrases
-                .as_ref()
-                .and_then(|m| m.get(raw_path))
-                .cloned();
-            let passphrase = match provided {
-                Some(p) => p,
+            // A passphrase the connection carried in from the keychain gets
+            // one silent attempt. If it does not open the file it is simply
+            // the wrong secret, and the only way forward is to ask — which is
+            // what this used to refuse to do: a passphrase saved by mistake
+            // ended every later connection here, with no prompt and no way to
+            // correct it from inside the app.
+            let stored = stored_passphrase(spec, raw_path);
+            let unlocked = match &stored {
+                Some(p) => match russh::keys::decode_secret_key(&contents, Some(p)) {
+                    Ok(k) => Some(k),
+                    Err(e) => {
+                        log::warn!("the stored passphrase did not decrypt {path}: {e}");
+                        None
+                    }
+                },
+                None => None,
+            };
+            match unlocked {
+                Some(k) => k,
                 None => {
                     let resp = broker
                         .prompt(AuthPromptKind::KeyPassphrase {
                             key_path: raw_path.to_string(),
                             comment: String::new(),
+                            rejected: stored.is_some(),
                         })
                         .await;
-                    match resp {
+                    let typed = match resp {
                         AuthResponse::Secret(p) => p,
                         _ => return Outcome::Skipped,
+                    };
+                    // The user just typed this one, so a failure here is not
+                    // stale state to heal — it is the answer being wrong, and
+                    // saying so beats silently asking again.
+                    match russh::keys::decode_secret_key(&contents, Some(&typed)) {
+                        Ok(k) => k,
+                        Err(e) => {
+                            log::warn!("could not decrypt identity file {path}: {e}");
+                            return failed(format!("could not decrypt identity file {path}"));
+                        }
                     }
-                }
-            };
-            match russh::keys::decode_secret_key(&contents, Some(&passphrase)) {
-                Ok(k) => k,
-                Err(e) => {
-                    log::warn!("could not decrypt identity file {path}: {e}");
-                    return failed(format!("could not decrypt identity file {path}"));
                 }
             }
         }
@@ -542,6 +558,16 @@ async fn try_identity_file(
         },
         Err(e) => failed(format!("public-key auth error: {e}")),
     }
+}
+
+/// The passphrase this connection already carries for `raw_path`, if any.
+///
+/// The map is keyed by the identity path exactly as the spec lists it — the
+/// same string the prompt names and the GUI files the keychain entry under —
+/// so the lookup uses the raw path, not the one `expand_identity_path` built
+/// for the filesystem.
+fn stored_passphrase(spec: &NativeSshSpec, raw_path: &str) -> Option<String> {
+    spec.key_passphrases.as_ref()?.get(raw_path).cloned()
 }
 
 async fn try_agent(handle: &mut Handle<ClientHandler>, spec: &NativeSshSpec) -> Outcome {
@@ -861,6 +887,27 @@ mod tests {
 
         let hosts = gssapi_service_hosts_with_lookup("10.0.0.1", |_| Some("10.0.0.1".into()));
         assert_eq!(hosts, vec!["10.0.0.1".to_string()]);
+    }
+
+    fn spec_with(extra: &str) -> NativeSshSpec {
+        serde_json::from_str(&format!(
+            r#"{{"host":"h","port":22,"user":"u","auth_mode":"auto"{extra}}}"#
+        ))
+        .expect("the minimal spec shape is what the daemon already accepts on the wire")
+    }
+
+    #[test]
+    fn a_stored_passphrase_is_found_by_the_path_the_spec_lists() {
+        // The GUI files the entry under the identity path it put in the spec,
+        // tilde and all, and `try_identity_file` has to look it up under the
+        // same string rather than under the filesystem path it expanded to.
+        let spec = spec_with(r#","key_passphrases":{"~/.ssh/id_ed25519":"pp"}"#);
+        assert_eq!(
+            stored_passphrase(&spec, "~/.ssh/id_ed25519").as_deref(),
+            Some("pp")
+        );
+        assert_eq!(stored_passphrase(&spec, "/home/u/.ssh/id_ed25519"), None);
+        assert_eq!(stored_passphrase(&spec_with(""), "~/.ssh/id_ed25519"), None);
     }
 
     #[test]
