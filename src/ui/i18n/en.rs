@@ -962,6 +962,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelAgentDone => "done",
         L10nKey::PanelRevealInFinder => "Reveal in Finder",
         L10nKey::PanelOpenFolder => "Open Folder",
+        L10nKey::PanelOpenInBrowser => "Open in Browser",
         L10nKey::ScmGroupMerge => "Merge Changes",
         L10nKey::ScmGroupStaged => "Staged Changes",
         L10nKey::ScmGroupChanges => "Changes",

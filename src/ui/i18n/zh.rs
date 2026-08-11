@@ -913,6 +913,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelAgentDone => "已完成",
         L10nKey::PanelRevealInFinder => "在 Finder 中显示",
         L10nKey::PanelOpenFolder => "打开文件夹",
+        L10nKey::PanelOpenInBrowser => "在浏览器中打开",
         L10nKey::ScmGroupMerge => "合并冲突",
         L10nKey::ScmGroupStaged => "暂存的更改",
         L10nKey::ScmGroupChanges => "更改",

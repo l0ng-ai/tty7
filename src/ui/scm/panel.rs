@@ -29,7 +29,7 @@ use crate::terminal::git_diff::DiffSource;
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App};
 use crate::ui::host_ops::{HostId, SharedHost};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
-use crate::ui::right_panel::{SEARCH_H, git_badge, info_chip};
+use crate::ui::right_panel::{ROW_INSET, SEARCH_H, action_strip, git_badge, info_chip};
 use crate::ui::rounding::{CARD_RADIUS, HAIRLINE, RoundedCorners as _, segment_corners};
 use crate::ui::scm::ScmIntent;
 use crate::ui::scm::path::{elide_middle, split_display_path};
@@ -52,15 +52,6 @@ const ROW_H: f32 = 24.;
 /// drawn from two numbers is a column that will eventually be drawn from two
 /// different numbers.
 const BADGE_W: f32 = 14.;
-
-/// Rows are laid out inside this inset and then pad themselves back out, so a
-/// hovered row's background is wider than its text on both sides.
-///
-/// The text lands on `CONTENT_INSET` whatever this is — the list subtracts it
-/// outside the row and the row adds it back inside — so all this number sets
-/// is how far the hover fill bleeds past the text. `scm/detail.rs` carries the
-/// same pair for the same reason.
-const ROW_INSET: f32 = 4.;
 
 /// The key context the message box installs, and the one `ScmCommit` is
 /// bound inside. The two are the same string on purpose: a binding whose
@@ -1649,43 +1640,6 @@ impl Tty7App {
         self.scm.set_group_collapsed(group, !collapsed);
         cx.notify();
     }
-}
-
-/// The strip the row and group action buttons live in, revealed by hovering
-/// `row`.
-///
-/// Absolutely positioned and opaque, so it covers the tail of the directory
-/// rather than pushing it aside: hovering a row must not move a single pixel
-/// of it, or the list crawls under the pointer.
-///
-/// It stops the mouse-down by hand instead of calling `occlude()`, which is
-/// the obvious way to keep a click off the row underneath and was what made
-/// the buttons vanish the moment the pointer reached them. `occlude()` is a
-/// *hitbox* behaviour, and gpui inserts hitboxes in prepaint, which never
-/// looks at `visibility` — so the strip blocked the mouse even while it was
-/// invisible. Blocking cuts the hit test short at the blocking hitbox, and the
-/// row's hitbox is behind this one because a parent prepaints before its
-/// children; `group_hover` is nothing more than "is the group's hitbox
-/// hovered", so the row stopped counting as hovered and the strip hid itself
-/// — background, buttons and all — with the pointer sitting right on it. The
-/// buttons' own hitboxes came from prepaint and outlived the paint, so they
-/// went on answering tooltips for glyphs that were no longer drawn.
-///
-/// Stopping propagation buys the same "this click is ours, not the row's"
-/// without lying to the hit test: children register their handlers after this
-/// one and gpui bubbles back to front, so a button still gets its click first.
-fn action_strip(row: &SharedString, backing: u32) -> gpui::Div {
-    h_flex()
-        .absolute()
-        .right(px(ROW_INSET))
-        .top_0()
-        .bottom_0()
-        .items_center()
-        .gap(px(1.))
-        .bg(gpui::rgb(backing))
-        .invisible()
-        .group_hover(row.clone(), |s| s.visible())
-        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
 }
 
 /// Which sections an entry shows up in.

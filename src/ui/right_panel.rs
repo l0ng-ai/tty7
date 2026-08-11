@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use crate::core::config::{Config, RightPanelTab};
 use crate::daemon::protocol::PaneProcs;
 use crate::ui::app::{
-    CONTENT_INSET, TILE_GLYPH_SM, TILE_SIZE_SM, Tty7App, tile_trailing_inset,
+    CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App, tile_trailing_inset,
     tile_trailing_inset_sm,
 };
 use crate::ui::i18n::{L10nKey, t};
@@ -58,6 +58,54 @@ const HEADING: f32 = 11. * STEP;
 // superseded by the interface font scale's rems tokens; the Source Control
 // panel still names its own px steps locally until it moves onto that scale.)
 
+/// Rows are laid out inside this inset and then pad themselves back out, so a
+/// hovered row's background is wider than its text on both sides.
+///
+/// The text lands on `CONTENT_INSET` whatever this is — a list subtracts it
+/// outside the row and the row adds it back inside — so all this number sets
+/// is how far the hover fill bleeds past the text. It lives here rather than
+/// in one tab because every tab of this panel is the same list of rows seen
+/// from a different angle, and a fill that bleeds 4px under Source Control and
+/// 6px under Info is a panel whose rows visibly do not belong to each other.
+pub(crate) const ROW_INSET: f32 = 4.;
+
+/// The strip the row and group action buttons live in, revealed by hovering
+/// `row`.
+///
+/// Absolutely positioned and opaque, so it covers the tail of the row's text
+/// rather than pushing it aside: hovering a row must not move a single pixel
+/// of it, or the list crawls under the pointer.
+///
+/// It stops the mouse-down by hand instead of calling `occlude()`, which is
+/// the obvious way to keep a click off the row underneath and was what made
+/// the buttons vanish the moment the pointer reached them. `occlude()` is a
+/// *hitbox* behaviour, and gpui inserts hitboxes in prepaint, which never
+/// looks at `visibility` — so the strip blocked the mouse even while it was
+/// invisible. Blocking cuts the hit test short at the blocking hitbox, and the
+/// row's hitbox is behind this one because a parent prepaints before its
+/// children; `group_hover` is nothing more than "is the group's hitbox
+/// hovered", so the row stopped counting as hovered and the strip hid itself
+/// — background, buttons and all — with the pointer sitting right on it. The
+/// buttons' own hitboxes came from prepaint and outlived the paint, so they
+/// went on answering tooltips for glyphs that were no longer drawn.
+///
+/// Stopping propagation buys the same "this click is ours, not the row's"
+/// without lying to the hit test: children register their handlers after this
+/// one and gpui bubbles back to front, so a button still gets its click first.
+pub(crate) fn action_strip(row: &gpui::SharedString, backing: u32) -> gpui::Div {
+    h_flex()
+        .absolute()
+        .right(px(ROW_INSET))
+        .top_0()
+        .bottom_0()
+        .items_center()
+        .gap(px(1.))
+        .bg(gpui::rgb(backing))
+        .invisible()
+        .group_hover(row.clone(), |s| s.visible())
+        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+}
+
 /// Height of the search strip.
 ///
 /// gpui-component sizes an `Input` border-box, and `.xsmall()` is
@@ -84,6 +132,78 @@ pub(crate) struct RightPanelState {
 
 const PROCS_POLL: std::time::Duration = std::time::Duration::from_millis(2000);
 
+/// What a session row draws in its value column.
+///
+/// Every row used to be a `(&str, String)` pair rendered identically, and the
+/// column paid for it twice: `changes` came out as an inert mono `+0 −0` —
+/// the same fact the sidebar draws in green and red and opens the diff overlay
+/// from — and the agent's state came out as a word where the sidebar has a
+/// coloured dot. A row carries its own shape now, so one pane's facts read the
+/// same whichever surface is showing them.
+enum InfoValue {
+    /// Mono text, truncated from the tail.
+    Text(String),
+    /// A filesystem path, shrunk from the head so the leaf survives.
+    Path(String),
+    /// `+N −M` in the sidebar's two colours, and a click into the diff
+    /// overlay when the setting that governs the sidebar's counts allows it.
+    Diff {
+        added: u32,
+        removed: u32,
+        open: Option<(crate::ui::host_ops::HostId, PathBuf)>,
+    },
+    /// An agent and what it is doing, behind the status dot the sidebar draws
+    /// on the tab — `hollow` for Waiting, which is a different *shape* rather
+    /// than one more hue, for the same reason the tab's dot is.
+    Agent {
+        text: String,
+        dot: Option<u32>,
+        hollow: bool,
+    },
+}
+
+/// One label/value line of the Session section.
+struct InfoRow {
+    label: &'static str,
+    value: InfoValue,
+    /// What this row's copy tile puts on the clipboard, where copying it is
+    /// plausibly what someone wants — a path, a host, a branch. `None` on the
+    /// rows where it is not ("zsh"), because a hover affordance that appears
+    /// on every row teaches nothing about which rows can do something.
+    copy: Option<String>,
+    /// Set on the working-directory row when the path is on the machine the
+    /// file manager can see, which is the only case Reveal means anything in.
+    reveal: Option<PathBuf>,
+}
+
+impl InfoRow {
+    fn text(label: &'static str, value: String) -> Self {
+        Self {
+            label,
+            value: InfoValue::Text(value),
+            copy: None,
+            reveal: None,
+        }
+    }
+
+    fn copyable(mut self) -> Self {
+        self.copy = match &self.value {
+            InfoValue::Text(v) | InfoValue::Path(v) => Some(v.clone()),
+            _ => None,
+        };
+        self
+    }
+
+    /// Whether the row does anything if you click or hover it. It is what
+    /// decides the hover fill, so the fill never promises an action the row
+    /// does not have.
+    fn interactive(&self) -> bool {
+        self.copy.is_some()
+            || self.reveal.is_some()
+            || matches!(self.value, InfoValue::Diff { open: Some(_), .. })
+    }
+}
+
 /// Widest of the labels actually on screen, so the values line up without a
 /// fixed width guessing at them.
 ///
@@ -93,11 +213,7 @@ const PROCS_POLL: std::time::Duration = std::time::Duration::from_millis(2000);
 /// clamp keeps the longest of those from eating the panel; anything past it
 /// runs into the gap rather than folding, which `whitespace_nowrap` on the
 /// label guarantees.
-fn info_label_column(
-    rows: &[(&'static str, String)],
-    window: &mut Window,
-    cx: &gpui::App,
-) -> gpui::Pixels {
+fn info_label_column(rows: &[InfoRow], window: &mut Window, cx: &gpui::App) -> gpui::Pixels {
     // Shaping needs real pixels, so this is the one place the rem has to be
     // resolved by hand. Both bounds were measured against a 12px label, so
     // they are carried as multiples of it rather than as pixels — otherwise
@@ -115,11 +231,12 @@ fn info_label_column(
     };
     let widest = rows
         .iter()
-        .map(|(k, _)| {
+        .map(|row| {
+            let k = row.label;
             window
                 .text_system()
                 .shape_line(
-                    gpui::SharedString::from(*k),
+                    gpui::SharedString::from(k),
                     px(label_px),
                     &[gpui::TextRun {
                         len: k.len(),
@@ -418,7 +535,12 @@ impl Tty7App {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(Input::new(input).appearance(false).xsmall()),
+                    // A filter with no way out of it but selecting the text
+                    // and deleting it is a filter people leave on and then
+                    // wonder where their files went. The button only exists
+                    // while there is something to clear, so an empty field
+                    // still reads as one line of chrome.
+                    .child(Input::new(input).appearance(false).xsmall().cleanable(true)),
             )
             .into_any_element()
     }
@@ -468,28 +590,44 @@ impl Tty7App {
 
     fn render_panel_info(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let title = self.panel_title(t(L10nKey::PanelInfoTitle), None, None, window, cx);
-        let mut rows: Vec<(&'static str, String)> = Vec::new();
-        let mut cwd_for_actions: Option<(PathBuf, bool)> = None;
+        let mut rows: Vec<InfoRow> = Vec::new();
         let mut pane_id: Option<u64> = None;
         let mut forwards_pane: Option<u64> = None;
+        let mut local_pane = false;
+        // Where the `changes` row's counts lead. Same source as the sidebar's,
+        // and gated on the same setting, so turning the preview off turns it
+        // off in both places rather than in one of them.
+        let mut diff_target: Option<(crate::ui::host_ops::HostId, PathBuf)> = None;
 
         if let Some(tab) = self.tabs.get(self.active) {
             if let Some(leaf) = tab.detail_pane(window, cx) {
                 let view = leaf.read(cx);
                 pane_id = Some(view.pane_id);
+                local_pane = view.remote_context().is_none();
+                diff_target = crate::ui::tab_sidebar::diff_click_cwd(
+                    cx.global::<Config>(),
+                    view.git_status_cwd()
+                        .map(|cwd| (view.host_id(), cwd.to_path_buf())),
+                );
                 if let Some(cwd) = view.effective_cwd() {
-                    rows.push((t(L10nKey::PanelCwd), compact_path(&cwd)));
-                    // Copy Path is right either way; Reveal only means anything
-                    // when the path is on the machine the file manager can see.
-                    cwd_for_actions = Some((cwd, view.local_cwd().is_some()));
+                    rows.push(InfoRow {
+                        label: t(L10nKey::PanelCwd),
+                        value: InfoValue::Path(compact_path(&cwd)),
+                        // The compacted `~/…` spelling is for reading; what
+                        // goes on the clipboard is the path a shell can use.
+                        copy: Some(cwd.display().to_string()),
+                        // Reveal only means anything when the path is on the
+                        // machine the file manager can see.
+                        reveal: view.local_cwd().is_some().then(|| cwd.clone()),
+                    });
                 }
                 let shell = match view.shell_spec().map(|s| s.program.clone()) {
                     Some(program) => crate::core::shells::default_shell_name(Some(&program)),
                     None => self.default_shell_label(cx),
                 };
-                rows.push((t(L10nKey::PanelShell), shell));
+                rows.push(InfoRow::text(t(L10nKey::PanelShell), shell));
                 if let Some(ssh) = view.ssh_spec() {
-                    rows.push((t(L10nKey::PanelSsh), ssh.host.clone()));
+                    rows.push(InfoRow::text(t(L10nKey::PanelSsh), ssh.host.clone()).copyable());
                 }
                 let connected_ssh = view
                     .remote_context()
@@ -503,19 +641,38 @@ impl Tty7App {
                 }
             }
             if let Some(git) = tab.git_status(Some(window), cx) {
-                rows.push((t(L10nKey::PanelBranch), git.branch.clone()));
-                rows.push((
-                    t(L10nKey::PanelChangesRow),
-                    format!("+{} −{}", git.added, git.removed),
-                ));
+                rows.push(InfoRow::text(t(L10nKey::PanelBranch), git.branch.clone()).copyable());
+                rows.push(InfoRow {
+                    label: t(L10nKey::PanelChangesRow),
+                    value: InfoValue::Diff {
+                        added: git.added,
+                        removed: git.removed,
+                        // A clean tree has no diff to open, so the row keeps
+                        // its place in the table but stops being a button.
+                        open: (git.added > 0 || git.removed > 0)
+                            .then_some(diff_target.clone())
+                            .flatten(),
+                    },
+                    copy: None,
+                    reveal: None,
+                });
             }
             if let Some(agent) = tab.agent(cx) {
                 let name = agent.display_name();
-                let status = match tab.agent_status(cx) {
-                    Some(s) => format!("{name} · {}", agent_status_label(s)),
-                    None => name.to_string(),
-                };
-                rows.push((t(L10nKey::PanelAgent), status));
+                let status = tab.agent_status(cx);
+                rows.push(InfoRow {
+                    label: t(L10nKey::PanelAgent),
+                    value: InfoValue::Agent {
+                        text: match status {
+                            Some(s) => format!("{name} · {}", agent_status_label(s)),
+                            None => name.to_string(),
+                        },
+                        dot: status.and_then(|s| s.dot_rgb()),
+                        hollow: status == Some(crate::core::cli_agent::AgentStatus::Waiting),
+                    },
+                    copy: None,
+                    reveal: None,
+                });
             }
         }
 
@@ -533,109 +690,232 @@ impl Tty7App {
         let route = forwards_pane.map(|id| self.forward_route(id, cx));
         self.sync_procs(pane_id, route, cx);
 
-        let mono = cx.theme().mono_font_family.clone();
-        let cwd_label = t(L10nKey::PanelCwd);
         let label_w = info_label_column(&rows, window, cx);
-        let mut list = v_flex().px(px(CONTENT_INSET)).py(px(2.)).gap(px(3.));
-        for (k, v) in rows {
-            list = list.child(
-                h_flex()
-                    .items_baseline()
-                    .gap(px(9.))
-                    .py(px(1.))
-                    .text_size(rems(TEXT))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(label_w)
-                            .whitespace_nowrap()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(k),
-                    )
-                    .child(match k == cwd_label {
-                        // A path identifies a pane by its last segment, and
-                        // plain truncation eats exactly that: a deep checkout
-                        // read "/private/tmp/claude-501…" and told you
-                        // nothing. Let the head absorb the shrinking so the
-                        // leaf survives, the way a file manager shows a path.
-                        true => {
-                            let (head, leaf) = split_path_leaf(&v);
-                            h_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .text_size(rems(TEXT_MONO))
-                                .font_family(mono.clone())
-                                .text_color(cx.theme().foreground)
-                                .child(div().min_w_0().flex_shrink(999.).truncate().child(head))
-                                .child(div().min_w_0().flex_shrink(1.).truncate().child(leaf))
-                                .into_any_element()
-                        }
-                        false => div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(rems(TEXT_MONO))
-                            .font_family(mono.clone())
-                            .text_color(cx.theme().foreground)
-                            .child(v)
-                            .into_any_element(),
-                    }),
-            );
+        // Rows pad themselves back out to `CONTENT_INSET`, so their hover fill
+        // bleeds past the text on both sides — the geometry the Source Control
+        // tab's rows are on, one tab over.
+        let mut list = v_flex().px(px(CONTENT_INSET - ROW_INSET)).py(px(2.));
+        for (i, row) in rows.into_iter().enumerate() {
+            list = list.child(self.info_row(i, row, label_w, cx));
         }
 
         let inner = v_flex()
             .child(self.panel_subtitle(t(L10nKey::PanelSessionSubtitle), false, None, cx))
             .child(list)
-            .when_some(cwd_for_actions, |this, (cwd, local)| {
-                this.child(self.cwd_actions(cwd, local, cx))
-            })
             .children(self.procs_section(pane_id, cx))
-            .children(self.ports_section(pane_id, cx))
+            .children(self.ports_section(pane_id, local_pane, cx))
             .children(self.forwards_section(forwards_pane, cx))
             .into_any_element();
         self.panel_scroll(inner, title)
     }
 
-    fn cwd_actions(&self, cwd: PathBuf, local: bool, cx: &mut Context<Self>) -> AnyElement {
-        let reveal_label = reveal_label();
-        h_flex()
-            .gap(px(2.))
-            .px(px(tile_trailing_inset_sm()))
-            .pt(px(6.))
-            .when(local, |this| {
-                this.child(
-                    crate::ui::tab_strip::chrome_tile_sized(
-                        Button::new("panel-info-reveal").icon(Icon::new(IconName::FolderOpen)),
-                        TILE_SIZE_SM,
-                        TILE_GLYPH_SM,
-                        false,
-                        cx,
-                    )
-                    .rounded_md()
-                    .tooltip(reveal_label)
-                    .on_click({
-                        let cwd = cwd.clone();
-                        move |_, _window, cx| cx.reveal_path(&cwd)
-                    }),
+    /// One label/value line, with whatever it can do revealed on hover.
+    ///
+    /// The two cwd buttons used to sit in a strip of their own under the whole
+    /// table, unlabelled, four rows below the path they acted on and closer to
+    /// the Processes heading than to it — "copy" and "open" with no stated
+    /// object. Hanging them off the row they belong to is what makes them
+    /// answerable, and it buys the panel the hover feedback it had none of.
+    fn info_row(
+        &self,
+        i: usize,
+        row: InfoRow,
+        label_w: gpui::Pixels,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
+        let mono = cx.theme().mono_font_family.clone();
+        let id = gpui::SharedString::from(format!("panel-info-row-{i}"));
+        let interactive = row.interactive();
+        // "Copy" is honest on a branch or a host, but on the working directory
+        // it is the file tree's *Copy Path*, and the two live a right-click
+        // apart from each other. Say the same words for the same act.
+        let copy_label = match row.value {
+            InfoValue::Path(_) => t(L10nKey::FileTreeContextCopyPath),
+            _ => t(L10nKey::CmdCopy),
+        };
+
+        let value = match row.value {
+            // A path identifies a pane by its last segment, and plain
+            // truncation eats exactly that: a deep checkout read
+            // "/private/tmp/claude-501…" and told you nothing. Let the head
+            // absorb the shrinking so the leaf survives, the way a file
+            // manager shows a path.
+            InfoValue::Path(v) => {
+                let (head, leaf) = split_path_leaf(&v);
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(rems(TEXT_MONO))
+                    .font_family(mono.clone())
+                    .text_color(cx.theme().foreground)
+                    .child(div().min_w_0().flex_shrink(999.).truncate().child(head))
+                    .child(div().min_w_0().flex_shrink(1.).truncate().child(leaf))
+                    .into_any_element()
+            }
+            InfoValue::Text(v) => div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(rems(TEXT_MONO))
+                .font_family(mono.clone())
+                .text_color(cx.theme().foreground)
+                .child(v)
+                .into_any_element(),
+            InfoValue::Diff {
+                added,
+                removed,
+                open,
+            } => {
+                let clean = added == 0 && removed == 0;
+                let counts = h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_baseline()
+                    .gap(px(6.))
+                    .text_size(rems(TEXT_MONO))
+                    .font_family(mono.clone())
+                    // A clean tree said "+0 −0", which is two numbers to read
+                    // before learning there was nothing to read. The dash is
+                    // the table convention for an empty cell, and it needs no
+                    // translating.
+                    .when(clean, |this| {
+                        this.child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("—".to_string()),
+                        )
+                    })
+                    .when(added > 0, |this| {
+                        this.child(
+                            div()
+                                .text_color(cx.theme().success)
+                                .child(format!("+{added}")),
+                        )
+                    })
+                    .when(removed > 0, |this| {
+                        this.child(
+                            div()
+                                .text_color(cx.theme().danger)
+                                .child(format!("−{removed}")),
+                        )
+                    });
+                match open {
+                    // The row's hover fill says the line reacts; the underline
+                    // says where the button inside it starts — the same pair
+                    // the sidebar's counts wear.
+                    Some((host, cwd)) => counts
+                        .id(("panel-info-diff", i))
+                        .cursor_pointer()
+                        .hover(|s| s.underline())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.toggle_diff_overlay(host, cwd.clone(), window, cx);
+                        }))
+                        .into_any_element(),
+                    None => counts.into_any_element(),
+                }
+            }
+            // The dot hangs out of the flow rather than sitting in it. A
+            // childless box has no baseline of its own, so as a flex item it
+            // offers up its bottom edge instead — and the row, which aligns
+            // its label and its value on their shared baseline, then hoisted
+            // the whole value six pixels and left "agent" sitting under its
+            // own value. Out of flow it cannot be mistaken for the thing that
+            // sets the line.
+            InfoValue::Agent { text, dot, hollow } => div()
+                .flex_1()
+                .min_w_0()
+                .relative()
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .when(dot.is_some(), |d| d.pl(px(PIP_SIZE + 7.)))
+                        .text_size(rems(TEXT_MONO))
+                        .font_family(mono.clone())
+                        .text_color(cx.theme().foreground)
+                        .child(text),
                 )
-            })
-            .child(
-                crate::ui::tab_strip::chrome_tile_sized(
-                    Button::new("panel-info-copy-path").icon(Icon::new(IconName::Copy)),
-                    TILE_SIZE_SM,
-                    TILE_GLYPH_SM,
-                    false,
+                .children(dot.map(|rgb| status_pip(rgb, hollow)))
+                .into_any_element(),
+        };
+
+        let mut tiles = action_strip(&id, sf.hover);
+        let mut has_tiles = false;
+        if let Some(cwd) = row.reveal {
+            has_tiles = true;
+            tiles = tiles.child(
+                self.info_tile(
+                    "panel-info-reveal",
+                    IconName::FolderOpen,
+                    reveal_label(),
                     cx,
                 )
-                .rounded_md()
-                .tooltip(t(L10nKey::FileTreeContextCopyPath))
-                .on_click(move |_, _window, cx| {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                        cwd.display().to_string(),
-                    ));
-                }),
+                .on_click(move |_, _window, cx| cx.reveal_path(&cwd)),
+            );
+        }
+        if let Some(text) = row.copy {
+            has_tiles = true;
+            tiles = tiles.child(
+                self.info_tile(("panel-info-copy", i), IconName::Copy, copy_label, cx)
+                    .on_click(move |_, _window, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                    }),
+            );
+        }
+        // A row with nothing to reveal gets no strip at all, rather than an
+        // empty one carrying a hover subscription for a set of buttons that
+        // does not exist.
+        let actions = has_tiles.then_some(tiles);
+
+        h_flex()
+            .id(id.clone())
+            .group(id)
+            .relative()
+            .items_baseline()
+            .gap(px(9.))
+            .px(px(ROW_INSET))
+            .py(px(2.))
+            .rounded(px(5.))
+            .text_size(rems(TEXT))
+            // Only rows that can do something light up, so the fill is never a
+            // promise the row cannot keep.
+            .when(interactive, |this| {
+                this.hover(|s| s.bg(gpui::rgb(sf.hover)))
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .w(label_w)
+                    .whitespace_nowrap()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(row.label),
             )
+            .child(value)
+            .children(actions)
             .into_any_element()
+    }
+
+    /// The tile an Info row's hover strip is made of — the [`TILE_SIZE_XS`]
+    /// box the Source Control rows use, because three `TILE_SIZE_SM` squares
+    /// would eat a quarter of the width a path has to live in.
+    fn info_tile(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        icon: IconName,
+        tooltip: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        crate::ui::tab_strip::chrome_tile_sized(
+            Button::new(id).icon(Icon::new(icon)),
+            TILE_SIZE_XS,
+            TILE_GLYPH_XS,
+            false,
+            cx,
+        )
+        .rounded(px(4.))
+        .tooltip(tooltip)
     }
 
     pub(crate) fn panel_subtitle(
@@ -698,11 +978,16 @@ impl Tty7App {
                             .pl(px(f32::from(p.depth) * 10.))
                             .text_size(rems(TEXT_MONO))
                             .font_family(mono.clone())
-                            .text_color(if p.foreground {
-                                cx.theme().foreground
-                            } else {
-                                cx.theme().muted_foreground
+                            // Which of these has the terminal is the one thing
+                            // the list is read for, and a hue apart from its
+                            // neighbours was carrying it alone — a difference
+                            // a light theme flattens and colour vision can
+                            // miss. Weight says it a second way.
+                            .when(p.foreground, |d| {
+                                d.font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(cx.theme().foreground)
                             })
+                            .when(!p.foreground, |d| d.text_color(cx.theme().muted_foreground))
                             .child(p.name.clone()),
                     )
                     .child(info_chip(
@@ -721,18 +1006,70 @@ impl Tty7App {
         )
     }
 
-    fn ports_section(&self, pane_id: Option<u64>, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The listening ports of the pane's processes.
+    ///
+    /// `local` is whether the pane's processes are on this machine, and it is
+    /// what decides whether the browser tile appears: `localhost:8765` means
+    /// the far machine's 8765 when the pane is a remote one, and opening this
+    /// machine's is not a near miss, it is a different service.
+    fn ports_section(
+        &self,
+        pane_id: Option<u64>,
+        local: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let ports = &self.procs(pane_id)?.ports;
         if ports.is_empty() {
             return None;
         }
+        let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let mono = cx.theme().mono_font_family.clone();
-        let mut list = v_flex().px(px(CONTENT_INSET)).py(px(1.)).gap(px(2.));
+        let mut list = v_flex().px(px(CONTENT_INSET - ROW_INSET)).py(px(1.));
         for p in ports {
+            // "What is this pane serving, and where" is the question the
+            // section answers, and the next thing anyone does with the answer
+            // is go there — so the row hands over an address instead of making
+            // it something to read off the screen and retype.
+            let authority = format!("localhost:{}", p.port);
+            let id = gpui::SharedString::from(format!("panel-port-{}", p.port));
+            let mut actions = action_strip(&id, sf.hover);
+            if local {
+                let url = format!("http://{authority}");
+                actions = actions.child(
+                    self.info_tile(
+                        ("panel-port-open", p.port as usize),
+                        IconName::Globe,
+                        t(L10nKey::PanelOpenInBrowser),
+                        cx,
+                    )
+                    .on_click(move |_, _window, cx| cx.open_url(&url)),
+                );
+            }
+            actions = actions.child(
+                self.info_tile(
+                    ("panel-port-copy", p.port as usize),
+                    IconName::Copy,
+                    t(L10nKey::CmdCopy),
+                    cx,
+                )
+                .on_click({
+                    let authority = authority.clone();
+                    move |_, _window, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(authority.clone()));
+                    }
+                }),
+            );
             list = list.child(
                 h_flex()
+                    .id(id.clone())
+                    .group(id)
+                    .relative()
                     .items_center()
                     .gap(px(8.))
+                    .px(px(ROW_INSET))
+                    .py(px(1.))
+                    .rounded(px(5.))
+                    .hover(|s| s.bg(gpui::rgb(sf.hover)))
                     .child(info_chip(
                         &p.port.to_string(),
                         cx.theme().accent,
@@ -748,7 +1085,8 @@ impl Tty7App {
                             .font_family(mono.clone())
                             .text_color(cx.theme().muted_foreground)
                             .child(p.name.clone()),
-                    ),
+                    )
+                    .child(actions),
             );
         }
         Some(
@@ -916,6 +1254,38 @@ pub(crate) fn git_badge(letter: &str, color: gpui::Hsla, mono: &gpui::SharedStri
         .into_any_element()
 }
 
+/// Diameter of the agent dot in the Info panel.
+///
+/// Seven, because a dot on a line of text has to survive being read at a
+/// glance without becoming a bullet: below this the hollow variant loses its
+/// hole to the 2px ring, and above it the dot starts to outweigh the word it
+/// is qualifying.
+const PIP_SIZE: f32 = 7.;
+
+/// The dot a tab wears for its agent's state, at the size a line of panel text
+/// can carry it.
+///
+/// Same colours and the same hollow-for-Waiting rule as the sidebar's, because
+/// it is the same fact: a reader who has learned that amber-with-a-hole means
+/// "it wants you" on a tab must not have to learn it a second time here.
+///
+/// Positioned absolutely by its caller, which is what keeps it out of the
+/// row's baseline arithmetic; `top` centres it on the x-height of the line
+/// rather than on the line box, so it reads as sitting *in* the text.
+fn status_pip(rgb: u32, hollow: bool) -> AnyElement {
+    div()
+        .absolute()
+        .left_0()
+        .top(px(6.))
+        .size(px(PIP_SIZE))
+        .rounded_full()
+        .map(|d| match hollow {
+            true => d.border(px(2.)).border_color(gpui::rgb(rgb)),
+            false => d.bg(gpui::rgb(rgb)),
+        })
+        .into_any_element()
+}
+
 /// A small filled pill around a mono token — a pid, a port number.
 ///
 /// The padding and the radius are derived from the text size: at
@@ -981,7 +1351,87 @@ fn compact_path(path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::split_path_leaf;
+    use super::{InfoRow, InfoValue, split_path_leaf};
+
+    fn diff(added: u32, removed: u32, open: bool) -> InfoRow {
+        InfoRow {
+            label: "changes",
+            value: InfoValue::Diff {
+                added,
+                removed,
+                open: open.then(|| {
+                    (
+                        crate::ui::host_ops::HostId::LOCAL,
+                        std::path::PathBuf::from("/w/repo"),
+                    )
+                }),
+            },
+            copy: None,
+            reveal: None,
+        }
+    }
+
+    #[test]
+    fn a_row_lights_up_only_when_there_is_something_behind_it() {
+        // The hover fill is the panel's only "this line does something", so a
+        // row that cannot do anything must not draw one.
+        assert!(
+            !InfoRow::text("shell", "zsh".into()).interactive(),
+            "a plain readout is not a control"
+        );
+        assert!(
+            InfoRow::text("branch", "main".into())
+                .copyable()
+                .interactive(),
+            "a copy tile is something to hover for"
+        );
+        assert!(
+            InfoRow {
+                reveal: Some(std::path::PathBuf::from("/w/repo")),
+                ..InfoRow::text("cwd", "/w/repo".into())
+            }
+            .interactive(),
+            "so is Reveal, even with nothing else on the row"
+        );
+    }
+
+    #[test]
+    fn counts_are_a_button_only_when_there_is_a_diff_to_open() {
+        assert!(
+            diff(3, 1, true).interactive(),
+            "changes with somewhere to go open the overlay"
+        );
+        // Both halves have to hold: a clean tree has no diff to show, and the
+        // setting that governs the sidebar's counts can take the target away
+        // from a dirty one.
+        assert!(
+            !diff(0, 0, false).interactive(),
+            "a clean tree is a readout, not a link"
+        );
+        assert!(
+            !diff(3, 1, false).interactive(),
+            "no target means no link, however dirty the tree"
+        );
+    }
+
+    #[test]
+    fn copyable_takes_the_text_the_row_shows_and_nothing_else() {
+        // `copyable()` reads the value it was given; rows built with an
+        // explicit clipboard string (the cwd, which copies the real path
+        // rather than the `~/…` spelling) set `copy` themselves.
+        assert_eq!(
+            InfoRow::text("ssh", "box".into())
+                .copyable()
+                .copy
+                .as_deref(),
+            Some("box")
+        );
+        assert_eq!(
+            diff(3, 1, true).copyable().copy,
+            None,
+            "there is no sensible clipboard form of two coloured numbers"
+        );
+    }
 
     #[test]
     fn the_head_and_leaf_rejoin_into_the_path_they_came_from() {
