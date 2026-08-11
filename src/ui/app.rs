@@ -683,7 +683,7 @@ impl Tty7App {
 
     pub fn for_workspace_at(
         id: Option<WorkspaceId>,
-        initial_cwd: Option<std::path::PathBuf>,
+        mut initial_cwd: Option<std::path::PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -701,9 +701,20 @@ impl Tty7App {
         let on_machine = id.is_some_and(|id| crate::ui::machine_mirror::machine_holds_tabs(cx, id));
         let hydrate = on_machine || (known && (restore || is_remote));
         let session = hydrate.then(Session::default);
+        // A window that is about to pull its layout cannot also open the folder
+        // the launch asked for as its first terminal — the pull would find a
+        // window that already has a tab, decline to adopt into it, and push
+        // that one tab back as the whole workspace. So the folder travels with
+        // the hydration and becomes a tab once the layout is up.
+        let open_after_hydrate = hydrate.then(|| initial_cwd.take()).flatten();
         let app = Self::with_session_at(Some(workspace), session, initial_cwd, window, cx);
         if hydrate {
-            crate::ui::tree_sync::hydrate_window_from_tree(cx, workspace);
+            match open_after_hydrate {
+                Some(cwd) => {
+                    crate::ui::tree_sync::hydrate_window_then_open(cx, workspace, cwd);
+                }
+                None => crate::ui::tree_sync::hydrate_window_from_tree(cx, workspace),
+            }
         } else {
             if !is_remote {
                 crate::ui::tree_sync::mark_window_informed(cx, workspace);

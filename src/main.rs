@@ -454,10 +454,7 @@ fn main() {
             keymap::init(cx);
             crate::ui::local_link::LocalLink::install(cx);
 
-            let reopen = open_path
-                .is_none()
-                .then(|| crate::core::session::WorkspaceStore::restore_one(cx))
-                .flatten();
+            let reopen = crate::ui::windows::restore_target(cx, open_path.as_deref());
             crate::ui::windows::open_at(cx, reopen, open_path);
         });
 }

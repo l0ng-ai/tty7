@@ -727,6 +727,14 @@ struct WsState {
     /// Leaving it standing after the run ends is what makes a *first* failure
     /// wait the cap: the count would still be carrying an outage that is over.
     rehydrate_attempts: u32,
+    /// A folder the launch asked for, waiting for this window's layout.
+    ///
+    /// Held here rather than opened straight away because a window with a tab
+    /// in it is one `Adopt::IfEmpty` will not adopt into: the pull would land,
+    /// decline the layout, and push the single tab back as the whole workspace.
+    /// Parking it also means a pull that has to be retried still gets the
+    /// folder opened, on whichever attempt finally lands.
+    then_open: Option<std::path::PathBuf>,
     /// Whether this window has already been told why it opened empty.
     ///
     /// The retry is as quiet as the failure was, so a window whose machine
@@ -750,6 +758,7 @@ impl Default for WsState {
             epoch: 0,
             rehydrate: None,
             rehydrate_attempts: 0,
+            then_open: None,
             said_why_empty: false,
         }
     }
@@ -1267,6 +1276,48 @@ pub(crate) fn hydrate_window_from_tree(cx: &mut App, client_ws: WorkspaceId) {
     hydrate(cx, client_ws, Adopt::IfEmpty);
 }
 
+/// Pulls this window's layout, then opens `path` as one more tab in it.
+///
+/// This is what a launch carrying a directory does — Explorer's "Open in tty7",
+/// or `tty7 <PATH>` with no window up. Both halves are wanted: the layout the
+/// user left, and the folder they just double-clicked.
+pub(crate) fn hydrate_window_then_open(
+    cx: &mut App,
+    client_ws: WorkspaceId,
+    path: std::path::PathBuf,
+) {
+    cx.default_global::<TreeSync>()
+        .windows
+        .entry(client_ws)
+        .or_default()
+        .then_open = Some(path);
+    hydrate(cx, client_ws, Adopt::IfEmpty);
+}
+
+/// Opens the folder a launch parked here, now that the layout it waited for is
+/// up. Does nothing for the windows — every other one — that parked nothing.
+fn open_parked_path(cx: &mut App, client_ws: WorkspaceId) {
+    let Some(path) = cx
+        .default_global::<TreeSync>()
+        .windows
+        .get_mut(&client_ws)
+        .and_then(|state| state.then_open.take())
+    else {
+        return;
+    };
+    let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, client_ws) else {
+        return;
+    };
+    let Some(app) =
+        crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|app| app.upgrade())
+    else {
+        return;
+    };
+    let _ = handle.update(cx, move |_, window, cx| {
+        app.update(cx, |app, cx| app.new_tab_at(path, window, cx));
+    });
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Adopt {
     IfEmpty,
@@ -1559,6 +1610,22 @@ fn finish_hydration(
     adopt: Adopt,
     outcome: io::Result<(Machine, WsMirror, Session)>,
 ) {
+    if settle_hydration(cx, client_ws, epoch, adopt, outcome) {
+        open_parked_path(cx, client_ws);
+    }
+}
+
+/// The body of [`finish_hydration`]. Returns whether this attempt settled the
+/// window's layout — false for one that was superseded or has to be retried,
+/// which are the two cases where a parked folder waits for the attempt that
+/// does settle it rather than opening over a layout still on its way.
+fn settle_hydration(
+    cx: &mut App,
+    client_ws: WorkspaceId,
+    epoch: u64,
+    adopt: Adopt,
+    outcome: io::Result<(Machine, WsMirror, Session)>,
+) -> bool {
     let current = cx
         .default_global::<TreeSync>()
         .windows
@@ -1566,7 +1633,7 @@ fn finish_hydration(
         .map(|s| s.epoch);
     if current != Some(epoch) {
         log::debug!("workspace {client_ws}: dropping a superseded hydration");
-        return;
+        return false;
     }
     let (machine, mirror, session) = match outcome {
         Ok(pulled) => pulled,
@@ -1581,7 +1648,7 @@ fn finish_hydration(
                 "could not hydrate workspace {client_ws} from its machine: {e}"
             );
             let _ = owe_rehydration(cx, client_ws, epoch, adopt);
-            return;
+            return false;
         }
     };
     let host = WorkspaceStore::host_of(cx, client_ws);
@@ -1589,7 +1656,7 @@ fn finish_hydration(
     let machine_was_empty = mirror.tabs.is_empty();
     let was_dirty = {
         let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
-            return;
+            return false;
         };
         let dirty = matches!(state.sync, SyncPhase::Unprimed { dirty: true, .. });
         state.informed |= machine_was_empty;
@@ -1604,7 +1671,7 @@ fn finish_hydration(
     let Some(app) =
         crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|app| app.upgrade())
     else {
-        return;
+        return false;
     };
     if adopt == Adopt::IfEmpty && !app.read(cx).tabs.is_empty() {
         // A full window over an empty tree has to write itself back, whether
@@ -1622,7 +1689,7 @@ fn finish_hydration(
         if was_dirty || machine_was_empty {
             app.update(cx, |app, cx| sync_window(app, cx));
         }
-        return;
+        return true;
     }
     if session.tabs.is_empty() && adopt == Adopt::IfEmpty {
         if was_dirty
@@ -1631,10 +1698,10 @@ fn finish_hydration(
         {
             app.update(cx, |app, cx| sync_window(app, cx));
         }
-        return;
+        return true;
     }
     let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, client_ws) else {
-        return;
+        return false;
     };
     let wanted = session.tabs.len();
     log::info!("rebuilding {wanted} tab(s) of workspace {client_ws} from its machine's tree");
@@ -1669,6 +1736,7 @@ fn finish_hydration(
              window uninformed so the layout is not mistaken for an empty workspace"
         );
     }
+    true
 }
 
 /// Someone else removed this workspace from its machine — `tty7 ws rm`, or
@@ -2110,6 +2178,50 @@ mod tests {
 
         assert!(matches!(classify_tree_link(None), TreeLink::Down));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui::test]
+    fn a_parked_folder_outlives_the_pull_that_has_to_be_retried(cx: &mut gpui::TestAppContext) {
+        // The folder an Explorer launch asked for is opened by whichever
+        // attempt finally lands, so re-entering `hydrate` — which is how every
+        // retry gets here — must not reset it along with the rest of the pull
+        // state. Losing it would mean the double-clicked folder never opens.
+        cx.update(|cx| {
+            let ws = WorkspaceId::new();
+            let path = std::path::PathBuf::from("/tmp/from-explorer");
+            crate::core::session::WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews::default(),
+            );
+            crate::ui::windows::WindowRegistry::init(cx);
+
+            hydrate_window_then_open(cx, ws, path.clone());
+            assert_eq!(
+                cx.default_global::<TreeSync>().windows[&ws]
+                    .then_open
+                    .as_ref(),
+                Some(&path),
+                "the request must be parked, not opened over a layout still in flight"
+            );
+
+            hydrate(cx, ws, Adopt::IfEmpty);
+            assert_eq!(
+                cx.default_global::<TreeSync>().windows[&ws]
+                    .then_open
+                    .as_ref(),
+                Some(&path),
+                "a retry must still owe the folder"
+            );
+
+            // With no window to put it in there is nothing to open, and the
+            // request must not survive to surface in some unrelated window.
+            open_parked_path(cx, ws);
+            assert!(
+                cx.default_global::<TreeSync>().windows[&ws]
+                    .then_open
+                    .is_none()
+            );
+        });
     }
 
     #[gpui::test]

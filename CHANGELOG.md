@@ -270,6 +270,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its switcher row offers *Remove entry* next to a note that a new profile
   finds the session again.
 
+- **Opening a folder from Explorer no longer costs you your layout** — "Open in
+  tty7", "Open tty7 here", and `tty7 <PATH>` restore the last window's tabs and
+  splits before opening the folder as one more tab in it. A launch naming a
+  directory used to skip the restore outright whenever no window was already
+  up — whatever "Restore last layout" said — so the folder arrived as a lone
+  blank terminal and the previous tabs were left behind, still running on the
+  server but reachable only through the workspace switcher. With a window
+  already up the same menu entry had always just added a tab, which is the
+  behavior both shapes of launch now share. A path still declines to follow the
+  layout onto a remote machine and starts a fresh local workspace there, since
+  the directory it names is a path on this computer.
+
 - **An SFTP upload no longer sits in the browser under its temporary name** —
   an upload is written as `<name>.tty7-upload-<hex>` and renamed into place at
   the end, and the browser listed the directory the moment the transfer

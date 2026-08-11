@@ -285,20 +285,40 @@ pub fn open_from_cli(cx: &mut App, path: Option<std::path::PathBuf>) {
     });
 }
 
+/// The workspace a launch reopens, if any.
+///
+/// A launch that carries a directory restores the last layout exactly like a
+/// pathless one does, and the directory becomes another tab in it. The two used
+/// to disagree: "Open in tty7" from Explorer, or `tty7 <PATH>`, skipped the
+/// restore outright whenever no window was already up, so a folder opened that
+/// way came back as one blank terminal with the previous tabs nowhere — still
+/// live on the machine, but reachable only through the switcher.
+///
+/// What a path does change is that it will not follow the layout onto a remote
+/// machine. The requested directory is a path on this computer and a remote
+/// workspace has no business spawning it, so that case starts a fresh local
+/// workspace — which is what every path-carrying launch used to do.
+pub fn restore_target(cx: &mut App, path: Option<&std::path::Path>) -> Option<WorkspaceId> {
+    if path.is_some() {
+        let views = WorkspaceStore::all(cx);
+        let candidate = views.workspace_to_restore()?;
+        if views.get(candidate).is_some_and(|view| view.is_remote()) {
+            return None;
+        }
+    }
+    WorkspaceStore::restore_one(cx)
+}
+
 /// Opens a window after CLI routing reaches a GUI process with no live windows.
 ///
-/// A pathless request follows the same restoration policy as normal startup.
-/// An explicit path always starts a fresh local workspace so the requested tab
-/// cannot accidentally be attached to a detached remote workspace.
+/// Both shapes of request follow the same restoration policy as normal startup;
+/// see [`restore_target`] for the one way a path narrows it.
 fn open_missing_cli_window_with(
     cx: &mut App,
     path: Option<std::path::PathBuf>,
     open: impl FnOnce(&mut App, Option<WorkspaceId>, Option<std::path::PathBuf>),
 ) {
-    let restore = path
-        .is_none()
-        .then(|| WorkspaceStore::restore_one(cx))
-        .flatten();
+    let restore = restore_target(cx, path.as_deref());
     open(cx, restore, path);
 }
 
@@ -755,6 +775,75 @@ mod tests {
         });
 
         assert_eq!(opened, Some((None, None)));
+    }
+
+    #[gpui::test]
+    fn a_request_carrying_a_path_restores_the_layout_and_brings_the_path_along(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The Explorer "Open in tty7" case with no window up: the folder is
+        // wanted *and* so are the tabs that were there, which used to be
+        // dropped on the floor by every launch that named a directory.
+        let view = WindowView::default();
+        let restored = view.id;
+        let path = std::path::PathBuf::from("/tmp/somewhere");
+        let mut opened = None;
+
+        cx.update(|cx| {
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![view],
+                    active: Some(restored),
+                },
+            );
+            open_missing_cli_window_with(cx, Some(path.clone()), |_, workspace, path| {
+                opened = Some((workspace, path));
+            });
+        });
+
+        assert_eq!(opened, Some((Some(restored), Some(path))));
+    }
+
+    #[gpui::test]
+    fn a_path_will_not_follow_the_layout_onto_a_remote_machine(cx: &mut gpui::TestAppContext) {
+        // The directory is a path on this computer, so a remote workspace is
+        // the one restore candidate a path-carrying launch declines.
+        let remote = WindowView::on_remote(RemoteRef::new(
+            RemoteTarget::Wsl {
+                distro: "Ubuntu".into(),
+            },
+            WorkspaceId::new(),
+        ));
+        let remote_id = remote.id;
+        let path = std::path::PathBuf::from("/tmp/somewhere");
+        let mut opened = None;
+
+        cx.update(|cx| {
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![remote],
+                    active: Some(remote_id),
+                },
+            );
+            open_missing_cli_window_with(cx, Some(path.clone()), |_, workspace, path| {
+                opened = Some((workspace, path));
+            });
+        });
+
+        assert_eq!(opened, Some((None, Some(path))));
+
+        // Declining it is not the same as detaching it: the remote window is
+        // left exactly as it was for the next pathless launch to restore.
+        cx.update(|cx| {
+            assert!(
+                WorkspaceStore::all(cx)
+                    .get(remote_id)
+                    .is_some_and(|view| view.open),
+                "a declined remote candidate must not be closed on its behalf"
+            );
+        });
     }
 
     #[test]
