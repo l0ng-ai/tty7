@@ -1103,6 +1103,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteStripConnecting => "Connecting to {machine}…",
         L10nKey::RemoteStripReconnecting => "Reconnecting to {machine}…",
         L10nKey::RemoteStripReconnectingAttempt => "Reconnecting to {machine}… (attempt {count})",
+        L10nKey::RemoteStripReconnectingFailed => "Reconnecting to {machine}… — last failure: {error}",
+        L10nKey::RemoteStripReconnectingAttemptFailed => {
+            "Reconnecting to {machine}… (attempt {count}) — last failure: {error}"
+        }
         L10nKey::RemoteStripPreempted => "This workspace was opened on {by}",
         L10nKey::RemoteStripFailed => "Not connected to {machine} — {error}",
         L10nKey::RemoteNoticePreempted => "Opened elsewhere — typing has no effect",
@@ -1475,6 +1479,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherStatusRestarting => "restarting…",
         L10nKey::SwitcherStatusInstalling => "installing…",
         L10nKey::SwitcherStatusConnecting => "connecting…",
+        L10nKey::SwitcherStatusReconnecting => "reconnecting…",
         L10nKey::SwitcherStatusConnectFailed => "couldn't connect",
         L10nKey::SwitcherStatusNotConnected => "not connected",
         L10nKey::SettingsFontDefault => "Default (match primary)",

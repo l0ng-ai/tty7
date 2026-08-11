@@ -20,7 +20,7 @@ use crate::terminal::pane_liveness::Liveness;
 use crate::ui::app::Tty7App;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow, human_bytes};
-use crate::ui::remote_workspace::ConnectFlow;
+use crate::ui::remote_workspace::{ConnectFlow, RemoteStatus};
 
 const CARD_W: f32 = 840.0;
 
@@ -59,6 +59,7 @@ enum Link {
     Local,
     Connected,
     Connecting,
+    Reconnecting,
     Failed,
     Offline,
 }
@@ -752,6 +753,20 @@ impl Tty7App {
                 return Link::Failed;
             }
             _ => {}
+        }
+        // The supervisor knows more than the presence of a control link: a
+        // machine being reconnected is not "Connected", and one whose last
+        // attempt failed is not plain "Offline" either (#497).
+        match crate::ui::remote_workspace::RemoteLinks::machine_status(cx, target.host_id()) {
+            Some(RemoteStatus::Connecting) => return Link::Connecting,
+            Some(RemoteStatus::Reconnecting { .. }) => return Link::Reconnecting,
+            Some(RemoteStatus::Failed(_)) => return Link::Failed,
+            Some(RemoteStatus::Attached) => return Link::Connected,
+            Some(RemoteStatus::Disconnected) => return Link::Offline,
+            // machine_status never reports Preempted — that state is
+            // per-workspace — so only "no supervision on this machine" falls
+            // through to the control-link check.
+            Some(RemoteStatus::Preempted { .. }) | None => {}
         }
         match remote_connect::HostLinks::get(cx, target.host_id()) {
             Some(_) => Link::Connected,
@@ -1606,6 +1621,10 @@ impl Tty7App {
                 Some(theme.warning),
                 Some(t(L10nKey::SwitcherStatusConnecting)),
             ),
+            Link::Reconnecting => (
+                Some(theme.warning),
+                Some(t(L10nKey::SwitcherStatusReconnecting)),
+            ),
             Link::Failed => (
                 Some(theme.danger),
                 Some(t(L10nKey::SwitcherStatusConnectFailed)),
@@ -1616,7 +1635,7 @@ impl Tty7App {
             ),
         };
         let word_color = match group.link {
-            Link::Connecting => theme.warning,
+            Link::Connecting | Link::Reconnecting => theme.warning,
             Link::Failed => theme.danger,
             _ => muted,
         };
