@@ -124,6 +124,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An alias put back in an `Include`d ssh config file is found again** — the
+  check behind a parked remote workspace watched `~/.ssh/config` for changes
+  and nothing else, but `Include` is common and editing an included file
+  leaves the including file's timestamp exactly where it was. So re-adding a
+  `Host` block where it used to live changed nothing: the workspaces on that
+  alias stayed parked, with no retry and no error, saying a new profile would
+  find them again — which is what the user had just done. Every file the parse
+  reads is watched now, and the root config even when it could not be read, so
+  one appearing later is noticed too.
+
 - **A rejected stored credential asks again instead of failing forever** — a key
   passphrase saved with "remember" was written to the keychain before the daemon
   had tried it, and a wrong one then ended every later connection at "could not

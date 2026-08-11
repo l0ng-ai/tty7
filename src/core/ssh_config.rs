@@ -237,7 +237,7 @@ pub fn import_report_from(root: PathBuf, home: &Path) -> ImportReport {
         ignored: ignored_options(&parsed.blocks),
         source: root,
         source_read: parsed.root_read,
-        files_read: parsed.files_read,
+        files_read: parsed.files.len(),
     }
 }
 
@@ -307,32 +307,75 @@ fn alias_resolves_in(blocks: &[HostBlock], alias: &str) -> bool {
 /// be the only file IO on that hot path, so the parse is cached by mtime:
 /// an edit made outside tty7 is seen on the first tick after the file
 /// changes, and an untouched file costs one stat.
-pub fn alias_still_resolves(alias: &str) -> bool {
-    struct Cache {
-        mtime: Option<std::time::SystemTime>,
-        blocks: Vec<HostBlock>,
+/// The parse behind [`alias_still_resolves`], kept only as long as none of
+/// the files it came from has moved.
+///
+/// Watching `~/.ssh/config` alone was not enough (#525): `Include` is common,
+/// and editing an included file leaves the including file's mtime exactly
+/// where it was — so an alias put back where it used to live went on reading
+/// as gone, and its workspaces stayed parked with nothing to say why. The
+/// stamps cover every file the parse read, and the root even when it could
+/// not be read, so a config that appears later is noticed too.
+///
+/// Not covered: a brand-new *filename* arriving in a glob include that
+/// matched it before. Catching that means watching the directories a glob
+/// resolves through, which is a wider net than this needs.
+#[derive(Default)]
+struct AliasCache {
+    stamps: Vec<(PathBuf, Option<std::time::SystemTime>)>,
+    blocks: Vec<HostBlock>,
+    parsed: bool,
+}
+
+impl AliasCache {
+    fn resolves(&mut self, root: &Path, home: &Path, alias: &str) -> bool {
+        if !self.parsed || self.stamps != stamps_of(self.sources(root)) {
+            let parsed = parse_config(root, home);
+            let mut sources = parsed.files;
+            if !sources.iter().any(|p| p == root) {
+                sources.push(root.to_path_buf());
+            }
+            self.stamps = stamps_of(sources);
+            self.blocks = parsed.blocks;
+            self.parsed = true;
+        }
+        alias_resolves_in(&self.blocks, alias)
     }
-    static CACHE: std::sync::Mutex<Option<Cache>> = std::sync::Mutex::new(None);
+
+    fn sources(&self, root: &Path) -> Vec<PathBuf> {
+        match self.stamps.is_empty() {
+            true => vec![root.to_path_buf()],
+            false => self.stamps.iter().map(|(p, _)| p.clone()).collect(),
+        }
+    }
+}
+
+/// A file that cannot be stat'ed stamps as `None`, which is a value like any
+/// other: a config that appears, or disappears, moves the stamp either way.
+fn stamps_of(paths: Vec<PathBuf>) -> Vec<(PathBuf, Option<std::time::SystemTime>)> {
+    paths
+        .into_iter()
+        .map(|path| {
+            let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            (path, mtime)
+        })
+        .collect()
+}
+
+pub fn alias_still_resolves(alias: &str) -> bool {
+    static CACHE: std::sync::Mutex<Option<AliasCache>> = std::sync::Mutex::new(None);
 
     let Some(home) = home_dir() else {
         return false;
     };
     let root = home.join(".ssh/config");
-    let mtime = std::fs::metadata(&root).and_then(|m| m.modified()).ok();
     let mut cache = match CACHE.lock() {
         Ok(c) => c,
         Err(_) => return false,
     };
-    if cache.as_ref().is_none_or(|c| c.mtime != mtime) {
-        *cache = Some(Cache {
-            mtime,
-            blocks: parse_config(&root, &home).blocks,
-        });
-    }
-    match cache.as_ref() {
-        Some(c) => alias_resolves_in(&c.blocks, alias),
-        None => false,
-    }
+    cache
+        .get_or_insert_with(AliasCache::default)
+        .resolves(&root, &home, alias)
 }
 
 fn apply_resolved(profile: &mut ManagedProfile, alias: &str, r: ResolvedHost) -> Option<String> {
@@ -491,18 +534,22 @@ struct ResolvedHost {
 struct ParsedConfig {
     blocks: Vec<HostBlock>,
     root_read: bool,
-    files_read: usize,
+    /// Every file the parse actually read, root and includes alike. A count
+    /// is enough to report an import; watching for a change needs the paths
+    /// (#525), because an edit to an included file leaves the file that
+    /// included it untouched.
+    files: Vec<PathBuf>,
 }
 
 fn parse_config(root: &Path, home: &Path) -> ParsedConfig {
     let mut blocks = Vec::new();
     let mut seen = HashSet::new();
-    let mut files_read = 0;
-    let root_read = parse_config_file(root, home, 0, &mut blocks, &mut seen, &mut files_read);
+    let mut files = Vec::new();
+    let root_read = parse_config_file(root, home, 0, &mut blocks, &mut seen, &mut files);
     ParsedConfig {
         blocks,
         root_read,
-        files_read,
+        files,
     }
 }
 
@@ -515,7 +562,7 @@ fn parse_config_file(
     depth: usize,
     blocks: &mut Vec<HostBlock>,
     seen: &mut HashSet<PathBuf>,
-    files_read: &mut usize,
+    files: &mut Vec<PathBuf>,
 ) -> bool {
     if depth > MAX_INCLUDE_DEPTH || seen.len() >= MAX_CONFIG_FILES {
         return false;
@@ -527,7 +574,7 @@ fn parse_config_file(
     let Ok(text) = std::fs::read_to_string(&path) else {
         return false;
     };
-    *files_read += 1;
+    files.push(path.clone());
     let base = path.parent().unwrap_or(home).to_path_buf();
 
     let mut current: Option<HostBlock> = None;
@@ -569,7 +616,7 @@ fn parse_config_file(
             }
             for token in split_words(rest) {
                 for include in expand_include(&token, &base, home) {
-                    parse_config_file(&include, home, depth + 1, blocks, seen, files_read);
+                    parse_config_file(&include, home, depth + 1, blocks, seen, files);
                 }
             }
         } else if !in_match {
@@ -1332,6 +1379,55 @@ mod tests {
         assert_eq!(report.files_read, 1);
         assert!(report.profiles.is_empty());
         assert!(report.ignored.is_empty());
+    }
+
+    #[test]
+    fn a_parse_reports_every_file_it_read_not_just_how_many() {
+        // What the alias cache has to watch (#525): an edit to an included
+        // file changes nothing about the file that included it, so a cache
+        // holding one mtime cannot see it. It can only stat what the parse
+        // says it read.
+        let root = temp_root("include-stamps");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(ssh.join("conf.d")).unwrap();
+        std::fs::write(ssh.join("config"), "Include conf.d/*\nHost root\n").unwrap();
+        std::fs::write(ssh.join("conf.d/work"), "Host work\n").unwrap();
+
+        let parsed = parse_config(&ssh.join("config"), &root);
+        let mut files = parsed.files.clone();
+        files.sort();
+        assert_eq!(
+            files,
+            vec![ssh.join("conf.d/work"), ssh.join("config")],
+            "the included file is as much a source as the root"
+        );
+    }
+
+    #[test]
+    fn an_alias_added_to_an_included_file_is_seen_without_touching_the_root() {
+        // The recovery direction of #525, which is the one that strands a
+        // user: the alias is gone, its workspaces park, the user puts it back
+        // in the file where it lived — and nothing about `~/.ssh/config`
+        // changed, so a root-only cache keeps answering "still gone".
+        let root = temp_root("include-recovery");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(ssh.join("conf.d")).unwrap();
+        std::fs::write(ssh.join("config"), "Include conf.d/*\nHost root\n").unwrap();
+        std::fs::write(ssh.join("conf.d/work"), "Host elsewhere\n").unwrap();
+
+        let cfg = ssh.join("config");
+        let mut cache = AliasCache::default();
+        assert!(
+            !cache.resolves(&cfg, &root, "work"),
+            "the alias is not in the config yet"
+        );
+
+        std::fs::write(ssh.join("conf.d/work"), "Host work\n").unwrap();
+        assert!(
+            cache.resolves(&cfg, &root, "work"),
+            "an alias put back in an included file is found again, \
+             though the root config never changed"
+        );
     }
 
     fn temp_root(name: &str) -> PathBuf {
