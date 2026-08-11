@@ -678,6 +678,8 @@ async fn try_keyboard_interactive(
     const MAX_ROUNDS: u32 = 16;
     let mut rounds = 0u32;
     let mut stored_password_used = false;
+    let mut stored_password_rejected = false;
+    let mut last_source = KiAnswerSource::Nothing;
     loop {
         rounds += 1;
         if rounds > MAX_ROUNDS {
@@ -688,9 +690,29 @@ async fn try_keyboard_interactive(
             KeyboardInteractiveAuthResponse::Failure {
                 remaining_methods, ..
             } => {
+                // OpenSSH ends a rejected kbdint request with a plain
+                // USERAUTH_FAILURE rather than another info request, so a
+                // round answered from the keychain used to end the method
+                // right here — the same stale password on every reconnect,
+                // and the user never once asked to type a different one.
+                // Start the request over instead, with the stored password
+                // now spent, so the next round reaches the prompt.
+                if should_retry_ki(last_source, &remaining_methods) {
+                    stored_password_used = true;
+                    stored_password_rejected = true;
+                    last_source = KiAnswerSource::Nothing;
+                    resp = match handle
+                        .authenticate_keyboard_interactive_start(&spec.user, None)
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => return failed(format!("keyboard-interactive start error: {e}")),
+                    };
+                    continue;
+                }
                 return Outcome::Failed {
                     remaining_methods: Some(remaining_methods),
-                    reason: Some("keyboard-interactive rejected".to_string()),
+                    reason: Some(ki_rejection_reason(last_source, stored_password_rejected)),
                 };
             }
             KeyboardInteractiveAuthResponse::InfoRequest {
@@ -709,23 +731,32 @@ async fn try_keyboard_interactive(
                     continue;
                 }
 
-                let allow_stored = !stored_password_used;
-                stored_password_used = true;
-                let answers = match collect_ki_answers(
+                // A device that asks again inside the same request has already
+                // turned the stored password down, exactly as a failed request
+                // that had to be restarted has.
+                stored_password_rejected |= last_source == KiAnswerSource::Stored;
+                let round = match collect_ki_answers(
                     spec,
                     broker,
                     &name,
                     &instructions,
                     &prompts,
-                    allow_stored,
+                    !stored_password_used,
+                    stored_password_rejected,
                 )
                 .await
                 {
                     Some(a) => a,
                     None => return failed("keyboard-interactive cancelled"),
                 };
+                // Only a round that actually sent the stored password spends
+                // it. Marking it spent for every round refused it to an
+                // OTP-then-password flow, where the first round is the code
+                // and the password is not asked for until the second.
+                last_source = round.source;
+                stored_password_used |= round.source == KiAnswerSource::Stored;
                 resp = match handle
-                    .authenticate_keyboard_interactive_respond(answers)
+                    .authenticate_keyboard_interactive_respond(round.answers)
                     .await
                 {
                     Ok(r) => r,
@@ -736,6 +767,58 @@ async fn try_keyboard_interactive(
     }
 }
 
+/// Where the answers of the keyboard-interactive round that just went out came
+/// from. It decides both whether a rejection is worth starting over for and
+/// what to tell the user the server turned down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KiAnswerSource {
+    /// No round has answered yet — the server refused the method before it
+    /// asked anything.
+    Nothing,
+    Stored,
+    Typed,
+}
+
+struct KiRound {
+    answers: Vec<String>,
+    source: KiAnswerSource,
+}
+
+/// A rejection is only worth a second request when the round the server turned
+/// down was answered from the keychain: nobody has been asked anything yet, so
+/// the attempt has not actually been spent. An answer the user typed is their
+/// answer, and re-asking for it in a loop is what a rejecting server would
+/// like us to do.
+///
+/// An empty `remaining_methods` is read as "the server did not say" and left
+/// retryable, which is how `try_gssapi` above reads it too. The retry cannot
+/// run away: it is reached only from `KiAnswerSource::Stored`, and the restart
+/// spends the stored password, so no second restart can ever qualify — and the
+/// round counter it shares with the info-request loop caps the whole method
+/// either way.
+fn should_retry_ki(last_source: KiAnswerSource, remaining: &MethodSet) -> bool {
+    last_source == KiAnswerSource::Stored
+        && (remaining.is_empty() || remaining.contains(&MethodKind::KeyboardInteractive))
+}
+
+/// "keyboard-interactive rejected" answered for three different situations,
+/// and the one worth naming is the stored password: the user typed nothing, so
+/// a message about their answer sends them looking for a typo they never made.
+/// `stored_rejected` carries that across a restarted request, where the round
+/// that spent the stored password belongs to the request before this one.
+fn ki_rejection_reason(last_source: KiAnswerSource, stored_rejected: bool) -> String {
+    match last_source {
+        KiAnswerSource::Typed => "keyboard-interactive: your answer was rejected".to_string(),
+        KiAnswerSource::Stored => {
+            "keyboard-interactive: the stored password was rejected".to_string()
+        }
+        KiAnswerSource::Nothing if stored_rejected => {
+            "keyboard-interactive: the stored password was rejected".to_string()
+        }
+        KiAnswerSource::Nothing => "keyboard-interactive rejected".to_string(),
+    }
+}
+
 async fn collect_ki_answers(
     spec: &NativeSshSpec,
     broker: &Arc<PromptBroker>,
@@ -743,13 +826,17 @@ async fn collect_ki_answers(
     instructions: &str,
     prompts: &[russh::client::Prompt],
     allow_stored: bool,
-) -> Option<Vec<String>> {
+    stored_rejected: bool,
+) -> Option<KiRound> {
     let all_password_type = prompts
         .iter()
         .all(|p| !p.echo && p.prompt.to_lowercase().contains("password"));
     if all_password_type && allow_stored {
         if let Some(pw) = &spec.password {
-            return Some(prompts.iter().map(|_| pw.clone()).collect());
+            return Some(KiRound {
+                answers: prompts.iter().map(|_| pw.clone()).collect(),
+                source: KiAnswerSource::Stored,
+            });
         }
     }
 
@@ -765,13 +852,18 @@ async fn collect_ki_answers(
             name: name.to_string(),
             instructions: instructions.to_string(),
             prompts: ki_prompts,
+            stored_rejected,
         })
         .await;
-    match resp {
-        AuthResponse::Secrets(v) if v.len() == prompts.len() => Some(v),
-        AuthResponse::Secret(s) if prompts.len() == 1 => Some(vec![s]),
-        _ => None,
-    }
+    let answers = match resp {
+        AuthResponse::Secrets(v) if v.len() == prompts.len() => v,
+        AuthResponse::Secret(s) if prompts.len() == 1 => vec![s],
+        _ => return None,
+    };
+    Some(KiRound {
+        answers,
+        source: KiAnswerSource::Typed,
+    })
 }
 
 fn rsa_hash_alg(algorithm: &Algorithm) -> Option<HashAlg> {
@@ -908,6 +1000,44 @@ mod tests {
         );
         assert_eq!(stored_passphrase(&spec, "/home/u/.ssh/id_ed25519"), None);
         assert_eq!(stored_passphrase(&spec_with(""), "~/.ssh/id_ed25519"), None);
+    }
+
+    #[test]
+    fn only_a_stored_answer_earns_a_second_keyboard_interactive_request() {
+        let offers = MethodSet::from(&[MethodKind::KeyboardInteractive][..]);
+
+        // Nobody was asked anything, so nothing has been spent yet.
+        assert!(should_retry_ki(KiAnswerSource::Stored, &offers));
+
+        // The user answered and was turned down; asking them again in a loop
+        // is what a rejecting server would like us to do.
+        assert!(!should_retry_ki(KiAnswerSource::Typed, &offers));
+        assert!(!should_retry_ki(KiAnswerSource::Nothing, &offers));
+
+        // A server that no longer offers the method cannot be restarted into
+        // it; one that said nothing about what is left still can.
+        let elsewhere = MethodSet::from(&[MethodKind::PublicKey][..]);
+        assert!(!should_retry_ki(KiAnswerSource::Stored, &elsewhere));
+        assert!(should_retry_ki(KiAnswerSource::Stored, &MethodSet::empty()));
+    }
+
+    #[test]
+    fn a_rejection_says_whose_answer_it_was() {
+        let stored = ki_rejection_reason(KiAnswerSource::Stored, true);
+        assert!(stored.contains("stored password"), "{stored}");
+
+        let typed = ki_rejection_reason(KiAnswerSource::Typed, true);
+        assert!(typed.contains("your answer"), "{typed}");
+
+        // The restarted request carries the stored rejection across, even
+        // though its own rounds never sent anything.
+        let carried = ki_rejection_reason(KiAnswerSource::Nothing, true);
+        assert!(carried.contains("stored password"), "{carried}");
+
+        // A server that refused the method outright blames neither.
+        let neither = ki_rejection_reason(KiAnswerSource::Nothing, false);
+        assert!(!neither.contains("stored password"), "{neither}");
+        assert!(!neither.contains("your answer"), "{neither}");
     }
 
     #[test]

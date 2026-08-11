@@ -559,6 +559,11 @@ pub enum AuthPromptKind {
         name: String,
         instructions: String,
         prompts: Vec<KiPrompt>,
+        /// The round that just failed was answered with the stored password
+        /// rather than by the user, so this prompt exists to replace it. Same
+        /// compatibility reasoning as `KeyPassphrase::rejected` above.
+        #[serde(default)]
+        stored_rejected: bool,
     },
     HostKeyUnknown {
         host: String,
@@ -2174,6 +2179,7 @@ mod tests {
                         text: "Code:".into(),
                         echo: true,
                     }],
+                    stored_rejected: true,
                 },
             },
             DaemonMsg::AuthPrompt {
@@ -2234,6 +2240,38 @@ mod tests {
             serde_json::from_str::<LegacyPromptKind>(&new).unwrap();
         assert_eq!(key_path, "/k");
         assert_eq!(comment, "work laptop");
+    }
+
+    /// `stored_rejected` gets the same treatment as `rejected` above, for the
+    /// same reason and with the same `PROTOCOL_VERSION` left alone.
+    #[test]
+    fn a_stored_rejected_flag_decodes_from_a_peer_that_never_sends_it() {
+        let old = r#"{"KeyboardInteractive":{"name":"2FA","instructions":"","prompts":[]}}"#;
+        assert_eq!(
+            serde_json::from_str::<AuthPromptKind>(old).unwrap(),
+            AuthPromptKind::KeyboardInteractive {
+                name: "2FA".into(),
+                instructions: String::new(),
+                prompts: vec![],
+                stored_rejected: false,
+            }
+        );
+
+        let new = serde_json::to_string(&AuthPromptKind::KeyboardInteractive {
+            name: "2FA".into(),
+            instructions: "code".into(),
+            prompts: vec![],
+            stored_rejected: true,
+        })
+        .unwrap();
+        #[derive(Deserialize)]
+        enum LegacyPromptKind {
+            KeyboardInteractive { name: String, instructions: String },
+        }
+        let LegacyPromptKind::KeyboardInteractive { name, instructions } =
+            serde_json::from_str::<LegacyPromptKind>(&new).unwrap();
+        assert_eq!(name, "2FA");
+        assert_eq!(instructions, "code");
     }
 
     #[test]

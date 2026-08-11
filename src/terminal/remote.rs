@@ -179,6 +179,10 @@ pub struct RemoteTerminal {
     auth_prompts: Arc<Mutex<VecDeque<(u64, AuthPromptKind)>>>,
     ssh_phase: Arc<Mutex<Option<SshPhase>>>,
     ssh_endpoint: Option<(String, u16)>,
+    /// The account the SSH connection authenticates as. `ssh_endpoint` is what
+    /// the disconnect strip and the forward sheet need; the keychain files a
+    /// password under the user as well, so the auth sheet needs this too.
+    ssh_user: Option<String>,
     auto_supplied_password: bool,
     agent: Arc<Mutex<Option<CLIAgent>>>,
     agent_session: Arc<Mutex<Option<AgentSessionState>>>,
@@ -551,6 +555,7 @@ impl RemoteTerminal {
             auth_prompts,
             ssh_phase,
             ssh_endpoint: None,
+            ssh_user: None,
             auto_supplied_password: false,
             agent,
             agent_session,
@@ -1325,6 +1330,7 @@ impl RemoteTerminal {
         let mut stream = connect()?;
         let win = win_size(size, cell_w, cell_h);
         let endpoint = (spec.host.clone(), spec.port);
+        let user = spec.user.clone();
         let auto_supplied_password = spec.password.is_some();
 
         ClientMsg::SpawnNativeSsh {
@@ -1347,6 +1353,7 @@ impl RemoteTerminal {
 
         let mut term = Self::from_stream(stream, size)?;
         term.ssh_endpoint = Some(endpoint);
+        term.ssh_user = Some(user);
         term.auto_supplied_password = auto_supplied_password;
         Ok((term, pane_id))
     }
@@ -1381,6 +1388,10 @@ impl RemoteTerminal {
 
     pub fn ssh_endpoint(&self) -> Option<(String, u16)> {
         self.ssh_endpoint.clone()
+    }
+
+    pub fn ssh_user(&self) -> Option<String> {
+        self.ssh_user.clone()
     }
 
     pub fn auto_supplied_password(&self) -> bool {

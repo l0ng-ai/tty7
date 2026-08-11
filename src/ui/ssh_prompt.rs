@@ -19,6 +19,18 @@ pub(crate) struct KiRow {
     pub echo: bool,
 }
 
+/// The connection a prompt belongs to, which is also the key the keychain
+/// files its password under. A password prompt names its own user and host,
+/// but nothing on the wire carries the port and a keyboard-interactive prompt
+/// names none of the three — so whoever raises the sheet has to supply what it
+/// knows about the connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PromptEndpoint {
+    pub user: String,
+    pub host: String,
+    pub port: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PromptModel {
     Password {
@@ -36,6 +48,12 @@ pub(crate) enum PromptModel {
         name: String,
         instructions: String,
         prompts: Vec<KiRow>,
+        /// `None` when nothing told the sheet which connection is asking — a
+        /// route the GUI could not resolve to an SSH hop. Without it there is
+        /// no keychain entry to name, so a rejected stored password can only
+        /// be re-typed, not forgotten.
+        endpoint: Option<PromptEndpoint>,
+        stored_rejected: bool,
     },
     HostKeyUnknown {
         host: String,
@@ -78,10 +96,10 @@ pub(crate) enum KeychainWrite {
 impl PromptModel {
     pub(crate) fn from_prompt(
         kind: AuthPromptKind,
-        endpoint: Option<(String, u16)>,
+        endpoint: Option<PromptEndpoint>,
         auto_supplied_password: bool,
     ) -> Option<PromptModel> {
-        let port = endpoint.as_ref().map(|(_, p)| *p).unwrap_or(22);
+        let port = endpoint.as_ref().map(|e| e.port).unwrap_or(22);
         Some(match kind {
             AuthPromptKind::Password { user, host } => PromptModel::Password {
                 user,
@@ -102,6 +120,7 @@ impl PromptModel {
                 name,
                 instructions,
                 prompts,
+                stored_rejected,
             } => PromptModel::KeyboardInteractive {
                 name,
                 instructions,
@@ -112,6 +131,8 @@ impl PromptModel {
                         echo: p.echo,
                     })
                     .collect(),
+                endpoint,
+                stored_rejected,
             },
             AuthPromptKind::HostKeyUnknown {
                 host,
@@ -202,8 +223,23 @@ pub(crate) fn passphrase_submit(
     (AuthResponse::Secret(secret), write)
 }
 
-pub(crate) fn ki_submit(answers: Vec<String>) -> AuthResponse {
-    AuthResponse::Secrets(answers)
+/// Keyboard-interactive answers are never saved — one of them is as likely to
+/// be a one-time code as a password — so this side only ever *forgets*: the
+/// stored password the daemon says the server just turned down.
+pub(crate) fn ki_submit(
+    endpoint: Option<&PromptEndpoint>,
+    answers: Vec<String>,
+    stored_rejected: bool,
+) -> (AuthResponse, KeychainWrite) {
+    let write = match endpoint.filter(|_| stored_rejected) {
+        Some(e) => KeychainWrite::DeletePassword {
+            user: e.user.clone(),
+            host: e.host.clone(),
+            port: e.port,
+        },
+        None => KeychainWrite::None,
+    };
+    (AuthResponse::Secrets(answers), write)
 }
 
 pub(crate) fn host_key_unknown_decision(trust: bool) -> AuthResponse {
@@ -308,8 +344,13 @@ impl Tty7App {
                     }
                 }
             }
+            let endpoint = term.ssh_endpoint().map(|(host, port)| PromptEndpoint {
+                user: term.ssh_user().unwrap_or_default(),
+                host,
+                port,
+            });
             (
-                term.ssh_endpoint(),
+                endpoint,
                 term.auto_supplied_password(),
                 term.ssh_phase(),
                 banners,
@@ -362,7 +403,11 @@ impl Tty7App {
         if self.ssh_prompt.model.is_some() {
             return SheetOutcome::GiveBack(pending);
         }
-        let Some(model) = PromptModel::from_prompt(pending.prompt.clone(), None, false) else {
+        let Some(model) = PromptModel::from_prompt(
+            pending.prompt.clone(),
+            pending.endpoint.clone(),
+            pending.auto_supplied_password,
+        ) else {
             if let AuthPromptKind::Banner { text } = &pending.prompt {
                 self.ssh_prompt.banners.push(text.clone());
             }
@@ -427,7 +472,11 @@ impl Tty7App {
                 let secret = values.first().cloned().unwrap_or_default();
                 passphrase_submit(key_path, secret, remember, *rejected)
             }
-            PromptModel::KeyboardInteractive { .. } => (ki_submit(values), KeychainWrite::None),
+            PromptModel::KeyboardInteractive {
+                endpoint,
+                stored_rejected,
+                ..
+            } => ki_submit(endpoint.as_ref(), values, *stored_rejected),
             PromptModel::HostKeyUnknown { .. } => {
                 (host_key_unknown_decision(true), KeychainWrite::None)
             }
@@ -755,9 +804,15 @@ impl Tty7App {
             PromptModel::KeyboardInteractive {
                 instructions,
                 prompts,
+                stored_rejected,
                 ..
             } => {
                 let mut c = card;
+                if *stored_rejected {
+                    c = c.child(div().text_xs().text_color(danger).child(crate::ui::i18n::t(
+                        crate::ui::i18n::L10nKey::StoredPasswordRejected,
+                    )));
+                }
                 if !instructions.is_empty() {
                     c = c.child(div().text_xs().child(instructions.clone()));
                 }
@@ -943,6 +998,14 @@ fn build_inputs(
 mod tests {
     use super::*;
 
+    fn endpoint() -> PromptEndpoint {
+        PromptEndpoint {
+            user: "deploy".into(),
+            host: "10.0.0.5".into(),
+            port: 2222,
+        }
+    }
+
     #[test]
     fn password_prompt_carries_port_from_endpoint_and_marks_rejection() {
         let m = PromptModel::from_prompt(
@@ -950,7 +1013,7 @@ mod tests {
                 user: "deploy".into(),
                 host: "10.0.0.5".into(),
             },
-            Some(("10.0.0.5".into(), 2222)),
+            Some(endpoint()),
             true,
         )
         .unwrap();
@@ -1050,6 +1113,66 @@ mod tests {
     }
 
     #[test]
+    fn ki_submit_bundles_all_answers() {
+        let (resp, write) = ki_submit(Some(&endpoint()), vec!["a".into(), "b".into()], false);
+        assert_eq!(resp, AuthResponse::Secrets(vec!["a".into(), "b".into()]));
+        assert_eq!(write, KeychainWrite::None);
+    }
+
+    /// Keyboard-interactive has no "remember" of its own — an answer may well
+    /// be a one-time code — so the only keychain move it makes is letting go
+    /// of the stored password the server just turned down. Without it that
+    /// password was replayed into every later connection, and the prompt the
+    /// user answered here never became the one the next attempt sent.
+    #[test]
+    fn ki_answer_forgets_the_stored_password_the_server_rejected() {
+        let (resp, write) = ki_submit(Some(&endpoint()), vec!["typed".into()], true);
+        assert_eq!(resp, AuthResponse::Secrets(vec!["typed".into()]));
+        assert_eq!(
+            write,
+            KeychainWrite::DeletePassword {
+                user: "deploy".into(),
+                host: "10.0.0.5".into(),
+                port: 2222,
+            }
+        );
+
+        // A prompt nobody could tie to an endpoint has no entry to name, so it
+        // must not guess one — deleting the wrong account is worse than
+        // leaving the right one in place.
+        let (_r, w) = ki_submit(None, vec!["typed".into()], true);
+        assert_eq!(w, KeychainWrite::None);
+    }
+
+    /// The port has to come from the connection, not from the default: a
+    /// prompt for `:2222` that files its keychain entry under `:22` writes a
+    /// secret nothing ever reads back.
+    #[test]
+    fn keyboard_interactive_carries_the_endpoint_and_the_rejection_through() {
+        let m = PromptModel::from_prompt(
+            AuthPromptKind::KeyboardInteractive {
+                name: "2FA".into(),
+                instructions: "code please".into(),
+                prompts: vec![],
+                stored_rejected: true,
+            },
+            Some(endpoint()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            m,
+            PromptModel::KeyboardInteractive {
+                name: "2FA".into(),
+                instructions: "code please".into(),
+                prompts: vec![],
+                endpoint: Some(endpoint()),
+                stored_rejected: true,
+            }
+        );
+    }
+
+    #[test]
     fn passphrase_prompt_carries_the_daemons_rejection() {
         let m = PromptModel::from_prompt(
             AuthPromptKind::KeyPassphrase {
@@ -1068,14 +1191,6 @@ mod tests {
                 comment: String::new(),
                 rejected: true,
             }
-        );
-    }
-
-    #[test]
-    fn ki_submit_bundles_all_answers() {
-        assert_eq!(
-            ki_submit(vec!["a".into(), "b".into()]),
-            AuthResponse::Secrets(vec!["a".into(), "b".into()])
         );
     }
 
