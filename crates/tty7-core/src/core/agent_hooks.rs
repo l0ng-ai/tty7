@@ -922,27 +922,50 @@ fn opencode_plugin_js(target: &HookTarget) -> Option<String> {
 export const Tty7Presence = async ({{ $ }}) => {{
   if (!process.env["TTY7"]) return {{}}
   const cmd = {prefix}
-  const emit = (event) => $`sh -c ${{cmd + event}}`.quiet().nothrow()
-
-  // Plugin load = the agent is running in this pane.
-  await emit("session-start")
+  let sessionId = ""
+  let announced = ""
+  const emit = (event) => {{
+    // Every event carries the session id (`properties.sessionID`), so a pane
+    // that restarts can resume the same session with `opencode --session`.
+    const payload = sessionId ? new Response(JSON.stringify({{ session_id: sessionId }})) : undefined
+    const proc = payload ? $`sh -c ${{cmd + event}} < ${{payload}}` : $`sh -c ${{cmd + event}}`
+    return proc.quiet().nothrow()
+  }}
+  // The session id is only known once opencode creates the session (the
+  // `session.created` event); the session-start report rides on the first
+  // event that names one, so a restored pane can reattach to it.
+  const capture = async (id) => {{
+    if (id) sessionId = id
+    if (sessionId && sessionId !== announced) {{
+      announced = sessionId
+      await emit("session-start")
+    }}
+  }}
+  const ACTION = {{
+    "session.status.busy": "prompt-submit",
+    "session.status.idle": "stop",
+    "session.idle": "stop",
+    "permission.replied": "prompt-submit",
+  }}
 
   return {{
     dispose: async () => {{
       await emit("session-end")
     }},
-    "tool.execute.before": async () => {{
+    "tool.execute.before": async (input) => {{
+      await capture(input?.sessionID)
       await emit("prompt-submit")
     }},
     "permission.ask": async () => {{
+      await capture()
       await emit("permission-request")
     }},
     event: async ({{ event }}) => {{
-      if (event.type === "session.idle") {{
-        await emit("stop")
-      }} else if (event.type === "permission.replied") {{
-        await emit("prompt-submit")
-      }}
+      const properties = event.properties ?? {{}}
+      await capture(properties.sessionID)
+      const key = event.type === "session.status" ? `session.status.${{properties.status?.type}}` : event.type
+      const action = ACTION[key]
+      if (action) await emit(action)
     }},
   }}
 }}
@@ -1386,6 +1409,26 @@ mod tests {
         assert!(opencode.contains("agent-hook opencode"));
         assert!(opencode.contains(hook_exe));
         assert!(opencode.contains(r#"process.env["TTY7"]"#));
+        for (needle, message) in [
+            (
+                "properties.sessionID",
+                "opencode captures the session id from event properties",
+            ),
+            (
+                r#"session_id: sessionId"#,
+                "opencode forwards the session id to the emitter",
+            ),
+            (
+                "session.status",
+                "opencode maps session.status busy/idle to prompt-submit/stop",
+            ),
+            (
+                "session.idle",
+                "opencode still maps the session.idle event to stop",
+            ),
+        ] {
+            assert!(opencode.contains(needle), "{message}");
+        }
 
         for (agent, slug, package) in [
             (HookAgent::Pi, "pi", "@mariozechner/pi-coding-agent"),
