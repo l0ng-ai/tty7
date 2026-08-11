@@ -63,6 +63,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A pane's shell is recorded alongside, so a git bash pane no longer comes
   back as PowerShell.
 
+- **SSH probes the `~/.ssh` default identity keys** — a connection with no
+  identity file of its own used to offer the server nothing unless an agent
+  was running, which on Windows is the common case (the OpenSSH
+  Authentication Agent service is off by default), and then reported "no
+  public key was accepted" when no key had ever been sent. `id_ed25519`,
+  `id_ecdsa` and `id_rsa` are now offered after the connection's own files
+  and before the agent, OpenSSH-style, deduplicated against the explicit list
+  by canonical path so one key spelled two ways is offered once — every offer
+  spends one of the server's `MaxAuthTries`. A discovered key that is
+  encrypted is used only when its passphrase is already in the OS keychain:
+  russh has no offer-without-signing probe, so asking would spend a prompt on
+  a key the server may not even want. A key named in the profile still asks,
+  as before. The failure text now separates the two situations the old line
+  papered over — keys the server rejected are named, and a round that offered
+  nothing says where it looked. (#484)
+
 ### Fixed
 
 - **An SFTP upload no longer sits in the browser under its temporary name** —
