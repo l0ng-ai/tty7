@@ -899,8 +899,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeContextShowDotfiles => "ドットファイルを表示",
         L10nKey::FileDropIntoItself => "フォルダを自分自身の中にはコピーできません",
         L10nKey::FileDropNotHere => "このマシンにはありません",
+        L10nKey::FileDropNameTaken => "同じドロップ内の別の項目がすでにこの名前を使っています",
         L10nKey::FileDropTooDeep => "フォルダの入れ子が {n} 階層を超えています",
         L10nKey::FileDropTooLarge => "{limit} MB を超えています。SFTP で転送してください",
+        L10nKey::FileDropNoWorkingName => "隣に空いている一時的な名前がなく、先にコピーできません",
         L10nKey::FileDropReplaceTitle => "「{name}」を置き換えますか？",
         L10nKey::FileDropReplaceManyTitle => "{n} 項目を置き換えますか？",
         L10nKey::FileDropReplaceBody => {

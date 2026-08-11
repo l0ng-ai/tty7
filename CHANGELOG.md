@@ -16,9 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   belongs to the top of it. The landing is highlighted while the drag is in
   flight. Folders come in whole, the executable bit survives the copy, and a
   name already taken is asked about rather than silently replaced — a "no"
-  leaves every file in the drop untouched. It works over a remote workspace
-  too, reading here and writing there, up to the size one control frame can
-  carry; past that the panel says to use SFTP.
+  leaves every file in the drop untouched, and a "yes" copies beside what is
+  there and swaps the two only once the copy is whole, so a copy that fails
+  partway leaves the original where it was. Two dropped items of the same
+  name are one name and one file: the first keeps it and the second is
+  refused, rather than landing on top of it with both reported as copied. It
+  works over a remote workspace too, reading here and writing there, up to
+  the size one control frame can carry; past that the panel says to use
+  SFTP.
 
 - **Rearrange splits by dragging a pane** — hovering a pane now floats a small
   grip along its top edge; dragging it moves that pane elsewhere in the tab.

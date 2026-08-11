@@ -31,6 +31,15 @@ const MAX_DEPTH: usize = 64;
 /// The megabyte of slack is for that JSON and the framing around it.
 const REMOTE_FILE_MAX: u64 = (crate::daemon::protocol::MAX_FRAME - 1024 * 1024) as u64;
 
+/// How many working names beside a destination are tried before a replacement
+/// gives up.
+///
+/// The first choice is normally free. It is not free when a copy was killed
+/// outright and left its half-written tree behind, and — the reason these are
+/// probed rather than cleared out of the way — it is not free when the name
+/// happens to belong to a file of somebody's own.
+const WORKING_NAME_TRIES: usize = 16;
+
 /// What one drop did, in the terms the panel has to answer in: rows to
 /// refresh, names to ask about, failures to report.
 #[derive(Default)]
@@ -88,10 +97,22 @@ pub(crate) fn copy_into_dir(
             report.fail(&name, t(L10nKey::FileDropNotHere).to_string());
             continue;
         }
-        if host.exists(&host.join(dir, &name)) {
+        let dest = host.join(dir, &name);
+        // Two sources of one drop can carry the same name: `~/a/notes.md` and
+        // `~/b/notes.md` dragged in together. Nothing in the destination
+        // objects to either of them, so neither is a conflict — they collide
+        // with each other, and the second would be written straight over the
+        // first with the panel reporting both as copied. One name is one file:
+        // the first claim on it stands, and the rest are refused out loud
+        // rather than allowed to eat it.
+        if planned.iter().any(|(_, taken, _)| *taken == dest) {
+            report.fail(&name, t(L10nKey::FileDropNameTaken).to_string());
+            continue;
+        }
+        if host.exists(&dest) {
             report.conflicts.push(name.clone());
         }
-        planned.push((src.clone(), host.join(dir, &name), name));
+        planned.push((src.clone(), dest, name));
     }
 
     if !overwrite && !report.conflicts.is_empty() {
@@ -102,18 +123,92 @@ pub(crate) fn copy_into_dir(
         // Replace rather than merge: a folder dropped onto a folder of the
         // same name should end up as what was dropped, not as the union of the
         // two, which is what writing into it one file at a time would leave.
-        if host.exists(&dest)
-            && let Err(e) = host.remove(&dest, true)
-        {
-            report.errors.push((name, e));
-            continue;
-        }
-        match copy_tree(host, &src, &dest, 0) {
+        //
+        // What is already there is not cleared away to make room, though. A
+        // copy can fail halfway — a full disk, a control connection that drops
+        // mid-tree — and clearing the way first is what turns that into a
+        // destination holding neither the old thing nor a whole new one. The
+        // copy lands beside it instead, and only takes its place once it is
+        // whole.
+        let done = match host.exists(&dest) {
+            true => copy_over(host, &src, dir, &dest, &name),
+            false => copy_tree(host, &src, &dest, 0),
+        };
+        match done {
             Ok(()) => report.copied.push(name),
             Err(e) => report.errors.push((name, e)),
         }
     }
     report
+}
+
+/// Copy `src` onto a `dest` that is already there, without `dest` ever being
+/// the thing that is missing.
+///
+/// Three steps, and what was there survives all of them: the copy lands on a
+/// working name beside it, the old thing is moved aside rather than removed,
+/// and a rename — one metadata operation, not a tree walk — puts the new copy
+/// in its place. A failure anywhere puts the old thing back, and in the one
+/// case where even that fails it is still on disk under the name it was moved
+/// to, which is a name somebody can find.
+fn copy_over(host: &dyn Host, src: &Path, dir: &Path, dest: &Path, name: &str) -> io::Result<()> {
+    let staged = free_name_beside(host, dir, "partial", name)?;
+    if let Err(e) = copy_tree(host, src, &staged, 0) {
+        let _ = host.remove(&staged, true);
+        return Err(e);
+    }
+    let aside = match free_name_beside(host, dir, "replaced", name) {
+        Ok(aside) => aside,
+        Err(e) => {
+            let _ = host.remove(&staged, true);
+            return Err(e);
+        }
+    };
+    if let Err(e) = host.rename(dest, &aside) {
+        let _ = host.remove(&staged, true);
+        return Err(e);
+    }
+    if let Err(e) = host.rename(&staged, dest) {
+        if let Err(back) = host.rename(&aside, dest) {
+            log::warn!(
+                "{} could not be put back after a failed replacement and is at {}: {back}",
+                dest.display(),
+                aside.display()
+            );
+        }
+        let _ = host.remove(&staged, true);
+        return Err(e);
+    }
+    if let Err(e) = host.remove(&aside, true) {
+        // The copy is in place and the drop succeeded; all that is left is the
+        // old thing under a name nobody asked for.
+        log::warn!(
+            "{} outlived the copy that replaced it: {e}",
+            aside.display()
+        );
+    }
+    Ok(())
+}
+
+/// A name in `dir` that nothing is using yet, for a copy to land on before it
+/// takes the destination's place.
+///
+/// The leading dot keeps the working copy out of the way of a tree that hides
+/// dotfiles, and the tag says what it is to anyone who finds one that outlived
+/// the copy that made it.
+fn free_name_beside(host: &dyn Host, dir: &Path, tag: &str, name: &str) -> io::Result<PathBuf> {
+    for n in 0..WORKING_NAME_TRIES {
+        let candidate = match n {
+            0 => host.join(dir, &format!(".tty7-{tag}-{name}")),
+            n => host.join(dir, &format!(".tty7-{tag}-{n}-{name}")),
+        };
+        if !host.exists(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err(io::Error::other(
+        t(L10nKey::FileDropNoWorkingName).to_string(),
+    ))
 }
 
 fn copy_tree(host: &dyn Host, src: &Path, dest: &Path, depth: usize) -> io::Result<()> {
@@ -179,6 +274,18 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, body).unwrap();
+    }
+
+    /// The working files a replacement makes, and is supposed to take away
+    /// again whichever way it ends.
+    fn leavings(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with(".tty7-"))
+            .collect();
+        names.sort();
+        names
     }
 
     #[test]
@@ -291,6 +398,83 @@ mod tests {
         assert!(
             !dest_dir.join("pkg/stale.txt").exists(),
             "replacing a folder must not merge into it"
+        );
+    }
+
+    #[test]
+    fn two_dropped_items_of_the_same_name_do_not_land_on_top_of_each_other() {
+        let root = scratch("same-name");
+        let first = root.join("from/a/notes.md");
+        let second = root.join("from/b/notes.md");
+        write(&first, "first");
+        write(&second, "second");
+        let dest_dir = root.join("into");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+
+        let report = copy_into_dir(&*LocalHost::shared(), &[first, second], &dest_dir, false);
+
+        assert_eq!(report.copied, vec!["notes.md".to_string()]);
+        assert_eq!(
+            report.errors.len(),
+            1,
+            "the one that could not be written has to be said out loud"
+        );
+        assert_eq!(report.errors[0].0, "notes.md");
+        assert_eq!(
+            std::fs::read_to_string(dest_dir.join("notes.md")).unwrap(),
+            "first",
+            "the first claim on the name stands"
+        );
+    }
+
+    #[test]
+    fn a_finished_replacement_leaves_no_working_files_behind() {
+        let root = scratch("replace-clean");
+        let src = root.join("from/note.txt");
+        write(&src, "new");
+        let dest_dir = root.join("into");
+        write(&dest_dir.join("note.txt"), "old");
+
+        let report = copy_into_dir(&*LocalHost::shared(), &[src], &dest_dir, true);
+
+        assert_eq!(report.copied, vec!["note.txt".to_string()]);
+        assert_eq!(
+            std::fs::read_to_string(dest_dir.join("note.txt")).unwrap(),
+            "new"
+        );
+        assert!(
+            leavings(&dest_dir).is_empty(),
+            "the replacement left its working files behind: {:?}",
+            leavings(&dest_dir)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replacement_that_fails_partway_leaves_what_was_there() {
+        let root = scratch("replace-fails");
+        // A walk that cannot finish: the copy gets deep enough to have written
+        // part of itself before it gives up, which is the shape of the full
+        // disk and the dropped connection this path exists for.
+        let src = root.join("from/pkg");
+        write(&src.join("a.txt"), "a");
+        std::os::unix::fs::symlink(&src, src.join("loop")).unwrap();
+        let dest_dir = root.join("into");
+        write(&dest_dir.join("pkg/keep.txt"), "keep");
+
+        let report = copy_into_dir(&*LocalHost::shared(), &[src], &dest_dir, true);
+
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.copied.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dest_dir.join("pkg/keep.txt")).unwrap(),
+            "keep",
+            "a copy that failed took the destination down with it"
+        );
+        assert!(
+            leavings(&dest_dir).is_empty(),
+            "the failed copy was left behind: {:?}",
+            leavings(&dest_dir)
         );
     }
 

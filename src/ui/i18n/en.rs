@@ -857,8 +857,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::FileTreeContextShowDotfiles => "Show Dotfiles",
         L10nKey::FileDropIntoItself => "A folder cannot be copied into itself.",
         L10nKey::FileDropNotHere => "Not on this machine.",
+        L10nKey::FileDropNameTaken => "Another item in the same drop already has that name.",
         L10nKey::FileDropTooDeep => "Nested more than {n} folders deep.",
         L10nKey::FileDropTooLarge => "Larger than {limit} MB — send it over SFTP instead.",
+        L10nKey::FileDropNoWorkingName => "No free name beside it to copy onto first.",
         L10nKey::FileDropReplaceTitle => "Replace \"{name}\"?",
         L10nKey::FileDropReplaceManyTitle => "Replace {n} items?",
         L10nKey::FileDropReplaceBody => {
