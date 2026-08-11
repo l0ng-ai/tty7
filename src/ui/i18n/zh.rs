@@ -45,6 +45,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::KeepMine => "保留我的版本",
         L10nKey::Dismiss => "关闭",
         L10nKey::StoredPasswordRejected => "已存储的密码被拒绝，请输入新密码。",
+        L10nKey::StoredPassphraseRejected => "已保存的口令无法解锁该密钥，请输入正确的口令。",
         L10nKey::Trust => "信任",
         L10nKey::Abort => "中止",
         L10nKey::HostKeyOverrideMessage => "输入 yes 覆盖并信任新密钥，或按 Esc 中止。",
@@ -1055,6 +1056,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteStripConnecting => "正在连接 {machine}…",
         L10nKey::RemoteStripReconnecting => "正在重新连接 {machine}…",
         L10nKey::RemoteStripReconnectingAttempt => "正在重新连接 {machine}…（第 {count} 次尝试）",
+        L10nKey::RemoteStripReconnectingWhy => "正在重新连接 {machine}…（上次失败：{error}）",
+        L10nKey::RemoteStripReconnectingAttemptWhy => {
+            "正在重新连接 {machine}…（第 {count} 次尝试，上次失败：{error}）"
+        }
         L10nKey::RemoteStripPreempted => "此工作区已在 {by} 上打开",
         L10nKey::RemoteStripFailed => "未连接到 {machine}——{error}",
         L10nKey::RemoteStripRouteLost => "{machine} 的连接配置已不存在，无法重连",
@@ -1415,6 +1420,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherStatusConnecting => "正在连接…",
         L10nKey::SwitcherStatusConnectFailed => "连接失败",
         L10nKey::SwitcherStatusNotConnected => "未连接",
+        L10nKey::SwitcherStatusReconnecting => "正在重连…",
+        L10nKey::SwitcherStatusTakenOver => "已被接管",
         L10nKey::SettingsFontDefault => "默认（匹配主字体）",
         L10nKey::ForwardDescriptionPlaceholder => "用途说明",
         L10nKey::SettingsShellDefaultLoginShell => "你的登录 shell",

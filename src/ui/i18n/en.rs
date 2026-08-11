@@ -45,6 +45,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::KeepMine => "Keep mine",
         L10nKey::Dismiss => "Dismiss",
         L10nKey::StoredPasswordRejected => "The stored password was rejected. Enter a new one.",
+        L10nKey::StoredPassphraseRejected => {
+            "The saved passphrase did not unlock this key. Enter the right one."
+        }
         L10nKey::Trust => "Trust",
         L10nKey::Abort => "Abort",
         L10nKey::HostKeyOverrideMessage => {
@@ -1116,6 +1119,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteStripConnecting => "Connecting to {machine}…",
         L10nKey::RemoteStripReconnecting => "Reconnecting to {machine}…",
         L10nKey::RemoteStripReconnectingAttempt => "Reconnecting to {machine}… (attempt {count})",
+        L10nKey::RemoteStripReconnectingWhy => "Reconnecting to {machine}… — last failure: {error}",
+        L10nKey::RemoteStripReconnectingAttemptWhy => {
+            "Reconnecting to {machine}… (attempt {count}) — last failure: {error}"
+        }
         L10nKey::RemoteStripPreempted => "This workspace was opened on {by}",
         L10nKey::RemoteStripFailed => "Not connected to {machine} — {error}",
         L10nKey::RemoteStripRouteLost => {
@@ -1496,6 +1503,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherStatusConnecting => "connecting…",
         L10nKey::SwitcherStatusConnectFailed => "couldn't connect",
         L10nKey::SwitcherStatusNotConnected => "not connected",
+        L10nKey::SwitcherStatusReconnecting => "reconnecting…",
+        L10nKey::SwitcherStatusTakenOver => "taken over",
         L10nKey::SettingsFontDefault => "Default (match primary)",
         L10nKey::ForwardDescriptionPlaceholder => "what it's for",
         L10nKey::SettingsShellDefaultLoginShell => "your login shell",

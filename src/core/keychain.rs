@@ -63,7 +63,6 @@ pub trait CredentialStore: Send + Sync {
         Ok(CredentialRef::key_passphrase(key_sha512_hex.to_string()))
     }
 
-    #[allow(dead_code)]
     fn delete_key_passphrase(&self, key_sha512_hex: &str) -> CredentialResult<()> {
         self.delete(SERVICE_KEY_PASSPHRASE, key_sha512_hex)
     }

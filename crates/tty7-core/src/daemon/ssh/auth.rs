@@ -626,7 +626,10 @@ impl KeyRound {
 /// point (#484 review): russh has no offer-without-signature probe, so
 /// trying an encrypted key means signing — i.e. prompting *before* the server
 /// has shown any interest in that key. An explicit key earns that prompt; a
-/// discovered default with no cached passphrase does not.
+/// discovered default never does — not with no cached passphrase, and not with
+/// a cached one that turned out to be wrong (#486), which for an explicit key
+/// reopens the prompt but here would mean a sheet per stale `~/.ssh` entry on
+/// every connection.
 enum IdentityLoad {
     Ready(russh::keys::PrivateKey),
     /// Not worth an offer: a `.pub`, an undecodable file, or a discovered
@@ -634,8 +637,13 @@ enum IdentityLoad {
     Skip,
     /// An explicit key the user should hear about.
     Unusable(String),
-    /// Explicit, encrypted, no cached passphrase — ask the user.
-    NeedsPassphrase,
+    /// Explicit and encrypted, and no passphrase to hand opened it — ask the
+    /// user. `rejected` says a cached passphrase was tried first and refused,
+    /// which the sheet has to admit to before asking again (#486); without one
+    /// this is simply the first time anybody has been asked.
+    NeedsPassphrase {
+        rejected: bool,
+    },
 }
 
 fn load_identity(
@@ -660,19 +668,25 @@ fn load_identity(
             Some(passphrase) => match russh::keys::decode_secret_key(contents, Some(passphrase)) {
                 Ok(key) => IdentityLoad::Ready(key),
                 Err(e) => {
-                    log::warn!("could not decrypt identity file {raw_path}: {e}");
+                    log::warn!("the stored passphrase did not decrypt {raw_path}: {e}");
                     match source {
-                        KeySource::Explicit => IdentityLoad::Unusable(format!(
-                            "could not decrypt identity file {raw_path}"
-                        )),
+                        // Ending the attempt here is what locked an explicit
+                        // key out for good once a wrong passphrase reached the
+                        // keychain: no prompt, and no way to correct it from
+                        // inside the app (#486). The secret is simply wrong, so
+                        // ask — and say that is why.
+                        KeySource::Explicit => IdentityLoad::NeedsPassphrase { rejected: true },
                         // A stale cached passphrase for a key the user never
-                        // configured: skip, don't shout.
+                        // configured: skip, don't shout — and above all do not
+                        // prompt. #484's rule holds whatever the reason the
+                        // passphrase failed; nobody asked for this key, so it
+                        // must never be the thing that puts a sheet on screen.
                         KeySource::Discovered => IdentityLoad::Skip,
                     }
                 }
             },
             None => match source {
-                KeySource::Explicit => IdentityLoad::NeedsPassphrase,
+                KeySource::Explicit => IdentityLoad::NeedsPassphrase { rejected: false },
                 KeySource::Discovered => IdentityLoad::Skip,
             },
         },
@@ -748,12 +762,12 @@ async fn try_identity_file(
         }
     };
 
-    let cached = spec
-        .key_passphrases
-        .as_ref()
-        .and_then(|m| m.get(raw_path))
-        .map(String::as_str);
-    let key = match load_identity(&contents, raw_path, source, cached) {
+    let key = match load_identity(
+        &contents,
+        raw_path,
+        source,
+        stored_passphrase(spec, raw_path),
+    ) {
         IdentityLoad::Ready(k) => k,
         IdentityLoad::Skip => return Outcome::Skipped,
         IdentityLoad::Unusable(reason) => {
@@ -763,16 +777,23 @@ async fn try_identity_file(
                 reason: None,
             };
         }
-        IdentityLoad::NeedsPassphrase => {
+        // One prompt serves both ways of arriving here — no passphrase to try,
+        // or one that was tried and refused. `rejected` is the only difference,
+        // and it only changes what the sheet says (#486).
+        IdentityLoad::NeedsPassphrase { rejected } => {
             let resp = broker
                 .prompt(AuthPromptKind::KeyPassphrase {
                     key_path: raw_path.to_string(),
                     comment: String::new(),
+                    rejected,
                 })
                 .await;
             let AuthResponse::Secret(passphrase) = resp else {
                 return Outcome::Skipped;
             };
+            // The user just typed this one, so a failure here is not stale
+            // state to heal — it is the answer being wrong, and saying so
+            // beats asking again forever.
             match russh::keys::decode_secret_key(&contents, Some(&passphrase)) {
                 Ok(k) => k,
                 Err(e) => {
@@ -813,6 +834,20 @@ async fn try_identity_file(
             }
         }
     }
+}
+
+/// The passphrase this connection already carries for `raw_path`, if any.
+///
+/// The map is keyed by the identity path exactly as the spec lists it — the
+/// same string the prompt names, the GUI files the keychain entry under, and
+/// `default_identity_candidates` spells a discovered key with — so the lookup
+/// uses the raw path, not the one `expand_identity_placeholders` built for the
+/// filesystem.
+fn stored_passphrase<'a>(spec: &'a NativeSshSpec, raw_path: &str) -> Option<&'a str> {
+    spec.key_passphrases
+        .as_ref()?
+        .get(raw_path)
+        .map(String::as_str)
 }
 
 async fn try_agent(
@@ -933,6 +968,8 @@ async fn try_keyboard_interactive(
     const MAX_ROUNDS: u32 = 16;
     let mut rounds = 0u32;
     let mut stored_password_used = false;
+    let mut stored_password_rejected = false;
+    let mut last_source = KiAnswerSource::Nothing;
     loop {
         rounds += 1;
         if rounds > MAX_ROUNDS {
@@ -943,9 +980,29 @@ async fn try_keyboard_interactive(
             KeyboardInteractiveAuthResponse::Failure {
                 remaining_methods, ..
             } => {
+                // OpenSSH ends a rejected kbdint request with a plain
+                // USERAUTH_FAILURE rather than another info request, so a
+                // round answered from the keychain used to end the method
+                // right here — the same stale password on every reconnect,
+                // and the user never once asked to type a different one.
+                // Start the request over instead, with the stored password
+                // now spent, so the next round reaches the prompt.
+                if should_retry_ki(last_source, &remaining_methods) {
+                    stored_password_used = true;
+                    stored_password_rejected = true;
+                    last_source = KiAnswerSource::Nothing;
+                    resp = match handle
+                        .authenticate_keyboard_interactive_start(&spec.user, None)
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => return failed(format!("keyboard-interactive start error: {e}")),
+                    };
+                    continue;
+                }
                 return Outcome::Failed {
                     remaining_methods: Some(remaining_methods),
-                    reason: Some("keyboard-interactive rejected".to_string()),
+                    reason: Some(ki_rejection_reason(last_source, stored_password_rejected)),
                 };
             }
             KeyboardInteractiveAuthResponse::InfoRequest {
@@ -964,23 +1021,32 @@ async fn try_keyboard_interactive(
                     continue;
                 }
 
-                let allow_stored = !stored_password_used;
-                stored_password_used = true;
-                let answers = match collect_ki_answers(
+                // A device that asks again inside the same request has already
+                // turned the stored password down, exactly as a failed request
+                // that had to be restarted has.
+                stored_password_rejected |= last_source == KiAnswerSource::Stored;
+                let round = match collect_ki_answers(
                     spec,
                     broker,
                     &name,
                     &instructions,
                     &prompts,
-                    allow_stored,
+                    !stored_password_used,
+                    stored_password_rejected,
                 )
                 .await
                 {
                     Some(a) => a,
                     None => return failed("keyboard-interactive cancelled"),
                 };
+                // Only a round that actually sent the stored password spends
+                // it. Marking it spent for every round refused it to an
+                // OTP-then-password flow, where the first round is the code
+                // and the password is not asked for until the second.
+                last_source = round.source;
+                stored_password_used |= round.source == KiAnswerSource::Stored;
                 resp = match handle
-                    .authenticate_keyboard_interactive_respond(answers)
+                    .authenticate_keyboard_interactive_respond(round.answers)
                     .await
                 {
                     Ok(r) => r,
@@ -991,6 +1057,58 @@ async fn try_keyboard_interactive(
     }
 }
 
+/// Where the answers of the keyboard-interactive round that just went out came
+/// from. It decides both whether a rejection is worth starting over for and
+/// what to tell the user the server turned down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KiAnswerSource {
+    /// No round has answered yet — the server refused the method before it
+    /// asked anything.
+    Nothing,
+    Stored,
+    Typed,
+}
+
+struct KiRound {
+    answers: Vec<String>,
+    source: KiAnswerSource,
+}
+
+/// A rejection is only worth a second request when the round the server turned
+/// down was answered from the keychain: nobody has been asked anything yet, so
+/// the attempt has not actually been spent. An answer the user typed is their
+/// answer, and re-asking for it in a loop is what a rejecting server would
+/// like us to do.
+///
+/// An empty `remaining_methods` is read as "the server did not say" and left
+/// retryable, which is how `try_gssapi` above reads it too. The retry cannot
+/// run away: it is reached only from `KiAnswerSource::Stored`, and the restart
+/// spends the stored password, so no second restart can ever qualify — and the
+/// round counter it shares with the info-request loop caps the whole method
+/// either way.
+fn should_retry_ki(last_source: KiAnswerSource, remaining: &MethodSet) -> bool {
+    last_source == KiAnswerSource::Stored
+        && (remaining.is_empty() || remaining.contains(&MethodKind::KeyboardInteractive))
+}
+
+/// "keyboard-interactive rejected" answered for three different situations,
+/// and the one worth naming is the stored password: the user typed nothing, so
+/// a message about their answer sends them looking for a typo they never made.
+/// `stored_rejected` carries that across a restarted request, where the round
+/// that spent the stored password belongs to the request before this one.
+fn ki_rejection_reason(last_source: KiAnswerSource, stored_rejected: bool) -> String {
+    match last_source {
+        KiAnswerSource::Typed => "keyboard-interactive: your answer was rejected".to_string(),
+        KiAnswerSource::Stored => {
+            "keyboard-interactive: the stored password was rejected".to_string()
+        }
+        KiAnswerSource::Nothing if stored_rejected => {
+            "keyboard-interactive: the stored password was rejected".to_string()
+        }
+        KiAnswerSource::Nothing => "keyboard-interactive rejected".to_string(),
+    }
+}
+
 async fn collect_ki_answers(
     spec: &NativeSshSpec,
     broker: &Arc<PromptBroker>,
@@ -998,13 +1116,17 @@ async fn collect_ki_answers(
     instructions: &str,
     prompts: &[russh::client::Prompt],
     allow_stored: bool,
-) -> Option<Vec<String>> {
+    stored_rejected: bool,
+) -> Option<KiRound> {
     let all_password_type = prompts
         .iter()
         .all(|p| !p.echo && p.prompt.to_lowercase().contains("password"));
     if all_password_type && allow_stored {
         if let Some(pw) = &spec.password {
-            return Some(prompts.iter().map(|_| pw.clone()).collect());
+            return Some(KiRound {
+                answers: prompts.iter().map(|_| pw.clone()).collect(),
+                source: KiAnswerSource::Stored,
+            });
         }
     }
 
@@ -1020,13 +1142,18 @@ async fn collect_ki_answers(
             name: name.to_string(),
             instructions: instructions.to_string(),
             prompts: ki_prompts,
+            stored_rejected,
         })
         .await;
-    match resp {
-        AuthResponse::Secrets(v) if v.len() == prompts.len() => Some(v),
-        AuthResponse::Secret(s) if prompts.len() == 1 => Some(vec![s]),
-        _ => None,
-    }
+    let answers = match resp {
+        AuthResponse::Secrets(v) if v.len() == prompts.len() => v,
+        AuthResponse::Secret(s) if prompts.len() == 1 => vec![s],
+        _ => return None,
+    };
+    Some(KiRound {
+        answers,
+        source: KiAnswerSource::Typed,
+    })
 }
 
 fn rsa_hash_alg(algorithm: &Algorithm) -> Option<HashAlg> {
@@ -1116,6 +1243,62 @@ mod tests {
 
         let hosts = gssapi_service_hosts_with_lookup("10.0.0.1", |_| Some("10.0.0.1".into()));
         assert_eq!(hosts, vec!["10.0.0.1".to_string()]);
+    }
+
+    fn spec_with(extra: &str) -> NativeSshSpec {
+        serde_json::from_str(&format!(
+            r#"{{"host":"h","port":22,"user":"u","auth_mode":"auto"{extra}}}"#
+        ))
+        .expect("the minimal spec shape is what the daemon already accepts on the wire")
+    }
+
+    #[test]
+    fn a_stored_passphrase_is_found_by_the_path_the_spec_lists() {
+        // The GUI files the entry under the identity path it put in the spec,
+        // tilde and all, and `try_identity_file` has to look it up under the
+        // same string rather than under the filesystem path it expanded to.
+        let spec = spec_with(r#","key_passphrases":{"~/.ssh/id_ed25519":"pp"}"#);
+        assert_eq!(stored_passphrase(&spec, "~/.ssh/id_ed25519"), Some("pp"));
+        assert_eq!(stored_passphrase(&spec, "/home/u/.ssh/id_ed25519"), None);
+        assert_eq!(stored_passphrase(&spec_with(""), "~/.ssh/id_ed25519"), None);
+    }
+
+    #[test]
+    fn only_a_stored_answer_earns_a_second_keyboard_interactive_request() {
+        let offers = MethodSet::from(&[MethodKind::KeyboardInteractive][..]);
+
+        // Nobody was asked anything, so nothing has been spent yet.
+        assert!(should_retry_ki(KiAnswerSource::Stored, &offers));
+
+        // The user answered and was turned down; asking them again in a loop
+        // is what a rejecting server would like us to do.
+        assert!(!should_retry_ki(KiAnswerSource::Typed, &offers));
+        assert!(!should_retry_ki(KiAnswerSource::Nothing, &offers));
+
+        // A server that no longer offers the method cannot be restarted into
+        // it; one that said nothing about what is left still can.
+        let elsewhere = MethodSet::from(&[MethodKind::PublicKey][..]);
+        assert!(!should_retry_ki(KiAnswerSource::Stored, &elsewhere));
+        assert!(should_retry_ki(KiAnswerSource::Stored, &MethodSet::empty()));
+    }
+
+    #[test]
+    fn a_rejection_says_whose_answer_it_was() {
+        let stored = ki_rejection_reason(KiAnswerSource::Stored, true);
+        assert!(stored.contains("stored password"), "{stored}");
+
+        let typed = ki_rejection_reason(KiAnswerSource::Typed, true);
+        assert!(typed.contains("your answer"), "{typed}");
+
+        // The restarted request carries the stored rejection across, even
+        // though its own rounds never sent anything.
+        let carried = ki_rejection_reason(KiAnswerSource::Nothing, true);
+        assert!(carried.contains("stored password"), "{carried}");
+
+        // A server that refused the method outright blames neither.
+        let neither = ki_rejection_reason(KiAnswerSource::Nothing, false);
+        assert!(!neither.contains("stored password"), "{neither}");
+        assert!(!neither.contains("your answer"), "{neither}");
     }
 
     #[test]
@@ -1296,7 +1479,7 @@ mod tests {
         // rather than spending a prompt on a key the server may not want.
         assert!(matches!(
             load_identity(&encrypted_key(), "k", KeySource::Explicit, None),
-            IdentityLoad::NeedsPassphrase
+            IdentityLoad::NeedsPassphrase { rejected: false }
         ));
         assert!(matches!(
             load_identity(&encrypted_key(), "k", KeySource::Discovered, None),
@@ -1318,15 +1501,42 @@ mod tests {
     }
 
     #[test]
-    fn load_identity_wrong_cached_passphrase_is_loud_only_for_explicit() {
+    fn load_identity_wrong_cached_passphrase_asks_again_only_for_explicit() {
+        // #486 inside #484's matrix. A wrong stored passphrase used to be the
+        // end of an explicit key: `Unusable`, so "could not decrypt identity
+        // file" with no way to correct the secret from inside the app. It now
+        // reopens the prompt, flagged so the sheet can say the saved one was
+        // refused.
         assert!(matches!(
             load_identity(&encrypted_key(), "k", KeySource::Explicit, Some("wrong")),
-            IdentityLoad::Unusable(_)
+            IdentityLoad::NeedsPassphrase { rejected: true }
         ));
+        // The discovered half is the one that must not move: a `~/.ssh` default
+        // nobody configured stays silent whether its cached passphrase is
+        // absent or stale, so a stale entry cannot turn every connection into a
+        // prompt for a key the user never asked to use.
         assert!(matches!(
             load_identity(&encrypted_key(), "k", KeySource::Discovered, Some("wrong")),
             IdentityLoad::Skip
         ));
+    }
+
+    #[test]
+    fn no_discovered_key_ever_asks_for_a_passphrase() {
+        // The seam where #484 and #486 meet: the self-heal reopens a prompt on
+        // a refused passphrase, and the probe hands this function keys the user
+        // never named. Whatever a discovered candidate's state, it must never
+        // be the thing that puts a sheet on screen — several of them would
+        // otherwise queue up a prompt storm on every connection.
+        for cached in [None, Some("wrong"), Some(PASSPHRASE)] {
+            assert!(
+                !matches!(
+                    load_identity(&encrypted_key(), "k", KeySource::Discovered, cached),
+                    IdentityLoad::NeedsPassphrase { .. }
+                ),
+                "a discovered key must not prompt (cached: {cached:?})"
+            );
+        }
     }
 
     #[test]
