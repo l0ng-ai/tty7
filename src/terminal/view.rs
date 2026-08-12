@@ -29,7 +29,7 @@ use crate::core::actions::{
     ForkAgentSessionRight, ForkAgentSessionUp, IncreaseFontSize, NewTab, SendBackTab, SendTab,
     SplitDown, SplitRight, ToggleMaximizePane,
 };
-use crate::core::config::{BellMode, Config, NotifyMode};
+use crate::core::config::{BellMode, Config, LinkFileOpen, NotifyMode};
 use crate::daemon::protocol::{RemoteContext, ShellSpec};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
@@ -65,6 +65,21 @@ impl gpui::EventEmitter<AuthPromptReady> for TerminalView {}
 pub struct AgentSessionChanged;
 
 impl gpui::EventEmitter<AgentSessionChanged> for TerminalView {}
+
+/// A file link the user clicked, on its way to whoever can show it. The
+/// terminal resolves the path — it is the only thing that knows the pane's
+/// directory and host — and the app opens it, because the editor and the file
+/// tree are its to drive.
+pub struct OpenFileRequested {
+    pub path: std::path::PathBuf,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+    /// A directory link asks "where is this?", not "what does it say?" — the
+    /// app answers it in the file tree instead of the editor.
+    pub is_dir: bool,
+}
+
+impl gpui::EventEmitter<OpenFileRequested> for TerminalView {}
 
 pub struct NativeSshParts {
     terminal: RemoteTerminal,
@@ -161,6 +176,16 @@ pub struct TerminalView {
     last_mouse_cell: Option<(usize, usize)>,
     last_hover_cell: Option<(usize, usize)>,
     link_modifier_down: bool,
+    /// What this pane's host has said about paths printed in it, for panes
+    /// that cannot answer that from the local filesystem. Empty and unused on
+    /// a local pane, which resolves inline instead.
+    link_probes: super::link_probe::LinkProbeCache,
+    /// The repository the pane's directory sits in, once the host has been
+    /// asked, and the directory that answer belongs to. A second root for
+    /// relative paths: build output routinely names files from the workspace
+    /// root while the shell sits in a member crate.
+    link_repo_root: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
+    link_repo_root_pending: bool,
     /// The verdict of `should_show_context_menu` for the most recent right
     /// mouse-down, latched so the menu builder — which gpui-component runs on a
     /// deferred callback, one turn after the click — can still see the
@@ -260,6 +285,28 @@ enum LoopbackOpen {
     Forwarded(String),
     ForwardFailed(String),
     NotLoopback,
+}
+
+/// What sits under a cell, once the grid has been read.
+enum GridLink {
+    /// An OSC 8 hyperlink the emitter declared, with the extent it declared.
+    Hyperlink(String, Point, Point),
+    /// The logical line the cell belongs to, the grid point of every character
+    /// in it, and which of those the cell is.
+    Text(String, Vec<Point>, usize),
+}
+
+/// The outcome of asking what a cell links to.
+enum LinkAt {
+    Found(LinkTarget, Point, Point),
+    /// A token that parses as a path, that nothing has answered for.
+    /// `pending` separates the two reasons: the path is not there, or the host
+    /// that would know has not replied yet.
+    Unresolved {
+        candidate: super::search::FileCandidate,
+        pending: bool,
+    },
+    None,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1134,6 +1181,9 @@ impl TerminalView {
             report_mouse,
             last_hover_cell: None,
             link_modifier_down: false,
+            link_probes: Default::default(),
+            link_repo_root: None,
+            link_repo_root_pending: false,
             context_menu_allowed: true,
             scroll_debt: 0.,
             zoom_debt: 0.,
@@ -4613,7 +4663,7 @@ impl TerminalView {
     }
 
     pub fn open_link_at(
-        &self,
+        &mut self,
         col: usize,
         row: usize,
         window: &mut Window,
@@ -4623,19 +4673,93 @@ impl TerminalView {
             return false;
         }
         let include_loopback = self.can_forward_loopback(cx);
-        let Some((target, _start, _end)) = self.resolve_link_at(col, row, true, include_loopback)
-        else {
-            return false;
-        };
-        match target {
-            LinkTarget::Url(url) => self.open_url(&url, window, cx),
-            LinkTarget::File { path, line, column } => {
-                match cx.global::<Config>().link_file_command.as_deref() {
-                    Some(template) => run_file_command(template, &path, line, column),
-                    None => open_file_path(&path),
-                }
+        match self.resolve_link_at(col, row, true, include_loopback, cx) {
+            LinkAt::Found(LinkTarget::Url(url), ..) => self.open_url(&url, window, cx),
+            LinkAt::Found(
+                LinkTarget::File {
+                    path,
+                    line,
+                    column,
+                    is_dir,
+                },
+                ..,
+            ) => self.open_file_link(path, line, column, is_dir, cx),
+            LinkAt::Unresolved { candidate, pending } => {
+                return self.report_unresolved_link(&candidate, pending, window, cx);
             }
+            LinkAt::None => return false,
         }
+        true
+    }
+
+    /// Hands a resolved file link to whatever the user wants opening files.
+    ///
+    /// The built-in editor is the default because it is the one place that can
+    /// honour `line` and `column`, and the only one that can open a file that
+    /// lives on another machine at all — an external command would be handed a
+    /// path that means nothing here.
+    fn open_file_link(
+        &mut self,
+        path: std::path::PathBuf,
+        line: Option<u32>,
+        column: Option<u32>,
+        is_dir: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let cfg = cx.global::<Config>();
+        let mode = cfg.file_open_mode();
+        let command = cfg.link_file_command.clone();
+        match (mode, command) {
+            (LinkFileOpen::Command, Some(template)) => {
+                run_file_command(&template, &path, line, column)
+            }
+            (LinkFileOpen::System, _) => open_file_path(&path),
+            // Told to run a command, with no command left to run: falling back
+            // to the built-in editor beats the click doing nothing.
+            (LinkFileOpen::Internal | LinkFileOpen::Command, _) => cx.emit(OpenFileRequested {
+                path,
+                line,
+                column,
+                is_dir,
+            }),
+        }
+    }
+
+    /// Says why a path-shaped token did not open anything.
+    ///
+    /// Silence here is what makes the whole feature feel broken: a relative
+    /// path measured from somewhere other than this pane's directory looks
+    /// exactly like one that works, right up until the click does nothing.
+    /// Returns whether the click was spoken for.
+    fn report_unresolved_link(
+        &mut self,
+        candidate: &super::search::FileCandidate,
+        pending: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // A word that is not written like a path was never a link, and saying
+        // so on every modifier-click over ordinary output would be noise.
+        if !candidate.looks_like_a_path() {
+            return false;
+        }
+        // The host has not answered yet. The underline is the promise that it
+        // has; before then, accusing it of losing the file would be a guess.
+        if pending {
+            return false;
+        }
+        let root = self.link_roots(cx).into_iter().next();
+        let message = match &root {
+            Some(root) => t_fmt(
+                L10nKey::LinkFileNotUnder,
+                &[
+                    ("path", &candidate.path),
+                    ("dir", &root.display().to_string()),
+                ],
+            ),
+            None => t_fmt(L10nKey::LinkFileNoDirectory, &[("path", &candidate.path)]),
+        };
+        window.push_notification(message, cx);
         true
     }
 
@@ -4725,7 +4849,7 @@ impl TerminalView {
             return false;
         }
         let include_loopback = self.can_forward_loopback(cx);
-        let next = self.link_span_at(col, row, include_files, include_loopback);
+        let next = self.link_span_at(col, row, include_files, include_loopback, cx);
         if next != self.hovered_link {
             self.hovered_link = next;
             cx.notify();
@@ -4753,27 +4877,98 @@ impl TerminalView {
     }
 
     fn link_span_at(
-        &self,
+        &mut self,
         col: usize,
         row: usize,
         include_files: bool,
         include_loopback: bool,
+        cx: &mut Context<Self>,
     ) -> Option<HoveredLink> {
-        self.resolve_link_at(col, row, include_files, include_loopback)
-            .map(|(_, start, end)| HoveredLink { start, end })
+        match self.resolve_link_at(col, row, include_files, include_loopback, cx) {
+            LinkAt::Found(_, start, end) => Some(HoveredLink { start, end }),
+            LinkAt::Unresolved { .. } | LinkAt::None => None,
+        }
     }
 
     fn resolve_link_at(
-        &self,
+        &mut self,
         col: usize,
         row: usize,
         include_files: bool,
         include_loopback: bool,
-    ) -> Option<(LinkTarget, Point, Point)> {
+        cx: &mut Context<Self>,
+    ) -> LinkAt {
+        let Some(line) = self.link_line_at(col, row) else {
+            return LinkAt::None;
+        };
+        let (text, points, click_idx) = match line {
+            GridLink::Hyperlink(uri, start, end) => {
+                return LinkAt::Found(LinkTarget::Url(uri), start, end);
+            }
+            GridLink::Text(text, points, click_idx) => (text, points, click_idx),
+        };
+
+        // A pane whose paths belong to neither its host nor this machine —
+        // an `ssh` typed into a local shell — has nothing that can answer for
+        // them. It used to fall through to the local filesystem, so an
+        // absolute path that happened to exist on both ends opened *this*
+        // machine's copy without a word.
+        let files = include_files && self.cwd_is_on_host();
+        let roots = match files {
+            true => self.link_roots(cx),
+            false => Vec::new(),
+        };
+        let local = self.host_id.is_local();
+        // Before the first probe, not after: `retarget` empties the cache when
+        // the host has changed, and doing that between recording a wanted path
+        // and draining it would throw the question away unasked.
+        self.link_probes.retarget(self.host_id);
+        let probes = &mut self.link_probes;
+        let mut pending = false;
+        let mut probe = |path: &std::path::Path, require_file: bool| {
+            let answer = match local {
+                true => super::search::local_probe(path, require_file),
+                false => probes.probe(path, require_file),
+            };
+            pending |= matches!(answer, super::search::Probe::Unknown);
+            answer
+        };
+        let link = super::search::link_at(&text, click_idx, &roots, files, &mut probe);
+        // `probe` holds the cache borrow; nothing below touches it, so the
+        // borrow ends here and `self` is whole again for the flush.
+        self.flush_link_probes(cx);
+
+        let link = link.or_else(|| {
+            include_loopback.then(|| {
+                super::loopback::loopback_url_span_at(&text, click_idx).map(|(start, end, url)| {
+                    super::search::LinkMatch {
+                        start,
+                        end,
+                        target: LinkTarget::Url(url),
+                    }
+                })
+            })?
+        });
+        match link {
+            Some(link) => LinkAt::Found(link.target, points[link.start], points[link.end]),
+            // Nothing answered. Hand back what the token *said* so a click can
+            // say so out loud instead of looking broken.
+            None => match files
+                .then(|| super::search::file_candidate_at(&text, click_idx))
+                .flatten()
+            {
+                Some(candidate) => LinkAt::Unresolved { candidate, pending },
+                None => LinkAt::None,
+            },
+        }
+    }
+
+    /// The logical line under a cell, or the OSC 8 hyperlink that cell
+    /// declares — which wins outright, because the emitter said what it meant.
+    fn link_line_at(&self, col: usize, row: usize) -> Option<GridLink> {
         let term = self.terminal.term.lock();
         let line = Self::grid_line(&term, row)?;
-        let cols = term.columns();
-        if col >= cols {
+        if col >= term.columns() {
             return None;
         }
         let click = Point::new(line, Column(col));
@@ -4781,26 +4976,104 @@ impl TerminalView {
         if let Some(hl) = term.grid()[line][Column(col)].hyperlink() {
             let uri = hl.uri().to_string();
             if let Some((start, end)) = super::smart_select::hyperlink_run(&term, click) {
-                return Some((LinkTarget::Url(uri), start, end));
+                return Some(GridLink::Hyperlink(uri, start, end));
             }
         }
 
         let (text, points, click_idx) = super::smart_select::logical_line_at(&term, click, true)?;
-        drop(term);
-        let cwd = self.local_cwd();
-        let link = super::search::link_at(&text, click_idx, cwd.as_deref(), include_files)
-            .or_else(|| {
-                include_loopback.then(|| {
-                    super::loopback::loopback_url_span_at(&text, click_idx).map(
-                        |(start, end, url)| super::search::LinkMatch {
-                            start,
-                            end,
-                            target: LinkTarget::Url(url),
-                        },
-                    )
-                })?
-            })?;
-        Some((link.target, points[link.start], points[link.end]))
+        Some(GridLink::Text(text, points, click_idx))
+    }
+
+    /// The directories a relative path in this pane is measured from, best
+    /// first: where the work is happening, then the repository around it.
+    ///
+    /// Cargo, tsc and friends name files from the workspace root while the
+    /// shell sits in a member directory, so one root resolves only half of
+    /// what a build prints. The pane's own directory stays first, so a name
+    /// that exists in both is the near one.
+    fn link_roots(&mut self, cx: &mut Context<Self>) -> Vec<std::path::PathBuf> {
+        let Some(cwd) = self.effective_host_cwd() else {
+            return Vec::new();
+        };
+        self.request_link_repo_root(&cwd, cx);
+        let mut roots = vec![cwd.clone()];
+        if let Some((asked_for, Some(root))) = &self.link_repo_root
+            && *asked_for == cwd
+            && *root != cwd
+        {
+            roots.push(root.clone());
+        }
+        roots
+    }
+
+    fn request_link_repo_root(&mut self, cwd: &std::path::Path, cx: &mut Context<Self>) {
+        if self.link_repo_root_pending
+            || self
+                .link_repo_root
+                .as_ref()
+                .is_some_and(|(asked_for, _)| asked_for == cwd)
+        {
+            return;
+        }
+        let Some(host) = self.host(cx) else {
+            return;
+        };
+        self.link_repo_root_pending = true;
+        let cwd = cwd.to_path_buf();
+        crate::ui::host_ops::HostOps::run(
+            host,
+            cx,
+            {
+                let cwd = cwd.clone();
+                move |h| h.repo_root(&cwd).ok().flatten()
+            },
+            move |view, root, cx| {
+                view.link_repo_root_pending = false;
+                view.link_repo_root = Some((cwd, root));
+                let down = view.link_modifier_down;
+                view.refresh_link_hover(down, cx);
+            },
+        );
+    }
+
+    /// Asks the host about every path a lookup could not answer for, in one
+    /// call, and re-runs the hover once the replies are in — the mouse may
+    /// have been resting on the link the whole time it took.
+    fn flush_link_probes(&mut self, cx: &mut Context<Self>) {
+        if self.host_id.is_local() {
+            return;
+        }
+        let wanted = self.link_probes.take_wanted();
+        if wanted.is_empty() {
+            return;
+        }
+        let Some(host) = self.host(cx) else {
+            return;
+        };
+        crate::ui::host_ops::HostOps::run(
+            host,
+            cx,
+            move |h| {
+                use super::link_probe::Existence;
+                wanted
+                    .into_iter()
+                    .map(|path| {
+                        let existence = match h.stat(&path) {
+                            Ok(meta) if meta.is_dir => Existence::Dir,
+                            Ok(_) => Existence::File,
+                            Err(_) => Existence::Missing,
+                        };
+                        (path, existence)
+                    })
+                    .collect::<Vec<_>>()
+            },
+            |view, answers, cx| {
+                if view.link_probes.land(answers) {
+                    let down = view.link_modifier_down;
+                    view.refresh_link_hover(down, cx);
+                }
+            },
+        );
     }
 
     fn render_input_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -5714,7 +5987,9 @@ fn select_end_copy(enabled: bool, grid: bool, editor: bool) -> SelectEndCopy {
     }
 }
 
-fn open_file_path(path: &std::path::Path) {
+/// Hands a path to whatever the OS has it associated with. Also the fallback
+/// for a directory the file tree cannot reach.
+pub(crate) fn open_file_path(path: &std::path::Path) {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(windows) {
@@ -7978,6 +8253,113 @@ mod gpui_tests {
                 );
             })
             .unwrap();
+    }
+
+    /// The case from the bug report: a relative path printed by a tool, sitting
+    /// in a pane that reported its directory. It resolves; a name that is not
+    /// there does not, and comes back as an unresolved *candidate* so the click
+    /// can say why rather than doing nothing at all.
+    #[gpui::test]
+    fn a_relative_path_links_against_the_panes_own_directory(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("tty7-view-link-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("scratchpad")).expect("create scratchpad dir");
+        let notes = dir.join("scratchpad/notes.md");
+        std::fs::write(&notes, b"# notes").expect("create notes.md");
+
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Cwd(dir.clone()).encode(&mut daemon).unwrap();
+        DaemonMsg::Output(b"ready (scratchpad/notes.md) and (scratchpad/gone.md)\r\n".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        for _ in 0..200 {
+            let seen = window
+                .update(cx, |view, _, _| {
+                    view.cwd().is_some()
+                        && view.terminal.term.lock().grid()[Line(0)][Column(7)].c == 's'
+                })
+                .unwrap();
+            if seen {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, _, cx| {
+                assert_eq!(view.cwd().as_deref(), Some(dir.as_path()));
+                assert!(
+                    view.hover_link_at(7, 0, true, cx),
+                    "the file is right there under the pane's directory"
+                );
+                assert!(
+                    !view.hover_link_at(7, 0, false, cx),
+                    "without the modifier a file path is not a link"
+                );
+
+                let gone = "ready (scratchpad/notes.md) and (".len();
+                assert!(
+                    !view.hover_link_at(gone, 0, true, cx),
+                    "nothing underlines for a name that is not on disk"
+                );
+                match view.resolve_link_at(gone, 0, true, false, cx) {
+                    LinkAt::Unresolved { candidate, pending } => {
+                        assert_eq!(candidate.path, "scratchpad/gone.md");
+                        assert!(
+                            candidate.looks_like_a_path(),
+                            "so the click reports it instead of staying silent"
+                        );
+                        assert!(!pending, "a local pane answers on the spot");
+                    }
+                    _ => panic!("expected an unresolved path-shaped candidate"),
+                }
+            })
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Absolute paths in a pane that is `ssh`-ed somewhere used to be resolved
+    /// against *this* machine's filesystem, so `/etc/hosts` on the far end
+    /// opened the local copy without a word about it.
+    #[gpui::test]
+    fn a_pane_whose_paths_are_elsewhere_does_not_link_local_files(cx: &mut TestAppContext) {
+        let file = std::env::temp_dir().join(format!("tty7-elsewhere-{}.txt", std::process::id()));
+        std::fs::write(&file, b"local").expect("create local file");
+        let line = format!("open {} now\r\n", file.display());
+
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Output(line.clone().into_bytes())
+            .encode(&mut daemon)
+            .unwrap();
+        DaemonMsg::RemoteContext(Some(crate::daemon::protocol::RemoteContext {
+            kind: crate::daemon::protocol::RemoteKind::Ssh,
+            argv: vec!["ssh".into(), "box".into()],
+            target: "box".into(),
+        }))
+        .encode(&mut daemon)
+        .unwrap();
+        for _ in 0..200 {
+            let seen = window
+                .update(cx, |view, _, _| view.remote_context().is_some())
+                .unwrap();
+            if seen {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, _, cx| {
+                assert!(
+                    !view.cwd_is_on_host(),
+                    "a local host cannot answer for the far side of an ssh session"
+                );
+                assert!(
+                    !view.hover_link_at(6, 0, true, cx),
+                    "the local copy of that path is not what the pane printed"
+                );
+            })
+            .unwrap();
+        let _ = std::fs::remove_file(&file);
     }
 
     #[gpui::test]

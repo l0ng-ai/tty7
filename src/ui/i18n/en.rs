@@ -402,6 +402,16 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsForwardSshLoopbackLinksDesc => {
             "When a pane is in SSH, open localhost links through a temporary port forward."
         }
+        L10nKey::SettingsOpenFilesInternal => "Built-in editor",
+        L10nKey::SettingsOpenFilesSystem => "Default app",
+        L10nKey::SettingsOpenFilesCommand => "Command",
+        L10nKey::SettingsOpenFilesModeDesc => {
+            "What a {modifier}-clicked file link opens. The built-in editor is the only one that can jump to a line or open a file on a remote host."
+        }
+        L10nKey::LinkFileNotUnder => "{path} — nothing by that name under {dir}",
+        L10nKey::LinkFileNoDirectory => {
+            "{path} — this pane has not said which directory it is in, so a relative path has nothing to be measured from"
+        }
         L10nKey::OpenFilesWith => "Open files with",
         L10nKey::SettingsOpenFilesWithDesc => {
             "Command run when {modifier}-clicking a file link, instead of the default app. Use {path}, {line}, {column}; a flag whose value is absent is dropped (e.g. herdr edit {path} --line={line}). Empty uses the default app."

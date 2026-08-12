@@ -47,6 +47,9 @@ pub(super) enum LinkTarget {
         path: PathBuf,
         line: Option<u32>,
         column: Option<u32>,
+        /// Set when the path is a directory, which is a link to a *place* —
+        /// the file tree shows it, the editor cannot.
+        is_dir: bool,
     },
 }
 
@@ -680,11 +683,42 @@ pub(super) fn url_at(text: &str, col: usize) -> Option<String> {
     url_span_at(text, col).map(|(_, _, url)| url)
 }
 
+/// What checking one candidate path came back with.
+///
+/// The third arm is what makes remote panes work at all. A local pane answers
+/// out of the filesystem in microseconds, but a pane whose paths live on
+/// another machine has to ask that machine, and the answer arrives frames
+/// later — long after the mouse event that wanted it. [`Probe::Unknown`] is
+/// that gap: it means "nobody has asked yet", and the prober is expected to go
+/// ask so the *next* look finds a real answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Probe {
+    /// Something is there. Whether it is a directory travels with the answer:
+    /// a directory link belongs in the file tree, not in the editor.
+    Hit {
+        is_dir: bool,
+    },
+    Miss,
+    Unknown,
+}
+
+/// Answers for paths on the machine tty7 itself is running on.
+pub(super) fn local_probe(path: &Path, require_file: bool) -> Probe {
+    if path.is_file() {
+        return Probe::Hit { is_dir: false };
+    }
+    match !require_file && path.is_dir() {
+        true => Probe::Hit { is_dir: true },
+        false => Probe::Miss,
+    }
+}
+
 pub(super) fn link_at(
     text: &str,
     col: usize,
-    cwd: Option<&Path>,
+    roots: &[PathBuf],
     include_files: bool,
+    probe: &mut dyn FnMut(&Path, bool) -> Probe,
 ) -> Option<LinkMatch> {
     if let Some((start, end, url)) = url_span_at(text, col) {
         return Some(LinkMatch {
@@ -693,9 +727,125 @@ pub(super) fn link_at(
             target: LinkTarget::Url(url),
         });
     }
-    include_files
-        .then(|| file_span_at(text, col, cwd))
-        .flatten()
+    if !include_files {
+        return None;
+    }
+    let candidate = file_candidate_at(text, col)?;
+    let (path, is_dir) = resolve_candidate(&candidate, roots, probe)?;
+    Some(LinkMatch {
+        start: candidate.start,
+        end: candidate.end,
+        target: LinkTarget::File {
+            path,
+            line: candidate.line,
+            column: candidate.column,
+            is_dir,
+        },
+    })
+}
+
+/// The first of `candidate`'s possible paths that something answers for.
+///
+/// Roots are tried in order and the first [`Probe::Hit`] wins, which is what
+/// makes the pane's own directory beat the repository root when both hold a
+/// file by that name. A [`Probe::Unknown`] does not stop the walk — a later
+/// root may already be cached — it just leaves the token unresolved for now.
+pub(super) fn resolve_candidate(
+    candidate: &FileCandidate,
+    roots: &[PathBuf],
+    probe: &mut dyn FnMut(&Path, bool) -> Probe,
+) -> Option<(PathBuf, bool)> {
+    let require_file = candidate.require_file();
+    candidate
+        .paths(roots)
+        .into_iter()
+        .find_map(|path| match probe(&path, require_file) {
+            Probe::Hit { is_dir } => Some((path, is_dir)),
+            Probe::Miss | Probe::Unknown => None,
+        })
+}
+
+/// A path-shaped token lifted out of the grid, before anything has checked
+/// whether it points at something that exists. Splitting this out from the
+/// lookup is what lets one pane answer from the filesystem and another answer
+/// from a cache filled by a remote host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FileCandidate {
+    /// Column of the token's first character in the logical line.
+    pub start: usize,
+    /// Column of its last, inclusive.
+    pub end: usize,
+    /// The path exactly as it was written — relative, `~`-prefixed, absolute.
+    pub path: String,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+}
+
+impl FileCandidate {
+    /// A line number is a claim about a file's *contents*, so a directory that
+    /// happens to carry the name cannot answer for it. Without this,
+    /// `localhost:8080` resolves the moment a `localhost/` directory exists.
+    pub fn require_file(&self) -> bool {
+        self.line.is_some()
+    }
+
+    /// Every path this token could mean, best guess first: absolute paths
+    /// stand alone, relative ones are joined onto each root in turn.
+    pub fn paths(&self, roots: &[PathBuf]) -> Vec<PathBuf> {
+        let Some(expanded) = expand_home(&self.path, roots.first().map(PathBuf::as_path)) else {
+            return Vec::new();
+        };
+        if expanded.as_os_str().is_empty() {
+            return Vec::new();
+        }
+        if expanded.is_absolute() {
+            return vec![expanded];
+        }
+        let mut out: Vec<PathBuf> = Vec::new();
+        for root in roots {
+            let joined = root.join(&expanded);
+            if !out.contains(&joined) {
+                out.push(joined);
+            }
+        }
+        out
+    }
+
+    /// Whether the token is written enough like a path to be worth telling the
+    /// user about when nothing answers for it. A bare word is not — every
+    /// modifier-click on ordinary output would raise a notification saying so.
+    pub fn looks_like_a_path(&self) -> bool {
+        self.path.starts_with('~')
+            || self.path.contains('/')
+            || (cfg!(windows) && self.path.contains('\\'))
+    }
+}
+
+/// The syntactic half of file detection: everything that can be decided from
+/// the text alone, with no filesystem behind it.
+pub(super) fn file_candidate_at(text: &str, col: usize) -> Option<FileCandidate> {
+    let (start, end, token) = non_ws_token_at(text, col)?;
+    let (start, mut end, mut token) = trim_file_token(start, end, token);
+    if token.is_empty() {
+        return None;
+    }
+
+    let mut location = split_file_location(&token);
+    if location.line.is_none() && token.ends_with(':') {
+        token.pop();
+        end = end.saturating_sub(1);
+        location = split_file_location(&token);
+    }
+    if location.path.is_empty() {
+        return None;
+    }
+    (start..=end).contains(&col).then_some(FileCandidate {
+        start,
+        end,
+        path: location.path,
+        line: location.line,
+        column: location.column,
+    })
 }
 
 pub(super) fn url_span_at(text: &str, col: usize) -> Option<(usize, usize, String)> {
@@ -747,32 +897,6 @@ pub(super) fn url_span_at(text: &str, col: usize) -> Option<(usize, usize, Strin
     } else {
         None
     }
-}
-
-fn file_span_at(text: &str, col: usize, cwd: Option<&Path>) -> Option<LinkMatch> {
-    let (start, end, token) = non_ws_token_at(text, col)?;
-    let (start, mut end, mut token) = trim_file_token(start, end, token);
-    if token.is_empty() {
-        return None;
-    }
-
-    let mut location = split_file_location(&token);
-    if location.line.is_none() && token.ends_with(':') {
-        token.pop();
-        end = end.saturating_sub(1);
-        location = split_file_location(&token);
-    }
-
-    let path = resolve_existing_path(&location.path, cwd, location.line.is_some())?;
-    (start..=end).contains(&col).then_some(LinkMatch {
-        start,
-        end,
-        target: LinkTarget::File {
-            path,
-            line: location.line,
-            column: location.column,
-        },
-    })
 }
 
 fn non_ws_token_at(text: &str, col: usize) -> Option<(usize, usize, String)> {
@@ -871,20 +995,6 @@ fn strip_numeric_suffix(token: &str) -> Option<(&str, u32)> {
     }
     let value = suffix.parse().ok()?;
     Some((prefix, value))
-}
-
-fn resolve_existing_path(path: &str, cwd: Option<&Path>, require_file: bool) -> Option<PathBuf> {
-    if path.is_empty() {
-        return None;
-    }
-    let path = expand_home(path, cwd)?;
-    let candidate = if path.is_absolute() {
-        path
-    } else {
-        cwd?.join(path)
-    };
-    let hit = candidate.is_file() || (!require_file && candidate.is_dir());
-    hit.then_some(candidate)
 }
 
 fn expand_home(path: &str, cwd: Option<&Path>) -> Option<PathBuf> {
@@ -1254,6 +1364,15 @@ mod tests {
         path
     }
 
+    /// `link_at` against the real filesystem, the way a local pane resolves.
+    fn local_link_at(line: &str, col: usize, roots: &[PathBuf], files: bool) -> Option<LinkMatch> {
+        link_at(line, col, roots, files, &mut local_probe)
+    }
+
+    fn one_root(cwd: &Path) -> Vec<PathBuf> {
+        vec![cwd.to_path_buf()]
+    }
+
     fn assert_file_link(
         line: &str,
         col: usize,
@@ -1262,9 +1381,11 @@ mod tests {
         expected_line: Option<u32>,
         expected_column: Option<u32>,
     ) {
-        let link = link_at(line, col, Some(cwd), true).expect("file link under cursor");
+        let link = local_link_at(line, col, &one_root(cwd), true).expect("file link under cursor");
         match link.target {
-            LinkTarget::File { path, line, column } => {
+            LinkTarget::File {
+                path, line, column, ..
+            } => {
                 assert_eq!(path, expected_path);
                 assert_eq!(line, expected_line);
                 assert_eq!(column, expected_column);
@@ -1287,7 +1408,7 @@ mod tests {
             Some(2),
         );
 
-        let link = link_at("error src/main.rs:10:2 failed", 8, Some(cwd), true)
+        let link = local_link_at("error src/main.rs:10:2 failed", 8, &one_root(cwd), true)
             .expect("file link under cursor");
         assert_eq!((link.start, link.end), (6, 21));
     }
@@ -1317,17 +1438,19 @@ mod tests {
         let cwd = path.parent().and_then(Path::parent).unwrap();
         let line = "see (src/lib.rs:7), now";
 
-        let link = link_at(line, 7, Some(cwd), true).expect("wrapped file link");
+        let link = local_link_at(line, 7, &one_root(cwd), true).expect("wrapped file link");
         assert_eq!((link.start, link.end), (5, 16));
         match link.target {
             LinkTarget::File {
                 path: got,
                 line,
                 column,
+                is_dir,
             } => {
                 assert_eq!(got, path);
                 assert_eq!(line, Some(7));
                 assert_eq!(column, None);
+                assert!(!is_dir);
             }
             LinkTarget::Url(url) => panic!("expected file link, got URL {url}"),
         }
@@ -1337,18 +1460,24 @@ mod tests {
     fn link_at_rejects_missing_files_and_file_detection_can_be_disabled() {
         let cwd = std::env::temp_dir();
 
-        assert_eq!(link_at("missing src/nope.rs:1", 9, Some(&cwd), true), None);
-        assert_eq!(link_at("missing src/nope.rs:1", 9, Some(&cwd), false), None);
+        assert_eq!(
+            local_link_at("missing src/nope.rs:1", 9, &one_root(&cwd), true),
+            None
+        );
+        assert_eq!(
+            local_link_at("missing src/nope.rs:1", 9, &one_root(&cwd), false),
+            None
+        );
 
         let path = temp_file("disabled.rs");
         let line = format!("open {}", path.display());
-        assert!(link_at(&line, 6, Some(&cwd), false).is_none());
+        assert!(local_link_at(&line, 6, &one_root(&cwd), false).is_none());
     }
 
     #[test]
     fn link_at_keeps_url_detection_ahead_of_file_detection() {
         let url = "https://example.com/src/main.rs";
-        let link = link_at(url, 10, Some(Path::new("/")), true).expect("URL link");
+        let link = local_link_at(url, 10, &one_root(Path::new("/")), true).expect("URL link");
         assert_eq!(
             link,
             LinkMatch {
@@ -1365,20 +1494,138 @@ mod tests {
         let dir = file.parent().unwrap();
         let cwd = dir.parent().and_then(Path::parent).unwrap();
 
-        let link = link_at("artifacts in dircase/nested here", 14, Some(cwd), true)
+        let link = local_link_at("artifacts in dircase/nested here", 14, &one_root(cwd), true)
             .expect("directory link");
         assert_eq!((link.start, link.end), (13, 26));
         match link.target {
-            LinkTarget::File { path, line, column } => {
+            LinkTarget::File {
+                path,
+                line,
+                column,
+                is_dir,
+            } => {
                 assert_eq!(path, dir);
                 assert_eq!(line, None);
                 assert_eq!(column, None);
+                assert!(is_dir, "a directory link says so, so the tree can take it");
             }
             LinkTarget::Url(url) => panic!("expected directory link, got URL {url}"),
         }
 
-        assert!(link_at("ls dircase/nested/ done", 5, Some(cwd), true).is_some());
-        assert!(link_at("artifacts in dircase/nested here", 14, Some(cwd), false).is_none());
+        assert!(local_link_at("ls dircase/nested/ done", 5, &one_root(cwd), true).is_some());
+        assert!(
+            local_link_at(
+                "artifacts in dircase/nested here",
+                14,
+                &one_root(cwd),
+                false
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_relative_path_falls_back_to_the_repository_root() {
+        // What `cargo` prints from a member directory: the path is measured
+        // from the workspace root, not from where the shell happens to be.
+        let path = temp_file("multiroot/crates/inner/src/lib.rs");
+        let root = path
+            .ancestors()
+            .nth(4)
+            .expect("multiroot/ above crates/inner/src")
+            .to_path_buf();
+        let cwd = root.join("crates/inner");
+        std::fs::create_dir_all(cwd.join("empty")).expect("create a cwd with no src/");
+
+        let line = "warning: unused import crates/inner/src/lib.rs:3";
+        let col = line.find("crates").expect("path start");
+        assert_eq!(local_link_at(line, col, &one_root(&cwd), true), None);
+
+        let roots = vec![cwd.clone(), root.clone()];
+        let link = local_link_at(line, col, &roots, true).expect("resolved from the repo root");
+        match link.target {
+            LinkTarget::File { path: got, .. } => assert_eq!(got, path),
+            LinkTarget::Url(url) => panic!("expected file link, got URL {url}"),
+        }
+    }
+
+    #[test]
+    fn the_nearer_root_wins_when_both_hold_the_name() {
+        let near = temp_file("ambiguous/crate/src/main.rs");
+        let far = temp_file("ambiguous/src/main.rs");
+        let cwd = near
+            .ancestors()
+            .nth(2)
+            .expect("ambiguous/crate above src/")
+            .to_path_buf();
+        let root = far.ancestors().nth(2).expect("ambiguous/").to_path_buf();
+
+        let roots = vec![cwd, root];
+        let link = local_link_at("at src/main.rs:1", 3, &roots, true).expect("file link");
+        match link.target {
+            LinkTarget::File { path, .. } => assert_eq!(
+                path, near,
+                "the pane's own directory is tried before the repository around it"
+            ),
+            LinkTarget::Url(url) => panic!("expected file link, got URL {url}"),
+        }
+    }
+
+    #[test]
+    fn an_unanswered_probe_resolves_to_nothing_and_asks_about_every_root() {
+        let mut asked: Vec<PathBuf> = Vec::new();
+        let roots = vec![PathBuf::from("/work/crate"), PathBuf::from("/work")];
+        let link = link_at("see src/lib.rs:9 there", 5, &roots, true, &mut |path, _| {
+            asked.push(path.to_path_buf());
+            Probe::Unknown
+        });
+
+        assert_eq!(link, None, "nothing underlines until the host has answered");
+        assert_eq!(
+            asked,
+            vec![
+                PathBuf::from("/work/crate/src/lib.rs"),
+                PathBuf::from("/work/src/lib.rs"),
+            ],
+            "every root is asked about, so one round trip covers them all"
+        );
+    }
+
+    #[test]
+    fn a_path_shaped_token_is_kept_apart_from_a_bare_word() {
+        let path_shaped = file_candidate_at("wrote scratchpad/notes.md now", 8).expect("candidate");
+        assert_eq!(path_shaped.path, "scratchpad/notes.md");
+        assert!(path_shaped.looks_like_a_path());
+
+        let word = file_candidate_at("wrote notes now", 8).expect("candidate");
+        assert_eq!(word.path, "notes");
+        assert!(
+            !word.looks_like_a_path(),
+            "a bare word must not raise a notification on every modifier-click"
+        );
+    }
+
+    #[test]
+    fn a_relative_candidate_has_no_paths_without_a_root() {
+        let candidate = file_candidate_at("see src/lib.rs here", 5).expect("candidate");
+        assert!(
+            candidate.paths(&[]).is_empty(),
+            "a pane that never said where it is cannot measure a relative path"
+        );
+        assert_eq!(
+            candidate.paths(&[PathBuf::from("/w"), PathBuf::from("/w")]),
+            vec![PathBuf::from("/w/src/lib.rs")],
+            "a repo root equal to the cwd is one root, not two probes"
+        );
+    }
+
+    #[test]
+    fn an_absolute_candidate_ignores_the_roots_entirely() {
+        let candidate = file_candidate_at("open /etc/hosts now", 6).expect("candidate");
+        assert_eq!(
+            candidate.paths(&[PathBuf::from("/w")]),
+            vec![PathBuf::from("/etc/hosts")]
+        );
     }
 
     #[test]
@@ -1387,9 +1634,9 @@ mod tests {
         let cwd = file.parent().and_then(Path::parent).unwrap();
 
         assert_eq!(
-            link_at("listening on localhost:8080", 15, Some(cwd), true),
+            local_link_at("listening on localhost:8080", 15, &one_root(cwd), true),
             None
         );
-        assert!(link_at("listening on localhost", 15, Some(cwd), true).is_some());
+        assert!(local_link_at("listening on localhost", 15, &one_root(cwd), true).is_some());
     }
 }

@@ -2181,6 +2181,14 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.link_url = on);
     }
 
+    pub(crate) fn set_link_file_open(
+        &mut self,
+        mode: crate::core::config::LinkFileOpen,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_config(cx, |cfg| cfg.link_file_open = Some(mode));
+    }
+
     pub(crate) fn set_ssh_loopback_forward(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.ssh_loopback_forward = on);
     }
@@ -7020,6 +7028,7 @@ fn build_terminal_view(
         },
     )
     .detach();
+    watch_open_file_requests(&view, window, cx);
     watch_pane_focus(&view, window, cx);
     view
 }
@@ -7028,6 +7037,24 @@ fn kill_pane_off_thread(route: crate::terminal::PaneRoute, pane_id: u64, cx: &mu
     cx.background_executor()
         .spawn(async move { crate::terminal::RemoteTerminal::kill_pane_on(&route, pane_id) })
         .detach();
+}
+
+/// Routes the file links clicked in a pane to whatever the app opens files
+/// with. Every pane needs this, however it was spawned — a link in an SSH pane
+/// is the same click as a link in a local one.
+fn watch_open_file_requests(
+    view: &Entity<TerminalView>,
+    window: &mut Window,
+    cx: &mut Context<Tty7App>,
+) {
+    cx.subscribe_in(
+        view,
+        window,
+        |app, _view, ev: &crate::terminal::view::OpenFileRequested, window, cx| {
+            app.open_linked_file(&ev.path, ev.line, ev.column, ev.is_dir, window, cx);
+        },
+    )
+    .detach();
 }
 
 fn watch_pane_focus(view: &Entity<TerminalView>, window: &mut Window, cx: &mut Context<Tty7App>) {
@@ -7067,6 +7094,7 @@ pub(crate) fn new_terminal_native(
         },
     )
     .detach();
+    watch_open_file_requests(&view, window, cx);
     watch_pane_focus(&view, window, cx);
     Ok(view)
 }

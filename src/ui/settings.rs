@@ -23,7 +23,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::core::config::{
-    BellMode, Config, CursorStyle, NewTabPosition, NotifyMode, TabBarPosition,
+    BellMode, Config, CursorStyle, LinkFileOpen, NewTabPosition, NotifyMode, TabBarPosition,
     UI_FONT_SIZE_DEFAULT, UpdateChannel, WindowBackdrop,
 };
 use crate::core::keychain::CredentialRef;
@@ -4801,11 +4801,39 @@ impl Tty7App {
             .checked(ssh_loopback_forward)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_ssh_loopback_forward(*on, cx)))
             .into_any_element();
-        let link_file_command_control = div()
-            .w(px(300.))
-            .max_w_full()
-            .child(Input::new(&link_file_command_input).small())
-            .into_any_element();
+        let link_file_open = cfg.file_open_mode();
+        let link_file_open_radio = self.segmented(
+            "term-link-file-open",
+            &[
+                t(L10nKey::SettingsOpenFilesInternal),
+                t(L10nKey::SettingsOpenFilesSystem),
+                t(L10nKey::SettingsOpenFilesCommand),
+            ],
+            match link_file_open {
+                LinkFileOpen::Internal => 0,
+                LinkFileOpen::System => 1,
+                LinkFileOpen::Command => 2,
+            },
+            cx,
+            |this, ix, _w, cx| {
+                let mode = match ix {
+                    0 => LinkFileOpen::Internal,
+                    1 => LinkFileOpen::System,
+                    _ => LinkFileOpen::Command,
+                };
+                this.set_link_file_open(mode, cx);
+            },
+        );
+        // Only shown under `Command`: an empty box next to two working modes
+        // reads as "this is what file links do", which is the one thing it is
+        // not unless the mode above says so.
+        let link_file_command_control = (link_file_open == LinkFileOpen::Command).then(|| {
+            div()
+                .w(px(300.))
+                .max_w_full()
+                .child(Input::new(&link_file_command_input).small())
+                .into_any_element()
+        });
         let scrollback_radio = self.segmented(
             "term-scrollback",
             &["1,000", "10,000", "100,000"],
@@ -4954,17 +4982,28 @@ impl Tty7App {
             .child(self.settings_row(
                 t(L10nKey::OpenFilesWith),
                 t_fmt(
-                    L10nKey::SettingsOpenFilesWithDesc,
-                    &[
-                        ("modifier", LINK_MODIFIER_LABEL),
-                        ("path", "{path}"),
-                        ("line", "{line}"),
-                        ("column", "{column}"),
-                    ],
+                    L10nKey::SettingsOpenFilesModeDesc,
+                    &[("modifier", LINK_MODIFIER_LABEL)],
                 ),
-                link_file_command_control,
+                link_file_open_radio,
                 cx,
             ))
+            .children(link_file_command_control.map(|control| {
+                self.settings_row(
+                    t(L10nKey::SettingsOpenFilesCommand),
+                    t_fmt(
+                        L10nKey::SettingsOpenFilesWithDesc,
+                        &[
+                            ("modifier", LINK_MODIFIER_LABEL),
+                            ("path", "{path}"),
+                            ("line", "{line}"),
+                            ("column", "{column}"),
+                        ],
+                    ),
+                    control,
+                    cx,
+                )
+            }))
             .into_any_element()
     }
 

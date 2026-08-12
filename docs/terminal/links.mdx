@@ -17,10 +17,30 @@ Turn detection off with **Settings → Terminal → Links → Detect URLs**
 ## Files
 
 A file path in the output — a compiler error, a test failure, a `grep -n` hit —
-opens in your default application for that file type.
+opens in tty7's own editor, on the line the link named, and the Files panel
+selects it if it is open. A path to a directory opens the Files panel on it
+instead.
 
-To send it somewhere specific instead, set **Settings → Terminal → Links → Open
-files with**. The command runs with placeholders substituted:
+Both absolute and relative paths are detected. A relative one is measured
+against the directory the pane is working in, and then against the repository
+around it — which is what makes a path a build tool printed from the workspace
+root resolve while the shell sits in a member directory. A path that matches
+nothing under either says so rather than doing nothing.
+
+Paths in a pane connected to another machine are resolved *on that machine*,
+so the underline appears a moment after the pointer settles rather than
+instantly. A pane running `ssh` typed into a local shell has no host that can
+answer for its paths, so file links are off there.
+
+**Settings → Terminal → Links → Open files with** picks what a click opens:
+
+| Mode | Opens in |
+| --- | --- |
+| Built-in editor | tty7's editor, at `:line:column`. The default, and the only one that works for a file on a remote host. |
+| Default app | Whatever the OS associates with the file type. |
+| Command | A command of your own — see below. |
+
+Under **Command**, the command runs with placeholders substituted:
 
 ```
 code --goto {path}:{line}:{column}
@@ -30,10 +50,12 @@ herdr edit {path} --line={line}
 
 `{path}`, `{line}`, and `{column}` are filled in from the link. A flag whose
 value is not available is dropped rather than passed empty — so
-`--line={line}` simply disappears when the link had no line number. Leave the
-field blank to go back to the default application.
+`--line={line}` simply disappears when the link had no line number.
 
-The same setting is `link_file_command` in `config.json`.
+The settings are `link_file_open` (`internal`, `system`, or `command`) and
+`link_file_command` in `config.json`. A config written before `link_file_open`
+existed keeps working: one that set a command stays on **Command**, and one
+that did not moves to the built-in editor.
 
 ## localhost ports
 

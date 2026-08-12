@@ -351,6 +351,16 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsForwardSshLoopbackLinksDesc => {
             "当窗格处于 SSH 中时，通过临时端口转发打开 localhost 链接。"
         }
+        L10nKey::SettingsOpenFilesInternal => "内置编辑器",
+        L10nKey::SettingsOpenFilesSystem => "默认应用",
+        L10nKey::SettingsOpenFilesCommand => "自定义命令",
+        L10nKey::SettingsOpenFilesModeDesc => {
+            "{modifier}+点击 文件链接时用什么打开。只有内置编辑器能跳到指定行，也只有它能打开远程主机上的文件。"
+        }
+        L10nKey::LinkFileNotUnder => "{path} —— {dir} 下没有这个文件",
+        L10nKey::LinkFileNoDirectory => {
+            "{path} —— 这个窗格没有报告自己在哪个目录，相对路径无从算起"
+        }
         L10nKey::OpenFilesWith => "打开文件方式",
         L10nKey::SettingsOpenFilesWithDesc => {
             "{modifier}+点击 文件链接时运行的命令，而不是默认应用。可使用 {path}、{line}、{column}；参数值缺失的标志会被丢弃（例如 herdr edit {path} --line={line}）。留空使用默认应用。"

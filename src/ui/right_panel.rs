@@ -137,7 +137,19 @@ pub(crate) struct RightPanelState {
     pub(crate) procs_forwards: Option<crate::ui::app::ForwardRoute>,
     pub(crate) scroll: gpui::ScrollHandle,
     pub(crate) tree_scroll: gpui::ScrollHandle,
+    /// A path the tree should scroll onto, and how many more renders it may
+    /// take to get there. The row is usually not drawn yet when the request is
+    /// made — its parents were only just expanded and their listings are still
+    /// on their way — so the index has to be recomputed until it appears. The
+    /// countdown is what stops a path that never arrives from being compared
+    /// against every row forever.
+    pub(crate) tree_reveal: Option<(PathBuf, u8)>,
 }
+
+/// How many renders a reveal waits for its row to show up. Generous: it costs
+/// one path comparison per row, and a cold directory listing over SSH can take
+/// a moment.
+pub(crate) const TREE_REVEAL_RENDERS: u8 = 60;
 
 const PROCS_POLL: std::time::Duration = std::time::Duration::from_millis(2000);
 

@@ -5,6 +5,32 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **File links open in tty7 instead of leaving it.** A ⌘/Ctrl-clicked file path
+  now opens in the built-in editor, on the line and column the link named, and
+  the Files panel selects it and scrolls it into view; a directory link opens
+  the panel on that directory. **Settings → Terminal → Links → Open files with**
+  picks between the built-in editor, the OS file association and a command of
+  your own — anyone who had already set `link_file_command` keeps it.
+
+### Fixed
+
+- **A file link in a remote pane no longer opens this machine's copy.** An
+  absolute path was checked against the local filesystem whatever the pane was
+  connected to, so `/etc/nginx/nginx.conf` on a server opened the one on your
+  laptop, silently. Paths are now resolved on the pane's own host, and a pane
+  running `ssh` typed into a local shell — where neither side can answer for
+  them — no longer offers file links at all.
+- **Relative paths resolve from where the work is, and from the repository
+  around it.** Detection followed the shell's kernel cwd, which an agent
+  working in a git worktree never updates, and only ever tried one directory —
+  so a path a build tool printed from the workspace root did not resolve from a
+  member directory. A path that matches nothing under either now says so
+  instead of the click doing nothing.
+
 ## [26.8.3] - 2026-08-12
 
 ### Added

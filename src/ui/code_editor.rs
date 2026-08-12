@@ -8,7 +8,7 @@ use gpui::{
     div, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::input::{Input, InputEvent, InputState, TabSize};
+use gpui_component::input::{Input, InputEvent, InputState, Position, TabSize};
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
@@ -80,6 +80,11 @@ impl TabCode {
 }
 
 pub(crate) struct EditorPanelState {
+    /// Where to put the cursor once a particular file is on screen, for a
+    /// `file.rs:120:3` that has to load first. Carried rather than applied at
+    /// the call site because opening is asynchronous: the click is long over
+    /// by the time there is a buffer to put a cursor in.
+    pending_cursor: Option<(PathBuf, u32, u32)>,
     watch: Option<Arc<WatchSub>>,
     watch_host: Option<SharedHost>,
     watch_opening: bool,
@@ -114,6 +119,7 @@ impl EditorPanelState {
         })
         .detach();
         Self {
+            pending_cursor: None,
             watch: None,
             watch_host: None,
             watch_opening: false,
@@ -178,6 +184,44 @@ pub(crate) fn language_for_path(path: &Path) -> &'static str {
         "cmake" => "cmake",
         _ => "text",
     }
+}
+
+/// How many frames a jump-to-line may wait for the editor to be laid out.
+///
+/// `InputState::scroll_to` gives up when the buffer has never been painted,
+/// and that is exactly the state a file that just opened is in: the cursor
+/// lands on the right line and the view stays at the top of the file, which
+/// is the one thing a `:120` link exists to avoid. Three frames is the same
+/// bounded-retry shape `prefill::select_all_when_drawn` uses against the same
+/// class of problem.
+const CURSOR_SCROLL_ATTEMPTS: u8 = 3;
+
+/// Puts the cursor at `position`, re-trying on later frames until the scroll
+/// that follows it can actually be computed.
+///
+/// Applied immediately as well as on the retry: the cursor itself lands with
+/// no layout, so the position is right even for a pane that never paints.
+fn place_cursor(
+    input: Entity<InputState>,
+    position: Position,
+    left: u8,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    input.update(cx, |state, cx| {
+        state.set_cursor_position(position, window, cx);
+    });
+    // A target near the top of the file scrolls nowhere and is already done;
+    // so is one that has landed. Either way this stops.
+    if left <= 1 || input.read(cx).scroll_offset().y != px(0.) {
+        return;
+    }
+    window.on_next_frame(move |window, cx| {
+        place_cursor(input, position, left - 1, window, cx);
+    });
+    // Registering a callback does not by itself ask for a frame, and an
+    // overlay that has finished drawing has no other reason to produce one.
+    window.refresh();
 }
 
 fn looks_binary(bytes: &[u8]) -> bool {
@@ -343,6 +387,84 @@ impl Tty7App {
         );
     }
 
+    /// Shows what a file link in the grid pointed at.
+    ///
+    /// A file opens in the editor, on the line the link named; the tree
+    /// follows along so "what does it say?" and "where does it live?" are
+    /// answered by the same click. A directory has no contents to show, so it
+    /// is only ever the tree.
+    pub(crate) fn open_linked_file(
+        &mut self,
+        path: &Path,
+        line: Option<u32>,
+        column: Option<u32>,
+        is_dir: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if is_dir {
+            self.file_tree_show(path, cx);
+            return;
+        }
+        self.open_file_in_editor_at(path, line, column, window, cx);
+        self.file_tree_reveal_path(path, cx);
+    }
+
+    /// [`Self::open_file_in_editor`], landing the cursor on a line the caller
+    /// already knows — what a `src/main.rs:120:3` in the grid was pointing at.
+    pub(crate) fn open_file_in_editor_at(
+        &mut self,
+        path: &Path,
+        line: Option<u32>,
+        column: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor.pending_cursor =
+            line.map(|line| (path.to_path_buf(), line, column.unwrap_or(1)));
+        self.open_file_in_editor(path, window, cx);
+    }
+
+    /// Moves the cursor to the position a link asked for, if the file it asked
+    /// about is the one that just opened. Anything else — a different file
+    /// opened in between, a file that never arrived — drops the request rather
+    /// than throwing the cursor somewhere it was never meant to go.
+    fn apply_pending_cursor(
+        &mut self,
+        requested: &Path,
+        opened: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Peeked before it is taken: another file opening in the meantime must
+        // not swallow a request that was never about it.
+        if self
+            .editor
+            .pending_cursor
+            .as_ref()
+            .is_none_or(|(wanted, ..)| wanted != requested)
+        {
+            return;
+        }
+        let Some((_, line, column)) = self.editor.pending_cursor.take() else {
+            return;
+        };
+        let Some(file) = self
+            .tab_code()
+            .and_then(|c| c.files.iter().find(|f| f.path == *opened))
+        else {
+            return;
+        };
+        let input = file.input.clone();
+        // The grid counts from one and `Position` counts from zero, and a
+        // compiler that says "line 1" means the first line either way.
+        let position = Position {
+            line: line.saturating_sub(1),
+            character: column.saturating_sub(1),
+        };
+        place_cursor(input, position, CURSOR_SCROLL_ATTEMPTS, window, cx);
+    }
+
     pub(crate) fn open_file_in_editor(
         &mut self,
         path: &Path,
@@ -360,6 +482,7 @@ impl Tty7App {
             return;
         };
         let p = path.to_path_buf();
+        let requested = p.clone();
         HostOps::run_in(
             host,
             window,
@@ -408,7 +531,13 @@ impl Tty7App {
                 Ok((path, text, meta.mtime))
             },
             move |app, opened, window, cx| match opened {
-                Ok((path, text, mtime)) => app.editor_install_file(path, text, mtime, window, cx),
+                Ok((path, text, mtime)) => {
+                    app.editor_install_file(path.clone(), text, mtime, window, cx);
+                    // Against `requested`, not `path`: the host canonicalised
+                    // it on the way through, and a link that named a symlink
+                    // would otherwise lose the line it asked for.
+                    app.apply_pending_cursor(&requested, &path, window, cx);
+                }
                 Err(message) => window.push_notification(message, cx),
             },
         );
@@ -431,6 +560,7 @@ impl Tty7App {
         code.files.insert(0, f);
         code.active = 0;
         self.focus_editor(window, cx);
+        self.apply_pending_cursor(path, path, window, cx);
         cx.notify();
         true
     }

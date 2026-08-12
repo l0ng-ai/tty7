@@ -948,17 +948,78 @@ impl Tty7App {
     }
 
     fn file_tree_reveal(&mut self, dir: &Path, cx: &mut Context<Self>) {
+        if self.file_tree_expand_ancestors(dir) {
+            cx.notify();
+        }
+    }
+
+    /// Opens `dir` and every directory between it and its root. Returns
+    /// whether that changed anything, so a caller inside a render can decide
+    /// whether the frame it is drawing is already out of date.
+    fn file_tree_expand_ancestors(&mut self, dir: &Path) -> bool {
         let roots = self.tab_code().map(|c| c.roots.clone()).unwrap_or_default();
         let Some(root) = roots.iter().find(|r| dir.starts_with(r)).cloned() else {
-            return;
+            return false;
         };
         let Some(code) = self.tab_code_mut() else {
-            return;
+            return false;
         };
+        let mut opened = false;
         for a in dir.ancestors().take_while(|a| a.starts_with(&root)) {
-            code.expanded.insert(a.to_path_buf());
+            opened |= code.expanded.insert(a.to_path_buf());
         }
+        opened
+    }
+
+    /// Points the tree at `path`: opens every directory above it, selects it,
+    /// and asks the column to scroll it into view.
+    ///
+    /// Quiet on purpose — it does not open the panel or steal focus. A file
+    /// link's answer is the file itself, in the editor; the tree following
+    /// along is context, and context that shoves the layout around while you
+    /// are reading is not worth having. Use [`Self::file_tree_show`] when the
+    /// tree *is* the answer.
+    /// Returns whether the tree could hold it — a path outside every root has
+    /// no row to scroll to. An empty root list is not that: it means the panel
+    /// has never drawn and does not know its roots yet, and the request
+    /// outlives the render that fills them in.
+    pub(crate) fn file_tree_reveal_path(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
+        let roots = self.tab_code().map(|c| c.roots.clone()).unwrap_or_default();
+        if !roots.is_empty() && !roots.iter().any(|root| path.starts_with(root)) {
+            return false;
+        }
+        // `path` itself, not its parent: a directory link wants opening, and a
+        // file in `expanded` is inert — only directory rows consult that set.
+        self.file_tree_reveal(path, cx);
+        // `_or_init`, not `tab_code_mut`: a tab whose Files panel has never
+        // been on screen has no code state at all, and the plain accessor
+        // dropped the selection on the floor there — the first reveal in a
+        // session landed on a row that was expanded but not highlighted.
+        if let Some(code) = self.tab_code_mut_or_init() {
+            code.selected = Some(path.to_path_buf());
+        }
+        self.right_panel.tree_reveal = Some((
+            path.to_path_buf(),
+            crate::ui::right_panel::TREE_REVEAL_RENDERS,
+        ));
         cx.notify();
+        true
+    }
+
+    /// [`Self::file_tree_reveal_path`], with the panel brought up to show it.
+    /// For a link to a directory, where the tree is the whole answer and
+    /// revealing it behind a closed panel would be the click doing nothing.
+    pub(crate) fn file_tree_show(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if !self.file_tree_reveal_path(path, cx) {
+            // Outside every root the tree has nothing to show, and a panel
+            // that opened onto the wrong place would be worse than none.
+            crate::terminal::view::open_file_path(path);
+            return;
+        }
+        if !self.right_panel_open(cx) {
+            self.toggle_right_panel(cx);
+        }
+        self.set_right_panel_tab(RightPanelTab::Files, cx);
     }
 
     fn file_tree_key_down(
@@ -1440,6 +1501,15 @@ impl Tty7App {
             Some(code) => (code.roots.clone(), code.expanded.clone()),
             None => (Vec::new(), std::collections::HashSet::new()),
         };
+        // The reveal has to open its ancestors here rather than where it was
+        // asked for: the roots above may only have just landed, and a row
+        // whose parent is still collapsed is a row `visible_rows` will not
+        // produce and the scroll below will never find.
+        if let Some((path, _)) = self.right_panel.tree_reveal.clone()
+            && self.file_tree_expand_ancestors(&path)
+        {
+            cx.notify();
+        }
         let query = self.file_tree_query(cx);
         let host = self.active_host(cx);
         let host_id = self.spawn_host(cx);
@@ -1484,10 +1554,7 @@ impl Tty7App {
                 this.file_tree_key_down(ev, window, cx);
             }))
             .children(blank)
-            .children(rows.iter().flat_map(|row| {
-                let deco = row_decoration(&decor, &row.entry);
-                self.render_tree_row(row, deco, window, cx)
-            }))
+            .children(self.render_tree_children(&rows, &decor, window, cx))
             // Everything the rows do not cover — the gap below the last one,
             // and the whole column while the tree is still empty — belongs to
             // the top of the tree. A row under the cursor wins: gpui hands a
@@ -1533,6 +1600,56 @@ impl Tty7App {
         }
         order_innermost_first(&mut decor);
         decor
+    }
+
+    /// The rows, plus the scroll a pending reveal asked for.
+    ///
+    /// The index has to be counted here rather than taken from the row number:
+    /// a row draws two elements while an inline rename or new-file box is
+    /// attached to it, and `scroll_to_item` counts painted children. The
+    /// request survives until the row it names is actually laid out, because
+    /// revealing a file usually expands directories whose listings have not
+    /// arrived yet — the row does not exist for another frame or three.
+    fn render_tree_children(
+        &mut self,
+        rows: &[TreeRow],
+        decor: &Decorations,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let reveal = self.right_panel.tree_reveal.clone();
+        let mut children: Vec<AnyElement> = Vec::new();
+        let mut reveal_ix = None;
+        for row in rows {
+            if row.note.is_none()
+                && reveal
+                    .as_ref()
+                    .is_some_and(|(path, _)| *path == row.entry.path)
+            {
+                reveal_ix = Some(children.len());
+            }
+            let deco = row_decoration(decor, &row.entry);
+            children.extend(self.render_tree_row(row, deco, window, cx));
+        }
+        let Some((path, left)) = reveal else {
+            return children;
+        };
+        match reveal_ix {
+            Some(ix) => {
+                self.right_panel.tree_scroll.scroll_to_item(ix);
+                // Bounds only exist once the row has been through a layout, so
+                // this is what says the scroll landed on a real position
+                // rather than being queued against an index that may still
+                // shift as sibling listings arrive.
+                if self.right_panel.tree_scroll.bounds_for_item(ix).is_some() {
+                    self.right_panel.tree_reveal = None;
+                }
+            }
+            None => {
+                self.right_panel.tree_reveal = left.checked_sub(1).map(|left| (path, left));
+            }
+        }
+        children
     }
 
     fn render_tree_row(
