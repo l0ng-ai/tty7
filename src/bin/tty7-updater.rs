@@ -163,14 +163,7 @@ mod macos {
     }
 
     fn install(plan: InstallPlan) -> Result<(), String> {
-        let result = install_inner(&plan);
-        report_outcome(
-            plan.result_file.as_deref(),
-            &plan.log,
-            &plan.expected_version,
-            &result,
-        );
-        result
+        install_inner(&plan)
     }
 
     fn install_inner(plan: &InstallPlan) -> Result<(), String> {
@@ -182,11 +175,29 @@ mod macos {
         if let Err(error) = verification {
             log_line(&plan.log, &error);
             let _ = fs::remove_dir_all(&plan.stage);
+            let result = Err(error);
+            // The outcome lands before the old app does: the relaunched GUI
+            // merges it at startup, and a write afterward races that merge
+            // (#540).
+            report_outcome(
+                plan.result_file.as_deref(),
+                &plan.log,
+                &plan.expected_version,
+                &result,
+            );
             let _ = launch_app(&plan.current);
-            return Err(error);
+            return result;
         }
         log_line(&plan.log, &format!("replacing {}", plan.current.display()));
-        replace_and_relaunch(&plan.current, &replacement, &plan.stage, launch_app)
+        let report = |result: &Result<(), String>| {
+            report_outcome(
+                plan.result_file.as_deref(),
+                &plan.log,
+                &plan.expected_version,
+                result,
+            );
+        };
+        replace_and_relaunch(&plan.current, &replacement, &plan.stage, launch_app, report)
             .inspect_err(|error| log_line(&plan.log, error))
     }
 
@@ -293,6 +304,7 @@ mod macos {
         replacement: &Path,
         stage: &Path,
         launch: impl Fn(&Path) -> Result<(), String>,
+        report: impl Fn(&Result<(), String>),
     ) -> Result<(), String> {
         // The staging directory is a fresh TempDir created beside the current
         // bundle, so a backup here stays on the same filesystem without using a
@@ -301,33 +313,55 @@ mod macos {
         // update (or simply an unrelated user-owned path).
         let backup = stage.join("previous.app");
         if backup.exists() {
-            return Err(format!(
+            let result = Err(format!(
                 "the update staging backup already exists: {}",
                 backup.display()
             ));
+            report(&result);
+            return result;
         }
-        fs::rename(current, &backup)
-            .map_err(|error| format!("moving the current app aside: {error}"))?;
+        if let Err(error) = fs::rename(current, &backup) {
+            let result = Err(format!("moving the current app aside: {error}"));
+            report(&result);
+            return result;
+        }
 
         if let Err(error) = fs::rename(replacement, current) {
             let _ = fs::rename(&backup, current);
             let _ = fs::remove_dir_all(stage);
-            return Err(format!("putting the staged app in place: {error}"));
+            let result = Err(format!("putting the staged app in place: {error}"));
+            report(&result);
+            return result;
         }
 
         match launch(current) {
             Ok(()) => {
                 let _ = remove_path(&backup);
                 let _ = fs::remove_dir_all(stage);
-                Ok(())
+                let result = Ok(());
+                report(&result);
+                result
             }
             Err(error) => {
                 let _ = remove_path(current);
-                fs::rename(&backup, current)
-                    .map_err(|restore| format!("{error}; restoring the previous app: {restore}"))?;
-                let _ = fs::remove_dir_all(stage);
-                let _ = launch(current);
-                Err(error)
+                let (result, relaunch) = match fs::rename(&backup, current) {
+                    Ok(()) => {
+                        let _ = fs::remove_dir_all(stage);
+                        (Err(error), true)
+                    }
+                    Err(restore) => (
+                        Err(format!("{error}; restoring the previous app: {restore}")),
+                        false,
+                    ),
+                };
+                // The outcome lands before the old app does: the relaunched GUI
+                // merges it at startup, and a write afterward races that merge
+                // (#540).
+                report(&result);
+                if relaunch {
+                    let _ = launch(current);
+                }
+                result
             }
         }
     }
@@ -434,7 +468,7 @@ mod macos {
             bundle(&current, "old");
             bundle(&replacement, "new");
 
-            replace_and_relaunch(&current, &replacement, &stage, |_| Ok(())).unwrap();
+            replace_and_relaunch(&current, &replacement, &stage, |_| Ok(()), |_| ()).unwrap();
 
             assert_eq!(fs::read_to_string(current.join("marker")).unwrap(), "new");
             assert!(!stage.exists());
@@ -450,19 +484,30 @@ mod macos {
             bundle(&current, "old");
             bundle(&replacement, "new");
             let launches = std::cell::Cell::new(0);
+            let reported_after_launches = std::cell::Cell::new(usize::MAX);
 
-            let error = replace_and_relaunch(&current, &replacement, &stage, |_| {
-                launches.set(launches.get() + 1);
-                if launches.get() == 1 {
-                    Err("new app failed".to_string())
-                } else {
-                    Ok(())
-                }
-            })
+            let error = replace_and_relaunch(
+                &current,
+                &replacement,
+                &stage,
+                |_| {
+                    launches.set(launches.get() + 1);
+                    if launches.get() == 1 {
+                        Err("new app failed".to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+                |_| reported_after_launches.set(launches.get()),
+            )
             .unwrap_err();
 
             assert_eq!(error, "new app failed");
             assert_eq!(launches.get(), 2);
+            // The outcome is reported after the failed first launch but before
+            // the old app comes back — the relaunched GUI must find it already
+            // on disk at startup (#540).
+            assert_eq!(reported_after_launches.get(), 1);
             assert_eq!(fs::read_to_string(current.join("marker")).unwrap(), "old");
             assert!(!stage.exists());
         }
@@ -478,7 +523,7 @@ mod macos {
             bundle(&replacement, "new");
             bundle(&sibling, "keep");
 
-            replace_and_relaunch(&current, &replacement, &stage, |_| Ok(())).unwrap();
+            replace_and_relaunch(&current, &replacement, &stage, |_| Ok(()), |_| ()).unwrap();
 
             assert_eq!(fs::read_to_string(current.join("marker")).unwrap(), "new");
             assert_eq!(fs::read_to_string(sibling.join("marker")).unwrap(), "keep");
@@ -896,9 +941,10 @@ mod windows {
     }
 
     /// The terminal outcome of the attempt, for the next GUI launch to merge
-    /// into the update state (#540). Best-effort: the install already ended
-    /// by the time this runs, and a result that cannot be recorded goes to
-    /// the log like every other updater detail.
+    /// into the update state (#540). Best-effort: a result that cannot be
+    /// recorded goes to the log like every other updater detail. On paths that
+    /// relaunch the previous app this runs *before* the relaunch, so the GUI
+    /// finds the outcome already on disk when it starts.
     fn report_outcome(
         result_file: Option<&Path>,
         log: &Path,
@@ -965,25 +1011,11 @@ mod windows {
     }
 
     fn install(plan: InstallPlan) -> Result<(), String> {
-        let result = install_inner(&plan, Completion::RelaunchHere);
-        report_outcome(
-            plan.result_file.as_deref(),
-            &plan.log,
-            &plan.expected_version,
-            &result,
-        );
-        result
+        install_inner(&plan, Completion::RelaunchHere)
     }
 
     fn install_elevated(plan: InstallPlan) -> Result<(), String> {
-        let result = install_inner(&plan, Completion::ReportToWatcher);
-        report_outcome(
-            plan.result_file.as_deref(),
-            &plan.log,
-            &plan.expected_version,
-            &result,
-        );
-        result
+        install_inner(&plan, Completion::ReportToWatcher)
     }
 
     fn install_inner(plan: &InstallPlan, completion: Completion) -> Result<(), String> {
@@ -1043,11 +1075,19 @@ mod windows {
             return recover_from_failed_update(plan, error, completion);
         }
         if completion == Completion::ReportToWatcher {
-            tty7_core::daemon::update_guard::clear();
             log_line(
                 &plan.log,
                 "the Windows update completed; the watcher relaunches tty7",
             );
+            // The watcher hands the outcome to the next GUI launch, so it is
+            // written before the guard comes off and anything can start.
+            report_outcome(
+                plan.result_file.as_deref(),
+                &plan.log,
+                &plan.expected_version,
+                &Ok(()),
+            );
+            tty7_core::daemon::update_guard::clear();
             queue_cleanup(&plan.install_dir, &plan.stage);
             return Ok(());
         }
@@ -1056,6 +1096,15 @@ mod windows {
         if let Err(error) = &result {
             log_line(&plan.log, error);
         }
+        // A failed relaunch is the outcome here, and there is no running GUI
+        // to race it; a successful one launches the new build, whose absorb
+        // finds this already on disk.
+        report_outcome(
+            plan.result_file.as_deref(),
+            &plan.log,
+            &plan.expected_version,
+            &result,
+        );
         queue_cleanup(&plan.install_dir, &plan.stage);
         result
     }
@@ -1073,11 +1122,27 @@ mod windows {
             // do, failure recovery included. The guard still ends here: the
             // installation is no longer being replaced.
             log_line(&plan.log, &error);
+            let result = Err(error);
+            // Before the guard comes off: the watcher hands this to the next
+            // GUI launch, and the guard is what holds that launch back.
+            report_outcome(
+                plan.result_file.as_deref(),
+                &plan.log,
+                &plan.expected_version,
+                &result,
+            );
             tty7_core::daemon::update_guard::clear();
             queue_cleanup(&plan.install_dir, &plan.stage);
-            return Err(error);
+            return result;
         }
-        recover_without_replacement(&plan.log, &plan.install_dir, &plan.stage, error)
+        recover_without_replacement(
+            &plan.log,
+            &plan.install_dir,
+            &plan.stage,
+            plan.result_file.as_deref(),
+            &plan.expected_version,
+            error,
+        )
     }
 
     // ---------------------------------------------------------------------
@@ -1519,25 +1584,32 @@ mod windows {
     }
 
     fn install_portable(plan: PortableInstallPlan) -> Result<(), String> {
-        let result = install_portable_inner(&plan);
-        report_outcome(
-            plan.result_file.as_deref(),
-            &plan.log,
-            &plan.expected_version,
-            &result,
-        );
-        result
+        install_portable_inner(&plan)
     }
 
     fn install_portable_inner(plan: &PortableInstallPlan) -> Result<(), String> {
         log_line(&plan.log, "waiting for the tty7 GUI to exit");
         if let Err(error) = wait_for_exit(plan.parent_pid) {
-            return recover_without_replacement(&plan.log, &plan.install_dir, &plan.stage, error);
+            return recover_without_replacement(
+                &plan.log,
+                &plan.install_dir,
+                &plan.stage,
+                plan.result_file.as_deref(),
+                &plan.expected_version,
+                error,
+            );
         }
 
         let payload = plan.stage.join(PORTABLE_PAYLOAD_DIR);
         if let Err(error) = remove_path(&payload) {
-            return recover_without_replacement(&plan.log, &plan.install_dir, &plan.stage, error);
+            return recover_without_replacement(
+                &plan.log,
+                &plan.install_dir,
+                &plan.stage,
+                plan.result_file.as_deref(),
+                &plan.expected_version,
+                error,
+            );
         }
         log_line(
             &plan.log,
@@ -1550,7 +1622,14 @@ mod windows {
             &plan.expected_version,
             &payload,
         ) {
-            return recover_without_replacement(&plan.log, &plan.install_dir, &plan.stage, error);
+            return recover_without_replacement(
+                &plan.log,
+                &plan.install_dir,
+                &plan.stage,
+                plan.result_file.as_deref(),
+                &plan.expected_version,
+                error,
+            );
         }
 
         log_line(
@@ -1562,10 +1641,25 @@ mod windows {
         // immediately, and a guard naming a dead writer holds nothing.
         tty7_core::daemon::update_guard::hold();
         if let Err(error) = stop_daemon_from_payload(&payload, &plan.install_dir) {
-            return recover_without_replacement(&plan.log, &plan.install_dir, &plan.stage, error);
+            return recover_without_replacement(
+                &plan.log,
+                &plan.install_dir,
+                &plan.stage,
+                plan.result_file.as_deref(),
+                &plan.expected_version,
+                error,
+            );
         }
 
         log_line(&plan.log, "replacing the tty7 Windows portable files");
+        let report = |result: &Result<(), String>| {
+            report_outcome(
+                plan.result_file.as_deref(),
+                &plan.log,
+                &plan.expected_version,
+                result,
+            );
+        };
         let result = replace_portable_and_relaunch(
             &plan.install_dir,
             &payload,
@@ -1574,6 +1668,7 @@ mod windows {
                 launch_app(directory)
             },
             launch_app,
+            &report,
         );
         if let Err(error) = &result {
             log_line(&plan.log, error);
@@ -1588,12 +1683,19 @@ mod windows {
         log: &Path,
         install_dir: &Path,
         stage: &Path,
+        result_file: Option<&Path>,
+        version: &str,
         error: String,
     ) -> Result<(), String> {
         log_line(log, &error);
+        let result = Err(error);
+        // The outcome lands before the old app does: the relaunched GUI
+        // merges it into the update state at startup, and a write afterward
+        // races that merge (#540).
+        report_outcome(result_file, log, version, &result);
         let _ = launch_app(install_dir);
         queue_cleanup(install_dir, stage);
-        Err(error)
+        result
     }
 
     fn verify_update(
@@ -1960,11 +2062,16 @@ mod windows {
         payload: &Path,
         activate_replacement: impl Fn(&Path) -> Result<(), String>,
         relaunch_previous: impl Fn(&Path) -> Result<(), String>,
+        report: &impl Fn(&Result<(), String>),
     ) -> Result<(), String> {
         // A unique backup inside the portable directory is on the same volume
         // as every managed path, so moving old files aside does not degrade to
         // a cross-volume copy. Keep it explicitly: if rollback itself fails,
         // dropping a TempDir must never delete the only remaining old binary.
+        //
+        // Every failure arm reports its outcome before relaunching the
+        // previous app: the relaunched GUI merges the outcome at startup, and
+        // a write afterward races that merge (#540).
         let backup = match tempfile::Builder::new()
             .prefix(".tty7-update-backup-")
             .tempdir_in(install_dir)
@@ -1978,6 +2085,7 @@ mod windows {
                 // The daemon has already stopped, but no installed files have
                 // moved yet. Restore GUI availability before returning the
                 // backup error so every post-shutdown failure recovers alike.
+                report(&Err(cause.clone()));
                 return Err(with_relaunch_failure(cause, relaunch_previous(install_dir)));
             }
         };
@@ -1988,6 +2096,7 @@ mod windows {
         if let Err(error) = fs::write(backup.join(PORTABLE_BACKUP_INCOMPLETE), b"") {
             let cause = format!("marking the update backup {}: {error}", backup.display());
             let _ = remove_path(&backup);
+            report(&Err(cause.clone()));
             return Err(with_relaunch_failure(cause, relaunch_previous(install_dir)));
         }
 
@@ -2003,6 +2112,7 @@ mod windows {
                     "moving {} into the update backup: {error}",
                     current.display()
                 );
+                report(&Err(cause.clone()));
                 let restore = restore_moved_roots(install_dir, &backup, &moved);
                 let relaunch = relaunch_previous(install_dir);
                 if restore.is_ok() {
@@ -2019,11 +2129,23 @@ mod windows {
             .filter(|(source, _)| source.exists())
             .try_for_each(|(source, destination)| copy_path(&source, &destination));
         if let Err(error) = copy_result {
-            return rollback_portable_failure(install_dir, &backup, error, &relaunch_previous);
+            return rollback_portable_failure(
+                install_dir,
+                &backup,
+                error,
+                &relaunch_previous,
+                report,
+            );
         }
 
         if let Err(error) = activate_replacement(install_dir) {
-            return rollback_portable_failure(install_dir, &backup, error, &relaunch_previous);
+            return rollback_portable_failure(
+                install_dir,
+                &backup,
+                error,
+                &relaunch_previous,
+                report,
+            );
         }
 
         // The replacement survived its launch grace period. Old managed files
@@ -2033,6 +2155,7 @@ mod windows {
         // it is finished business the next launch may discard on its own.
         let _ = fs::remove_file(backup.join(PORTABLE_BACKUP_INCOMPLETE));
         let _ = remove_path(&backup);
+        report(&Ok(()));
         Ok(())
     }
 
@@ -2041,7 +2164,9 @@ mod windows {
         backup: &Path,
         cause: String,
         relaunch_previous: &impl Fn(&Path) -> Result<(), String>,
+        report: &impl Fn(&Result<(), String>),
     ) -> Result<(), String> {
+        report(&Err(cause.clone()));
         let restore = restore_portable_backup(install_dir, backup);
         let relaunch = relaunch_previous(install_dir);
         if restore.is_ok() {
@@ -2750,6 +2875,7 @@ mod windows {
                     Ok(())
                 },
                 |_| panic!("the previous version must not relaunch after success"),
+                &|_| {},
             )
             .unwrap();
 
@@ -2795,6 +2921,7 @@ mod windows {
                     Ok(())
                 },
                 |_| panic!("the previous version must not relaunch after success"),
+                &|_| {},
             )
             .unwrap();
 
@@ -2820,15 +2947,21 @@ mod windows {
             fs::write(payload.path().join("tty7-app.exe"), b"new app").unwrap();
             fs::write(payload.path().join("tty7.exe"), b"new cli").unwrap();
             let relaunched = Cell::new(0usize);
+            let reported = Cell::new(false);
 
             let error = replace_portable_and_relaunch(
                 install.path(),
                 payload.path(),
                 |_| Err("the new app exited immediately".to_string()),
                 |_| {
+                    // The outcome must already be on disk when the previous
+                    // app comes back — the relaunched GUI reads it at startup
+                    // (#540).
+                    assert!(reported.get(), "the outcome is reported first");
                     relaunched.set(relaunched.get() + 1);
                     Ok(())
                 },
+                &|_| reported.set(true),
             )
             .unwrap_err();
 
@@ -2865,6 +2998,7 @@ mod windows {
                     relaunched.set(relaunched.get() + 1);
                     Ok(())
                 },
+                &|_| {},
             )
             .unwrap_err();
 

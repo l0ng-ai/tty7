@@ -1121,13 +1121,16 @@ pub fn absorb_update_outcome_at_launch() {
         version: outcome.version.clone(),
         detail,
     });
-    // Unlike an in-process launch failure (`record_failure`, which clears
-    // `last_prompted` so the version asks again), this attempt already
-    // restarted the app once. Clearing the prompt state here is what turned
-    // one failed install into the same dialog on every check (#540). The
-    // failure sits in Settings until the user acts on it.
+    // A failure must not retire the version — `last_prompted` set with no
+    // `remind_after` is "one failed install retires it for good", the
+    // invariant `a_failure_lets_the_version_prompt_again` pins. But this
+    // attempt already restarted the app once, and `spawn_check` runs at every
+    // launch: asking again seconds later is the nag loop #540 is about. The
+    // middle course is the one "Later" already uses — keep the version marked
+    // as asked, and push the next ask out by `REMIND_LATER`. The failure sits
+    // in Settings the whole while.
     state.last_prompted = Some(outcome.version);
-    state.remind_after = None;
+    state.remind_after = Some(now_secs() + REMIND_LATER.as_secs());
     state.save();
 }
 
@@ -3147,8 +3150,9 @@ mod tests {
         let state = UpdateState::load();
         assert!(state.last_failure.is_none() && state.last_prompted.is_none());
 
-        // A failure lands in the state and — the #540 half — must not set
-        // the version up to prompt again on its own.
+        // A failure lands in the state and — the #540 half — does not set the
+        // version up to prompt again on its own right away: the throttle is
+        // `remind_after`, never a retirement.
         write_outcome(
             &outcome_path,
             &UpdateOutcome {
@@ -3159,7 +3163,7 @@ mod tests {
         )
         .unwrap();
         absorb_update_outcome_at_launch();
-        let state = UpdateState::load();
+        let mut state = UpdateState::load();
         assert_eq!(
             state.last_failure,
             Some(FailureRecord {
@@ -3168,7 +3172,16 @@ mod tests {
             })
         );
         assert!(!should_prompt(&state, "27.0.0"));
-        assert!(state.remind_after.is_none());
+        // The version is throttled, not retired: once the reminder expires the
+        // question comes back — the same invariant
+        // `a_failure_lets_the_version_prompt_again` pins for the in-process
+        // path.
+        let due = state
+            .remind_after
+            .expect("a failed install defers the next prompt rather than retiring it");
+        assert!(due > now_secs());
+        state.remind_after = Some(now_secs().saturating_sub(1));
+        assert!(should_prompt(&state, "27.0.0"));
         assert!(!outcome_path.exists(), "the outcome is consumed once");
 
         // A later launch finds no file and changes nothing.
