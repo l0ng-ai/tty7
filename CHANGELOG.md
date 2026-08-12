@@ -151,6 +151,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Switching workspaces no longer wipes the tab titles of the one you left** —
+  in the switcher, the workspace the window was showing had properly named tabs
+  while every other one read "Claude Code", over and over, for as many tabs as
+  it had. The two columns come from two sources: a window names its own tabs
+  from its live terminals' OSC titles, and every workspace it does not own it
+  reads out of the machine tree — which recorded each pane's foreground
+  *process* name and never the terminal's title, so the naming fell through to
+  the next best thing it had, the agent. Switching a workspace happens in place
+  and drops the terminals the window was reading, so the workspace you just
+  left went from named tabs to a column of identical rows. The daemon now
+  records the title a pane sets (OSC 0 and 2, capped at 256 characters) in the
+  tree beside its cwd, and the switcher shows it, put through the same
+  abbreviation the tab strip uses so a shell's `user@host:~/dir` reads `…/dir`
+  in both places. In a split, the pane running an agent names the tab rather
+  than whichever shell happens to be first. `tty7 tab ls` and workspaces listed
+  on a remote machine were reading the same missing field, and are named the
+  same way now.
+
 - **A WSL distro that cannot reach `/mnt` keeps its own `.bashrc`** — the
   bootstrap handed bash a `--rcfile` living on the Windows side without
   checking the distro could read it. bash ignores an unreadable `--rcfile`

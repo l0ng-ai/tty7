@@ -1480,6 +1480,7 @@ mod tests {
             pane_id,
             cwd: None,
             title: "sh".into(),
+            osc_title: None,
             alive: true,
             owner: owner.map(str::to_string),
         }

@@ -547,6 +547,7 @@ fn machine_with_live_panes(conn: &Conn) -> io::Result<machine::Machine> {
         };
         record.cwd = info.cwd.map(|p| p.to_string_lossy().into_owned());
         record.title = info.title;
+        record.osc_title = info.osc_title;
         record.live = info.alive;
     }
     Ok(machine)
@@ -1731,6 +1732,7 @@ mod aggregate_tests {
                     pane_id: 7,
                     cwd: Some(PathBuf::from("/repo/tty7")),
                     title: "nvim".into(),
+                    osc_title: Some("nvim ~/repo/tty7".into()),
                     alive: true,
                     owner: None,
                 }],
@@ -1742,6 +1744,7 @@ mod aggregate_tests {
         };
         let pane = machine.panes.iter().find(|p| p.id == 7).unwrap();
         assert_eq!(pane.title, "nvim");
+        assert_eq!(pane.osc_title.as_deref(), Some("nvim ~/repo/tty7"));
         assert!(pane.live);
     }
 

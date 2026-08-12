@@ -47,15 +47,10 @@ fn shell_spec(shell: &DetectedShell) -> ShellSpec {
     }
 }
 
-/// Strips a `user@host:` prefix a shell put in front of its title, leaving
-/// the path (or command) it actually names. A bare `host:` with no user is
-/// left alone — that is a drive letter on Windows.
-pub(crate) fn strip_host_prefix(raw: &str) -> &str {
-    match raw.split_once(':') {
-        Some((head, tail)) if head.contains('@') => tail,
-        _ => raw,
-    }
-}
+/// Shared with the switcher's tab column and the CLI, which name tabs of
+/// workspaces this process does not own and have to cut the same head off the
+/// same titles.
+pub(crate) use tty7_core::core::tab_view::strip_host_prefix;
 
 pub(crate) fn abbreviate_home(path: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;

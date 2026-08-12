@@ -84,6 +84,8 @@ struct PaneRecord {
     size: WinSize,
     cwd: Option<PathBuf>,
     #[serde(default)]
+    osc_title: Option<String>,
+    #[serde(default)]
     shell: Option<crate::daemon::protocol::ShellSpec>,
     shell_active: bool,
     at_prompt: bool,
@@ -229,6 +231,7 @@ fn stage(panes: &[Carried], next_pane_id: u64) -> std::io::Result<std::fs::File>
             integration_dir: pane.integration_dir.clone(),
             size: pane.size,
             cwd: pane.cwd.clone(),
+            osc_title: pane.osc_title.clone(),
             shell: pane.shell_spec.clone(),
             shell_active: pane.shell_active,
             at_prompt: pane.at_prompt,
@@ -361,6 +364,7 @@ pub fn adopt(fd: RawFd) -> Option<Adopted> {
             size: record.size,
             ring,
             cwd: record.cwd,
+            osc_title: record.osc_title,
             shell_spec: record.shell,
             shell_active: record.shell_active,
             at_prompt: record.at_prompt,
@@ -404,6 +408,7 @@ mod tests {
                 bytes: output.to_vec(),
             }],
             cwd: Some(PathBuf::from("/work")),
+            osc_title: Some("user@host:~/work".into()),
             shell_spec: None,
             shell_active: true,
             at_prompt: true,

@@ -642,6 +642,9 @@ struct PaneState {
     observers: Vec<Observer>,
     observer_seq: u64,
     cwd: Option<PathBuf>,
+    /// The last title the pane reported over OSC 0/2, for the machine tree to
+    /// record. See [`crate::core::machine::PaneRecord::osc_title`].
+    osc_title: Option<String>,
     shell: ShellState,
     /// What this pane is running, for the machine tree to record. Distinct from
     /// `shell` above, which is the shell-integration state.
@@ -970,6 +973,7 @@ pub struct Carried {
     pub size: WinSize,
     pub ring: Vec<crate::daemon::scrollback::Segment>,
     pub cwd: Option<PathBuf>,
+    pub osc_title: Option<String>,
     /// What the pane is running. Nothing on the other side of the exec can work
     /// it out again — the command line belongs to a child this image never
     /// spawned — so a handoff that dropped it would leave the tree naming no
@@ -1288,6 +1292,7 @@ impl DaemonPane {
                 observers: Vec::new(),
                 observer_seq: 0,
                 cwd: spawn.initial_cwd,
+                osc_title: None,
                 shell: ShellState::default(),
                 shell_spec: spawn.shell.clone(),
                 remote: spawn.remote.clone(),
@@ -1437,6 +1442,7 @@ impl DaemonPane {
             size: st.ring.tail_size(),
             ring: st.ring.snapshot(),
             cwd: st.cwd.clone(),
+            osc_title: st.osc_title.clone(),
             shell_spec: st.shell_spec.clone(),
             shell_active: st.shell.active,
             at_prompt: st.shell.at_prompt,
@@ -1500,6 +1506,7 @@ impl DaemonPane {
                 observers: Vec::new(),
                 observer_seq: 0,
                 cwd: carried.cwd,
+                osc_title: carried.osc_title,
                 shell_spec: carried.shell_spec,
                 shell: ShellState {
                     active: carried.shell_active,
@@ -1554,6 +1561,7 @@ impl DaemonPane {
             // it is, `ssh_spec` already says.
             shell_spec: None,
             cwd: None,
+            osc_title: None,
             shell: ShellState::default(),
             remote: Some(remote),
             agent: None,
@@ -1807,6 +1815,7 @@ impl DaemonPane {
 
                             let tr1 = trace.then(std::time::Instant::now);
                             let may_change_facts = signals.cwd.is_some()
+                                || signals.title.is_some()
                                 || !signals.agent_events.is_empty()
                                 || signals.notification.is_some()
                                 || !signals.shell.is_empty()
@@ -1841,14 +1850,16 @@ impl DaemonPane {
                                 && let (Some(before), Some(after)) = (facts_before, facts_after)
                                 && facts_changed(&before, &after)
                             {
-                                let (cwd, agent, shell) = after;
                                 crate::core::machine::observe_pane(pane, |p| {
-                                    if cwd.is_some() {
-                                        p.cwd = cwd;
+                                    if after.cwd.is_some() {
+                                        p.cwd = after.cwd;
                                     }
-                                    p.agent = agent;
-                                    if shell.is_some() {
-                                        p.shell = shell;
+                                    // Unlike the others this one is also cleared
+                                    // by a reset, so it is assigned either way.
+                                    p.osc_title = after.osc_title;
+                                    p.agent = after.agent;
+                                    if after.shell.is_some() {
+                                        p.shell = after.shell;
                                     }
                                     if alive {
                                         p.live = true;
@@ -1950,14 +1961,15 @@ impl DaemonPane {
     }
 
     pub fn info(&self) -> PaneInfo {
-        let (cwd, alive) = {
+        let (cwd, osc_title, alive) = {
             let st = self.state.lock().unwrap();
-            (st.cwd.clone(), st.alive)
+            (st.cwd.clone(), st.osc_title.clone(), st.alive)
         };
         PaneInfo {
             pane_id: self.id,
             cwd: cwd.or_else(|| self.foreground_cwd()),
             title: self.foreground_title(),
+            osc_title,
             alive,
             owner: self.owner.clone(),
         }
@@ -2403,11 +2415,16 @@ fn agent_state_snapshot(st: &PaneState) -> Option<crate::daemon::control::PaneAg
         })
 }
 
-type ObservedFacts = (
-    Option<String>,
-    Option<crate::core::machine::AgentFacts>,
-    Option<ShellSpec>,
-);
+/// What the daemon has learned about a pane that the machine tree wants to
+/// hold. Compared before and after each read, and written out only when it
+/// moved — every field here costs a `PaneFacts` delta to every attached client.
+#[derive(Debug, PartialEq)]
+struct ObservedFacts {
+    cwd: Option<String>,
+    osc_title: Option<String>,
+    agent: Option<crate::core::machine::AgentFacts>,
+    shell: Option<ShellSpec>,
+}
 
 fn observed_facts(st: &PaneState) -> ObservedFacts {
     let cwd = st.cwd.as_ref().map(|p| p.to_string_lossy().into_owned());
@@ -2421,13 +2438,19 @@ fn observed_facts(st: &PaneState) -> ObservedFacts {
             .or_else(|| st.agent_argv.clone()),
         status: st.agent_session.as_ref().map(|s| s.status),
     });
-    (cwd, agent, st.shell_spec.clone())
+    ObservedFacts {
+        cwd,
+        osc_title: st.osc_title.clone(),
+        agent,
+        shell: st.shell_spec.clone(),
+    }
 }
 
 fn facts_changed(before: &ObservedFacts, after: &ObservedFacts) -> bool {
-    before.0 != after.0
-        || agent_facts_changed(before.1.as_ref(), after.1.as_ref())
-        || before.2 != after.2
+    before.cwd != after.cwd
+        || before.osc_title != after.osc_title
+        || agent_facts_changed(before.agent.as_ref(), after.agent.as_ref())
+        || before.shell != after.shell
 }
 
 fn agent_facts_changed(
@@ -2452,6 +2475,11 @@ fn apply_signals(st: &mut PaneState, signals: SniffSignals) {
             notify(st, DaemonMsg::Cwd(cwd.clone()));
             st.cwd = Some(cwd);
         }
+    }
+    if let Some(title) = signals.title {
+        // No `notify`: a window renders its own tabs from its own terminal,
+        // which parsed the same sequence. This is only for the tree.
+        st.osc_title = (!title.is_empty()).then_some(title);
     }
     for shell in signals.shell {
         #[cfg(windows)]
@@ -2753,6 +2781,10 @@ struct ShellState {
 #[derive(Default)]
 struct SniffSignals {
     cwd: Option<PathBuf>,
+    /// The last title the pane set in this read, already capped. `Some("")` is
+    /// a reset — an empty OSC 0/2 clears the title rather than setting a blank
+    /// one, the same way the GUI's terminal treats it.
+    title: Option<String>,
     shell: Vec<ShellState>,
     agent_events: Vec<crate::core::cli_agent::AgentEvent>,
     notification: Option<String>,
@@ -2766,7 +2798,7 @@ struct OscSniffer {
 impl OscSniffer {
     fn new() -> Self {
         Self {
-            tok: OscTokenizer::new(&[b"7", b"133", b"9", b"777"]),
+            tok: OscTokenizer::new(&[b"0", b"2", b"7", b"133", b"9", b"777"]),
             shell: ShellState::default(),
         }
     }
@@ -2777,6 +2809,8 @@ impl OscSniffer {
         self.tok.feed(bytes, |payload| {
             if let Some(path) = parse_osc7(payload) {
                 signals.cwd = Some(path);
+            } else if let Some(title) = parse_osc_title(payload) {
+                signals.title = Some(title);
             } else if let Some(rest) = payload.strip_prefix(b"133;") {
                 if handle_osc133(shell, rest) {
                     match signals.shell.last_mut() {
@@ -2859,6 +2893,31 @@ pub(crate) fn parse_osc7(payload: &[u8]) -> Option<PathBuf> {
         return None;
     }
     Some(path_from_bytes(&decoded))
+}
+
+/// Longest title the tree will keep. The window that owns the pane shows about
+/// forty columns of it; the rest is only ever paid for — in `machine.json`, and
+/// in a `PaneFacts` delta to every attached client — so it is cut here rather
+/// than at each place that renders one.
+const MAX_OSC_TITLE: usize = 256;
+
+/// The title from an OSC 0 (icon *and* window) or OSC 2 (window) payload,
+/// capped. An empty payload comes back as `Some("")`: that is a reset, which
+/// the caller has to tell apart from "no title in this read".
+///
+/// OSC 1 is deliberately not read. It sets the icon name alone, which the GUI's
+/// terminal ignores — and the point of recording a title at all is to agree
+/// with what the GUI shows.
+pub(crate) fn parse_osc_title(payload: &[u8]) -> Option<String> {
+    let rest = payload
+        .strip_prefix(b"0;")
+        .or_else(|| payload.strip_prefix(b"2;"))?;
+    let title = String::from_utf8_lossy(rest);
+    let title = title.trim();
+    Some(match title.chars().count() > MAX_OSC_TITLE {
+        true => title.chars().take(MAX_OSC_TITLE).collect(),
+        false => title.to_string(),
+    })
 }
 
 fn percent_decode(input: &[u8]) -> Vec<u8> {
@@ -3604,6 +3663,81 @@ mod tests {
         assert_eq!(sig.cwd, Some(PathBuf::from("/Users/me/dev")));
     }
 
+    /// The tree's only source of the name a window actually shows on a tab. A
+    /// tokenizer that does not list 0 and 2 sniffs nothing here, and the
+    /// switcher goes back to calling every agent tab "Claude Code".
+    #[test]
+    fn sniff_osc_title() {
+        let mut s = OscSniffer::new();
+        assert_eq!(
+            s.feed(b"\x1b]0;user@host:~/dev\x07").title.as_deref(),
+            Some("user@host:~/dev")
+        );
+        assert_eq!(
+            s.feed(b"\x1b]2;\xe2\x9c\xb3 fixing the switcher\x1b\\")
+                .title
+                .as_deref(),
+            Some("✳ fixing the switcher")
+        );
+        // The last one in a read is the one that stuck.
+        assert_eq!(
+            s.feed(b"\x1b]0;first\x07\x1b]0;second\x07")
+                .title
+                .as_deref(),
+            Some("second")
+        );
+        // An empty title is a reset, and has to be told apart from a read with
+        // no title in it at all.
+        assert_eq!(s.feed(b"\x1b]2;\x07").title.as_deref(), Some(""));
+        assert_eq!(s.feed(b"plain output\r\n").title, None);
+        // OSC 1 names the icon, which the window ignores; so do we.
+        assert_eq!(s.feed(b"\x1b]1;icon\x07").title, None);
+
+        let long = format!("\x1b]0;{}\x07", "t".repeat(MAX_OSC_TITLE + 10));
+        assert_eq!(
+            s.feed(long.as_bytes()).title.map(|t| t.chars().count()),
+            Some(MAX_OSC_TITLE)
+        );
+    }
+
+    /// Titles arrive interleaved with everything else in the same read, and the
+    /// tokenizer has one identifier filter for the lot: sniffing a title must
+    /// not cost a cwd or a prompt mark.
+    #[test]
+    fn a_title_does_not_swallow_the_other_marks_in_the_same_read() {
+        let mut s = OscSniffer::new();
+        let sig = s.feed(b"\x1b]0;user@host:~/dev\x07\x1b]7;file://host/dev\x07\x1b]133;A\x07");
+        assert_eq!(sig.title.as_deref(), Some("user@host:~/dev"));
+        assert_eq!(sig.cwd, Some(PathBuf::from("/dev")));
+        assert!(sig.shell.last().unwrap().at_prompt);
+    }
+
+    #[test]
+    fn a_title_is_kept_until_it_changes_and_a_reset_clears_it() {
+        let mut st = test_state(true);
+        apply_signals(
+            &mut st,
+            SniffSignals {
+                title: Some("✳ fixing the switcher".into()),
+                ..SniffSignals::default()
+            },
+        );
+        assert_eq!(st.osc_title.as_deref(), Some("✳ fixing the switcher"));
+
+        // A read with no title in it leaves the stored one alone.
+        apply_signals(&mut st, SniffSignals::default());
+        assert_eq!(st.osc_title.as_deref(), Some("✳ fixing the switcher"));
+
+        apply_signals(
+            &mut st,
+            SniffSignals {
+                title: Some(String::new()),
+                ..SniffSignals::default()
+            },
+        );
+        assert_eq!(st.osc_title, None, "an empty title clears, not blanks");
+    }
+
     #[test]
     fn sniff_osc133_prompt() {
         let mut s = OscSniffer::new();
@@ -3960,6 +4094,7 @@ mod tests {
             observer_seq: 0,
             shell_spec: None,
             cwd: None,
+            osc_title: None,
             shell: ShellState::default(),
             remote: None,
             agent: None,
@@ -3975,7 +4110,15 @@ mod tests {
         use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
 
         let mut st = test_state(true);
-        assert_eq!(observed_facts(&st), (None, None, None));
+        assert_eq!(
+            observed_facts(&st),
+            ObservedFacts {
+                cwd: None,
+                osc_title: None,
+                agent: None,
+                shell: None,
+            }
+        );
 
         st.cwd = Some(PathBuf::from("/work/api"));
         st.agent = Some(CLIAgent::Claude);
@@ -3987,9 +4130,9 @@ mod tests {
             ..Default::default()
         });
 
-        let (cwd, agent, _shell) = observed_facts(&st);
-        assert_eq!(cwd.as_deref(), Some("/work/api"));
-        let agent = agent.expect("an agent in the foreground is a fact");
+        let facts = observed_facts(&st);
+        assert_eq!(facts.cwd.as_deref(), Some("/work/api"));
+        let agent = facts.agent.expect("an agent in the foreground is a fact");
         assert_eq!(agent.agent, CLIAgent::Claude);
         assert_eq!(agent.session_id.as_deref(), Some("sess-1"));
         assert_eq!(
@@ -4000,9 +4143,9 @@ mod tests {
         assert_eq!(agent.status, Some(AgentStatus::Working));
 
         st.agent_session = None;
-        let (_, agent, _) = observed_facts(&st);
+        let facts = observed_facts(&st);
         assert_eq!(
-            agent.unwrap().launch_argv.as_deref(),
+            facts.agent.unwrap().launch_argv.as_deref(),
             Some(&["claude".to_string()][..])
         );
     }
@@ -4080,6 +4223,64 @@ mod tests {
         assert!(
             store.pane(PANE).unwrap().agent.is_none(),
             "an agent that left a pane still in use is a fact, and clears"
+        );
+
+        withdraw_observations();
+    }
+
+    /// The whole path a title takes into the tree: sniffed out of the pane's
+    /// own output, kept on its state, and written to the record every other
+    /// viewer reads. Nothing else can name the tabs of a workspace this process
+    /// does not own — without this the switcher fell back to the agent, and
+    /// every tab of a workspace running one read "Claude Code".
+    #[test]
+    fn a_pane_title_reaches_the_machine_tree() {
+        use crate::core::machine::{
+            MACHINE_FILE, MachineStore, OBSERVE_SLOT, PaneSeed, publish_observations,
+            withdraw_observations,
+        };
+
+        const PANE: u64 = 78;
+        let _slot = OBSERVE_SLOT.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = MachineStore::open(dir.path().join(MACHINE_FILE));
+        let ws = store.workspace_create(None, None, None).unwrap();
+        store
+            .tab_create(ws.id, None, PaneSeed::bare(PANE), None, None)
+            .unwrap();
+        publish_observations(&store);
+
+        let run = |had: Option<&str>, output: &[u8]| {
+            let mut state = test_state(true);
+            state.id = PANE;
+            state.osc_title = had.map(str::to_string);
+            DaemonPane::spawn_reader(
+                Arc::new(Mutex::new(state)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(OutputGate::new()),
+                Box::new(std::io::Cursor::new(output.to_vec())),
+                null_writer(),
+                || false,
+                ForegroundProbes {
+                    remote: Box::new(|| None),
+                    agent: Box::new(|| Some(None)),
+                    cwd: Box::new(|| None),
+                },
+                Arc::new(DeathReporter::new(|| {})),
+            )
+            .join()
+            .unwrap();
+            store.pane(PANE).expect("the record was seeded").osc_title
+        };
+
+        assert_eq!(
+            run(None, b"\x1b]0;\xe2\x9c\xb3 fixing the switcher\x07").as_deref(),
+            Some("✳ fixing the switcher")
+        );
+        assert_eq!(
+            run(Some("✳ fixing the switcher"), b"\x1b]2;\x07"),
+            None,
+            "a pane that resets its title clears the one on record"
         );
 
         withdraw_observations();

@@ -2442,10 +2442,11 @@ impl TabRow {
 /// `Tty7App::tab_label` shows for local ones.
 ///
 /// The two read different sources and have to be talked into agreeing. A local
-/// tab is named by its terminal's OSC title, which shells set to the working
-/// directory and agents overwrite with their own name. The machine tree has
-/// neither: `PaneRecord::title` is the *foreground process name* ("zsh"), so
-/// the cwd and the agent stand in for it here.
+/// tab is named by its live terminal's OSC title, which shells set to the
+/// working directory and agents overwrite with what they are doing. The tree
+/// carries a copy of that title (`PaneRecord::osc_title`), which is what makes
+/// the two columns agree; `PaneRecord::title` is the *foreground process name*
+/// ("zsh") and only stands in when there is no title at all.
 fn tab_view_label(view: &crate::ui::machine_mirror::TabView, index: usize) -> String {
     let unnamed = || {
         t_fmt(
@@ -2453,20 +2454,24 @@ fn tab_view_label(view: &crate::ui::machine_mirror::TabView, index: usize) -> St
             &[("n", &((index + 1).to_string()))],
         )
     };
+    // A path can shorten away to nothing (a bare "user@host:"), and the process
+    // name is still worth more than a number.
+    let shortened = |raw: &str| match crate::ui::tab_strip::short_title(raw) {
+        shortened if !shortened.trim().is_empty() => shortened,
+        _ => match view.title.trim() {
+            "" => unnamed(),
+            title => title.to_string(),
+        },
+    };
     match view.label() {
         crate::ui::machine_mirror::TabLabel::Named(name) => name.to_string(),
+        // Through `short_title` because the local strip puts its own titles
+        // through it too: the shell integration writes `user@host:~/dir`, and a
+        // tab that spelled that out in full where the strip says "…/dir" would
+        // be the same disagreement in a new place.
+        crate::ui::machine_mirror::TabLabel::Osc(title) => shortened(title),
         crate::ui::machine_mirror::TabLabel::Agent(agent) => agent.display_name().to_string(),
-        // A cwd can shorten away to nothing (a bare "user@host:"), and the
-        // process name is still worth more than a number.
-        crate::ui::machine_mirror::TabLabel::Cwd(cwd) => {
-            match crate::ui::tab_strip::short_title(cwd) {
-                shortened if !shortened.trim().is_empty() => shortened,
-                _ => match view.title.trim() {
-                    "" => unnamed(),
-                    title => title.to_string(),
-                },
-            }
-        }
+        crate::ui::machine_mirror::TabLabel::Cwd(cwd) => shortened(cwd),
         crate::ui::machine_mirror::TabLabel::Process(title) => title.to_string(),
         crate::ui::machine_mirror::TabLabel::Unknown => unnamed(),
     }
@@ -2975,6 +2980,7 @@ mod tests {
             id: TabId::new(),
             name: Some("  build  ".to_string()),
             title: "zsh".to_string(),
+            osc_title: Some("✳ 修复 workspace switcher".to_string()),
             cwd: Some("/Users/x/repo/tty7".to_string()),
             agent: Some(crate::core::cli_agent::CLIAgent::Claude),
             status: None,
@@ -2986,8 +2992,29 @@ mod tests {
         view.name = None;
         assert_eq!(
             tab_view_label(&view, 0),
+            "✳ 修复 workspace switcher",
+            "then the title the local strip would be showing, verbatim"
+        );
+
+        view.osc_title = Some("user@host:~/repo/025/tty7".to_string());
+        assert_eq!(
+            tab_view_label(&view, 0),
+            crate::ui::tab_strip::short_title("user@host:~/repo/025/tty7"),
+            "a shell's title goes through the shortener the strip uses"
+        );
+
+        view.osc_title = Some("user@host:".to_string());
+        assert_eq!(
+            tab_view_label(&view, 0),
+            "zsh",
+            "a title that shortens away to nothing falls through"
+        );
+
+        view.osc_title = None;
+        assert_eq!(
+            tab_view_label(&view, 0),
             "Claude Code",
-            "an agent names its own tab, as its OSC title would locally"
+            "an agent names a tab that has told us nothing else"
         );
 
         view.agent = None;

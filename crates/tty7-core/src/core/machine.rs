@@ -272,6 +272,18 @@ pub struct PaneRecord {
     pub cwd: Option<String>,
     #[serde(default)]
     pub title: String,
+    /// The title the terminal itself reports (OSC 0/2): a shell writes
+    /// `user@host:~/dir` from its integration, an agent overwrites it with what
+    /// it is working on. Distinct from `title` above, which is the foreground
+    /// process name.
+    ///
+    /// This is the name the window that owns the pane puts on its tab, so it is
+    /// also what anyone else has to read to agree with that window — the
+    /// switcher listing a workspace it does not own, `tty7 tab ls` across a
+    /// socket. `None` until the pane emits one; a pane that resets its title
+    /// clears it back.
+    #[serde(default)]
+    pub osc_title: Option<String>,
     #[serde(default)]
     pub ssh_spec: Option<Box<NativeSshSpec>>,
     #[serde(default)]
@@ -295,6 +307,7 @@ impl PaneRecord {
             id,
             cwd: None,
             title: String::new(),
+            osc_title: None,
             ssh_spec: None,
             agent: None,
             shell: None,
@@ -346,6 +359,7 @@ impl PaneSeed {
             id: self.pane,
             cwd: self.cwd,
             title: String::new(),
+            osc_title: None,
             ssh_spec: self.ssh_spec.map(|s| Box::new(s.without_secrets())),
             agent: self.agent,
             shell: self.shell,

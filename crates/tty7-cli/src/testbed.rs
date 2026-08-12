@@ -45,6 +45,7 @@ pub fn two_workspace_machine() -> Machine {
         id,
         cwd: Some(cwd.to_string()),
         title: String::new(),
+        osc_title: None,
         ssh_spec: None,
         agent: None,
         shell: None,

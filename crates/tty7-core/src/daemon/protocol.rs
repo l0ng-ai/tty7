@@ -119,6 +119,10 @@ pub struct PaneInfo {
     pub cwd: Option<PathBuf>,
     #[serde(default)]
     pub title: String,
+    /// See [`crate::core::machine::PaneRecord::osc_title`] — the terminal's own
+    /// title, not the foreground process name `title` carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub osc_title: Option<String>,
     pub alive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
@@ -1590,6 +1594,7 @@ mod tests {
                     pane_id: 3,
                     cwd: Some(PathBuf::from("/x")),
                     title: "zsh".into(),
+                    osc_title: Some("user@host:~/x".into()),
                     alive: true,
                     owner: None,
                 },
@@ -1597,6 +1602,7 @@ mod tests {
                     pane_id: 4,
                     cwd: None,
                     title: String::new(),
+                    osc_title: None,
                     alive: true,
                     owner: Some("ffe038d0-9ad6-40c0-815d-1fcc43c17ec0".into()),
                 },

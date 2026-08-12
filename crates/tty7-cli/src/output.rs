@@ -2,25 +2,45 @@ use unicode_width::UnicodeWidthStr;
 
 use tty7_core::core::machine::{Machine, PaneNode, Workspace};
 use tty7_core::core::session::WorkspaceId;
-use tty7_core::core::tab_view::{TabLabel, TabView, tab_views_of};
+use tty7_core::core::tab_view::{TabLabel, TabView, strip_host_prefix, tab_views_of};
 use tty7_core::daemon::control::{PaneAgentState, RouteInfo, ServerStatus};
 use tty7_core::daemon::protocol::{PaneInfo, PaneProcs};
 
 use crate::resolve;
 
-/// What to call a tab in a table or a tree. Almost no tab carries a name —
-/// the GUI's strip reads OSC titles the machine tree never sees — so a column
-/// printing `tab.name` alone comes out empty for a window full of work. The
-/// evidence ranking is shared with the GUI; only the rendering is ours.
+/// What to call a tab in a table or a tree. Almost no tab carries a name — the
+/// GUI's strip shows the terminal's OSC title instead — so a column printing
+/// `tab.name` alone comes out empty for a window full of work. The evidence
+/// ranking is shared with the GUI; only the rendering is ours.
 pub fn tab_label(view: &TabView) -> String {
     match view.label() {
         TabLabel::Named(name) => name.to_string(),
+        TabLabel::Osc(title) => {
+            let title = strip_host_prefix(title);
+            // A title that is only a path is what a shell integration writes,
+            // and it gets cut down to its leaf like a cwd — the tree prints the
+            // whole path underneath anyway. Prose is an agent saying what it is
+            // doing: that is the name, and it stays whole, clamped only so one
+            // talkative tab cannot widen every column in the table.
+            match title.starts_with(['/', '~']) {
+                true => path_leaf(title).to_string(),
+                false => clamp(title, 40),
+            }
+        }
         TabLabel::Agent(agent) => agent.display_name().to_string(),
         // The tree prints every pane's full cwd right underneath, and a table
         // has no room for one anyway: the leaf is what tells tabs apart.
         TabLabel::Cwd(cwd) => path_leaf(cwd).to_string(),
         TabLabel::Process(title) => title.to_string(),
         TabLabel::Unknown => "-".to_string(),
+    }
+}
+
+/// `max` characters at most, with an ellipsis in place of what was dropped.
+fn clamp(s: &str, max: usize) -> String {
+    match s.chars().count() > max {
+        true => s.chars().take(max - 1).chain(['…']).collect(),
+        false => s.to_string(),
     }
 }
 
@@ -328,6 +348,7 @@ mod tests {
             pane_id: id,
             cwd: None,
             title: "zsh".into(),
+            osc_title: None,
             alive: true,
             owner: owner.map(str::to_string),
         };
@@ -447,12 +468,13 @@ mod tests {
     }
 
     #[test]
-    fn an_unnamed_tab_borrows_an_agent_then_a_place_then_its_process() {
+    fn an_unnamed_tab_borrows_its_title_then_an_agent_then_a_place_then_its_process() {
         let view = |f: &dyn Fn(&mut TabView)| {
             let mut v = TabView {
                 id: tty7_core::core::machine::TabId::new(),
                 name: None,
                 title: String::new(),
+                osc_title: None,
                 cwd: None,
                 agent: None,
                 status: None,
@@ -472,6 +494,26 @@ mod tests {
             )),
             "Claude Code"
         );
+        // What the pane's own terminal says it is doing beats naming the agent
+        // running it — every tab of a workspace would otherwise read alike.
+        assert_eq!(
+            tab_label(&view(&|v| {
+                v.osc_title = Some("✳ fixing the switcher".into());
+                v.agent = Some(tty7_core::core::cli_agent::CLIAgent::Claude);
+            })),
+            "✳ fixing the switcher"
+        );
+        assert_eq!(
+            tab_label(&view(
+                &|v| v.osc_title = Some("user@host:~/repo/tty7".into())
+            )),
+            "tty7",
+            "a shell's title is a path and is cut down like one"
+        );
+        let long = "wondering ".repeat(8);
+        let clamped = tab_label(&view(&|v| v.osc_title = Some(long.clone())));
+        assert_eq!(clamped.chars().count(), 40);
+        assert!(clamped.ends_with('…'));
         assert_eq!(
             tab_label(&view(&|v| v.cwd = Some("/Users/me/repo/tty7".into()))),
             "tty7"
