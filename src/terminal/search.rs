@@ -23,6 +23,16 @@ const MAX_MATCHES: usize = 10_000;
 /// pause rather than one per frame.
 pub(super) const SCAN_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(120);
 
+/// How many debounce windows a pane that never stops printing may push the
+/// rescan out before it gets one anyway.
+///
+/// A debounce alone waits for a pause, and a coding agent streaming a reply
+/// does not give one for a minute at a time — the count would sit frozen for
+/// the whole flood and the highlights would sit on text that has since been
+/// rewritten under them. Rebasing keeps a highlight under text that *scrolled*;
+/// only a scan catches up with text that changed in place.
+pub(super) const SCAN_LAG_LIMIT: u32 = 4;
+
 /// The search bar floats over the top of the grid rather than pushing it down,
 /// so these two decide how many rows it hides. Keep them next to the `.top()`
 /// and `.h()` that use them — a match parked under the bar is on screen and
@@ -51,9 +61,12 @@ pub struct SearchState {
     pub input: Entity<InputState>,
     pub matches: Vec<Match>,
     pub current_index: Option<usize>,
-    /// Scrollback depth when `matches` was read off the grid. Match points are
-    /// viewport-relative, so this is what turns one back into the absolute row
-    /// it named — see [`TerminalView::refresh_matches_after_output`].
+    /// Scrollback depth the `matches` lines are counted against. Match points
+    /// are grid-relative, so this is what turns one back into the absolute row
+    /// it named — see [`TerminalView::refresh_matches_after_output`]. It is the
+    /// depth at the last scan until output scrolls the grid, which moves the
+    /// lines and this together (see
+    /// [`TerminalView::rebase_matches_after_scroll`]) so the anchors hold.
     scanned_history: usize,
     _subs: Vec<Subscription>,
 }
@@ -177,10 +190,10 @@ impl TerminalView {
     /// Every match of the current query in the whole grid, and whether the
     /// pattern failed to compile.
     ///
-    /// Match points are lines *relative to the viewport*, so they are only
-    /// meaningful against the grid they were read from: the moment output
-    /// scrolls the grid, every one of them names a different line. Nothing here
-    /// caches, and the two callers below both re-read the grid.
+    /// A match point is a line *of the grid it was read from*, and output
+    /// scrolling the grid makes every one of them name a different line —
+    /// which is what [`TerminalView::rebase_matches_after_scroll`] undoes
+    /// between scans. Nothing here caches, and both callers re-read the grid.
     fn scan_matches(&self, query: &str) -> Scan {
         let mut matches: Vec<Match> = Vec::new();
         if query.is_empty() {
@@ -240,28 +253,38 @@ impl TerminalView {
 
     /// Note that output changed the grid an open search bar is describing.
     ///
-    /// The rescan is debounced rather than run per wakeup: it reads the whole
-    /// grid, which is up to `MAX_SCROLLBACK` lines, and a pane mid-flood is
-    /// repainting far faster than anyone can read a match count off it. One
-    /// task waits for the printing to pause and then rescans once; further
-    /// output while it waits only pushes the deadline out.
+    /// Two things happen here, because output breaks a scan in two ways.
+    ///
+    /// The cheap one runs every wakeup: text that scrolled took the highlights
+    /// off their rows, and [`Self::rebase_matches_after_scroll`] puts them back
+    /// without reading the grid.
+    ///
+    /// The rescan behind it is debounced rather than run per wakeup: it reads
+    /// the whole grid, which is up to `MAX_SCROLLBACK` lines, and a pane
+    /// mid-flood is repainting far faster than anyone can read a match count
+    /// off it. One task waits for the printing to pause and then rescans once;
+    /// further output while it waits pushes the deadline out, up to
+    /// [`SCAN_LAG_LIMIT`] windows — a pane that never pauses still gets scanned.
     pub(super) fn note_output_under_search(&mut self, cx: &mut Context<Self>) {
         if self.search.is_none() {
             return;
         }
+        self.rebase_matches_after_scroll(cx);
         self.search_scan_epoch = self.search_scan_epoch.wrapping_add(1);
         if self.search_scan_armed {
             return;
         }
         self.search_scan_armed = true;
         cx.spawn(async move |this, cx| {
+            let mut waited = 0;
             loop {
                 let Ok(epoch) = this.update(cx, |view, _| view.search_scan_epoch) else {
                     break;
                 };
                 cx.background_executor().timer(SCAN_DEBOUNCE).await;
+                waited += 1;
                 let settled = this.update(cx, |view, cx| {
-                    if view.search_scan_epoch != epoch {
+                    if view.search_scan_epoch != epoch && waited < SCAN_LAG_LIMIT {
                         return false;
                     }
                     view.search_scan_armed = false;
@@ -275,6 +298,52 @@ impl TerminalView {
             }
         })
         .detach();
+    }
+
+    /// Slide the stored match points along with the text they name.
+    ///
+    /// A match point is a grid line, and output moves the text under it: every
+    /// line that scrolls off the top of the screen shifts the whole grid up
+    /// one. Between two scans that leaves each highlight washing the row its
+    /// text has just left — one row off per line scrolled, for as long as the
+    /// printing keeps the debounced rescan from firing, which is exactly when
+    /// someone is watching the highlight. Absolute rows (see [`anchor_row`]) do
+    /// not move, so re-deriving each line from its anchor puts the highlight
+    /// back under its text. Nothing here re-reads the grid, so it is cheap
+    /// enough for every wakeup.
+    ///
+    /// Matches carried off the top of the scrollback are dropped. A grid that
+    /// *shrank* — a cleared scrollback, a swap to the alt screen — moved every
+    /// anchor by an amount this cannot see, so that case rescans instead.
+    fn rebase_matches_after_scroll(&mut self, cx: &mut Context<Self>) {
+        let history = self.terminal.term.lock().grid().history_size();
+        let Some(s) = self.search.as_mut() else {
+            return;
+        };
+        let drift = history as i64 - s.scanned_history as i64;
+        if drift == 0 {
+            return;
+        }
+        if drift < 0 {
+            self.refresh_matches_after_output(cx);
+            return;
+        }
+
+        let drift = drift as i32;
+        let topmost = -(history as i32);
+        let moved = |p: &Point| Point::new(Line(p.line.0 - drift), p.column);
+        // The matches are in grid order, so the ones that fell off the top are
+        // a prefix — and a match whose start survived kept its end too.
+        let gone = s
+            .matches
+            .partition_point(|m| m.start().line.0 - drift < topmost);
+        s.matches.drain(..gone);
+        for m in &mut s.matches {
+            let (start, end) = (moved(m.start()), moved(m.end()));
+            *m = start..=end;
+        }
+        s.current_index = s.current_index.and_then(|i| i.checked_sub(gone));
+        s.scanned_history = history;
     }
 
     /// Re-run the query against the grid as it now stands, keeping the count
@@ -293,12 +362,12 @@ impl TerminalView {
             return;
         };
         let scan = self.scan_matches(&query);
-        // Stay on the match the user stepped to if it survived. Its start point
-        // is viewport-relative, so output that scrolled the grid has already
-        // made it name a different line — compare where it *was*, by absolute
-        // row, or the selection silently latches onto whichever occurrence has
-        // taken over that screen position. When it is gone, fall back to where
-        // a fresh query would land rather than to a stale ordinal.
+        // Stay on the match the user stepped to if it survived. Compare where
+        // it was by absolute row, not by line: a line is only meaningful with
+        // the scrollback depth it was counted against, and matching on the raw
+        // number would latch the selection onto whichever occurrence has taken
+        // that grid row over. When it is gone, fall back to where a fresh query
+        // would land rather than to a stale ordinal.
         let previous = self
             .search
             .as_ref()

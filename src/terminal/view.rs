@@ -10432,6 +10432,146 @@ mod gpui_tests {
         });
     }
 
+    /// Print lines into the grid and post the wakeup the reader thread would
+    /// have posted behind them.
+    ///
+    /// Going through the parser directly rather than the socket keeps the two
+    /// tests below off both real time and the clock: the pane has printed by
+    /// the time this returns, and no timer has had a chance to fire.
+    fn print(cx: &mut TestAppContext, view: &Entity<TerminalView>, lines: Vec<String>) {
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                {
+                    use alacritty_terminal::vte::ansi::Handler as _;
+                    let mut term = v.terminal.term.lock();
+                    for line in lines {
+                        for c in line.chars() {
+                            term.input(c);
+                        }
+                        term.carriage_return();
+                        term.linefeed();
+                    }
+                }
+                v.handle_event(AlacEvent::Wakeup, cx);
+            })
+        });
+    }
+
+    /// Filler that scrolls the grid without ever matching the query.
+    fn filler(lines: usize) -> Vec<String> {
+        (0..lines).map(|i| format!("filler {i}")).collect()
+    }
+
+    /// What the grid holds where the current match says its word starts, so a
+    /// test can ask the question the eye asks: is the highlight still on it?
+    fn word_at_the_match(
+        cx: &mut TestAppContext,
+        view: &Entity<TerminalView>,
+        len: usize,
+    ) -> String {
+        cx.update(|cx| {
+            let v = view.read(cx);
+            let start = *v
+                .search
+                .as_ref()
+                .and_then(|s| s.current())
+                .expect("a match to stand on")
+                .start();
+            let term = v.terminal.term.lock();
+            let grid = term.grid();
+            (0..len)
+                .map(|i| grid[start.line][Column(start.column.0 + i)].c)
+                .collect()
+        })
+    }
+
+    /// Print the searched-for word and bury it in the scrollback, then open the
+    /// bar on it. Returns with exactly one match, sitting in history.
+    fn search_a_buried_word(
+        window: &gpui::WindowHandle<gpui_component::Root>,
+        cx: &mut TestAppContext,
+        view: &Entity<TerminalView>,
+    ) {
+        let rows = cx.update(|cx| view.read(cx).terminal.term.lock().grid().screen_lines());
+        print(cx, view, vec!["world 1".to_string()]);
+        print(cx, view, filler(rows + 8));
+        cx.update(|cx| {
+            assert!(
+                view.read(cx).terminal.term.lock().grid().history_size() > 0,
+                "the word has to be in the scrollback for the grid to scroll under it"
+            );
+        });
+
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| {
+                    v.open_search(window, cx);
+                    let input = v.search.as_ref().unwrap().input.clone();
+                    input.update(cx, |s, cx| s.set_value("world", window, cx));
+                    v.recompute_matches(cx);
+                    assert_eq!(v.search.as_ref().unwrap().matches.len(), 1);
+                });
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_highlight_follows_its_text_as_output_scrolls_under_it(cx: &mut TestAppContext) {
+        let (window, view, _daemon) = rooted_harness(cx);
+        search_a_buried_word(&window, cx, &view);
+        assert_eq!(
+            word_at_the_match(cx, &view, 5),
+            "world",
+            "the scan has to name its own word"
+        );
+
+        // Output arrives and the clock never moves, so nothing rescans: the
+        // stored point is all the highlight has to go on. Every line printed
+        // here slid the grid up under it, and it has to have come along.
+        print(cx, &view, filler(7));
+        cx.update(|cx| {
+            assert!(
+                view.read(cx).search_scan_armed,
+                "the rescan is still waiting for the pane to go quiet"
+            );
+        });
+        assert_eq!(
+            word_at_the_match(cx, &view, 5),
+            "world",
+            "a match point has to name the row its text scrolled to, \
+             not the row it was read from"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pane_that_never_pauses_is_rescanned_anyway(cx: &mut TestAppContext) {
+        let (window, view, _daemon) = rooted_harness(cx);
+        search_a_buried_word(&window, cx, &view);
+
+        // A pane mid-flood: something new lands every half debounce window, so
+        // the pause the rescan is waiting for never comes.
+        for i in 0..(super::super::search::SCAN_LAG_LIMIT * 2 + 2) {
+            print(cx, &view, vec![format!("world {}", i + 2)]);
+            cx.executor()
+                .advance_clock(super::super::search::SCAN_DEBOUNCE / 2);
+            cx.run_until_parked();
+        }
+
+        cx.update(|cx| {
+            let search = view
+                .read(cx)
+                .search
+                .as_ref()
+                .expect("the bar is still open");
+            assert!(
+                search.matches.len() > 1,
+                "printing without a pause must not hold the scan off forever, \
+                 got {} matches",
+                search.matches.len()
+            );
+        });
+    }
+
     #[gpui::test]
     fn child_exit_marks_the_view_exited(cx: &mut TestAppContext) {
         let (window, _daemon) = harness(cx);
