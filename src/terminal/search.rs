@@ -1702,14 +1702,27 @@ mod tests {
             candidate.paths(&LinkRoots::local(vec![PathBuf::from("/w")])),
             vec![PathBuf::from("/etc/hosts")]
         );
-        assert!(
-            candidate.is_rooted(),
-            "so a report about it never claims it was looked for under a root"
-        );
+    }
+
+    /// `is_rooted` decides whether a report about an unresolved token may name
+    /// a directory it was "looked for under", so it has to agree with
+    /// [`FileCandidate::paths`] about when the roots are consulted at all.
+    /// Both ask `is_absolute`, and on Windows a leading `/` does not make a
+    /// path that — which is why this only claims to hold where it does.
+    #[test]
+    #[cfg(unix)]
+    fn a_rooted_candidate_is_told_apart_from_one_measured_from_a_root() {
+        for line in ["open /etc/hosts now", "open ~/.zshrc now"] {
+            assert!(
+                file_candidate_at(line, 6).expect("candidate").is_rooted(),
+                "{line} says for itself where it starts"
+            );
+        }
         assert!(
             !file_candidate_at("see src/lib.rs here", 5)
                 .expect("candidate")
-                .is_rooted()
+                .is_rooted(),
+            "a relative path is only ever found by measuring from somewhere"
         );
     }
 
