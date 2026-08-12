@@ -9798,6 +9798,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "shell-words",
  "smallvec",
  "smol",
  "tempfile",

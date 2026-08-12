@@ -55,6 +55,15 @@ memchr = "2"
 # emoji, and half a flag renders as a bare letter. Already in the tree via
 # gpui, so this pins no new code.
 unicode-segmentation = "1"
+
+# POSIX-shell word splitting and quoting for the Settings "Shell Arguments"
+# field (`ui::app::commit_shell` parses what the user typed, and
+# `build_shell_inputs` quotes the saved argv back into field text). The pair
+# has to round-trip losslessly through the `shell.args` JSON array —
+# `split_whitespace` tore quoted strings apart and `join(" ")` could not spell
+# an argument containing a space (#551). Already in the tree via
+# `portable-pty`, so this pins no new code.
+shell-words = "1"
 smol.workspace = true
 smallvec.workspace = true
 serde = { workspace = true }

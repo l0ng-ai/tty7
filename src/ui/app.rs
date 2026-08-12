@@ -4709,7 +4709,14 @@ impl Tty7App {
     ) -> (Entity<InputState>, Entity<InputState>, Entity<InputState>) {
         let cfg = cx.global::<Config>();
         let (shell_program, shell_args) = match &cfg.shell {
-            Some(s) => (s.program.clone(), s.args.join(" ")),
+            // Quote each argument back into field text rather than joining on
+            // spaces: `join(" ")` cannot spell an argument that contains one,
+            // so a perfectly legal `"args": ["-c", "echo hi"]` in config.json
+            // refilled as four words and re-committed as four argv the moment
+            // the field lost focus — the user never typed a thing (#551).
+            // `shell_words::join` quotes only what needs it, and
+            // `commit_shell`'s matching `split` parses it back losslessly.
+            Some(s) => (s.program.clone(), shell_words::join(&s.args)),
             None => (String::new(), String::new()),
         };
         let wd_path = cfg.working_directory.path.clone();
@@ -5136,13 +5143,21 @@ impl Tty7App {
             .value()
             .trim()
             .to_string();
-        let args: Vec<String> = settings
-            .shell_args_input
-            .read(cx)
-            .value()
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
+        // Split the way a shell would, not on raw whitespace: the text goes on
+        // to become argv verbatim, and `split_whitespace` kept the quote
+        // characters while tearing the quoted string apart — `-c "echo hi"`
+        // reached the shell as `["-c", "\"echo", "hi\""]` (#551).
+        let raw_args = settings.shell_args_input.read(cx).value();
+        let args: Vec<String> = match shell_words::split(&raw_args) {
+            Ok(args) => args,
+            // An unbalanced quote cannot become argv at all. Keep the value
+            // out of `config.json` — the proxy row's pattern: refuse the save
+            // and let the row explain why under the input after this notify.
+            Err(_) => {
+                cx.notify();
+                return;
+            }
+        };
         let shell = if program.is_empty() {
             None
         } else {
@@ -7825,6 +7840,43 @@ mod tests {
         assert!(parse_ssh_connect_input("ssh -- dev").is_err());
         assert!(parse_ssh_connect_input("ssh 'host").is_err());
         assert!(parse_ssh_connect_input("ssh host -p 0").is_err());
+    }
+
+    /// The invariant #551 is fixed with: what `build_shell_inputs` writes into
+    /// the Arguments field must parse back to exactly the argv it came from,
+    /// and what `commit_shell` accepts must survive the trip into config.json
+    /// and back into the field unchanged.
+    #[test]
+    fn shell_arguments_round_trip_between_field_text_and_argv() {
+        let argv = vec![
+            "-l".to_string(),
+            "-c".to_string(),
+            "echo hi".to_string(),
+            // An empty argument and one carrying a quote of its own are the
+            // cases a space-join cannot even spell.
+            String::new(),
+            "don't".to_string(),
+        ];
+        let field_text = shell_words::join(&argv);
+        assert_eq!(
+            shell_words::split(&field_text).expect("tty7's own refill must parse"),
+            argv
+        );
+        // …and the plain case still reads exactly like it always has.
+        assert_eq!(shell_words::join(["-l", "--verbose"]), "-l --verbose");
+    }
+
+    /// The other half of the #551 contract: a value that cannot become argv is
+    /// refused, not shredded into fragments that happen to contain quotes.
+    #[test]
+    fn unbalanced_quotes_are_refused_not_shredded() {
+        assert!(shell_words::split("-c \"echo hi").is_err());
+        assert!(shell_words::split("--name 'tty7").is_err());
+        // Quoted text survives as one argument, without the quotes.
+        assert_eq!(
+            shell_words::split("-c \"echo hi\"").expect("balanced quotes parse"),
+            vec!["-c".to_string(), "echo hi".to_string()]
+        );
     }
 }
 

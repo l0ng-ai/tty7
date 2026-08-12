@@ -309,8 +309,14 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsProgram => "程序",
         L10nKey::SettingsProgramDesc => "PATH 中的可执行文件名或绝对路径，例如 zsh、fish、pwsh。",
+        L10nKey::SettingsProgramUndetected => {
+            "不在 tty7 检测到的 shell 之列——值已保存，但若是笔误，要到新开窗格时才会暴露。"
+        }
         L10nKey::SettingsArguments => "参数",
-        L10nKey::SettingsArgumentsDesc => "以空格分隔的启动参数，例如登录 shell 用 -l。",
+        L10nKey::SettingsArgumentsDesc => {
+            "启动参数，按 shell 命令行规则切分——含空格的参数请用引号包住（例如 -l，或 -c \"echo hi\"）。"
+        }
+        L10nKey::SettingsArgumentsInvalid => "引号不配对，该值未保存。",
         L10nKey::SettingsStartIn => "起始目录",
         L10nKey::SettingsStartInDesc => "新 shell 的启动目录：tty7 的启动目录、主目录或固定路径。",
         L10nKey::SettingsCustomPath => "自定义路径",

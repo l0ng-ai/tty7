@@ -197,7 +197,13 @@ fn inventory_from(
 }
 
 /// Compares executable identities without collapsing two explicit installs.
-fn same_shell_program(detected: &str, configured: &str) -> bool {
+///
+/// A bare configured command such as `nu` matches any detected executable with
+/// the same basename, because both resolve through PATH. Settings reuses this
+/// for its "tty7 did not detect this shell" nudge (#551): the caller pre-accepts
+/// anything spelled as a path, so the bare-name branch is the only one that
+/// runs there — and it never touches the filesystem.
+pub fn same_shell_program(detected: &str, configured: &str) -> bool {
     let detected = detected.trim();
     let configured = configured.trim();
     if detected.is_empty() || configured.is_empty() {

@@ -356,8 +356,16 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsProgramDesc => {
             "PATH 上の実行可能ファイル名または絶対パス。例: zsh、fish、pwsh"
         }
+        L10nKey::SettingsProgramUndetected => {
+            "tty7 が検出したシェルではありません。値は保存されましたが、入力ミスの場合は新しいペインを開くまで気づきません"
+        }
         L10nKey::SettingsArguments => "引数",
-        L10nKey::SettingsArgumentsDesc => "スペース区切りの起動フラグ。例: ログインシェル用の -l",
+        L10nKey::SettingsArgumentsDesc => {
+            "シェルのコマンドラインと同じ規則で分割される起動フラグ。空白を含むものはクォートしてください（例: -l、-c \"echo hi\"）"
+        }
+        L10nKey::SettingsArgumentsInvalid => {
+            "引用符が対応していないため、この値は保存されませんでした"
+        }
         L10nKey::SettingsStartIn => "初期作業ディレクトリ",
         L10nKey::SettingsStartInDesc => {
             "新しいシェルの開始場所: tty7 の起動ディレクトリ、ホームフォルダ、または固定パス"

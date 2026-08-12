@@ -129,6 +129,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the living panes; where the failure really did take the daemon away, the
   missed pull leaves a rehydration debt instead, which is what stops the
   empty window from being pushed up as the layout. (#554)
+- **Settings' Shell Arguments field now splits like a command line, and quotes
+  on the way back.** The field split on raw whitespace, so `-c "echo hi"`
+  reached the new shell as four argv fragments with the quote characters still
+  attached, and the damage was invisible until the pane misbehaved. The round
+  trip was lossy in the other direction too: a perfectly legal
+  `"args": ["-c", "echo hi"]` in `config.json` refilled the field as
+  `-c echo hi` and re-committed as three argv the moment it lost focus, without
+  the user typing a thing. Quoted text is now one argument, the refill quotes
+  the arguments that need it, and a value whose quotes do not close is refused
+  with an explanation under the input rather than saved as fragments. A path
+  spelled with backslashes still means itself. (#551)
 
 ## [26.8.3] - 2026-08-12
 
