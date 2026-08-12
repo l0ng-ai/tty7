@@ -412,6 +412,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::LinkFileNoDirectory => {
             "{path} — this pane has not said which directory it is in, so a relative path has nothing to be measured from"
         }
+        L10nKey::LinkFileMissing => "{path} — nothing at that path",
+        L10nKey::LinkDirOutsideTree => {
+            "{path} — on another machine, and outside every folder the Files panel has open"
+        }
         L10nKey::OpenFilesWith => "Open files with",
         L10nKey::SettingsOpenFilesWithDesc => {
             "Command run when {modifier}-clicking a file link, instead of the default app. Use {path}, {line}, {column}; a flag whose value is absent is dropped (e.g. herdr edit {path} --line={line}). Empty uses the default app."

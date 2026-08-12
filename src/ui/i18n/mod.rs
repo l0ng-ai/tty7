@@ -377,6 +377,8 @@ l10n_keys! {
     SettingsOpenFilesModeDesc,
     LinkFileNotUnder,
     LinkFileNoDirectory,
+    LinkFileMissing,
+    LinkDirOutsideTree,
     SettingsBellModeOff,
     SettingsBellModeVisual,
     SettingsBellModeAudible,

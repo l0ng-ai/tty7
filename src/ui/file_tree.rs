@@ -20,7 +20,9 @@ use gpui::{
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
-use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 
 const INDENT: f32 = 14.0;
 
@@ -1009,11 +1011,29 @@ impl Tty7App {
     /// [`Self::file_tree_reveal_path`], with the panel brought up to show it.
     /// For a link to a directory, where the tree is the whole answer and
     /// revealing it behind a closed panel would be the click doing nothing.
-    pub(crate) fn file_tree_show(&mut self, path: &Path, cx: &mut Context<Self>) {
+    pub(crate) fn file_tree_show(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.file_tree_reveal_path(path, cx) {
             // Outside every root the tree has nothing to show, and a panel
-            // that opened onto the wrong place would be worse than none.
-            crate::terminal::view::open_file_path(path);
+            // that opened onto the wrong place would be worse than none. The
+            // desktop can take it from here — unless the directory is on
+            // another machine, where handing the name to a local file manager
+            // would open whatever this one keeps at that path, or nothing.
+            if self.can_spawn_locally(cx) {
+                crate::terminal::view::open_file_path(path);
+            } else {
+                window.push_notification(
+                    t_fmt(
+                        L10nKey::LinkDirOutsideTree,
+                        &[("path", &path.display().to_string())],
+                    ),
+                    cx,
+                );
+            }
             return;
         }
         if !self.right_panel_open(cx) {
@@ -1634,21 +1654,25 @@ impl Tty7App {
         let Some((path, left)) = reveal else {
             return children;
         };
-        match reveal_ix {
+        let landed = match reveal_ix {
             Some(ix) => {
                 self.right_panel.tree_scroll.scroll_to_item(ix);
                 // Bounds only exist once the row has been through a layout, so
                 // this is what says the scroll landed on a real position
                 // rather than being queued against an index that may still
                 // shift as sibling listings arrive.
-                if self.right_panel.tree_scroll.bounds_for_item(ix).is_some() {
-                    self.right_panel.tree_reveal = None;
-                }
+                self.right_panel.tree_scroll.bounds_for_item(ix).is_some()
             }
-            None => {
-                self.right_panel.tree_reveal = left.checked_sub(1).map(|left| (path, left));
-            }
-        }
+            None => false,
+        };
+        // The countdown runs whether or not the row was found. A row that is
+        // there but never reports bounds would otherwise keep the request
+        // alive for good, re-issuing a scroll on every single render and
+        // holding the column against anyone trying to scroll it by hand.
+        self.right_panel.tree_reveal = match landed {
+            true => None,
+            false => left.checked_sub(1).map(|left| (path, left)),
+        };
         children
     }
 

@@ -157,7 +157,7 @@ pub struct Config {
 
     pub link_url: bool,
     /// What a clicked file link opens in. `None` means the key predates this
-    /// setting; [`Config::normalize`] resolves it, and every reader should go
+    /// setting; [`Config::sanitize`] resolves it, and every reader should go
     /// through [`Config::file_open_mode`] rather than read it raw.
     #[serde(default, deserialize_with = "de_lenient")]
     pub link_file_open: Option<LinkFileOpen>,
@@ -1000,6 +1000,59 @@ mod tests {
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(back.ssh_warn_on_close);
         assert_eq!(back.ssh_profile_frecency.get(&id).unwrap().count, 4);
+    }
+
+    /// The upgrade path, which is the whole reason `link_file_open` is an
+    /// `Option`: whichever way a config written before this key existed is
+    /// read, it has to keep doing what it did yesterday.
+    #[test]
+    fn link_file_open_takes_its_default_from_the_config_it_upgrades() {
+        let mut had_a_command: Config =
+            serde_json::from_str(r#"{"link_file_command":"code --goto {path}"}"#).unwrap();
+        had_a_command.sanitize();
+        assert_eq!(
+            had_a_command.file_open_mode(),
+            LinkFileOpen::Command,
+            "someone who pointed this at their own editor asked for it and keeps it"
+        );
+        assert_eq!(
+            had_a_command.link_file_command.as_deref(),
+            Some("code --goto {path}")
+        );
+
+        let mut had_none: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        had_none.sanitize();
+        assert_eq!(
+            had_none.file_open_mode(),
+            LinkFileOpen::Internal,
+            "everyone else was silently getting the OS file association"
+        );
+
+        // A command that only ever held whitespace is no command at all —
+        // `sanitize` drops it, and the mode must not be decided on the corpse.
+        let mut blank: Config = serde_json::from_str(r#"{"link_file_command":"   "}"#).unwrap();
+        blank.sanitize();
+        assert_eq!(blank.link_file_command, None);
+        assert_eq!(blank.file_open_mode(), LinkFileOpen::Internal);
+
+        let mut chosen: Config =
+            serde_json::from_str(r#"{"link_file_open":"system","link_file_command":"code"}"#)
+                .unwrap();
+        chosen.sanitize();
+        assert_eq!(
+            chosen.file_open_mode(),
+            LinkFileOpen::System,
+            "an explicit choice outranks whatever the command box holds"
+        );
+
+        let json = serde_json::to_string(&chosen).unwrap();
+        assert!(json.contains("\"link_file_open\":\"system\""), "persisted");
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.file_open_mode(), LinkFileOpen::System);
+
+        // Unknown values fall back rather than refusing the whole file.
+        let garbage: Config = serde_json::from_str(r#"{"link_file_open":"emacs"}"#).unwrap();
+        assert_eq!(garbage.file_open_mode(), LinkFileOpen::Internal);
     }
 
     #[test]

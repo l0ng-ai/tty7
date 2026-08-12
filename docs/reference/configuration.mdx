@@ -132,7 +132,7 @@ angle brackets, and a tab:
 | Key | Type | Default | |
 |---|---|---|---|
 | `link_url` | bool | `true` | Underline and open URLs on ⌘/Ctrl-click. |
-| `link_file_open` | string | `internal` | What a file link opens: `internal` (tty7's editor, at the line), `system` (the OS file association), `command`. |
+| `link_file_open` | string | `internal` | What a file link opens: `internal` (tty7's editor, at the line), `system` (the OS file association), `command`. A file on another machine always uses `internal`. |
 | `link_file_command` | string | — | Command for file links under `link_file_open: command`. `{path}`, `{line}`, `{column}` are substituted; a flag whose value is missing is dropped. |
 | `ssh_loopback_forward` | bool | `false` | Open `localhost:PORT` links through a temporary forward when the pane is in SSH. |
 

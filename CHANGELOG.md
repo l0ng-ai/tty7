@@ -23,7 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connected to, so `/etc/nginx/nginx.conf` on a server opened the one on your
   laptop, silently. Paths are now resolved on the pane's own host, and a pane
   running `ssh` typed into a local shell — where neither side can answer for
-  them — no longer offers file links at all.
+  them — no longer offers file links at all. A file on another machine opens
+  in the built-in editor whatever **Open files with** says, since a local
+  `open` or editor command would land back on this machine's copy.
 - **Relative paths resolve from where the work is, and from the repository
   around it.** Detection followed the shell's kernel cwd, which an agent
   working in a git worktree never updates, and only ever tried one directory —

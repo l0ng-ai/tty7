@@ -419,6 +419,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::LinkFileNoDirectory => {
             "{path} — このペインはどのディレクトリにいるかを報告していないため、相対パスの起点がありません"
         }
+        L10nKey::LinkFileMissing => "{path} — そのパスには何もありません",
+        L10nKey::LinkDirOutsideTree => {
+            "{path} — 別のマシン上にあり、ファイルパネルで開いているどのフォルダにも含まれていません"
+        }
         L10nKey::OpenFilesWith => "ファイルを開くアプリケーション",
         L10nKey::SettingsOpenFilesWithDesc => {
             "ファイルリンクを {modifier}+クリックで開くときに使うコマンドです。デフォルトアプリの代わりに実行します。{path}、{line}、{column} を使えます。値のないフラグは除外されます（例: herdr edit {path} --line={line}）。空欄ならデフォルトアプリを使います"

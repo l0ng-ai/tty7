@@ -4709,6 +4709,16 @@ impl TerminalView {
         let cfg = cx.global::<Config>();
         let mode = cfg.file_open_mode();
         let command = cfg.link_file_command.clone();
+        // A path that was just resolved on another machine means nothing to a
+        // local opener: `open` and a user's `code --goto` would both be handed
+        // a path this filesystem never had, throwing away the one thing that
+        // made the link right and silently showing this machine's copy when
+        // one happens to exist. The editor is the only one that can reach the
+        // file, so it takes the click whatever the setting says.
+        let mode = match self.host_id.is_local() {
+            true => mode,
+            false => LinkFileOpen::Internal,
+        };
         match (mode, command) {
             (LinkFileOpen::Command, Some(template)) => {
                 run_file_command(&template, &path, line, column)
@@ -4748,8 +4758,15 @@ impl TerminalView {
         if pending {
             return false;
         }
-        let root = self.link_roots(cx).into_iter().next();
-        let message = match &root {
+        // An absolute or `~`-rooted path was never measured from anywhere, so
+        // naming a directory it was "looked for under" would send the user to
+        // somewhere nothing was ever asked about.
+        let rooted = candidate.is_rooted();
+        let root = match rooted {
+            true => None,
+            false => self.link_roots(cx).dirs.into_iter().next(),
+        };
+        let message = match root {
             Some(root) => t_fmt(
                 L10nKey::LinkFileNotUnder,
                 &[
@@ -4757,6 +4774,7 @@ impl TerminalView {
                     ("dir", &root.display().to_string()),
                 ],
             ),
+            None if rooted => t_fmt(L10nKey::LinkFileMissing, &[("path", &candidate.path)]),
             None => t_fmt(L10nKey::LinkFileNoDirectory, &[("path", &candidate.path)]),
         };
         window.push_notification(message, cx);
@@ -4916,7 +4934,7 @@ impl TerminalView {
         let files = include_files && self.cwd_is_on_host();
         let roots = match files {
             true => self.link_roots(cx),
-            false => Vec::new(),
+            false => super::search::LinkRoots::default(),
         };
         let local = self.host_id.is_local();
         // Before the first probe, not after: `retarget` empties the cache when
@@ -4991,19 +5009,23 @@ impl TerminalView {
     /// shell sits in a member directory, so one root resolves only half of
     /// what a build prints. The pane's own directory stays first, so a name
     /// that exists in both is the near one.
-    fn link_roots(&mut self, cx: &mut Context<Self>) -> Vec<std::path::PathBuf> {
+    fn link_roots(&mut self, cx: &mut Context<Self>) -> super::search::LinkRoots {
+        let local_home = self.host_id.is_local();
         let Some(cwd) = self.effective_host_cwd() else {
-            return Vec::new();
+            return super::search::LinkRoots {
+                dirs: Vec::new(),
+                local_home,
+            };
         };
         self.request_link_repo_root(&cwd, cx);
-        let mut roots = vec![cwd.clone()];
+        let mut dirs = vec![cwd.clone()];
         if let Some((asked_for, Some(root))) = &self.link_repo_root
             && *asked_for == cwd
             && *root != cwd
         {
-            roots.push(root.clone());
+            dirs.push(root.clone());
         }
-        roots
+        super::search::LinkRoots { dirs, local_home }
     }
 
     fn request_link_repo_root(&mut self, cwd: &std::path::Path, cx: &mut Context<Self>) {
@@ -5013,6 +5035,20 @@ impl TerminalView {
                 .as_ref()
                 .is_some_and(|(asked_for, _)| asked_for == cwd)
         {
+            return;
+        }
+        // The git-status probe asks this same question about this same
+        // directory on its own schedule and files the answer per host, so a
+        // hit there costs nothing and saves a round trip. Only a hit: the
+        // cache cannot tell "asked, and there is no repository" apart from
+        // "never asked", and treating the second as the first would nail a
+        // pane to one root forever.
+        let cached = cx
+            .try_global::<crate::terminal::git_status::GitStatusCache>()
+            .and_then(|cache| cache.repo_root_for(self.host_id, cwd))
+            .map(std::path::Path::to_path_buf);
+        if let Some(root) = cached {
+            self.link_repo_root = Some((cwd.to_path_buf(), Some(root)));
             return;
         }
         let Some(host) = self.host(cx) else {
@@ -5043,13 +5079,19 @@ impl TerminalView {
         if self.host_id.is_local() {
             return;
         }
+        // The host comes first: `take_wanted` moves the paths into the
+        // in-flight set on the promise that a call is about to carry them, and
+        // a host that has gone away between the hover and here would break
+        // that promise permanently — those paths would stay `Unknown` for the
+        // life of the pane, which looks exactly like the silent nothing this
+        // whole path exists to get rid of.
+        let Some(host) = self.host(cx) else {
+            return;
+        };
         let wanted = self.link_probes.take_wanted();
         if wanted.is_empty() {
             return;
         }
-        let Some(host) = self.host(cx) else {
-            return;
-        };
         crate::ui::host_ops::HostOps::run(
             host,
             cx,
@@ -8360,6 +8402,60 @@ mod gpui_tests {
             })
             .unwrap();
         let _ = std::fs::remove_file(&file);
+    }
+
+    /// A path a remote pane printed stays *wanted* until a host has actually
+    /// been asked about it.
+    ///
+    /// `take_wanted` moves paths into the in-flight set on the promise that a
+    /// call is carrying them; a lookup that finds no host to make that call
+    /// must not have made the promise. Otherwise those paths sit "not answered
+    /// yet" for the life of the pane — no underline, and a click that says
+    /// nothing, which is the silence this whole path exists to remove.
+    #[gpui::test]
+    fn a_probe_with_no_host_to_ask_stays_wanted(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Output(b"see /etc/hosts now\r\n".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        for _ in 0..200 {
+            let seen = window
+                .update(cx, |view, _, _| {
+                    view.terminal.term.lock().grid()[Line(0)][Column(4)].c == '/'
+                })
+                .unwrap();
+            if seen {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, _, cx| {
+                bind_to_a_disconnected_remote_workspace(view, cx);
+                assert!(
+                    view.host(cx).is_none(),
+                    "a workspace that never connected has nothing to ask"
+                );
+                assert!(
+                    view.cwd_is_on_host(),
+                    "the pane's paths are the far side's, whether or not it is up"
+                );
+                assert!(
+                    !view.hover_link_at(4, 0, true, cx),
+                    "nothing underlines while the answer is still unknown"
+                );
+                assert_eq!(
+                    view.link_probes.take_wanted(),
+                    vec![std::path::PathBuf::from("/etc/hosts")],
+                    "and the question survives, ready for a host to answer it"
+                );
+                assert!(
+                    !view.link_roots(cx).local_home,
+                    "this machine's $HOME describes nobody over there"
+                );
+            })
+            .unwrap();
     }
 
     #[gpui::test]

@@ -361,6 +361,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::LinkFileNoDirectory => {
             "{path} —— 这个窗格没有报告自己在哪个目录，相对路径无从算起"
         }
+        L10nKey::LinkFileMissing => "{path} —— 这个路径下什么也没有",
+        L10nKey::LinkDirOutsideTree => "{path} —— 它在另一台机器上，也不在文件面板打开的任何目录里",
         L10nKey::OpenFilesWith => "打开文件方式",
         L10nKey::SettingsOpenFilesWithDesc => {
             "{modifier}+点击 文件链接时运行的命令，而不是默认应用。可使用 {path}、{line}、{column}；参数值缺失的标志会被丢弃（例如 herdr edit {path} --line={line}）。留空使用默认应用。"

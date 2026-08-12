@@ -36,9 +36,14 @@ answer for its paths, so file links are off there.
 
 | Mode | Opens in |
 | --- | --- |
-| Built-in editor | tty7's editor, at `:line:column`. The default, and the only one that works for a file on a remote host. |
+| Built-in editor | tty7's editor, at `:line:column`. The default. |
 | Default app | Whatever the OS associates with the file type. |
 | Command | A command of your own — see below. |
+
+A file on another machine always opens in the built-in editor, whichever mode
+is set: a path that was just resolved on the far side means nothing to a local
+`open` or `code`, which would show this machine's copy of that path or nothing
+at all.
 
 Under **Command**, the command runs with placeholders substituted:
 

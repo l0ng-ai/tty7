@@ -713,10 +713,45 @@ pub(super) fn local_probe(path: &Path, require_file: bool) -> Probe {
     }
 }
 
+/// Where a relative path printed by a pane is measured from.
+///
+/// `local_home` is the part that is easy to miss. `~` has to become a real
+/// directory before anything can be looked up, and the only clue a pane
+/// usually offers is its own cwd; when that does not reveal a home, this
+/// machine's `$HOME` is the last resort. Sound for a pane on this machine, and
+/// a fabrication for one whose paths live elsewhere — `/Users/me/.zshrc` is
+/// not what `~/.zshrc` means on a Linux box, and asking that box about it is
+/// at best a miss and at worst somebody else's file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct LinkRoots {
+    /// Directories a relative path is tried against, nearest first.
+    pub dirs: Vec<PathBuf>,
+    /// Whether this machine's `$HOME` may stand in for a `~` the roots cannot
+    /// explain.
+    pub local_home: bool,
+}
+
+impl LinkRoots {
+    /// Roots on the machine tty7 is running on, where `$HOME` means what it
+    /// says.
+    pub fn local(dirs: Vec<PathBuf>) -> Self {
+        Self {
+            dirs,
+            local_home: true,
+        }
+    }
+
+    /// The directory the pane is in — the first root, and the one a `~` is
+    /// read out of.
+    pub fn cwd(&self) -> Option<&Path> {
+        self.dirs.first().map(PathBuf::as_path)
+    }
+}
+
 pub(super) fn link_at(
     text: &str,
     col: usize,
-    roots: &[PathBuf],
+    roots: &LinkRoots,
     include_files: bool,
     probe: &mut dyn FnMut(&Path, bool) -> Probe,
 ) -> Option<LinkMatch> {
@@ -752,7 +787,7 @@ pub(super) fn link_at(
 /// root may already be cached — it just leaves the token unresolved for now.
 pub(super) fn resolve_candidate(
     candidate: &FileCandidate,
-    roots: &[PathBuf],
+    roots: &LinkRoots,
     probe: &mut dyn FnMut(&Path, bool) -> Probe,
 ) -> Option<(PathBuf, bool)> {
     let require_file = candidate.require_file();
@@ -791,8 +826,8 @@ impl FileCandidate {
 
     /// Every path this token could mean, best guess first: absolute paths
     /// stand alone, relative ones are joined onto each root in turn.
-    pub fn paths(&self, roots: &[PathBuf]) -> Vec<PathBuf> {
-        let Some(expanded) = expand_home(&self.path, roots.first().map(PathBuf::as_path)) else {
+    pub fn paths(&self, roots: &LinkRoots) -> Vec<PathBuf> {
+        let Some(expanded) = expand_home(&self.path, roots.cwd(), roots.local_home) else {
             return Vec::new();
         };
         if expanded.as_os_str().is_empty() {
@@ -802,13 +837,21 @@ impl FileCandidate {
             return vec![expanded];
         }
         let mut out: Vec<PathBuf> = Vec::new();
-        for root in roots {
+        for root in &roots.dirs {
             let joined = root.join(&expanded);
             if !out.contains(&joined) {
                 out.push(joined);
             }
         }
         out
+    }
+
+    /// Whether the token says for itself where it starts, rather than being
+    /// measured from anywhere. [`Self::paths`] ignores the roots entirely for
+    /// these, so a report about one must not name a directory as the place it
+    /// was looked for.
+    pub fn is_rooted(&self) -> bool {
+        self.path.starts_with('~') || Path::new(&self.path).is_absolute()
     }
 
     /// Whether the token is written enough like a path to be worth telling the
@@ -997,19 +1040,30 @@ fn strip_numeric_suffix(token: &str) -> Option<(&str, u32)> {
     Some((prefix, value))
 }
 
-fn expand_home(path: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+fn expand_home(path: &str, cwd: Option<&Path>, local_home: bool) -> Option<PathBuf> {
     if path == "~" {
-        return home_dir(cwd);
+        return home_dir(cwd, local_home);
     }
     if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
-        return home_dir(cwd).map(|home| home.join(rest));
+        return home_dir(cwd, local_home).map(|home| home.join(rest));
     }
     Some(PathBuf::from(path))
 }
 
-fn home_dir(cwd: Option<&Path>) -> Option<PathBuf> {
+/// The home `~` stands for, read out of the cwd where it can be and out of the
+/// environment where it cannot.
+///
+/// The environment half only applies to a pane on this machine. Anywhere else
+/// it would be guessing with our own answer: a cwd of `/srv/app` on a Linux
+/// box says nothing about that box's home, and turning `~/.zshrc` into
+/// `/Users/me/.zshrc` and asking the far side about it is how a link ends up
+/// pointing at a file nobody meant.
+fn home_dir(cwd: Option<&Path>, local_home: bool) -> Option<PathBuf> {
     if let Some(home) = cwd.and_then(home_from_cwd) {
         return Some(home);
+    }
+    if !local_home {
+        return None;
     }
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -1365,12 +1419,12 @@ mod tests {
     }
 
     /// `link_at` against the real filesystem, the way a local pane resolves.
-    fn local_link_at(line: &str, col: usize, roots: &[PathBuf], files: bool) -> Option<LinkMatch> {
+    fn local_link_at(line: &str, col: usize, roots: &LinkRoots, files: bool) -> Option<LinkMatch> {
         link_at(line, col, roots, files, &mut local_probe)
     }
 
-    fn one_root(cwd: &Path) -> Vec<PathBuf> {
-        vec![cwd.to_path_buf()]
+    fn one_root(cwd: &Path) -> LinkRoots {
+        LinkRoots::local(vec![cwd.to_path_buf()])
     }
 
     fn assert_file_link(
@@ -1418,8 +1472,27 @@ mod tests {
     fn tilde_expansion_prefers_home_inferred_from_the_pane_cwd() {
         let cwd = Path::new("/Users/alice/clone/tty7");
         assert_eq!(
-            expand_home("~/clone/tty7/src/main.rs", Some(cwd)),
+            expand_home("~/clone/tty7/src/main.rs", Some(cwd), true),
             Some(PathBuf::from("/Users/alice/clone/tty7/src/main.rs"))
+        );
+    }
+
+    /// A cwd that reveals no home is the end of the road for a pane on another
+    /// machine: this machine's `$HOME` describes nobody there, and a path built
+    /// out of it would be asked about — and possibly answered — on the far side.
+    #[test]
+    #[cfg(unix)]
+    fn tilde_expansion_does_not_borrow_this_machines_home_for_another_one() {
+        let cwd = Path::new("/srv/app");
+        assert_eq!(expand_home("~/.zshrc", Some(cwd), false), None);
+        assert_eq!(
+            expand_home("~/.zshrc", Some(Path::new("/home/deploy/app")), false),
+            Some(PathBuf::from("/home/deploy/.zshrc")),
+            "a cwd that does reveal the home needs nothing from us"
+        );
+        assert!(
+            expand_home("~/.zshrc", Some(cwd), true).is_some(),
+            "a local pane still falls back to the environment"
         );
     }
 
@@ -1541,7 +1614,7 @@ mod tests {
         let col = line.find("crates").expect("path start");
         assert_eq!(local_link_at(line, col, &one_root(&cwd), true), None);
 
-        let roots = vec![cwd.clone(), root.clone()];
+        let roots = LinkRoots::local(vec![cwd.clone(), root.clone()]);
         let link = local_link_at(line, col, &roots, true).expect("resolved from the repo root");
         match link.target {
             LinkTarget::File { path: got, .. } => assert_eq!(got, path),
@@ -1560,7 +1633,7 @@ mod tests {
             .to_path_buf();
         let root = far.ancestors().nth(2).expect("ambiguous/").to_path_buf();
 
-        let roots = vec![cwd, root];
+        let roots = LinkRoots::local(vec![cwd, root]);
         let link = local_link_at("at src/main.rs:1", 3, &roots, true).expect("file link");
         match link.target {
             LinkTarget::File { path, .. } => assert_eq!(
@@ -1574,7 +1647,7 @@ mod tests {
     #[test]
     fn an_unanswered_probe_resolves_to_nothing_and_asks_about_every_root() {
         let mut asked: Vec<PathBuf> = Vec::new();
-        let roots = vec![PathBuf::from("/work/crate"), PathBuf::from("/work")];
+        let roots = LinkRoots::local(vec![PathBuf::from("/work/crate"), PathBuf::from("/work")]);
         let link = link_at("see src/lib.rs:9 there", 5, &roots, true, &mut |path, _| {
             asked.push(path.to_path_buf());
             Probe::Unknown
@@ -1609,11 +1682,14 @@ mod tests {
     fn a_relative_candidate_has_no_paths_without_a_root() {
         let candidate = file_candidate_at("see src/lib.rs here", 5).expect("candidate");
         assert!(
-            candidate.paths(&[]).is_empty(),
+            candidate.paths(&LinkRoots::default()).is_empty(),
             "a pane that never said where it is cannot measure a relative path"
         );
         assert_eq!(
-            candidate.paths(&[PathBuf::from("/w"), PathBuf::from("/w")]),
+            candidate.paths(&LinkRoots::local(vec![
+                PathBuf::from("/w"),
+                PathBuf::from("/w")
+            ])),
             vec![PathBuf::from("/w/src/lib.rs")],
             "a repo root equal to the cwd is one root, not two probes"
         );
@@ -1623,8 +1699,17 @@ mod tests {
     fn an_absolute_candidate_ignores_the_roots_entirely() {
         let candidate = file_candidate_at("open /etc/hosts now", 6).expect("candidate");
         assert_eq!(
-            candidate.paths(&[PathBuf::from("/w")]),
+            candidate.paths(&LinkRoots::local(vec![PathBuf::from("/w")])),
             vec![PathBuf::from("/etc/hosts")]
+        );
+        assert!(
+            candidate.is_rooted(),
+            "so a report about it never claims it was looked for under a root"
+        );
+        assert!(
+            !file_candidate_at("see src/lib.rs here", 5)
+                .expect("candidate")
+                .is_rooted()
         );
     }
 

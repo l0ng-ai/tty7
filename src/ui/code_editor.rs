@@ -403,7 +403,7 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         if is_dir {
-            self.file_tree_show(path, cx);
+            self.file_tree_show(path, window, cx);
             return;
         }
         self.open_file_in_editor_at(path, line, column, window, cx);
