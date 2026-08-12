@@ -899,15 +899,17 @@ fn shell_quote(s: &str) -> String {
 /// `remote::bootstrap_command` does over SSH, and anything else falls back to a
 /// plain login shell.
 ///
-/// The zsh arm asks whether the redirectors are really there before trusting
-/// them. They live on the Windows side and reach the distro over `/mnt`, which
-/// is not a given: automount can be off, `/etc/wsl.conf` can move the root, and
-/// a distro can have no drvfs at all. An unguarded `ZDOTDIR` pointing at a
-/// directory that is not there starts zsh with no startup files whatsoever —
-/// the user's entire configuration gone, without a word. Guarded, that distro
-/// gets the plain login shell it had before any of this. The `*/bash)` arm
-/// above has no such guard; that is a real hole of its own, and changing
-/// released behaviour belongs in its own commit rather than riding along here.
+/// Both file-backed arms ask whether what they were handed is really there
+/// before trusting it. The files live on the Windows side and reach the distro
+/// over `/mnt`, which is not a given: automount can be off, `/etc/wsl.conf` can
+/// move the root, and a distro can have no drvfs at all. Unguarded, bash is
+/// handed a `--rcfile` it cannot read — which it ignores in silence, taking the
+/// user's own `.bashrc` down with it, because tty7 starts it non-login so that
+/// `--rcfile` is honoured at all — and zsh is pointed at a `ZDOTDIR` that does
+/// not exist, which takes every startup file the user wrote with it. Guarded,
+/// such a distro gets the plain login shell it had before any of this: no
+/// integration, but the startup files a bare `wsl.exe` pane reads, which is the
+/// failure worth having.
 ///
 /// `sh` parses this script, so the fish body is POSIX-quoted here — unlike the
 /// SSH path, where the far end's own login shell parses the bootstrap and
@@ -917,7 +919,8 @@ fn wsl_exec_script() -> String {
     format!(
         concat!(
             r#"case "${{SHELL:-}}" in "#,
-            r#"*/bash) exec "$SHELL" --rcfile "$TTY7_RC" -i ;; "#,
+            r#"*/bash) [ -r "${{TTY7_RC:-}}" ] && exec "$SHELL" --rcfile "$TTY7_RC" -i; "#,
+            r#"exec "$SHELL" -l ;; "#,
             r#"*/zsh) [ -n "${{TTY7_ZDOTDIR:-}}" ] && [ -r "$TTY7_ZDOTDIR/.zshrc" ] "#,
             r#"&& export ZDOTDIR="$TTY7_ZDOTDIR"; exec "$SHELL" -l ;; "#,
             r#"*/fish) exec "$SHELL" -C {} -l ;; "#,
@@ -1571,7 +1574,9 @@ mod tests {
     fn the_wsl_bootstrap_carries_integration_for_fish_not_just_bash() {
         let script = wsl_exec_script();
 
-        assert!(script.contains(r#"*/bash) exec "$SHELL" --rcfile "$TTY7_RC" -i ;;"#));
+        assert!(script.contains(
+            r#"*/bash) [ -r "${TTY7_RC:-}" ] && exec "$SHELL" --rcfile "$TTY7_RC" -i; exec "$SHELL" -l ;;"#
+        ));
         assert!(script.contains(&format!(
             r#"*/fish) exec "$SHELL" -C {} -l ;;"#,
             shell_quote(FISH_INTEGRATION)
@@ -1650,13 +1655,16 @@ mod tests {
         std::fs::create_dir_all(&zdotdir).unwrap();
         std::fs::write(zdotdir.join(".zshrc"), "").unwrap();
 
-        let run = |shell: &str, zdot: &str| {
+        let rcfile = dir.join("bashrc");
+        std::fs::write(&rcfile, "").unwrap();
+
+        let run = |shell: &str, rc: &str, zdot: &str| {
             let out = Command::new("sh")
                 .arg("-c")
                 .arg(wsl_exec_script())
                 .env_clear()
                 .env("SHELL", dir.join(shell).to_string_lossy().into_owned())
-                .env("TTY7_RC", dir.join("bashrc").to_string_lossy().into_owned())
+                .env("TTY7_RC", rc)
                 .env("TTY7_ZDOTDIR", zdot)
                 .output()
                 .expect("run the bootstrap");
@@ -1664,20 +1672,30 @@ mod tests {
             String::from_utf8_lossy(&out.stdout).into_owned()
         };
 
+        let rc = rcfile.to_string_lossy().into_owned();
         let zdot = zdotdir.to_string_lossy().into_owned();
-        assert!(run("bash", &zdot).contains("bash --rcfile"));
-        assert!(run("fish", &zdot).starts_with("fish -C"));
+        assert!(run("bash", &rc, &zdot).contains("bash --rcfile"));
+        assert!(run("fish", &rc, &zdot).starts_with("fish -C"));
 
-        let zsh = run("zsh", &zdot);
+        let zsh = run("zsh", &rc, &zdot);
         assert!(zsh.contains("zsh -l"), "{zsh}");
         assert!(zsh.contains(&format!("ZDOTDIR={zdot}")), "{zsh}");
 
-        // The distro that cannot see /mnt. It must still get its shell, and it
-        // must not get a ZDOTDIR pointing at nothing.
+        // The distro that cannot see /mnt. Every arm that was handed a path has
+        // to notice, and fall back to the login shell that reads the user's own
+        // files rather than to one holding a path that is not there.
         let missing = dir.join("not-there").to_string_lossy().into_owned();
-        let blind = run("zsh", &missing);
-        assert!(blind.contains("zsh -l"), "{blind}");
-        assert!(blind.contains("ZDOTDIR=unset"), "{blind}");
+
+        let blind_zsh = run("zsh", &rc, &missing);
+        assert!(blind_zsh.contains("zsh -l"), "{blind_zsh}");
+        assert!(blind_zsh.contains("ZDOTDIR=unset"), "{blind_zsh}");
+
+        let blind_bash = run("bash", &missing, &zdot);
+        assert!(
+            !blind_bash.contains("--rcfile"),
+            "bash was handed an rcfile it cannot read: {blind_bash}"
+        );
+        assert!(blind_bash.contains("bash -l"), "{blind_bash}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -137,6 +137,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A WSL distro that cannot reach `/mnt` keeps its own `.bashrc`** — the
+  bootstrap handed bash a `--rcfile` living on the Windows side without
+  checking the distro could read it. bash ignores an unreadable `--rcfile`
+  without a word, and tty7 starts it non-login precisely so that `--rcfile` is
+  honoured at all — so a distro with automount off, or a root moved by
+  `wsl.conf`, opened a shell that had read no startup file the user wrote: not
+  tty7's, and not their `.bashrc` or `.bash_profile` either. The arm now checks
+  first and falls back to a plain login shell, which reads the same startup
+  files a pane without shell integration reads and only gives up the
+  integration.
+
 - **An idle window stops re-reading the repository on Linux** — with a
   repository open, tty7 ran `git status -uall` about two and a half times a
   second, forever, with nothing on screen changing and nobody touching the
