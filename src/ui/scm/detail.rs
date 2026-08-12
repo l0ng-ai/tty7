@@ -63,6 +63,14 @@ const ROW_INSET: f32 = 4.;
 /// past that it is a changelog, and the file list is what the reader came for.
 const BODY_LINES: usize = 4;
 
+/// The body's leading, spelled out because the fold is a height and a height
+/// needs a line to multiply.
+///
+/// 18px is what `phi()` already resolved 11px type to, so nothing moves by
+/// naming it — what it buys is a fold that lands on a line boundary instead of
+/// through the middle of one.
+const BODY_LINE_H: f32 = 18.;
+
 /// And how much of the subject, which wraps rather than folding. Three lines
 /// of 12px in 260px is around 90 characters — longer than every subject in
 /// this repository but a handful, and a cap for the ones that are a paragraph.
@@ -368,17 +376,41 @@ impl Tty7App {
                     // and the parents below it are set in. A size of its own
                     // bought nothing and cost the reader a fourth step in a
                     // view eight lines tall.
+                    //
+                    // The fold is a clipped height, not `line_clamp`. That
+                    // helper only limits the *wrap* boundaries inside one
+                    // logical line: `shape_text` splits on `\n` first and
+                    // shapes every hard line it finds, so a clamp of four over
+                    // a thirty-line commit message laid out all thirty and the
+                    // fold did visibly nothing. A commit body is the one string
+                    // in this panel that is always hard-wrapped, which is
+                    // exactly the case the helper does not cover.
+                    //
+                    // Truncating the string as well keeps the shaper off the
+                    // lines nobody can see; the height is what guarantees the
+                    // fold, because those four lines can each wrap again in a
+                    // column this narrow.
                     div()
                         .pt(px(2.))
                         .text_size(px(SECONDARY_SIZE))
+                        .line_height(px(BODY_LINE_H))
                         .text_color(cx.theme().muted_foreground)
-                        .when(folded, |d| d.line_clamp(BODY_LINES))
-                        .child(SharedString::from(body.to_string())),
+                        .when(folded, |d| {
+                            d.max_h(px(2. + BODY_LINE_H * BODY_LINES as f32))
+                                .overflow_hidden()
+                        })
+                        .debug_selector(|| "scm-detail-body".into())
+                        .child(SharedString::from(if folded {
+                            body.lines().take(BODY_LINES).collect::<Vec<_>>().join("\n")
+                        } else {
+                            body.to_string()
+                        })),
                 )
                 .when(lines > BODY_LINES, |this| {
                     this.child(
                         div()
                             .id("scm-detail-body-fold")
+                            .debug_selector(|| "scm-detail-fold".into())
                             .w_full()
                             .py(px(1.))
                             .cursor_pointer()
@@ -1246,6 +1278,114 @@ mod detail_gpui_tests {
             );
             assert_eq!(detail.files.as_ref().unwrap().len(), 3);
         });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn fold_click(vcx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+        vcx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                    position: at,
+                    pressed_button: None,
+                    modifiers: gpui::Modifiers::none(),
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position: at,
+                    modifiers: gpui::Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position: at,
+                    modifiers: gpui::Modifiers::none(),
+                    click_count: 1,
+                }),
+                cx,
+            );
+            window.refresh();
+        });
+        vcx.run_until_parked();
+    }
+
+    /// The fold has to move the body, not just relabel itself.
+    ///
+    /// This is the test the state flag alone could never be: `body_expanded`
+    /// flipped correctly the whole time the fold was broken. What was wrong was
+    /// the clamp — `line_clamp` only limits the wrapped lines *within* one
+    /// logical line, so a commit message, which is hard-wrapped, laid out in
+    /// full whichever way the flag pointed. Both clicks and both heights, or it
+    /// proves nothing.
+    #[gpui::test]
+    fn the_fold_shortens_the_body_and_the_second_click_puts_it_back(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let root = two_commit_repo("fold");
+        let head = git(&root, &["rev-parse", "HEAD"]);
+        let (app, mut vcx, _pane) = panel_on(cx, &root);
+        let repo = app.update_in(&mut vcx, |app, _, _| app.scm.repo.clone().unwrap());
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.open_commit_detail(repo.clone(), head.clone(), None, cx)
+        });
+        settle(&app, &mut vcx, |app, _| {
+            app.scm.detail.as_ref().is_some_and(|d| d.loaded)
+        });
+        app.update_in(&mut vcx, |_, _, cx| cx.notify());
+        vcx.run_until_parked();
+
+        // The scratch commit's body is six lines, so a fold of four has to cost
+        // it two of them.
+        let body_h = |vcx: &mut VisualTestContext| {
+            vcx.debug_bounds("scm-detail-body")
+                .expect("the body is drawn")
+                .size
+                .height
+        };
+        let folded = body_h(&mut vcx);
+        assert!(
+            folded <= px(2. + BODY_LINE_H * BODY_LINES as f32),
+            "a six-line body opens folded to four: {folded:?}"
+        );
+
+        let fold = vcx
+            .debug_bounds("scm-detail-fold")
+            .expect("six lines earn a fold row");
+        fold_click(&mut vcx, fold.center());
+        assert!(
+            app.update_in(&mut vcx, |app, _, _| app
+                .scm
+                .detail
+                .as_ref()
+                .unwrap()
+                .body_expanded),
+            "the click landed"
+        );
+        let open = body_h(&mut vcx);
+        assert!(open > folded, "and the body grew: {open:?} over {folded:?}");
+
+        let fold = vcx.debug_bounds("scm-detail-fold").expect("still there");
+        fold_click(&mut vcx, fold.center());
+        assert!(
+            !app.update_in(&mut vcx, |app, _, _| app
+                .scm
+                .detail
+                .as_ref()
+                .unwrap()
+                .body_expanded),
+            "Show less is the same row again"
+        );
+        assert_eq!(
+            body_h(&mut vcx),
+            folded,
+            "and it folds back to where it was"
+        );
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
