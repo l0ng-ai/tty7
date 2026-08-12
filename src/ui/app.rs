@@ -1554,14 +1554,34 @@ impl Tty7App {
                         crate::ui::tree_sync::resync_after_local_daemon_change(cx);
                     }
                     Err(e) => {
-                        // The user asked for this and lands on an empty home
-                        // page; without a reason there it looks like the
-                        // restart worked and took everything with it.
-                        log::error!("restart background service failed, staying on home page: {e}");
-                        this.startup_error = Some(gpui::SharedString::from(t_fmt(
+                        // A refused handoff leaves the daemon exactly as it was,
+                        // still serving the panes this window just dropped. Leaving
+                        // it at the error here strands them: every restore path is
+                        // tree-driven, and the next sync of this emptied window
+                        // would diff into "close every tab" against the mirror —
+                        // deleting the pane records under the still-running shells,
+                        // or the whole workspace if the user simply closes the
+                        // window first (#554). Pull the layout back instead; where
+                        // the failure really did take the daemon away (an exec that
+                        // never re-listened), the pull misses and the rehydration
+                        // debt keeps the empty window from being pushed up.
+                        //
+                        // The invalidating helper, not the one the reconnect uses:
+                        // nothing here handshaked a link. Half of `hand_off`'s
+                        // failures happen *after* the exec — a daemon that never
+                        // started listening again is gone, and the client we still
+                        // hold points at its socket, which `is_connected` keeps
+                        // calling good until its reader sees the EOF.
+                        log::error!(
+                            "restart background service failed, resyncing from the tree: {e}"
+                        );
+                        let text = t_fmt(
                             L10nKey::AppRestartServerFailed,
                             &[("error", &e.to_string())],
-                        )));
+                        );
+                        this.startup_error = Some(gpui::SharedString::from(text.clone()));
+                        window.push_notification(text, cx);
+                        crate::ui::tree_sync::resync_after_local_daemon_change(cx);
                     }
                 }
                 this.focus_active(window, cx);

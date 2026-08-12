@@ -116,6 +116,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`scrollback_limit: 5000` highlighted "10,000", and clicking that cell
   silently overwrote it) — it shows a "Custom (5,000)" cell that names the
   real value and is not a button (#550).
+- **A refused in-place daemon restart no longer strands every pane it
+  promised to keep** — Restart Server clears the window before attempting the
+  handoff, and when the handoff failed the window simply stayed empty with an
+  error on the home page. The daemon was still running and serving those
+  panes, but every restore path is driven by the machine tree, and the next
+  sync of the emptied window diffed into "close every tab" against it —
+  deleting the pane records under shells that were still alive, or the whole
+  workspace at once if the user just closed the window, right after the
+  dialog had promised nothing would be interrupted. A failed restart now
+  drops the dead link and pulls the layout back from the tree, reattaching
+  the living panes; where the failure really did take the daemon away, the
+  missed pull leaves a rehydration debt instead, which is what stops the
+  empty window from being pushed up as the layout. (#554)
 
 ## [26.8.3] - 2026-08-12
 
