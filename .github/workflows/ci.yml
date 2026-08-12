@@ -175,9 +175,18 @@ jobs:
       #
       # Deleting this step would not fail anything — it would silently retire
       # thirteen end-to-end tests.
+      #
+      # No `-p tty7-cli`, and that is load-bearing rather than shorthand.
+      # Naming the package resolves features for *its* dependency graph alone,
+      # while every step above builds the default members together — and the root
+      # package turns on tty7-core's `gssapi` and `remote-install`. The two
+      # feature sets are two different builds of tty7-core, so `-p` rebuilds it
+      # and everything above it from scratch: 91 crates, measured at 1m03s on
+      # Linux and 2m12s on Windows. Without `-p`, cargo selects the same default
+      # members as the rest of the job and compiles nothing.
       - name: CLI end-to-end
         timeout-minutes: 15
-        run: cargo test --locked -p tty7-cli --test cli_e2e --target ${{ matrix.target }}
+        run: cargo test --locked --test cli_e2e --target ${{ matrix.target }}
 
       # nextest does not run doctests, so on its own the switch above would let a
       # doctest be added and silently never run. There are none in the tree today

@@ -14,8 +14,9 @@
 # Excluding it here rather than teaching it the libtest protocol is the right
 # trade: converting it would mean giving up the shared daemon and the self-exec,
 # which is the whole design of the file. CI keeps running it, under plain
-# `cargo test`, in its own step — see the `CLI end-to-end` step in ci.yml. Keep
-# the two in sync: dropping the step would silently retire thirteen tests.
+# `cargo test`, in its own step — see the `CLI end-to-end` step in ci.yml, and
+# note the comment there about why that step must not name the package. Keep the
+# two in sync: dropping the step would silently retire thirteen tests.
 #
 # This lives on `default` rather than on `ci` so a local `cargo nextest run`
 # behaves the same way instead of erroring out.
