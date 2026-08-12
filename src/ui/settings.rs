@@ -3,6 +3,7 @@ use gpui::{
     Image, ImageFormat, KeyDownEvent, MouseButton, SharedString, Stateful, Subscription, Window,
     div, img, prelude::*, px, relative, rgb,
 };
+use gpui_component::FocusTrapElement as _;
 use gpui_component::InteractiveElementExt as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::color_picker::{ColorPicker, ColorPickerState};
@@ -1431,12 +1432,215 @@ fn seed_input(
     })
 }
 
+/// The keybinding page's record chip, a component for the same reason as
+/// `SegmentedControl`: its render needs the `Window` to mint a stable focus
+/// handle and to know whether to draw the ring. Once focused, gpui itself
+/// turns an Enter/Space key-up into a click on the element (its keyboard-click
+/// path), so "press Enter to record" takes nothing beyond the handle (#552).
+struct KeyCaptureChip {
+    app: gpui::WeakEntity<Tty7App>,
+    action: String,
+    is_recording: bool,
+    captured: AnyElement,
+    kbd_bg: gpui::Hsla,
+    accent: gpui::Hsla,
+}
+
+impl gpui::RenderOnce for KeyCaptureChip {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let Self {
+            app,
+            action,
+            is_recording,
+            captured,
+            kbd_bg,
+            accent,
+        } = self;
+        let focus = window
+            .use_keyed_state(format!("kb-{action}"), cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone();
+        let focused = focus.is_focused(window);
+        div()
+            .id(SharedString::from(format!("kb-{action}")))
+            .track_focus(&focus)
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            // One accent outline for "this chip is live", whether the keyboard
+            // put it there or a recording is in flight.
+            .when(is_recording || focused, |d| {
+                d.border_1().border_color(accent)
+            })
+            .hover(|d| d.bg(kbd_bg))
+            .child(captured)
+            .on_click(move |_, window, cx| {
+                app.update(cx, |this, cx| {
+                    this.start_recording_key(action.clone(), window, cx)
+                })
+                .ok();
+            })
+    }
+}
+
+/// Arrow-key stepping for a focused segmented group (#552). Up pairs with Left
+/// and Down with Right, the way every toolkit's radio groups read them, and
+/// the walk clamps at the ends instead of wrapping — a segmented is a picker,
+/// not a dial. Modified chords are left alone for whoever else wants them.
+///
+/// `buckets` counts the cells that carry a value, so the trailing "Custom (N)"
+/// cell of a [`Tty7App::segmented_valued`] is never stepped onto — there is no
+/// value behind it to write (#550). `selected` is `None` exactly when that cell
+/// holds the highlight, and since it is painted after the last bucket, a step
+/// left off it lands on that bucket and a step right has nowhere to go.
+fn segmented_arrow_step(
+    key: &str,
+    modifiers: &gpui::Modifiers,
+    selected: Option<usize>,
+    buckets: usize,
+) -> Option<usize> {
+    if modifiers.control || modifiers.alt || modifiers.shift || modifiers.platform {
+        return None;
+    }
+    let Some(selected) = selected else {
+        return match key {
+            "left" | "up" => buckets.checked_sub(1),
+            _ => None,
+        };
+    };
+    match key {
+        "left" | "up" => selected.checked_sub(1),
+        "right" | "down" => (selected + 1 < buckets).then_some(selected + 1),
+        _ => None,
+    }
+}
+
+/// The settings segmented control as a component rather than a bare row of
+/// click targets. Building it as a `RenderOnce` is what gets its render the
+/// `Window` the section renderers never see — and the window is what a stable
+/// focus handle (`use_keyed_state`, the same way gpui-component's `Button`
+/// gets one) and the focus query for the ring need (#552).
+struct SegmentedControl {
+    app: gpui::WeakEntity<Tty7App>,
+    sf: presets::Surface,
+    id: SharedString,
+    options: Vec<String>,
+    selected: Option<usize>,
+    custom_label: Option<String>,
+    on_pick: std::rc::Rc<dyn Fn(&mut Tty7App, usize, &mut Window, &mut Context<Tty7App>)>,
+}
+
+impl gpui::RenderOnce for SegmentedControl {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let SegmentedControl {
+            app,
+            sf,
+            id,
+            options,
+            selected,
+            custom_label,
+            on_pick,
+        } = self;
+        let theme = cx.theme();
+        let (border, accent) = (theme.border, theme.accent);
+        let buckets = options.len();
+        // The display cells: the fixed buckets, then the custom cell if the
+        // live value matched none of them.
+        let cells: Vec<(String, Option<usize>)> = options
+            .into_iter()
+            .enumerate()
+            .map(|(i, label)| (label, Some(i)))
+            .chain(custom_label.map(|label| (label, None)))
+            .collect();
+        let count = cells.len();
+        // A focus handle of its own is what puts the group in the tab order.
+        // Keyed by the control id so a re-render finds the same handle and
+        // focus survives it; the focused group wears the accent border the
+        // key-capture chip already uses for its recording state.
+        let focus = window
+            .use_keyed_state(id.clone(), cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone();
+        let focused = focus.is_focused(window);
+        h_flex()
+            .id(gpui::ElementId::Name(id.clone()))
+            .track_focus(&focus)
+            .h(px(24.))
+            .rounded(rounding::TRACK_RADIUS)
+            .border_1()
+            .border_color(if focused { accent } else { border })
+            .bg(gpui::rgb(sf.base))
+            .overflow_hidden()
+            .on_key_down({
+                let app = app.clone();
+                let on_pick = on_pick.clone();
+                move |ev: &KeyDownEvent, window, cx| {
+                    let Some(next) = segmented_arrow_step(
+                        &ev.keystroke.key,
+                        &ev.keystroke.modifiers,
+                        selected,
+                        buckets,
+                    ) else {
+                        return;
+                    };
+                    cx.stop_propagation();
+                    app.update(cx, |this, cx| on_pick(this, next, window, cx))
+                        .ok();
+                }
+            })
+            .children(cells.into_iter().enumerate().map(|(i, (label, bucket))| {
+                // A bucket is highlighted only on an exact match, and the
+                // custom cell (`bucket == None`) exactly when no bucket was.
+                let active = bucket == selected;
+                let on_pick = on_pick.clone();
+                let app = app.clone();
+                let corners =
+                    rounding::segment_corners(i, count, rounding::TRACK_RADIUS, rounding::HAIRLINE);
+                let cell = h_flex()
+                    .id(gpui::ElementId::NamedInteger(id.clone(), i as u64))
+                    .items_center()
+                    .justify_center()
+                    .h_full()
+                    .px_2p5()
+                    .text_sm()
+                    .rounded_corners(corners)
+                    .when(i > 0, |s| s.border_l_1().border_color(border))
+                    .when(active, |s| {
+                        s.bg(gpui::rgb(sf.selected))
+                            .text_color(gpui::rgb(sf.text_selected))
+                            .font_weight(FontWeight::MEDIUM)
+                    })
+                    .when(!active, |s| {
+                        s.text_color(gpui::rgb(sf.text_resting))
+                            .hover(|h| h.bg(gpui::rgb(sf.hover)))
+                    })
+                    .child(label);
+                match bucket {
+                    Some(ix) => cell
+                        .cursor_pointer()
+                        .active(|s| s.bg(gpui::rgb(sf.pressed)))
+                        .on_click(move |_, window, cx| {
+                            app.update(cx, |this, cx| on_pick(this, ix, window, cx))
+                                .ok();
+                        }),
+                    // The custom cell names the current value; it is not a
+                    // button, because there is no bucket value to write.
+                    None => cell,
+                }
+            }))
+    }
+}
+
 impl Tty7App {
     pub(crate) fn render_settings(
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    ) -> AnyElement {
         let theme = cx.theme();
         // The settings panel covers the whole window. Paint it on an opaque
         // surface so the workspace translucency (window opacity / backdrop
@@ -1459,7 +1663,7 @@ impl Tty7App {
                 s.theme_panel_open,
                 s.search.clone(),
             ),
-            None => return div(),
+            None => return div().into_any_element(),
         };
         let query = search.read(cx).value().trim().to_lowercase();
         let show_theme_panel = theme_panel_open && section == SettingsSection::Appearance;
@@ -1699,7 +1903,13 @@ impl Tty7App {
             .flex_row()
             .bg(background)
             .text_color(foreground)
-            .track_focus(&focus_handle)
+            // Occluding stops the mouse, but only the trap stops Tab: without
+            // it the focus walk steps straight out of the overlay onto the
+            // workspace chrome behind it and paints focus rings there (#552) —
+            // the same leak the Palette guards against in `keymap.rs`. The
+            // container tracks the page's own focus handle, so the explicit
+            // `track_focus` the Escape handler relied on comes with it.
+            .focus_trap("settings", &focus_handle)
             // Escape peels one layer at a time. With the theme picker open that
             // layer is the picker: closing the whole page instead threw away a
             // panel the user had opened a moment ago, and left them to walk
@@ -1779,7 +1989,7 @@ impl Tty7App {
         if let Some((start, label)) = prof {
             crate::ui::perf::record(label, start.elapsed());
         }
-        root
+        root.into_any_element()
     }
 
     /// The column widths this render settled on. `settings_columns` is pure and
@@ -2023,65 +2233,16 @@ impl Tty7App {
         cx: &mut Context<Self>,
         on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
-        let border = cx.theme().border;
-        let id: SharedString = id.into();
-        let on_pick = std::rc::Rc::new(on_pick);
-        let count = options.len() + usize::from(custom_label.is_some());
-        // The display cells: the fixed buckets, then the custom cell if the
-        // live value matched none of them.
-        let cells: Vec<(String, Option<usize>)> = options
-            .iter()
-            .enumerate()
-            .map(|(i, l)| (l.to_string(), Some(i)))
-            .chain(custom_label.map(|l| (l, None)))
-            .collect();
-        h_flex()
-            .id(gpui::ElementId::Name(id.clone()))
-            .h(px(24.))
-            .rounded(rounding::TRACK_RADIUS)
-            .border_1()
-            .border_color(border)
-            .bg(gpui::rgb(sf.base))
-            .overflow_hidden()
-            .children(cells.into_iter().enumerate().map(|(i, (label, bucket))| {
-                // A bucket is highlighted only on an exact match, and the
-                // custom cell (`bucket == None`) exactly when no bucket was.
-                let active = bucket == selected;
-                let on_pick = on_pick.clone();
-                let corners =
-                    rounding::segment_corners(i, count, rounding::TRACK_RADIUS, rounding::HAIRLINE);
-                let cell = h_flex()
-                    .id(gpui::ElementId::NamedInteger(id.clone(), i as u64))
-                    .items_center()
-                    .justify_center()
-                    .h_full()
-                    .px_2p5()
-                    .text_sm()
-                    .rounded_corners(corners)
-                    .when(i > 0, |s| s.border_l_1().border_color(border))
-                    .when(active, |s| {
-                        s.bg(gpui::rgb(sf.selected))
-                            .text_color(gpui::rgb(sf.text_selected))
-                            .font_weight(FontWeight::MEDIUM)
-                    })
-                    .when(!active, |s| {
-                        s.text_color(gpui::rgb(sf.text_resting))
-                            .hover(|h| h.bg(gpui::rgb(sf.hover)))
-                    })
-                    .child(label);
-                match bucket {
-                    Some(ix) => cell
-                        .cursor_pointer()
-                        .active(|s| s.bg(gpui::rgb(sf.pressed)))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            on_pick(this, ix, window, cx);
-                        })),
-                    // The custom cell names the current value; it is not a
-                    // button, because there is no bucket value to write.
-                    None => cell,
-                }
-            }))
-            .into_any_element()
+        gpui::Component::new(SegmentedControl {
+            app: cx.entity().downgrade(),
+            sf,
+            id: id.into(),
+            options: options.iter().map(|option| (*option).to_string()).collect(),
+            selected,
+            custom_label,
+            on_pick: std::rc::Rc::new(on_pick),
+        })
+        .into_any_element()
     }
 
     fn render_settings_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -6513,22 +6674,14 @@ impl Tty7App {
                 keycaps(&key).into_any_element()
             };
 
-            let action_for_click = action.clone();
-            let capture = div()
-                .id(SharedString::from(format!("kb-{action}")))
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .cursor_pointer()
-                .when(is_recording, |d| d.border_1().border_color(accent))
-                .hover(|d| d.bg(kbd_bg))
-                .child(captured)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.start_recording_key(action_for_click.clone(), window, cx)
-                }));
+            let capture = gpui::Component::new(KeyCaptureChip {
+                app: cx.entity().downgrade(),
+                action: action.clone(),
+                is_recording,
+                captured,
+                kbd_bg,
+                accent,
+            });
 
             let action_for_reset = action.clone();
             let right = h_flex()
@@ -7844,6 +7997,27 @@ mod tests {
         assert_eq!(profiles_sharing_endpoint(&cfg, staging_id), 0);
         // A profile that is no longer on the list shares with nobody.
         assert_eq!(profiles_sharing_endpoint(&cfg, Uuid::new_v4()), 0);
+    }
+
+    /// The #552 keyboard contract: arrows step the selection, clamped at the
+    /// ends without wrapping, and a modified chord is never eaten.
+    #[test]
+    fn segmented_arrows_step_and_clamp_without_wrapping() {
+        let plain = gpui::Modifiers::default();
+        assert_eq!(segmented_arrow_step("left", &plain, Some(1), 3), Some(0));
+        assert_eq!(segmented_arrow_step("up", &plain, Some(1), 3), Some(0));
+        assert_eq!(segmented_arrow_step("right", &plain, Some(1), 3), Some(2));
+        assert_eq!(segmented_arrow_step("down", &plain, Some(1), 3), Some(2));
+        // The ends clamp instead of wrapping.
+        assert_eq!(segmented_arrow_step("left", &plain, Some(0), 3), None);
+        assert_eq!(segmented_arrow_step("right", &plain, Some(2), 3), None);
+        // Anything else — letters, Tab, a modified arrow — is not ours.
+        assert_eq!(segmented_arrow_step("tab", &plain, Some(1), 3), None);
+        let ctrl = gpui::Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        assert_eq!(segmented_arrow_step("left", &ctrl, Some(1), 3), None);
     }
 }
 

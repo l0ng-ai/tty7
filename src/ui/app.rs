@@ -5720,6 +5720,18 @@ impl Tty7App {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Re-entering capture for the row that is already capturing must not
+        // wipe the chords gathered so far. It is reachable by accident now
+        // that the chip is focusable (#552): gpui turns an Enter/Space key-up
+        // on a focused element into a click, and the recorder below only
+        // intercepts key-downs — so binding a bare Enter or Space would
+        // restart capture and throw the just-recorded chord away.
+        if self
+            .active_settings()
+            .is_some_and(|s| s.recording.as_ref().is_some_and(|r| r.action == action))
+        {
+            return;
+        }
         let this = cx.weak_entity();
         let intercept = cx.intercept_keystrokes(move |ev, _window, cx| {
             let keystroke = ev.keystroke.clone();
@@ -8450,6 +8462,28 @@ mod keybinding_gpui_tests {
         vcx.simulate_keystrokes("secondary-b");
         vcx.simulate_keystrokes("x");
         wait_for_binding(&mut vcx, "CloseActiveTab", "secondary-b x");
+    }
+
+    /// #552 made the chip focusable, and gpui clicks a focused element on an
+    /// Enter/Space key-up while the recorder only intercepts key-downs — so
+    /// binding a bare Enter or Space would re-enter capture and wipe the chord
+    /// it just gathered. Re-entry for the row already capturing is a no-op.
+    #[gpui::test]
+    fn reentering_capture_for_the_same_row_keeps_the_captured_chord(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        begin_capture(&app, &mut vcx, "NewTab");
+        vcx.simulate_keystrokes("secondary-shift-n");
+        // The chord sits uncommitted for the commit delay; re-entering capture
+        // while it does must leave the recording exactly as it was.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.start_recording_key("NewTab".to_string(), window, cx);
+        });
+        let chords = app.update_in(&mut vcx, |app, _, _| {
+            app.active_settings()
+                .and_then(|s| s.recording.as_ref().map(|r| r.chords.len()))
+        });
+        assert_eq!(chords, Some(1), "re-entry wiped the captured chord");
+        wait_for_binding(&mut vcx, "NewTab", "secondary-shift-n");
     }
 
     #[gpui::test]
