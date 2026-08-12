@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A local daemon that dies and comes back no longer leaves a window of dead
+  panes looking live** — from the client's side a killed daemon is
+  indistinguishable from one whose shells all exited at once, so the window
+  kept showing every pane with its last title, and the reconnect then pushed
+  that dead layout back up as the new daemon's truth. The control handshake's
+  instance id is now compared on every local reconnect — the same check the
+  remote path already made — and a changed instance rebuilds each local
+  window from the machine tree instead: tabs come back, and each pane is
+  restored from its scrollback snapshot with the "this is a new shell" banner
+  rather than left frozen mid-lie. The restart-server action uses the same
+  rebuild path (#553).
 - **A file link in a remote pane no longer opens this machine's copy.** An
   absolute path was checked against the local filesystem whatever the pane was
   connected to, so `/etc/nginx/nginx.conf` on a server opened the one on your
