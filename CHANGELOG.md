@@ -115,6 +115,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   papered over — keys the server rejected are named, and a round that offered
   nothing says where it looked. (#484)
 
+- **A WSL pane gets its shell integration whatever the distro's shell is** —
+  the bootstrap that runs inside the distro dispatches on `$SHELL`, and until
+  now only bash had an arm of its own. A distro whose login shell is fish got
+  one in #422; a zsh distro fell through to the catch-all and opened as a
+  plain login shell, with no prompt marks and no working directory reported —
+  so the inline editor never armed, and neither did anything else downstream
+  of OSC 133. zsh now gets the same redirectors the native path writes,
+  carried in over `WSLENV` and pointed at with `ZDOTDIR`. The bootstrap checks
+  they are actually readable from inside the distro before trusting them: they
+  live on the Windows side and arrive over `/mnt`, which a distro with
+  automount off cannot see, and a `ZDOTDIR` aimed at nothing would start zsh
+  with none of the user's own startup files at all. (#135)
+
 ### Changed
 
 - **`tty7 pane close --json` now reports `{"closed": [ids]}`** rather than a

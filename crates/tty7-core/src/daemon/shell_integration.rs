@@ -878,6 +878,15 @@ fn setup_bash() -> Option<Injection> {
 
 const WSL_RCFILE_ENV: &str = "TTY7_RC";
 
+/// Where the zsh redirectors landed, in the Windows spelling `WSLENV`'s `/p`
+/// translates for the distro.
+///
+/// Deliberately not `ZDOTDIR`: everything in this map is handed to *every* WSL
+/// pane, and a bash or fish distro that found a `ZDOTDIR` in its environment
+/// would carry it into any `zsh` started inside it. The bootstrap decides
+/// whether this becomes `ZDOTDIR`, and it only decides that for a zsh distro.
+const WSL_ZDOTDIR_ENV: &str = "TTY7_ZDOTDIR";
+
 /// POSIX single-quoting, for a body some other shell has to re-parse.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
@@ -885,9 +894,20 @@ fn shell_quote(s: &str) -> String {
 
 /// The bootstrap `sh` runs inside the distro. `$SHELL` is the only place the
 /// user's real shell is named, so every arm dispatches on it: bash re-execs
-/// through the rcfile written on the Windows side, fish carries its integration
-/// inline the way `remote::bootstrap_command` does over SSH, and anything else
-/// falls back to a plain login shell.
+/// through the rcfile written on the Windows side, zsh points `ZDOTDIR` at the
+/// redirectors written beside it, fish carries its integration inline the way
+/// `remote::bootstrap_command` does over SSH, and anything else falls back to a
+/// plain login shell.
+///
+/// The zsh arm asks whether the redirectors are really there before trusting
+/// them. They live on the Windows side and reach the distro over `/mnt`, which
+/// is not a given: automount can be off, `/etc/wsl.conf` can move the root, and
+/// a distro can have no drvfs at all. An unguarded `ZDOTDIR` pointing at a
+/// directory that is not there starts zsh with no startup files whatsoever —
+/// the user's entire configuration gone, without a word. Guarded, that distro
+/// gets the plain login shell it had before any of this. The `*/bash)` arm
+/// above has no such guard; that is a real hole of its own, and changing
+/// released behaviour belongs in its own commit rather than riding along here.
 ///
 /// `sh` parses this script, so the fish body is POSIX-quoted here — unlike the
 /// SSH path, where the far end's own login shell parses the bootstrap and
@@ -898,6 +918,8 @@ fn wsl_exec_script() -> String {
         concat!(
             r#"case "${{SHELL:-}}" in "#,
             r#"*/bash) exec "$SHELL" --rcfile "$TTY7_RC" -i ;; "#,
+            r#"*/zsh) [ -n "${{TTY7_ZDOTDIR:-}}" ] && [ -r "$TTY7_ZDOTDIR/.zshrc" ] "#,
+            r#"&& export ZDOTDIR="$TTY7_ZDOTDIR"; exec "$SHELL" -l ;; "#,
             r#"*/fish) exec "$SHELL" -C {} -l ;; "#,
             r#"*) exec "${{SHELL:-/bin/sh}}" -l ;; "#,
             "esac"
@@ -906,12 +928,66 @@ fn wsl_exec_script() -> String {
     )
 }
 
+/// The files a WSL pane needs on the Windows side, and the environment that
+/// tells the distro where they are.
+///
+/// Split out of `setup_wsl` so that everything deciding anything is compiled
+/// and tested on every platform; what stays behind the `#[cfg(windows)]` is the
+/// argv and a call to this.
+///
+/// `TTY7_USER_ZDOTDIR` is conspicuously absent, and that is the point.
+/// `real_user_zdotdir` answers from this process's own environment, and this
+/// process is on the Windows side of the boundary — the `ZDOTDIR` the user
+/// actually set lives inside the distro and is a Linux path nothing out here
+/// can name. A Windows path sent across would aim every redirector at a
+/// directory that is not there, and the user's `.zshrc` would go missing
+/// silently. Left unset, `zsh_redirectors` falls through to `${ZDOTDIR:-$HOME}`
+/// — the distro's own home — and its `.zshenv` arm recaptures a relocated
+/// `ZDOTDIR` from in there, which is the only side that ever knew it.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn wsl_integration_env(dir: &Path, wslenv: Option<&str>) -> Option<HashMap<String, String>> {
+    let rcfile = dir.join("bashrc");
+    std::fs::write(&rcfile, bash_rcfile()).ok()?;
+
+    let mut env = HashMap::new();
+    let mut names = vec![format!("{WSL_RCFILE_ENV}/p")];
+    env.insert(
+        WSL_RCFILE_ENV.to_string(),
+        rcfile.to_string_lossy().into_owned(),
+    );
+
+    // The zsh half is best-effort on purpose. It is the bash rcfile that a WSL
+    // pane has depended on since this path existed, and failing the whole setup
+    // because a second set of files could not be written would take a working
+    // bash distro down with it. Nothing names the directory unless all of it
+    // landed, so a half-written one is never advertised to the distro.
+    if let Some(zdotdir) = wsl_zdotdir(dir) {
+        env.insert(WSL_ZDOTDIR_ENV.to_string(), zdotdir);
+        names.push(format!("{WSL_ZDOTDIR_ENV}/p"));
+    }
+
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    env.insert("WSLENV".to_string(), wslenv_with(wslenv, &names));
+    Some(env)
+}
+
+/// The zsh redirectors, under the pane's own throwaway directory so that the
+/// `remove_dir_all` closing the pane already takes them.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn wsl_zdotdir(dir: &Path) -> Option<String> {
+    let zdotdir = dir.join(format!("{ZDOTDIR_PREFIX}wsl"));
+    std::fs::create_dir_all(&zdotdir).ok()?;
+    for (name, contents) in zsh_redirectors() {
+        std::fs::write(zdotdir.join(name), contents).ok()?;
+    }
+    Some(zdotdir.to_string_lossy().into_owned())
+}
+
 #[cfg(windows)]
 fn setup_wsl(args: &[String]) -> Option<Injection> {
     let distro = wsl_distro(args);
     let dir = throwaway_dir("tty7-wslrc-")?;
-    let rcfile = dir.join("bashrc");
-    std::fs::write(&rcfile, bash_rcfile()).ok()?;
+    let env = wsl_integration_env(&dir, std::env::var("WSLENV").ok().as_deref())?;
 
     let mut argv: Vec<String> = Vec::new();
     if let Some(d) = &distro {
@@ -929,19 +1005,6 @@ fn setup_wsl(args: &[String]) -> Option<Injection> {
     argv.push("sh".to_string());
     argv.push("-c".to_string());
     argv.push(wsl_exec_script());
-
-    let mut env = HashMap::new();
-    env.insert(
-        WSL_RCFILE_ENV.to_string(),
-        rcfile.to_string_lossy().into_owned(),
-    );
-    env.insert(
-        "WSLENV".to_string(),
-        wslenv_with(
-            std::env::var("WSLENV").ok().as_deref(),
-            &[&format!("{WSL_RCFILE_ENV}/p")],
-        ),
-    );
 
     Some(Injection {
         env,
@@ -1521,6 +1584,104 @@ mod tests {
         assert!(script.contains(r"printf '\''\e]%s\a'\'' $argv[1]"));
     }
 
+    #[test]
+    fn the_wsl_bootstrap_carries_integration_for_zsh_too() {
+        let script = wsl_exec_script();
+
+        assert!(
+            script
+                .contains(r#"*/zsh) [ -n "${TTY7_ZDOTDIR:-}" ] && [ -r "$TTY7_ZDOTDIR/.zshrc" ] "#)
+        );
+        assert!(script.contains(r#"&& export ZDOTDIR="$TTY7_ZDOTDIR"; exec "$SHELL" -l ;;"#));
+
+        // The redirectors read this to find the user's own startup files, and
+        // only the distro can answer it. Naming it out here would aim them at a
+        // Windows path no distro has.
+        assert!(
+            !script.contains("TTY7_USER_ZDOTDIR"),
+            "the bootstrap must not carry a ZDOTDIR this side made up"
+        );
+    }
+
+    #[test]
+    fn wsl_integration_env_writes_what_each_shell_reads_and_names_it_for_the_distro() {
+        let dir = throwaway_dir("tty7-wsltest-").expect("temp dir");
+        let env = wsl_integration_env(&dir, None).expect("integration files");
+
+        let rcfile = PathBuf::from(env.get(WSL_RCFILE_ENV).expect("TTY7_RC"));
+        assert_eq!(std::fs::read_to_string(&rcfile).unwrap(), bash_rcfile());
+
+        let zdotdir = PathBuf::from(env.get(WSL_ZDOTDIR_ENV).expect("TTY7_ZDOTDIR"));
+        for (name, contents) in zsh_redirectors() {
+            assert_eq!(
+                std::fs::read_to_string(zdotdir.join(name)).unwrap(),
+                contents
+            );
+        }
+
+        // Both are Windows paths — `/p` is what turns them into the distro's
+        // view of themselves, so neither may be pre-translated here.
+        assert_eq!(env.get("WSLENV").unwrap(), "TTY7_RC/p:TTY7_ZDOTDIR/p");
+        assert!(!env.contains_key("TTY7_USER_ZDOTDIR"));
+        assert!(!env.contains_key("ZDOTDIR"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The arms are strings until something runs them. This asks a real `sh`
+    /// which one it picks, with stub shells standing in for the distro's.
+    #[cfg(unix)]
+    #[test]
+    fn the_wsl_bootstrap_picks_the_arm_that_matches_the_distro_s_shell() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::process::Command;
+
+        let dir = throwaway_dir("tty7-wslarm-").expect("temp dir");
+        for name in ["bash", "zsh", "fish"] {
+            let stub = dir.join(name);
+            std::fs::write(
+                &stub,
+                format!("#!/bin/sh\necho {name} \"$@\"\necho ZDOTDIR=${{ZDOTDIR-unset}}\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let zdotdir = dir.join("zdot");
+        std::fs::create_dir_all(&zdotdir).unwrap();
+        std::fs::write(zdotdir.join(".zshrc"), "").unwrap();
+
+        let run = |shell: &str, zdot: &str| {
+            let out = Command::new("sh")
+                .arg("-c")
+                .arg(wsl_exec_script())
+                .env_clear()
+                .env("SHELL", dir.join(shell).to_string_lossy().into_owned())
+                .env("TTY7_RC", dir.join("bashrc").to_string_lossy().into_owned())
+                .env("TTY7_ZDOTDIR", zdot)
+                .output()
+                .expect("run the bootstrap");
+            assert!(out.status.success(), "the bootstrap exited non-zero");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+
+        let zdot = zdotdir.to_string_lossy().into_owned();
+        assert!(run("bash", &zdot).contains("bash --rcfile"));
+        assert!(run("fish", &zdot).starts_with("fish -C"));
+
+        let zsh = run("zsh", &zdot);
+        assert!(zsh.contains("zsh -l"), "{zsh}");
+        assert!(zsh.contains(&format!("ZDOTDIR={zdot}")), "{zsh}");
+
+        // The distro that cannot see /mnt. It must still get its shell, and it
+        // must not get a ZDOTDIR pointing at nothing.
+        let missing = dir.join("not-there").to_string_lossy().into_owned();
+        let blind = run("zsh", &missing);
+        assert!(blind.contains("zsh -l"), "{blind}");
+        assert!(blind.contains("ZDOTDIR=unset"), "{blind}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The distro runs this through `sh`, so a quoting slip is a pane that
     /// never opens. CI's Linux and macOS legs have a real `sh` to ask.
     #[cfg(unix)]
@@ -1583,6 +1744,14 @@ mod tests {
         assert_eq!(wslenv_with(None, &["TTY7_RC/p"]), "TTY7_RC/p");
         assert_eq!(wslenv_with(Some(""), &["TTY7_RC/p"]), "TTY7_RC/p");
         assert_eq!(wslenv_with(Some("TTY7_RC/l"), &["TTY7_RC/p"]), "TTY7_RC/l");
+        assert_eq!(
+            wslenv_with(None, &["TTY7_RC/p", "TTY7_ZDOTDIR/p"]),
+            "TTY7_RC/p:TTY7_ZDOTDIR/p"
+        );
+        assert_eq!(
+            wslenv_with(Some("TTY7_ZDOTDIR/l"), &["TTY7_RC/p", "TTY7_ZDOTDIR/p"]),
+            "TTY7_ZDOTDIR/l:TTY7_RC/p"
+        );
     }
 
     #[test]
